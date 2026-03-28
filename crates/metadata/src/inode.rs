@@ -90,6 +90,35 @@ pub fn load_inode(dict: &Dictionary, key: &Digest224) -> Result<InodeMeta, MetaE
 mod tests {
     use super::*;
     use dedupfs_traits::metadata::InodeMeta;
+    use proptest::prelude::*;
+
+    // Proptest strategy for arbitrary InodeMeta
+    prop_compose! {
+        fn arb_inode_meta()(
+            ino in any::<u64>(),
+            mode in any::<u32>(),
+            uid in any::<u32>(),
+            gid in any::<u32>(),
+            nlinks in any::<u32>(),
+            size in any::<u64>(),
+            mtime_sec in any::<i64>(),
+            mtime_nsec in any::<u32>(),
+            ctime_sec in any::<i64>(),
+            ctime_nsec in any::<u32>(),
+        ) -> InodeMeta {
+            InodeMeta { ino, mode, uid, gid, nlinks, size, mtime_sec, mtime_nsec, ctime_sec, ctime_nsec }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_round_trip(meta in arb_inode_meta()) {
+            let bytes = serialize_inode(&meta);
+            prop_assert_eq!(bytes.len(), 56);
+            let recovered = deserialize_inode(&bytes).expect("deserialize failed");
+            prop_assert_eq!(meta, recovered);
+        }
+    }
 
     fn sample_meta() -> InodeMeta {
         InodeMeta {
