@@ -92,6 +92,17 @@ impl Default for DictMetadataStore {
     }
 }
 
+impl DictMetadataStore {
+    /// Access the underlying Dictionary (for content operations like `State::push_all`).
+    ///
+    /// # Warning
+    /// Do NOT hold this lock while calling any other `DictMetadataStore` method.
+    /// Those methods acquire the same lock internally; double-locking will deadlock.
+    pub fn dict(&self) -> &Mutex<Dictionary> {
+        &self.dict
+    }
+}
+
 impl MetadataStore for DictMetadataStore {
     fn create_inode(&self, meta: &InodeMeta) -> Result<InodeId, MetaError> {
         let mut inode_map = self.inode_map.lock().unwrap();
@@ -1077,6 +1088,52 @@ mod tests {
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"."), ". missing after reload");
         assert!(names.contains(&".."), ".. missing after reload");
+    }
+
+    /// Verify that content pushed into `store.dict()` via `State::push_all` is
+    /// accessible after a commit + serialize/deserialize + `load_from_root` cycle.
+    ///
+    /// This proves the seed command's design is sound: file content and metadata
+    /// can share the same Dictionary, and nothing is lost on a round-trip.
+    #[test]
+    fn test_dict_accessor_content_survives_reload() {
+        use blockset::{GetBytes, GetData, Tree};
+        use slicefs_traits::digest::from_digest224;
+
+        let store = DictMetadataStore::new();
+
+        // Push content bytes into the store's dict via the public accessor.
+        let content = b"hello, SliceFS content round-trip test!";
+        let content_digest: Digest224 = {
+            let mut dict = store.dict().lock().unwrap();
+            State::push_all(&mut *dict, content)
+        };
+
+        // Create a file inode and attach the content digest as its manifest.
+        let file_ino = store.create_inode(&new_file_meta()).unwrap();
+        store.link(1, "content.txt", file_ino).unwrap();
+        store.set_manifest(file_ino, &[content_digest]).unwrap();
+
+        // Commit, then serialize the Dictionary to bytes and deserialize fresh.
+        let root = store.commit().unwrap();
+        let bytes = {
+            let dict = store.dict().lock().unwrap();
+            serialize_dictionary(&*dict)
+        };
+        let new_dict = deserialize_dictionary(&bytes).unwrap();
+
+        // Reload the metadata store from the fresh Dictionary.
+        let reloaded = DictMetadataStore::load_from_root(new_dict, &root).unwrap();
+
+        // Verify manifest lookup still returns the same digest.
+        let manifest = reloaded.get_manifest(file_ino).unwrap();
+        assert_eq!(manifest, vec![content_digest]);
+
+        // Verify the content bytes are retrievable from the Dictionary via GetBytes.
+        let dict = reloaded.dict().lock().unwrap();
+        let digest256 = from_digest224(&content_digest);
+        let read_back: Vec<u8> = GetBytes::new(GetData::new(&*dict, &digest256)).collect();
+        assert_eq!(read_back, content.as_slice());
     }
 }
 
