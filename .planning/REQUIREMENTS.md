@@ -34,7 +34,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **POSIX-07**: Timestamps (mtime, ctime; noatime by default)
 - [ ] **POSIX-08**: Extended attributes (xattr) for macOS Finder metadata, SELinux labels
 - [ ] **POSIX-09**: Truncate/ftruncate with correct partial block handling
-- [ ] **POSIX-10**: Stable inode numbers across mount cycles
+- [x] **POSIX-10**: Stable inode numbers across mount cycles
 - [ ] **POSIX-11**: fsync/fdatasync correctness (guaranteed durability)
 - [ ] **POSIX-12**: POSIX locking (fcntl locks, flock)
 - [ ] **POSIX-13**: Correct errno values for all operations
@@ -131,7 +131,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | POSIX-07 | Phase 2 | Complete |
 | POSIX-08 | Phase 2 | Pending |
 | POSIX-09 | Phase 4 | Pending |
-| POSIX-10 | Phase 2 | Pending |
+| POSIX-10 | Phase 2 | Complete |
 | POSIX-11 | Phase 5 | Pending |
 | POSIX-12 | Phase 4 | Pending |
 | POSIX-13 | Phase 3 | Pending |
