@@ -34,9 +34,9 @@ Decimal phases appear between their surrounding integers in numeric order.
   5. A retrieved block fails verification if its stored bytes have been corrupted (integrity check on read)
 **Plans:** 3/3 plans complete
 Plans:
-- [ ] 01-01-PLAN.md — Cargo workspace setup and CAS trait definitions in dedupfs-traits
-- [ ] 01-02-PLAN.md — Blake3Hasher, FixedChunker, and MemBlockStore stub implementations
-- [ ] 01-03-PLAN.md — LocalDiskStore and MemDedupIndex with bloom filter
+- [x] 01-01-PLAN.md — Cargo workspace setup and CAS trait definitions in dedupfs-traits
+- [x] 01-02-PLAN.md — Blake3Hasher, FixedChunker, and MemBlockStore stub implementations
+- [x] 01-03-PLAN.md — LocalDiskStore and MemDedupIndex with bloom filter
 
 ### Phase 2: Metadata Engine
 **Goal**: The inode table, directory tree, file manifests, and xattr store exist as an ACID-backed metadata layer completely separated from the block store — FUSE can be wired on top of it
@@ -48,7 +48,11 @@ Plans:
   3. A file manifest linking inode to ordered list of block hashes can be created and retrieved
   4. Extended attributes can be stored and retrieved on an inode
   5. Inode numbers are stable — the same inode number is assigned to the same file across process restarts
-**Plans**: TBD
+**Plans:** 3 plans
+Plans:
+- [ ] 02-01-PLAN.md — data-id submodule, dedupfs-traits redesign, InodeMeta serialization
+- [ ] 02-02-PLAN.md — DictMetadataStore with inode CRUD, directory ops, and manifest storage
+- [ ] 02-03-PLAN.md — Xattr storage and persistence round-trip with inode stability proof
 
 ### Phase 3: Read-Only FUSE
 **Goal**: The filesystem can be mounted and browsed read-only by the OS; a human can ls, cat, and stat files through the mount point using pre-populated content — the kernel interface is validated before write complexity is introduced
@@ -118,7 +122,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. CAS Foundation | 3/3 | Complete   | 2026-03-28 |
-| 2. Metadata Engine | 0/TBD | Not started | - |
+| 2. Metadata Engine | 0/3 | Not started | - |
 | 3. Read-Only FUSE | 0/TBD | Not started | - |
 | 4. Full POSIX Write Path | 0/TBD | Not started | - |
 | 5. Crash Safety and GC | 0/TBD | Not started | - |
