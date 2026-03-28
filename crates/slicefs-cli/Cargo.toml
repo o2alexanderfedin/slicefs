@@ -1,0 +1,23 @@
+[package]
+name = "slicefs-cli"
+version = "0.1.0"
+edition = "2021"
+description = "SliceFS FUSE binary — mounts, seeds, and manages SliceFS volumes"
+
+[[bin]]
+name = "slicefs"
+path = "src/main.rs"
+
+[dependencies]
+slicefs-traits = { path = "../slicefs-traits" }
+metadata       = { path = "../metadata" }
+blockset       = { path = "../data-id/blockset" }
+
+clap      = { workspace = true }
+fuser     = { workspace = true }
+libc      = { workspace = true }
+thiserror = { workspace = true }
+tracing   = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
