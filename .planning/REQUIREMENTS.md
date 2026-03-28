@@ -30,8 +30,8 @@ Requirements for initial release. Each maps to roadmap phases.
 - [ ] **POSIX-03**: Atomic rename (rename(2)) for editors, package managers
 - [ ] **POSIX-04**: Symbolic links (symlink/readlink)
 - [ ] **POSIX-05**: Hard links (link(2)) with correct inode-level reference counting
-- [ ] **POSIX-06**: File permissions (chmod/chown, uid/gid)
-- [ ] **POSIX-07**: Timestamps (mtime, ctime; noatime by default)
+- [x] **POSIX-06**: File permissions (chmod/chown, uid/gid)
+- [x] **POSIX-07**: Timestamps (mtime, ctime; noatime by default)
 - [ ] **POSIX-08**: Extended attributes (xattr) for macOS Finder metadata, SELinux labels
 - [ ] **POSIX-09**: Truncate/ftruncate with correct partial block handling
 - [ ] **POSIX-10**: Stable inode numbers across mount cycles
@@ -45,7 +45,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [ ] **META-01**: Atomic metadata commits (crash-safe root pointer update)
 - [ ] **META-02**: Clean mount/unmount with graceful SIGTERM handling and pending write flush
-- [ ] **META-03**: Metadata storage separated from block storage (independent stores)
+- [x] **META-03**: Metadata storage separated from block storage (independent stores)
 
 ### Snapshots & Versioning
 
@@ -127,8 +127,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | POSIX-03 | Phase 4 | Pending |
 | POSIX-04 | Phase 4 | Pending |
 | POSIX-05 | Phase 4 | Pending |
-| POSIX-06 | Phase 2 | Pending |
-| POSIX-07 | Phase 2 | Pending |
+| POSIX-06 | Phase 2 | Complete |
+| POSIX-07 | Phase 2 | Complete |
 | POSIX-08 | Phase 2 | Pending |
 | POSIX-09 | Phase 4 | Pending |
 | POSIX-10 | Phase 2 | Pending |
@@ -139,7 +139,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | POSIX-15 | Phase 3 | Pending |
 | META-01 | Phase 5 | Pending |
 | META-02 | Phase 3 | Pending |
-| META-03 | Phase 2 | Pending |
+| META-03 | Phase 2 | Complete |
 | SNAP-01 | Phase 6 | Pending |
 | SNAP-02 | Phase 6 | Pending |
 | SNAP-03 | Phase 6 | Pending |

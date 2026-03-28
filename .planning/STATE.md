@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Phase 2 context gathered
-last_updated: "2026-03-28T07:49:32.340Z"
+stopped_at: Completed 02-metadata-engine/02-01-PLAN.md
+last_updated: "2026-03-28T08:39:09.969Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
   completed_phases: 1
-  total_plans: 3
-  completed_plans: 3
+  total_plans: 6
+  completed_plans: 4
   percent: 0
 ---
 
@@ -53,6 +53,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-cas-foundation P01 | 12 | 2 tasks | 16 files |
 | Phase 01-cas-foundation P02 | 7 | 2 tasks | 3 files |
 | Phase 01-cas-foundation P03 | 6 | 2 tasks | 2 files |
+| Phase 02-metadata-engine P01 | 25 | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,9 @@ Recent decisions affecting current work:
 - [Phase 01-cas-foundation]: AtomicBloomFilter used for DedupIndex insert() to satisfy &self trait requirement without Mutex wrapping
 - [Phase 01-cas-foundation]: Atomic writes via .tmp + rename prevent partial block writes from appearing as valid CAS blocks
 - [Phase 01-cas-foundation]: Bloom serialization via HashSet + rebuild: fastbloom serde not enabled, HashSet persisted and bloom rebuilt on load
+- [Phase 02-metadata-engine]: blockset StorageAdd/StorageGet are private traits — intern_inode/load_inode use blockset::Dictionary directly
+- [Phase 02-metadata-engine]: Digest224/Digest256/Branches redeclared as type aliases in dedupfs-traits (not re-exported from private blockset modules)
+- [Phase 02-metadata-engine]: InodeMeta defined in dedupfs-traits as plain data struct — serialization lives in metadata crate
 
 ### Pending Todos
 
@@ -90,6 +94,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-28T07:49:32.334Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-metadata-engine/02-CONTEXT.md
+Last session: 2026-03-28T08:39:09.965Z
+Stopped at: Completed 02-metadata-engine/02-01-PLAN.md
+Resume file: None
