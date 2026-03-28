@@ -1,0 +1,12 @@
+[package]
+name = "metadata"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dedupfs-traits = { path = "../dedupfs-traits" }
+blockset = { path = "../data-id/blockset" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

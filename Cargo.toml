@@ -2,11 +2,13 @@
 members = [
     "crates/dedupfs-traits",
     "crates/cas-local",
+    "crates/metadata",
 ]
 resolver = "2"
 
 [workspace.dependencies]
 thiserror  = "2"
+sha2-compress = "0.7.1"
 blake3     = "1"
 fastbloom  = "0.14"
 proptest   = "1"

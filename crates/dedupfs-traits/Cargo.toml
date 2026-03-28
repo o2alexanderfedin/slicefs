@@ -6,3 +6,4 @@ description = "CAS trait contracts for the dedupfs filesystem (ContentHasher, Ch
 
 [dependencies]
 thiserror.workspace = true
+blockset = { path = "../data-id/blockset" }
