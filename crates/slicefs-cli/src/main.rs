@@ -5,6 +5,7 @@
 
 mod cli;
 mod filesystem;
+mod seed;
 mod store_io;
 
 use clap::Parser;
@@ -20,8 +21,11 @@ fn main() {
         Cmd::Unmount { .. } => {
             todo!("unmount")
         }
-        Cmd::Seed { .. } => {
-            todo!("seed")
+        Cmd::Seed { store, source_dir } => {
+            if let Err(e) = seed::run_seed(&store, &source_dir) {
+                eprintln!("slicefs seed error: {e}");
+                std::process::exit(1);
+            }
         }
     }
 }
