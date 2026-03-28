@@ -17,6 +17,8 @@ The project was initially named "DedupFS" but should be rebranded to "SliceFS" (
 - Crate naming convention: `dedupfs-traits` → `slicefs-traits` (or similar)
 - **Directory names**: `crates/dedupfs-traits/` → `crates/slicefs-traits/` (and any other dirs with "dedupfs")
 - Binary name: `dedupfs` → `slicefs`
+- **Source code**: all `use dedupfs_*` imports, struct/module names containing "dedupfs"
+- **File names**: any `.rs` or config files with "dedupfs" in the filename
 - Internal references in doc comments, error messages, README
 - Cargo workspace member paths must be updated after directory renames
 
