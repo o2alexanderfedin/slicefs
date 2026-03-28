@@ -11,7 +11,7 @@
 //!   5. `manifest_data`
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
 
 use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, MetadataStore};
@@ -56,6 +56,11 @@ pub struct DictMetadataStore {
     /// Reference counts for content `Digest224`s.
     /// Incremented when a manifest references a block; decremented on manifest replacement or inode deletion.
     refcounts: Mutex<BTreeMap<Digest224, u64>>,
+    /// Running total of logical bytes — sum of all inode `size` fields.
+    ///
+    /// Updated atomically in `create_inode` (+size), `update_inode` (delta),
+    /// and `delete_inode` (-size).  Never goes below 0.
+    logical_bytes: AtomicU64,
 }
 
 impl DictMetadataStore {
@@ -87,6 +92,7 @@ impl DictMetadataStore {
             manifest_data: Mutex::new(BTreeMap::new()),
             xattr_data: Mutex::new(BTreeMap::new()),
             refcounts: Mutex::new(BTreeMap::new()),
+            logical_bytes: AtomicU64::new(0),
         }
     }
 }
@@ -135,6 +141,14 @@ impl DictMetadataStore {
         let rc = self.refcounts.lock().unwrap();
         rc.get(digest).copied().unwrap_or(0)
     }
+
+    /// Return the current logical byte total — the sum of all inode `size` fields.
+    ///
+    /// This is the "logical" space consumed by the filesystem, before deduplication.
+    /// Dividing logical_bytes by (dict.len() * 92) gives the dedup ratio.
+    pub fn logical_bytes(&self) -> u64 {
+        self.logical_bytes.load(Ordering::Relaxed)
+    }
 }
 
 impl MetadataStore for DictMetadataStore {
@@ -150,6 +164,11 @@ impl MetadataStore for DictMetadataStore {
 
         inode_map.insert(ino, digest);
         self.inode_data.lock().unwrap().insert(ino, digest);
+
+        // Track logical bytes: add this inode's size to running total.
+        if full_meta.size > 0 {
+            self.logical_bytes.fetch_add(full_meta.size, Ordering::Relaxed);
+        }
         Ok(ino)
     }
 
@@ -164,27 +183,57 @@ impl MetadataStore for DictMetadataStore {
 
     fn update_inode(&self, meta: &InodeMeta) -> Result<(), MetaError> {
         let ino = meta.ino;
-        {
+
+        // Capture old size before replacing the digest, so we can adjust logical_bytes.
+        let old_size = {
             let inode_data = self.inode_data.lock().unwrap();
-            if !inode_data.contains_key(&ino) {
-                return Err(MetaError::NotFound(ino));
-            }
-        }
+            let old_digest = inode_data.get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
+            drop(inode_data);
+            let dict = self.dict.lock().unwrap();
+            load_inode(&*dict, &old_digest).map(|m| m.size).unwrap_or(0)
+        };
+
         let mut dict = self.dict.lock().unwrap();
         let new_digest = intern_inode(&mut *dict, meta);
         drop(dict);
 
         self.inode_data.lock().unwrap().insert(ino, new_digest);
         self.inode_map.lock().unwrap().insert(ino, new_digest);
+
+        // Adjust logical_bytes by the size delta (saturating arithmetic prevents underflow).
+        let new_size = meta.size;
+        if new_size > old_size {
+            self.logical_bytes.fetch_add(new_size - old_size, Ordering::Relaxed);
+        } else if old_size > new_size {
+            self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                Some(cur.saturating_sub(old_size - new_size))
+            }).ok();
+        }
         Ok(())
     }
 
     fn delete_inode(&self, ino: InodeId) -> Result<(), MetaError> {
-        let removed = self.inode_data.lock().unwrap().remove(&ino);
-        if removed.is_none() {
-            return Err(MetaError::NotFound(ino));
-        }
+        // Capture size before removing so we can decrement logical_bytes.
+        let size = {
+            let inode_data = self.inode_data.lock().unwrap();
+            if let Some(digest) = inode_data.get(&ino).copied() {
+                drop(inode_data);
+                let dict = self.dict.lock().unwrap();
+                load_inode(&*dict, &digest).map(|m| m.size).unwrap_or(0)
+            } else {
+                return Err(MetaError::NotFound(ino));
+            }
+        };
+
+        self.inode_data.lock().unwrap().remove(&ino);
         self.inode_map.lock().unwrap().remove(ino);
+
+        // Decrement logical_bytes by the deleted inode's size.
+        if size > 0 {
+            self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                Some(cur.saturating_sub(size))
+            }).ok();
+        }
         Ok(())
     }
 
@@ -601,6 +650,11 @@ impl DictMetadataStore {
             )));
         }
 
+        // Recompute logical_bytes as the sum of all loaded inode sizes.
+        let initial_logical_bytes: u64 = inode_data.values().map(|digest| {
+            load_inode(&dict, digest).map(|m| m.size).unwrap_or(0)
+        }).sum();
+
         Ok(DictMetadataStore {
             dict: Mutex::new(dict),
             inode_map: Mutex::new(inode_map),
@@ -609,6 +663,7 @@ impl DictMetadataStore {
             manifest_data: Mutex::new(manifest_data),
             xattr_data: Mutex::new(xattr_data),
             refcounts: Mutex::new(refcounts),
+            logical_bytes: AtomicU64::new(initial_logical_bytes),
         })
     }
 }

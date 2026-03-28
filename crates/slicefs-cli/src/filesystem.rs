@@ -847,19 +847,32 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
-        // Read-only snapshot: report reasonable fixed values.
-        // bsize=4096, blocks=1M, bfree=0 (read-only), bavail=0,
-        // files=1M, ffree=0, namelen=255, frsize=0
-        reply.statfs(
-            1_000_000, // blocks
-            0,         // bfree (read-only)
-            0,         // bavail (read-only)
-            1_000_000, // files
-            0,         // ffree
-            4096,      // bsize
-            255,       // namelen
-            0,         // frsize
-        );
+        // Dedup-aware statfs:
+        //   logical  = sum of all inode sizes (what users see as space used)
+        //   physical = dict.len() * 92  (actual CAS storage on disk)
+        //
+        // Showing logical allows `df` to display dedup ratio when users compare
+        // output of `du -sh` (logical) against `df -h` (physical).
+        let logical = self.meta.logical_bytes();
+        let physical_entries = {
+            let dict = self.dict.lock().unwrap();
+            dict.len() as u64
+        };
+        let physical = physical_entries * 92;
+
+        let bsize: u32 = 4096;
+        // blocks: logical bytes / block size (round up, minimum 1 to avoid div-by-zero on empty fs)
+        let blocks = if logical == 0 { 0 } else { (logical + bsize as u64 - 1) / bsize as u64 };
+        // Physical blocks used — drives what `df` shows as "Used"
+        let blocks_used = if physical == 0 { 0 } else { (physical + bsize as u64 - 1) / bsize as u64 };
+        // CAS dedup filesystem is effectively unlimited: bfree is very large
+        let bfree = u64::MAX / 4;
+        let bavail = bfree;
+        let files = 1_000_000u64; // generous max inodes
+        // ffree: rough estimate based on blocks_used vs blocks
+        let ffree = files.saturating_sub(blocks_used);
+
+        reply.statfs(blocks, bfree, bavail, files, ffree, bsize, 255, 0);
     }
 
     fn access(&self, _req: &Request, _ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
