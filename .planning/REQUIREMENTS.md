@@ -25,7 +25,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### POSIX Filesystem
 
-- [ ] **POSIX-01**: File read/write/create/delete operations
+- [x] **POSIX-01**: File read/write/create/delete operations
 - [x] **POSIX-02**: Directory create/delete/list (readdir with . and .. entries)
 - [x] **POSIX-03**: Atomic rename (rename(2)) for editors, package managers
 - [x] **POSIX-04**: Symbolic links (symlink/readlink)
@@ -33,7 +33,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **POSIX-06**: File permissions (chmod/chown, uid/gid)
 - [x] **POSIX-07**: Timestamps (mtime, ctime; noatime by default)
 - [x] **POSIX-08**: Extended attributes (xattr) for macOS Finder metadata, SELinux labels
-- [ ] **POSIX-09**: Truncate/ftruncate with correct partial block handling
+- [x] **POSIX-09**: Truncate/ftruncate with correct partial block handling
 - [x] **POSIX-10**: Stable inode numbers across mount cycles
 - [ ] **POSIX-11**: fsync/fdatasync correctness (guaranteed durability)
 - [ ] **POSIX-12**: POSIX locking (fcntl locks, flock)
@@ -122,7 +122,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | GC-01 | Phase 5 | Pending |
 | GC-02 | Phase 5 | Pending |
 | GC-03 | Phase 5 | Pending |
-| POSIX-01 | Phase 4 | Pending |
+| POSIX-01 | Phase 4 | Complete |
 | POSIX-02 | Phase 4 | Complete |
 | POSIX-03 | Phase 4 | Complete |
 | POSIX-04 | Phase 4 | Complete |
@@ -130,7 +130,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | POSIX-06 | Phase 2 | Complete |
 | POSIX-07 | Phase 2 | Complete |
 | POSIX-08 | Phase 2 | Complete |
-| POSIX-09 | Phase 4 | Pending |
+| POSIX-09 | Phase 4 | Complete |
 | POSIX-10 | Phase 2 | Complete |
 | POSIX-11 | Phase 5 | Pending |
 | POSIX-12 | Phase 4 | Pending |
