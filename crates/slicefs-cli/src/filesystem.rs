@@ -1,10 +1,9 @@
-//! `SliceFsFilesystem` — read-only FUSE adapter for SliceFS.
+//! `SliceFsFilesystem` — FUSE adapter for SliceFS.
 //!
 //! Implements `fuser::Filesystem` using `DictMetadataStore` for inode/directory/manifest
 //! lookups and blockset `GetBytes` for file content reads.
 //!
-//! All write operations return `EROFS` (read-only filesystem). This is intentional
-//! per the project decision: EROFS signals "read-only filesystem", not "not implemented".
+//! Write callbacks (create, write, release, setattr) are fully implemented in Phase 4.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -14,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use blockset::{Dictionary, GetBytes, GetData};
+use blockset::{Dictionary, GetBytes, GetData, State, Tree};
 use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
     Generation, INodeNo, KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr,
@@ -158,8 +157,514 @@ pub fn meta_error_to_errno(e: &MetaError) -> i32 {
     }
 }
 
-/// TTL for all fuser replies (1 second is appropriate for a read-only snapshot).
+/// TTL for all fuser replies (1 second is appropriate for a write-capable snapshot).
 const TTL: Duration = Duration::from_secs(1);
+
+// ── Test helpers ──────────────────────────────────────────────────────────────
+//
+// These methods expose the create/write/release/setattr pipeline without going
+// through FUSE request/reply machinery, enabling unit and integration testing
+// on macOS where a FUSE mount is not available.
+
+impl SliceFsFilesystem {
+    /// Create a regular file inode in `parent_ino` directory, returning `(ino, fh)`.
+    /// Used by integration tests to bypass the FUSE request/reply layer.
+    pub fn test_create(
+        &self,
+        parent_ino: u64,
+        name: &str,
+        mode: u32,
+        umask: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<(u64, u64), i32> {
+        let file_mode = S_IFREG | (mode & !umask & 0o7777);
+        let file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
+        let ino = self.meta.create_inode(&file_meta).map_err(|e| meta_error_to_errno(&e))?;
+        if let Err(e) = self.meta.link(parent_ino, name, ino) {
+            let _ = self.meta.delete_inode(ino);
+            return Err(meta_error_to_errno(&e));
+        }
+        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
+        self.open_files.lock().unwrap().insert(fh, OpenFileState { ino, buf: Vec::new() });
+        Ok((ino, fh))
+    }
+
+    /// Write `data` at `offset` into the buffer for `fh`. Returns bytes written.
+    /// Used by integration tests to bypass the FUSE request/reply layer.
+    pub fn test_write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, i32> {
+        let mut open_files = self.open_files.lock().unwrap();
+        let state = open_files.get_mut(&fh).ok_or(libc::EBADF)?;
+        let end = offset as usize + data.len();
+        if end > state.buf.len() {
+            state.buf.resize(end, 0);
+        }
+        state.buf[offset as usize..end].copy_from_slice(data);
+        Ok(data.len() as u32)
+    }
+
+    /// Release file handle `fh`, flushing its buffer to CAS and updating the inode.
+    /// Used by integration tests to bypass the FUSE request/reply layer.
+    pub fn test_release(&self, ino: u64, fh: u64) -> Result<(), i32> {
+        let state = self.open_files.lock().unwrap().remove(&fh);
+        let buf = match state {
+            Some(s) => s.buf,
+            None => return Ok(()), // Already closed
+        };
+        self.flush_buffer_to_cas(ino, buf)
+    }
+
+    /// Flush `buf` to CAS, set manifest, update inode size/mtime.
+    /// Shared between test_release and the FUSE release() callback.
+    fn flush_buffer_to_cas(&self, ino: u64, buf: Vec<u8>) -> Result<(), i32> {
+        if buf.is_empty() {
+            // Empty file: set empty manifest
+            self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
+        } else {
+            // Push content through CDC — acquire dict, push, release BEFORE any meta call
+            let content_digest = {
+                let mut dict = self.dict.lock().unwrap();
+                State::push_all(&mut *dict, &buf)
+                // dict lock dropped here
+            };
+            self.meta.set_manifest(ino, &[content_digest]).map_err(|_| libc::EIO)?;
+            self.meta.increment_refcount(&content_digest);
+        }
+
+        // Update inode size and mtime
+        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
+        inode.size = buf.len() as u64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
+        inode.mtime_sec = now.as_secs() as i64;
+        inode.mtime_nsec = now.subsec_nanos();
+        inode.ctime_sec = inode.mtime_sec;
+        inode.ctime_nsec = inode.mtime_nsec;
+        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
+        Ok(())
+    }
+
+    /// Truncate/extend a file to `new_size` bytes. If `fh` is Some and open,
+    /// operates on the in-flight buffer; otherwise reads from CAS, adjusts, re-pushes.
+    pub fn test_setattr_size(&self, ino: u64, fh: Option<u64>, new_size: u64) -> Result<(), i32> {
+        // Case A: open file handle — truncate in-flight buffer directly
+        if let Some(fh_val) = fh {
+            let mut open_files = self.open_files.lock().unwrap();
+            if let Some(state) = open_files.get_mut(&fh_val) {
+                state.buf.resize(new_size as usize, 0);
+                // Update inode size immediately
+                drop(open_files);
+                let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
+                inode.size = new_size;
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or(Duration::ZERO);
+                inode.ctime_sec = now.as_secs() as i64;
+                inode.ctime_nsec = now.subsec_nanos();
+                self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
+                return Ok(());
+            }
+        }
+
+        // Case B: closed file — read from CAS, truncate/extend, re-push
+        let old_manifest = self.meta.get_manifest(ino).map_err(|_| libc::EIO)?;
+
+        // Read current content
+        let mut content: Vec<u8> = if old_manifest.is_empty() {
+            Vec::new()
+        } else {
+            let root256 = from_digest224(&old_manifest[0]);
+            let dict = self.dict.lock().unwrap();
+            let get_data = GetData::new(&*dict, &root256);
+            GetBytes::new(get_data).collect()
+        };
+
+        // Decrement old refcount
+        if !old_manifest.is_empty() {
+            self.meta.decrement_refcount(&old_manifest[0]);
+        }
+
+        // Truncate or zero-extend
+        content.resize(new_size as usize, 0);
+
+        // Push new content
+        if content.is_empty() {
+            self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
+        } else {
+            let new_digest = {
+                let mut dict = self.dict.lock().unwrap();
+                State::push_all(&mut *dict, &content)
+            };
+            self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
+            self.meta.increment_refcount(&new_digest);
+        }
+
+        // Update inode
+        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
+        inode.size = new_size;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
+        inode.ctime_sec = now.as_secs() as i64;
+        inode.ctime_nsec = now.subsec_nanos();
+        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
+        Ok(())
+    }
+
+    /// Update permission bits (preserving file type bits) for an inode.
+    pub fn test_setattr_mode(&self, ino: u64, mode: u32) -> Result<(), i32> {
+        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
+        inode.mode = (inode.mode & S_IFMT) | (mode & 0o7777);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
+        inode.ctime_sec = now.as_secs() as i64;
+        inode.ctime_nsec = now.subsec_nanos();
+        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
+        Ok(())
+    }
+
+    /// Update uid and/or gid for an inode.
+    pub fn test_setattr_uid_gid(
+        &self,
+        ino: u64,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> Result<(), i32> {
+        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
+        if let Some(u) = uid {
+            inode.uid = u;
+        }
+        if let Some(g) = gid {
+            inode.gid = g;
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
+        inode.ctime_sec = now.as_secs() as i64;
+        inode.ctime_nsec = now.subsec_nanos();
+        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
+        Ok(())
+    }
+
+    /// Update mtime for an inode to a specific (sec, nsec).
+    pub fn test_setattr_mtime(&self, ino: u64, mtime_sec: i64, mtime_nsec: u32) -> Result<(), i32> {
+        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
+        inode.mtime_sec = mtime_sec;
+        inode.mtime_nsec = mtime_nsec;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
+        inode.ctime_sec = now.as_secs() as i64;
+        inode.ctime_nsec = now.subsec_nanos();
+        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
+        Ok(())
+    }
+
+    /// Returns ENOSYS — mknod (device nodes, FIFOs) is not supported in Phase 4.
+    pub fn test_mknod(&self, _parent: u64, _name: &str, _mode: u32, _rdev: u32) -> Result<(), i32> {
+        Err(libc::ENOSYS)
+    }
+
+    // ── Directory and link simulate helpers (Phase 4 Plan 03) ─────────────────
+
+    /// Create a subdirectory named `name` in `parent_ino`.
+    ///
+    /// Delegates to `DictMetadataStore::create_directory` which handles:
+    /// - inode allocation, . and .. entries, adding name to parent, parent nlinks increment.
+    ///
+    /// Returns the new directory's inode number.
+    pub fn simulate_mkdir(
+        &self,
+        parent_ino: u64,
+        name: &str,
+        mode: u32,
+        umask: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<u64, i32> {
+        let dir_mode = S_IFDIR | (mode & !umask & 0o7777);
+        let dir_meta = InodeMeta::new_directory(0, uid, gid, dir_mode);
+        self.meta
+            .create_directory(parent_ino, name, &dir_meta)
+            .map_err(|e| meta_error_to_errno(&e))
+    }
+
+    /// Remove empty directory `name` from `parent_ino`.
+    ///
+    /// Returns ENOTEMPTY if the directory still has entries beyond . and ..
+    /// Returns EISDIR if the target is not a directory (though lookup normally guards this).
+    pub fn simulate_rmdir(&self, parent_ino: u64, name: &str) -> Result<(), i32> {
+        // Resolve name to inode
+        let ino = self
+            .meta
+            .lookup(parent_ino, name)
+            .map_err(|e| meta_error_to_errno(&e))?;
+
+        // Verify it is a directory
+        let inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        if inode.mode & S_IFDIR == 0 {
+            return Err(libc::ENOTDIR);
+        }
+
+        // Check emptiness: list_directory returns . and .. plus any real entries
+        let entries = self
+            .meta
+            .list_directory(ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
+        // . and .. always present — anything beyond that is ENOTEMPTY
+        let real_entries = entries.iter().filter(|e| e.name != "." && e.name != "..").count();
+        if real_entries > 0 {
+            return Err(libc::ENOTEMPTY);
+        }
+
+        // Remove directory entry from parent and delete directory inode
+        self.meta
+            .unlink(parent_ino, name)
+            .map_err(|e| meta_error_to_errno(&e))?;
+        self.meta.delete_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+
+        // Decrement parent nlinks (removing the .. backlink from the deleted subdir)
+        let mut parent_inode = self
+            .meta
+            .get_inode(parent_ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
+        if parent_inode.nlinks > 0 {
+            parent_inode.nlinks -= 1;
+            self.meta.update_inode(&parent_inode).map_err(|e| meta_error_to_errno(&e))?;
+        }
+        Ok(())
+    }
+
+    /// Remove file (non-directory) `name` from `parent_ino`.
+    ///
+    /// Manages nlinks lifecycle:
+    /// - Decrements nlinks.
+    /// - When nlinks reaches 0: decrements content refcounts and deletes inode.
+    /// - When nlinks > 0: updates inode (hard link still exists elsewhere).
+    ///
+    /// Returns EISDIR if the target is a directory (use rmdir instead).
+    pub fn simulate_unlink(&self, parent_ino: u64, name: &str) -> Result<(), i32> {
+        // Resolve name
+        let ino = self
+            .meta
+            .lookup(parent_ino, name)
+            .map_err(|e| meta_error_to_errno(&e))?;
+
+        // Get inode
+        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+
+        // Must not be a directory
+        if inode.mode & S_IFDIR != 0 {
+            return Err(libc::EISDIR);
+        }
+
+        // Remove directory entry
+        self.meta
+            .unlink(parent_ino, name)
+            .map_err(|e| meta_error_to_errno(&e))?;
+
+        // Guard against underflow
+        if inode.nlinks > 0 {
+            inode.nlinks -= 1;
+        }
+
+        if inode.nlinks == 0 {
+            // Decrement content refcounts
+            if let Ok(manifest) = self.meta.get_manifest(ino) {
+                for digest in &manifest {
+                    self.meta.decrement_refcount(digest);
+                }
+            }
+            // Delete inode
+            let _ = self.meta.delete_inode(ino);
+        } else {
+            // Hard links still exist — just persist the decremented nlinks
+            self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
+        }
+        Ok(())
+    }
+
+    /// Create a hard link: add `newname` in `newparent_ino` pointing at `ino`.
+    ///
+    /// POSIX disallows hard links to directories — returns EPERM.
+    /// Returns the new inode number (same as `ino`).
+    pub fn simulate_link(&self, ino: u64, newparent_ino: u64, newname: &str) -> Result<u64, i32> {
+        // Get source inode
+        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+
+        // Disallow hard links to directories
+        if inode.mode & S_IFDIR != 0 {
+            return Err(libc::EPERM);
+        }
+
+        // Add new directory entry
+        self.meta
+            .link(newparent_ino, newname, ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
+
+        // Increment nlinks and update ctime
+        inode.nlinks += 1;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
+        inode.ctime_sec = now.as_secs() as i64;
+        inode.ctime_nsec = now.subsec_nanos();
+        self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
+
+        Ok(ino)
+    }
+
+    /// Rename `name` in `parent_ino` to `newname` in `newparent_ino`.
+    ///
+    /// `flags` maps to Linux rename2 flags:
+    /// - 0: normal rename (overwrite target if it exists)
+    /// - 1 (RENAME_NOREPLACE): return EEXIST if target already exists
+    /// - 2 (RENAME_EXCHANGE): return ENOSYS (not supported)
+    pub fn simulate_rename(
+        &self,
+        parent_ino: u64,
+        name: &str,
+        newparent_ino: u64,
+        newname: &str,
+        flags: u32,
+    ) -> Result<(), i32> {
+        // RENAME_EXCHANGE not supported
+        if flags & 2 != 0 {
+            return Err(libc::ENOSYS);
+        }
+
+        // Resolve source inode
+        let src_ino = self
+            .meta
+            .lookup(parent_ino, name)
+            .map_err(|_| libc::ENOENT)?;
+
+        // RENAME_NOREPLACE: fail if target already exists
+        let target_ino = self.meta.lookup(newparent_ino, newname).ok();
+        if flags & 1 != 0 {
+            if target_ino.is_some() {
+                return Err(libc::EEXIST);
+            }
+        }
+
+        // If target exists and we're doing a normal rename, remove the old target
+        if let Some(dst_ino) = target_ino {
+            let dst_inode = self.meta.get_inode(dst_ino).map_err(|e| meta_error_to_errno(&e))?;
+            self.meta
+                .unlink(newparent_ino, newname)
+                .map_err(|e| meta_error_to_errno(&e))?;
+            // Manage nlinks for the displaced target
+            let new_nlinks = dst_inode.nlinks.saturating_sub(1);
+            if new_nlinks == 0 && dst_inode.mode & S_IFDIR == 0 {
+                // Decrement refcounts and delete inode for regular files
+                if let Ok(manifest) = self.meta.get_manifest(dst_ino) {
+                    for digest in &manifest {
+                        self.meta.decrement_refcount(digest);
+                    }
+                }
+                let _ = self.meta.delete_inode(dst_ino);
+            } else if new_nlinks > 0 {
+                let mut updated_dst = dst_inode.clone();
+                updated_dst.nlinks = new_nlinks;
+                let _ = self.meta.update_inode(&updated_dst);
+            }
+            // Directories are left orphaned (no directory hard links in our impl)
+        }
+
+        // Link source at new location and unlink from old location
+        self.meta
+            .link(newparent_ino, newname, src_ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
+        self.meta
+            .unlink(parent_ino, name)
+            .map_err(|e| meta_error_to_errno(&e))?;
+
+        // Update ctime on moved inode
+        let mut src_inode = self.meta.get_inode(src_ino).map_err(|e| meta_error_to_errno(&e))?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
+        src_inode.ctime_sec = now.as_secs() as i64;
+        src_inode.ctime_nsec = now.subsec_nanos();
+        self.meta.update_inode(&src_inode).map_err(|e| meta_error_to_errno(&e))?;
+
+        Ok(())
+    }
+
+    /// Create a symbolic link named `link_name` in `parent_ino` with `target` as content.
+    ///
+    /// Target is stored as CAS content in the dictionary; manifest points to it.
+    /// Returns the new symlink inode number.
+    pub fn simulate_symlink(
+        &self,
+        parent_ino: u64,
+        link_name: &str,
+        target: &str,
+        uid: u32,
+        gid: u32,
+    ) -> Result<u64, i32> {
+        let target_bytes = target.as_bytes();
+        let symlink_meta = InodeMeta {
+            ino: 0,
+            mode: S_IFLNK | 0o777,
+            uid,
+            gid,
+            nlinks: 1,
+            size: target_bytes.len() as u64,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            ctime_sec: 0,
+            ctime_nsec: 0,
+        };
+
+        // Create inode
+        let ino = self
+            .meta
+            .create_inode(&symlink_meta)
+            .map_err(|e| meta_error_to_errno(&e))?;
+
+        // Link into parent directory
+        if let Err(e) = self.meta.link(parent_ino, link_name, ino) {
+            let _ = self.meta.delete_inode(ino);
+            return Err(meta_error_to_errno(&e));
+        }
+
+        // Store target as CAS content
+        let content_digest = {
+            let mut dict = self.dict.lock().unwrap();
+            State::push_all(&mut *dict, target_bytes)
+        };
+        self.meta
+            .set_manifest(ino, &[content_digest])
+            .map_err(|_| libc::EIO)?;
+        self.meta.increment_refcount(&content_digest);
+
+        // Update inode size to target length
+        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
+        inode.size = target_bytes.len() as u64;
+        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
+
+        Ok(ino)
+    }
+
+    /// Read the target of a symbolic link inode.
+    ///
+    /// Loads the manifest, reads content bytes from the dictionary, and returns them as a String.
+    pub fn simulate_readlink(&self, ino: u64) -> Result<String, i32> {
+        let manifest = self.meta.get_manifest(ino).map_err(|_| libc::EINVAL)?;
+        if manifest.is_empty() {
+            return Ok(String::new());
+        }
+        let root256 = from_digest224(&manifest[0]);
+        let dict = self.dict.lock().unwrap();
+        let get_data = GetData::new(&*dict, &root256);
+        let bytes: Vec<u8> = GetBytes::new(get_data).collect();
+        drop(dict);
+        String::from_utf8(bytes).map_err(|_| libc::EINVAL)
+    }
+}
 
 impl Filesystem for SliceFsFilesystem {
     fn init(&mut self, _req: &Request, _config: &mut KernelConfig) -> io::Result<()> {
@@ -246,13 +751,24 @@ impl Filesystem for SliceFsFilesystem {
         &self,
         _req: &Request,
         ino: INodeNo,
-        _fh: FileHandle,
+        fh: FileHandle,
         offset: u64,
         size: u32,
         _flags: OpenFlags,
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
+        // Read-after-write within the same open session: serve from in-flight buffer
+        if fh.0 > 0 {
+            let open_files = self.open_files.lock().unwrap();
+            if let Some(state) = open_files.get(&fh.0) {
+                let buf = &state.buf;
+                let start = (offset as usize).min(buf.len());
+                let end = (offset as usize + size as usize).min(buf.len());
+                return reply.data(&buf[start..end]);
+            }
+        }
+
         let manifest = match self.meta.get_manifest(ino.0) {
             Ok(m) => m,
             Err(e) => return reply.error(meta_error_to_fuse_errno(&e)),
@@ -302,17 +818,21 @@ impl Filesystem for SliceFsFilesystem {
     fn release(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         fh: FileHandle,
         _flags: OpenFlags,
         _lock_owner: Option<LockOwner>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        if fh.0 > 0 {
-            self.open_files.lock().unwrap().remove(&fh.0);
+        if fh.0 == 0 {
+            // Read-only handle — nothing to flush
+            return reply.ok();
         }
-        reply.ok();
+        match self.test_release(ino.0, fh.0) {
+            Ok(()) => reply.ok(),
+            Err(_) => reply.error(Errno::EIO),
+        }
     }
 
     fn releasedir(
@@ -386,46 +906,77 @@ impl Filesystem for SliceFsFilesystem {
         }
     }
 
-    // ── Write operations — all return EROFS ───────────────────────────────────
+    // ── Write operations ───────────────────────────────────────────────────────
 
     fn write(
         &self,
         _req: &Request,
         _ino: INodeNo,
-        _fh: FileHandle,
-        _offset: u64,
-        _data: &[u8],
+        fh: FileHandle,
+        offset: u64,
+        data: &[u8],
         _write_flags: WriteFlags,
         _flags: OpenFlags,
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
-        reply.error(Errno::EROFS);
+        match self.test_write(fh.0, offset, data) {
+            Ok(n) => reply.written(n),
+            Err(_) => reply.error(Errno::EBADF),
+        }
     }
 
     fn create(
         &self,
-        _req: &Request,
-        _parent: INodeNo,
-        _name: &OsStr,
-        _mode: u32,
-        _umask: u32,
+        req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
         _flags: i32,
         reply: ReplyCreate,
     ) {
-        reply.error(Errno::EROFS);
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => return reply.error(Errno::EINVAL),
+        };
+        match self.test_create(parent.0, name_str, mode, umask, req.uid(), req.gid()) {
+            Ok((ino, fh)) => {
+                match self.meta.get_inode(ino) {
+                    Ok(meta) => {
+                        let attr = inode_to_file_attr(&meta);
+                        reply.created(&TTL, &attr, Generation(0), FileHandle(fh), FopenFlags::empty());
+                    }
+                    Err(e) => reply.error(meta_error_to_fuse_errno(&e)),
+                }
+            }
+            Err(errno) => reply.error(Errno::from_i32(errno)),
+        }
     }
 
     fn mkdir(
         &self,
-        _req: &Request,
-        _parent: INodeNo,
-        _name: &OsStr,
-        _mode: u32,
-        _umask: u32,
+        req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EROFS);
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => return reply.error(Errno::EINVAL),
+        };
+        match self.simulate_mkdir(parent.0, name_str, mode, umask, req.uid(), req.gid()) {
+            Ok(ino) => match self.meta.get_inode(ino) {
+                Ok(meta) => {
+                    let attr = inode_to_file_attr(&meta);
+                    reply.entry(&TTL, &attr, Generation(0));
+                }
+                Err(e) => reply.error(meta_error_to_fuse_errno(&e)),
+            },
+            Err(errno) => reply.error(Errno::from_i32(errno)),
+        }
     }
 
     fn mknod(
@@ -438,71 +989,182 @@ impl Filesystem for SliceFsFilesystem {
         _rdev: u32,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EROFS);
+        // Device nodes and FIFOs are not supported in Phase 4.
+        // Regular file creation goes through create().
+        reply.error(Errno::ENOSYS);
     }
 
     fn symlink(
         &self,
-        _req: &Request,
-        _parent: INodeNo,
-        _link_name: &OsStr,
-        _target: &std::path::Path,
+        req: &Request,
+        parent: INodeNo,
+        link_name: &OsStr,
+        target: &std::path::Path,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EROFS);
+        let name_str = match link_name.to_str() {
+            Some(s) => s,
+            None => return reply.error(Errno::EINVAL),
+        };
+        let target_str = match target.to_str() {
+            Some(s) => s,
+            None => return reply.error(Errno::EINVAL),
+        };
+        match self.simulate_symlink(parent.0, name_str, target_str, req.uid(), req.gid()) {
+            Ok(ino) => match self.meta.get_inode(ino) {
+                Ok(meta) => {
+                    let attr = inode_to_file_attr(&meta);
+                    reply.entry(&TTL, &attr, Generation(0));
+                }
+                Err(e) => reply.error(meta_error_to_fuse_errno(&e)),
+            },
+            Err(errno) => reply.error(Errno::from_i32(errno)),
+        }
+    }
+
+    fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
+        match self.simulate_readlink(ino.0) {
+            Ok(target) => reply.data(target.as_bytes()),
+            Err(errno) => reply.error(Errno::from_i32(errno)),
+        }
     }
 
     fn link(
         &self,
         _req: &Request,
-        _ino: INodeNo,
-        _newparent: INodeNo,
-        _newname: &OsStr,
+        ino: INodeNo,
+        newparent: INodeNo,
+        newname: &OsStr,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EROFS);
+        let name_str = match newname.to_str() {
+            Some(s) => s,
+            None => return reply.error(Errno::EINVAL),
+        };
+        match self.simulate_link(ino.0, newparent.0, name_str) {
+            Ok(new_ino) => match self.meta.get_inode(new_ino) {
+                Ok(meta) => {
+                    let attr = inode_to_file_attr(&meta);
+                    reply.entry(&TTL, &attr, Generation(0));
+                }
+                Err(e) => reply.error(meta_error_to_fuse_errno(&e)),
+            },
+            Err(errno) => reply.error(Errno::from_i32(errno)),
+        }
     }
 
-    fn unlink(&self, _req: &Request, _parent: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
-        reply.error(Errno::EROFS);
+    fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => return reply.error(Errno::EINVAL),
+        };
+        match self.simulate_unlink(parent.0, name_str) {
+            Ok(()) => reply.ok(),
+            Err(errno) => reply.error(Errno::from_i32(errno)),
+        }
     }
 
-    fn rmdir(&self, _req: &Request, _parent: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
-        reply.error(Errno::EROFS);
+    fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => return reply.error(Errno::EINVAL),
+        };
+        match self.simulate_rmdir(parent.0, name_str) {
+            Ok(()) => reply.ok(),
+            Err(errno) => reply.error(Errno::from_i32(errno)),
+        }
     }
 
     fn rename(
         &self,
         _req: &Request,
-        _parent: INodeNo,
-        _name: &OsStr,
-        _newparent: INodeNo,
-        _newname: &OsStr,
-        _flags: RenameFlags,
+        parent: INodeNo,
+        name: &OsStr,
+        newparent: INodeNo,
+        newname: &OsStr,
+        flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
-        reply.error(Errno::EROFS);
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => return reply.error(Errno::EINVAL),
+        };
+        let newname_str = match newname.to_str() {
+            Some(s) => s,
+            None => return reply.error(Errno::EINVAL),
+        };
+        match self.simulate_rename(parent.0, name_str, newparent.0, newname_str, flags.bits()) {
+            Ok(()) => reply.ok(),
+            Err(errno) => reply.error(Errno::from_i32(errno)),
+        }
     }
 
     fn setattr(
         &self,
         _req: &Request,
-        _ino: INodeNo,
-        _mode: Option<u32>,
-        _uid: Option<u32>,
-        _gid: Option<u32>,
-        _size: Option<u64>,
+        ino: INodeNo,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
         _atime: Option<TimeOrNow>,
-        _mtime: Option<TimeOrNow>,
+        mtime: Option<TimeOrNow>,
         _ctime: Option<SystemTime>,
-        _fh: Option<FileHandle>,
+        fh: Option<FileHandle>,
         _crtime: Option<SystemTime>,
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
         _flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
-        reply.error(Errno::EROFS);
+        let mut inode = match self.meta.get_inode(ino.0) {
+            Ok(m) => m,
+            Err(e) => return reply.error(meta_error_to_fuse_errno(&e)),
+        };
+
+        if let Some(m) = mode {
+            inode.mode = (inode.mode & S_IFMT) | (m & 0o7777);
+        }
+        if let Some(u) = uid {
+            inode.uid = u;
+        }
+        if let Some(g) = gid {
+            inode.gid = g;
+        }
+        if let Some(mt) = mtime {
+            let t = match mt {
+                TimeOrNow::SpecificTime(st) => st,
+                TimeOrNow::Now => SystemTime::now(),
+            };
+            let dur = t.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
+            inode.mtime_sec = dur.as_secs() as i64;
+            inode.mtime_nsec = dur.subsec_nanos();
+        }
+        if let Some(new_size) = size {
+            let fh_opt = fh.map(|f| f.0);
+            if let Err(e) = self.test_setattr_size(ino.0, fh_opt, new_size) {
+                return reply.error(Errno::from_i32(e));
+            }
+            // Re-load inode after size change (test_setattr_size updates it)
+            inode = match self.meta.get_inode(ino.0) {
+                Ok(m) => m,
+                Err(e) => return reply.error(meta_error_to_fuse_errno(&e)),
+            };
+        }
+
+        // Always update ctime
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
+        inode.ctime_sec = now.as_secs() as i64;
+        inode.ctime_nsec = now.subsec_nanos();
+
+        if let Err(e) = self.meta.update_inode(&inode) {
+            return reply.error(meta_error_to_fuse_errno(&e));
+        }
+
+        let attr = inode_to_file_attr(&inode);
+        reply.attr(&TTL, &attr);
     }
 
     fn fallocate(
