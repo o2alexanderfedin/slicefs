@@ -61,7 +61,7 @@ created: 2026-03-28
 - [ ] `crates/metadata/src/xattr.rs` — covers POSIX-08, Phase SC 4
 - [ ] `crates/metadata/src/inode_map.rs` — covers POSIX-10, Phase SC 5
 - [ ] `git submodule add https://github.com/o2alexanderfedin/data-id.git crates/data-id` — data-id not yet cloned
-- [ ] `crates/dedupfs-traits` redesign — Digest224/Digest256 replacing ChunkHash
+- [ ] `crates/slicefs-traits` redesign — Digest224/Digest256 replacing ChunkHash
 
 *Wave 0 installs test infrastructure and creates all stub files with failing tests.*
 

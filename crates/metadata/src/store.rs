@@ -13,8 +13,8 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use dedupfs_traits::digest::Digest224;
-use dedupfs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, MetadataStore};
+use slicefs_traits::digest::Digest224;
+use slicefs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, MetadataStore};
 use blockset::{Dictionary, State, Tree};
 
 use crate::inode::{intern_inode, load_inode};
@@ -429,7 +429,7 @@ fn load_u64_digest_map(
     dict: &Dictionary,
     key: &Digest224,
 ) -> Result<BTreeMap<u64, Digest224>, MetaError> {
-    use dedupfs_traits::digest::from_digest224;
+    use slicefs_traits::digest::from_digest224;
     use blockset::{GetBytes, GetData};
     let digest256 = from_digest224(key);
     let get_data = GetData::new(dict, &digest256);
@@ -471,7 +471,7 @@ impl DictMetadataStore {
     /// Restores all in-memory maps (inode_data, dir_data, manifest_data, xattr_data)
     /// and inode numbering state so that subsequent operations continue seamlessly.
     pub fn load_from_root(dict: Dictionary, root: &Digest224) -> Result<Self, MetaError> {
-        use dedupfs_traits::digest::from_digest224;
+        use slicefs_traits::digest::from_digest224;
         use blockset::{GetBytes, GetData};
         use crate::inode_map::load_inode_map;
 
@@ -621,7 +621,7 @@ fn parse_digest224(bytes: &[u8]) -> Digest224 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dedupfs_traits::metadata::{InodeMeta, MetadataStore};
+    use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 
     fn new_dir_meta() -> InodeMeta {
         InodeMeta::new_directory(0, 1000, 1000, S_IFDIR | 0o755)

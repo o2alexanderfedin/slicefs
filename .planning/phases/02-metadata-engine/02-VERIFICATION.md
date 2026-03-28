@@ -34,9 +34,9 @@ re_verification: false
 | Artifact | Expected | Status | Details |
 | -------- | -------- | ------ | ------- |
 | `crates/data-id/blockset/Cargo.toml` | blockset crate as git submodule | VERIFIED | Submodule initialized at commit `7054519`; `blockset/Cargo.toml` exists |
-| `crates/dedupfs-traits/src/digest.rs` | Re-exports Digest224, Digest256, Branches | VERIFIED | Type aliases `Digest224 = [u32; 7]`, `Digest256 = [u32; 8]`, `Branches = [Digest256; 2]` declared; helper functions re-exported from blockset |
-| `crates/dedupfs-traits/src/storage.rs` | Re-exports StorageAdd, StorageGet | VERIFIED | Traits declared independently (blockset storage module is private); structurally identical |
-| `crates/dedupfs-traits/src/metadata.rs` | MetadataStore trait, InodeId, DirEntry, MetaError, InodeMeta | VERIFIED | All types and 16-method trait defined; `InodeMeta` has uid/gid/mode/mtime/ctime fields |
+| `crates/slicefs-traits/src/digest.rs` | Re-exports Digest224, Digest256, Branches | VERIFIED | Type aliases `Digest224 = [u32; 7]`, `Digest256 = [u32; 8]`, `Branches = [Digest256; 2]` declared; helper functions re-exported from blockset |
+| `crates/slicefs-traits/src/storage.rs` | Re-exports StorageAdd, StorageGet | VERIFIED | Traits declared independently (blockset storage module is private); structurally identical |
+| `crates/slicefs-traits/src/metadata.rs` | MetadataStore trait, InodeId, DirEntry, MetaError, InodeMeta | VERIFIED | All types and 16-method trait defined; `InodeMeta` has uid/gid/mode/mtime/ctime fields |
 | `crates/metadata/src/inode.rs` | InodeMeta 56-byte binary serialization | VERIFIED | `serialize_inode` produces exactly 56 bytes; `intern_inode`/`load_inode` for Dictionary CAS; 9 tests including proptest pass |
 | `crates/metadata/src/inode_map.rs` | InodeMap: monotonic allocation, CAS intern/load | VERIFIED | `allocate_ino()` starts at 2; 36-byte record serialization; `set_next_ino()` for reload |
 | `crates/metadata/src/directory.rs` | Per-entry directory CAS operations | VERIFIED | `create_dir_entries`, `add_dir_entry`, `remove_dir_entry`, `lookup_dir_entry`, `list_dir_entries` implemented; dot/dotdot protection in place |
@@ -50,7 +50,7 @@ re_verification: false
 
 | From | To | Via | Status | Details |
 | ---- | -- | --- | ------ | ------- |
-| `crates/dedupfs-traits/src/digest.rs` | `blockset` | `pub use blockset::from_digest224` etc. | WIRED | Helper functions re-exported from blockset; type aliases declared locally due to private blockset modules |
+| `crates/slicefs-traits/src/digest.rs` | `blockset` | `pub use blockset::from_digest224` etc. | WIRED | Helper functions re-exported from blockset; type aliases declared locally due to private blockset modules |
 | `crates/metadata/src/store.rs` | `blockset::Dictionary` | `Mutex<Dictionary>` field | WIRED | `dict: Mutex<Dictionary>` at line 44; all operations lock this |
 | `crates/metadata/src/store.rs` | `crates/metadata/src/directory.rs` | function calls | WIRED | `use crate::directory::{create_dir_entries, add_dir_entry, ...}` at line 22; called in `create_directory`, `list_directory`, `lookup`, `link`, `unlink` |
 | `crates/metadata/src/store.rs` | `crates/metadata/src/inode_map.rs` | `InodeMap` field | WIRED | `inode_map: Mutex<InodeMap>` at line 46; `allocate_ino()`, `insert()`, `set_next_ino()` called throughout |
@@ -77,7 +77,7 @@ re_verification: false
 
 No anti-patterns detected.
 
-Scanned: `store.rs`, `xattr.rs`, `directory.rs`, `inode.rs`, `inode_map.rs`, `manifest.rs`, `crates/dedupfs-traits/src/metadata.rs`
+Scanned: `store.rs`, `xattr.rs`, `directory.rs`, `inode.rs`, `inode_map.rs`, `manifest.rs`, `crates/slicefs-traits/src/metadata.rs`
 
 - No `TODO`, `FIXME`, `XXX`, `HACK`, or `PLACEHOLDER` comments in any file
 - No stub returns (`return null`, `return {}`, etc.)
@@ -95,7 +95,7 @@ None. All phase-2 success criteria are verifiable programmatically. The metadata
 
 All three plans executed successfully. The metadata engine is complete:
 
-- **Plan 02-01** established the type foundation: `data-id` git submodule wired as `blockset` path dependency, `Digest224`/`Digest256`/`MetadataStore`/`InodeMeta` types in `dedupfs-traits`, metadata crate with 56-byte inode serialization and Dictionary CAS round-trip.
+- **Plan 02-01** established the type foundation: `data-id` git submodule wired as `blockset` path dependency, `Digest224`/`Digest256`/`MetadataStore`/`InodeMeta` types in `slicefs-traits`, metadata crate with 56-byte inode serialization and Dictionary CAS round-trip.
 - **Plan 02-02** built the core store: `InodeMap` with monotonic allocation, per-entry directory CAS operations, file manifest storage, and `DictMetadataStore` implementing all 16 `MetadataStore` trait methods backed by `Mutex<Dictionary>`.
 - **Plan 02-03** completed xattr storage and proved the persistence story: `load_from_root()` reconstructs complete filesystem state from a Dictionary + root `Digest224`, with inode numbers stable across the cycle.
 

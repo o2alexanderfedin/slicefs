@@ -24,8 +24,8 @@
 
 use std::collections::BTreeMap;
 
-use dedupfs_traits::digest::{Digest224, from_digest224};
-use dedupfs_traits::metadata::{DirEntry, MetaError};
+use slicefs_traits::digest::{Digest224, from_digest224};
+use slicefs_traits::metadata::{DirEntry, MetaError};
 use blockset::{State, Tree, GetBytes, GetData, Dictionary};
 
 // ─── public primitives ────────────────────────────────────────────────────────
@@ -41,12 +41,12 @@ pub fn entry_key(dict: &mut Dictionary, name: &str) -> Digest224 {
 /// Encode an inode number as an inline `Digest256`.
 ///
 /// 8 bytes always fits within the inline (non-hash) capacity of a `Digest256`.
-pub fn ino_to_digest256(ino: u64) -> dedupfs_traits::digest::Digest256 {
+pub fn ino_to_digest256(ino: u64) -> slicefs_traits::digest::Digest256 {
     blockset::from_bytes(&ino.to_le_bytes()).expect("8-byte value always fits inline")
 }
 
 /// Decode an inode number from an inline `Digest256`.
-pub fn digest256_to_ino(d: &dedupfs_traits::digest::Digest256) -> u64 {
+pub fn digest256_to_ino(d: &slicefs_traits::digest::Digest256) -> u64 {
     let bytes = blockset::to_data(d);
     let mut arr = [0u8; 8];
     let len = bytes.len().min(8);

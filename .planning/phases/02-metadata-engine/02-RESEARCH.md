@@ -9,10 +9,10 @@
 
 ### Locked Decisions
 
-- Adapt dedupfs-traits to fit data-id's native types (Digest224, Digest256, StorageAdd/StorageGet, Tree/State) — not an adapter layer over existing traits
+- Adapt slicefs-traits to fit data-id's native types (Digest224, Digest256, StorageAdd/StorageGet, Tree/State) — not an adapter layer over existing traits
 - data-id (https://github.com/o2alexanderfedin/data-id.git) cloned as a git submodule — not a crates.io dependency — to allow future optimizations
 - SHA-224 is the hash algorithm: Digest224 `[u32; 7]` is the actual 224-bit hash used as Dictionary keys; Digest256 `[u32; 8]` is a tagged union container where word[7] is either `0xFFFFFFFF` (hash marker) or encodes inline data bit-length
-- Keep `&self` + internal sync pattern from current dedupfs-traits — wrap data-id's `&mut self` (StorageAdd) with Mutex/RwLock internally for Arc<dyn Trait> sharing across FUSE threads
+- Keep `&self` + internal sync pattern from current slicefs-traits — wrap data-id's `&mut self` (StorageAdd) with Mutex/RwLock internally for Arc<dyn Trait> sharing across FUSE threads
 - Dedup is implicit via content addressing — no separate bloom filter or dedup index needed (data-id's model: same content = same hash = same tree node)
 - One shared Dictionary for everything — metadata and content stored as CAS tree nodes in the same Dictionary instance
 - No separate embedded database (redb/sled/SQLite) — data-id's Dictionary IS the storage layer
@@ -34,7 +34,7 @@
 
 ### Deferred Ideas (OUT OF SCOPE)
 
-- **Phase 1 trait refactoring**: dedupfs-traits needs redesign to align with data-id. This may be a Phase 1.5 or rolled into Phase 2 planning
+- **Phase 1 trait refactoring**: slicefs-traits needs redesign to align with data-id. This may be a Phase 1.5 or rolled into Phase 2 planning
 - **GC and SSD optimization**: Segment-based compaction, batch deletes, TRIM/discard — deferred to Phase 5
 - **Snapshot pinning protocol**: How to mark roots as live for GC — deferred to Phase 5/6
 - **Async wrappers**: For distributed backends in v2 milestone
@@ -59,11 +59,11 @@
 
 Phase 2 builds the metadata engine on top of data-id's `Dictionary` (a `BTreeMap<Digest224, Branches>`). There is no separate database — metadata lives as CAS subtrees in the same Dictionary as content blocks. The filesystem state at any moment is a single `Digest224` root that points to a metadata tree whose leaves are inodes, directory entries, file manifests, and xattr values.
 
-The central design challenge is adapting the existing `dedupfs-traits` crate (which uses `ChunkHash(Vec<u8>)` and `&mut self` StorageAdd) to data-id's native `Digest224`/`Digest256` types and its `&mut self` `StorageAdd` trait. The resolution is: rewrite `dedupfs-traits` to use `Digest224`/`Digest256` natively and introduce a new `MetadataStore` trait; wrap the Dictionary's `&mut self` methods behind a `Mutex<Dictionary>` so the store satisfies `&self` + `Send + Sync`. The data-id crate becomes a git submodule at `crates/data-id` and is referenced as a path dependency.
+The central design challenge is adapting the existing `slicefs-traits` crate (which uses `ChunkHash(Vec<u8>)` and `&mut self` StorageAdd) to data-id's native `Digest224`/`Digest256` types and its `&mut self` `StorageAdd` trait. The resolution is: rewrite `slicefs-traits` to use `Digest224`/`Digest256` natively and introduce a new `MetadataStore` trait; wrap the Dictionary's `&mut self` methods behind a `Mutex<Dictionary>` so the store satisfies `&self` + `Send + Sync`. The data-id crate becomes a git submodule at `crates/data-id` and is referenced as a path dependency.
 
 The five success criteria decompose into four implementation units: (1) an `InodeStore` trait and implementation for CRUD on inodes stored as compact binary-serialized subtrees, (2) a `DirectoryStore` for per-entry subtrees with guaranteed `.` and `..`, (3) a `ManifestStore` linking inode numbers to ordered lists of block Digest224 values, and (4) an `XattrStore` implemented as a subtree under each inode. All four are unified behind a single `MetadataStore` facade that holds the Dictionary and the current filesystem root.
 
-**Primary recommendation:** Introduce a new `metadata` crate. Redesign `dedupfs-traits` in the same phase to use Digest224/Digest256. Implement MetadataStore wrapping `Mutex<Dictionary>`. Use fixed-layout binary structs (little-endian, no serde) for all inode fields — they fit in ≤ 3 Digest256 leaf nodes (88 bytes).
+**Primary recommendation:** Introduce a new `metadata` crate. Redesign `slicefs-traits` in the same phase to use Digest224/Digest256. Implement MetadataStore wrapping `Mutex<Dictionary>`. Use fixed-layout binary structs (little-endian, no serde) for all inode fields — they fit in ≤ 3 Digest256 leaf nodes (88 bytes).
 
 ---
 
@@ -113,7 +113,7 @@ The five success criteria decompose into four implementation units: (1) an `Inod
 crates/
 ├── data-id/                 # git submodule (o2alexanderfedin/data-id)
 │   └── blockset/            # the actual crate consumed as path dep
-├── dedupfs-traits/          # redesigned: Digest224/256 types, MetadataStore trait
+├── slicefs-traits/          # redesigned: Digest224/256 types, MetadataStore trait
 │   └── src/
 │       ├── lib.rs
 │       ├── digest.rs        # re-export Digest224, Digest256, Branches from blockset
@@ -512,9 +512,9 @@ pub use visual::print_tree;
 
 ---
 
-## dedupfs-traits Redesign Plan (Phase 2 prerequisite)
+## slicefs-traits Redesign Plan (Phase 2 prerequisite)
 
-The existing `dedupfs-traits` crate uses `ChunkHash(Vec<u8>)`. Phase 2 must redesign it. The scope of changes:
+The existing `slicefs-traits` crate uses `ChunkHash(Vec<u8>)`. Phase 2 must redesign it. The scope of changes:
 
 1. **Add `digest.rs`** — re-exports `Digest224`, `Digest256`, `Branches` from `blockset`
 2. **Add `storage.rs`** — re-exports `StorageAdd`, `StorageGet` from `blockset::storage`
@@ -608,7 +608,7 @@ The `cas-local` stubs (MemBlockStore, Blake3Hasher, FixedChunker, MemDedupIndex)
 - [ ] `crates/metadata/src/xattr.rs` — covers POSIX-08, Phase SC 4
 - [ ] `crates/metadata/src/inode_map.rs` — covers POSIX-10, Phase SC 5
 - [ ] `git submodule add https://github.com/o2alexanderfedin/data-id.git crates/data-id` — data-id not yet cloned
-- [ ] `crates/dedupfs-traits` redesign — Digest224/Digest256 replacing ChunkHash
+- [ ] `crates/slicefs-traits` redesign — Digest224/Digest256 replacing ChunkHash
 
 ---
 
@@ -641,7 +641,7 @@ The `cas-local` stubs (MemBlockStore, Blake3Hasher, FixedChunker, MemDedupIndex)
 - Standard stack: HIGH — data-id source confirmed via GitHub API; all types verified
 - Architecture: HIGH — data-id Dictionary model is fully understood; patterns derived directly from source
 - Pitfalls: HIGH — derived from careful reading of actual data-id source code (compress vs add, end() behavior, inline data threshold)
-- dedupfs-traits redesign scope: HIGH — current source confirmed; required changes are mechanical
+- slicefs-traits redesign scope: HIGH — current source confirmed; required changes are mechanical
 
 **Research date:** 2026-03-27
 **Valid until:** 2026-06-27 (data-id is a git submodule at a fixed commit; changes only on explicit submodule update)

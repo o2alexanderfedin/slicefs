@@ -1,6 +1,6 @@
 //! `FixedChunker`: implements `Chunker` with fixed-size blocks.
 
-use dedupfs_traits::{chunk::{Chunk, Chunker}, error::CasError};
+use slicefs_traits::{chunk::{Chunk, Chunker}, error::CasError};
 
 /// Fixed-size block chunker.
 ///

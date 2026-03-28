@@ -8,8 +8,8 @@
 //! (which is `BTreeMap<[u32;7], [[u32;8];2]>`). Therefore, `intern_inode` and
 //! `load_inode` work directly with `blockset::Dictionary`.
 
-use dedupfs_traits::metadata::{InodeMeta, MetaError};
-use dedupfs_traits::digest::{Digest224, Digest256, from_digest224};
+use slicefs_traits::metadata::{InodeMeta, MetaError};
+use slicefs_traits::digest::{Digest224, Digest256, from_digest224};
 use blockset::{State, Tree, GetBytes, GetData, Dictionary};
 
 /// Serialize `InodeMeta` to a fixed 56-byte little-endian buffer.
@@ -89,7 +89,7 @@ pub fn load_inode(dict: &Dictionary, key: &Digest224) -> Result<InodeMeta, MetaE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dedupfs_traits::metadata::InodeMeta;
+    use slicefs_traits::metadata::InodeMeta;
     use proptest::prelude::*;
 
     // Proptest strategy for arbitrary InodeMeta

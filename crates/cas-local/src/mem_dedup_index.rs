@@ -26,7 +26,7 @@ use std::{
 
 use fastbloom::AtomicBloomFilter;
 
-use dedupfs_traits::{
+use slicefs_traits::{
     dedup_index::{DedupIndex, DedupResult},
     error::CasError,
     hash::ChunkHash,
@@ -198,7 +198,7 @@ impl DedupIndex for MemDedupIndex {
 mod tests {
     use super::*;
     use crate::blake3_hasher::Blake3Hasher;
-    use dedupfs_traits::hash::ContentHasher;
+    use slicefs_traits::hash::ContentHasher;
     use proptest::prelude::*;
 
     // -----------------------------------------------------------------------

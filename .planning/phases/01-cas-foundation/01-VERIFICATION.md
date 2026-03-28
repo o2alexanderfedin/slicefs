@@ -39,11 +39,11 @@ All artifacts from all three plan `must_haves` sections verified at all three le
 
 | Artifact                                           | Expected                               | Status     | Details                                                                           |
 |----------------------------------------------------|----------------------------------------|------------|-----------------------------------------------------------------------------------|
-| `crates/dedupfs-traits/src/hash.rs`                | ContentHasher trait, ChunkHash newtype | VERIFIED   | `pub trait ContentHasher: Send + Sync` defined; `ChunkHash(Vec<u8>)` newtype with `from_bytes`/`as_bytes`/`Display` |
-| `crates/dedupfs-traits/src/chunk.rs`               | Chunker trait, Chunk struct            | VERIFIED   | `pub trait Chunker: Send + Sync` defined; `Chunk { offset, data }` struct         |
-| `crates/dedupfs-traits/src/block_store.rs`         | BlockStore trait, BlockStoreConfig     | VERIFIED   | `pub trait BlockStore: Send + Sync` with `put/get/exists/delete`; `BlockStoreConfig { verify_on_read: bool }` with `Default` impl (true) |
-| `crates/dedupfs-traits/src/dedup_index.rs`         | DedupIndex trait, DedupResult enum     | VERIFIED   | `pub trait DedupIndex: Send + Sync` with `bloom_check/lookup/insert/remove`; `DedupResult { DefinitelyAbsent, Present, Absent }` |
-| `crates/dedupfs-traits/src/error.rs`               | CasError typed error enum              | VERIFIED   | `pub enum CasError` with all 6 variants: `NotFound`, `IntegrityFailure`, `HashCollision`, `Io`, `Chunker`, `Index` |
+| `crates/slicefs-traits/src/hash.rs`                | ContentHasher trait, ChunkHash newtype | VERIFIED   | `pub trait ContentHasher: Send + Sync` defined; `ChunkHash(Vec<u8>)` newtype with `from_bytes`/`as_bytes`/`Display` |
+| `crates/slicefs-traits/src/chunk.rs`               | Chunker trait, Chunk struct            | VERIFIED   | `pub trait Chunker: Send + Sync` defined; `Chunk { offset, data }` struct         |
+| `crates/slicefs-traits/src/block_store.rs`         | BlockStore trait, BlockStoreConfig     | VERIFIED   | `pub trait BlockStore: Send + Sync` with `put/get/exists/delete`; `BlockStoreConfig { verify_on_read: bool }` with `Default` impl (true) |
+| `crates/slicefs-traits/src/dedup_index.rs`         | DedupIndex trait, DedupResult enum     | VERIFIED   | `pub trait DedupIndex: Send + Sync` with `bloom_check/lookup/insert/remove`; `DedupResult { DefinitelyAbsent, Present, Absent }` |
+| `crates/slicefs-traits/src/error.rs`               | CasError typed error enum              | VERIFIED   | `pub enum CasError` with all 6 variants: `NotFound`, `IntegrityFailure`, `HashCollision`, `Io`, `Chunker`, `Index` |
 
 ### Plan 01-02 Artifacts
 
@@ -66,13 +66,13 @@ All artifacts from all three plan `must_haves` sections verified at all three le
 
 | From                                         | To                                              | Via                                       | Status   | Details                                                                 |
 |----------------------------------------------|-------------------------------------------------|-------------------------------------------|----------|-------------------------------------------------------------------------|
-| `crates/dedupfs-traits/src/lib.rs`           | all trait modules                               | `pub mod` + `pub use` re-exports          | WIRED    | All 5 modules declared; all 9 public types re-exported at crate root    |
-| `crates/cas-local/Cargo.toml`                | `crates/dedupfs-traits`                         | workspace path dependency                 | WIRED    | `dedupfs-traits = { path = "../dedupfs-traits" }` confirmed             |
-| `crates/cas-local/src/blake3_hasher.rs`      | `dedupfs_traits::hash::ContentHasher`           | `impl ContentHasher for Blake3Hasher`     | WIRED    | Trait impl present; tests exercise it via `&dyn ContentHasher`          |
-| `crates/cas-local/src/mem_block_store.rs`    | `dedupfs_traits::block_store::BlockStore`       | `impl BlockStore for MemBlockStore`       | WIRED    | Trait impl present; all 4 methods implemented with internal `RwLock`    |
-| `crates/cas-local/src/disk_block_store.rs`   | `dedupfs_traits::block_store::BlockStore`       | `impl BlockStore for LocalDiskStore`      | WIRED    | Trait impl present; `self.hasher.hash()` called on both `put` and `get` |
-| `crates/cas-local/src/disk_block_store.rs`   | `dedupfs_traits::hash::ContentHasher`           | re-hash on read for integrity verification | WIRED   | `self.hasher.hash(&data)` called in `get()` when `verify_on_read=true`  |
-| `crates/cas-local/src/mem_dedup_index.rs`    | `dedupfs_traits::dedup_index::DedupIndex`       | `impl DedupIndex for MemDedupIndex`       | WIRED    | Trait impl present; `AtomicBloomFilter` fast path + `RwLock<HashSet>` authoritative lookup |
+| `crates/slicefs-traits/src/lib.rs`           | all trait modules                               | `pub mod` + `pub use` re-exports          | WIRED    | All 5 modules declared; all 9 public types re-exported at crate root    |
+| `crates/cas-local/Cargo.toml`                | `crates/slicefs-traits`                         | workspace path dependency                 | WIRED    | `slicefs-traits = { path = "../slicefs-traits" }` confirmed             |
+| `crates/cas-local/src/blake3_hasher.rs`      | `slicefs_traits::hash::ContentHasher`           | `impl ContentHasher for Blake3Hasher`     | WIRED    | Trait impl present; tests exercise it via `&dyn ContentHasher`          |
+| `crates/cas-local/src/mem_block_store.rs`    | `slicefs_traits::block_store::BlockStore`       | `impl BlockStore for MemBlockStore`       | WIRED    | Trait impl present; all 4 methods implemented with internal `RwLock`    |
+| `crates/cas-local/src/disk_block_store.rs`   | `slicefs_traits::block_store::BlockStore`       | `impl BlockStore for LocalDiskStore`      | WIRED    | Trait impl present; `self.hasher.hash()` called on both `put` and `get` |
+| `crates/cas-local/src/disk_block_store.rs`   | `slicefs_traits::hash::ContentHasher`           | re-hash on read for integrity verification | WIRED   | `self.hasher.hash(&data)` called in `get()` when `verify_on_read=true`  |
+| `crates/cas-local/src/mem_dedup_index.rs`    | `slicefs_traits::dedup_index::DedupIndex`       | `impl DedupIndex for MemDedupIndex`       | WIRED    | Trait impl present; `AtomicBloomFilter` fast path + `RwLock<HashSet>` authoritative lookup |
 
 ---
 
@@ -82,8 +82,8 @@ All 5 requirement IDs declared across phase plans are Phase 1 requirements. No p
 
 | Requirement | Source Plans       | Description                                                                           | Status     | Evidence                                                                                                    |
 |-------------|--------------------|---------------------------------------------------------------------------------------|------------|-------------------------------------------------------------------------------------------------------------|
-| CAS-01      | 01-01, 01-02       | Block-level content-addressable storage with pluggable hash function trait            | SATISFIED  | `ContentHasher` trait defined in `dedupfs-traits`; `Blake3Hasher` implements it; swap test proves `&dyn ContentHasher` pluggability without changing calling code |
-| CAS-02      | 01-01, 01-02       | Pluggable chunking/block-splitting trait interface                                    | SATISFIED  | `Chunker` trait defined in `dedupfs-traits`; `FixedChunker` implements it; swap test with `LargeBlockChunker` proves `&dyn Chunker` pluggability |
+| CAS-01      | 01-01, 01-02       | Block-level content-addressable storage with pluggable hash function trait            | SATISFIED  | `ContentHasher` trait defined in `slicefs-traits`; `Blake3Hasher` implements it; swap test proves `&dyn ContentHasher` pluggability without changing calling code |
+| CAS-02      | 01-01, 01-02       | Pluggable chunking/block-splitting trait interface                                    | SATISFIED  | `Chunker` trait defined in `slicefs-traits`; `FixedChunker` implements it; swap test with `LargeBlockChunker` proves `&dyn Chunker` pluggability |
 | CAS-03      | 01-01, 01-03       | Pluggable storage backend trait for CAS blocks with local disk implementation         | SATISFIED  | `BlockStore` trait defined; `LocalDiskStore` implements it with 2-byte sharded disk I/O; `MemBlockStore` provides the in-memory variant |
 | CAS-05      | 01-01, 01-02, 01-03 | Integrity verification on read (re-hash block, compare to stored hash, configurable) | SATISFIED  | `BlockStoreConfig::verify_on_read` flag; `MemBlockStore` and `LocalDiskStore` both implement the re-hash path; corruption test in `disk_block_store.rs` writes garbage bytes to disk and confirms `IntegrityFailure` returned |
 | CAS-06      | (Phase 4, not Phase 1) | Dedup-aware space reporting — NOT a Phase 1 requirement                           | OUT OF SCOPE | Correctly deferred to Phase 4; not present in any Phase 1 plan `requirements` field |

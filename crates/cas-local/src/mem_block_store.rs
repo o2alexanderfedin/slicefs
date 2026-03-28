@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use dedupfs_traits::block_store::{BlockStore, BlockStoreConfig};
-use dedupfs_traits::error::CasError;
-use dedupfs_traits::hash::{ChunkHash, ContentHasher};
+use slicefs_traits::block_store::{BlockStore, BlockStoreConfig};
+use slicefs_traits::error::CasError;
+use slicefs_traits::hash::{ChunkHash, ContentHasher};
 
 /// In-memory [`BlockStore`] backed by a `HashMap<ChunkHash, Vec<u8>>`.
 ///

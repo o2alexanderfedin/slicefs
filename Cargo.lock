@@ -73,9 +73,9 @@ name = "cas-local"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "dedupfs-traits",
  "fastbloom",
  "proptest",
+ "slicefs-traits",
  "tempfile",
  "thiserror",
 ]
@@ -109,14 +109,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "dedupfs-traits"
-version = "0.1.0"
-dependencies = [
- "blockset",
- "thiserror",
 ]
 
 [[package]]
@@ -288,8 +280,8 @@ name = "metadata"
 version = "0.1.0"
 dependencies = [
  "blockset",
- "dedupfs-traits",
  "proptest",
+ "slicefs-traits",
  "thiserror",
 ]
 
@@ -520,6 +512,14 @@ name = "siphasher"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2aa850e253778c88a04c3d7323b043aeda9d3e30d5971937c1855769763678e"
+
+[[package]]
+name = "slicefs-traits"
+version = "0.1.0"
+dependencies = [
+ "blockset",
+ "thiserror",
+]
 
 [[package]]
 name = "syn"

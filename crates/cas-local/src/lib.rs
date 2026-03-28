@@ -1,4 +1,4 @@
-//! Stub/test implementations of the dedupfs CAS traits.
+//! Stub/test implementations of the SliceFS CAS traits.
 //!
 //! These implementations exist to prove out the trait interfaces and support
 //! unit and integration testing before the owner's production algorithm crates

@@ -16,10 +16,10 @@ Requirements: META-03, POSIX-06, POSIX-07, POSIX-08, POSIX-10
 ## Implementation Decisions
 
 ### data-id integration
-- Adapt dedupfs-traits to fit data-id's native types (Digest224, Digest256, StorageAdd/StorageGet, Tree/State) — not an adapter layer over existing traits
+- Adapt slicefs-traits to fit data-id's native types (Digest224, Digest256, StorageAdd/StorageGet, Tree/State) — not an adapter layer over existing traits
 - data-id (https://github.com/o2alexanderfedin/data-id.git) cloned as a git submodule — not a crates.io dependency — to allow future optimizations
 - SHA-224 is the hash algorithm: Digest224 `[u32; 7]` is the actual 224-bit hash used as Dictionary keys; Digest256 `[u32; 8]` is a tagged union container where word[7] is either `0xFFFFFFFF` (hash marker) or encodes inline data bit-length
-- Keep `&self` + internal sync pattern from current dedupfs-traits — wrap data-id's `&mut self` (StorageAdd) with Mutex/RwLock internally for Arc<dyn Trait> sharing across FUSE threads
+- Keep `&self` + internal sync pattern from current slicefs-traits — wrap data-id's `&mut self` (StorageAdd) with Mutex/RwLock internally for Arc<dyn Trait> sharing across FUSE threads
 - Dedup is implicit via content addressing — no separate bloom filter or dedup index needed (data-id's model: same content = same hash = same tree node)
 
 ### Storage architecture
@@ -62,13 +62,13 @@ Requirements: META-03, POSIX-06, POSIX-07, POSIX-08, POSIX-10
 - `FileStorageAdd` — file-backed storage implementation
 - All sync, no serde, hand-rolled binary serialization
 
-### Reusable Assets in dedupfs
-- `dedupfs-traits` crate — needs redesign to align with data-id types (replace ChunkHash(Vec<u8>) with Digest224/Digest256)
+### Reusable Assets in slicefs
+- `slicefs-traits` crate — needs redesign to align with data-id types (replace ChunkHash(Vec<u8>) with Digest224/Digest256)
 - `cas-local` crate — stub implementations (MemBlockStore, Blake3Hasher, FixedChunker, MemDedupIndex) — most will be replaced by data-id adapters
 - Existing trait pattern: `&self`, `Send + Sync`, `Result<T, CasError>` — keep this ergonomic pattern
 
 ### Integration Points
-- `dedupfs-traits` must be refactored to use data-id's Digest224/Digest256 instead of ChunkHash(Vec<u8>)
+- `slicefs-traits` must be refactored to use data-id's Digest224/Digest256 instead of ChunkHash(Vec<u8>)
 - BlockStore, DedupIndex traits may be collapsed into StorageAdd/StorageGet adapters
 - ContentHasher trait becomes thin wrapper around data-id's compress() function
 - Chunker trait maps to data-id's Tree/State CDC implementation
@@ -88,7 +88,7 @@ Requirements: META-03, POSIX-06, POSIX-07, POSIX-08, POSIX-10
 <deferred>
 ## Deferred Ideas
 
-- **Phase 1 trait refactoring**: dedupfs-traits needs redesign to align with data-id. This may be a Phase 1.5 or rolled into Phase 2 planning
+- **Phase 1 trait refactoring**: slicefs-traits needs redesign to align with data-id. This may be a Phase 1.5 or rolled into Phase 2 planning
 - **GC and SSD optimization**: Segment-based compaction, batch deletes, TRIM/discard — deferred to Phase 5
 - **Snapshot pinning protocol**: How to mark roots as live for GC — deferred to Phase 5/6
 - **Async wrappers**: For distributed backends in v2 milestone

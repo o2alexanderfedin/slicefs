@@ -3,8 +3,8 @@ created: 2026-03-28T08:29:44.698Z
 title: Rename dedupfs to slicefs across codebase
 area: general
 files:
-  - crates/dedupfs-traits/Cargo.toml
-  - crates/dedupfs-traits/src/lib.rs
+  - crates/slicefs-traits/Cargo.toml
+  - crates/slicefs-traits/src/lib.rs
   - crates/cas-local/Cargo.toml
   - crates/metadata/Cargo.toml
   - Cargo.toml
@@ -14,8 +14,8 @@ files:
 
 The project was initially named "DedupFS" but should be rebranded to "SliceFS" (also styled as "Slice/FS" where appropriate). All references to "dedupfs" in crate names, module paths, documentation, and configuration need to be updated to "slicefs". This includes:
 
-- Crate naming convention: `dedupfs-traits` → `slicefs-traits` (or similar)
-- **Directory names**: `crates/dedupfs-traits/` → `crates/slicefs-traits/` (and any other dirs with "dedupfs")
+- Crate naming convention: `slicefs-traits` → `slicefs-traits` (or similar)
+- **Directory names**: `crates/slicefs-traits/` → `crates/slicefs-traits/` (and any other dirs with "dedupfs")
 - Binary name: `dedupfs` → `slicefs`
 - **Source code**: all `use dedupfs_*` imports, struct/module names containing "dedupfs"
 - **File names**: any `.rs` or config files with "dedupfs" in the filename

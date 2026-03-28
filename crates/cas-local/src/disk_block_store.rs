@@ -16,7 +16,7 @@ use std::{
     path::PathBuf,
 };
 
-use dedupfs_traits::{
+use slicefs_traits::{
     block_store::{BlockStore, BlockStoreConfig},
     error::CasError,
     hash::{ChunkHash, ContentHasher},

@@ -5,8 +5,8 @@
 //! (28 bytes per block hash: 7 × u32 LE) in the blockset Dictionary via
 //! `State::push_all`, which returns a single `Digest224` key for the whole list.
 
-use dedupfs_traits::digest::{Digest224, from_digest224};
-use dedupfs_traits::metadata::MetaError;
+use slicefs_traits::digest::{Digest224, from_digest224};
+use slicefs_traits::metadata::MetaError;
 use blockset::{State, Tree, GetBytes, GetData, Dictionary};
 
 /// Serialize and store an ordered list of block hashes in the Dictionary.

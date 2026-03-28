@@ -16,8 +16,8 @@
 //! An empty attribute set is represented by an empty byte sequence and is stored
 //! in the Dictionary as the canonical empty-content `Digest224`.
 
-use dedupfs_traits::digest::{Digest224, from_digest224};
-use dedupfs_traits::metadata::MetaError;
+use slicefs_traits::digest::{Digest224, from_digest224};
+use slicefs_traits::metadata::MetaError;
 use blockset::{State, Tree, GetBytes, GetData, Dictionary};
 
 // ─── serialization helpers ────────────────────────────────────────────────────

@@ -6,8 +6,8 @@
 
 use std::collections::BTreeMap;
 
-use dedupfs_traits::digest::Digest224;
-use dedupfs_traits::metadata::MetaError;
+use slicefs_traits::digest::Digest224;
+use slicefs_traits::metadata::MetaError;
 use blockset::{State, Tree, GetBytes, GetData, Dictionary};
 
 /// In-memory inode number → Digest224 key mapping.
@@ -143,7 +143,7 @@ pub fn intern_inode_map(dict: &mut Dictionary, map: &InodeMap) -> Digest224 {
 
 /// Retrieve and deserialize an `InodeMap` from a blockset Dictionary.
 pub fn load_inode_map(dict: &Dictionary, key: &Digest224) -> Result<InodeMap, MetaError> {
-    use dedupfs_traits::digest::from_digest224;
+    use slicefs_traits::digest::from_digest224;
     let digest256 = from_digest224(key);
     let get_data = GetData::new(dict, &digest256);
     let bytes: Vec<u8> = GetBytes::new(get_data).collect();

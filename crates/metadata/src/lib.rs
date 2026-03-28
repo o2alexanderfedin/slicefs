@@ -2,7 +2,7 @@
 //! xattrs built on data-id's CAS Dictionary.
 //!
 //! This crate provides concrete implementations of the metadata traits defined
-//! in `dedupfs-traits`. The storage backend is a data-id `Dictionary`.
+//! in `slicefs-traits`. The storage backend is a data-id `Dictionary`.
 
 pub mod inode;
 pub mod inode_map;

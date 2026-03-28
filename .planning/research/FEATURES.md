@@ -55,7 +55,7 @@ Features that go beyond what every filesystem provides. These are where DedupFS 
 | Compression of stored blocks | Stacks with dedup: compress after dedup; further reduces physical storage | MEDIUM | Best as a pluggable wrapper around the block store; LZ4 for speed, Zstd for ratio; must apply before hashing or after (design decision — see pitfalls) |
 | Encryption at rest | Stores sensitive data securely; relevant for cloud/remote backends later | HIGH | AES-256-GCM per-block; key derived from passphrase via Argon2/scrypt; must encrypt before storing, decrypt on read; note: encrypt-then-dedup or dedup-then-encrypt are different designs — see anti-features |
 | Mount options for performance tuning | Power users need noatime, writeback cache, read-ahead tuning | MEDIUM | `noatime` (skip atime updates), `sync` vs `async` write modes, cache size controls |
-| Integrity scrub command | Proactive corruption detection: walk all blocks, re-verify hashes | MEDIUM | CLI command: `dedupfs scrub <mountpoint>` — reports corrupted blocks; doesn't repair (no redundancy in v1) |
+| Integrity scrub command | Proactive corruption detection: walk all blocks, re-verify hashes | MEDIUM | CLI command: `slicefs scrub <mountpoint>` — reports corrupted blocks; doesn't repair (no redundancy in v1) |
 
 ---
 

@@ -403,10 +403,10 @@ Inline dedup is architecturally simpler (single write path, no staging area), so
 |---------|---------------|----------------|
 | Reference count corruption (data loss) | HIGH | Requires offline fsck: walk all inodes, recompute correct refcounts, identify discrepancies, manually adjudicate blocks with refcount 0 but referenced by inodes |
 | GC deleted live block | HIGH | No recovery without a separate backup; offline forensic walk of block store looking for blocks that match expected hashes from metadata |
-| Crash consistency failure (orphaned blocks) | LOW | Run `dedupfs fsck --orphan-gc` on next mount; orphaned blocks are safe to delete |
+| Crash consistency failure (orphaned blocks) | LOW | Run `slicefs fsck --orphan-gc` on next mount; orphaned blocks are safe to delete |
 | Crash consistency failure (dangling reference) | HIGH | Requires offline repair: identify inodes with dangling references, mark those inodes as corrupted, attempt content recovery from any surviving blocks |
 | Index OOM crash | LOW | Resize index memory budget in config; restart; index will be rebuilt from block store on next GC cycle if designed correctly |
-| Fragmentation-induced read slowdown | MEDIUM | Run `dedupfs defrag` command; expect it to take proportionally to dataset size |
+| Fragmentation-induced read slowdown | MEDIUM | Run `slicefs defrag` command; expect it to take proportionally to dataset size |
 | Block size mismatch (data format change) | HIGH | Full data migration required: mount old filesystem, copy all files to new filesystem with new block size |
 
 ---

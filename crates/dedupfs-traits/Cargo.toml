@@ -1,9 +1,0 @@
-[package]
-name = "dedupfs-traits"
-version = "0.1.0"
-edition = "2021"
-description = "CAS trait contracts for the dedupfs filesystem (ContentHasher, Chunker, BlockStore, DedupIndex)"
-
-[dependencies]
-thiserror.workspace = true
-blockset = { path = "../data-id/blockset" }

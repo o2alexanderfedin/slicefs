@@ -62,10 +62,10 @@
 # Cargo.toml (workspace root)
 [workspace]
 members = [
-    "crates/dedupfs-core",    # CAS engine, chunking traits, hash traits
-    "crates/dedupfs-meta",    # Metadata store (redb-backed inode table)
-    "crates/dedupfs-fuse",    # fuser integration, FUSE filesystem impl
-    "crates/dedupfs-cli",     # mount/umount CLI
+    "crates/slicefs-core",    # CAS engine, chunking traits, hash traits
+    "crates/slicefs-meta",    # Metadata store (redb-backed inode table)
+    "crates/slicefs-fuse",    # fuser integration, FUSE filesystem impl
+    "crates/slicefs-cli",     # mount/umount CLI
 ]
 resolver = "2"
 
@@ -93,7 +93,7 @@ tempfile   = "3"
 nix        = { version = "0.29", features = ["fs", "mount", "signal"] }
 
 # Windows (conditional)
-# winfsp   = "0.12"   # enable in dedupfs-fuse with cfg(windows)
+# winfsp   = "0.12"   # enable in slicefs-fuse with cfg(windows)
 ```
 
 ---

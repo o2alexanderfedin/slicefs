@@ -28,7 +28,7 @@ Requirements: CAS-01, CAS-02, CAS-03, CAS-05, CAS-07
 ### Crate organization
 - Cargo workspace with subcrates per component
 - Initial subcrates: cas-traits, cas-local (stub/test implementations), metadata, fuse-frontend, plus more as needed
-- Crate naming convention: Claude's discretion (recommend dedupfs-* prefix for clarity)
+- Crate naming convention: Claude's discretion (recommend slicefs-* prefix for clarity)
 
 ### Trait API shape
 - Sync traits first — owner's existing algorithms are synchronous, and fuser uses sync callbacks (thread-per-request model)
@@ -38,7 +38,7 @@ Requirements: CAS-01, CAS-02, CAS-03, CAS-05, CAS-07
 
 ### Claude's Discretion
 - Error handling strategy (recommend thiserror for typed errors + anyhow for application code)
-- Crate naming convention (recommend dedupfs-* prefix)
+- Crate naming convention (recommend slicefs-* prefix)
 - Stub implementation details (in-memory HashMap-based BlockStore for testing)
 - Test harness design and property-based testing approach
 

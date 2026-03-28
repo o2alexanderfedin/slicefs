@@ -23,7 +23,7 @@
 
 ### Claude's Discretion
 - Error handling strategy (recommend thiserror for typed errors + anyhow for application code)
-- Crate naming convention (recommend dedupfs-* prefix)
+- Crate naming convention (recommend slicefs-* prefix)
 - Stub implementation details (in-memory HashMap-based BlockStore for testing)
 - Test harness design and property-based testing approach
 
@@ -50,11 +50,11 @@
 
 Phase 1 delivers the trait contracts that every subsequent component depends on — NOT the production implementations. The owner has unpublished Rust crates for hashing, chunking, block storage, addressing, and dedup index; those plug in as adapter impls of these traits in a dedicated later phase. Phase 1's job is to define clean, filesystem-oriented trait surfaces and prove they work via stub/test implementations.
 
-The architecture is trait-driven dependency injection throughout. `ContentHasher`, `Chunker`, `BlockStore`, and `DedupIndex` are all abstract traits defined in a single `dedupfs-traits` (or `cas-traits`) crate. The `cas-local` crate provides stub/test implementations: an in-memory `HashMap`-backed `BlockStore`, a fixed-size `Chunker` stub, a `Blake3Hasher`, and an in-memory `DedupIndex` with a serializable bloom filter front-end. Unit tests exercise all five success criteria against the stub implementations.
+The architecture is trait-driven dependency injection throughout. `ContentHasher`, `Chunker`, `BlockStore`, and `DedupIndex` are all abstract traits defined in a single `slicefs-traits` (or `cas-traits`) crate. The `cas-local` crate provides stub/test implementations: an in-memory `HashMap`-backed `BlockStore`, a fixed-size `Chunker` stub, a `Blake3Hasher`, and an in-memory `DedupIndex` with a serializable bloom filter front-end. Unit tests exercise all five success criteria against the stub implementations.
 
 The critical design decision is to make all traits sync (matching fuser's thread-per-request model and the owner's existing sync algorithms), use buffered I/O (`&[u8]` / `Vec<u8>`) rather than streaming, and ensure the `DedupIndex` trait explicitly separates the bloom-filter fast path from the on-disk index lookup — both of which the owner's real algorithm will satisfy when it is integrated.
 
-**Primary recommendation:** Design traits first in `dedupfs-traits`. Implement in-memory stubs in `cas-local`. Write test harness that proves all five success criteria. Do not expose any implementation detail of storage layout or chunking strategy through the trait interface — the owner's algorithms define those.
+**Primary recommendation:** Design traits first in `slicefs-traits`. Implement in-memory stubs in `cas-local`. Write test harness that proves all five success criteria. Do not expose any implementation detail of storage layout or chunking strategy through the trait interface — the owner's algorithms define those.
 
 ---
 
@@ -93,7 +93,7 @@ The critical design decision is to make all traits sync (matching fuser's thread
 # Cargo.toml (workspace root)
 [workspace]
 members = [
-    "crates/dedupfs-traits",   # All CAS trait definitions; zero deps except std
+    "crates/slicefs-traits",   # All CAS trait definitions; zero deps except std
     "crates/cas-local",        # Stub/test implementations (HashMap BlockStore, etc.)
 ]
 resolver = "2"
@@ -126,7 +126,7 @@ anyhow     = "1"
 
 ```
 crates/
-├── dedupfs-traits/            # The trait contract crate (Phase 1 primary output)
+├── slicefs-traits/            # The trait contract crate (Phase 1 primary output)
 │   ├── Cargo.toml             # Deps: thiserror only (keep dependency-free)
 │   └── src/
 │       ├── lib.rs             # Re-exports all public traits and types
@@ -137,7 +137,7 @@ crates/
 │       └── error.rs           # CasError enum (thiserror)
 │
 ├── cas-local/                 # Stub/test implementations (Phase 1 secondary output)
-│   ├── Cargo.toml             # Deps: dedupfs-traits, blake3, fastbloom, thiserror
+│   ├── Cargo.toml             # Deps: slicefs-traits, blake3, fastbloom, thiserror
 │   └── src/
 │       ├── lib.rs
 │       ├── blake3_hasher.rs   # Blake3Hasher: implements ContentHasher
@@ -147,23 +147,23 @@ crates/
 │       └── mem_dedup_index.rs # MemDedupIndex: bloom filter + HashMap<ChunkHash, ()>
 │
 # Later phases add crates:
-# crates/dedupfs-meta/         # Metadata engine (Phase 2)
-# crates/dedupfs-fuse/         # FUSE integration (Phase 3)
-# crates/dedupfs-cli/          # CLI binary (Phase 3)
-# crates/dedupfs-owner-adapter/# Owner's algorithm adapters (dedicated adapter phase)
+# crates/slicefs-meta/         # Metadata engine (Phase 2)
+# crates/slicefs-fuse/         # FUSE integration (Phase 3)
+# crates/slicefs-cli/          # CLI binary (Phase 3)
+# crates/slicefs-owner-adapter/# Owner's algorithm adapters (dedicated adapter phase)
 ```
 
 ### Pattern 1: Trait Definition in Zero-Dependency Crate
 
-**What:** All trait definitions live in `dedupfs-traits` with no external crate dependencies beyond `std` and `thiserror`. Every other crate in the workspace depends on `dedupfs-traits`.
+**What:** All trait definitions live in `slicefs-traits` with no external crate dependencies beyond `std` and `thiserror`. Every other crate in the workspace depends on `slicefs-traits`.
 
 **When to use:** Always — this is the architectural boundary that enables adapter crates for the owner's algorithms to exist independently.
 
-**Why:** Keeping `dedupfs-traits` dependency-free (or nearly so) means the owner's adapter crate can implement the traits without pulling in every library that `cas-local` uses. It also makes the trait contract auditable without noise.
+**Why:** Keeping `slicefs-traits` dependency-free (or nearly so) means the owner's adapter crate can implement the traits without pulling in every library that `cas-local` uses. It also makes the trait contract auditable without noise.
 
 ```rust
 // Source: Rust API Guidelines + project design
-// crates/dedupfs-traits/src/hash.rs
+// crates/slicefs-traits/src/hash.rs
 
 use std::fmt;
 use crate::error::CasError;
@@ -209,7 +209,7 @@ pub trait ContentHasher: Send + Sync {
 **When to use:** Use this pattern from day one — the `verify_on_read` flag must be in the interface so the owner's adapter can implement the same contract.
 
 ```rust
-// crates/dedupfs-traits/src/block_store.rs
+// crates/slicefs-traits/src/block_store.rs
 
 use crate::{hash::ChunkHash, error::CasError};
 
@@ -251,7 +251,7 @@ pub trait BlockStore: Send + Sync {
 **When to use:** Use this two-method interface from day one (CAS-07). The bloom pre-filter is mandatory — it prevents the ZFS DDT memory explosion pitfall.
 
 ```rust
-// crates/dedupfs-traits/src/dedup_index.rs
+// crates/slicefs-traits/src/dedup_index.rs
 
 use crate::{hash::ChunkHash, error::CasError};
 
@@ -292,7 +292,7 @@ pub trait DedupIndex: Send + Sync {
 **When to use:** The stub `FixedChunker` divides the buffer into equal-sized chunks. The owner's CDC algorithm will produce variable-length chunks — the trait accommodates both.
 
 ```rust
-// crates/dedupfs-traits/src/chunk.rs
+// crates/slicefs-traits/src/chunk.rs
 
 use crate::error::CasError;
 
@@ -438,7 +438,7 @@ fn hash_to_path(root: &Path, hash: &ChunkHash) -> PathBuf {
 ```rust
 // crates/cas-local/src/blake3_hasher.rs
 use blake3::Hasher;
-use dedupfs_traits::{hash::{ChunkHash, ContentHasher}, error::CasError};
+use slicefs_traits::{hash::{ChunkHash, ContentHasher}, error::CasError};
 
 pub struct Blake3Hasher;
 
@@ -477,7 +477,7 @@ mod tests {
 // crates/cas-local/src/mem_block_store.rs
 use std::collections::HashMap;
 use std::sync::RwLock;
-use dedupfs_traits::{
+use slicefs_traits::{
     hash::{ChunkHash, ContentHasher},
     block_store::{BlockStore, BlockStoreConfig},
     error::CasError,
@@ -542,7 +542,7 @@ impl BlockStore for MemBlockStore {
 // Source: casync design, git object store convention
 
 use std::path::{Path, PathBuf};
-use dedupfs_traits::hash::ChunkHash;
+use slicefs_traits::hash::ChunkHash;
 
 fn hash_to_path(root: &Path, hash: &ChunkHash) -> PathBuf {
     // "ab" prefix directory + remainder as filename
@@ -560,7 +560,7 @@ fn hash_to_path(root: &Path, hash: &ChunkHash) -> PathBuf {
 use fastbloom::BloomFilter;
 use std::sync::RwLock;
 use std::collections::HashSet;
-use dedupfs_traits::{
+use slicefs_traits::{
     hash::ChunkHash,
     dedup_index::{DedupIndex, DedupResult},
     error::CasError,
@@ -614,7 +614,7 @@ impl DedupIndex for MemDedupIndex {
 ### CasError — Typed Error Enum
 
 ```rust
-// crates/dedupfs-traits/src/error.rs
+// crates/slicefs-traits/src/error.rs
 use thiserror::Error;
 use crate::hash::ChunkHash;
 
@@ -683,7 +683,7 @@ pub enum CasError {
 |----------|-------|
 | Framework | Rust built-in (`cargo test`) + `proptest` 1.x |
 | Config file | None needed — standard Rust test infrastructure |
-| Quick run command | `cargo test -p dedupfs-traits -p cas-local` |
+| Quick run command | `cargo test -p slicefs-traits -p cas-local` |
 | Full suite command | `cargo test --workspace` |
 
 ### Phase Requirements to Test Map
@@ -700,16 +700,16 @@ pub enum CasError {
 
 ### Sampling Rate
 
-- **Per task commit:** `cargo test -p dedupfs-traits -p cas-local`
+- **Per task commit:** `cargo test -p slicefs-traits -p cas-local`
 - **Per wave merge:** `cargo test --workspace`
 - **Phase gate:** All workspace tests green before `/gsd:verify-work`
 
 ### Wave 0 Gaps
 
-- [ ] `crates/dedupfs-traits/src/` — entire crate (traits not yet created)
+- [ ] `crates/slicefs-traits/src/` — entire crate (traits not yet created)
 - [ ] `crates/cas-local/src/` — entire crate (implementations not yet created)
 - [ ] `Cargo.toml` (workspace root) — workspace not yet initialized
-- [ ] `crates/dedupfs-traits/Cargo.toml`
+- [ ] `crates/slicefs-traits/Cargo.toml`
 - [ ] `crates/cas-local/Cargo.toml`
 - [ ] All test files under `crates/cas-local/src/*/tests` — covers all REQ IDs above
 - [ ] Framework install: `cargo add` is built-in; no additional tooling install needed

@@ -70,7 +70,7 @@ Recent decisions affecting current work:
 - Roadmap: Windows deferred to Phase 7 — GPL-3 license implications of winfsp-rs must be resolved before distribution work begins
 - [Phase 01-cas-foundation]: 01-01: ChunkHash uses Vec<u8> not [u8;32] — variable-width accommodates owner's unknown hash algorithm output size
 - [Phase 01-cas-foundation]: 01-01: All traits use &self — enables Arc<dyn Trait> sharing; implementations handle sync internally
-- [Phase 01-cas-foundation]: 01-01: dedupfs-traits depends only on thiserror — adapter crates implement traits without pulling cas-local deps
+- [Phase 01-cas-foundation]: 01-01: slicefs-traits depends only on thiserror — adapter crates implement traits without pulling cas-local deps
 - [Phase 01-cas-foundation]: 01-01: DedupIndex exposes bloom_check() separately from lookup() — explicit two-phase design from day one per CAS-07
 - [Phase 01-cas-foundation]: 01-02: MemBlockStore write-time integrity check on put() — catches caller bugs where hash and data diverge before any storage occurs
 - [Phase 01-cas-foundation]: 01-02: FixedChunker strategy_id() uses match on block_size for &'static str — trait requires &'static str; named constants cover 4096/8192; 'fixed-custom' fallback for others
@@ -79,8 +79,8 @@ Recent decisions affecting current work:
 - [Phase 01-cas-foundation]: Atomic writes via .tmp + rename prevent partial block writes from appearing as valid CAS blocks
 - [Phase 01-cas-foundation]: Bloom serialization via HashSet + rebuild: fastbloom serde not enabled, HashSet persisted and bloom rebuilt on load
 - [Phase 02-metadata-engine]: blockset StorageAdd/StorageGet are private traits — intern_inode/load_inode use blockset::Dictionary directly
-- [Phase 02-metadata-engine]: Digest224/Digest256/Branches redeclared as type aliases in dedupfs-traits (not re-exported from private blockset modules)
-- [Phase 02-metadata-engine]: InodeMeta defined in dedupfs-traits as plain data struct — serialization lives in metadata crate
+- [Phase 02-metadata-engine]: Digest224/Digest256/Branches redeclared as type aliases in slicefs-traits (not re-exported from private blockset modules)
+- [Phase 02-metadata-engine]: InodeMeta defined in slicefs-traits as plain data struct — serialization lives in metadata crate
 - [Phase 02-metadata-engine]: blockset::Tree must be in scope to call State::push_all (trait method not auto-imported)
 - [Phase 02-metadata-engine]: Directory entry list stores (key, ino, name) tuples as CAS blob — blockset API does not allow choosing dictionary keys
 - [Phase 02-metadata-engine]: DictMetadataStore xattr methods stub out for Plan 03; all other MetadataStore ops fully implemented

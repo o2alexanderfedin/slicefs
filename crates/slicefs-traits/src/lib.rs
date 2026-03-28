@@ -1,7 +1,7 @@
-//! CAS trait contracts for the dedupfs filesystem.
+//! CAS trait contracts for the SliceFS filesystem.
 //!
 //! This crate defines the core trait interfaces that every component in the
-//! dedupfs workspace depends on.
+//! slicefs workspace depends on.
 //!
 //! # CAS Traits (Phase 1)
 //!
@@ -38,7 +38,7 @@ pub mod metadata;
 pub mod storage;
 
 // Re-export all public types for ergonomic imports:
-// `use dedupfs_traits::{ContentHasher, ChunkHash, CasError, ...}`
+// `use slicefs_traits::{ContentHasher, ChunkHash, CasError, ...}`
 
 pub use block_store::{BlockStore, BlockStoreConfig};
 pub use chunk::{Chunk, Chunker};

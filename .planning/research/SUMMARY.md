@@ -21,7 +21,7 @@ The key risks fall into two categories. The first is correctness: reference coun
 
 The Rust ecosystem provides a clean, pure-Rust stack for all critical layers. `fuser` 0.17 is the only actively maintained FUSE implementation for Rust (2,100+ dependents, Feb 2026 release) and runs on Linux natively and macOS via FUSE-T. `redb` 3.1 is the correct metadata store: pure Rust, ACID, MVCC, stable format — it replaces both `sled` (pre-1.0, format-unstable, abandoned in practice) and SQLite (C dependency, write-serialized WAL). `blake3` is the default hash (80M downloads, SIMD-accelerated, designed for CAS). `fastcdc` 3.2 provides the default chunking algorithm while the owner's proprietary CDC implementation plugs in via a `Chunker` trait.
 
-The workspace should be structured as four crates: `dedupfs-core` (CAS engine, traits), `dedupfs-meta` (redb-backed inode table), `dedupfs-fuse` (fuser integration), and `dedupfs-cli` (mount/umount/stats). Windows support via `winfsp` 0.12 is a separate, later-phase concern with a GPL-3 license implication that must be resolved before distribution.
+The workspace should be structured as four crates: `slicefs-core` (CAS engine, traits), `slicefs-meta` (redb-backed inode table), `slicefs-fuse` (fuser integration), and `slicefs-cli` (mount/umount/stats). Windows support via `winfsp` 0.12 is a separate, later-phase concern with a GPL-3 license implication that must be resolved before distribution.
 
 **Core technologies:**
 - `fuser` 0.17: FUSE filesystem interface — only actively maintained pure-Rust FUSE implementation

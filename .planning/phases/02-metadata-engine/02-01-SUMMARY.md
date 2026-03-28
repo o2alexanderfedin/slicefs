@@ -2,19 +2,19 @@
 phase: 02-metadata-engine
 plan: 01
 subsystem: metadata
-tags: [blockset, data-id, submodule, InodeMeta, serialization, traits, dedupfs-traits]
+tags: [blockset, data-id, submodule, InodeMeta, serialization, traits, slicefs-traits]
 dependency_graph:
   requires: []
   provides: [data-id-submodule, Digest224, Digest256, StorageAdd, StorageGet, MetadataStore, InodeMeta, metadata-crate]
-  affects: [dedupfs-traits, metadata, all-future-metadata-plans]
+  affects: [slicefs-traits, metadata, all-future-metadata-plans]
 tech_stack:
   added: [blockset (data-id path dependency), sha2-compress (0.7.2), proptest]
   patterns: [56-byte LE inode serialization, Dictionary-backed CAS intern/load, blockset::Dictionary as StorageAdd+StorageGet]
 key_files:
   created:
-    - crates/dedupfs-traits/src/digest.rs
-    - crates/dedupfs-traits/src/storage.rs
-    - crates/dedupfs-traits/src/metadata.rs
+    - crates/slicefs-traits/src/digest.rs
+    - crates/slicefs-traits/src/storage.rs
+    - crates/slicefs-traits/src/metadata.rs
     - crates/metadata/Cargo.toml
     - crates/metadata/src/lib.rs
     - crates/metadata/src/inode.rs
@@ -22,13 +22,13 @@ key_files:
     - Cargo.toml
     - Cargo.lock
     - .gitmodules
-    - crates/dedupfs-traits/Cargo.toml
-    - crates/dedupfs-traits/src/lib.rs
+    - crates/slicefs-traits/Cargo.toml
+    - crates/slicefs-traits/src/lib.rs
 decisions:
   - "blockset StorageAdd/StorageGet are private traits — intern_inode/load_inode use blockset::Dictionary directly rather than generic bounds"
-  - "Digest224/Digest256/Branches redeclared as type aliases in dedupfs-traits (not re-exported from private blockset modules)"
-  - "StorageAdd/StorageGet redeclared as traits in dedupfs-traits/storage.rs — structurally compatible with blockset but independent"
-  - "InodeMeta defined in dedupfs-traits/metadata.rs as plain data struct — serialization lives in metadata crate"
+  - "Digest224/Digest256/Branches redeclared as type aliases in slicefs-traits (not re-exported from private blockset modules)"
+  - "StorageAdd/StorageGet redeclared as traits in slicefs-traits/storage.rs — structurally compatible with blockset but independent"
+  - "InodeMeta defined in slicefs-traits/metadata.rs as plain data struct — serialization lives in metadata crate"
   - "sha2-compress added to workspace dependencies to satisfy blockset's workspace inheritance"
 metrics:
   duration: "~25 minutes"
@@ -40,21 +40,21 @@ metrics:
 
 # Phase 2 Plan 1: data-id Integration and Metadata Type Foundation Summary
 
-**One-liner:** data-id git submodule wired as blockset path dependency, Digest224/Digest256/MetadataStore types added to dedupfs-traits, metadata crate created with 56-byte LE InodeMeta serialization and Dictionary CAS round-trip.
+**One-liner:** data-id git submodule wired as blockset path dependency, Digest224/Digest256/MetadataStore types added to slicefs-traits, metadata crate created with 56-byte LE InodeMeta serialization and Dictionary CAS round-trip.
 
 ## What Was Built
 
-### Task 1: data-id Submodule, blockset Integration, dedupfs-traits Redesign
+### Task 1: data-id Submodule, blockset Integration, slicefs-traits Redesign
 
-Added the data-id repository as a git submodule at `crates/data-id`. The blockset crate within it is used as a path dependency in both `dedupfs-traits` and `metadata`.
+Added the data-id repository as a git submodule at `crates/data-id`. The blockset crate within it is used as a path dependency in both `slicefs-traits` and `metadata`.
 
-Key types established in `dedupfs-traits`:
+Key types established in `slicefs-traits`:
 
 - **`digest.rs`**: Type aliases `Digest224 = [u32; 7]`, `Digest256 = [u32; 8]`, `Branches = [Digest256; 2]` plus helper functions `from_digest224`, `to_digest224`, `digest256_from_bytes`, `digest256_to_data`.
 - **`storage.rs`**: `StorageAdd` and `StorageGet` traits (redeclared independently since blockset's `storage` module is private).
 - **`metadata.rs`**: `InodeId = u64`, `MetaError` enum (8 variants), `DirEntry` struct, `InodeMeta` struct (10 fields), `InodeMeta::new_directory` / `new_file` constructors, `MetadataStore` trait (16 methods).
 
-**Deviation (Rule 1 — Bug Fix):** blockset's `StorageAdd`/`StorageGet` traits are private and not re-exported from blockset's lib.rs. The plan specified re-exporting them from blockset module paths, but that produces `E0603 private module` errors. Fixed by declaring equivalent traits independently in `dedupfs-traits/src/storage.rs` (structurally identical). Similarly, `intern_inode`/`load_inode` use `blockset::Dictionary` directly since it is the only publicly-accessible implementation.
+**Deviation (Rule 1 — Bug Fix):** blockset's `StorageAdd`/`StorageGet` traits are private and not re-exported from blockset's lib.rs. The plan specified re-exporting them from blockset module paths, but that produces `E0603 private module` errors. Fixed by declaring equivalent traits independently in `slicefs-traits/src/storage.rs` (structurally identical). Similarly, `intern_inode`/`load_inode` use `blockset::Dictionary` directly since it is the only publicly-accessible implementation.
 
 **Deviation (Rule 1 — Bug Fix):** blockset's `sha2-compress` dependency uses workspace inheritance from blockset's own workspace (not ours). Added `sha2-compress = "0.7.1"` to the SliceFS workspace `[workspace.dependencies]` to satisfy Cargo's workspace-inheritance requirement when blockset is used as a path dependency in our workspace.
 
@@ -84,7 +84,7 @@ Created `crates/metadata/src/inode.rs` with:
 |-------|-------|--------|
 | blockset | 34 | PASS |
 | cas-local | 52 | PASS |
-| dedupfs-traits | 0 | PASS |
+| slicefs-traits | 0 | PASS |
 | metadata | 9 | PASS |
 | **Total** | **95** | **ALL PASS** |
 
@@ -95,8 +95,8 @@ Created `crates/metadata/src/inode.rs` with:
 **1. [Rule 1 - Bug] blockset storage module is private — StorageAdd/StorageGet not re-exportable**
 - **Found during:** Task 1 (cargo check)
 - **Issue:** Plan specified `pub use blockset::storage::StorageAdd` but blockset's `mod storage` is private (`E0603`).
-- **Fix:** Declared `StorageAdd` and `StorageGet` as independent traits in `dedupfs-traits/src/storage.rs` with identical signatures. `intern_inode`/`load_inode` use `blockset::Dictionary` directly since it is the only public concrete type implementing blockset's private storage traits.
-- **Files modified:** `crates/dedupfs-traits/src/storage.rs`, `crates/metadata/src/inode.rs`
+- **Fix:** Declared `StorageAdd` and `StorageGet` as independent traits in `slicefs-traits/src/storage.rs` with identical signatures. `intern_inode`/`load_inode` use `blockset::Dictionary` directly since it is the only public concrete type implementing blockset's private storage traits.
+- **Files modified:** `crates/slicefs-traits/src/storage.rs`, `crates/metadata/src/inode.rs`
 - **Commit:** 15d437e
 
 **2. [Rule 3 - Blocking] blockset workspace sha2-compress dependency not in SliceFS workspace**
@@ -109,9 +109,9 @@ Created `crates/metadata/src/inode.rs` with:
 ## Self-Check: PASSED
 
 Files exist:
-- crates/dedupfs-traits/src/digest.rs: FOUND
-- crates/dedupfs-traits/src/storage.rs: FOUND
-- crates/dedupfs-traits/src/metadata.rs: FOUND
+- crates/slicefs-traits/src/digest.rs: FOUND
+- crates/slicefs-traits/src/storage.rs: FOUND
+- crates/slicefs-traits/src/metadata.rs: FOUND
 - crates/metadata/src/inode.rs: FOUND
 - .gitmodules: FOUND
 - crates/data-id/blockset/Cargo.toml: FOUND

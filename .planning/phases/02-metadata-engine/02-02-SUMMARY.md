@@ -7,7 +7,7 @@ tags: [blockset, dictionary, cas, inode, directory, manifest, btreemap, mutex]
 # Dependency graph
 requires:
   - phase: 02-01
-    provides: InodeMeta/DirEntry/MetadataStore trait in dedupfs-traits, inode serialization in metadata crate, blockset Dictionary API
+    provides: InodeMeta/DirEntry/MetadataStore trait in slicefs-traits, inode serialization in metadata crate, blockset Dictionary API
 
 provides:
   - InodeMap: monotonic inode allocation (starts at 2), insert/get/remove, CAS intern/load with 36-byte records

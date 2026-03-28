@@ -34,7 +34,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   5. A retrieved block fails verification if its stored bytes have been corrupted (integrity check on read)
 **Plans:** 3/3 plans complete
 Plans:
-- [x] 01-01-PLAN.md — Cargo workspace setup and CAS trait definitions in dedupfs-traits
+- [x] 01-01-PLAN.md — Cargo workspace setup and CAS trait definitions in slicefs-traits
 - [x] 01-02-PLAN.md — Blake3Hasher, FixedChunker, and MemBlockStore stub implementations
 - [x] 01-03-PLAN.md — LocalDiskStore and MemDedupIndex with bloom filter
 
@@ -50,7 +50,7 @@ Plans:
   5. Inode numbers are stable — the same inode number is assigned to the same file across process restarts
 **Plans:** 2/3 plans executed
 Plans:
-- [ ] 02-01-PLAN.md — data-id submodule, dedupfs-traits redesign, InodeMeta serialization
+- [ ] 02-01-PLAN.md — data-id submodule, slicefs-traits redesign, InodeMeta serialization
 - [ ] 02-02-PLAN.md — DictMetadataStore with inode CRUD, directory ops, and manifest storage
 - [ ] 02-03-PLAN.md — Xattr storage and persistence round-trip with inode stability proof
 

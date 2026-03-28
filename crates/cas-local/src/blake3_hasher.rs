@@ -1,6 +1,6 @@
 //! `Blake3Hasher`: implements `ContentHasher` using the BLAKE3 hash function.
 
-use dedupfs_traits::hash::{ChunkHash, ContentHasher};
+use slicefs_traits::hash::{ChunkHash, ContentHasher};
 
 /// Stateless BLAKE3 content hasher.
 ///

@@ -303,7 +303,7 @@ Application unlink(path) or rmdir
 ### Garbage Collection Path
 
 ```
-User runs: dedupfs gc (or background scheduler triggers)
+User runs: slicefs gc (or background scheduler triggers)
     ↓
 [GcEngine.run()]
     ↓

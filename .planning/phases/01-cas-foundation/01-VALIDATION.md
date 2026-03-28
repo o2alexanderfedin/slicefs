@@ -19,7 +19,7 @@ created: 2026-03-27
 |----------|-------|
 | **Framework** | Rust built-in (`cargo test`) + `proptest` 1.x |
 | **Config file** | None needed — standard Rust test infrastructure |
-| **Quick run command** | `cargo test -p dedupfs-traits -p cas-local` |
+| **Quick run command** | `cargo test -p slicefs-traits -p cas-local` |
 | **Full suite command** | `cargo test --workspace` |
 | **Estimated runtime** | ~5 seconds |
 
@@ -27,7 +27,7 @@ created: 2026-03-27
 
 ## Sampling Rate
 
-- **After every task commit:** Run `cargo test -p dedupfs-traits -p cas-local`
+- **After every task commit:** Run `cargo test -p slicefs-traits -p cas-local`
 - **After every plan wave:** Run `cargo test --workspace`
 - **Before `/gsd:verify-work`:** Full suite must be green
 - **Max feedback latency:** 10 seconds
@@ -53,8 +53,8 @@ created: 2026-03-27
 ## Wave 0 Requirements
 
 - [ ] `Cargo.toml` (workspace root) — workspace initialization
-- [ ] `crates/dedupfs-traits/Cargo.toml` — traits crate manifest
-- [ ] `crates/dedupfs-traits/src/` — trait definitions
+- [ ] `crates/slicefs-traits/Cargo.toml` — traits crate manifest
+- [ ] `crates/slicefs-traits/src/` — trait definitions
 - [ ] `crates/cas-local/Cargo.toml` — local implementations crate manifest
 - [ ] `crates/cas-local/src/` — stub/test implementations
 - [ ] All test files under `crates/cas-local/src/*/tests` — covers all REQ IDs above
