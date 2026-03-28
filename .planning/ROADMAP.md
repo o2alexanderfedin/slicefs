@@ -64,7 +64,11 @@ Plans:
   3. The filesystem unmounts cleanly via the unmount command with no kernel errors; SIGTERM triggers a graceful flush
   4. All POSIX operations return correct errno values for read-only violations (e.g., EROFS on write attempt)
   5. Mount options (noatime, cache size) are accepted and applied
-**Plans**: TBD
+**Plans:** 3 plans
+Plans:
+- [ ] 03-01-PLAN.md — CLI crate scaffold, StoreIo, clap subcommands, and SliceFsFilesystem FUSE adapter
+- [ ] 03-02-PLAN.md — Seed command: import directory tree into CAS store via State CDC
+- [ ] 03-03-PLAN.md — Mount and unmount commands with FUSE lifecycle and end-to-end verification
 
 ### Phase 4: Full POSIX Write Path
 **Goal**: Files can be created, written, modified, renamed, deleted, and linked through the mount point with inline deduplication active; real tools (editors, package managers, build systems) work correctly; pjdfstest passes >95% on Linux
@@ -117,13 +121,13 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. CAS Foundation | 3/3 | Complete   | 2026-03-28 |
 | 2. Metadata Engine | 2/3 | In Progress|  |
-| 3. Read-Only FUSE | 0/TBD | Not started | - |
+| 3. Read-Only FUSE | 0/3 | Not started | - |
 | 4. Full POSIX Write Path | 0/TBD | Not started | - |
 | 5. Crash Safety and GC | 0/TBD | Not started | - |
 | 6. Compression and Snapshots | 0/TBD | Not started | - |
