@@ -22,15 +22,23 @@ use crate::inode_map::{InodeMap, intern_inode_map};
 use crate::directory::{create_dir_entries, add_dir_entry, remove_dir_entry,
                        lookup_dir_entry, list_dir_entries};
 use crate::manifest::{intern_manifest, load_manifest};
+use crate::xattr::{intern_xattrs, load_xattrs, set_xattr_entry, get_xattr_entry,
+                   list_xattr_names, remove_xattr_entry};
 
 // S_IFDIR bit mask (POSIX directory type)
 const S_IFDIR: u32 = 0o0040_000;
 
 /// Concrete `MetadataStore` backed by a blockset `Dictionary`.
 ///
-/// All operations are lock-safe and `Send + Sync`.  Xattr operations are stubbed
-/// and will return `MetaError::Corrupted("xattr not yet implemented")` until
-/// Plan 03 is executed.
+/// All operations are lock-safe and `Send + Sync`.
+///
+/// Locking order (always acquire in this order to prevent deadlocks):
+///   1. `inode_map`
+///   2. `dict`
+///   3. `inode_data`
+///   4. `dir_data`
+///   5. `manifest_data`
+///   6. `xattr_data`
 pub struct DictMetadataStore {
     /// The CAS block store — shared across all operations.
     dict: Mutex<Dictionary>,
@@ -42,6 +50,8 @@ pub struct DictMetadataStore {
     dir_data: Mutex<BTreeMap<u64, Digest224>>,
     /// Maps file inode number → current manifest `Digest224`.
     manifest_data: Mutex<BTreeMap<u64, Digest224>>,
+    /// Maps inode number → xattr set `Digest224` (only for inodes with xattrs).
+    xattr_data: Mutex<BTreeMap<u64, Digest224>>,
 }
 
 impl DictMetadataStore {
@@ -71,6 +81,7 @@ impl DictMetadataStore {
             inode_data: Mutex::new(inode_data),
             dir_data: Mutex::new(dir_data),
             manifest_data: Mutex::new(BTreeMap::new()),
+            xattr_data: Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -249,20 +260,81 @@ impl MetadataStore for DictMetadataStore {
         load_manifest(&*dict, &digest)
     }
 
-    fn set_xattr(&self, _ino: InodeId, _name: &str, _value: &[u8]) -> Result<(), MetaError> {
-        Err(MetaError::Corrupted("xattr not yet implemented".into()))
+    fn set_xattr(&self, ino: InodeId, name: &str, value: &[u8]) -> Result<(), MetaError> {
+        // Load existing xattrs for this inode (or empty vec if none yet)
+        let mut xattrs = {
+            let xattr_data = self.xattr_data.lock().unwrap();
+            if let Some(digest) = xattr_data.get(&ino).copied() {
+                drop(xattr_data);
+                let dict = self.dict.lock().unwrap();
+                load_xattrs(&*dict, &digest)?
+            } else {
+                vec![]
+            }
+        };
+
+        set_xattr_entry(&mut xattrs, name, value);
+
+        let mut dict = self.dict.lock().unwrap();
+        let new_digest = intern_xattrs(&mut *dict, &xattrs);
+        drop(dict);
+
+        self.xattr_data.lock().unwrap().insert(ino, new_digest);
+        Ok(())
     }
 
-    fn get_xattr(&self, _ino: InodeId, _name: &str) -> Result<Vec<u8>, MetaError> {
-        Err(MetaError::Corrupted("xattr not yet implemented".into()))
+    fn get_xattr(&self, ino: InodeId, name: &str) -> Result<Vec<u8>, MetaError> {
+        let xattr_data = self.xattr_data.lock().unwrap();
+        let digest = match xattr_data.get(&ino).copied() {
+            Some(d) => d,
+            None => return Err(MetaError::NotFound(ino)),
+        };
+        drop(xattr_data);
+
+        let dict = self.dict.lock().unwrap();
+        let xattrs = load_xattrs(&*dict, &digest)?;
+        drop(dict);
+
+        get_xattr_entry(&xattrs, name).ok_or(MetaError::NotFound(ino))
     }
 
-    fn list_xattrs(&self, _ino: InodeId) -> Result<Vec<String>, MetaError> {
-        Err(MetaError::Corrupted("xattr not yet implemented".into()))
+    fn list_xattrs(&self, ino: InodeId) -> Result<Vec<String>, MetaError> {
+        let xattr_data = self.xattr_data.lock().unwrap();
+        let digest = match xattr_data.get(&ino).copied() {
+            Some(d) => d,
+            None => return Ok(vec![]),
+        };
+        drop(xattr_data);
+
+        let dict = self.dict.lock().unwrap();
+        let xattrs = load_xattrs(&*dict, &digest)?;
+        drop(dict);
+
+        Ok(list_xattr_names(&xattrs))
     }
 
-    fn remove_xattr(&self, _ino: InodeId, _name: &str) -> Result<(), MetaError> {
-        Err(MetaError::Corrupted("xattr not yet implemented".into()))
+    fn remove_xattr(&self, ino: InodeId, name: &str) -> Result<(), MetaError> {
+        let xattr_data = self.xattr_data.lock().unwrap();
+        let digest = match xattr_data.get(&ino).copied() {
+            Some(d) => d,
+            None => return Err(MetaError::NotFound(ino)),
+        };
+        drop(xattr_data);
+
+        let dict = self.dict.lock().unwrap();
+        let mut xattrs = load_xattrs(&*dict, &digest)?;
+        drop(dict);
+
+        if !remove_xattr_entry(&mut xattrs, name) {
+            return Err(MetaError::NotFound(ino));
+        }
+
+        let mut dict = self.dict.lock().unwrap();
+        let new_digest = intern_xattrs(&mut *dict, &xattrs);
+        drop(dict);
+
+        self.xattr_data.lock().unwrap().insert(ino, new_digest);
+        Ok(())
     }
 
     fn root_ino(&self) -> InodeId {
@@ -446,12 +518,91 @@ mod tests {
     }
 
     #[test]
-    fn test_xattr_stubs_return_error() {
+    fn test_xattr_set_get() {
         let store = DictMetadataStore::new();
-        assert!(store.set_xattr(1, "user.test", b"val").is_err());
-        assert!(store.get_xattr(1, "user.test").is_err());
-        assert!(store.list_xattrs(1).is_err());
-        assert!(store.remove_xattr(1, "user.test").is_err());
+        let file_ino = store.create_inode(&new_file_meta()).unwrap();
+        store.set_xattr(file_ino, "user.test", b"myvalue").unwrap();
+        let val = store.get_xattr(file_ino, "user.test").unwrap();
+        assert_eq!(val, b"myvalue");
+    }
+
+    #[test]
+    fn test_xattr_list() {
+        let store = DictMetadataStore::new();
+        let file_ino = store.create_inode(&new_file_meta()).unwrap();
+        store.set_xattr(file_ino, "user.a", b"1").unwrap();
+        store.set_xattr(file_ino, "user.b", b"2").unwrap();
+        store.set_xattr(file_ino, "security.x", b"3").unwrap();
+        let mut names = store.list_xattrs(file_ino).unwrap();
+        names.sort();
+        assert!(names.contains(&"user.a".to_string()));
+        assert!(names.contains(&"user.b".to_string()));
+        assert!(names.contains(&"security.x".to_string()));
+        assert_eq!(names.len(), 3);
+    }
+
+    #[test]
+    fn test_xattr_remove() {
+        let store = DictMetadataStore::new();
+        let file_ino = store.create_inode(&new_file_meta()).unwrap();
+        store.set_xattr(file_ino, "user.k", b"v").unwrap();
+        store.remove_xattr(file_ino, "user.k").unwrap();
+        let result = store.get_xattr(file_ino, "user.k");
+        assert!(result.is_err(), "get after remove should error");
+    }
+
+    #[test]
+    fn test_xattr_overwrite() {
+        let store = DictMetadataStore::new();
+        let file_ino = store.create_inode(&new_file_meta()).unwrap();
+        store.set_xattr(file_ino, "user.x", b"first").unwrap();
+        store.set_xattr(file_ino, "user.x", b"second").unwrap();
+        let val = store.get_xattr(file_ino, "user.x").unwrap();
+        assert_eq!(val, b"second");
+    }
+
+    #[test]
+    fn test_xattr_on_directory() {
+        let store = DictMetadataStore::new();
+        // Set xattr on the root directory inode (ino=1)
+        store.set_xattr(1, "user.dir_attr", b"dir_val").unwrap();
+        let val = store.get_xattr(1, "user.dir_attr").unwrap();
+        assert_eq!(val, b"dir_val");
+    }
+
+    #[test]
+    fn test_xattr_large_value() {
+        let store = DictMetadataStore::new();
+        let file_ino = store.create_inode(&new_file_meta()).unwrap();
+        // Value > 31 bytes exercises CAS tree storage
+        let large_value: Vec<u8> = (0u8..=127u8).collect();
+        store.set_xattr(file_ino, "user.big", &large_value).unwrap();
+        let recovered = store.get_xattr(file_ino, "user.big").unwrap();
+        assert_eq!(recovered, large_value);
+    }
+
+    #[test]
+    fn test_xattr_list_empty() {
+        let store = DictMetadataStore::new();
+        let file_ino = store.create_inode(&new_file_meta()).unwrap();
+        let names = store.list_xattrs(file_ino).unwrap();
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn test_xattr_get_not_found() {
+        let store = DictMetadataStore::new();
+        let file_ino = store.create_inode(&new_file_meta()).unwrap();
+        let result = store.get_xattr(file_ino, "user.missing");
+        assert!(matches!(result, Err(MetaError::NotFound(_))));
+    }
+
+    #[test]
+    fn test_xattr_remove_not_found() {
+        let store = DictMetadataStore::new();
+        let file_ino = store.create_inode(&new_file_meta()).unwrap();
+        let result = store.remove_xattr(file_ino, "user.nonexistent");
+        assert!(result.is_err());
     }
 
     #[test]

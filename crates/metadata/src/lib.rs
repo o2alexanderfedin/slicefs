@@ -8,4 +8,5 @@ pub mod inode;
 pub mod inode_map;
 pub mod directory;
 pub mod manifest;
+pub mod xattr;
 pub mod store;
