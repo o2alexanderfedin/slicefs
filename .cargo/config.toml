@@ -1,0 +1,6 @@
+# Project-level cargo config.
+# Override the global rustc = "rust-fv-driver" setting from ~/.cargo/config.toml,
+# which is currently broken due to a toolchain version mismatch (compiled against
+# rustc 1.93.0 but current toolchain is 1.94.1). Use the standard rustc for this project.
+[build]
+rustc = "rustc"
