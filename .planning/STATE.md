@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 04-full-posix-write-path/04-02-PLAN.md
-last_updated: "2026-03-28T21:42:20.646Z"
+stopped_at: Completed 04-full-posix-write-path/04-04-PLAN.md
+last_updated: "2026-03-28T21:53:08.306Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 13
-  completed_plans: 12
+  completed_plans: 13
   percent: 0
 ---
 
@@ -62,6 +62,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 04-full-posix-write-path P01 | 249 | 2 tasks | 4 files |
 | Phase 04-full-posix-write-path P03 | 273 | 2 tasks | 2 files |
 | Phase 04-full-posix-write-path P02 | 15 | 2 tasks | 3 files |
+| Phase 04-full-posix-write-path P04 | 20 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -111,6 +112,9 @@ Recent decisions affecting current work:
 - [Phase 04-full-posix-write-path]: test_* helpers bypass FUSE request/reply machinery — public impl methods on SliceFsFilesystem enable integration tests without mounting
 - [Phase 04-full-posix-write-path]: flush_buffer_to_cas() shared helper: dict lock dropped before meta.* calls to prevent deadlock; called by both test_release and FUSE release()
 - [Phase 04-full-posix-write-path]: setattr size: in-flight buffer resize for open handles; CAS read-resize-push for closed files with refcount update
+- [Phase 04-full-posix-write-path]: logical_bytes uses AtomicU64 for lock-free counter maintenance; update_inode reads old size before overwriting digest for delta tracking
+- [Phase 04-full-posix-write-path]: fuser 0.17 getlk/setlk already return ENOSYS by default — no explicit stubs needed for POSIX locking
+- [Phase 04-full-posix-write-path]: statfs bfree = u64::MAX/4 — dedup filesystem is effectively unlimited; physical = dict.len() * 92 bytes
 
 ### Pending Todos
 
@@ -126,6 +130,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-28T21:42:20.643Z
-Stopped at: Completed 04-full-posix-write-path/04-02-PLAN.md
+Last session: 2026-03-28T21:53:08.303Z
+Stopped at: Completed 04-full-posix-write-path/04-04-PLAN.md
 Resume file: None

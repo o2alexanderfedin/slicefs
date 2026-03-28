@@ -14,7 +14,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **CAS-03**: Pluggable storage backend trait for CAS blocks with local disk implementation
 - [x] **CAS-04**: Reference counting per block with atomic increment/decrement
 - [x] **CAS-05**: Integrity verification on read (re-hash block, compare to stored hash, configurable on/off)
-- [ ] **CAS-06**: Dedup-aware space reporting (logical size vs physical size via statfs)
+- [x] **CAS-06**: Dedup-aware space reporting (logical size vs physical size via statfs)
 - [x] **CAS-07**: On-disk dedup index with bounded memory usage (no full DDT in RAM)
 
 ### Garbage Collection
@@ -36,9 +36,9 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **POSIX-09**: Truncate/ftruncate with correct partial block handling
 - [x] **POSIX-10**: Stable inode numbers across mount cycles
 - [ ] **POSIX-11**: fsync/fdatasync correctness (guaranteed durability)
-- [ ] **POSIX-12**: POSIX locking (fcntl locks, flock)
+- [x] **POSIX-12**: POSIX locking (fcntl locks, flock)
 - [x] **POSIX-13**: Correct errno values for all operations
-- [ ] **POSIX-14**: pjdfstest pass rate >95%
+- [x] **POSIX-14**: pjdfstest pass rate >95%
 - [x] **POSIX-15**: All POSIX operations that FUSE frontend allows on each platform
 
 ### Metadata & Crash Safety
@@ -117,7 +117,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CAS-03 | Phase 1 | Complete |
 | CAS-04 | Phase 4 | Complete |
 | CAS-05 | Phase 1 | Complete |
-| CAS-06 | Phase 4 | Pending |
+| CAS-06 | Phase 4 | Complete |
 | CAS-07 | Phase 1 | Complete |
 | GC-01 | Phase 5 | Pending |
 | GC-02 | Phase 5 | Pending |
@@ -133,9 +133,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | POSIX-09 | Phase 4 | Complete |
 | POSIX-10 | Phase 2 | Complete |
 | POSIX-11 | Phase 5 | Pending |
-| POSIX-12 | Phase 4 | Pending |
+| POSIX-12 | Phase 4 | Complete |
 | POSIX-13 | Phase 3 | Complete |
-| POSIX-14 | Phase 4 | Pending |
+| POSIX-14 | Phase 4 | Complete |
 | POSIX-15 | Phase 3 | Complete |
 | META-01 | Phase 5 | Pending |
 | META-02 | Phase 3 | Complete |

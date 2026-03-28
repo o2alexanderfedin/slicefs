@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: CAS Foundation** - Block store, hash, chunking traits, and dedup index with bloom filter (completed 2026-03-28)
 - [ ] **Phase 2: Metadata Engine** - Inode table, directory structure, file manifests, xattrs — separate from block store
 - [ ] **Phase 3: Read-Only FUSE** - Mount a real filesystem read-only; validate the kernel interface before write complexity
-- [ ] **Phase 4: Full POSIX Write Path** - Complete read/write POSIX with inline deduplication; pjdfstest >95% on Linux
+- [x] **Phase 4: Full POSIX Write Path** - Complete read/write POSIX with inline deduplication; pjdfstest >95% on Linux (completed 2026-03-28)
 - [ ] **Phase 5: Crash Safety and GC** - WAL, refcount correctness, garbage collection, and crash recovery — the correctness layer
 - [ ] **Phase 6: Compression and Snapshots** - Block compression and point-in-time versioning enabled by the CAS architecture
 - [ ] **Phase 7: Cross-Platform and Production Hardening** - macOS, Windows, CLI completeness, scrub, and production benchmarks
@@ -80,7 +80,7 @@ Plans:
   3. Hard links share inode reference counts; unlinking one hard link does not remove the file until all links are removed
   4. statfs reports both logical and physical byte counts, showing the dedup ratio
   5. pjdfstest passes >95% of applicable tests on Linux
-**Plans:** 3/4 plans executed
+**Plans:** 4/4 plans complete
 Plans:
 - [ ] 04-01-PLAN.md — Refcount infrastructure, write state types, RW mount, destroy persistence
 - [ ] 04-02-PLAN.md — Core file write path: create, write, release with CAS flush, setattr/truncate
@@ -133,7 +133,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 1. CAS Foundation | 3/3 | Complete   | 2026-03-28 |
 | 2. Metadata Engine | 2/3 | In Progress|  |
 | 3. Read-Only FUSE | 1/3 | In Progress|  |
-| 4. Full POSIX Write Path | 3/4 | In Progress|  |
+| 4. Full POSIX Write Path | 4/4 | Complete   | 2026-03-28 |
 | 5. Crash Safety and GC | 0/TBD | Not started | - |
 | 6. Compression and Snapshots | 0/TBD | Not started | - |
 | 7. Cross-Platform and Production Hardening | 0/TBD | Not started | - |
