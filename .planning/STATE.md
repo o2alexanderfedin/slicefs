@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 02-metadata-engine/02-02-PLAN.md
-last_updated: "2026-03-28T08:48:49.292Z"
+stopped_at: Completed 02-metadata-engine/02-03-PLAN.md
+last_updated: "2026-03-28T09:04:11.052Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 6
-  completed_plans: 5
+  completed_plans: 6
   percent: 0
 ---
 
@@ -55,6 +55,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-cas-foundation P03 | 6 | 2 tasks | 2 files |
 | Phase 02-metadata-engine P01 | 25 | 2 tasks | 11 files |
 | Phase 02-metadata-engine P02 | 6min | 2 tasks | 5 files |
+| Phase 02-metadata-engine P03 | 10min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -83,6 +84,10 @@ Recent decisions affecting current work:
 - [Phase 02-metadata-engine]: blockset::Tree must be in scope to call State::push_all (trait method not auto-imported)
 - [Phase 02-metadata-engine]: Directory entry list stores (key, ino, name) tuples as CAS blob — blockset API does not allow choosing dictionary keys
 - [Phase 02-metadata-engine]: DictMetadataStore xattr methods stub out for Plan 03; all other MetadataStore ops fully implemented
+- [Phase 02-metadata-engine]: blockset::serialize/deserialize broken for small payloads — implemented own serialize_dictionary/deserialize_dictionary (92 bytes/entry: key+branches verbatim)
+- [Phase 02-metadata-engine]: Root record expanded from 44 to 156 bytes: adds inode_data/dir_data/manifest_data/xattr_data digests enabling full state reconstruction via load_from_root
+- [Phase 02-metadata-engine]: Xattr storage: load-mutate-re-intern pattern; list_xattrs returns empty vec for inodes with no xattrs
+- [Phase 02-metadata-engine]: InodeMap::set_next_ino() added for O(1) counter restoration after reload
 
 ### Pending Todos
 
@@ -98,6 +103,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-28T08:48:49.289Z
-Stopped at: Completed 02-metadata-engine/02-02-PLAN.md
+Last session: 2026-03-28T09:04:11.048Z
+Stopped at: Completed 02-metadata-engine/02-03-PLAN.md
 Resume file: None
