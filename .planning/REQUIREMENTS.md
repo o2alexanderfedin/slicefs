@@ -112,55 +112,55 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CAS-01 | — | Pending |
-| CAS-02 | — | Pending |
-| CAS-03 | — | Pending |
-| CAS-04 | — | Pending |
-| CAS-05 | — | Pending |
-| CAS-06 | — | Pending |
-| CAS-07 | — | Pending |
-| GC-01 | — | Pending |
-| GC-02 | — | Pending |
-| GC-03 | — | Pending |
-| POSIX-01 | — | Pending |
-| POSIX-02 | — | Pending |
-| POSIX-03 | — | Pending |
-| POSIX-04 | — | Pending |
-| POSIX-05 | — | Pending |
-| POSIX-06 | — | Pending |
-| POSIX-07 | — | Pending |
-| POSIX-08 | — | Pending |
-| POSIX-09 | — | Pending |
-| POSIX-10 | — | Pending |
-| POSIX-11 | — | Pending |
-| POSIX-12 | — | Pending |
-| POSIX-13 | — | Pending |
-| POSIX-14 | — | Pending |
-| POSIX-15 | — | Pending |
-| META-01 | — | Pending |
-| META-02 | — | Pending |
-| META-03 | — | Pending |
-| SNAP-01 | — | Pending |
-| SNAP-02 | — | Pending |
-| SNAP-03 | — | Pending |
-| COMP-01 | — | Pending |
-| COMP-02 | — | Pending |
-| PLAT-01 | — | Pending |
-| PLAT-02 | — | Pending |
-| PLAT-03 | — | Pending |
-| PLAT-04 | — | Pending |
-| CLI-01 | — | Pending |
-| CLI-02 | — | Pending |
-| CLI-03 | — | Pending |
-| CLI-04 | — | Pending |
-| CLI-05 | — | Pending |
-| CLI-06 | — | Pending |
+| CAS-01 | Phase 1 | Pending |
+| CAS-02 | Phase 1 | Pending |
+| CAS-03 | Phase 1 | Pending |
+| CAS-04 | Phase 4 | Pending |
+| CAS-05 | Phase 1 | Pending |
+| CAS-06 | Phase 4 | Pending |
+| CAS-07 | Phase 1 | Pending |
+| GC-01 | Phase 5 | Pending |
+| GC-02 | Phase 5 | Pending |
+| GC-03 | Phase 5 | Pending |
+| POSIX-01 | Phase 4 | Pending |
+| POSIX-02 | Phase 4 | Pending |
+| POSIX-03 | Phase 4 | Pending |
+| POSIX-04 | Phase 4 | Pending |
+| POSIX-05 | Phase 4 | Pending |
+| POSIX-06 | Phase 2 | Pending |
+| POSIX-07 | Phase 2 | Pending |
+| POSIX-08 | Phase 2 | Pending |
+| POSIX-09 | Phase 4 | Pending |
+| POSIX-10 | Phase 2 | Pending |
+| POSIX-11 | Phase 5 | Pending |
+| POSIX-12 | Phase 4 | Pending |
+| POSIX-13 | Phase 3 | Pending |
+| POSIX-14 | Phase 4 | Pending |
+| POSIX-15 | Phase 3 | Pending |
+| META-01 | Phase 5 | Pending |
+| META-02 | Phase 3 | Pending |
+| META-03 | Phase 2 | Pending |
+| SNAP-01 | Phase 6 | Pending |
+| SNAP-02 | Phase 6 | Pending |
+| SNAP-03 | Phase 6 | Pending |
+| COMP-01 | Phase 6 | Pending |
+| COMP-02 | Phase 6 | Pending |
+| PLAT-01 | Phase 7 | Pending |
+| PLAT-02 | Phase 3 | Pending |
+| PLAT-03 | Phase 7 | Pending |
+| PLAT-04 | Phase 7 | Pending |
+| CLI-01 | Phase 3 | Pending |
+| CLI-02 | Phase 3 | Pending |
+| CLI-03 | Phase 7 | Pending |
+| CLI-04 | Phase 7 | Pending |
+| CLI-05 | Phase 7 | Pending |
+| CLI-06 | Phase 3 | Pending |
 
 **Coverage:**
 - v1 requirements: 43 total
-- Mapped to phases: 0
-- Unmapped: 43
+- Mapped to phases: 43
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-27*
-*Last updated: 2026-03-27 after initial definition*
+*Last updated: 2026-03-27 after roadmap creation — all 43 v1 requirements mapped*
