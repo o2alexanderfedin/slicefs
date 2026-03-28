@@ -1,0 +1,15 @@
+[package]
+name = "cas-local"
+version = "0.1.0"
+edition = "2021"
+description = "Stub/test implementations of dedupfs CAS traits (Blake3 hasher, fixed chunker, in-memory and disk block stores, in-memory dedup index)"
+
+[dependencies]
+dedupfs-traits = { path = "../dedupfs-traits" }
+blake3.workspace = true
+fastbloom.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
