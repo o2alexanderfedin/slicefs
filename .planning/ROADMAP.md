@@ -80,7 +80,7 @@ Plans:
   3. Hard links share inode reference counts; unlinking one hard link does not remove the file until all links are removed
   4. statfs reports both logical and physical byte counts, showing the dedup ratio
   5. pjdfstest passes >95% of applicable tests on Linux
-**Plans:** 1/4 plans executed
+**Plans:** 2/4 plans executed
 Plans:
 - [ ] 04-01-PLAN.md — Refcount infrastructure, write state types, RW mount, destroy persistence
 - [ ] 04-02-PLAN.md — Core file write path: create, write, release with CAS flush, setattr/truncate
@@ -133,7 +133,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 1. CAS Foundation | 3/3 | Complete   | 2026-03-28 |
 | 2. Metadata Engine | 2/3 | In Progress|  |
 | 3. Read-Only FUSE | 1/3 | In Progress|  |
-| 4. Full POSIX Write Path | 1/4 | In Progress|  |
+| 4. Full POSIX Write Path | 2/4 | In Progress|  |
 | 5. Crash Safety and GC | 0/TBD | Not started | - |
 | 6. Compression and Snapshots | 0/TBD | Not started | - |
 | 7. Cross-Platform and Production Hardening | 0/TBD | Not started | - |

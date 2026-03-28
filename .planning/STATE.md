@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 04-full-posix-write-path/04-01-PLAN.md
-last_updated: "2026-03-28T21:30:53.863Z"
+stopped_at: Completed 04-full-posix-write-path/04-03-PLAN.md
+last_updated: "2026-03-28T21:41:39.149Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
   completed_phases: 3
   total_plans: 13
-  completed_plans: 10
+  completed_plans: 11
   percent: 0
 ---
 
@@ -60,6 +60,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03-read-only-fuse P02 | 8 | 2 tasks | 3 files |
 | Phase 03-read-only-fuse P03 | 3min | 1 tasks | 3 files |
 | Phase 04-full-posix-write-path P01 | 249 | 2 tasks | 4 files |
+| Phase 04-full-posix-write-path P03 | 273 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -103,6 +104,9 @@ Recent decisions affecting current work:
 - [Phase 04-full-posix-write-path]: Root record expanded from 156 to 184 bytes: adds refcount_data_digest as 7th Digest224; 156-byte records accepted as backward-compat (empty refcounts)
 - [Phase 04-full-posix-write-path]: OpenFlags.acc_mode() used for write-mode detection — fuser 0.17 OpenFlags is newtype i32 with no bitfield methods
 - [Phase 04-full-posix-write-path]: MountOption::RO removed: filesystem mounts read-write; destroy() persists dictionary.bin + root.bin to store_path
+- [Phase 04-full-posix-write-path]: simulate_rename uses raw u32 flags bits (0/1/2) — RENAME_NOREPLACE/EXCHANGE are linux-only; raw bits portable for macOS test env
+- [Phase 04-full-posix-write-path]: simulate_mkdir delegates to DictMetadataStore::create_directory — it handles nlinks/dot-entries/parent-update internally
+- [Phase 04-full-posix-write-path]: Integration tests in separate tests/*.rs files compile independently — 04-02 RED phase errors do not block 04-03 tests
 
 ### Pending Todos
 
@@ -118,6 +122,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-28T21:30:53.860Z
-Stopped at: Completed 04-full-posix-write-path/04-01-PLAN.md
+Last session: 2026-03-28T21:41:39.146Z
+Stopped at: Completed 04-full-posix-write-path/04-03-PLAN.md
 Resume file: None
