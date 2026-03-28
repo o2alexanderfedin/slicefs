@@ -32,7 +32,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. An alternative chunking strategy can be swapped in by implementing the Chunker trait without changing any other code
   4. A duplicate block write is detected via the bloom filter + on-disk index before any disk write occurs
   5. A retrieved block fails verification if its stored bytes have been corrupted (integrity check on read)
-**Plans:** 1/3 plans executed
+**Plans:** 2/3 plans executed
 Plans:
 - [ ] 01-01-PLAN.md — Cargo workspace setup and CAS trait definitions in dedupfs-traits
 - [ ] 01-02-PLAN.md — Blake3Hasher, FixedChunker, and MemBlockStore stub implementations
@@ -117,7 +117,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. CAS Foundation | 1/3 | In Progress|  |
+| 1. CAS Foundation | 2/3 | In Progress|  |
 | 2. Metadata Engine | 0/TBD | Not started | - |
 | 3. Read-Only FUSE | 0/TBD | Not started | - |
 | 4. Full POSIX Write Path | 0/TBD | Not started | - |
