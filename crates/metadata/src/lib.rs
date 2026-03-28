@@ -5,3 +5,6 @@
 //! in `dedupfs-traits`. The storage backend is a data-id `Dictionary`.
 
 pub mod inode;
+pub mod inode_map;
+pub mod directory;
+pub mod manifest;
