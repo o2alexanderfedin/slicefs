@@ -12,7 +12,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **CAS-01**: Block-level content-addressable storage with pluggable hash function trait
 - [x] **CAS-02**: Pluggable chunking/block-splitting trait interface (concrete algorithms provided by owner's existing technology)
 - [x] **CAS-03**: Pluggable storage backend trait for CAS blocks with local disk implementation
-- [ ] **CAS-04**: Reference counting per block with atomic increment/decrement
+- [x] **CAS-04**: Reference counting per block with atomic increment/decrement
 - [x] **CAS-05**: Integrity verification on read (re-hash block, compare to stored hash, configurable on/off)
 - [ ] **CAS-06**: Dedup-aware space reporting (logical size vs physical size via statfs)
 - [x] **CAS-07**: On-disk dedup index with bounded memory usage (no full DDT in RAM)
@@ -115,7 +115,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CAS-01 | Phase 1 | Complete |
 | CAS-02 | Phase 1 | Complete |
 | CAS-03 | Phase 1 | Complete |
-| CAS-04 | Phase 4 | Pending |
+| CAS-04 | Phase 4 | Complete |
 | CAS-05 | Phase 1 | Complete |
 | CAS-06 | Phase 4 | Pending |
 | CAS-07 | Phase 1 | Complete |

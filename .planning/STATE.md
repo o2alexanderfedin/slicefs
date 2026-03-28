@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Phase 4 context gathered
-last_updated: "2026-03-28T19:56:16.329Z"
+stopped_at: Completed 04-full-posix-write-path/04-01-PLAN.md
+last_updated: "2026-03-28T21:30:53.863Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
   completed_phases: 3
-  total_plans: 9
-  completed_plans: 9
+  total_plans: 13
+  completed_plans: 10
   percent: 0
 ---
 
@@ -59,6 +59,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03-read-only-fuse P01 | 402 | 2 tasks | 6 files |
 | Phase 03-read-only-fuse P02 | 8 | 2 tasks | 3 files |
 | Phase 03-read-only-fuse P03 | 3min | 1 tasks | 3 files |
+| Phase 04-full-posix-write-path P01 | 249 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -99,6 +100,9 @@ Recent decisions affecting current work:
 - [Phase 03-read-only-fuse]: fuser 0.17 Config is #[non_exhaustive] — use Config::default() + field mutation, not struct literal
 - [Phase 03-read-only-fuse]: Dictionary cloned before load_from_root: load_from_root consumes dict; clone provides content_dict for SliceFsFilesystem
 - [Phase 03-read-only-fuse]: Task 2 (end-to-end FUSE mount) deferred: requires Linux or macFUSE; not available on macOS dev machine
+- [Phase 04-full-posix-write-path]: Root record expanded from 156 to 184 bytes: adds refcount_data_digest as 7th Digest224; 156-byte records accepted as backward-compat (empty refcounts)
+- [Phase 04-full-posix-write-path]: OpenFlags.acc_mode() used for write-mode detection — fuser 0.17 OpenFlags is newtype i32 with no bitfield methods
+- [Phase 04-full-posix-write-path]: MountOption::RO removed: filesystem mounts read-write; destroy() persists dictionary.bin + root.bin to store_path
 
 ### Pending Todos
 
@@ -114,6 +118,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-28T19:56:16.326Z
-Stopped at: Phase 4 context gathered
-Resume file: .planning/phases/04-full-posix-write-path/04-CONTEXT.md
+Last session: 2026-03-28T21:30:53.860Z
+Stopped at: Completed 04-full-posix-write-path/04-01-PLAN.md
+Resume file: None
