@@ -37,9 +37,9 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **POSIX-10**: Stable inode numbers across mount cycles
 - [ ] **POSIX-11**: fsync/fdatasync correctness (guaranteed durability)
 - [ ] **POSIX-12**: POSIX locking (fcntl locks, flock)
-- [ ] **POSIX-13**: Correct errno values for all operations
+- [x] **POSIX-13**: Correct errno values for all operations
 - [ ] **POSIX-14**: pjdfstest pass rate >95%
-- [ ] **POSIX-15**: All POSIX operations that FUSE frontend allows on each platform
+- [x] **POSIX-15**: All POSIX operations that FUSE frontend allows on each platform
 
 ### Metadata & Crash Safety
 
@@ -61,18 +61,18 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Cross-Platform
 
 - [ ] **PLAT-01**: macOS support via FUSE-T + fuser
-- [ ] **PLAT-02**: Linux support via libfuse + fuser
+- [x] **PLAT-02**: Linux support via libfuse + fuser
 - [ ] **PLAT-03**: Windows support via WinFSP (note: GPL-3 license implications)
 - [ ] **PLAT-04**: Platform-specific POSIX compliance testing on each target
 
 ### CLI & Operations
 
-- [ ] **CLI-01**: Mount command with configurable options (backing store path, mount options)
-- [ ] **CLI-02**: Unmount command with clean shutdown
+- [x] **CLI-01**: Mount command with configurable options (backing store path, mount options)
+- [x] **CLI-02**: Unmount command with clean shutdown
 - [ ] **CLI-03**: Stats command (dedup ratio, logical/physical bytes, block count, reference distribution)
 - [ ] **CLI-04**: Scrub command (walk all blocks, re-verify hashes, report corruption)
 - [ ] **CLI-05**: Structured JSON output from all CLI commands for tooling integration
-- [ ] **CLI-06**: Mount options for performance tuning (noatime, writeback cache, cache size)
+- [x] **CLI-06**: Mount options for performance tuning (noatime, writeback cache, cache size)
 
 ## v2 Requirements
 
@@ -134,9 +134,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | POSIX-10 | Phase 2 | Complete |
 | POSIX-11 | Phase 5 | Pending |
 | POSIX-12 | Phase 4 | Pending |
-| POSIX-13 | Phase 3 | Pending |
+| POSIX-13 | Phase 3 | Complete |
 | POSIX-14 | Phase 4 | Pending |
-| POSIX-15 | Phase 3 | Pending |
+| POSIX-15 | Phase 3 | Complete |
 | META-01 | Phase 5 | Pending |
 | META-02 | Phase 3 | Pending |
 | META-03 | Phase 2 | Complete |
@@ -146,15 +146,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 | COMP-01 | Phase 6 | Pending |
 | COMP-02 | Phase 6 | Pending |
 | PLAT-01 | Phase 7 | Pending |
-| PLAT-02 | Phase 3 | Pending |
+| PLAT-02 | Phase 3 | Complete |
 | PLAT-03 | Phase 7 | Pending |
 | PLAT-04 | Phase 7 | Pending |
-| CLI-01 | Phase 3 | Pending |
-| CLI-02 | Phase 3 | Pending |
+| CLI-01 | Phase 3 | Complete |
+| CLI-02 | Phase 3 | Complete |
 | CLI-03 | Phase 7 | Pending |
 | CLI-04 | Phase 7 | Pending |
 | CLI-05 | Phase 7 | Pending |
-| CLI-06 | Phase 3 | Pending |
+| CLI-06 | Phase 3 | Complete |
 
 **Coverage:**
 - v1 requirements: 43 total

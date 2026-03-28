@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Phase 3 context gathered
-last_updated: "2026-03-28T09:44:20.834Z"
+stopped_at: Completed 03-read-only-fuse 03-01-PLAN.md
+last_updated: "2026-03-28T10:36:22.088Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
   completed_phases: 2
-  total_plans: 6
-  completed_plans: 6
+  total_plans: 9
+  completed_plans: 7
   percent: 0
 ---
 
@@ -56,6 +56,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02-metadata-engine P01 | 25 | 2 tasks | 11 files |
 | Phase 02-metadata-engine P02 | 6min | 2 tasks | 5 files |
 | Phase 02-metadata-engine P03 | 10min | 2 tasks | 4 files |
+| Phase 03-read-only-fuse P01 | 402 | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -88,6 +89,9 @@ Recent decisions affecting current work:
 - [Phase 02-metadata-engine]: Root record expanded from 44 to 156 bytes: adds inode_data/dir_data/manifest_data/xattr_data digests enabling full state reconstruction via load_from_root
 - [Phase 02-metadata-engine]: Xattr storage: load-mutate-re-intern pattern; list_xattrs returns empty vec for inodes with no xattrs
 - [Phase 02-metadata-engine]: InodeMap::set_next_ino() added for O(1) counter restoration after reload
+- [Phase 03-read-only-fuse]: fuser macos-no-mount feature: compiles without macFUSE install, provides full Filesystem API for unit tests
+- [Phase 03-read-only-fuse]: All write FUSE callbacks return EROFS (not ENOSYS) — signals read-only filesystem per POSIX
+- [Phase 03-read-only-fuse]: SliceFsFilesystem dual Arc: meta Arc<DictMetadataStore> + dict Arc<Mutex<Dictionary>> to avoid deadlock with DictMetadataStore's internal mutex
 
 ### Pending Todos
 
@@ -103,6 +107,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-28T09:44:20.831Z
-Stopped at: Phase 3 context gathered
-Resume file: .planning/phases/03-read-only-fuse/03-CONTEXT.md
+Last session: 2026-03-28T10:36:22.085Z
+Stopped at: Completed 03-read-only-fuse 03-01-PLAN.md
+Resume file: None
