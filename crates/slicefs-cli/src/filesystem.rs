@@ -6,8 +6,11 @@
 //! All write operations return `EROFS` (read-only filesystem). This is intentional
 //! per the project decision: EROFS signals "read-only filesystem", not "not implemented".
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,7 +21,7 @@ use fuser::{
     ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
     ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
-use metadata::store::DictMetadataStore;
+use metadata::store::{DictMetadataStore, serialize_dictionary};
 use slicefs_traits::digest::from_digest224;
 use slicefs_traits::metadata::{InodeMeta, MetaError, MetadataStore};
 
@@ -28,14 +31,29 @@ const S_IFREG: u32 = 0o100_000;
 const S_IFDIR: u32 = 0o040_000;
 const S_IFLNK: u32 = 0o120_000;
 
-/// Read-only FUSE filesystem adapter backed by a [`DictMetadataStore`].
+/// Per-handle state for a writable file descriptor.
+///
+/// Created on `open()` when `O_WRONLY` or `O_RDWR` flags are present.
+/// Removed on `release()`. The write buffer accumulates data until flush.
+struct OpenFileState {
+    ino: u64,
+    buf: Vec<u8>,
+}
+
+/// FUSE filesystem adapter backed by a [`DictMetadataStore`].
 ///
 /// `meta` provides all inode/directory/manifest metadata.
 /// `dict` is a clone of the dictionary used for content reads via `GetBytes`.
 /// Keeping `dict` separate avoids deadlocking with `DictMetadataStore`'s internal mutex.
+///
+/// `open_files` tracks per-handle write buffers; `next_fh` allocates unique handles.
+/// `store_path` is the on-disk store root used by `destroy()` to persist state.
 pub struct SliceFsFilesystem {
     pub(crate) meta: Arc<DictMetadataStore>,
     pub(crate) dict: Arc<Mutex<Dictionary>>,
+    open_files: Mutex<HashMap<u64, OpenFileState>>,
+    next_fh: AtomicU64,
+    store_path: Option<PathBuf>,
 }
 
 impl SliceFsFilesystem {
@@ -43,10 +61,15 @@ impl SliceFsFilesystem {
     ///
     /// `meta` provides metadata.
     /// `dict` is a clone of the content dictionary (used for `GetBytes` reads).
-    pub fn new(meta: DictMetadataStore, dict: Dictionary) -> Self {
+    /// `store_path` is the on-disk store root; when `Some`, `destroy()` persists
+    /// `dictionary.bin` and `root.bin` after the FUSE session ends.
+    pub fn new(meta: DictMetadataStore, dict: Dictionary, store_path: Option<PathBuf>) -> Self {
         Self {
             meta: Arc::new(meta),
             dict: Arc::new(Mutex::new(dict)),
+            open_files: Mutex::new(HashMap::new()),
+            next_fh: AtomicU64::new(0),
+            store_path,
         }
     }
 
@@ -144,7 +167,19 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn destroy(&mut self) {
-        let _ = self.meta.commit();
+        if let Ok(root) = self.meta.commit() {
+            let dict = self.dict.lock().unwrap();
+            let bytes = serialize_dictionary(&*dict);
+            drop(dict);
+            if let Some(ref store_path) = self.store_path {
+                let _ = std::fs::write(store_path.join("dictionary.bin"), &bytes);
+                let mut root_bytes = Vec::with_capacity(28);
+                for word in &root {
+                    root_bytes.extend_from_slice(&word.to_le_bytes());
+                }
+                let _ = std::fs::write(store_path.join("root.bin"), &root_bytes);
+            }
+        }
     }
 
     // ── Read operations ───────────────────────────────────────────────────────
@@ -242,8 +277,22 @@ impl Filesystem for SliceFsFilesystem {
         reply.data(&bytes);
     }
 
-    fn open(&self, _req: &Request, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        reply.opened(FileHandle(0), FopenFlags::empty());
+    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        use fuser::OpenAccMode;
+        let mode = flags.acc_mode();
+        if mode == OpenAccMode::O_WRONLY || mode == OpenAccMode::O_RDWR {
+            let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
+            self.open_files.lock().unwrap().insert(
+                fh,
+                OpenFileState {
+                    ino: ino.0,
+                    buf: Vec::new(),
+                },
+            );
+            reply.opened(FileHandle(fh), FopenFlags::empty());
+        } else {
+            reply.opened(FileHandle(0), FopenFlags::empty());
+        }
     }
 
     fn opendir(&self, _req: &Request, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
@@ -254,12 +303,15 @@ impl Filesystem for SliceFsFilesystem {
         &self,
         _req: &Request,
         _ino: INodeNo,
-        _fh: FileHandle,
+        fh: FileHandle,
         _flags: OpenFlags,
         _lock_owner: Option<LockOwner>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
+        if fh.0 > 0 {
+            self.open_files.lock().unwrap().remove(&fh.0);
+        }
         reply.ok();
     }
 
@@ -480,7 +532,7 @@ mod tests {
     fn fresh_fs() -> SliceFsFilesystem {
         let meta = DictMetadataStore::new();
         let dict = Dictionary::default();
-        SliceFsFilesystem::new(meta, dict)
+        SliceFsFilesystem::new(meta, dict, None)
     }
 
     #[test]
@@ -550,7 +602,7 @@ mod tests {
         meta_store.link(1, "testfile", ino).unwrap();
         meta_store.set_manifest(ino, &[root_digest224]).unwrap();
 
-        let fs = SliceFsFilesystem::new(meta_store, dict);
+        let fs = SliceFsFilesystem::new(meta_store, dict, None);
 
         let manifest = fs.meta.get_manifest(ino).unwrap();
         assert!(!manifest.is_empty());
@@ -576,7 +628,7 @@ mod tests {
         let ino = meta_store.create_inode(&file_meta).unwrap();
         meta_store.set_manifest(ino, &[root_digest224]).unwrap();
 
-        let fs = SliceFsFilesystem::new(meta_store, dict);
+        let fs = SliceFsFilesystem::new(meta_store, dict, None);
 
         let manifest = fs.meta.get_manifest(ino).unwrap();
         let root256 = from_digest224(&manifest[0]);

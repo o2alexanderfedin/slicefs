@@ -82,12 +82,11 @@ pub fn load_store(
 
 /// Build the FUSE mount configuration.
 ///
-/// Always includes: `RO`, `FSName("slicefs")`, `DefaultPermissions`.
+/// Always includes: `FSName("slicefs")`, `DefaultPermissions`.
 /// Adds `NoAtime` when `noatime` is true.
 /// ACL defaults to `Owner` (only the mounting user can access the filesystem).
 pub fn build_mount_options(noatime: bool) -> Config {
     let mut mount_options = vec![
-        MountOption::RO,
         MountOption::FSName("slicefs".to_string()),
         MountOption::DefaultPermissions,
     ];
@@ -114,10 +113,10 @@ pub fn run_mount(
     _cache_size: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (meta, content_dict) = load_store(store_path)?;
-    let fs = SliceFsFilesystem::new(meta, content_dict);
+    let fs = SliceFsFilesystem::new(meta, content_dict, Some(store_path.to_path_buf()));
     let config = build_mount_options(noatime);
 
-    println!("SliceFS mounted read-only at {}", mountpoint.display());
+    println!("SliceFS mounted at {}", mountpoint.display());
 
     mount2(fs, mountpoint, &config)?;
 
@@ -242,8 +241,8 @@ mod tests {
     fn test_build_mount_options_with_noatime() {
         let config = build_mount_options(true);
         assert!(
-            config.mount_options.contains(&MountOption::RO),
-            "RO must always be present"
+            !config.mount_options.contains(&MountOption::RO),
+            "RO must NOT be present (mount is read-write)"
         );
         assert!(
             config.mount_options.contains(&MountOption::NoAtime),
@@ -259,8 +258,8 @@ mod tests {
     fn test_build_mount_options_without_noatime() {
         let config = build_mount_options(false);
         assert!(
-            config.mount_options.contains(&MountOption::RO),
-            "RO must always be present"
+            !config.mount_options.contains(&MountOption::RO),
+            "RO must NOT be present (mount is read-write)"
         );
         assert!(
             !config.mount_options.contains(&MountOption::NoAtime),
