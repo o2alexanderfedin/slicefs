@@ -59,6 +59,15 @@ impl InodeMap {
     pub fn next_ino(&self) -> u64 {
         self.next_ino
     }
+
+    /// Directly set `next_ino` to the given value.
+    ///
+    /// Used during deserialization to restore the exact counter value from the
+    /// root record, which may be higher than `max(keys) + 1` if inodes were
+    /// deleted.  The caller must ensure `value >= max(keys) + 1`.
+    pub fn set_next_ino(&mut self, value: u64) {
+        self.next_ino = value;
+    }
 }
 
 impl Default for InodeMap {
