@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Phase 1 context gathered
-last_updated: "2026-03-28T05:51:05.313Z"
+stopped_at: Completed 01-cas-foundation-01-PLAN.md
+last_updated: "2026-03-28T06:28:35.541Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  total_plans: 3
+  completed_plans: 1
   percent: 0
 ---
 
@@ -50,6 +50,7 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: —
 
 *Updated after each plan completion*
+| Phase 01-cas-foundation P01 | 12 | 2 tasks | 16 files |
 
 ## Accumulated Context
 
@@ -62,6 +63,10 @@ Recent decisions affecting current work:
 - Roadmap: Refcount + WAL + GC co-developed in Phase 5 — GC correctness depends on refcount invariants; splitting them forces two correction cycles
 - Roadmap: Compression and snapshots grouped in Phase 6 — both are natural CAS capabilities, not bolt-ons
 - Roadmap: Windows deferred to Phase 7 — GPL-3 license implications of winfsp-rs must be resolved before distribution work begins
+- [Phase 01-cas-foundation]: 01-01: ChunkHash uses Vec<u8> not [u8;32] — variable-width accommodates owner's unknown hash algorithm output size
+- [Phase 01-cas-foundation]: 01-01: All traits use &self — enables Arc<dyn Trait> sharing; implementations handle sync internally
+- [Phase 01-cas-foundation]: 01-01: dedupfs-traits depends only on thiserror — adapter crates implement traits without pulling cas-local deps
+- [Phase 01-cas-foundation]: 01-01: DedupIndex exposes bloom_check() separately from lookup() — explicit two-phase design from day one per CAS-07
 
 ### Pending Todos
 
@@ -77,6 +82,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-28T05:51:05.306Z
-Stopped at: Phase 1 context gathered
-Resume file: .planning/phases/01-cas-foundation/01-CONTEXT.md
+Last session: 2026-03-28T06:28:35.537Z
+Stopped at: Completed 01-cas-foundation-01-PLAN.md
+Resume file: None

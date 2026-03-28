@@ -9,13 +9,13 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### CAS & Deduplication
 
-- [ ] **CAS-01**: Block-level content-addressable storage with pluggable hash function trait
-- [ ] **CAS-02**: Pluggable chunking/block-splitting trait interface (concrete algorithms provided by owner's existing technology)
-- [ ] **CAS-03**: Pluggable storage backend trait for CAS blocks with local disk implementation
+- [x] **CAS-01**: Block-level content-addressable storage with pluggable hash function trait
+- [x] **CAS-02**: Pluggable chunking/block-splitting trait interface (concrete algorithms provided by owner's existing technology)
+- [x] **CAS-03**: Pluggable storage backend trait for CAS blocks with local disk implementation
 - [ ] **CAS-04**: Reference counting per block with atomic increment/decrement
-- [ ] **CAS-05**: Integrity verification on read (re-hash block, compare to stored hash, configurable on/off)
+- [x] **CAS-05**: Integrity verification on read (re-hash block, compare to stored hash, configurable on/off)
 - [ ] **CAS-06**: Dedup-aware space reporting (logical size vs physical size via statfs)
-- [ ] **CAS-07**: On-disk dedup index with bounded memory usage (no full DDT in RAM)
+- [x] **CAS-07**: On-disk dedup index with bounded memory usage (no full DDT in RAM)
 
 ### Garbage Collection
 
@@ -112,13 +112,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CAS-01 | Phase 1 | Pending |
-| CAS-02 | Phase 1 | Pending |
-| CAS-03 | Phase 1 | Pending |
+| CAS-01 | Phase 1 | Complete |
+| CAS-02 | Phase 1 | Complete |
+| CAS-03 | Phase 1 | Complete |
 | CAS-04 | Phase 4 | Pending |
-| CAS-05 | Phase 1 | Pending |
+| CAS-05 | Phase 1 | Complete |
 | CAS-06 | Phase 4 | Pending |
-| CAS-07 | Phase 1 | Pending |
+| CAS-07 | Phase 1 | Complete |
 | GC-01 | Phase 5 | Pending |
 | GC-02 | Phase 5 | Pending |
 | GC-03 | Phase 5 | Pending |
