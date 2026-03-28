@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 03-read-only-fuse 03-01-PLAN.md
-last_updated: "2026-03-28T10:36:22.088Z"
+stopped_at: Completed 03-read-only-fuse 03-02-PLAN.md
+last_updated: "2026-03-28T10:41:38.494Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
   completed_phases: 2
   total_plans: 9
-  completed_plans: 7
+  completed_plans: 8
   percent: 0
 ---
 
@@ -57,6 +57,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02-metadata-engine P02 | 6min | 2 tasks | 5 files |
 | Phase 02-metadata-engine P03 | 10min | 2 tasks | 4 files |
 | Phase 03-read-only-fuse P01 | 402 | 2 tasks | 6 files |
+| Phase 03-read-only-fuse P02 | 8 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -92,6 +93,8 @@ Recent decisions affecting current work:
 - [Phase 03-read-only-fuse]: fuser macos-no-mount feature: compiles without macFUSE install, provides full Filesystem API for unit tests
 - [Phase 03-read-only-fuse]: All write FUSE callbacks return EROFS (not ENOSYS) — signals read-only filesystem per POSIX
 - [Phase 03-read-only-fuse]: SliceFsFilesystem dual Arc: meta Arc<DictMetadataStore> + dict Arc<Mutex<Dictionary>> to avoid deadlock with DictMetadataStore's internal mutex
+- [Phase 03-read-only-fuse]: dict() accessor exposes shared Dictionary for seed content ops; deadlock warning prevents misuse
+- [Phase 03-read-only-fuse]: Seed uses same Dictionary for file content and metadata to avoid desync on persist
 
 ### Pending Todos
 
@@ -107,6 +110,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-28T10:36:22.085Z
-Stopped at: Completed 03-read-only-fuse 03-01-PLAN.md
+Last session: 2026-03-28T10:41:38.491Z
+Stopped at: Completed 03-read-only-fuse 03-02-PLAN.md
 Resume file: None
