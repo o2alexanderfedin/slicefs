@@ -39,6 +39,7 @@ const S_IFDIR: u32 = 0o0040_000;
 ///   4. `dir_data`
 ///   5. `manifest_data`
 ///   6. `xattr_data`
+///   7. `refcounts`
 pub struct DictMetadataStore {
     /// The CAS block store — shared across all operations.
     dict: Mutex<Dictionary>,
@@ -52,6 +53,9 @@ pub struct DictMetadataStore {
     manifest_data: Mutex<BTreeMap<u64, Digest224>>,
     /// Maps inode number → xattr set `Digest224` (only for inodes with xattrs).
     xattr_data: Mutex<BTreeMap<u64, Digest224>>,
+    /// Reference counts for content `Digest224`s.
+    /// Incremented when a manifest references a block; decremented on manifest replacement or inode deletion.
+    refcounts: Mutex<BTreeMap<Digest224, u64>>,
 }
 
 impl DictMetadataStore {
@@ -82,6 +86,7 @@ impl DictMetadataStore {
             dir_data: Mutex::new(dir_data),
             manifest_data: Mutex::new(BTreeMap::new()),
             xattr_data: Mutex::new(BTreeMap::new()),
+            refcounts: Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -100,6 +105,35 @@ impl DictMetadataStore {
     /// Those methods acquire the same lock internally; double-locking will deadlock.
     pub fn dict(&self) -> &Mutex<Dictionary> {
         &self.dict
+    }
+
+    /// Increment the reference count for `digest` by 1.
+    ///
+    /// Creates the entry (starting at 1) if it does not yet exist.
+    pub fn increment_refcount(&self, digest: &Digest224) {
+        let mut rc = self.refcounts.lock().unwrap();
+        *rc.entry(*digest).or_insert(0) += 1;
+    }
+
+    /// Decrement the reference count for `digest` by 1.
+    ///
+    /// Removes the entry entirely when the count reaches 0.
+    /// Does nothing if `digest` is not tracked.
+    pub fn decrement_refcount(&self, digest: &Digest224) {
+        let mut rc = self.refcounts.lock().unwrap();
+        if let Some(count) = rc.get_mut(digest) {
+            if *count <= 1 {
+                rc.remove(digest);
+            } else {
+                *count -= 1;
+            }
+        }
+    }
+
+    /// Return the current reference count for `digest`, or `0` if not tracked.
+    pub fn get_refcount(&self, digest: &Digest224) -> u64 {
+        let rc = self.refcounts.lock().unwrap();
+        rc.get(digest).copied().unwrap_or(0)
     }
 }
 
@@ -353,14 +387,17 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn commit(&self) -> Result<Digest224, MetaError> {
-        // Serialize full in-memory state into a root record (156 bytes):
-        //   [inode_map_digest:   28 bytes (Digest224)]
-        //   [root_dir_ino:        8 bytes (u64 LE)]
-        //   [next_ino:            8 bytes (u64 LE)]
-        //   [inode_data_digest:  28 bytes (Digest224)] -- serialized BTreeMap<u64, Digest224>
-        //   [dir_data_digest:    28 bytes (Digest224)] -- serialized BTreeMap<u64, Digest224>
+        // Serialize full in-memory state into a root record (184 bytes):
+        //   [inode_map_digest:     28 bytes (Digest224)]
+        //   [root_dir_ino:          8 bytes (u64 LE)]
+        //   [next_ino:              8 bytes (u64 LE)]
+        //   [inode_data_digest:    28 bytes (Digest224)] -- serialized BTreeMap<u64, Digest224>
+        //   [dir_data_digest:      28 bytes (Digest224)] -- serialized BTreeMap<u64, Digest224>
         //   [manifest_data_digest: 28 bytes (Digest224)]
-        //   [xattr_data_digest:  28 bytes (Digest224)]
+        //   [xattr_data_digest:    28 bytes (Digest224)]
+        //   [refcount_data_digest: 28 bytes (Digest224)] -- NEW in v2
+        //
+        // Backward compat: root records of exactly 156 bytes are old format (no refcounts).
         let inode_map = self.inode_map.lock().unwrap();
         let mut dict = self.dict.lock().unwrap();
 
@@ -384,8 +421,12 @@ impl MetadataStore for DictMetadataStore {
             let map = self.xattr_data.lock().unwrap();
             intern_u64_digest_map(&mut *dict, &map)
         };
+        let refcount_data_digest = {
+            let rc = self.refcounts.lock().unwrap();
+            intern_digest224_u64_map(&mut *dict, &rc)
+        };
 
-        let mut root_bytes = Vec::with_capacity(156);
+        let mut root_bytes = Vec::with_capacity(184);
         // inode_map_digest: 28 bytes
         for word in &inode_map_digest {
             root_bytes.extend_from_slice(&word.to_le_bytes());
@@ -410,8 +451,12 @@ impl MetadataStore for DictMetadataStore {
         for word in &xattr_data_digest {
             root_bytes.extend_from_slice(&word.to_le_bytes());
         }
+        // refcount_data_digest: 28 bytes (new in v2 — 184-byte format)
+        for word in &refcount_data_digest {
+            root_bytes.extend_from_slice(&word.to_le_bytes());
+        }
 
-        assert_eq!(root_bytes.len(), 156, "root record must be 156 bytes");
+        assert_eq!(root_bytes.len(), 184, "root record must be 184 bytes");
         let root_digest = State::push_all(&mut *dict, &root_bytes);
         Ok(root_digest)
     }
@@ -491,12 +536,15 @@ impl DictMetadataStore {
         let get_data = GetData::new(&dict, &digest256);
         let bytes: Vec<u8> = GetBytes::new(get_data).collect();
 
-        if bytes.len() != 156 {
-            return Err(MetaError::Corrupted(format!(
-                "root record: expected 156 bytes, got {}",
-                bytes.len()
-            )));
-        }
+        // Accept both old (156-byte) and new (184-byte) formats.
+        let has_refcounts = match bytes.len() {
+            156 => false, // v1 format — no refcounts field
+            184 => true,  // v2 format — includes refcount_data_digest
+            n => return Err(MetaError::Corrupted(format!(
+                "root record: expected 156 or 184 bytes, got {}",
+                n
+            ))),
+        };
 
         // Parse the 7 fixed-width fields
         let mut off = 0;
@@ -520,6 +568,14 @@ impl DictMetadataStore {
         off += 28;
 
         let xattr_data_digest = parse_digest224(&bytes[off..off + 28]);
+        off += 28;
+
+        // v2 format: read refcount_data_digest at offset 156-184
+        let refcount_data_digest_opt: Option<Digest224> = if has_refcounts {
+            Some(parse_digest224(&bytes[off..off + 28]))
+        } else {
+            None
+        };
 
         // Load and patch inode_map so next_ino is exactly restored.
         // The deserialized map computes max(keys)+1 which may be lower if
@@ -531,6 +587,11 @@ impl DictMetadataStore {
         let dir_data = load_u64_digest_map(&dict, &dir_data_digest)?;
         let manifest_data = load_u64_digest_map(&dict, &manifest_data_digest)?;
         let xattr_data = load_u64_digest_map(&dict, &xattr_data_digest)?;
+        let refcounts = if let Some(ref rc_digest) = refcount_data_digest_opt {
+            load_digest224_u64_map(&dict, rc_digest)?
+        } else {
+            BTreeMap::new()
+        };
 
         // Sanity: root directory inode must exist
         if !inode_data.contains_key(&root_dir_ino) {
@@ -547,6 +608,7 @@ impl DictMetadataStore {
             dir_data: Mutex::new(dir_data),
             manifest_data: Mutex::new(manifest_data),
             xattr_data: Mutex::new(xattr_data),
+            refcounts: Mutex::new(refcounts),
         })
     }
 }
@@ -613,6 +675,62 @@ pub fn deserialize_dictionary(bytes: &[u8]) -> Result<Dictionary, MetaError> {
         dict.insert(key, branches);
     }
     Ok(dict)
+}
+
+/// Serialize and store a `BTreeMap<Digest224, u64>` in the Dictionary.
+///
+/// Format: `[count: u64 LE][for each entry: 28 bytes Digest224 + 8 bytes u64 LE]`
+/// Each entry is 36 bytes; total = 8 + count × 36.
+fn intern_digest224_u64_map(dict: &mut Dictionary, map: &BTreeMap<Digest224, u64>) -> Digest224 {
+    let mut bytes = Vec::with_capacity(8 + map.len() * 36);
+    bytes.extend_from_slice(&(map.len() as u64).to_le_bytes());
+    for (digest, count) in map {
+        for word in digest {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        bytes.extend_from_slice(&count.to_le_bytes());
+    }
+    State::push_all(dict, &bytes)
+}
+
+/// Retrieve and deserialize a `BTreeMap<Digest224, u64>` from the Dictionary.
+fn load_digest224_u64_map(
+    dict: &Dictionary,
+    key: &Digest224,
+) -> Result<BTreeMap<Digest224, u64>, MetaError> {
+    use slicefs_traits::digest::from_digest224;
+    use blockset::{GetBytes, GetData};
+    let digest256 = from_digest224(key);
+    let get_data = GetData::new(dict, &digest256);
+    let bytes: Vec<u8> = GetBytes::new(get_data).collect();
+
+    if bytes.len() < 8 {
+        return Err(MetaError::Corrupted(format!(
+            "digest224-u64 map: expected at least 8 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    let count = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
+    let expected = 8 + count * 36;
+    if bytes.len() != expected {
+        return Err(MetaError::Corrupted(format!(
+            "digest224-u64 map: expected {} bytes for {} entries, got {}",
+            expected, count, bytes.len()
+        )));
+    }
+
+    let mut map = BTreeMap::new();
+    for i in 0..count {
+        let off = 8 + i * 36;
+        let mut digest: Digest224 = [0u32; 7];
+        for (j, word) in digest.iter_mut().enumerate() {
+            let o = off + j * 4;
+            *word = u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+        }
+        let count_val = u64::from_le_bytes(bytes[off + 28..off + 36].try_into().unwrap());
+        map.insert(digest, count_val);
+    }
+    Ok(map)
 }
 
 /// Parse a `Digest224` from a 28-byte slice.
