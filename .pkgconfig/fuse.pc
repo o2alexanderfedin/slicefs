@@ -1,0 +1,18 @@
+## FUSE-T compatibility shim for fuser's build.rs
+##
+## FUSE-T implements the libfuse 2.9 API but its fuse-t.pc reports
+## its own product version (1.0.x). fuser's build.rs probes for
+## "fuse >= 2.6.0", so we report the API version here.
+##
+## Usage: PKG_CONFIG_PATH=.pkgconfig cargo build
+
+prefix=/usr/local
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include/fuse
+
+Name: fuse
+Description: FUSE-T (libfuse 2.9 API compatible) for macOS
+Version: 2.9.9
+Libs: -L${libdir} -Wl,-rpath,${libdir} -lfuse-t
+Cflags: -I${includedir}
