@@ -4,3 +4,9 @@
 # rustc 1.93.0 but current toolchain is 1.94.1). Use the standard rustc for this project.
 [build]
 rustc = "rustc"
+
+[env]
+# Resolve .pkgconfig/ relative to the workspace root so `cargo build` finds
+# the bundled fuse.pc (for FUSE-T on macOS) without a manual PKG_CONFIG_PATH.
+# force = false means an externally-set PKG_CONFIG_PATH takes precedence.
+PKG_CONFIG_PATH = { value = ".pkgconfig", relative = true, force = false }
