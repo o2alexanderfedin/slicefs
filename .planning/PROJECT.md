@@ -8,22 +8,40 @@ A general-purpose deduplicating filesystem built in Rust that uses content-addre
 
 High-ratio data deduplication that works transparently as a real, daily-driver filesystem — not a backup tool or archive format, but a mountable POSIX filesystem you can use for actual work.
 
+## Current Milestone: v2.0 — Streaming Writes & Hardening
+
+**Goal:** Remove the file size limitation by streaming writes through data-id's incremental push API, remove write-path compression (dedup on raw content), and fix known v1.0 bugs.
+
+**Target features:**
+- Streaming writes via State::push_bytes() — O(log N) memory regardless of file size
+- Remove compression from write/read path — raw bytes to Merkle tree, cross-compressor dedup works
+- Fix refcount overflow (silent wrap to 0 = data loss risk)
+- Fix statfs reporting (hardcoded f_files=1M, unrealistic bfree)
+- Improve snapshot lookup (O(n) → indexed)
+
 ## Requirements
 
-### Validated
+### Validated (v1.0)
 
-(None yet — ship to validate)
+- ✓ Block-level CAS-based deduplication with pluggable hash functions — v1.0
+- ✓ Pluggable chunking/block-splitting strategy — v1.0
+- ✓ Pluggable storage backend for CAS blocks — v1.0
+- ✓ Full POSIX filesystem semantics — v1.0
+- ✓ FUSE frontend via fuser (FUSE-T on macOS, libfuse on Linux) — v1.0
+- ✓ macOS + Linux support — v1.0
+- ✓ Crash safety (WAL, GC, refcounts) — v1.0
+- ✓ Block compression (Zstd/LZ4/None, pluggable) — v1.0
+- ✓ Point-in-time snapshots (create/list/switch) — v1.0
+- ✓ CLI completeness (mount/unmount/seed/gc/snapshot/stats/scrub/--json) — v1.0
+- ✓ CI pipeline (Linux + macOS, pjdfstest) — v1.0
 
 ### Active
 
-- [ ] Block-level CAS-based deduplication with pluggable hash functions
-- [ ] Pluggable chunking/block-splitting strategy (owner has existing technology)
-- [ ] Pluggable storage backend for CAS blocks
-- [ ] Full POSIX filesystem semantics (read, write, create, delete, rename, symlinks, permissions, xattrs)
-- [ ] FUSE frontend via fuser crate (FUSE-T on macOS, libfuse on Linux, WinFSP on Windows)
-- [ ] Cross-platform support: macOS, Linux, Windows
-- [ ] Production-quality reliability for daily use as a real filesystem
-- [ ] Clean abstraction layers ready for future distributed/decentralized extension
+- [ ] Streaming writes — no file size = RAM limitation
+- [ ] Remove write-path compression — raw bytes to tree, dedup on original content
+- [ ] Refcount overflow protection — saturating_add or checked_add
+- [ ] Realistic statfs reporting — track actual inode count, physical usage
+- [ ] Snapshot indexed lookup — O(1) by version, O(1) by name
 
 ### Out of Scope
 
@@ -31,6 +49,8 @@ High-ratio data deduplication that works transparently as a real, daily-driver f
 - Specific chunking algorithm selection — owner will provide existing technology
 - Network protocol design — depends on distributed topology decisions
 - GUI or management UI — CLI-first
+- Windows support — winfsp-rs GPL-3 license issue, deferred
+- Segment-level compression (Option C) — deferred to v2.1 after streaming writes land
 
 ## Context
 
@@ -59,4 +79,4 @@ High-ratio data deduplication that works transparently as a real, daily-driver f
 | Defer distributed/decentralized to future milestone | Focus on solid local foundation first | — Pending |
 
 ---
-*Last updated: 2026-03-27 after initialization*
+*Last updated: 2026-03-29 after v2.0 milestone start*

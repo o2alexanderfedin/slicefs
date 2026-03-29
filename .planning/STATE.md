@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: milestone
+milestone: v2.0
+milestone_name: streaming-writes-hardening
 status: planning
-stopped_at: Completed 07-03-PLAN.md - CI pipeline and benchmark infrastructure
-last_updated: "2026-03-29T21:02:51.503Z"
-last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
+stopped_at: Milestone v2.0 started
+last_updated: "2026-03-29T22:00:00.000Z"
+last_activity: 2026-03-29 — Milestone v2.0 started; defining requirements
 progress:
-  total_phases: 7
-  completed_phases: 7
-  total_plans: 24
-  completed_plans: 24
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
   percent: 0
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-27)
 
 **Core value:** High-ratio data deduplication that works transparently as a real, daily-driver POSIX filesystem
-**Current focus:** Phase 1 — CAS Foundation
+**Current focus:** v2.0 — Streaming Writes & Hardening
 
 ## Current Position
 
-Phase: 1 of 7 (CAS Foundation)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-03-29 — Milestone v2.0 started
 
 Progress: [░░░░░░░░░░] 0%
 
