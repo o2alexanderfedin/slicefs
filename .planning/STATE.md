@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 07-01-PLAN.md
-last_updated: "2026-03-29T20:42:27.455Z"
+stopped_at: Completed 07-02-PLAN.md - stats/scrub CLI commands
+last_updated: "2026-03-29T20:47:25.063Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
   completed_phases: 6
   total_plans: 24
-  completed_plans: 22
+  completed_plans: 23
   percent: 0
 ---
 
@@ -72,6 +72,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 06-compression-and-snapshots P04 | 14min | 2 tasks | 9 files |
 | Phase 06-compression-and-snapshots P02 | 863s | 2 tasks | 12 files |
 | Phase 07-cross-platform-and-production-hardening P01 | 149s | 2 tasks | 4 files |
+| Phase 07-cross-platform-and-production-hardening P02 | 421s | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -149,6 +150,8 @@ Recent decisions affecting current work:
 - [Phase 06-compression-and-snapshots]: to_wire_bytes/from_wire_bytes helpers centralize store_version gating across all write/read sites
 - [Phase 07-cross-platform-and-production-hardening]: SessionACL::All used for allow_other (fuser 0.17 has no MountOption::AllowOther)
 - [Phase 07-cross-platform-and-production-hardening]: direct_io via MountOption::CUSTOM on macOS only to fix FUSE-T NFS page cache staleness (issue #45)
+- [Phase 07-cross-platform-and-production-hardening]: SHA-224 verification in scrub uses SHA224.compress directly: blockset::compress does data concatenation for small inputs, not SHA-224; all dictionary keys are always SHA-224 hashes
+- [Phase 07-cross-platform-and-production-hardening]: Stats works on mounted stores (read-only scan, warns on mount.lock): allows monitoring live filesystems without lock refusal
 
 ### Pending Todos
 
@@ -164,6 +167,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-29T20:42:27.451Z
-Stopped at: Completed 07-01-PLAN.md
+Last session: 2026-03-29T20:47:25.060Z
+Stopped at: Completed 07-02-PLAN.md - stats/scrub CLI commands
 Resume file: None

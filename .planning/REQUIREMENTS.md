@@ -69,9 +69,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **CLI-01**: Mount command with configurable options (backing store path, mount options)
 - [x] **CLI-02**: Unmount command with clean shutdown
-- [ ] **CLI-03**: Stats command (dedup ratio, logical/physical bytes, block count, reference distribution)
-- [ ] **CLI-04**: Scrub command (walk all blocks, re-verify hashes, report corruption)
-- [ ] **CLI-05**: Structured JSON output from all CLI commands for tooling integration
+- [x] **CLI-03**: Stats command (dedup ratio, logical/physical bytes, block count, reference distribution)
+- [x] **CLI-04**: Scrub command (walk all blocks, re-verify hashes, report corruption)
+- [x] **CLI-05**: Structured JSON output from all CLI commands for tooling integration
 - [x] **CLI-06**: Mount options for performance tuning (noatime, writeback cache, cache size)
 
 ## v2 Requirements
@@ -151,9 +151,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PLAT-04 | Phase 7 | Pending |
 | CLI-01 | Phase 3 | Complete |
 | CLI-02 | Phase 3 | Complete |
-| CLI-03 | Phase 7 | Pending |
-| CLI-04 | Phase 7 | Pending |
-| CLI-05 | Phase 7 | Pending |
+| CLI-03 | Phase 7 | Complete |
+| CLI-04 | Phase 7 | Complete |
+| CLI-05 | Phase 7 | Complete |
 | CLI-06 | Phase 3 | Complete |
 
 **Coverage:**
