@@ -17,7 +17,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 3: Read-Only FUSE** - Mount a real filesystem read-only; validate the kernel interface before write complexity
 - [x] **Phase 4: Full POSIX Write Path** - Complete read/write POSIX with inline deduplication; pjdfstest >95% on Linux (completed 2026-03-28)
 - [x] **Phase 5: Crash Safety and GC** - WAL, refcount correctness, garbage collection, and crash recovery — the correctness layer (completed 2026-03-29)
-- [ ] **Phase 6: Compression and Snapshots** - Block compression and point-in-time versioning enabled by the CAS architecture
+- [x] **Phase 6: Compression and Snapshots** - Block compression and point-in-time versioning enabled by the CAS architecture (completed 2026-03-29)
 - [ ] **Phase 7: Cross-Platform and Production Hardening** - macOS, Windows, CLI completeness, scrub, and production benchmarks
 
 ## Phase Details
@@ -114,7 +114,7 @@ Plans:
   3. A snapshot command creates a read-only point-in-time view; files in the snapshot are readable and match their state at snapshot time
   4. Switching to a historical version makes the live filesystem reflect that version's file contents
   5. Two snapshots sharing blocks do not double-count physical storage; shared blocks appear once in physical usage
-**Plans:** 2/4 plans executed
+**Plans:** 4/4 plans complete
 Plans:
 - [ ] 06-01-PLAN.md — Compressor trait in slicefs-traits + Zstd/LZ4/None implementations in slicefs-compression crate
 - [ ] 06-02-PLAN.md — Compression wired into FUSE write/read path + CLI flags (--compressor, --compressor-level)
@@ -145,5 +145,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 3. Read-Only FUSE | 1/3 | In Progress|  |
 | 4. Full POSIX Write Path | 4/4 | Complete   | 2026-03-28 |
 | 5. Crash Safety and GC | 4/4 | Complete   | 2026-03-29 |
-| 6. Compression and Snapshots | 2/4 | In Progress|  |
+| 6. Compression and Snapshots | 4/4 | Complete   | 2026-03-29 |
 | 7. Cross-Platform and Production Hardening | 0/TBD | Not started | - |
