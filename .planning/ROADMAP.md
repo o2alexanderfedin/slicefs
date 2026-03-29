@@ -1,26 +1,14 @@
-# Roadmap: DedupFS
+# Roadmap: SliceFS
 
-## Overview
+## Milestones
 
-DedupFS is built bottom-up along its dependency graph. The CAS block store and chunking traits are the foundation — every other component depends on them and nothing else. The metadata engine is built in parallel isolation, then the FUSE layer is mounted read-only to validate all three pillars under real kernel interaction before any write complexity is introduced. Full POSIX write semantics with inline deduplication completes the functional core. Crash safety, reference counting, and garbage collection are co-developed as a single correctness layer because GC correctness depends entirely on refcount invariants holding. Compression and snapshots arrive next — both are natural CAS capabilities unlocked by the foundation, not bolt-ons. The roadmap closes with cross-platform expansion to macOS and Windows and production hardening that earns the "daily-driver" label.
+- ✅ **v1.0 Foundation** - Phases 1-7 (shipped 2026-03-29)
+- 🚧 **v2.0 Streaming Writes & Hardening** - Phases 8-11 (in progress)
 
 ## Phases
 
-**Phase Numbering:**
-- Integer phases (1, 2, 3): Planned milestone work
-- Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
-
-Decimal phases appear between their surrounding integers in numeric order.
-
-- [x] **Phase 1: CAS Foundation** - Block store, hash, chunking traits, and dedup index with bloom filter (completed 2026-03-28)
-- [ ] **Phase 2: Metadata Engine** - Inode table, directory structure, file manifests, xattrs — separate from block store
-- [ ] **Phase 3: Read-Only FUSE** - Mount a real filesystem read-only; validate the kernel interface before write complexity
-- [x] **Phase 4: Full POSIX Write Path** - Complete read/write POSIX with inline deduplication; pjdfstest >95% on Linux (completed 2026-03-28)
-- [x] **Phase 5: Crash Safety and GC** - WAL, refcount correctness, garbage collection, and crash recovery — the correctness layer (completed 2026-03-29)
-- [x] **Phase 6: Compression and Snapshots** - Block compression and point-in-time versioning enabled by the CAS architecture (completed 2026-03-29)
-- [x] **Phase 7: Cross-Platform and Production Hardening** - macOS, Windows, CLI completeness, scrub, and production benchmarks (completed 2026-03-29)
-
-## Phase Details
+<details>
+<summary>✅ v1.0 Foundation (Phases 1-7) - SHIPPED 2026-03-29</summary>
 
 ### Phase 1: CAS Foundation
 **Goal**: The immutable block store, pluggable hash interface, pluggable chunking interface, and dedup index exist and can be exercised in unit tests — every subsequent component has a foundation to build on
@@ -33,6 +21,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. A duplicate block write is detected via the bloom filter + on-disk index before any disk write occurs
   5. A retrieved block fails verification if its stored bytes have been corrupted (integrity check on read)
 **Plans:** 3/3 plans complete
+
 Plans:
 - [x] 01-01-PLAN.md — Cargo workspace setup and CAS trait definitions in slicefs-traits
 - [x] 01-02-PLAN.md — Blake3Hasher, FixedChunker, and MemBlockStore stub implementations
@@ -48,11 +37,12 @@ Plans:
   3. A file manifest linking inode to ordered list of block hashes can be created and retrieved
   4. Extended attributes can be stored and retrieved on an inode
   5. Inode numbers are stable — the same inode number is assigned to the same file across process restarts
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
+
 Plans:
-- [ ] 02-01-PLAN.md — data-id submodule, slicefs-traits redesign, InodeMeta serialization
-- [ ] 02-02-PLAN.md — DictMetadataStore with inode CRUD, directory ops, and manifest storage
-- [ ] 02-03-PLAN.md — Xattr storage and persistence round-trip with inode stability proof
+- [x] 02-01-PLAN.md — data-id submodule, slicefs-traits redesign, InodeMeta serialization
+- [x] 02-02-PLAN.md — DictMetadataStore with inode CRUD, directory ops, and manifest storage
+- [x] 02-03-PLAN.md — Xattr storage and persistence round-trip with inode stability proof
 
 ### Phase 3: Read-Only FUSE
 **Goal**: The filesystem can be mounted and browsed read-only by the OS; a human can ls, cat, and stat files through the mount point using pre-populated content — the kernel interface is validated before write complexity is introduced
@@ -64,11 +54,12 @@ Plans:
   3. The filesystem unmounts cleanly via the unmount command with no kernel errors; SIGTERM triggers a graceful flush
   4. All POSIX operations return correct errno values for read-only violations (e.g., EROFS on write attempt)
   5. Mount options (noatime, cache size) are accepted and applied
-**Plans:** 1/3 plans executed
+**Plans:** 3/3 plans complete
+
 Plans:
-- [ ] 03-01-PLAN.md — CLI crate scaffold, StoreIo, clap subcommands, and SliceFsFilesystem FUSE adapter
-- [ ] 03-02-PLAN.md — Seed command: import directory tree into CAS store via State CDC
-- [ ] 03-03-PLAN.md — Mount and unmount commands with FUSE lifecycle and end-to-end verification
+- [x] 03-01-PLAN.md — CLI crate scaffold, StoreIo, clap subcommands, and SliceFsFilesystem FUSE adapter
+- [x] 03-02-PLAN.md — Seed command: import directory tree into CAS store via State CDC
+- [x] 03-03-PLAN.md — Mount and unmount commands with FUSE lifecycle and end-to-end verification
 
 ### Phase 4: Full POSIX Write Path
 **Goal**: Files can be created, written, modified, renamed, deleted, and linked through the mount point with inline deduplication active; real tools (editors, package managers, build systems) work correctly; pjdfstest passes >95% on Linux
@@ -81,11 +72,12 @@ Plans:
   4. statfs reports both logical and physical byte counts, showing the dedup ratio
   5. pjdfstest passes >95% of applicable tests on Linux
 **Plans:** 4/4 plans complete
+
 Plans:
-- [ ] 04-01-PLAN.md — Refcount infrastructure, write state types, RW mount, destroy persistence
-- [ ] 04-02-PLAN.md — Core file write path: create, write, release with CAS flush, setattr/truncate
-- [ ] 04-03-PLAN.md — Directory ops, rename, symlinks, hard links, unlink with nlinks lifecycle
-- [ ] 04-04-PLAN.md — Dedup-aware statfs, POSIX locking stubs, custom POSIX compliance test suite
+- [x] 04-01-PLAN.md — Refcount infrastructure, write state types, RW mount, destroy persistence
+- [x] 04-02-PLAN.md — Core file write path: create, write, release with CAS flush, setattr/truncate
+- [x] 04-03-PLAN.md — Directory ops, rename, symlinks, hard links, unlink with nlinks lifecycle
+- [x] 04-04-PLAN.md — Dedup-aware statfs, POSIX locking stubs, custom POSIX compliance test suite
 
 ### Phase 5: Crash Safety and GC
 **Goal**: The filesystem survives crashes and power loss without data loss or block leaks; garbage collection reclaims orphaned blocks safely without racing against active writes or snapshots
@@ -98,11 +90,12 @@ Plans:
   4. A block referenced by any snapshot is never deleted by GC, even when its refcount reaches zero in the live tree
   5. WAL replay on dirty mount restores the last committed state without manual intervention
 **Plans:** 4/4 plans complete
+
 Plans:
-- [ ] 05-01-PLAN.md — Segment file I/O layer and WAL strategy trait with per-op and no-op implementations
-- [ ] 05-02-PLAN.md — DictMetadataStore segment integration, dirty mount detection, fsync callback, --wal-strategy CLI
-- [ ] 05-03-PLAN.md — Mark-and-sweep GC engine with segment compaction and background thread
-- [ ] 05-04-PLAN.md — Offline GC CLI command, mount with background GC, crash recovery integration tests
+- [x] 05-01-PLAN.md — Segment file I/O layer and WAL strategy trait with per-op and no-op implementations
+- [x] 05-02-PLAN.md — DictMetadataStore segment integration, dirty mount detection, fsync callback, --wal-strategy CLI
+- [x] 05-03-PLAN.md — Mark-and-sweep GC engine with segment compaction and background thread
+- [x] 05-04-PLAN.md — Offline GC CLI command, mount with background GC, crash recovery integration tests
 
 ### Phase 6: Compression and Snapshots
 **Goal**: Stored blocks are compressed to reduce physical footprint; point-in-time snapshots can be created and the filesystem state can be switched between historical versions — both capabilities are natural expressions of the CAS architecture already in place
@@ -115,11 +108,12 @@ Plans:
   4. Switching to a historical version makes the live filesystem reflect that version's file contents
   5. Two snapshots sharing blocks do not double-count physical storage; shared blocks appear once in physical usage
 **Plans:** 4/4 plans complete
+
 Plans:
-- [ ] 06-01-PLAN.md — Compressor trait in slicefs-traits + Zstd/LZ4/None implementations in slicefs-compression crate
-- [ ] 06-02-PLAN.md — Compression wired into FUSE write/read path + CLI flags (--compressor, --compressor-level)
-- [ ] 06-03-PLAN.md — SnapshotRecord segment entry + DictMetadataStore snapshot methods (create/list/find/roots)
-- [ ] 06-04-PLAN.md — Snapshot CLI commands (create/list/switch) + snapshot mount flags + snapshot-aware GC
+- [x] 06-01-PLAN.md — Compressor trait in slicefs-traits + Zstd/LZ4/None implementations in slicefs-compression crate
+- [x] 06-02-PLAN.md — Compression wired into FUSE write/read path + CLI flags (--compressor, --compressor-level)
+- [x] 06-03-PLAN.md — SnapshotRecord segment entry + DictMetadataStore snapshot methods (create/list/find/roots)
+- [x] 06-04-PLAN.md — Snapshot CLI commands (create/list/switch) + snapshot mount flags + snapshot-aware GC
 
 ### Phase 7: Cross-Platform and Production Hardening
 **Goal**: The filesystem runs on macOS via FUSE-T with full POSIX compliance; the CLI is complete with stats, scrub, and structured JSON output; benchmark baselines confirm daily-driver performance; Windows support is deferred to v2
@@ -132,22 +126,93 @@ Plans:
   4. The scrub command walks all stored blocks, re-verifies their hashes, and reports any corrupted blocks without modifying the store
   5. Sequential write throughput on NVMe meets or exceeds 200 MB/s as measured by fio with 4K writes; dedup index memory stays below the configured cap under 100 GB unique data load
 **Plans:** 3/3 plans complete
+
 Plans:
-- [ ] 07-01-PLAN.md — FUSE-T write path fix + macOS build ergonomics (direct_io, .cargo/config.toml, build.rs)
-- [ ] 07-02-PLAN.md — Global --json flag + stats and scrub CLI commands with human and JSON output
-- [ ] 07-03-PLAN.md — GitHub Actions CI (Linux + macOS), benchmark infrastructure, Windows deferral documentation
+- [x] 07-01-PLAN.md — FUSE-T write path fix + macOS build ergonomics (direct_io, .cargo/config.toml, build.rs)
+- [x] 07-02-PLAN.md — Global --json flag + stats and scrub CLI commands with human and JSON output
+- [x] 07-03-PLAN.md — GitHub Actions CI (Linux + macOS), benchmark infrastructure, Windows deferral documentation
+
+</details>
+
+### v2.0 — Streaming Writes & Hardening
+
+**Milestone Goal:** Remove the file size = RAM limitation via incremental Merkle streaming writes; remove write-path compression so dedup hashes raw content; fix known correctness bugs from v1.0 operation.
+
+#### Phase 8: Correctness Fixes
+**Goal**: Known v1.0 correctness bugs are eliminated before the invasive write-path restructuring begins — refcount overflow risk is closed, statfs reports real numbers, and snapshot lookup is O(1)
+**Depends on**: Phase 7
+**Requirements**: FIX-01, FIX-02, FIX-03, FIX-04
+**Success Criteria** (what must be TRUE):
+  1. Incrementing a block's refcount at u64::MAX produces u64::MAX (saturating), not 0 — no silent data loss under extreme dedup load
+  2. `df` on a mounted SliceFS volume reports the actual number of inodes in use, not a hardcoded 1,000,000
+  3. Physical bytes reported by statfs reflect the real store occupancy, not an arithmetic approximation based on dict entry count
+  4. Looking up a snapshot by version number or name executes in O(1) time regardless of how many snapshots exist
+**Plans**: TBD
+
+Plans:
+- [ ] 08-01-PLAN.md — saturating_add refcount fix, inode_count AtomicU64, accurate statfs bfree
+- [ ] 08-02-PLAN.md — HashMap snapshot indexes replacing Vec linear scan
+
+#### Phase 9: Compression Removal
+**Goal**: The write path pushes raw bytes directly into the Merkle tree with no compression header; a new store format version (v3) is introduced; the read path handles all three versions so existing stores remain readable
+**Depends on**: Phase 8
+**Requirements**: DECOMP-01, DECOMP-02, DECOMP-03, DECOMP-04
+**Success Criteria** (what must be TRUE):
+  1. Writing a file to a mounted v3 store produces no compression header bytes — raw content is stored in the Merkle tree verbatim
+  2. Two files with identical raw content deduplicate correctly even if one was written before compression removal and one after
+  3. Reading a file written under v1.0 (no header), v2.0 (compression header), or v3.0 (raw, no header) all return the correct bytes without manual intervention
+  4. The store version reported by `slicefs stats` increments to 3 after the first write to a freshly created store
+**Plans**: TBD
+
+Plans:
+- [ ] 09-01-PLAN.md — Remove to_wire_bytes from write path; gate from_wire_bytes on store_version; bump version to 3
+- [ ] 09-02-PLAN.md — Cross-version read integration tests (v1/v2/v3 blocks in same store)
+
+#### Phase 10: Streaming Writes Core
+**Goal**: Sequential file writes use the incremental push_bytes API so that open file handle memory is O(log N) in file size — arbitrarily large files can be written without hitting a RAM ceiling; fsync mid-stream and truncate on an open handle both work correctly
+**Depends on**: Phase 9
+**Requirements**: STRM-01, STRM-03, STRM-04, STRM-05
+**Success Criteria** (what must be TRUE):
+  1. Writing a 10 GB file sequentially through the mount point completes successfully on a machine with 512 MB of RAM available to the FUSE process — no OOM kill
+  2. Reading a file while it is still open for writing (before release) returns the bytes written so far, consistent with what a second process would see after the write completes
+  3. Calling fsync mid-stream commits all bytes written up to that point durably; subsequent writes to the same file handle continue correctly and produce a consistent final file
+  4. Truncating an open file handle to a smaller size atomically resets the streaming state and adjusts inode size — the file is correct after release with no leftover bytes beyond the truncation point
+**Plans**: TBD
+
+Plans:
+- [ ] 10-01-PLAN.md — OpenFileState: replace Vec<u8> buf with blockset::State + byte_count tracking
+- [ ] 10-02-PLAN.md — flush_buffer_to_cas rewritten to use state.end(); fsync mid-stream; read-after-write materialisation
+- [ ] 10-03-PLAN.md — Truncate with in-progress streaming State; cas_committed guard update; integration tests
+
+#### Phase 11: Non-Sequential Write Handling
+**Goal**: pwrite at arbitrary offsets, memory-mapped writes, and writeback_cache out-of-order delivery all produce correct results — the streaming path handles sequential writes and falls back to the v1.0 buffer model for non-sequential writes with no regression
+**Depends on**: Phase 10
+**Requirements**: STRM-02
+**Success Criteria** (what must be TRUE):
+  1. pwrite(2) at a non-sequential offset on an open file handle produces a correct file after release — no corruption, no silent data loss
+  2. Enabling writeback_cache on a mount with in-flight writes produces correct files — out-of-order FUSE write callbacks do not corrupt the Merkle root
+  3. A file written via a tool that uses non-sequential access patterns (vim, sqlite, cp --sparse) is byte-identical to the source after release
+**Plans**: TBD
+
+Plans:
+- [ ] 11-01-PLAN.md — next_expected_offset tracking + WriteMode enum; fallback to Vec<u8> on non-sequential offset
+- [ ] 11-02-PLAN.md — writeback_cache integration test; pwrite and sparse-file correctness tests
 
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
+Phases execute in numeric order: 8 -> 9 -> 10 -> 11
 
-| Phase | Plans Complete | Status | Completed |
-|-------|----------------|--------|-----------|
-| 1. CAS Foundation | 3/3 | Complete   | 2026-03-28 |
-| 2. Metadata Engine | 2/3 | In Progress|  |
-| 3. Read-Only FUSE | 1/3 | In Progress|  |
-| 4. Full POSIX Write Path | 4/4 | Complete   | 2026-03-28 |
-| 5. Crash Safety and GC | 4/4 | Complete   | 2026-03-29 |
-| 6. Compression and Snapshots | 4/4 | Complete   | 2026-03-29 |
-| 7. Cross-Platform and Production Hardening | 3/3 | Complete   | 2026-03-29 |
+| Phase | Milestone | Plans Complete | Status | Completed |
+|-------|-----------|----------------|--------|-----------|
+| 1. CAS Foundation | v1.0 | 3/3 | Complete | 2026-03-28 |
+| 2. Metadata Engine | v1.0 | 3/3 | Complete | 2026-03-28 |
+| 3. Read-Only FUSE | v1.0 | 3/3 | Complete | 2026-03-28 |
+| 4. Full POSIX Write Path | v1.0 | 4/4 | Complete | 2026-03-28 |
+| 5. Crash Safety and GC | v1.0 | 4/4 | Complete | 2026-03-29 |
+| 6. Compression and Snapshots | v1.0 | 4/4 | Complete | 2026-03-29 |
+| 7. Cross-Platform and Production Hardening | v1.0 | 3/3 | Complete | 2026-03-29 |
+| 8. Correctness Fixes | v2.0 | 0/2 | Not started | - |
+| 9. Compression Removal | v2.0 | 0/2 | Not started | - |
+| 10. Streaming Writes Core | v2.0 | 0/3 | Not started | - |
+| 11. Non-Sequential Write Handling | v2.0 | 0/2 | Not started | - |

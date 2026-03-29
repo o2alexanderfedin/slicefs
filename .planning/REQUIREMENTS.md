@@ -182,12 +182,25 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CLI-04 | Phase 7 | Complete |
 | CLI-05 | Phase 7 | Complete |
 | CLI-06 | Phase 3 | Complete |
+| FIX-01 | Phase 8 | Pending |
+| FIX-02 | Phase 8 | Pending |
+| FIX-03 | Phase 8 | Pending |
+| FIX-04 | Phase 8 | Pending |
+| DECOMP-01 | Phase 9 | Pending |
+| DECOMP-02 | Phase 9 | Pending |
+| DECOMP-03 | Phase 9 | Pending |
+| DECOMP-04 | Phase 9 | Pending |
+| STRM-01 | Phase 10 | Pending |
+| STRM-03 | Phase 10 | Pending |
+| STRM-04 | Phase 10 | Pending |
+| STRM-05 | Phase 10 | Pending |
+| STRM-02 | Phase 11 | Pending |
 
 **Coverage:**
-- v1 requirements: 43 total
-- Mapped to phases: 43
+- v1 requirements: 43 total, mapped to phases: 43
+- v2.0 requirements: 13 total, mapped to phases: 13
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-27*
-*Last updated: 2026-03-27 after roadmap creation — all 43 v1 requirements mapped*
+*Last updated: 2026-03-29 after v2.0 roadmap creation — all 13 v2.0 requirements mapped to phases 8-11*
