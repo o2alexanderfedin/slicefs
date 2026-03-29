@@ -829,6 +829,7 @@ dependencies = [
  "metadata",
  "serde",
  "serde_json",
+ "sha2-compress",
  "slicefs-compression",
  "slicefs-traits",
  "tempfile",
