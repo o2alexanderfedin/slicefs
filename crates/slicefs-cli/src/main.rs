@@ -4,6 +4,7 @@
 
 mod cli;
 mod filesystem;
+mod gc;
 mod mount;
 mod seed;
 mod store_io;
@@ -31,6 +32,12 @@ fn main() {
         Cmd::Seed { store, source_dir } => {
             if let Err(e) = seed::run_seed(&store, &source_dir) {
                 eprintln!("slicefs seed error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Cmd::Gc { store } => {
+            if let Err(e) = gc::run_gc(&store) {
+                eprintln!("slicefs gc error: {e}");
                 std::process::exit(1);
             }
         }

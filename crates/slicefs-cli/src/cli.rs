@@ -59,6 +59,15 @@ pub enum Cmd {
         /// Source directory to ingest.
         source_dir: PathBuf,
     },
+
+    /// Run offline garbage collection on a SliceFS block store.
+    ///
+    /// The store must NOT be mounted when this command is run.
+    /// Use the background GC thread for in-process GC during active mounts.
+    Gc {
+        /// Path to the SliceFS block store directory.
+        store: PathBuf,
+    },
 }
 
 #[cfg(test)]

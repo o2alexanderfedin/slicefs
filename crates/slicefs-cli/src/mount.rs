@@ -21,53 +21,19 @@
 //! The command blocks until the FUSE session ends (SIGTERM, Ctrl+C, or `slicefs unmount`).
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use blockset::Dictionary;
 use fuser::{mount2, Config, MountOption, SessionACL};
+use metadata::gc::background::spawn_background_gc;
 use metadata::mount_lock::{acquire_mount_lock, MountLock, MountLockError};
 use metadata::segment::{load_store_from_segments, migrate_legacy_store};
 use metadata::store::DictMetadataStore;
 use metadata::wal::{WalConfig, create_wal};
 
 use crate::filesystem::SliceFsFilesystem;
-
-/// Errors returned by `load_store`.
-#[derive(Debug)]
-pub enum LoadStoreError {
-    Migration(String),
-    DirtyMount,
-    NoStore(String),
-    Io(std::io::Error),
-    Metadata(String),
-    MountLock(MountLockError),
-}
-
-impl std::fmt::Display for LoadStoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LoadStoreError::Migration(s) => write!(f, "migration failed: {}", s),
-            LoadStoreError::DirtyMount => write!(f, "dirty mount detected: store was not cleanly unmounted; WAL replay needed"),
-            LoadStoreError::NoStore(s) => write!(f, "{}", s),
-            LoadStoreError::Io(e) => write!(f, "I/O error: {}", e),
-            LoadStoreError::Metadata(s) => write!(f, "metadata error: {}", s),
-            LoadStoreError::MountLock(e) => write!(f, "mount lock error: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for LoadStoreError {}
-
-impl From<std::io::Error> for LoadStoreError {
-    fn from(e: std::io::Error) -> Self {
-        LoadStoreError::Io(e)
-    }
-}
-
-impl From<MountLockError> for LoadStoreError {
-    fn from(e: MountLockError) -> Self {
-        LoadStoreError::MountLock(e)
-    }
-}
 
 /// Load a seeded store from disk, returning `(DictMetadataStore, Dictionary, MountLock)`.
 ///
@@ -223,12 +189,31 @@ pub fn run_mount(
     let fs = SliceFsFilesystem::new(meta, content_dict, Some(store_path.to_path_buf()));
     let config = build_mount_options(noatime);
 
+    // Spawn background GC thread.
+    // The GC thread holds a Weak<DictMetadataStore> so it exits automatically when
+    // the filesystem is dropped. We also use an explicit shutdown flag to stop it
+    // gracefully before the MountLock drops.
+    let weak_meta = Arc::downgrade(fs.meta());
+    let segments_dir = store_path.join("segments");
+    let gc_shutdown = Arc::new(AtomicBool::new(false));
+    let gc_handle = spawn_background_gc(
+        weak_meta,
+        segments_dir,
+        Duration::from_secs(60),
+        1000,
+        Arc::clone(&gc_shutdown),
+    );
+
     println!("SliceFS mounted at {}", mountpoint.display());
 
     mount2(fs, mountpoint, &config)?;
 
-    // mount2 has returned — session ended, destroy() already called.
+    // mount2 has returned — FUSE session ended, destroy() already called.
     // destroy() calls shutdown_wal() which flushes and closes the WAL segment.
+    // Shut down the GC thread before the MountLock drops.
+    gc_shutdown.store(true, Ordering::SeqCst);
+    gc_handle.shutdown();
+
     // _mount_lock is dropped here, removing mount.lock from the store directory.
     println!("SliceFS unmounted.");
 
