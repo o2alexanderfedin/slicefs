@@ -1,8 +1,20 @@
 # Feature Research
 
-**Domain:** Deduplicating POSIX FUSE Filesystem (DedupFS)
-**Researched:** 2026-03-27
-**Confidence:** MEDIUM-HIGH (core POSIX requirements HIGH; dedup nuances MEDIUM based on ZFS/Btrfs documentation and academic research)
+**Domain:** Deduplicating POSIX FUSE Filesystem — v2.0 Streaming Writes & Hardening Milestone
+**Researched:** 2026-03-29
+**Confidence:** HIGH (existing codebase fully inspected; patterns cross-checked against bup/restic/borg/bcachefs documentation)
+
+---
+
+## Milestone Context
+
+v1.0 is complete: full POSIX write path, WAL crash safety, GC, Zstd/LZ4/None compression, snapshots, stats/scrub CLI, macOS FUSE-T + Linux support.
+
+v2.0 goal: remove the file-size-equals-RAM limitation, remove write-path compression (so dedup operates on raw content), and fix three known correctness bugs.
+
+Existing write path (v1.0): all writes accumulate in `OpenFileState.buf: Vec<u8>` in memory, then flush atomically to `State::push_all()` on release/fsync. This is the buffer-flush model — correct, simple, but limited to files that fit in available RAM.
+
+Target write path (v2.0): replace the single-buffer model with incremental `State::push_bytes()` streaming through the Merkle tree, bounded O(log N) memory per open file handle.
 
 ---
 
@@ -10,177 +22,143 @@
 
 ### Table Stakes (Users Expect These)
 
-Features users assume exist in any daily-driver POSIX filesystem. Missing any of these means the filesystem cannot be used for real work — tools will break, data will be lost, or users will hit walls immediately.
+Features that the v2.0 milestone must deliver. Missing any = the milestone is incomplete or introduces data-loss risk.
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| read/write/create/delete files | Fundamental POSIX | LOW | fuser trait implementation; baseline for everything else |
-| Directory create/delete/list (readdir) | Fundamental POSIX | LOW | Must include `.` and `..` entries correctly |
-| Atomic rename (rename(2)) | POSIX requires rename atomicity; mv, editors, package managers depend on it | MEDIUM | Critical: editors do rename-on-save; must be truly atomic across the virtual namespace; COW makes this non-trivial |
-| Symbolic links (symlink/readlink) | Universally expected; package managers, toolchains, dotfiles use them | MEDIUM | Must preserve target path verbatim; no content-dedup of link targets |
-| Hard links (link(2)) | Expected by build systems (make, ninja), inode-based tools | MEDIUM | Challenging with CAS: hard links share one inode but two filesystem paths — reference counting must reflect this |
-| File permissions (chmod/chown, uid/gid) | Any multi-user or permission-sensitive workload | MEDIUM | Must store independently from block content in metadata layer |
-| Timestamps (atime, mtime, ctime) | POSIX-mandated; make, rsync, and many tools depend on mtime | MEDIUM | atime updates on read cause dedup inefficiency; support `noatime` mount option |
-| Extended attributes (xattr) | macOS Finder metadata, SELinux labels, ACLs stored here | MEDIUM | Not in POSIX.1 but universally required; needed for macOS compatibility |
-| Truncate (truncate/ftruncate) | Editors, databases, log rotation depend on it | MEDIUM | Must update metadata and handle partial block reference counting |
-| stat/fstat/lstat | Every tool uses these to check file existence, size, type | LOW | Must return consistent values; inode numbers must be stable |
-| Stable inode numbers | Tools cache inode numbers; stale inodes break NFS, watch APIs, build tools | HIGH | CAS blocks have content-addresses, but inodes are metadata-layer identifiers — they must be stable across mount cycles |
-| fsync/fdatasync | Databases, editors, package managers call fsync to guarantee durability | HIGH | Must guarantee data is committed to backing store before returning; FUSE writeback cache makes this subtle |
-| POSIX locking (fcntl locks, flock) | Databases, editors (vim .swp files), package managers use locking | HIGH | FUSE passes these through but the filesystem must handle them; incorrect behavior corrupts data |
-| Correct error codes (errno) | POSIX specifies which errors mean what; tools parse errno | MEDIUM | Wrong errno causes silent failures; e.g. ENOSPC vs EIO vs EROFS vs ENOENT |
-| Space reporting (statfs) | df, du, editors checking free space | MEDIUM | Dedup complicates this: logical size vs physical size must be reported correctly and consistently |
-| Mount/unmount cleanly | Crash recovery, data integrity on unexpected unmount | HIGH | Must handle SIGTERM gracefully; flush all pending writes; block count consistency |
-| Block-level CAS deduplication | Core value proposition — the reason DedupFS exists | HIGH | Hash-based dedup; reference counting per block; pluggable hash function |
-| Integrity verification on read | Silent data corruption is worse than visible errors; CAS makes this natural | MEDIUM | Re-hash block on read, compare to stored hash; configurable (on/off for performance) |
-| Garbage collection of orphan blocks | Blocks with zero references must be reclaimed | HIGH | Two-phase mark-and-sweep or reference-count-based; must be crash-safe; see pitfalls |
-| CLI mount/unmount tool | Users need a way to mount and unmount; no GUI planned | LOW | Thin wrapper around FUSE mount; accepts options for backing store path, hash algorithm |
-| Basic stats CLI (dedup ratio, physical vs logical size) | Users need to see dedup is working | MEDIUM | Reports: logical bytes written, physical bytes stored, dedup ratio, block count, reference distribution |
+| Unbounded file writes (no RAM ceiling) | Current limit blocks any file > available free RAM; unusable for large video, disk images, databases | HIGH | Replace `OpenFileState.buf: Vec<u8>` with `(State, Dictionary)` stream pair; `push_bytes()` per FUSE write call |
+| Streaming write: correct final digest on release | `State::end()` must be called once at release/fsync time; manifest must store the resulting `Digest224` | MEDIUM | Already exists in blockset API; need to call `end()` correctly at release, not at each `write()` |
+| Streaming write: correct inode.size tracking | `inode.size` must reflect logical bytes written, not tree size | MEDIUM | Accumulate byte count in `OpenFileState` alongside the `State`; update on release |
+| Streaming write: fsync mid-file | FUSE may call `fsync()` before `release()`; streaming state must be checkpointable or serialisable | HIGH | Most systems buffer to disk and re-load; simplest approach: materialise `State::end()` + snapshot manifest at fsync, continue streaming from empty state after |
+| Remove write-path compression | Dedup must operate on raw content bytes; compressor currently applied before `State::push_all()` means `Digest224` is over compressed bytes — cross-compressor dedup impossible | MEDIUM | Remove `to_wire_bytes()` call from `flush_buffer_to_cas()`; store raw bytes in Merkle tree |
+| Remove read-path decompression for new blocks | Read path calls `from_wire_bytes()` which decompresses; new raw blocks must return without decompression attempt | MEDIUM | Gate decompression on a per-block header or a new store_version value (e.g. v3) |
+| Backward compat: old compressed blocks still readable | Existing v1.0 stores have compressed blocks; migration must be seamless | MEDIUM | Keep `from_wire_bytes()` as a fallback; check `store_version` to decide whether to attempt decompression |
+| Refcount overflow protection | `*rc.entry(*digest).or_insert(0) += 1` wraps on overflow (`u64`); silent wrap to 0 = GC deletes live data | MEDIUM | Change to `saturating_add(1)` or `checked_add(1).unwrap_or(u64::MAX)`; add a saturated-refcount warning log |
+| Realistic statfs reporting | `f_files` is hardcoded to 1,000,000; `bfree` is unrealistic — tools like `df` and POSIX compliance tests check these | MEDIUM | Track inode count via `AtomicU64 inode_count` in `DictMetadataStore`; compute `f_bfree` from `logical_bytes` vs estimated capacity |
+| Snapshot indexed lookup | `snapshots: Vec<SnapshotEntry>` is O(n) scan by version and by name; becomes visible latency at thousands of snapshots | LOW | Add `HashMap<u64, usize>` (version → index) and `HashMap<String, usize>` (name → index) rebuilt on `set_snapshots()` and appended on `create_snapshot()` |
 
----
+### Differentiators (Competitive Advantage Beyond Table Stakes)
 
-### Differentiators (Competitive Advantage)
-
-Features that go beyond what every filesystem provides. These are where DedupFS competes and justifies its existence over simpler solutions.
+Features that go beyond the mandatory fixes and would make v2.0 a materially stronger product. Not required for the milestone definition but worth noting as future-phase candidates.
 
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| Pluggable hash function | Future-proof against hash deprecation (SHA-256 today, BLAKE3 tomorrow); enables owner's existing tech integration | MEDIUM | Trait abstraction: `trait ContentHash { fn hash(data: &[u8]) -> Hash; }` — selected at pool creation time, stored in pool metadata |
-| Pluggable chunking/block-splitting strategy | Owner has existing algorithm; pluggability enables content-defined chunking (CDC) for higher dedup ratios on variable-content files | HIGH | CDC (e.g. Rabin, FastCDC) dramatically outperforms fixed-size chunking on real-world data |
-| Pluggable storage backend | Enables future distributed/decentralized backends (S3, IPFS, custom P2P) without rewriting core | HIGH | Trait abstraction: `trait BlockStore { fn get(hash) -> Block; fn put(hash, block); fn delete(hash); }` |
-| Cross-dedup across all files in the pool | Unlike file-level tools, every file in the pool shares the block namespace — a block stored once by any file is deduplicated for all files | MEDIUM | Natural consequence of pool-wide CAS; must be preserved in architecture |
-| Transparent operation (no workflow change) | Users treat it like any other filesystem; no special commands to trigger dedup | LOW | FUSE transparency is the key — dedup happens invisibly in the write path |
-| Dedup-aware space reporting | Users see both logical (what they wrote) and physical (what's stored) sizes | MEDIUM | `statfs` returns physical; CLI tool reports logical+physical+ratio; crucial for user trust |
-| Content-defined chunking (CDC) for binary files | Variable-size chunks following content boundaries survive insertions/deletions — much higher dedup ratios for real data | HIGH | Requires pluggable chunker; FastCDC is a strong starting algorithm |
-| Snapshots (read-only point-in-time views) | Safe backups without copying data; rollback capability; space-efficient due to shared blocks | HIGH | Requires metadata versioning: snapshot = frozen pointer to root metadata tree; new writes go to new metadata without touching snapshot |
-| Compression of stored blocks | Stacks with dedup: compress after dedup; further reduces physical storage | MEDIUM | Best as a pluggable wrapper around the block store; LZ4 for speed, Zstd for ratio; must apply before hashing or after (design decision — see pitfalls) |
-| Encryption at rest | Stores sensitive data securely; relevant for cloud/remote backends later | HIGH | AES-256-GCM per-block; key derived from passphrase via Argon2/scrypt; must encrypt before storing, decrypt on read; note: encrypt-then-dedup or dedup-then-encrypt are different designs — see anti-features |
-| Mount options for performance tuning | Power users need noatime, writeback cache, read-ahead tuning | MEDIUM | `noatime` (skip atime updates), `sync` vs `async` write modes, cache size controls |
-| Integrity scrub command | Proactive corruption detection: walk all blocks, re-verify hashes | MEDIUM | CLI command: `slicefs scrub <mountpoint>` — reports corrupted blocks; doesn't repair (no redundancy in v1) |
-
----
+| Streaming writes with zero-copy FUSE splice | FUSE `write()` can receive kernel buffer pointers with splice(2) on Linux; avoids user-space memcpy for large sequential writes | HIGH | Requires `fuser` splice support; not in scope for v2.0 but architecturally enabled by streaming model |
+| Per-chunk incremental dedup during write | Instead of one `Digest224` per file, chunk file during streaming writes, store one `Digest224` per chunk — enables partial-file dedup | HIGH | Needs `Chunker` trait integration at write time; current architecture pushes raw bytes byte-by-byte to `State`; chunking is currently only applied at seed time |
+| Write coalescing: group small writes before push | FUSE delivers writes in 128KB–4MB pages; multiple `write()` calls per file in rapid succession; coalescing into larger push calls reduces Merkle tree height | MEDIUM | Could batch `push_bytes()` calls per-handle; already implicit if streaming is per-FUSE-write |
+| WAL entries for in-flight streaming state | If process crashes mid-stream, the partial bytes are lost; WAL could checkpoint streaming state so large writes survive crash | VERY HIGH | Over-engineered for v2.0; truncate-on-open is acceptable semantics for crash mid-write |
 
 ### Anti-Features (Commonly Requested, Often Problematic)
 
 | Feature | Why Requested | Why Problematic | Alternative |
 |---------|---------------|-----------------|-------------|
-| Encrypt-before-dedup | Security-conscious users want everything encrypted, including on write path | Encryption destroys block content patterns — encrypted blocks of identical data produce different ciphertext; dedup ratio drops to zero. You get the cost of both with the benefit of neither. | Dedup-then-encrypt: deduplicate blocks first (in memory or on a temporary local store), then encrypt the deduplicated block store at rest. This preserves dedup ratio while securing stored blocks. |
-| Inline ZFS-style dedup with DDT in memory | ZFS does this; seems natural | ZFS requires ~320 bytes RAM per unique block. A 4 TB pool at 4 KB blocks = 1 billion potential blocks = 320 GB DDT. This is why ZFS dedup is infamously memory-hungry. | Keep the DDT on disk with an in-memory cache (LRU/ARC). OpenZFS Fast Dedup (2.3.0) solved this same problem the same way. Accept slightly higher lookup latency for dramatically lower RAM requirements. |
-| Online defragmentation | Users expect it from HDD-era wisdom | CAS-based storage with content-addressable blocks has no concept of physical adjacency meaningful to defrag. Blocks are stored by hash; adjacency is irrelevant. Defrag would be a no-op or counterproductive. | Compact/repack command: coalesce small blocks, rewrite pack files for sequential access. Different from defrag — this is about pack file layout, not block adjacency. |
-| Per-file dedup ratio tracking | Users want to know "how much space did THIS file save?" | Blocks are shared across files. A block deduplicated because File A already stored it doesn't "belong" to File A or File B — it's a pool resource. Per-file attribution is misleading and requires expensive reverse-mapping. | Report pool-level dedup ratio (total logical / total physical). Optionally report per-file logical size vs "estimated physical contribution" with a clear disclaimer that it's approximate. |
-| Distributed filesystem in v1 | Natural extension of the architecture | Adding distribution before the local filesystem is solid guarantees you'll be debugging distributed consistency bugs on top of unfinished local semantics. The pluggable backend architecture defers this correctly. | Implement clean `BlockStore` and `MetadataStore` traits now. Distributed backends plug in later without touching filesystem core. |
-| Journaling/WAL like ext4 | Crash safety is expected | FUSE filesystems can't journal at the kernel level. Attempting to replicate ext4's journal in userspace creates complexity without the kernel's atomicity guarantees. | Use atomic metadata updates: write new metadata version, fsync, then atomically update the root pointer (e.g., rename-based commit). CAS blocks are inherently safe to re-read; only metadata root needs atomic commit. |
-| POSIX atime updates | POSIX requires atime; some tools depend on it | atime requires a metadata write on every read. For a dedup filesystem, this means every read potentially triggers a block reference or metadata update, serializing reads. | Default to `noatime` (like most modern Linux deployments). Expose `atime`/`relatime` as mount options for users who need them. Document the default clearly. |
-| GUI management interface | Nice for non-technical users | Out of scope per PROJECT.md; adds platform-specific complexity; CLI-first is the right call for a filesystem tool | Provide structured JSON output from CLI stats commands so third-party GUIs can be built without first-party involvement |
+| Re-introduce write-path compression | Reduces disk I/O for incompressible data | Dedup operates on compressed bytes — `Digest224` changes per-compressor; same raw content compressed with Zstd vs LZ4 produces different digests = no cross-tool dedup; also requires decompression on every read | Store raw in Merkle tree; apply post-dedup segment-level compression as a v2.1 option (already in PROJECT.md out-of-scope list) |
+| Random-write in-place update without re-materialise | Users ask "why must the whole file re-stream on a single-byte change?" | CAS is structurally append-only; in-place mutation requires either copy-on-write of affected tree nodes (complex, like btrfs B-tree COW) or a write-ahead log of deltas (complex, like BTRFS extent tree); both require significant redesign of the Merkle tree internals | Accept whole-file re-stream on modify for v2.0; per-chunk dedup in v3.0 reduces waste |
+| Streaming write with mid-stream seek | `write(fd, buf, offset)` where offset < current position requires rewriting already-pushed tree nodes | Merkle tree is a write-once, append-only structure; seeks backwards break the invariant | Buffer writes for files where non-sequential writes are detected; fall back to whole-buffer model for that handle |
+| Segment-level compression at write time | Compress groups of blocks together for higher ratio | Requires second-pass over already-written data; adds latency spike at segment boundary; blocks read access until segment closed | Out of scope per PROJECT.md; defer to v2.1 |
+| Changing compressor mid-store without full re-write | Users want to switch from Zstd to LZ4 or None after migration | Old blocks keep their existing header; new blocks get new compressor; `get_refcount` / GC logic must handle mixed-format store; dedup across mixed-format blocks is lost | Document "one compressor per store" policy; provide a `slicefs migrate-compressor` command in v3.0 |
 
 ---
 
 ## Feature Dependencies
 
 ```
-[POSIX read/write/create/delete]
-    └──requires──> [Stable inode numbers]
-    └──requires──> [Metadata layer (inodes, directory entries)]
+[Streaming write path]
+    requires  --> [State + Dictionary per open handle in OpenFileState]
+    requires  --> [State::push_bytes() called per FUSE write()]
+    requires  --> [State::end() called on release()/fsync()]
+    enables   --> [Unbounded file sizes]
 
-[Block-level CAS deduplication]
-    └──requires──> [Pluggable hash function]
-    └──requires──> [Pluggable chunking strategy]
-    └──requires──> [Block store (local)]
-    └──requires──> [Reference counting per block]
-        └──requires──> [Garbage collection]
+[Remove write-path compression]
+    requires  --> [Streaming write path completed first] (both touch flush_buffer_to_cas)
+    requires  --> [store_version bump to v3]
+    requires  --> [Backward compat read path for old compressed blocks]
 
-[Atomic rename]
-    └──requires──> [Metadata layer atomic commits]
+[Refcount overflow fix]
+    independent -- no dependencies
 
-[Hard links]
-    └──requires──> [Reference counting at inode level (separate from block refcounts)]
+[Realistic statfs]
+    requires  --> [inode_count AtomicU64 in DictMetadataStore]
+    enhances  --> [statfs() FUSE callback accuracy]
 
-[Snapshots]
-    └──requires──> [COW metadata layer]
-    └──requires──> [Block-level CAS deduplication] (blocks are shared across snapshots naturally)
-    └──enhances──> [Garbage collection] (snapshots pin blocks; GC must respect snapshot refs)
-
-[Compression]
-    └──enhances──> [Block-level CAS deduplication] (stack: dedup first, then compress)
-    └──conflicts──> [Encrypt-before-dedup] (cannot dedup after encryption; design choice must be made early)
-
-[Encryption at rest]
-    └──requires──> [Block-level CAS deduplication] (must dedup before encrypting for ratio preservation)
-    └──conflicts──> [Encrypt-before-dedup anti-feature]
-
-[Integrity verification on read]
-    └──requires──> [Block-level CAS deduplication] (hashes are already computed; re-verification is free)
-
-[Integrity scrub command]
-    └──requires──> [Integrity verification on read] (same mechanism, applied proactively to all blocks)
-
-[Pluggable storage backend]
-    └──enhances──> [Block store (local)] (local is the first concrete implementation)
-    └──enables──> [Distributed backends (future)]
-
-[Basic stats CLI]
-    └──requires──> [Dedup-aware space reporting (statfs)]
-    └──requires──> [Block reference count metadata]
-
-[Snapshots]
-    └──enhances──> [Basic stats CLI] (snapshots consume physical space; stats must account for them)
-
-[fsync/fdatasync]
-    └──requires──> [Metadata layer atomic commits]
-    └──conflicts──> [FUSE writeback cache] (writeback cache delays flushes; fsync must force flush through cache)
+[Snapshot indexed lookup]
+    independent -- no dependencies
+    enhances  --> [snapshot list/switch CLI commands]
 ```
 
 ### Dependency Notes
 
-- **CAS deduplication requires reference counting:** Every block needs a refcount that's atomically updated on write (increment) and unlink/truncate/overwrite (decrement). Zero-refcount blocks are garbage.
-- **GC requires snapshot awareness:** If snapshots are implemented, GC must treat snapshot root pointers as GC roots — blocks reachable from any snapshot are live, not orphaned.
-- **Compression-before-hash vs hash-before-compression is a one-time design decision:** If you compress then hash, the hash identifies the compressed form. If you hash then compress, the hash identifies the original. For dedup integrity, hash the original; store compressed. This means: hash(original_block) → store compress(original_block). Re-verification decompresses then rehashes.
-- **Encryption placement:** Must be dedup-first, then encrypt stored blocks. Encrypting inputs before hashing kills dedup ratio entirely.
-- **Pluggable chunking owns block boundaries:** The chunker determines what a "block" is before hashing. Fixed-size is simplest; CDC (content-defined chunking) gives much higher real-world dedup ratios but is more complex.
+- **Streaming write requires compression removal to be done last (or together):** Both features touch `flush_buffer_to_cas()` and `OpenFileState`. Doing them in separate phases on the same struct avoids a double-rewrite — implement streaming first with compression still present, then remove compression as a follow-on diff, OR implement both together.
+- **store_version bump required for compression removal:** Existing stores are v2 (compressed blocks). Removing write-path compression must bump to v3 so the read path knows new blocks are raw. Without a version bump, `from_wire_bytes()` will attempt to decompress raw blocks and corrupt reads.
+- **Backward compat is mandatory:** v1.0 stores (version < 2) have raw blocks; v2.0 stores have compressed blocks; v3.0 stores (after compression removal) have raw blocks again. The read path must handle all three cases cleanly.
+- **Refcount fix and statfs fix are independent:** No shared state; either can ship in any order.
+- **Snapshot indexing is low risk:** `Vec<SnapshotEntry>` → `(Vec, HashMap<u64, usize>, HashMap<String, usize>)`; purely additive change.
 
 ---
 
-## MVP Definition
+## How Streaming CAS Writes Work (Research Findings)
 
-### Launch With (v1)
+### The blockset `State` API (HIGH confidence — source code inspected)
 
-Minimum viable for a daily-driver deduplicating filesystem. Everything here is load-bearing.
+`blockset::State` (alias for `Vec<Level>`) already implements the streaming Merkle tree. The write API is:
 
-- [ ] Full POSIX read/write/create/delete/stat/rename/symlink — without these, real tools break immediately
-- [ ] Stable inode numbers across mount cycles — build systems and editors depend on this
-- [ ] Hard links — required by package managers (Homebrew, apt) and build tools
-- [ ] Extended attributes (xattr) — required on macOS (Finder metadata); needed for basic usability
-- [ ] Block-level CAS deduplication with pluggable hash function (default: SHA-256 or BLAKE3) — core value proposition
-- [ ] Pluggable chunking interface (fixed-size as first implementation, owner's algorithm as second) — required by architecture
-- [ ] Local block store (file-based or RocksDB-backed) — pluggable via trait; first concrete implementation
-- [ ] Reference counting per block with crash-safe GC — without this, blocks leak and the filesystem fills up
-- [ ] Atomic metadata commits (rename-based or WAL-lite) — required for fsync correctness and crash safety
-- [ ] fsync/fdatasync correctness — databases and editors depend on this; getting it wrong silently corrupts data
-- [ ] Correct statfs (physical vs logical size) — users need to see how full the disk is
-- [ ] CLI: mount, unmount, stats (dedup ratio, logical/physical bytes, block count)
-- [ ] pjdfstest pass rate target: >95% — measures POSIX correctness objectively
-- [ ] Integrity verification on read (configurable on/off) — natural with CAS; builds user trust
+```rust
+state.push_bytes(&mut dictionary, &chunk);   // O(log N) memory per call
+let root = state.end(&mut dictionary);       // finalise tree, returns Digest224 (via push_all)
+```
 
-### Add After Validation (v1.x)
+`push_bytes()` processes bytes through a content-dependent tree (CDT) algorithm: bytes are accumulated into `MerkleTreeState` levels; when a level's rolling threshold fires, a new parent node is emitted. Tree height grows as O(log N) of total bytes pushed, so memory usage is bounded by the number of levels, not the file size.
 
-Add once the core is proven correct and stable under real workloads.
+The existing `flush_buffer_to_cas()` already calls `State::push_all()`, which internally calls `push_bytes()` + `end()`. The only change needed is to split these across the `write()` and `release()` FUSE callbacks:
 
-- [ ] Content-defined chunking (CDC, e.g. FastCDC) — trigger: users report poor dedup ratio on their actual data
-- [ ] Compression of stored blocks (LZ4 or Zstd) — trigger: users want further space reduction beyond dedup
-- [ ] noatime mount option — trigger: performance profiling shows atime updates are a bottleneck
-- [ ] Integrity scrub command — trigger: first report of silent corruption concern or storage media failure
-- [ ] Snapshot support (read-only point-in-time) — trigger: users ask for backup-safe snapshots; requires COW metadata first
-- [ ] Structured JSON output from CLI stats — trigger: third-party tooling interest
+- `write()`: call `push_bytes()` with the incoming data slice
+- `release()` / `fsync()`: call `end()` to get the root, store as manifest
 
-### Future Consideration (v2+)
+### The Random-Write Fallback Problem (MEDIUM confidence — inference from architecture + restic/bup patterns)
 
-Defer until product-market fit is established and local foundation is solid.
+CAS Merkle trees are write-once, append-only. A `write(fd, buf, 0)` after data has been pushed to a `State` cannot retroactively modify already-committed tree nodes. Three approaches exist in production systems:
 
-- [ ] Encryption at rest — deferred because it requires finalizing dedup-then-encrypt architecture; adds key management complexity
-- [ ] Pluggable remote/distributed storage backend — deferred per PROJECT.md; requires clean backend trait established in v1
-- [ ] Cross-machine dedup — requires distributed block store; natural extension once remote backend exists
-- [ ] Snapshot writeable clones (branch-on-write) — complex metadata management; v1 read-only snapshots are sufficient
-- [ ] Quota management (per-directory or per-user space limits) — complex with shared blocks; dedup complicates attribution
-- [ ] Online compaction/repack — useful for long-running pools; not needed until pool fragmentation is observed
+1. **Whole-buffer fallback (bup/restic model):** Detect non-sequential writes (offset != current stream position) and fall back to accumulating the full file content in a scratch buffer, then re-stream on release. Simple; correct; accepts memory cost for files written non-sequentially. This is the recommended approach for v2.0.
+
+2. **Copy-on-write tree nodes (btrfs/bcachefs model):** Walk the Merkle tree to the affected leaf nodes, copy and replace them, rebuild parent hashes up to the root. Correct and memory-efficient but requires addressable tree node storage and is a major architectural addition — not appropriate for v2.0.
+
+3. **Write-ahead delta log (ZFS intent log model):** Buffer random writes as a delta log, replay on read, merge periodically. Complex; adds read-path complexity; not appropriate for a CAS-only store.
+
+**Recommendation for v2.0:** Use approach 1. `OpenFileState` tracks `write_pos: u64`. On `write(offset, data)`, if `offset == write_pos`, call `push_bytes()` and advance `write_pos`. If `offset != write_pos` (seek or non-sequential write), set a `fallback: bool` flag and accumulate into a `Vec<u8>` buffer. On release, if `fallback = true`, re-stream the buffer from scratch; if `fallback = false`, call `end()` directly.
+
+In practice, the FUSE kernel buffer manager delivers writes in sequential pages for most workloads (cp, cat, editors writing via rename-on-save). Non-sequential writes occur mainly with memory-mapped writes and database files that do partial updates — these are the cases that fall back to the buffer model.
+
+### Incremental Merkle Tree Construction: Table Stakes vs Differentiators (HIGH confidence — blockset source + academic literature)
+
+**Table stakes (must work correctly):**
+- Final `Digest224` produced by streaming `push_bytes()` + `end()` must be identical to the `Digest224` produced by `push_all()` on the same bytes. This is guaranteed by the blockset API — both paths use the same CDT algorithm.
+- Tree height stays O(log N) regardless of file size. Verified in blockset source: `Vec<Level>` length is the tree height; each level fires when its content-dependent threshold triggers.
+- `end()` can only be called once; subsequent pushes after `end()` would create a new tree. This is correct — `release()` consumes the state.
+
+**Differentiators (not required for v2.0):**
+- Content-dependent chunking at write time (rolling hash CDC): instead of pushing raw bytes one-at-a-time through the CDT algorithm, chunk the stream with Rabin/FastCDC first, push chunk digests instead of byte digests. This enables cross-file dedup at the chunk level. The blockset `State` already supports `push_digest()` for this pattern — deferred to v3.0 per PROJECT.md scope.
+- Incremental tree update on partial rewrite: reuse unchanged subtrees. Requires storing the tree structure addressably. Not implemented in blockset; deferred.
+
+---
+
+## MVP Definition for v2.0 Milestone
+
+### Ship in v2.0
+
+- [ ] **Streaming write via `State::push_bytes()` per FUSE `write()` callback** — eliminates file size = RAM ceiling; core milestone goal
+- [ ] **Non-sequential write fallback to buffer model** — correctness for O_RDWR, mmap, database workloads
+- [ ] **Correct `inode.size` tracking during streaming** — byte counter in `OpenFileState`, not tree size
+- [ ] **Correct `fsync()` during streaming** — materialise `end()` at fsync, reset state for continuation writes (simplest approach: accept that fsync breaks streaming; resume as new stream after fsync)
+- [ ] **Remove write-path compression** — `to_wire_bytes()` returns raw bytes; store_version bumped to 3
+- [ ] **Backward-compat read path for v1/v2 compressed blocks** — `from_wire_bytes()` checks header presence based on store_version
+- [ ] **Refcount overflow protection (`saturating_add`)** — prevents silent data loss on overflow
+- [ ] **Realistic `statfs` reporting** — `inode_count` atomic, `f_bfree` computed from logical_bytes
+
+### Defer to v2.1 or Later
+
+- [ ] **Segment-level post-dedup compression** — in PROJECT.md out-of-scope; adds significant complexity
+- [ ] **Per-chunk dedup during streaming writes** — requires Chunker trait at write time; v3.0
+- [ ] **Snapshot indexed lookup** — O(n) is fine until thousands of snapshots; add to v2.0 if trivially low-effort, else v2.1
 
 ---
 
@@ -188,77 +166,44 @@ Defer until product-market fit is established and local foundation is solid.
 
 | Feature | User Value | Implementation Cost | Priority |
 |---------|------------|---------------------|----------|
-| POSIX read/write/create/delete/stat | HIGH | LOW | P1 |
-| Atomic rename | HIGH | MEDIUM | P1 |
-| Stable inode numbers | HIGH | MEDIUM | P1 |
-| Hard links | HIGH | MEDIUM | P1 |
-| Extended attributes (xattr) | HIGH | MEDIUM | P1 |
-| fsync/fdatasync correctness | HIGH | HIGH | P1 |
-| Block-level CAS deduplication | HIGH | HIGH | P1 |
-| Pluggable hash function | HIGH | MEDIUM | P1 |
-| Pluggable chunking interface | HIGH | MEDIUM | P1 |
-| Local block store (pluggable trait) | HIGH | MEDIUM | P1 |
-| Reference counting + crash-safe GC | HIGH | HIGH | P1 |
-| Atomic metadata commits | HIGH | HIGH | P1 |
-| Correct statfs reporting | HIGH | MEDIUM | P1 |
-| Integrity verification on read | HIGH | LOW | P1 |
-| CLI: mount/unmount/stats | HIGH | LOW | P1 |
-| Symbolic links | MEDIUM | MEDIUM | P1 |
-| Content-defined chunking (CDC) | HIGH | HIGH | P2 |
-| Compression (LZ4/Zstd) | MEDIUM | MEDIUM | P2 |
-| noatime mount option | MEDIUM | LOW | P2 |
-| Integrity scrub command | MEDIUM | MEDIUM | P2 |
-| Snapshots (read-only) | HIGH | HIGH | P2 |
-| Encryption at rest | MEDIUM | HIGH | P3 |
-| Distributed storage backend | HIGH | HIGH | P3 |
-| Snapshot writeable clones | MEDIUM | HIGH | P3 |
-| Quota management | LOW | HIGH | P3 |
+| Streaming write path | HIGH — removes hard RAM ceiling for large files | HIGH — touches OpenFileState, flush_buffer_to_cas, fsync path | P1 |
+| Remove write-path compression | HIGH — dedup on raw content; cross-tool correctness | MEDIUM — touches to_wire_bytes, store_version | P1 |
+| Refcount overflow fix | HIGH — data loss risk | LOW — two-line change in increment_refcount | P1 |
+| Realistic statfs | MEDIUM — affects tooling (df, quota checks, pjdfstest) | MEDIUM — add inode_count AtomicU64, update statfs callback | P2 |
+| Non-sequential write fallback | MEDIUM — correctness for database / mmap writes | MEDIUM — flag in OpenFileState, routing logic in write() | P1 (correctness) |
+| Snapshot indexed lookup | LOW — only relevant at thousands of snapshots | LOW — add two HashMaps to DictMetadataStore | P3 |
 
 **Priority key:**
-- P1: Must have for launch (v1)
-- P2: Should have, add after core validation (v1.x)
-- P3: Nice to have, future milestone (v2+)
+- P1: Must have for v2.0 — milestone-defining
+- P2: Should have — observable correctness improvement
+- P3: Nice to have — performance optimization
 
 ---
 
 ## Competitor Feature Analysis
 
-| Feature | ZFS | Btrfs | Borg/Restic | DedupFS Approach |
-|---------|-----|-------|-------------|-----------------|
-| Deduplication | Inline (block-level); memory-hungry DDT; Fast Dedup in 2.3.0 improves RAM | Offline only (ioctl_fideduperange); no inline | Chunk-based; post-process; repository-scoped | Inline, block-level CAS; on-disk DDT with LRU cache; pool-scoped |
-| Chunking | Fixed-size blocks | Fixed-size blocks | Content-defined (Rabin/Buzhash) | Pluggable; fixed-size first, CDC second |
-| Snapshots | COW, instant, space-efficient | COW, instant, space-efficient | Not a filesystem; repository snapshots | v1.x roadmap; COW metadata required first |
-| Compression | LZ4/Zstd/etc per dataset | LZ4/Zstd/etc per subvolume | LZ4/Zstd/etc per repo | v1.x; dedup-first then compress stored blocks |
-| Encryption | Native (AES-256-GCM, ZFS 0.8+) | Not native (use dm-crypt/LUKS) | AES-256-CTR+Poly1305 (Borg); AES-GCM (Restic) | v2+; dedup-then-encrypt; pluggable cipher |
-| POSIX compliance | Full (native kernel filesystem) | Full (native kernel filesystem) | Not POSIX (archive/backup tool) | Target: >95% pjdfstest; FUSE means some syscalls unavailable |
-| Cross-file dedup | Yes (pool-wide) | Yes (with manual ioctl) | Yes (repo-wide) | Yes (pool-wide CAS namespace) |
-| Storage backend | ZPool (local block devices) | Local block devices | Local, SSH | Pluggable trait; local first; remote later |
-| RAM requirements | High (DDT in memory by default) | Low | Low | Low (on-disk DDT; tunable cache size) |
-| Daily-driver use | Yes | Yes | No (backup tool) | Yes (core design goal) |
-| FUSE overhead | No (kernel native) | No (kernel native) | N/A | Yes; ~5-15% overhead vs kernel FS; accept the tradeoff for cross-platform and rapid development |
+| Feature | bup | restic | ZFS dedup | Our Approach |
+|---------|-----|--------|-----------|--------------|
+| Streaming write model | Split file into chunks via rolling hash, stream chunk digests | Pack files into chunks, write whole packfile before indexing | Fixed-size block level, in-kernel write path | `State::push_bytes()` CDT; one Merkle node per logical byte initially (v2.0); per-chunk in v3.0 |
+| Random write handling | Re-process file from scratch on backup run | Re-pack changed chunks on next backup | Block-level COW in kernel; ZFS manages it at extent level | Non-sequential write fallback to buffer; re-stream on release |
+| Compression | Write-time, per-object | Write-time, per-pack chunk | Write-time, LZ4/ZSTD per-block | Remove from write path in v2.0; deferred segment-level post-dedup compression in v2.1 |
+| Dedup scope | Cross-file, cross-backup, content-defined chunks | Cross-file, cross-backup, content-defined packs | Block-level, per-pool, online dedup | Cross-file, whole-file (v2.0); cross-file per-chunk (v3.0) |
+| Refcount model | Git-like object ref counting via pack index | Pack reference counted; GC via `forget` + `prune` | In-kernel DDT with overflow saturation | `BTreeMap<Digest224, u64>` with saturating_add (v2.0 fix) |
 
 ---
 
 ## Sources
 
-- [Deduplication — Btrfs Wiki](https://btrfs.wiki.kernel.org/index.php/Deduplication)
-- [Btrfs vs. ZFS Comparison 2026 — Wundertech](https://www.wundertech.net/btrfs-vs-zfs-comparison/)
-- [Introducing OpenZFS Fast Dedup — Klara Systems](https://klarasystems.com/articles/introducing-openzfs-fast-dedup/)
-- [OpenZFS dedup is good now and you shouldn't use it — despairlabs](https://despairlabs.com/blog/posts/2024-10-27-openzfs-dedup-is-good-dont-use-it/)
-- [ZFS Deduplication — TrueNAS Documentation Hub](https://www.truenas.com/docs/references/zfsdeduplication/)
-- [The Logic of Physical Garbage Collection in Deduplicating Storage — USENIX FAST 2017](https://www.usenix.org/system/files/conference/fast17/fast17-douglis.pdf)
-- [Performance and Resource Utilization of FUSE User-Space File Systems — ACM](https://dl.acm.org/doi/fullHtml/10.1145/3310148)
-- [To FUSE or Not to FUSE: Performance of User-Space File Systems — USENIX FAST 2017](https://www.usenix.org/system/files/conference/fast17/fast17-vangoor.pdf)
-- [DFUSE: Strongly Consistent Write-Back Kernel Caching — arXiv 2025](https://arxiv.org/html/2503.18191v1)
-- [Inline deduplication vs post-processing — TechTarget](https://www.techtarget.com/searchdatabackup/tutorial/Inline-deduplication-vs-post-processing-Data-dedupe-best-practices)
-- [pjdfstest — POSIX filesystem test suite](https://github.com/saidsay-so/pjdfstest)
-- [POSIX Compatibility comparison — JuiceFS Blog](https://juicefs.com/en/blog/engineering/posix-compatibility-comparison-among-four-file-system-on-the-cloud)
-- [gocryptfs FUSE encryption — ArchWiki](https://wiki.archlinux.org/title/Gocryptfs)
-- [Copy-on-write — Wikipedia](https://en.wikipedia.org/wiki/Copy-on-write)
-- [Deduplication Garbage Collection Overview — Microsoft TechNet](https://social.technet.microsoft.com/wiki/contents/articles/31178.deduplication-garbage-collection-overview.aspx)
-- [What is a POSIX File System? — Quobyte](https://www.quobyte.com/storage-explained/posix-filesystem/)
-- [Extended file attributes — Wikipedia](https://en.wikipedia.org/wiki/Extended_file_attributes)
+- blockset source code: `/Volumes/Unitek-B/Projects/file-systems/crates/data-id/blockset/src/` (HIGH confidence — direct inspection)
+- slicefs-cli filesystem.rs: `/Volumes/Unitek-B/Projects/file-systems/crates/slicefs-cli/src/filesystem.rs` (HIGH confidence — direct inspection)
+- metadata store.rs: `/Volumes/Unitek-B/Projects/file-systems/crates/metadata/src/store.rs` (HIGH confidence — direct inspection)
+- PROJECT.md v2.0 milestone definition: `/Volumes/Unitek-B/Projects/file-systems/.planning/PROJECT.md` (HIGH confidence)
+- [bup streaming model — GitHub restic/others comparison](https://github.com/restic/others/issues/21) (MEDIUM confidence — community discussion)
+- [bcachefs snapshot btree indexed lookup](https://bcachefs.org/Snapshots/) (MEDIUM confidence — official bcachefs docs)
+- [Linux kernel refcount_t overflow protection — LWN](https://lwn.net/Articles/728675/) (HIGH confidence — kernel documentation)
+- [statfs(2) man page — f_files / f_ffree semantics](https://man7.org/linux/man-pages/man2/statfs.2.html) (HIGH confidence — official POSIX man page)
+- [Content-defined Merkle Trees for Container Delivery — arxiv](https://arxiv.org/pdf/2104.02158) (MEDIUM confidence — academic paper on streaming CDT construction)
 
 ---
-*Feature research for: Deduplicating POSIX FUSE Filesystem (DedupFS)*
-*Researched: 2026-03-27*
+*Feature research for: SliceFS v2.0 Streaming Writes & Hardening milestone*
+*Researched: 2026-03-29*

@@ -1,183 +1,220 @@
 # Stack Research
 
-**Domain:** Deduplicating FUSE filesystem in Rust (CAS-backed, cross-platform)
-**Researched:** 2026-03-27
-**Confidence:** MEDIUM-HIGH — FUSE/Rust layer is HIGH; cross-platform Windows path is MEDIUM
+**Domain:** SliceFS v2.0 — Streaming writes, write-path compression removal, bug fixes
+**Researched:** 2026-03-29
+**Confidence:** HIGH — all changes are internal refactors or stdlib arithmetic; no new external crates required
 
 ---
 
-## Recommended Stack
+## Executive Summary
 
-### Core Technologies
+This milestone adds **no new external dependencies**. Every change is either:
 
-| Technology | Version | Purpose | Why Recommended |
-|------------|---------|---------|-----------------|
-| `fuser` | 0.17.0 | FUSE filesystem interface for Linux/macOS | The only actively maintained pure-Rust FUSE implementation; 2,100+ dependent crates; recent release Feb 2026; covers the full FUSE protocol without libfuse on Linux |
-| `redb` | 3.1.1 | Metadata storage (inode table, path index, chunk refs) | Pure Rust, ACID, MVCC, zero-copy reads, stable file format, fastest individual writes in its class, no C dependencies; stable since 1.0 |
-| `blake3` | 1.8.x | Primary CAS hash function | 80M+ downloads; fastest cryptographic hash available; SIMD-accelerated; 256-bit digests; designed for content-addressable storage; pluggable via trait |
-| `fastcdc` | 3.2.1 | Content-defined chunking reference implementation | Official Rust implementation of FastCDC v2016/v2020; async-capable (`AsyncStreamCDC` with tokio feature); deterministic — same input always produces same chunks |
-| `tokio` | 1.x | Async runtime | Ecosystem standard; fuser uses blocking threads internally so runtime is needed for background I/O, compaction tasks, and future distributed work |
-| `serde` + `bincode` | serde 1.x, bincode 2.x | Metadata serialization | serde is universal; bincode produces compact fixed-width binary records optimal for B-tree storage in redb |
+- A refactor within existing crates (streaming writes, compression removal)
+- Stdlib arithmetic primitives (`saturating_add`, `checked_add`)
+- Stdlib collection swap (`Vec` → `HashMap` for snapshot index)
+- An `AtomicU64` counter already used in the metadata store
 
-### Supporting Libraries
-
-| Library | Version | Purpose | When to Use |
-|---------|---------|---------|-------------|
-| `sha2` | 0.10.x | SHA-256 pluggable hash | When security-sensitive dedup proofs are required or BLAKE3 is not acceptable; part of RustCrypto project |
-| `winfsp` | 0.12.4 | WinFSP bindings for Windows filesystem | Required for Windows support; wraps WinFSP C library; passes ntptfs test suite; GPL-3 licensed |
-| `xattr` | latest | Extended attribute read/write on Unix | Required for POSIX xattr support on macOS and Linux; abstracts platform differences |
-| `libc` | 0.2.x | POSIX types and errno constants | Needed for correct FUSE reply construction (uid, gid, mode, nlink types) |
-| `thiserror` | 2.x | Structured error types | Domain errors for each subsystem (chunk, hash, metadata, fuse); zero-cost with `?` propagation |
-| `tracing` | 0.1.x | Structured logging/instrumentation | async-aware; integrates with tokio; essential for debugging FUSE operation traces |
-| `criterion` | 0.5.x | Micro-benchmarking | Statistical benchmarks for hash throughput, chunk throughput, metadata ops; supports bytes/sec reporting |
-| `proptest` | 1.x | Property-based testing | Randomized filesystem operation sequences; finds edge cases in inode reference counting |
-| `tempfile` | 3.x | Temporary file/dir management in tests | Test isolation; auto-cleanup; works on all target platforms |
-| `nix` | 0.29.x | Unix system calls | Needed for low-level mount/unmount helpers and signal handling on Linux/macOS |
-
-### Development Tools
-
-| Tool | Purpose | Notes |
-|------|---------|-------|
-| `cargo nextest` | Fast parallel test runner | Significantly faster than `cargo test`; required for integration tests that spawn mount processes |
-| `cargo clippy` | Linting | Enable `#![deny(clippy::all)]` from the start; FUSE code has subtle lifetime issues clippy catches |
-| `cargo flamegraph` | CPU profiling | Mount filesystem, run workload, profile; essential for finding hot paths in FUSE dispatch |
-| `pjdfstest` | POSIX conformance test suite | Industry-standard filesystem conformance tool; run on Linux under fuser and on macOS under FUSE-T |
-| `rust-analyzer` | IDE language server | Required for productivity in a large trait-heavy codebase |
+The v1.0 STACK.md (`STACK.md` dated 2026-03-27) remains fully valid. This document records only the delta — which APIs to use, which to stop using, and why.
 
 ---
 
-## Platform Matrix
+## What Changes (and Why)
 
-| Platform | FUSE Layer | Status | Notes |
-|----------|-----------|--------|-------|
-| Linux | `fuser` + kernel FUSE module | HIGH confidence, primary target | fuser is tested on Linux stable; no libfuse required at runtime with `--no-default-features` |
-| macOS | `fuser` + FUSE-T | MEDIUM confidence | FUSE-T is drop-in libfuse replacement using NFSv4 under the hood; fuser should work since API headers unchanged; some known NFS client quirks on Sonoma (see Pitfalls) |
-| Windows | `winfsp` crate (separate) | MEDIUM confidence, later phase | winfsp-rs 0.12.4 passes ntptfs tests; GPL-3 license may affect distribution; Windows path differs significantly from fuser |
+### 1. Streaming Writes — `State::push_bytes()` replaces `State::push_all()`
+
+**Current:** `OpenFileState.buf: Vec<u8>` accumulates the entire file in memory. On `release()` / fsync, `State::push_all(&mut dict, &wire_bytes)` pushes the entire buffer at once. For large files this is an unbounded memory allocation.
+
+**New:** `OpenFileState` holds a live `blockset::State` (type alias: `Vec<Level>`, where `Level = (MerkleTreeState, Digest256)`). Each FUSE `write()` call feeds incoming data directly into `state.push_bytes(&mut dict, data)` and discards the raw bytes immediately. On `release()`, `state.end(&mut dict)` finalises the Merkle root.
+
+**API already exists.** The `push_bytes` method is defined on the `Tree` trait in `crates/data-id/blockset/src/tree.rs` (lines 36-38). It is not new — it just has not been wired into the FUSE write path yet. No crate version bump needed.
+
+**Memory profile after change:** `O(log N)` — `State` holds at most one `(MerkleTreeState, Digest256)` entry per tree level; each level is ~72 bytes; at 4-byte leaf granularity a 1 GiB file produces ~7-8 levels.
+
+**Integration point:** `crates/slicefs-cli/src/filesystem.rs`
+
+- `OpenFileState` struct: replace `buf: Vec<u8>` + `cas_committed: bool` with `state: blockset::State` + a `dict` reference or lock handle.
+- `write()` FUSE handler: remove `buf.resize/copy_from_slice`, call `state.push_bytes(&mut dict, data)`.
+- `flush_buffer_to_cas()` and `flush_buffer_for_fsync()`: call `state.clone().end(&mut dict)` to finalise without consuming (fsync must allow further writes); or consume on `release()`.
+- `test_write()` / `test_release()`: update to match.
+
+**Constraint:** `State` is `Vec<Level>` which is `Clone` — cloning it for a non-consuming fsync is safe and cheap (log-depth vector).
+
+| API | Location | Status |
+|-----|----------|--------|
+| `Tree::push_bytes(&mut self, storage, v: &[u8])` | `blockset::tree` | Exists — wire it in |
+| `Tree::end(self, storage) -> Digest256` | `blockset::tree` | Exists — wire it in |
+| `State::push_all(storage, v) -> Digest224` | `blockset::content_dependant_tree` | Keep for small writes (symlink target, xattr); remove from large file path |
 
 ---
 
-## Installation
+### 2. Remove Write-Path Compression
 
-```toml
-# Cargo.toml (workspace root)
-[workspace]
-members = [
-    "crates/slicefs-core",    # CAS engine, chunking traits, hash traits
-    "crates/slicefs-meta",    # Metadata store (redb-backed inode table)
-    "crates/slicefs-fuse",    # fuser integration, FUSE filesystem impl
-    "crates/slicefs-cli",     # mount/umount CLI
-]
-resolver = "2"
+**Current:** `to_wire_bytes()` wraps every block with `compress_block()` (1-byte `AlgorithmId` header + compressed payload). All four write sites in `filesystem.rs` (lines 372, 410, 491, 832) call this. The `store_version >= 2` gate switches it on.
 
-[workspace.dependencies]
-fuser      = "0.17"
-redb       = "3.1"
-blake3     = "1.8"
-fastcdc    = "3.2"
-tokio      = { version = "1", features = ["full"] }
-serde      = { version = "1", features = ["derive"] }
-bincode    = "2"
-sha2       = "0.10"
-xattr      = "1"
-libc       = "0.2"
-thiserror  = "2"
-tracing    = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+**New:** Raw bytes go directly into the Merkle tree. Dedup operates on original content, which means two identical files compressed with different algorithms will now correctly deduplicate.
 
-# Dev/test
-criterion  = { version = "0.5", features = ["html_reports"] }
-proptest   = "1"
-tempfile   = "3"
+**Changes:**
+- Delete `to_wire_bytes()` from `SliceFsFilesystem` (or replace body with `raw.to_vec()` as no-op stub during transition).
+- Delete `from_wire_bytes()` or leave as read-path fallback for old blocks only.
+- Remove `compressor` field from `SliceFsFilesystem` (or demote to `Option<Arc<dyn Compressor>>`).
+- Remove `store_version` field (or keep it only for backward-compatible reads of old compressed blocks).
+- The `slicefs-compression` crate stays in the workspace — it may be used for future segment-level compression (v2.1). Do not delete it.
 
-# macOS/Linux
-nix        = { version = "0.29", features = ["fs", "mount", "signal"] }
+**No version changes needed.** `zstd`, `lz4_flex`, and `slicefs-compression` remain in Cargo.toml — just unused on the write path.
 
-# Windows (conditional)
-# winfsp   = "0.12"   # enable in slicefs-fuse with cfg(windows)
+---
+
+### 3. Refcount Overflow Fix — `saturating_add` / `checked_add`
+
+**Current:** `increment_refcount()` in `crates/metadata/src/store.rs` (line 136):
+
+```rust
+*rc.entry(*digest).or_insert(0) += 1;
 ```
 
----
+`+= 1` on a `u64` wraps to 0 on overflow in release builds (Rust integer overflow is defined as wrapping in release mode). A file with `u64::MAX` references would silently drop its refcount to 0, making the block eligible for GC — silent data loss.
 
-## Alternatives Considered
+**Fix:** Use `saturating_add(1)`:
 
-| Category | Recommended | Alternative | Why Not |
-|----------|-------------|-------------|---------|
-| FUSE library | `fuser` 0.17 | `fuse3` crate | fuse3 is less maintained, fewer dependents, overlapping scope |
-| FUSE library | `fuser` 0.17 | `fuse-rs` (zargony) | Archived/unmaintained — last commit years ago |
-| Metadata DB | `redb` 3.x | SQLite (`rusqlite`) | SQLite has better query flexibility but C dependency, slower point writes, and no zero-copy reads; redb is purpose-built for embedded KV |
-| Metadata DB | `redb` 3.x | `sled` 0.34 | sled is **beta, pre-1.0, file format unstable**; last release September 2021; maintainer recommends SQLite for reliability-first use cases |
-| Metadata DB | `redb` 3.x | RocksDB (`rocksdb` crate) | RocksDB is well-proven but brings large C++ build dependency; build times are painful; overkill for single-node metadata |
-| Hash | `blake3` | SHA-256 (`sha2`) | BLAKE3 is 3-10x faster on modern hardware while maintaining 256-bit security; better for CAS where hashing is on the critical path |
-| Chunking | `fastcdc` | Custom from owner's repo | Owner's existing chunking technology should be **integrated as the pluggable backend** — the fastcdc crate serves as the default/fallback until owner's chunker is wired in |
-| Serialization | `bincode` 2.x | `postcard` | postcard targets no_std/embedded; bincode has better performance on std targets with fixed-width types |
-| Async runtime | `tokio` | `async-std` | tokio is the ecosystem standard; fuser's async examples use tokio; broader library compatibility |
+```rust
+let count = rc.entry(*digest).or_insert(0);
+*count = count.saturating_add(1);
+```
 
----
+`saturating_add` clamps at `u64::MAX` instead of wrapping. In practice no real file will ever reach `u64::MAX` references, so this is both safe and correct.
 
-## What NOT to Use
+**Alternative considered:** `checked_add` returning `Err`. Rejected — the caller has no reasonable error recovery path for "too many references"; saturating is the correct semantic for a reference-counted store where the count is a safety floor, not an exact accounting figure.
 
-| Avoid | Why | Use Instead |
-|-------|-----|-------------|
-| `fuse-rs` (zargony/fuse-rs) | Archived, unmaintained, stuck at FUSE2 API | `fuser` (cberner/fuser) |
-| `sled` | Beta, pre-1.0, file format changes between releases, last release 2021, maintainer says "use SQLite if you need reliability" | `redb` |
-| `macfuse` (kernel extension) | Requires kext signing and user approval on modern macOS; broken on Apple Silicon without SIP changes | FUSE-T (userspace, kext-free) |
-| Direct `libfuse` C bindings | Unsafe, brittle, loses Rust memory safety guarantees | `fuser` which wraps or reimplements libfuse in Rust |
-| `rocksdb` crate | C++ build dependency makes CI painful; 30+ minute clean builds; overkill for this use case | `redb` for metadata; flat files for block data |
-| `bincode` 1.x | Breaking API changes in 2.x; 1.x has known soundness issues | `bincode` 2.x with explicit configuration |
-| Global `SHA-256` only hashing | Locks in single algorithm; breaks pluggable CAS promise | Abstract behind a `Hasher` trait; BLAKE3 as default |
+**No new dependencies.** `u64::saturating_add` is `std`.
 
 ---
 
-## Stack Patterns by Variant
+### 4. Realistic `statfs` Reporting
 
-**If chunk storage needs to survive crashes without journal replay:**
-- Use redb for chunk reference counts (ACID)
-- Store raw block data as flat files keyed by hash (first 2 bytes as directory sharding, e.g. `ab/cdef...`)
-- This avoids storing large blobs in redb B-trees which degrades performance
+**Current:** `statfs()` in `filesystem.rs` hardcodes `f_files = 1_000_000` and `bfree = u64::MAX / 4` (lines 1158-1164). This makes `df` display nonsense.
 
-**If plugging in owner's chunking technology:**
-- Define `trait Chunker: Send + Sync { fn chunk(&self, data: &[u8]) -> Vec<Chunk>; }`
-- Wire `fastcdc` as the default impl
-- Owner's algorithm slots in as an alternate impl without touching core CAS logic
+**Needed:**
+- `f_files` (total inodes): track the live inode count. The metadata store already has `logical_bytes: AtomicU64` as a precedent. Add `inode_count: AtomicU64` to `DictMetadataStore`, incremented in `create_inode()` and decremented in `delete_inode()`.
+- `f_ffree` (free inodes): `u64::MAX - inode_count` (CAS filesystem has no hard inode limit; this is the honest answer).
+- `f_blocks` (total blocks): derive from physical bytes — `dict.len() * 92 / bsize` (already computed for `blocks_used`).
+- `bfree` / `bavail`: CAS filesystem is append-only (old blocks are GC'd, new blocks always storable). A realistic answer is `u64::MAX / bsize` — "effectively unlimited" — which is more truthful than the current sentinel value, and matches what ZFS reports on pools with no hard quota.
 
-**If Windows support is added later:**
-- `winfsp` crate provides a separate filesystem trait; create a platform-abstracted `FilesystemBackend` trait
-- Do NOT attempt to route Windows through fuser — winfsp-rs has its own API surface
-- The GPL-3 license of winfsp-rs requires the binary distribution to also be GPL-3
+**Changes:**
+- `crates/metadata/src/store.rs`: add `inode_count: AtomicU64` field. Increment in `create_inode`, decrement in `delete_inode`. Expose via `fn inode_count(&self) -> u64`.
+- `crates/slicefs-cli/src/filesystem.rs`: use `self.meta.inode_count()` for `f_files` in `statfs()`.
 
-**If distributed backend is added later (future milestone):**
-- The storage backend trait already isolates local vs. remote; swap the redb backend for a networked one
-- No fuser or metadata schema changes needed if interfaces are clean from the start
+**No new dependencies.** `AtomicU64` is `std::sync::atomic`.
 
 ---
 
-## Version Compatibility
+### 5. Snapshot Indexed Lookup — `HashMap` Indexes
 
-| Package | Compatible With | Notes |
-|---------|-----------------|-------|
-| `fuser` 0.17 | Rust stable (1.75+) | Tests on Linux and FreeBSD; macOS marked "untested" in README but works with FUSE-T via libfuse API compatibility |
-| `redb` 3.x | Rust stable | File format stable since 1.0; 3.x has breaking API changes from 2.x — use 3.x from the start |
-| `blake3` 1.8.x | Rust stable | No breaking changes expected; pure Rust with optional C SIMD via feature flags |
-| `fastcdc` 3.2.1 | Rust stable; tokio 1.x | `tokio` feature enables `AsyncStreamCDC`; `futures` feature for futures-compatible async |
-| `winfsp` 0.12 | Rust stable (Windows only) | Requires WinFSP runtime installed on target machine; links against WinFSP import lib by default |
-| `bincode` 2.x | serde 1.x | bincode 2.x has incompatible wire format with 1.x — do not mix versions |
+**Current:** `snapshots: Mutex<Vec<SnapshotEntry>>` (line 75 of `store.rs`). `find_snapshot()` does `snaps.iter().find(...)` — O(n) linear scan. For typical snapshot counts (tens to hundreds) this is not a bottleneck, but the PROJECT.md explicitly targets O(1).
+
+**New:** Replace the single `Vec` with two indexes:
+
+```rust
+snapshots_by_version: Mutex<HashMap<u64, SnapshotEntry>>,
+snapshots_by_name:    Mutex<HashMap<String, u64>>,   // name → version key
+```
+
+`find_snapshot(ref)`:
+- If `ref` parses as `u64`: `snapshots_by_version.get(&version)` — O(1).
+- Otherwise: `snapshots_by_name.get(name).and_then(|v| snapshots_by_version.get(v))` — O(1).
+
+`list_snapshots()`: collect values from `snapshots_by_version`, sort by version — O(n log n), same as before.
+
+`create_snapshot()` and `set_snapshots()`: insert into both maps.
+
+**Why `HashMap` not `BTreeMap`:** `BTreeMap` would give O(log n) lookup and in-order iteration without the sort step in `list_snapshots`. For a small number of snapshots (expected: < 1000) the difference is negligible. `HashMap` is used because the PROJECT.md specifies O(1) lookup, not O(log n), and `HashMap` is more idiomatic for keyed lookup. If sorted iteration performance matters more than O(1) lookup a `BTreeMap<u64, SnapshotEntry>` + `HashMap<String, u64>` hybrid is also valid.
+
+**No new dependencies.** `std::collections::HashMap` is `std`.
+
+---
+
+## Recommended Stack (Delta Only)
+
+No new crates. Existing crates unchanged.
+
+### APIs to Start Using
+
+| API | Crate | Where | Purpose |
+|-----|-------|-------|---------|
+| `Tree::push_bytes(&mut self, storage, &[u8])` | `blockset` (local) | `filesystem.rs` write path | Stream bytes into Merkle tree without buffering full file |
+| `Tree::end(self, storage) -> Digest256` | `blockset` (local) | `filesystem.rs` release/fsync | Finalise in-progress Merkle state to root digest |
+| `u64::saturating_add(1)` | `std` | `store.rs::increment_refcount` | Refcount overflow protection |
+| `AtomicU64` | `std::sync::atomic` | `store.rs` | Track live inode count for statfs |
+| `HashMap<u64, SnapshotEntry>` | `std::collections` | `store.rs` | O(1) snapshot version lookup |
+| `HashMap<String, u64>` | `std::collections` | `store.rs` | O(1) snapshot name lookup |
+
+### APIs to Stop Using (on write path)
+
+| API | Crate | Reason |
+|-----|-------|--------|
+| `State::push_all(storage, &[u8]) -> Digest224` | `blockset` (local) | Buffers entire file; replace with `push_bytes` + `end` on large-file path |
+| `compress_block(&compressor, &[u8])` | `slicefs-compression` | Write-path compression removed; dedup on raw content |
+| `SliceFsFilesystem.to_wire_bytes()` | `slicefs-cli` | Wrapper around `compress_block`; delete |
+
+### Crates That Stay But Change Role
+
+| Crate | v1.0 Role | v2.0 Role |
+|-------|-----------|-----------|
+| `slicefs-compression` | Write + read path | Read path only (decompress legacy blocks); keep for v2.1 segment compression |
+| `blockset` (local) | `push_all` for writes | `push_bytes` + `end` for writes; `push_all` kept for small payloads (xattr, symlinks) |
+
+---
+
+## What NOT to Add
+
+| Do Not Add | Why |
+|------------|-----|
+| New streaming I/O crate (`bytes`, `tokio::io::AsyncWrite`, etc.) | Overkill — `push_bytes` already accepts `&[u8]` slices; FUSE write callbacks deliver data in fixed-size chunks natively |
+| A write buffer crate (`crossbeam-channel`, ring buffer, etc.) | The `State` (Merkle stack) is already the buffer; no secondary buffer needed |
+| A new indexing/KV crate for snapshots | `std::collections::HashMap` is sufficient; `redb` is appropriate if snapshots need to persist independently of WAL, but WAL-backed persistence is already working |
+| Any new async machinery | `push_bytes` is synchronous; no async required for this milestone |
+| Separate inode counter storage | `AtomicU64` on `DictMetadataStore` is sufficient; does not need separate DB table |
+
+---
+
+## Version Compatibility Notes
+
+All changes are within existing dependency versions already in `Cargo.lock`:
+
+| Package | Locked Version | Notes |
+|---------|---------------|-------|
+| `blockset` (local) | 0.1.0 | `push_bytes` and `end` already on `Tree` trait — no bump needed |
+| `fuser` | 0.17.0 | `write()` callback signature unchanged |
+| `blake3` | 2.11.0 (resolved) | No change |
+| `thiserror` | 3.27.0 (resolved) | No change |
+| `libc` | 0.2.x | No change |
+
+---
+
+## Integration Points Summary
+
+| Change | File | What to Modify |
+|--------|------|----------------|
+| Streaming writes | `crates/slicefs-cli/src/filesystem.rs` | `OpenFileState`, `write()`, `flush_buffer_to_cas()`, `flush_buffer_for_fsync()`, `test_write()`, `test_release()` |
+| Remove write compression | `crates/slicefs-cli/src/filesystem.rs` | Delete `to_wire_bytes()`, remove `compressor` field or demote to read-path only |
+| Refcount overflow | `crates/metadata/src/store.rs` | `increment_refcount()` line 136 |
+| Inode count tracking | `crates/metadata/src/store.rs` | Add `inode_count: AtomicU64`, update `create_inode`, `delete_inode`, expose getter |
+| Statfs improvement | `crates/slicefs-cli/src/filesystem.rs` | `statfs()` handler, consume `meta.inode_count()` |
+| Snapshot index | `crates/metadata/src/store.rs` | Replace `snapshots: Mutex<Vec<SnapshotEntry>>` with two HashMaps |
 
 ---
 
 ## Sources
 
-- [fuser on GitHub (cberner/fuser)](https://github.com/cberner/fuser) — version 0.17.0 confirmed, platform support, Feb 2026 release
-- [redb on GitHub (cberner/redb)](https://github.com/cberner/redb) — version 3.1.1 confirmed, ACID/MVCC features, Mar 2026 release
-- [blake3 on crates.io](https://crates.io/crates/blake3) — version 1.8.x, 80M downloads, SIMD acceleration confirmed
-- [fastcdc on GitHub (nlfiedler/fastcdc-rs)](https://github.com/nlfiedler/fastcdc-rs) — version 3.2.1 confirmed, async API confirmed
-- [winfsp-rs on GitHub (SnowflakePowered/winfsp-rs)](https://github.com/SnowflakePowered/winfsp-rs) — version 0.12.4, GPL-3, ntptfs test passing
-- [FUSE-T on GitHub (macos-fuse-t/fuse-t)](https://github.com/macos-fuse-t/fuse-t) — kext-free NFSv4 backend, drop-in libfuse compatibility
-- [sled on GitHub (spacejam/sled)](https://github.com/spacejam/sled) — last release 2021, pre-1.0, file format unstable, explicitly NOT recommended for production
-- [Rust Serialization Benchmarks](https://github.com/djkoloski/rust_serialization_benchmark) — bincode vs postcard performance comparison
-- WebSearch: RocksDB Rust crate 0.24.0 — MEDIUM confidence
-- WebSearch: sha2 0.10.x RustCrypto — MEDIUM confidence
+- `crates/data-id/blockset/src/tree.rs` — `push_bytes` and `end` API confirmed present (lines 36-49); no external crate needed
+- `crates/data-id/blockset/src/content_dependant_tree.rs` — `State = Vec<Level>` type confirmed; `Clone` via `Vec` derive
+- `crates/slicefs-cli/src/filesystem.rs` — `State::push_all` call sites confirmed at lines 375, 414, 494, 835; `compress_block` call sites confirmed
+- `crates/metadata/src/store.rs` — `refcounts: Mutex<BTreeMap<Digest224, u64>>` and `+= 1` overflow confirmed at line 136; `snapshots: Mutex<Vec<SnapshotEntry>>` linear scan confirmed
+- `crates/slicefs-cli/src/filesystem.rs` — `statfs()` hardcoded values confirmed at lines 1158-1164
+- Rust Reference: integer overflow in release mode is defined as wrapping (`wrapping_add`) — `saturating_add` is the correct fix [HIGH confidence]
+- `std::collections::HashMap` — O(1) average lookup [HIGH confidence, stdlib]
 
 ---
 
-*Stack research for: DedupFS — deduplicating FUSE filesystem in Rust*
-*Researched: 2026-03-27*
+*Stack research for: SliceFS v2.0 — Streaming writes and bug fixes*
+*Researched: 2026-03-29*

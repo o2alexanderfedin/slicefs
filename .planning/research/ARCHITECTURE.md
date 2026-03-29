@@ -1,502 +1,610 @@
 # Architecture Research
 
-**Domain:** Deduplicating FUSE Filesystem (Rust)
-**Researched:** 2026-03-27
-**Confidence:** HIGH (FUSE layer, CAS patterns, ZFS/Btrfs reference systems); MEDIUM (GC strategies, WAL specifics)
+**Domain:** Streaming writes integration — SliceFS v2.0
+**Researched:** 2026-03-29
+**Confidence:** HIGH (based on direct codebase inspection of all relevant source files)
 
-## Standard Architecture
+---
 
-### System Overview
+## Scope
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                        FUSE LAYER                                │
-│  Kernel VFS ←→ /dev/fuse ←→ fuser crate ←→ FuseHandler          │
-│  (lookup, getattr, read, write, create, unlink, rename, xattr)  │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │ POSIX ops (ino, fh, offset, size)
-┌──────────────────────────▼───────────────────────────────────────┐
-│                   VFS ADAPTER / ROUTER                           │
-│  Maps FUSE inode numbers → internal InodeId                     │
-│  Owns open file handle table (fh → FileState)                   │
-│  Enforces POSIX semantics (unlink-while-open, nlookup lifecycle) │
-└───────────┬─────────────────────────────────┬────────────────────┘
-            │                                 │
-┌───────────▼──────────┐         ┌────────────▼──────────────────┐
-│  METADATA ENGINE     │         │     WRITE PATH ENGINE         │
-│                      │         │                               │
-│  Inode store         │         │  Chunker (pluggable trait)    │
-│  Directory tree      │         │  Hash function (pluggable)    │
-│  Timestamps/perms    │         │  Dedup lookup (chunk index)   │
-│  xattrs              │         │  Block writer                 │
-│  Hard link refcount  │         │  File manifest builder        │
-│  (sled / sqlite)     │         │                               │
-└───────────┬──────────┘         └────────────┬──────────────────┘
-            │                                 │
-            │         ┌───────────────────────▼──────────────────┐
-            │         │         CHUNK INDEX                      │
-            │         │  hash → block address mapping            │
-            │         │  In-memory hot layer (LRU/bloom filter)  │
-            │         │  Persistent layer (sled / rocksdb)       │
-            │         └───────────────┬──────────────────────────┘
-            │                         │
-┌───────────▼─────────────────────────▼──────────────────────────┐
-│                   BLOCK STORE (CAS)                             │
-│  trait BlockStore { put(hash, data); get(hash) → data; del; }  │
-│                                                                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
-│  │  LocalDisk   │  │  ObjectStore │  │  Future:     │          │
-│  │  (files by   │  │  (S3/GCS     │  │  Distributed │          │
-│  │   hash path) │  │   shim)      │  │  P2P backend │          │
-│  └──────────────┘  └──────────────┘  └──────────────┘          │
-└─────────────────────────────────────────────────────────────────┘
-            │
-┌───────────▼─────────────────────────────────────────────────────┐
-│                REFERENCE COUNTER + GC ENGINE                    │
-│  Block refcount table (hash → u64)                              │
-│  Orphan detection (mark phase: walk all manifests)              │
-│  Sweep phase: delete blocks with refcount == 0                  │
-│  WAL / journal: staged refcount mutations for crash safety      │
-└─────────────────────────────────────────────────────────────────┘
-```
+This document answers the specific question for the v2.0 milestone: how does streaming
+writes (`State::push_bytes`) integrate with the existing FUSE write callback,
+flush/release lifecycle, compression removal, and read-after-write consistency? What
+changes to `OpenFileState`, `flush_buffer_to_cas`, and the read path?
 
-### Component Responsibilities
+All source locations are in `crates/slicefs-cli/src/filesystem.rs` unless noted.
 
-| Component | Responsibility | Typical Implementation |
-|-----------|----------------|------------------------|
-| **FuseHandler** | Translate kernel FUSE opcodes into internal ops; reply with FileAttr/data | Implements `fuser::Filesystem` trait |
-| **VFS Adapter** | Map FUSE inode numbers to internal InodeId; manage open file handles; enforce nlookup lifecycle | HashMap<u64, InodeId>, HashMap<u64, FileState> |
-| **Metadata Engine** | Own all filesystem metadata: inodes, directory entries, permissions, xattrs, link counts | Embedded KV store (sled/sqlite). Separate from block store. |
-| **Write Path Engine** | Accept byte stream on write(), chunk it, hash chunks, deduplicate, persist new blocks, update file manifest | Trait-dispatched chunker + hasher; calls chunk index |
-| **Chunk Index** | Map content hash → block store address + refcount. The deduplication lookup table. | In-memory LRU + bloom filter; persistent sled/rocksdb layer |
-| **Block Store (CAS)** | Immutable content-addressed storage of raw chunk bytes. Keyed by hash. | `trait BlockStore` with local disk impl; swappable backend |
-| **File Manifest** | Per-file ordered list of chunk hashes that reconstruct file content | Stored as inode attribute in metadata engine |
-| **Reference Counter** | Track how many file manifests reference each chunk hash | Maintained transactionally during writes and unlinks |
-| **GC Engine** | Reclaim blocks with zero references (two-phase: mark live hashes, sweep dead blocks) | Background task; runs on demand or scheduled |
-| **WAL / Journal** | Ensure crash safety: refcount mutations and metadata updates logged before application | Append-only log; replayed on mount |
-| **Read Path / Cache** | Reassemble file content from chunk hashes; cache hot chunks and reassembled regions | Chunk cache (LRU by hash); page-aligned read-ahead |
+---
 
-## Recommended Project Structure
+## System Overview (as-built, v1.0)
 
 ```
-src/
-├── main.rs                    # Mount entrypoint, CLI args, signal handling
-├── fuse/
-│   ├── handler.rs             # Implements fuser::Filesystem trait (FuseHandler)
-│   ├── adapter.rs             # VFS adapter: inode number mapping, file handle table
-│   └── reply.rs               # Helper builders for fuser reply types
-├── metadata/
-│   ├── mod.rs
-│   ├── inode.rs               # Inode struct: ino, mode, uid, gid, size, times, link_count
-│   ├── dir.rs                 # Directory entries: parent ino → [(name, child ino)]
-│   ├── manifest.rs            # File manifest: ino → Vec<ChunkHash>
-│   ├── xattr.rs               # Extended attributes store
-│   └── store.rs               # trait MetadataStore + sled/sqlite implementation
-├── cas/
-│   ├── mod.rs
-│   ├── block_store.rs         # trait BlockStore { put, get, delete, exists }
-│   ├── local.rs               # LocalDiskStore: blocks/ab/cd/<full-hash>
-│   └── chunk_index.rs         # ChunkIndex: hash → (address, refcount), bloom filter
-├── dedup/
-│   ├── mod.rs
-│   ├── chunker.rs             # trait Chunker { chunk(reader) → Iterator<Chunk> }
-│   ├── hasher.rs              # trait ContentHasher { hash(data) → ChunkHash }
-│   └── write_path.rs          # WritePathEngine: orchestrates chunk + hash + dedup + store
-├── refcount/
-│   ├── mod.rs
-│   ├── counter.rs             # RefCountStore: hash → u64, atomic increment/decrement
-│   └── journal.rs             # WAL entries for staged refcount mutations
-├── gc/
-│   ├── mod.rs
-│   └── sweep.rs               # GcEngine: mark phase + sweep phase
-├── cache/
-│   ├── mod.rs
-│   └── chunk_cache.rs         # LRU cache: ChunkHash → Arc<[u8]>
-└── error.rs                   # Unified error types
+Kernel VFS
+    │ FUSE opcodes
+    ▼
+SliceFsFilesystem (filesystem.rs)
+    │  Implements fuser::Filesystem
+    │  open_files: Mutex<HashMap<u64, OpenFileState>>
+    │
+    ├─── write()  ─────────────────────────────────────────────────────────────┐
+    │    appends data into OpenFileState.buf (Vec<u8>)                        │
+    │    sets cas_committed = false                                            │
+    │                                                                          │
+    ├─── flush() / fsync() ────────────────────────────────────────────────── │
+    │    calls flush_buffer_for_fsync(ino, fh)                                │
+    │      ├── takes buf out of open_files with mem::take                     │
+    │      ├── calls to_wire_bytes(buf) → compress_block (if store_version≥2) │
+    │      ├── State::push_all(&mut dict, &wire_bytes) → Digest224            │
+    │      ├── set_manifest(ino, &[digest]) + increment_refcount              │
+    │      └── puts empty buf back; sets cas_committed = true                 │
+    │                                                                          │
+    ├─── release() ─────────────────────────────────────────────────────────  │
+    │    calls test_release(ino, fh)                                           │
+    │      ├── if buf.is_empty() && cas_committed → skip (guard)              │
+    │      └── else flush_buffer_to_cas(ino, buf)  (same pipeline)            │
+    │                                                                          │
+    └─── read() ────────────────────────────────────────────────────────────  │
+         if fh is a write handle → serve from OpenFileState.buf (RAW)        │
+         else: get_manifest → GetData/GetBytes → from_wire_bytes (decompress) │
+                                                                               │
+DictMetadataStore (metadata/src/store.rs)                                     │
+    │  dict: Mutex<Dictionary>                                                 │
+    │  manifest_data: Mutex<BTreeMap<u64, Digest224>>                         │
+    │  refcounts: Mutex<BTreeMap<Digest224, u64>>                             │
+    │                                                                          │
+blockset::Dictionary (data-id/blockset/src/dictionary.rs)                     │
+    │  BTreeMap<Digest224, Branches>                                           │
+    │  StorageAdd: add(left, right) → Digest256                               │
+    │              end(x) → Digest224                                          │
+    │                                                                          │
+blockset::State = Vec<Level> (content_dependant_tree.rs)                      │
+    │  Level = (MerkleTreeState, Digest256)                                    │
+    │  push_digest() — O(log N) tree insertion                                 │
+    │  push_bytes(storage, &[u8]) — feeds bytes one-by-one into push_digest   │
+    │  push_all(storage, &[u8]) → Digest224 — full-buffer convenience         │
+    │  end(storage) → Digest256 — finalises partial state                     │
 ```
 
-### Structure Rationale
+---
 
-- **fuse/:** Thin translation layer. Must not contain business logic — it only maps kernel opcodes to internal calls and vice versa. Keeping it thin makes the rest testable without FUSE.
-- **metadata/:** Completely separate from block/CAS storage. Metadata (inodes, directories, manifests) is structured and transactional; block data is immutable and content-addressed. Mixing these causes the ZFS DDT problem: metadata and data lifetime management become entangled.
-- **cas/:** The content-addressable block store is the stable core. Everything else references blocks; blocks reference nothing. This makes CAS the foundation to build first.
-- **dedup/:** The chunker and hasher are pluggable traits. The write path engine wires them together but does not own them — it receives them via dependency injection. This is the integration point for the owner's existing chunking technology.
-- **refcount/:** Reference counting is separated from the chunk index because its mutation pattern is transactional (must be atomic with metadata changes), while the chunk index is primarily a lookup structure.
-- **gc/:** Isolated as a background concern. GC reads refcounts and block lists; it does not need to be on the write path.
+## Current Write Path (v1.0) — What Exists
 
-## Architectural Patterns
+### Buffer Accumulation
 
-### Pattern 1: Content-Addressable Storage with Two-Level Index
+`write()` FUSE callback appends into `OpenFileState.buf: Vec<u8>`. The entire file
+content is accumulated in-memory before any CAS interaction. This is the root cause of
+the file-size-equals-RAM limitation.
 
-**What:** Raw block bytes are stored immutably keyed by their cryptographic hash. A separate index maps each known hash to its physical storage address. The in-memory layer uses a bloom filter to avoid disk I/O for definitely-absent hashes.
+### Flush (CAS commit)
 
-**When to use:** Always — this is the core deduplication primitive. ZFS, Borg, rdedup, casync all use this pattern.
+`flush_buffer_to_cas(ino, buf)` and the non-closing variant `flush_buffer_for_fsync`
+both execute:
 
-**Trade-offs:** Lookup is O(1) amortized; storage is perfectly deduplicated for identical blocks; but index size grows linearly with unique block count and must eventually be managed.
+```
+raw_buf
+  → to_wire_bytes()               # compress_block if store_version >= 2
+  → State::push_all(&mut dict, &wire_bytes)  # whole buffer at once → Digest224
+  → set_manifest(ino, [digest])
+  → increment_refcount(digest)
+  → update inode size/mtime
+```
 
-**Example (Rust sketch):**
+`State::push_all` is a convenience wrapper:
+
 ```rust
-pub trait BlockStore: Send + Sync {
-    fn put(&self, hash: &ChunkHash, data: &[u8]) -> Result<()>;
-    fn get(&self, hash: &ChunkHash) -> Result<Bytes>;
-    fn exists(&self, hash: &ChunkHash) -> Result<bool>;
-    fn delete(&self, hash: &ChunkHash) -> Result<()>;
-}
-
-// Bloom filter fast-path before hitting disk
-pub struct ChunkIndex {
-    bloom: BloomFilter,          // probabilistic "definitely not present"
-    index: sled::Tree,           // hash bytes → address + refcount
+// tree.rs — Tree trait
+fn push_all(storage: &mut impl StorageAdd, v: &[u8]) -> Digest224 {
+    let mut state = Self::default();
+    state.push_bytes(storage, v);  // feeds bytes into incremental State
+    let root = state.end(storage); // finalises Merkle tree
+    storage.end(&root)             // wraps into Digest224
 }
 ```
 
-### Pattern 2: Inode-to-Manifest Indirection (Thin Inode)
+So `push_all` already calls `push_bytes` internally. The issue is that `v` is the
+entire already-buffered `Vec<u8>` — nothing is streamed.
 
-**What:** Inodes do not directly contain file data or even block pointers. Each inode stores a reference to a file manifest (an ordered list of chunk hashes). The inode contains only metadata (size, times, mode, uid/gid, link count). This mirrors how Borg stores items as a stream of chunk references.
+### Read-After-Write
 
-**When to use:** Essential for FUSE deduplicating filesystems. Decouples logical file identity (inode) from physical storage (chunks). Enables hard links, reflinks, and future snapshotting without data duplication.
+`read()` inspects `fh`: if it is a write handle (non-zero, present in `open_files`),
+data is served directly from `OpenFileState.buf` — raw, uncompressed bytes. This is
+correct for v1.0 because the buffer holds the canonical version. If the handle is
+read-only (fh == 0) the manifest → dictionary path is taken.
 
-**Trade-offs:** One extra indirection on read (inode → manifest → chunks); justified because it enables atomic file replacement (swap the manifest reference), cheap snapshotting (copy the manifest), and clean hard link semantics (multiple inodes reference the same manifest).
+### Compression Involvement
 
-**Example (Rust sketch):**
+`to_wire_bytes()` / `from_wire_bytes()` gate on `store_version`:
+
+- `< 2`: no-op (raw bytes, pre-v1.0 format)
+- `>= 2`: `compress_block` wraps payload with 1-byte `AlgorithmId` header; `decompress_block` strips it
+
+The compressor is stored in `SliceFsFilesystem.compressor: Arc<dyn Compressor>`. A
+`NoneCompressor` effectively makes the write path raw already.
+
+---
+
+## What v2.0 Changes
+
+### Goal 1 — Streaming Writes (O(log N) memory)
+
+Instead of buffering the entire file then calling `State::push_all`, maintain a live
+`State` (the incremental Merkle tree) in `OpenFileState`. Each `write()` call feeds its
+chunk of bytes directly into the tree via `State::push_bytes`. On flush/release the
+tree is finalised with `state.end(dict)` then `dict.end(root)`.
+
+### Goal 2 — Remove Compression from Write/Read Path
+
+Remove the `to_wire_bytes` / `from_wire_bytes` calls. Raw bytes go straight into the
+Merkle tree. Deduplication operates on raw content, so the same bytes from different
+files deduplicate regardless of what compressor was in use at any given time. The
+`slicefs-compression` crate and the compressor field on `SliceFsFilesystem` become
+unused on the active write path (may be kept for backward-compatible reads of v1.0
+blocks, or removed entirely).
+
+---
+
+## Component Changes — New vs Modified
+
+### Modified: `OpenFileState`
+
+**Current:**
 ```rust
-pub struct Inode {
-    pub ino: u64,
-    pub mode: u32,
-    pub uid: u32,
-    pub gid: u32,
-    pub size: u64,
-    pub atime: SystemTime,
-    pub mtime: SystemTime,
-    pub ctime: SystemTime,
-    pub nlink: u32,
-    pub manifest_id: Option<ManifestId>,  // None for dirs/symlinks
-}
-
-pub struct FileManifest {
-    pub id: ManifestId,
-    pub chunks: Vec<ChunkHash>,   // ordered; reconstruct by concatenation
+struct OpenFileState {
+    ino: u64,
+    buf: Vec<u8>,
+    cas_committed: bool,
 }
 ```
 
-### Pattern 3: Staged Write Buffer with Inline Deduplication
-
-**What:** On `write()`, data is accumulated in a per-file write buffer until a flush boundary (close, fsync, explicit flush, or buffer full). At flush time, the buffer is chunked, hashed, deduplicated against the chunk index, and committed atomically. This is inline deduplication: dedup happens before blocks reach persistent storage.
-
-**When to use:** Preferred for a daily-driver filesystem. Post-process deduplication is simpler but wastes disk I/O on writes that will later be deduplicated. Inline deduplication reduces write amplification and storage usage from the first write.
-
-**Trade-offs:** Inline dedup adds latency to the flush path proportional to chunk index lookup time. For workloads with large write bursts, the write buffer smooths this into batches. Post-process dedup would be simpler to implement first and can be replaced later.
-
-**Recommendation:** Build inline dedup from the start. The write buffer absorbs latency variance. Post-process dedup is a reasonable MVP shortcut but creates user-visible storage "balloons" before dedup runs — unacceptable for a daily-driver filesystem.
-
-### Pattern 4: Transactional Refcount Mutations via WAL
-
-**What:** When a chunk's reference count changes (block added or block dereferenced on file delete), the refcount mutation is written to a WAL entry before the metadata is updated. On crash recovery, the WAL is replayed to restore consistent refcounts before mounting.
-
-**When to use:** Any system where chunk deletion must be safe. Incorrect refcounts lead to premature GC (data loss) or leaked blocks (storage leak). ZFS uses transaction groups; Borg uses a transaction-safe key-value store.
-
-**Trade-offs:** Adds a WAL write on every file create/delete that changes chunk references. Sequential WAL writes are fast. The alternative (in-place refcount updates) risks inconsistency on crash.
-
-**Example WAL entry types:**
+**v2.0:**
 ```rust
-pub enum WalEntry {
-    ChunkRefIncrement { hash: ChunkHash, delta: u64 },
-    ChunkRefDecrement { hash: ChunkHash, delta: u64 },
-    InodeCreate { ino: u64, manifest_id: ManifestId },
-    InodeDelete { ino: u64 },
-    ManifestReplace { manifest_id: ManifestId, chunks: Vec<ChunkHash> },
+struct OpenFileState {
+    ino: u64,
+    state: blockset::State,   // replaces buf: Vec<u8>
+    byte_count: u64,          // tracks logical size (inode.size)
+    cas_committed: bool,
 }
 ```
 
-### Pattern 5: Mark-and-Sweep Garbage Collection
+`State = Vec<Level>` where `Level = (MerkleTreeState, Digest256)`. It grows
+O(log N) in the number of distinct content-defined chunks, not O(N) in bytes.
 
-**What:** Two-phase GC. Mark phase: walk all file manifests, collect the set of all referenced chunk hashes. Sweep phase: iterate all stored blocks; delete any block whose hash is not in the live set.
+`byte_count` is needed because the old path derived `inode.size` from `buf.len()`.
+With streaming, the buffer no longer exists at flush time — size must be tracked
+incrementally as bytes arrive in `write()`.
 
-**When to use:** Triggered manually by user command or periodically in a background task. Not on the hot path. Borg's `check --repair` and `compact` commands follow this pattern.
+`cas_committed` semantics are unchanged: set to `true` after a successful
+flush, cleared to `false` when new writes arrive.
 
-**Trade-offs:** Mark phase requires walking all metadata (can be slow on large filesystems). For the local MVP, this is acceptable. Future optimization: maintain a live/dead bloom filter incrementally via refcount transitions.
+### Modified: `write()` callback and `test_write()`
 
-## Data Flow
+**Current:** `buf.resize(end, 0); buf[offset..end].copy_from_slice(data)`
 
-### Write Path (Inline Deduplication)
+**v2.0:** `state.push_bytes(&mut dict, data); byte_count += data.len() as u64`
+
+The offset parameter becomes irrelevant for append-only streaming. For non-sequential
+writes (pwrite at arbitrary offsets) this needs careful handling — see Integration
+Considerations below.
+
+### Modified: `flush_buffer_to_cas()` and `flush_buffer_for_fsync()`
+
+**Current:**
+```
+buf → to_wire_bytes → State::push_all → Digest224
+```
+
+**v2.0:**
+```
+state.end(&mut dict) → Digest256 → dict.end(&root) → Digest224
+```
+
+The `State` already holds the partially-built Merkle tree. Finalising it requires only:
+
+```rust
+// Acquire dict lock
+let mut dict = self.dict.lock().unwrap();
+let root256 = state.end(&mut *dict);
+let digest = dict.end(&root256);
+// release lock
+self.meta.set_manifest(ino, &[digest]);
+self.meta.increment_refcount(&digest);
+```
+
+`inode.size` is set to `byte_count` (not `buf.len()`).
+
+The `to_wire_bytes` call is removed entirely. No `compress_block` on the write path.
+
+### Modified: `read()` callback and `test_read()`
+
+**Current read-after-write:** serves from `state.buf` (the raw Vec<u8>).
+
+**v2.0:** The `State` is not directly readable — it is a write-accumulation structure.
+Two options:
+
+1. **Materialise on demand** — when `read()` is called on an open write handle, call
+   `state.end()` on a clone of the state to produce a temporary root, then use
+   `GetBytes` to reconstruct the bytes. This is correct but has cost proportional to
+   file size on every read-during-write.
+
+2. **Shadow buffer** — keep a small shadow `Vec<u8>` in `OpenFileState` for reads
+   during the write session, separate from the streaming `State`. This duplicates
+   memory but avoids materialise cost for interactive read-after-write workloads.
+
+3. **Flush-then-read** — on `read()` for an open write handle, flush the streaming
+   state to the dictionary first, then read from the CAS path. Safe, correct, but
+   adds a CAS commit on every read.
+
+**Recommendation:** Option 1 (materialise on demand) is simplest and correct for the
+common case (read-after-write is rare in bulk-write workloads). A clone of `State` is
+cheap (small Vec) and `GetBytes` reconstruction has cost proportional to file size —
+acceptable.
+
+**Read path compression removal:** `from_wire_bytes` is removed for new blocks. For
+backward-compatible reads of v1.0 (store_version < 2) blocks, keep the
+`store_version`-gated decompress path or migrate old blocks on first read. If backward
+compatibility is not required, the decompression path can be deleted entirely.
+
+### Unchanged: `DictMetadataStore`
+
+No changes needed. `set_manifest`, `increment_refcount`, `get_manifest`, `get_inode`,
+`update_inode` all have the same signatures. The dict lock is still held only during
+the finalise step, not during the streaming push_bytes phase.
+
+### Unchanged: `blockset::State`, `Tree::push_bytes`, `Dictionary`
+
+The incremental API already exists and works correctly. `push_bytes` and `end` are the
+two calls that replace the single `push_all` call.
+
+### Unchanged: FUSE lifecycle callbacks (`open`, `flush`, `fsync`, `release`)
+
+The FUSE-level callbacks (`flush`, `fsync`, `release`) delegate to the internal
+helpers. Their signatures and semantics are unchanged — they call the same helper
+functions, which now operate on `State` instead of `Vec<u8>`.
+
+### Unchanged: `setattr` truncate path
+
+`test_setattr_size` reads from CAS (manifest → GetBytes) to reconstruct content, then
+resizes it. With compression removal this path simplifies (no `from_wire_bytes`). The
+core CAS-read-then-rewrite logic remains structurally identical.
+
+---
+
+## Data Flow: v2.0 Streaming Write Path
 
 ```
 Application write(fd, buf, offset)
     ↓
-[FuseHandler.write()] — receives raw bytes from kernel
+fuser::Filesystem::write()
     ↓
-[VFS Adapter] — looks up FileState by file handle (fh)
+test_write(fh, offset, data)
+    acquire open_files lock
+    state.push_bytes(&mut dict, data)   ← feeds raw bytes into Merkle tree
+    byte_count += data.len()
+    cas_committed = false
+    return bytes_written
+    (dict lock held only during push_bytes call)
+
+Application close(fd) / fsync(fd)
     ↓
-[Write Buffer] — accumulates bytes; triggers flush at boundary
-    ↓ (on flush)
-[Chunker] — splits buffer using pluggable chunking strategy
-    ↓ (per chunk)
-[ContentHasher] — computes chunk hash (e.g., BLAKE3)
-    ↓
-[ChunkIndex.lookup(hash)] — bloom filter fast path
-    ├── PRESENT: increment refcount, record hash in manifest (no I/O)
-    └── ABSENT:
-            ↓
-        [BlockStore.put(hash, bytes)] — persist new block to CAS
-            ↓
-        [ChunkIndex.insert(hash, address)] — update index
-            ↓
-        [RefCountStore.increment(hash)] — record new reference
-    ↓
-[FileManifest.append(hash)] — update ordered chunk list for this file
-    ↓
-[WAL.append(ManifestReplace + refcount deltas)] — durability
-    ↓
-[MetadataStore.update_inode(size, mtime)] — update inode metadata
+flush_buffer_for_fsync(ino, fh)  [or flush_buffer_to_cas for release]
+    acquire open_files lock
+    take state out of open_files (mem::take equivalent)
+    acquire dict lock
+    root256 = state.end(&mut dict)      ← finalises content-defined Merkle tree
+    digest224 = dict.end(&root256)      ← wraps to addressable Digest224
+    release dict lock
+    meta.set_manifest(ino, &[digest224])
+    meta.increment_refcount(&digest224)
+    meta.update_inode(ino, size=byte_count, mtime=now)
+    put empty State back; cas_committed = true
 ```
 
-### Read Path
+### Key difference from v1.0
+
+In v1.0, the dict lock was held for the entire `push_all` call (which includes
+`push_bytes` over all bytes). In v2.0, the dict lock is held during each `push_bytes`
+call in `write()` AND during the finalise in flush. This is the same locking granularity
+per-call — the semantic difference is that the CAS work is distributed across all
+`write()` calls rather than deferred to flush.
+
+**Locking implication:** The dict lock in `SliceFsFilesystem` is separate from the dict
+lock inside `DictMetadataStore`. The filesystem holds `self.dict: Arc<Mutex<Dictionary>>`
+as a clone for content reads. The store has its own `dict: Mutex<Dictionary>`. These
+two must remain consistent — write path pushes into `self.dict` (the filesystem's
+copy), and at commit time `set_manifest` records the digest against the store's copy.
+This is existing v1.0 behaviour; streaming does not change this boundary.
+
+---
+
+## Data Flow: v2.0 Read Path
 
 ```
 Application read(fd, offset, size)
     ↓
-[FuseHandler.read()] — receives offset + size from kernel
+fuser::Filesystem::read()
     ↓
-[VFS Adapter] — looks up FileState → InodeId → ManifestId
-    ↓
-[MetadataStore.get_manifest(manifest_id)] — retrieve chunk hash list
-    ↓
-[Manifest resolver] — compute which chunks cover [offset, offset+size)
-    ↓ (per needed chunk)
-[ChunkCache.get(hash)] — in-memory LRU cache
-    ├── HIT: return cached bytes
-    └── MISS:
-            ↓
-        [BlockStore.get(hash)] — fetch from CAS
-            ↓
-        [ChunkCache.insert(hash, bytes)] — populate cache
-    ↓
-[Reassembler] — stitch chunk bytes, slice to requested [offset, size]
-    ↓
-[fuser reply_data(bytes)] → kernel → application
+(if fh is a write handle)
+    acquire open_files lock
+    clone current state   ← cheap: State = Vec<Level>, small
+    acquire dict lock
+    root256 = cloned_state.end(&mut dict)
+    release dict lock
+    GetBytes::new(GetData::new(&dict, &root256)).collect() → Vec<u8>
+    return raw_bytes[offset..offset+size]
+
+(if fh == 0, read-only handle)
+    meta.get_manifest(ino) → [digest224]
+    from_digest224(digest224) → root256
+    acquire dict lock
+    GetBytes::new(GetData::new(&dict, &root256)).collect() → Vec<u8>
+    release dict lock
+    return raw_bytes[offset..offset+size]   ← no decompression (v2.0)
 ```
 
-### Unlink / Delete Path
+---
 
+## Integration Considerations
+
+### Non-Sequential Writes (pwrite)
+
+FUSE `write()` can be called with arbitrary offsets. The current v1.0 implementation
+handles this via `buf.resize(end, 0); buf[offset..end].copy_from_slice(data)` — sparse
+fills with zeros.
+
+`State::push_bytes` is append-only — it does not support seeking or overwriting. The
+v2.0 streaming approach only works cleanly when writes arrive in sequential order from
+offset 0 upward.
+
+**Mitigation options:**
+
+1. **Detect sequential writes** — track `next_expected_offset: u64` in `OpenFileState`.
+   If `offset == next_expected_offset`, push directly. If offset is non-sequential,
+   fall back to a buffer (revert to v1.0 behaviour for that file handle).
+
+2. **Require O_APPEND semantics from callers** — acceptable for the streaming write
+   use case (cp, tar extract, etc.) but breaks random-write workloads (database files,
+   mmap-write).
+
+3. **Accept in-order-only streaming, fallback otherwise** — the pragmatic choice:
+   most writes from standard tools (cp, rsync, cat) are sequential. Add a
+   `mode: WriteMode` enum to `OpenFileState` and switch between streaming and
+   buffered modes at first non-sequential write.
+
+**Recommendation:** Implement option 3. Start with streaming mode. On first
+non-sequential write, materialise the partially-streamed bytes into a fallback `Vec<u8>`
+(by calling `GetBytes` on the partial state), then continue in buffered mode for the
+remainder of the file's open session.
+
+### Truncate with Open Write Handle
+
+`test_setattr_size(ino, Some(fh), new_size)` currently resizes `state.buf` in-place.
+With streaming `State`, truncation of an in-progress write session requires:
+
+- If `new_size >= byte_count`: extend with zero padding (append zeros via `push_bytes`).
+- If `new_size < byte_count`: there is no way to "unwind" a `State`. Must flush the
+  partial state, read back the bytes, truncate, and rebuild a fresh `State` from the
+  truncated content.
+
+This case (truncate-then-write) is uncommon in normal use but must be handled for POSIX
+correctness.
+
+### Read-After-Write Consistency
+
+The current FUSE `read()` callback in v1.0 serves from `OpenFileState.buf` for write
+handles — raw bytes, no dictionary lookup needed. In v2.0, serving from a partially-
+built `State` via clone+end is correct but requires holding the dict lock during the
+read. This is fine for correctness; for throughput, avoid concurrent reads during
+large writes.
+
+### Inode Size During an Open Write Session
+
+v1.0: `inode.size` is only updated at flush. Any `getattr()` during an active write
+session returns the last-committed size (or 0 for a new file).
+
+v2.0 streaming maintains `byte_count` in `OpenFileState`. To provide accurate
+`getattr()` during open sessions, `getattr()` can check `open_files` for the inode's
+fh and return `byte_count` as the live size. This is an improvement over v1.0 but is
+optional — POSIX does not require stable size until the next `stat()` after `close()`.
+
+---
+
+## Architectural Patterns
+
+### Pattern 1: Incremental Merkle Tree Insertion (State::push_bytes)
+
+**What:** `blockset::State` (= `Vec<Level>`) is a streaming write accumulator.
+`push_bytes(storage, &[u8])` feeds raw bytes one-by-one into a content-defined
+Merkle tree. The tree is finalised with `state.end(storage)` at flush time. Memory
+usage grows O(log N) in the number of distinct chunk boundaries, not O(N) in bytes.
+
+**When to use:** Any sequential write of file content into the Merkle tree. Replace
+`State::push_all(dict, &full_buf)` with `state.push_bytes(dict, chunk)` called
+incrementally from `write()`, then `state.end(dict)` at flush.
+
+**Key API:**
+```rust
+// Incremental (v2.0)
+let mut state: blockset::State = State::default();
+state.push_bytes(&mut dict, chunk);     // call for each write() chunk
+let root256 = state.end(&mut dict);    // finalise at flush
+let digest224 = dict.end(&root256);    // wrap for manifest storage
+
+// Batch convenience (v1.0 — replaces above)
+let digest224 = State::push_all(&mut dict, &full_buf);
 ```
-Application unlink(path) or rmdir
-    ↓
-[FuseHandler.unlink(parent_ino, name)]
-    ↓
-[VFS Adapter] — resolve name → InodeId
-    ↓
-[MetadataStore.get_inode(ino)] — check nlink
-    ├── nlink > 1 (hard link): decrement nlink, update inode only
-    └── nlink == 1 (last reference):
-            ↓
-        [MetadataStore.get_manifest(manifest_id)] — get chunk list
-            ↓
-        [WAL.append(refcount decrements for all chunks)]
-            ↓
-        [RefCountStore.decrement_batch(chunks)] — update refcounts
-            ↓
-        [MetadataStore.delete_inode(ino) + delete_manifest(id)]
-    ↓
-(Zero-refcount blocks remain until GC sweep — safe lazy cleanup)
-```
 
-### Garbage Collection Path
+### Pattern 2: Separated Write Accumulation from Read Path
 
-```
-User runs: slicefs gc (or background scheduler triggers)
-    ↓
-[GcEngine.run()]
-    ↓
-[Mark phase]
-    Scan all inodes → collect all manifests → union all chunk hashes
-    Result: HashSet<ChunkHash> (live set)
-    ↓
-[Sweep phase]
-    Iterate ChunkIndex entries
-    For each hash: if hash NOT in live set AND refcount == 0:
-        BlockStore.delete(hash)
-        ChunkIndex.remove(hash)
-    ↓
-[WAL.truncate()] — checkpoint WAL after successful GC
-```
+**What:** `OpenFileState` owns the in-progress write `State`. Reads during an open
+write session clone the `State` and call `end()` on the clone — the original
+accumulator remains live. The dictionary grows monotonically; reads reconstruct bytes
+from it via `GetBytes`.
 
-## Scaling Considerations
+**When to use:** Any read-after-write within the same file handle's open session.
 
-This is a local single-node filesystem for daily use. Scaling here means "handles large working sets without degrading" not "handles many concurrent users."
+### Pattern 3: Compression Removal — NoneCompressor as Default
 
-| Concern | At 10K files (small) | At 1M files (large) | At 10M+ files (extreme) |
-|---------|----------------------|---------------------|--------------------------|
-| Chunk index memory | Fits in memory easily | Bloom filter + sled on-disk index required | Tiered index; memory-mapped hot region |
-| Metadata store | SQLite/sled trivially sufficient | sled with careful key design | RocksDB or similar LSM |
-| GC mark phase | Fast full scan | Incremental mark needed | Reference graph optimization (FGC approach) |
-| Read latency | In-memory chunk cache dominates | Cache miss → disk; SSD essential | Larger chunk cache; read-ahead prefetch |
-| Write throughput | Chunker CPU-bound | Parallel chunk processing | Concurrent write paths per file |
+**What:** In v1.0, compression is applied in `to_wire_bytes` before bytes enter the
+Merkle tree: `compress_block(compressor, raw) → wire_bytes`. In v2.0, raw bytes
+go directly into the tree: `state.push_bytes(dict, raw_data)`. The `NoneCompressor`
+path already makes `to_wire_bytes` a no-op, so the code change is simply removing the
+call entirely and removing the `compressor` field from `SliceFsFilesystem`.
 
-### Scaling Priorities
+**Why removing compression improves dedup:** With compression in the write path,
+two files with identical raw content but written with different compressors produce
+different `Digest224` values — they do not deduplicate. With raw-byte hashing, identical
+content always produces an identical `Digest224` regardless of any future compression
+layer.
 
-1. **First bottleneck:** Chunk index memory pressure on large repos. Mitigation: bloom filter in front of on-disk sled tree so most lookups skip disk for definitely-absent chunks.
-2. **Second bottleneck:** GC mark phase duration on file deletion. Mitigation: lazy GC (accumulate dead chunks, sweep periodically) rather than GC on every delete.
-3. **Third bottleneck:** Metadata store write contention. Mitigation: sled or sqlite with WAL mode handles concurrent reads well; writes are serialized through the VFS adapter.
+---
 
-## Anti-Patterns
+## Anti-Patterns to Avoid
 
-### Anti-Pattern 1: Mixing Metadata and Block Storage
+### Anti-Pattern 1: Holding dict Lock During Entire Write Session
 
-**What people do:** Store inodes and block data in the same key-value store or database, using different key prefixes.
+**What people do:** Lock the dict for the entire duration of streaming push, from
+first `write()` to `flush()`.
 
-**Why it's wrong:** Metadata and block data have very different access patterns. Metadata is read on every filesystem operation; block data is read only when file content is accessed. Mixing them in one store causes metadata operations to contend with large block I/O. GC becomes harder (how do you scan only blocks?). The boundary between "metadata schema" and "storage format" becomes unclear.
+**Why it's wrong:** Blocks all other dict operations (reads, GC, metadata commits)
+for the full write duration of every open file. For large files, this creates
+multi-second lock contention.
 
-**Do this instead:** Maintain completely separate stores. MetadataStore owns inodes, directories, manifests. BlockStore owns raw chunk bytes. ChunkIndex is a third, separate structure. Each has its own read/write patterns and can be independently tuned or swapped.
+**Do this instead:** Acquire the dict lock only for each individual `push_bytes` call
+in `write()` (or for each FUSE-level write callback). Release it after each call.
+The dict is a `BTreeMap` with synchronous `add()` semantics — fine-grained locking
+is correct.
 
-### Anti-Pattern 2: Eager Refcount Decrement on Unlink
+### Anti-Pattern 2: Cloning State as a Read Path Shortcut
 
-**What people do:** When a file is deleted, immediately decrement all chunk refcounts and delete zero-refcount blocks in the same transaction.
+**What people do:** Store a full `Vec<u8>` shadow buffer alongside the `State` for
+fast read-after-write, reasoning that the extra memory is "just temporary."
 
-**Why it's wrong:** Deleting a large file with many chunks requires touching many index entries synchronously on the hot path. On a file with 100K chunks, this serializes 100K block deletions into the unlink handler. Worse, if the system crashes mid-delete, the filesystem may be in an inconsistent state (some blocks deleted, some not).
+**Why it's wrong:** For a 10GB file write, the shadow buffer holds 10GB of RAM — the
+exact problem streaming writes are meant to solve. The point of streaming is to keep
+memory at O(log N), not O(N).
 
-**Do this instead:** Decrement refcounts in the WAL but defer physical block deletion to the background GC engine. The unlink path becomes: log refcount decrements → update metadata → return. GC later cleans up zero-refcount blocks safely.
+**Do this instead:** Read-after-write during an open write session reconstructs bytes
+by cloning the State and calling `end()`. This has per-call cost but bounded memory.
+If read performance during writes is critical, flush to CAS first (making the bytes
+available via GetBytes from the dictionary) then serve from the committed manifest.
 
-### Anti-Pattern 3: Fixed Block Size Without Pluggable Chunking Boundary
+### Anti-Pattern 3: Removing `cas_committed` Guard
 
-**What people do:** Hard-code a fixed block size (e.g., 4KB) as the chunking granularity.
+**What people do:** Simplify `release()` to always call `flush_buffer_to_cas`, even
+when the buffer is empty and data was already committed.
 
-**Why it's wrong:** Fixed-size chunking destroys deduplication across data that has been offset-shifted (inserting one byte at the start of a file changes every subsequent block boundary). The owner has existing rolling-hash/content-defined chunking technology for exactly this reason. Fixed-size chunking is only appropriate as a fallback or for append-only workloads.
+**Why it's wrong:** Without the guard, `release()` calls
+`set_manifest(ino, &[])` on an empty `State`, which overwrites the just-committed
+manifest with an empty one — silently erasing all written data. This is a pre-existing
+v1.0 bug that was fixed with `cas_committed`. Streaming writes must preserve this guard.
 
-**Do this instead:** Abstract chunking behind a `trait Chunker`. Ship with the owner's existing CDC implementation as the default. Allow fixed-size as an alternative strategy selectable at mount time.
+### Anti-Pattern 4: Implementing Streaming via Chunked Buffers
 
-### Anti-Pattern 4: In-Memory-Only Chunk Index
+**What people do:** Divide the write buffer into fixed-size chunks (e.g., 4MB), flush
+each chunk as a separate CAS object, and store multiple Digest224s in the manifest.
 
-**What people do:** Keep the entire hash-to-address index in memory as a HashMap.
+**Why it's wrong:** This creates a manifest that varies with write patterns (flush
+frequency), breaking deduplication for files that contain the same content but were
+written in different chunk sizes. It also complicates the read path (must reassemble
+across manifest entries) and the truncate path.
 
-**Why it's wrong:** The index grows proportionally to the number of unique chunks. A 1TB filesystem with 4MB average chunk size has 250K unique chunks. A 1MB average chunk size has 1M unique chunks. At 64 bytes per index entry, 1M chunks = 64MB just for the index — before accounting for HashMap overhead. For a daily-driver filesystem, this is unacceptable long-term.
+**Do this instead:** Use `State::push_bytes` as designed — a single `State` accumulates
+all bytes across all `write()` calls for the file's open session, producing exactly one
+`Digest224` per file on flush, matching v1.0 manifest format.
 
-**Do this instead:** Use a bloom filter as a probabilistic first layer (fast "definitely not present" check) backed by an on-disk sled tree. Hot entries naturally stay in sled's block cache. This is the BloomStore pattern from FAST'12 research.
-
-### Anti-Pattern 5: Implementing POSIX Semantics in the Block Store
-
-**What people do:** Teach the block store about files, directories, and permissions.
-
-**Why it's wrong:** The block store should be purely content-addressed: put/get/delete by hash. Any POSIX knowledge in the block store makes it impossible to swap backends (e.g., replace local disk with S3). It also makes testing much harder.
-
-**Do this instead:** All POSIX semantics live in the VFS Adapter and Metadata Engine. The block store is a dumb blob store. This is the boundary that enables future distributed/P2P backends without changes to the POSIX layer.
+---
 
 ## Integration Points
 
-### External Services
-
-| Service | Integration Pattern | Notes |
-|---------|---------------------|-------|
-| FUSE kernel module | fuser crate session loop; /dev/fuse fd | On macOS: FUSE-T via NFS; on Linux: libfuse kernel module |
-| FUSE-T (macOS) | fuser auto-detects via mount flags | No kext required; uses NFS transport internally |
-| WinFSP (Windows) | fuser WinFSP backend (future) | Separate mount mechanism; same Filesystem trait |
-| OS page cache | `direct_io` flag controls bypass; writeback vs write-through mode | Write-through by default is safest; write-back doubles throughput but requires careful cache invalidation |
-
 ### Internal Boundaries
 
-| Boundary | Communication | Notes |
-|----------|---------------|-------|
-| FuseHandler → VFS Adapter | Direct method calls (same process) | VFS Adapter holds mutable state; must be Arc<Mutex> or use message passing |
-| VFS Adapter → Metadata Engine | Synchronous read/write via MetadataStore trait | Trait allows swapping sled for sqlite or future distributed metadata |
-| VFS Adapter → Write Path Engine | Synchronous call on flush boundary | Write engine is stateless; VFS Adapter owns the write buffer per file handle |
-| Write Path Engine → Chunker | Trait method call (pluggable) | Owner's existing chunking tech plugs in here via the Chunker trait |
-| Write Path Engine → ChunkIndex | Lookup and insert per chunk | Hot path; must be fast; bloom filter in front |
-| Write Path Engine → BlockStore | put() only (immutable once written) | Trait abstraction; local disk impl first |
-| RefCountStore → WAL | WAL writes before refcount mutations commit | Crash safety boundary |
-| GC Engine → BlockStore | delete() for zero-refcount blocks | Only path that deletes from CAS; must check refcount atomically |
-| GC Engine → MetadataStore | Read-only during mark phase | GC must not modify metadata during scan |
+| Boundary | Communication | Notes for v2.0 |
+|----------|---------------|----------------|
+| `filesystem.rs::write()` → `blockset::State::push_bytes` | Direct call on `OpenFileState.state` | Acquire dict lock for each call; dict must be passed as `&mut impl StorageAdd` |
+| `filesystem.rs::flush_buffer_*()` → `blockset::State::end` | Direct call, returns `Digest256` | Then call `dict.end(&root256)` for the `Digest224` |
+| `filesystem.rs::read()` → `blockset::State::clone().end()` | Clone state for non-destructive materialise | Lock ordering: open_files then dict |
+| `SliceFsFilesystem.dict` → `DictMetadataStore.dict` | Two separate `Mutex<Dictionary>` clones | Write path populates filesystem's dict; manifest stores the resulting Digest224; both dicts must stay in sync (currently achieved by sharing the same Dictionary at construction time via Arc) |
+| `write()` / `flush()` → `inode.size` | `byte_count` in OpenFileState | Update inode size at flush; optionally expose live size via getattr |
 
-## Suggested Build Order
+### What is NOT Changed
 
-Dependencies drive this order: lower layers must exist before upper layers can be tested.
+| Component | Status | Reason |
+|-----------|--------|--------|
+| `DictMetadataStore` | Unchanged | Same `set_manifest`, `increment_refcount`, `get_manifest` API |
+| `blockset::State`, `Tree::push_bytes`, `Tree::end` | Unchanged | Already has the full incremental API |
+| `blockset::GetBytes`, `GetData` | Unchanged | Read path reconstruction unchanged |
+| `blockset::Dictionary` | Unchanged | BTreeMap, same `StorageAdd` trait |
+| FUSE lifecycle (`open`, `flush`, `fsync`, `release`) | Unchanged signatures | Delegate to same helpers |
+| WAL, GC, refcount logic | Unchanged | Operate on `Digest224`; indifferent to how it was produced |
+| `simulate_*` helpers (mkdir, unlink, rename, etc.) | Unchanged | Do not touch write buffer |
+
+---
+
+## Suggested Build Order for v2.0
+
+Dependencies drive the order.
 
 ```
-Phase 1 — CAS Foundation
-    BlockStore trait + LocalDiskStore impl
-    ContentHasher trait + BLAKE3 impl
-    ChunkIndex (in-memory only, no bloom filter yet)
-    Basic unit tests: put/get/exists round-trip
+Step 1 — Remove compression from write path
+    - Remove to_wire_bytes() call in flush_buffer_to_cas and flush_buffer_for_fsync
+    - Remove from_wire_bytes() call in read(), test_read(), test_setattr_size, simulate_readlink
+    - Set store_version check to pass-through (or remove the field)
+    - Tests: verify write-then-read round-trip produces identical bytes
+    - NOTE: This is a prerequisite for streaming, not a consequence of it.
+      Raw bytes into push_bytes is the correct semantic.
 
-Phase 2 — Chunking Integration
-    Chunker trait
-    Plug in owner's existing CDC implementation
-    WritePathEngine: chunk → hash → store (no dedup yet)
-    Integration test: write file, verify block contents
+Step 2 — Add byte_count to OpenFileState
+    - Add byte_count: u64 field
+    - Increment in test_write on each write call
+    - Use byte_count as inode.size source at flush (replacing buf.len())
+    - Tests: verify getattr size matches bytes written
 
-Phase 3 — Metadata Engine
-    Inode struct, FileManifest, DirEntry
-    MetadataStore trait + sled implementation
-    Inode create/read/update/delete
-    Directory listing and path resolution
+Step 3 — Replace Vec<u8> buf with blockset::State
+    - Change OpenFileState.buf: Vec<u8> → state: blockset::State
+    - Change test_write to call state.push_bytes(&mut dict, data)
+    - Change flush_buffer_to_cas / flush_buffer_for_fsync to call state.end() + dict.end()
+    - Update flush guard: replace buf.is_empty() check with byte_count == 0
+    - Tests: write / flush / read round-trip for files of various sizes
 
-Phase 4 — FUSE Layer (minimal read-only first)
-    FuseHandler implementing fuser::Filesystem
-    VFS Adapter: inode number mapping
-    lookup(), getattr(), read(), readdir()
-    Mount and unmount a read-only filesystem
+Step 4 — Fix read-after-write for open write handles
+    - Replace "serve from buf" with clone+end materialisation
+    - Tests: write then read within same open session returns correct bytes
 
-Phase 5 — Full Read/Write POSIX
-    Write path: write(), flush(), fsync()
-    Inline deduplication in write path
-    create(), unlink(), mkdir(), rmdir(), rename()
-    symlink(), link(), chmod(), chown(), utimens()
-    xattr operations
-    POSIX compliance test suite
+Step 5 — Handle non-sequential writes
+    - Track next_expected_offset in OpenFileState
+    - On sequential write: push_bytes as normal
+    - On non-sequential write: fallback to materialise-and-buffer
+    - Tests: pwrite at offset > 0, interspersed read/write patterns
 
-Phase 6 — Reference Counting + WAL
-    RefCountStore
-    WAL with crash recovery
-    Correct refcount maintenance through create/unlink/rename
+Step 6 — Handle truncate with in-progress streaming State
+    - test_setattr_size: if open write handle, handle new_size < byte_count by
+      materialising, truncating, rebuilding State
+    - Tests: truncate during write, extend during write
 
-Phase 7 — Garbage Collection
-    Mark phase: walk manifests to live set
-    Sweep phase: delete dead blocks
-    GC CLI command
-
-Phase 8 — Read Path Optimization
-    ChunkCache (LRU in-memory)
-    Bloom filter in ChunkIndex
-    Persistent ChunkIndex (sled backend)
-    Read-ahead prefetch for sequential access
-
-Phase 9 — Production Hardening
-    Error recovery and fsck-style repair
-    Comprehensive integration tests
-    Benchmark suite (dedup ratio, read/write throughput)
-    Cross-platform validation (macOS FUSE-T, Linux libfuse)
+Step 7 — Remove compression crate dependency from write path
+    - Remove compressor field from SliceFsFilesystem (or make it read-only for
+      backward-compatible reads of old blocks if needed)
+    - Remove slicefs-compression from slicefs-cli write-path imports
+    - Tests: existing tests pass without compression dependency on write path
 ```
 
-## Reference Systems
-
-| System | Type | Key Lessons |
-|--------|------|-------------|
-| **ZFS** | Kernel filesystem | DDT (dedup table) as central hash→address map; inline dedup; transaction groups for atomicity; DDT must fit in ARC RAM for performance |
-| **Btrfs** | Kernel filesystem | Extent tree for block reference counting; COW as foundation for dedup; out-of-band dedup via ioctl; refcount in extent_item struct |
-| **Borg** | Backup archiver | Repository = low-level KV store; Manifest = root of all archives; rolling hash chunker (Buzhash); global dedup across all backups; FUSE mount for restore |
-| **casync** | Image sync tool | Removes file boundaries before chunking; chunk store as directory tree; SHA256 + xz per chunk; index file separate from chunk store |
-| **Perkeep** | Personal storage | blobpacked: small blobs merged into large zip files for efficient access; metadata index separate from blob store; recovery via index rebuild |
-| **rdedup** | Dedup engine (Rust) | Recursive index (index-of-index until single hash); pluggable chunker/hasher/compressor via traits; immutable conflict-free store design; incremental GC |
+---
 
 ## Sources
 
-- [ZFS Deduplication — TrueNAS Documentation](https://www.truenas.com/docs/references/zfsdeduplication/)
-- [Introducing OpenZFS Fast Dedup — Klara Systems](https://klarasystems.com/articles/introducing-openzfs-fast-dedup/)
-- [Btrfs Design — BTRFS Documentation](https://btrfs.readthedocs.io/en/latest/dev/dev-btrfs-design.html)
-- [Btrfs: how reference counting works — Josef Bacik](https://josefbacik.github.io/kernel/btrfs/2021/12/16/btrfs-extent-reference-counting.html)
-- [Btrfs Deduplication — BTRFS Documentation](https://btrfs.readthedocs.io/en/latest/Deduplication.html)
-- [Borg Internals — Data Structures and File Formats](https://borgbackup.readthedocs.io/en/stable/internals/data-structures.html)
-- [casync — Content-Addressable Data Synchronization Tool](https://github.com/systemd/casync)
-- [Perkeep blobpacked package](https://pkg.go.dev/perkeep.org/pkg/blobserver/blobpacked)
-- [rdedup — Data Deduplication Engine (Rust)](https://github.com/dpc/rdedup)
-- [fuser — Filesystem in Userspace for Rust](https://docs.rs/fuser/latest/fuser/trait.Filesystem.html)
-- [fuser crate on crates.io](https://crates.io/crates/fuser)
-- [FUSE Inode Lifecycle — libfuse low-level ops](https://libfuse.github.io/doxygen/structfuse__lowlevel__ops.html)
-- [The Logic of Physical Garbage Collection in Deduplicating Storage — USENIX FAST'17](https://www.usenix.org/system/files/conference/fast17/fast17-douglis.pdf)
-- [Sparse Indexing: Large Scale Inline Deduplication — USENIX FAST'09](https://www.usenix.org/legacy/events/fast09/tech/full_papers/lillibridge/lillibridge_html/index.html)
-- [Scalable Filesystem Metadata Services with RocksDB — Alluxio](https://www.alluxio.io/resources/presentations/scalable-filesystem-metadata-services-with-rocksdb/)
-- [Inline vs Post-processing Deduplication — TechTarget](https://www.techtarget.com/searchdatabackup/tutorial/Inline-deduplication-vs-post-processing-Data-dedupe-best-practices)
-- [FUSE Caching Overview — Google Cloud Storage FUSE](https://docs.cloud.google.com/storage/docs/cloud-storage-fuse/caching)
-- [Linux FUSE Performance — Medium](https://medium.com/@xiaolongjiang/linux-fuse-file-system-performance-learning-efb23a1fb83f)
+- Direct inspection: `crates/slicefs-cli/src/filesystem.rs` (all 1,500+ lines)
+- Direct inspection: `crates/data-id/blockset/src/content_dependant_tree.rs` (State impl)
+- Direct inspection: `crates/data-id/blockset/src/tree.rs` (Tree trait, push_bytes, push_all)
+- Direct inspection: `crates/data-id/blockset/src/merkle_tree.rs` (MerkleTreeState)
+- Direct inspection: `crates/data-id/blockset/src/dictionary.rs` (StorageAdd impl)
+- Direct inspection: `crates/data-id/blockset/src/get_data.rs` (GetBytes, GetData)
+- Direct inspection: `crates/metadata/src/store.rs` (DictMetadataStore structure)
+- Direct inspection: `crates/slicefs-compression/src/lib.rs` (compress_block, decompress_block)
+- Direct inspection: `crates/slicefs-cli/tests/write_path_tests.rs` (integration test patterns)
+- `.planning/PROJECT.md` (v2.0 milestone goals)
 
 ---
-*Architecture research for: Deduplicating FUSE Filesystem (Rust / DedupFS)*
-*Researched: 2026-03-27*
+
+*Architecture research for: SliceFS v2.0 streaming writes integration*
+*Researched: 2026-03-29*

@@ -1,335 +1,252 @@
 # Pitfalls Research
 
-**Domain:** Deduplicating FUSE Filesystem (Rust, CAS-based, cross-platform)
-**Researched:** 2026-03-27
-**Confidence:** HIGH (multiple authoritative sources: USENIX FAST papers, ZFS post-mortems, FUSE benchmark studies, official crate documentation)
+**Domain:** SliceFS v2.0 — Streaming Writes, Compression Removal, Bug Fixes
+**Researched:** 2026-03-29
+**Confidence:** HIGH (v1.0 codebase read directly; FUSE kernel mailing lists; Linux refcount subsystem docs; USENIX FAST papers; production CAS backup tool analysis)
+
+---
+
+## Scope
+
+This document covers pitfalls specific to the v2.0 milestone additions:
+
+1. Replacing the buffered write path with streaming writes via `State::push_bytes()` (incremental Merkle tree)
+2. Removing compression from the write path so dedup hashes on raw bytes
+3. Maintaining backward compatibility with v1.0 stores that contain compressed blocks
+4. Fixing the refcount overflow bug and statfs reporting
+5. Improving snapshot lookup from O(n) to indexed
+
+The foundational pitfalls (GC races, crash consistency, FUSE context-switch overhead, dedup index memory) remain valid from the v1.0 research and are not repeated here.
 
 ---
 
 ## Critical Pitfalls
 
-### Pitfall 1: Reference Count Corruption Under Concurrent Deletion
+### Pitfall 1: State::push_bytes() Is Append-Only — Random Writes and Truncation Require Full Rebuild
 
 **What goes wrong:**
-When a file is deleted while a background GC pass is scanning live blocks, a block can be decremented to zero and freed before the deletion completes atomically — or conversely, a newly-written block that duplicates an existing block gets freed prematurely if the GC marks the block unreachable before the new reference is committed. This is the #1 cause of silent data loss in deduplicating storage.
+The `State` (content-dependent Merkle tree) accumulates bytes via `push_bytes()` in forward-only order. It has no concept of "overwrite bytes at offset N" or "truncate to size M." When the FUSE layer receives a random-offset write (`write(fd, buf, len)` at offset != current EOF) or a `setattr`/`ftruncate` call, naively calling `push_bytes()` with only the new data produces a completely wrong tree root. The inode's manifest will point to content that represents only the new bytes, discarding all earlier content.
 
 **Why it happens:**
-Developers treat reference counting as a simple increment/decrement, but in a CAS system the invariant "refcount == 0 means deletable" must hold across a write that establishes a reference AND a commit that makes that reference durable. Any window between "compute hash" and "commit reference" is a TOCTOU race. USENIX FAST 2013 documented this as a fundamental challenge requiring epoch-based or generation-number protocols to solve correctly.
+The buffered write path (v1.0) sidesteps this by keeping a `Vec<u8>` buffer in memory for the entire file lifetime and only calling `State::push_all()` at flush time. The buffer supports random writes and truncation trivially. When a developer migrates to streaming pushes without reading the `State` API contract, they assume `push_bytes()` is equivalent to `write(2)` semantics, but it is only equivalent to sequential `write(2)` from offset 0 with no gaps or overwrites.
 
 **How to avoid:**
-- Use a write-ahead log (WAL) or journal that records the *intention* to add a reference before the reference is counted as live.
-- Implement a two-phase GC: mark phase (find all live hashes from committed metadata) and sweep phase (free unreferenced blocks), with the constraint that any block referenced in an in-progress transaction is never swept.
-- Never decrement a refcount and free a block in the same atomic operation without holding a lock that prevents concurrent writers from adding references to the same block.
-- Consider epoch-based deletion: a block can only be freed when its refcount has been zero for at least two full GC cycles.
-- In Rust: model reference state transitions as an explicit state machine, not a bare `AtomicU64`.
+- Accept that `State` is a streaming digest accumulator, not a random-access buffer. The FUSE write path must maintain a per-handle `Vec<u8>` buffer **until it is certain all writes are sequential from offset 0 with no gaps**.
+- Alternatively, implement a "write pipeline" that sorts all write fragments by offset and detects gaps/overwrites before deciding whether streaming is possible. Only invoke `State::push_bytes()` if writes are provably sequential.
+- For the common case (sequential file creation, `cp`, `dd`), detect that `offset == current_buf_len` before pushing. Fall back to buffer otherwise.
+- Truncation (`setattr size < current`) can never be streamed — it always requires reading back and re-pushing the first `new_size` bytes, or discarding the in-progress `State` and starting fresh.
+- **Key invariant to codify in a type or comment:** A `State` that has had any bytes pushed to it cannot be rewound. If you need to truncate-and-continue, you must construct a new `State` and replay the kept bytes.
 
 **Warning signs:**
-- Test suite passing but integration tests with concurrent readers + deletes producing checksum errors.
-- Spurious "block not found" errors during read that disappear on retry.
-- Any code path where `refcount.fetch_sub(1)` is not in the same transaction as the metadata deletion.
+- Test with `vim`, `emacs`, or `cp --sparse` through the mount. These tools write non-sequentially (overwrite header bytes after seeking to EOF, or write the last byte first to pre-allocate).
+- A write-intensive test that uses `pwrite(2)` (positioned write) at random offsets produces files that read back garbage.
+- `ftruncate(fd, 0)` followed by new writes produces a file whose content starts with the old content rather than the new content.
 
-**Phase to address:** Core CAS + metadata layer (foundational phase); enforce in the first implementation of the GC.
+**Phase to address:** v2.0 streaming write phase — the streaming/sequential-write detection logic must be the first implementation decision. Do not write a single `push_bytes()` call in FUSE callbacks without this guard.
 
 ---
 
-### Pitfall 2: GC Race — New Write Lost During Mark Phase
+### Pitfall 2: The Inode Size Stored in Metadata Desynchronizes from the Merkle Tree Root
 
 **What goes wrong:**
-A GC mark phase scans all live inodes/blocks and produces a "live set." Between the start of the scan and the sweep, a new file is written whose blocks are not in the live set snapshot. The sweep phase then deletes blocks that are actually referenced, causing data loss without error.
+In the buffered write path, `inode.size = buf.len()` is set atomically with `set_manifest(digest)` at flush time. In the streaming path, `inode.size` must be updated incrementally as bytes are pushed, but the Merkle tree root is only finalized when `State::end()` is called. There is a window where `inode.size > 0` but the manifest is still the empty/old root from the previous flush. If a crash occurs or the FUSE daemon is killed between incrementing `inode.size` and finalizing the manifest, reads will return data from the old manifest but `stat(2)` will report the new (larger) size — producing apparent data truncation or garbage reads.
 
 **Why it happens:**
-Mark-and-sweep GC on a live filesystem cannot take a consistent snapshot without either pausing all writes or using a protocol that safely handles concurrent mutations. Most implementations get this right for the common case but miss the edge case where a write begins *after* the mark starts but *before* the sweep completes.
+Streaming writes update size on every push (or batch of pushes) to keep `getattr` responses accurate during the write, but the digest is only computable when the stream ends. The size and the digest are two separate invariants that v1.0 always kept in sync via a single flush-time update. The streaming path breaks this synchronization guarantee unless explicitly designed to handle it.
 
 **How to avoid:**
-- Maintain a "pending references" list: any block referenced by an in-progress write is added to a protected set before the write commits. GC never sweeps blocks in this set.
-- Alternatively, use reference-counted blocks with strict "no free if refcount transitions through zero while any write transaction is open" semantics.
-- For a local single-node filesystem, a readers-writer lock on the GC pass (write lock for the sweep phase, read lock held by all active write transactions) is practical and correct.
-- Test with a "GC chaos" mode that injects GC cycles between every write step.
+- Never write `inode.size` to durable metadata during an in-progress stream. Keep size as in-memory state on the `OpenFileState`.
+- Only commit `(manifest, size)` atomically as a unit when `State::end()` is called (at `fsync`, `release`, or at deliberate checkpoint intervals).
+- Use the WAL (already present) to journal both the manifest digest and the new size in a single atomic operation, so crash recovery either sees the complete update or the complete absence of it.
+- If intermediate `getattr` accuracy is required (so `ls -l` shows a growing file during a large write), track size in-memory per file handle and return the in-memory size from FUSE `getattr` while deferring the durable update.
 
 **Warning signs:**
-- GC completes without error but subsequent reads of recently written files fail.
-- GC trigger timing matters: bugs that only appear when GC runs frequently.
-- Any GC implementation with a "collect all hashes first, then delete" structure without transaction coordination.
+- `stat(2)` shows `size=1GB` but reading the file returns 0 bytes after a crash.
+- Any code that calls `update_inode(size=N)` in a loop during streaming without a paired `set_manifest`.
+- `getattr` reads `inode.size` from durable metadata (redb/WAL) rather than from in-memory `OpenFileState`.
 
-**Phase to address:** GC implementation phase; do not ship GC without a formal proof or exhaustive concurrency test.
+**Phase to address:** v2.0 streaming write phase — write the crash recovery test for streaming writes before implementing streaming.
 
 ---
 
-### Pitfall 3: Crash Inconsistency — Orphaned Blocks and Dangling References
+### Pitfall 3: Compression Removal Breaks Dedup Hash Identity — v1.0 and v2.0 Blocks Appear as Different Content
 
 **What goes wrong:**
-Two distinct failures:
-1. A write commits new blocks to the block store but crashes before committing the metadata reference. Result: blocks exist but no inode references them — orphaned blocks consuming space forever.
-2. A metadata update commits the reference but the blocks are not fully written. Result: a dangling reference pointing to nonexistent or partial block data — data corruption on read.
+In v1.0, the write path is: `raw_bytes → compress_block(raw) → State::push_all(wire_bytes)`. The Merkle root (Digest224) is computed over the **compressed** bytes. In v2.0, the target write path is: `raw_bytes → State::push_all(raw_bytes)`. The Merkle root is computed over the **raw** bytes. These two roots are structurally incompatible: the same file content produces a different Digest224 in v1.0 vs v2.0. This means:
+
+1. A file written in v1.0 and re-written in v2.0 gets stored as two distinct blocks — zero dedup between v1.0 and v2.0 writes, even for identical content.
+2. The v1.0 manifest digest stored in metadata cannot be used to read the v2.0 block store.
+3. Dedup ratio drops at store migration time because the logical block identity changes.
 
 **Why it happens:**
-CAS-based systems require two durable operations to be atomic together: (a) write the block, and (b) record the reference in metadata. Filesystems frequently crash between these two steps. Research on crash-consistency bugs found 10 new bugs in mature Linux filesystems (CrashMonkey, 2021), and deduplication adds new failure windows beyond what standard journaling handles.
+The correct ordering is always: **hash on raw bytes, then optionally compress the stored block as a storage optimization**. v1.0 violated this ordering by hashing compressed bytes, which broke cross-compressor dedup. v2.0 fixes the ordering, but fixing it creates a two-epoch block store where the two epochs cannot share dedup state.
 
 **How to avoid:**
-- Write blocks to the CAS store first, flush to durable storage, then commit the metadata reference. This ensures orphans (recoverable via GC) rather than dangling references (unrecoverable without additional mechanisms).
-- Journal or WAL the metadata reference with "write intent" semantics: the log entry is the ground truth; block existence is confirmed on recovery.
-- On startup, run a fast orphan scan (check all blocks with refcount == 0 that are older than a threshold) and either GC them or verify they are referenced.
-- Use `fdatasync` / `fsync` at the correct points; missing a sync is the single most common crash-consistency bug.
-- Use a crash-testing harness (e.g., a trait that injects failures at arbitrary storage operations) in the test suite from the beginning.
+- Add a per-block metadata tag (`raw` vs `compressed:algo`) that the read path consults when fetching a block. The manifest stores the Digest224 of the **raw** bytes; the block file on disk is stored with a header indicating whether it is compressed. This separates the identity (raw hash) from the storage format (compressed payload).
+- For the v2.0 migration: treat v1.0 blocks as read-only legacy. New writes go to the v2.0 store. Old blocks remain readable via the v1.0 decompression path. No migration of existing blocks is required at mount time.
+- The `store_version` field already in `SliceFsFilesystem` gates read-path behavior. Extend it to gate write-path behavior: version 1 writes hashed-compressed, version 2 writes hashed-raw.
+- Document that stores created with v1.0 and stores created with v2.0 cannot share dedup identity. Users who need unified dedup must migrate (read all files from v1.0 store, write to v2.0 store).
 
 **Warning signs:**
-- No explicit ordering between block write and metadata commit in the code.
-- `fsync` is called at the end of a batch operation rather than at phase boundaries.
-- Recovery logic that assumes "if metadata exists, all referenced blocks exist."
+- `slicefs stats` on a store that was first populated in v1.0 and then updated in v2.0 shows near-zero dedup ratio even when the content is identical across old and new writes.
+- Any test that writes the same bytes in v1.0 mode and v2.0 mode and expects the same Digest224.
+- Code that calls `State::push_all(wire_bytes)` regardless of whether `wire_bytes` are compressed or raw.
 
-**Phase to address:** Storage layer + metadata layer; write the recovery path before shipping the write path.
+**Phase to address:** v2.0 compression-removal phase — the block identity design decision (hash raw vs hash compressed) must be locked before touching the write path, and it must be documented in the store format spec.
 
 ---
 
-### Pitfall 4: FUSE Context-Switch Overhead Destroying Small-Write Performance
+### Pitfall 4: Mixed-Version Stores — Decompression Required for Old Blocks, Absent for New Blocks
 
 **What goes wrong:**
-Small I/O operations (4K writes) perform at ~20% of native filesystem speed on FUSE. Each FUSE write triggers a kernel/userspace context switch, and FUSE3 adds an extra `getattr` call per write to check for external changes. For a deduplicating filesystem, each write also triggers a hash computation, block lookup, and potential metadata update — compounding the overhead. The resulting latency is 3–4× worse than native for write-heavy workloads.
+After compression is removed from the write path (v2.0), the store contains a mix of:
+- Old blocks: stored as `[AlgorithmId byte][compressed payload]` (v1.0 format)
+- New blocks: stored as `[raw bytes]` with no header
+
+The read path must detect which format each block is in. The existing fallback in `from_wire_bytes()` (try decompress; on error, return raw) works for blocks that decompress cleanly, but is **unreliable for raw blocks whose first byte happens to be a valid `AlgorithmId`**. A raw block whose first byte is `0x01` (the Zstd ID) will be passed to the Zstd decompressor, which will either return an error (detectable) or — in pathological cases — successfully decompress garbage into garbage (silent corruption).
 
 **Why it happens:**
-FUSE's architecture places all VFS requests in a shared pending queue, causing lock contention under concurrent I/O. The userspace daemon round-trip doubles the effective path length of every syscall. The `getxattr` security capability call (on Linux) cannot be cached at the kernel level and fires on every write. USENIX FAST 2017 quantified FUSE worst-case overhead at 83% degradation.
+The fallback approach `try decompress, on error return raw` is correct only if decompression failure is guaranteed for unformatted input. In practice, raw binary data can begin with any byte value, and a decompressor may accept malformed input and return a non-error result. For Zstd specifically, the frame magic is `0xFD2FB528` (4 bytes), so a raw block is unlikely to accidentally satisfy the full Zstd header — but for the `AlgorithmId::None` and `AlgorithmId::Raw` IDs (which are passthroughs), any block whose first byte is `0x00` or `0x02` will appear as a "valid" no-compression block and return the remaining bytes as content, dropping the first byte.
 
 **How to avoid:**
-- Enable `writeback_cache` in fuser: batches small writes into 128KB requests, dramatically improving sequential write throughput. Trade-off: data in cache is lost if the daemon crashes — acceptable for a local filesystem with crash consistency guarantees at the storage layer.
-- Disable `FUSE_CAP_AUTO_INVAL_DATA` for local-only filesystems where external modification is not possible.
-- Hash computation should be done on write-path data *before* the context switch back to the kernel, not on the kernel-received data, to overlap work with scheduling latency.
-- Use a buffer pool to avoid per-operation allocation in the write hot path.
-- Benchmark the write path early with `fio` and establish latency/throughput baselines. Do not wait until the end.
+- Add an explicit format sentinel to the block store, not just a runtime heuristic. Options:
+  - **Preferred:** Store a `format_version` field in the block store index or in the block's directory manifest. The read path consults the version field to decide whether to attempt decompression, not the first byte of the block.
+  - **Acceptable:** Use the existing `store_version` field in `SliceFsFilesystem` consistently. If `store_version < 2`, all blocks are in v1.0 compressed format. If `store_version >= 2`, all blocks are in v2.0 raw format. No mixed-version store at the individual block level.
+  - **Avoid:** Per-block heuristic decompression detection. It is fragile and will corrupt files whose first byte accidentally matches an `AlgorithmId`.
+- Implement a `slicefs migrate` command that converts all blocks in a v1.0 store to v2.0 format atomically. After migration, `store_version` is bumped to 2 and no legacy path is needed.
 
 **Warning signs:**
-- Sequential 4K write throughput below 100MB/s on NVMe.
-- CPU profiling shows the FUSE daemon thread spending >20% of time in lock/unlock or queue operations.
-- Any write path that does a blocking metadata lookup per block without batching.
+- Any file whose first byte is `0x00` (e.g., a binary format with a null-padded header, a zero-filled sparse file, or a TIFF image whose magic starts with `0x49 0x49`) reads back with the first byte stripped or with corrupted content.
+- The `from_wire_bytes` fallback is triggered in production (add a log/metric counter to detect this).
+- No `slicefs migrate` command exists for v1.0 → v2.0 store conversion.
 
-**Phase to address:** FUSE integration and write path phase; baseline benchmarks must be part of phase acceptance criteria.
+**Phase to address:** v2.0 compression-removal phase — resolve block format versioning before implementing the raw write path. The block-level format detection approach must be decided and documented as part of the store format spec.
 
 ---
 
-### Pitfall 5: Dedup Table Memory Explosion (The ZFS DDT Lesson)
+### Pitfall 5: Refcount Overflow — Silent Wrap to Zero Frees a Still-Referenced Block
 
 **What goes wrong:**
-The deduplication index (hash → block location mapping) grows to consume all available RAM, then spills to disk, causing a read-modify-write cycle on every block write. At this point deduplication makes writes *slower* than not deduplicating. ZFS's DDT (Dedup Table) is the canonical example: each entry is ~320 bytes of kernel slab memory; a 16TB pool with 4K blocks has 4 billion potential entries (~1.2TB of RAM required).
+If a block's reference count is stored as a fixed-width unsigned integer (e.g., `u16`, `u32`) and the count reaches the maximum value, an arithmetic increment wraps to zero. The GC then sees `refcount == 0` and frees the block. All files referencing that block now have a dangling manifest entry pointing to a deleted block. Reads return `ENOENT` from the block store (best case) or return bytes from a different block that happened to reuse the same storage address (worst case, silent data corruption).
+
+In the v1.0 codebase, the PROJECT.md identifies this as a known bug. The existing implementation uses a simple numeric refcount that is incremented on dedup hit without overflow protection.
 
 **Why it happens:**
-Developers size the index for their test data volume, not for the worst-case live production dataset. Unique blocks — blocks that are never duplicated — still require index entries, consuming memory with zero deduplication benefit. ZFS found that in general-purpose workloads, most blocks are unique, making the index size proportional to total storage rather than duplicate storage.
+Refcounts wrap silently in Rust with `u32::wrapping_add(1)` or when using `+` on debug builds without overflow checks, and silently in release builds. A block that is duplicated more than `u32::MAX` (4 billion) times — plausible for a block of all zeros or a common file header in a large dataset — will wrap to zero and be freed. The bug is latent: it only triggers when a single block is referenced by an extraordinary number of files, but for a filesystem in daily use over years, this threshold is reachable.
 
 **How to avoid:**
-- Implement a probabilistic pre-filter (Bloom filter) before the main index lookup. This eliminates most lookups for unique blocks at the cost of a small false-positive rate.
-- Separate "unique" entries (refcount == 1, never seen a duplicate) from "shared" entries (refcount > 1). Aggressively evict or age out unique entries using an LRU with a configurable memory budget.
-- The dedup index must have a configurable memory cap with a graceful degradation path: when the index exceeds the cap, fall back to "no dedup for new blocks" rather than crashing or thrashing disk.
-- Design the index as a pluggable trait from the start. The in-memory hash map is fine for development; the production implementation needs disk-backed B-tree with memory-mapped access.
-- Target: 5GB of RAM per TB of *actual duplicated* data, not per TB of total storage.
+- Replace all refcount increments with `saturating_add(1)`. A saturated refcount means "this block has more references than we can count; never free it." This is the correct invariant: it is always safe to keep a block that might be referenced; it is never safe to free a block that is still referenced.
+- Add a test that creates `u32::MAX + 1` references to the same block (using a mock refcount store) and verifies the count saturates rather than wraps.
+- Consider `u64` for refcounts if the extra 4 bytes per block is acceptable in the index. At u64::MAX the wrap-to-zero risk is negligible in practice, but `saturating_add` is still the correct semantic.
+- Add an `fsck` check that reports any block with `refcount == u32::MAX` (the saturation sentinel) for operator visibility.
 
 **Warning signs:**
-- Index memory grows linearly with total bytes written, not with duplicate bytes found.
-- Memory usage grows without bound during a write benchmark.
-- Dedup ratio is below 1.05× (trivial) but memory consumption is high.
+- Any `refcount += 1` or `refcount.fetch_add(1, Ordering::Relaxed)` without overflow handling.
+- No test that verifies refcount behavior at the maximum value.
+- `increment_refcount` implementation that uses plain integer arithmetic.
 
-**Phase to address:** Core dedup engine design (first phase); the memory budget must be a first-class design constraint, not an optimization.
+**Phase to address:** v2.0 bug-fix phase — this is a correctness bug that can cause data loss. Fix it before streaming writes, as streaming writes may increase dedup hit rates and accelerate the path to overflow.
 
 ---
 
-### Pitfall 6: Block Size Selection Locking In the Wrong Tradeoffs
+### Pitfall 6: statfs Reports Incorrect Free Space — Applications Abort Writes or Over-Provision
 
 **What goes wrong:**
-A fixed block size that is too large (e.g., 1MB) produces low deduplication ratios because partial block changes force re-storing entire blocks. A fixed block size that is too small (e.g., 512B) produces excellent dedup ratios but a pathologically large index, severe fragmentation on reads, and per-block metadata overhead that exceeds the storage savings. The block size cannot easily be changed after data is written without a full migration.
+If `f_bfree` and `f_bavail` are hardcoded or computed incorrectly, applications that check free space before writing will either:
+- Refuse to write (if the reported free space is lower than actual), causing `ENOSPC` errors on operations that would succeed
+- Fail to detect a full filesystem (if reported free space is higher than actual), causing silent truncation or kernel-level write failures
+
+For a deduplicating filesystem, the "correct" answer for free space is ambiguous: the logical free space (based on total capacity minus logical file sizes) is always much larger than the physical free space (based on actual blocks on disk). Applications like `rsync`, `df`, `du`, and package managers all query `statfs`. Misleading values break them in hard-to-diagnose ways.
 
 **Why it happens:**
-Block size feels like a configuration detail but determines the fundamental tradeoff surface of the entire system. Developers pick a "round" number (4K, 64K) without benchmarking against the actual workload data types. Variable-length chunking (CDC — content-defined chunking) exists precisely to avoid this trap, but adds complexity.
+The v1.0 `statfs` uses hardcoded `f_files = 1_000_000` (inode count) and estimates `f_bfree` without tracking actual physical block usage. This is marked as a known bug in PROJECT.md. The correct implementation requires tracking total physical blocks stored in the CAS store, which is a metadata operation not yet connected to the `statfs` response path.
 
 **How to avoid:**
-- Since the owner has existing CDC technology, lean on it from the start. Variable-length chunking with target chunk size configurable at mount time is the correct approach.
-- If fixed block size must be used initially, make it a mount-time parameter (not compile-time), defaulting to 64K which offers a reasonable dedup ratio vs. index size balance for general workloads.
-- Measure dedup ratio vs. index size vs. read fragmentation across at least three workload types (source code trees, media files, binary/VM images) before finalizing defaults.
-- Document that changing block size requires full data migration — this must be in the user-visible design from day one.
+- Implement a `stats()` call on the metadata store that returns `(physical_blocks_used, total_capacity_blocks, inode_count)`. These are the source of truth for `statfs`.
+- Physical capacity (`f_blocks`) should reflect the underlying storage device capacity, obtained via `statvfs(2)` on the store directory.
+- Physical used (`f_bfree = f_blocks - used_blocks`) reflects CAS-deduplicated physical storage.
+- Expose both logical and physical in `slicefs stats --json` for operator visibility.
+- Add a test that writes known-size data, queries `statfs`, and verifies `f_bfree` decreases by the expected physical amount.
 
 **Warning signs:**
-- Block size is a compile-time constant (`const BLOCK_SIZE: usize = 65536`).
-- No benchmark suite testing dedup ratio across representative workload types.
-- README promises "configurable chunk size" but it requires recompilation.
+- Hardcoded `f_files` or `f_blocks` in the `statfs` callback.
+- `df -h /mnt/slicefs` reports a wildly incorrect value compared to the backing store's actual disk usage.
+- No test that validates `statfs` values against actual written data.
 
-**Phase to address:** Core chunking integration phase (when integrating the owner's CDC technology).
+**Phase to address:** v2.0 bug-fix phase — fix before streaming writes, since streaming writes change the physical block count as writes proceed rather than only at flush.
 
 ---
 
-### Pitfall 7: The "Dedup Everything" Trap
+### Pitfall 7: Streaming Write Breaks writeback_cache Inode Size Tracking
 
 **What goes wrong:**
-Applying deduplication to all writes unconditionally degrades performance for workloads where deduplication is ineffective (encrypted data, compressed media, random write patterns). The hash computation, index lookup, and metadata update costs are paid regardless of whether any deduplication occurs. For encrypted-at-rest content, deduplication is completely ineffective because identical plaintext produces different ciphertext.
+When `writeback_cache` is enabled in fuser (which SliceFS relies on for acceptable small-write throughput), the FUSE kernel module maintains its own view of inode size in the page cache. Writes that extend the file update the kernel's cached `i_size` **without notifying the FUSE daemon**. When the FUSE daemon eventually receives the write data (batched), the `offset + len` of the write may exceed the daemon's internally tracked size. The daemon must accept any `offset` as valid and not reject writes beyond its current tracked size as out-of-range.
+
+In the streaming write path, if the implementation uses `offset == current_stream_position` as a guard to decide between streaming and buffering, a write delivered out-of-order by the kernel (due to writeback batching) will misclassify a sequential write as a random write, triggering the fallback to full buffering and defeating the purpose of streaming.
 
 **Why it happens:**
-Deduplication is built into the write path as a mandatory step. The assumption is that "dedup can only help." In reality, for workloads with no duplicates, dedup adds 5–15% write latency overhead with zero benefit. ZFS's own maintainer documented this: his laptop's DDT had 11.7 million entries with trivial actual savings.
+FUSE `writeback_cache` defers delivery of write data to the daemon until either the dirty page limit is reached or `fsync`/`close` is called. The kernel may reorder and coalesce writes before delivering them. A 1GB sequential write may arrive at the daemon as a single 128KB-aligned call, or as several calls, not necessarily in order. The daemon must handle all orderings.
 
 **How to avoid:**
-- Make deduplication a per-file or per-directory policy, not a filesystem-global mandate.
-- Implement a "dedup skip" heuristic: if a block's hash lookup misses the index consistently for a given inode, disable dedup for that inode's subsequent writes for a configurable window.
-- If encryption is a future feature, document clearly that encryption and deduplication are mutually exclusive at the block level.
-- Add a `nodup` mount option or xattr that bypasses the dedup pipeline for specific files/directories.
+- Do not assume FUSE write callbacks arrive in `offset` order, even for a single file. The streaming write path must handle out-of-order delivery.
+- Maintain a `next_expected_offset` per file handle. If a write arrives at an unexpected offset, buffer it and sort rather than pushing to the streaming `State`.
+- Alternatively, disable `writeback_cache` for the streaming write path (revert to synchronous mode where writes arrive in order at the cost of throughput). Document this tradeoff explicitly.
+- Reference: FUSE kernel mailing list documents `writeback_cache` behavior — the cached writes beyond EOF extend local `i_size` without keeping the userspace server in sync. Trust `offset + len` from the write callback as the new minimum size; do not rely on the daemon's previous `i_size` being correct.
 
 **Warning signs:**
-- Deduplication cannot be disabled per file or per directory.
-- The write path has no fast-path for non-deduplication mode.
-- No measurement of the "dedup overhead for non-duplicate data" in the benchmark suite.
+- Write test with `writeback_cache` enabled that writes 10MB sequentially but delivers writes to the daemon in non-sequential callback order — streaming path produces incorrect Merkle root.
+- Any streaming implementation that assumes `write(fd, buf, N)` callbacks arrive with `offset == prev_offset + prev_len`.
+- No test specifically covering `writeback_cache` + large sequential write + correct read-back.
 
-**Phase to address:** FUSE write path phase; ensure the dedup pipeline has a bypass from the start.
+**Phase to address:** v2.0 streaming write phase — test with `writeback_cache` explicitly before declaring streaming writes complete.
 
 ---
 
-### Pitfall 8: FUSE-T (macOS) NFS Semantic Gaps
+### Pitfall 8: Partial Streaming State Is Not Crash-Safe Without WAL Integration
 
 **What goes wrong:**
-FUSE-T on macOS implements FUSE semantics via an NFSv4 translation layer. This introduces several POSIX gaps that are not present on Linux:
-- `mmap` writes are not flushed to the daemon until `munmap` or file close — applications that rely on `msync` + read visibility fail silently.
-- `flock`/`lockf`/`fcntl` byte-range locks bypass FUSE calls entirely and go through the NFS client, breaking any lock-based synchronization in the filesystem daemon.
-- `atime` and `mtime` cannot be set independently; NFS always updates both.
-- READDIR must return all results in one pass (no pagination); large directories cause memory spikes.
-- Attribute caching performed by the NFS client ignores the TTL values returned by the filesystem implementation.
-- NFS server has no authentication, potentially exposing it to DoS via a process that refuses to respond to NFS RPCs.
+The v1.0 write path is crash-safe because the buffer is held in memory until `fsync` or `release`, at which point the entire content is atomically committed to CAS via WAL. The streaming path by design commits blocks incrementally — as bytes are pushed to `State`, new blocks are stored in the Dictionary. If the process crashes between the first `push_bytes` call and the final `State::end()` call, the Dictionary contains partial block data that is not referenced by any manifest. These are orphaned blocks that the GC must clean up, which is acceptable. However:
+
+1. If the streaming path calls `set_manifest(partial_root)` at any intermediate checkpoint (to provide crash recovery of partial progress), and the file is then modified further, the old partial manifest must be dereferenced before the new manifest is committed. Failing to decrement the old manifest's refcount creates a permanent refcount leak.
+2. If `set_manifest(partial_root)` is called at intermediate checkpoints, a crash between the last checkpoint and `State::end()` leaves the inode pointing to partial content with `size` smaller than the final intended size — content truncation on crash.
 
 **Why it happens:**
-FUSE-T is a pragmatic workaround for Apple's refusal to expose a kernel filesystem API. The NFS translation is clever but lossy — POSIX semantics that FUSE assumes are not all preserved through NFS.
+Streaming writes tempt developers to checkpoint periodically (e.g., every 64MB) to bound memory usage while also bounding crash-recovery data loss. This looks safe but introduces a refcount leak when the checkpoint manifests are replaced by the final manifest.
 
 **How to avoid:**
-- Build an explicit POSIX compatibility test suite that runs on macOS and asserts behavior for: `mmap` write visibility, `flock` semantics, `atime`/`mtime` independence, and directory listing completeness.
-- Document the known gaps clearly. Do not silently fail POSIX tests on macOS — document them as known platform limitations.
-- Implement large directory listing with explicit memory limits to prevent OOM on READDIR.
-- Track the FSKit API (macOS 15+) as a potential future replacement for FUSE-T; design the FUSE interface layer so that switching backends requires only implementing a new adapter.
-- Do not rely on `flock` for internal daemon synchronization; use explicit Rust synchronization primitives instead.
+- For v2.0, the simplest correct approach is: **no intermediate manifests**. Keep partial streaming state purely in memory. The stream is only finalized (manifest set, refcount incremented) at `fsync` or `release`. This is equivalent to the v1.0 behavior except that instead of a `Vec<u8>` accumulating all bytes, you accumulate the streaming `State` struct (which is O(log N) in memory).
+- If checkpointing is required (files larger than available memory), design a checkpointing protocol using the WAL: write a WAL record that says "inode X at checkpoint C has partial root R with refcount pending finalization." GC must honor pending-finalization refcounts as live.
+- The "no intermediate manifests" approach avoids all refcount complexity and is the correct starting point for v2.0.
 
 **Warning signs:**
-- No macOS-specific POSIX test suite.
-- Code that calls `flock` and expects filesystem-mediated lock behavior on macOS.
-- `mmap` write tests that pass on Linux but are never run on macOS.
+- Any code that calls `set_manifest` more than once per file-open lifetime without decrementing the previous manifest's refcount.
+- Integration test: `fsync()` mid-file, then continue writing, then `close()` — verify only one manifest exists and refcount == 1.
+- GC running after a crash finds refcount == 2 for a block that is referenced by only one manifest.
 
-**Phase to address:** macOS FUSE-T integration phase; macOS POSIX test suite is a phase exit criterion.
+**Phase to address:** v2.0 streaming write phase — establish the "one manifest per file lifetime" invariant as a rule before writing any streaming code.
 
 ---
 
-### Pitfall 9: WinFSP POSIX Semantic Gaps
+### Pitfall 9: O(n) Snapshot Lookup Becomes a Latency Cliff on Mount
 
 **What goes wrong:**
-WinFSP translates between Windows ACL permissions and POSIX permission bits. Critical gaps:
-- POSIX `unlink` on an open file (delete-while-open) does not work the same way on Windows; the file cannot be deleted until all handles are closed.
-- Close-open consistency (guaranteed on Linux FUSE: data written before `close()` is visible after `open()`) is not guaranteed on WinFSP due to `IRP_CLEANUP` differences.
-- `rename` is not atomic on Windows when the destination exists; two-step move with delete is required.
-- Hard links via `link(2)` have restrictions on Windows (cannot cross volumes, limited in NTFS).
-- Alternate data streams (Windows) have no POSIX equivalent and vice versa.
+An O(n) snapshot scan at `slicefs snapshot list` or `slicefs snapshot switch` is tolerable when n < 10. As n grows (automated daily snapshots = 365/year), the scan becomes slow. If the mount command itself must scan all snapshots to find the active version (the common case), every mount adds latency proportional to snapshot count. With 1,000 snapshots, mount may take seconds. With 10,000 snapshots, it may time out.
 
 **Why it happens:**
-Windows filesystem semantics diverge from POSIX at a fundamental API level. WinFSP makes best-effort POSIX compatibility but cannot bridge all gaps without OS-level changes.
+The initial snapshot implementation stores snapshots in a list and iterates to find by name or version number. Indexing is deferred. The list structure grows monotonically as snapshots accumulate. Developers notice the problem in production when automated snapshot creation runs for months.
 
 **How to avoid:**
-- Establish a Windows POSIX compatibility test matrix early, identifying which POSIX operations are supported, partially supported, or unsupported.
-- For `unlink`-while-open: implement a "deferred delete" mechanism that marks the file as deleted but keeps it accessible until refcount drops to zero.
-- For close-open consistency: explicitly flush and sync on `flush` operations, not just on `fsync`.
-- Document Windows as a "best-effort POSIX" platform from day one. Do not claim full POSIX compliance on Windows.
+- Store snapshots in a `HashMap<version_number, snapshot_root>` and `HashMap<name, version_number>` for O(1) lookup by version and O(1) lookup by name.
+- Alternatively, use the existing metadata store (redb/B-tree) with a snapshot index table keyed by version number. Lookups are O(log n) in the B-tree, which is acceptable for 10,000+ snapshots.
+- The active version pointer (the "current mount" snapshot) should be a single record in the metadata store, not derived by scanning.
+- Add a test that creates 1,000 snapshots and verifies that `snapshot switch --version 500` completes in under 100ms.
 
 **Warning signs:**
-- Windows tests not in CI from day one.
-- `unlink` implementation on Windows does not handle the open-file case.
-- Any code that assumes `rename` is atomic without explicit atomicity guarantees.
+- Snapshot lookup code that iterates a Vec or list structure.
+- No performance test for snapshot operations with large n.
+- `slicefs mount` reads all snapshots on startup to find the latest version.
 
-**Phase to address:** Windows WinFSP integration phase; separate from the Linux and macOS phases.
-
----
-
-### Pitfall 10: Read Fragmentation Accumulation Over Time
-
-**What goes wrong:**
-As deduplication operates, logically sequential files become physically fragmented across the block store. A file written sequentially may reference blocks scattered across hundreds of non-contiguous storage locations. Read performance degrades progressively as the filesystem ages: what started as sequential reads become hundreds of random reads. In backup system research, deduplication-induced fragmentation has been shown to increase restore time by 42% on average, sometimes 2× or more.
-
-**Why it happens:**
-Deduplication breaks the locality of reference that sequential storage provides. A block written at time T may be physically adjacent to blocks written at time T-500 (because those blocks are duplicates of earlier content). The CAS store has no concept of "store this near that" unless explicitly implemented.
-
-**How to avoid:**
-- Implement a "container" or "segment" storage model: group blocks that are likely to be read together into physical storage segments. When deduplicating, prefer placing new references near the container where the majority of the file's blocks already reside.
-- Track per-file read access patterns and implement a background repack/defragmentation operation that co-locates frequently co-accessed blocks.
-- Design the block storage layer with a "hint" interface: the metadata layer can hint at preferred physical locality when storing new blocks.
-- Monitor and report fragmentation ratio as a first-class metric (number of storage seeks per file read).
-
-**Warning signs:**
-- Read throughput for a filesystem that has been in use for several months is significantly lower than freshly populated filesystem.
-- No "fragmentation ratio" or "block locality" metric in the monitoring interface.
-- Block store places blocks in purely content-address order with no locality optimization.
-
-**Phase to address:** Storage layer design; locality hints should be in the initial block store interface even if not implemented until a later phase.
-
----
-
-### Pitfall 11: Hash Collision Handling Absent or Incorrect
-
-**What goes wrong:**
-If two distinct blocks produce the same hash (collision), the second block's content is silently discarded and reads return the first block's content. For SHA-256 this is probabilistically negligible in any realistic dataset (~1/2^128 per 4 billion blocks), but:
-1. SHA-1 has known practical collisions; if pluggable hashes include SHA-1 for testing, it can be triggered.
-2. Bugs in the hash implementation (wrong initialization, truncated output) can cause practical collisions.
-3. If hash selection is pluggable and a weak hash (MD5, xxHash) is used, collision probability becomes non-trivial for large datasets.
-4. The system must have a defined behavior for collision — not ignore it.
-
-**Why it happens:**
-Developers assume "the hash is correct and unique." No collision-detection path is implemented. When a collision occurs due to a bug or weak hash, it is silent data corruption with no error returned to the user.
-
-**How to avoid:**
-- Implement a "verify on dedup" mode: when a hash collision is detected (incoming block hash matches an existing block hash), compare the full block content before accepting dedup. If content differs, it is a collision — reject the write with an error or store both blocks under a collision-resolution scheme.
-- Make this verification configurable: enabled by default, disable-able for performance-critical deployments with cryptographic hashes only.
-- For pluggable hash support: enforce a minimum security level for production use (SHA-256 or BLAKE3 only). Label weaker hashes as "testing only."
-- Add a `hash_verify` mode to the CLI that walks all blocks and verifies stored content against their hash.
-
-**Warning signs:**
-- No code path that compares block content when a hash match is found.
-- Tests use a weak hash (e.g., CRC32) for speed without marking it as collision-unsafe.
-- No documentation on minimum hash strength for production use.
-
-**Phase to address:** Core CAS engine (first phase); collision handling must be part of the block store interface contract.
-
----
-
-### Pitfall 12: Metadata Store Becoming a Bottleneck
-
-**What goes wrong:**
-The metadata store (inode table, block index, reference counts) is accessed on every FUSE operation. If it uses a serialized, single-writer database (SQLite in WAL mode, sled beta), it becomes the bottleneck under concurrent access. Worse: if the metadata store is not crash-consistent independently of the block store, partial transactions leave the filesystem in an unrecoverable state.
-
-**Why it happens:**
-Developers use a familiar embedded database (SQLite, sled) for the metadata store because it handles transactions and crash consistency "automatically." However, sled is not yet 1.0 (on-disk format changes require manual migration), SQLite's WAL mode serializes writes, and neither is designed for the access patterns of a filesystem (many small, high-frequency, concurrent reads and writes).
-
-**How to avoid:**
-- Use a B-tree embedded database with ACID transactions, crash consistency, and a stable on-disk format. Current best options for Rust:
-  - `redb` (pure Rust, stable, MVCC, production-ready)
-  - `rocksdb` (battle-tested, LSM-tree, excellent for write-heavy workloads, C FFI)
-  - `fjall` (pure Rust LSM, newer but growing)
-- Define the metadata store as a trait from day one so the implementation can be swapped.
-- Separate the dedup index (hash → block location) from the filesystem metadata (inode → block list, refcounts) — they have different access patterns and can benefit from different storage engines.
-- Test metadata store crash recovery explicitly: kill the process mid-write, verify consistency on restart.
-
-**Warning signs:**
-- Metadata store implementation is not behind a trait.
-- Using `sled` without acknowledging it is pre-1.0 and format-unstable.
-- Metadata operations are not measured separately in benchmarks.
-- Single-threaded metadata access under concurrent FUSE requests.
-
-**Phase to address:** Metadata layer design (foundational phase); trait boundary must be established before any implementation.
-
----
-
-### Pitfall 13: Inline Dedup Blocking the Write Hot Path
-
-**What goes wrong:**
-In-band (inline) deduplication means every write must: chunk the data, compute a hash per chunk, look up the hash in the index, update metadata if new, update refcounts if duplicate — all synchronously on the write path. This directly adds latency to every write, regardless of whether deduplication succeeds. Under write-heavy workloads with low duplicate ratios, this overhead is pure cost.
-
-**Why it happens:**
-Inline dedup is architecturally simpler (single write path, no staging area), so it is implemented first. The dedup computation is not separated from the I/O path. Blocking hash computation on the FUSE thread pool starves the Tokio async runtime if not handled via `spawn_blocking`.
-
-**How to avoid:**
-- Hash computation and index lookup must run in a `tokio::task::spawn_blocking` context, not in the FUSE callback thread, to avoid starving the async executor.
-- Implement an async dedup pipeline: write data to a staging buffer immediately (fast path), then deduplicate asynchronously. The file appears written; deduplication happens in the background.
-- The post-process dedup model: write blocks directly, trigger dedup as a background task. Trades dedup latency for write latency — acceptable for a daily-driver filesystem.
-- Never hold a `std::sync::Mutex` across an `.await` point in the dedup pipeline; this is a tokio deadlock waiting to happen.
-
-**Warning signs:**
-- Hash computation is done synchronously in the FUSE `write()` callback.
-- Blocking index lookup in `async fn` without `spawn_blocking`.
-- Write latency is proportional to block count per operation rather than data size.
-
-**Phase to address:** Write path architecture (first implementation phase); the sync vs. async dedup decision must be made before implementing the write path.
+**Phase to address:** v2.0 snapshot-indexing phase — implement indexed lookup alongside the streaming write work.
 
 ---
 
@@ -337,13 +254,12 @@ Inline dedup is architecturally simpler (single write path, no staging area), so
 
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
 |----------|-------------------|----------------|-----------------|
-| Global `Mutex<HashMap>` for dedup index | Simple to implement, correct | Single-threaded throughput ceiling; blocks all writes during lookup | Never for production; MVP only if behind a trait |
-| Fixed block size (not CDC) | Simpler chunking logic | Lower dedup ratio; cannot change without data migration | Acceptable in Phase 1 if block size is a runtime parameter and CDC integration is planned |
-| Synchronous inline dedup | Single write path, easy to reason about | Write latency bloat under non-duplicate workloads | Acceptable in Phase 1 with clear plan to make async |
-| SQLite for metadata | Familiar, ACID, immediate | WAL serialization under concurrent access; not optimized for filesystem access patterns | Never; choose redb or rocksdb from the start |
-| No Bloom filter for index | Simpler code | Full index lookup for every block, even unique ones; memory pressure | Never; Bloom filter is a 50-line addition that prevents the ZFS DDT problem |
-| sled as metadata store | Pure Rust, "champagne of beta databases" | Pre-1.0, on-disk format changes require migration, garbage collection overhead | Never in production; use redb instead |
-| Skip crash-consistency tests | Faster initial development | Undetectable data corruption on crash; unfixable without rearchitecture | Never; crash tests must be in CI from day one |
+| Keep buffered `Vec<u8>` for all writes, call `push_bytes` only at flush | Zero risk of streaming API misuse; v1.0 behavior preserved | File size still limited by RAM; the v2.0 goal is not achieved | Never — this is what v2.0 exists to change |
+| Stream all writes naively without sequential-write guard | Simpler code | Random writes and sparse files produce silently corrupt content | Never — must have the sequential detection guard |
+| Per-block heuristic decompression detection for mixed-version stores | No format migration needed | Silent corruption when raw block's first byte matches a valid AlgorithmId | Never — use store_version gating instead |
+| Delay refcount overflow fix until after streaming writes | Fewer concurrent changes | Streaming increases dedup hit rate, accelerating the path to overflow | Never — overflow fix must precede streaming writes |
+| Checkpoint intermediate manifests during streaming | Bounded crash-recovery loss | Refcount leaks if checkpoint manifests are not explicitly dereferenced | Only if checkpointing is explicitly required for >RAM files, with proper WAL protocol |
+| Keep O(n) snapshot scan | Zero migration work | Mount time grows with snapshot count; breaks automated rotation workflows | Acceptable only until snapshot count exceeds 50; fix before any automated snapshot workflow |
 
 ---
 
@@ -351,12 +267,12 @@ Inline dedup is architecturally simpler (single write path, no staging area), so
 
 | Integration | Common Mistake | Correct Approach |
 |-------------|----------------|------------------|
-| fuser crate (Rust FUSE) | Using the synchronous `Filesystem` trait blocking on I/O | Offload all blocking operations to `spawn_blocking`; keep FUSE callbacks non-blocking |
-| fuser `writeback_cache` | Disabled by default; developers accept the 4× write overhead | Enable it explicitly via `MountOption`; document the crash-consistency tradeoff |
-| FUSE-T (macOS) | Assuming attribute TTL values sent from daemon are respected | NFS client ignores daemon TTL; implement conservative cache invalidation |
-| WinFSP | Implementing `unlink` the Linux way (mark deleted, keep data until last handle closes) | Handle `IRP_CLEANUP` explicitly; implement deferred-delete semantics for Windows |
-| redb / rocksdb | Opening metadata store in the FUSE callback thread | Open at mount time, keep handle alive for filesystem lifetime; never reopen per-request |
-| tokio + FUSE | Running the fuser session loop inside `tokio::main` | Run fuser on a dedicated OS thread; bridge to tokio via channels |
+| `State::push_bytes()` | Calling `push_bytes` with only new write data at arbitrary offsets | `State` is append-only from byte 0; maintain `OpenFileState.buf` until sequential guarantee is established |
+| `State::end()` | Calling `end()` mid-stream to get a checkpoint digest and then calling `push_bytes()` on the consumed `State` | `end()` consumes `self`; you must construct a new `State` after `end()` — there is no "reset and continue" |
+| `writeback_cache` + streaming | Trusting that FUSE write callbacks arrive in offset order | Writes may arrive coalesced, reordered, or with gaps under writeback_cache; always validate offset continuity |
+| `store_version` gating | Reading `store_version` from the in-memory struct without verifying it was loaded from the on-disk store | `store_version` must be persisted in the store metadata (e.g., a `version` key in redb), not derived from mount flags |
+| `increment_refcount` | Using `+= 1` or `wrapping_add` | Always `saturating_add(1)` to prevent overflow-to-zero data loss |
+| `set_manifest` + `increment_refcount` ordering | Calling `set_manifest` before `increment_refcount` | Increment refcount first; if the process crashes between the two calls, the orphaned block (refcount > 0, no manifest) is handled safely by the next GC pass |
 
 ---
 
@@ -364,36 +280,26 @@ Inline dedup is architecturally simpler (single write path, no staging area), so
 
 | Trap | Symptoms | Prevention | When It Breaks |
 |------|----------|------------|----------------|
-| Dedup index not Bloom-filtered | Index lookup latency grows linearly with dataset; OOM on large datasets | Add Bloom filter as pre-lookup gate; configurable memory budget | At ~1M unique blocks |
-| Per-block `fsync` after write | Write throughput collapses to storage device IOPS ceiling | Batch writes; sync at transaction boundaries, not per-block | Immediately on any real workload |
-| Unbounded GC pause | GC pause time grows with dataset size; filesystem freezes | Incremental GC with time budgets; yield to write operations | At ~10GB stored data |
-| No writeback cache | 4K sequential writes at 20% native speed | Enable `writeback_cache` in fuser mount options | Always — default FUSE behavior |
-| Storing all refcounts in a single B-tree | Refcount update is a global write bottleneck | Shard refcount storage by hash prefix | At ~10K concurrent write operations |
-| Large READDIR on FUSE-T macOS | OOM when listing directory with >100K files | Page READDIR results; enforce a maximum batch size | Any directory with >50K entries |
-
----
-
-## Security Mistakes
-
-| Mistake | Risk | Prevention |
-|---------|------|------------|
-| Using MD5 or SHA-1 as production dedup hash | Hash collision attack: attacker crafts blocks that hash-collide, triggering cross-user data exposure | Enforce SHA-256 or BLAKE3 minimum; reject weak hashes at configuration parse time |
-| FUSE-T NFS server on non-loopback interface | Local network can DoS the filesystem or access data without authentication | Bind FUSE-T NFS server to loopback only; verify in FUSE-T integration code |
-| Exposing block content via hash-based API without authorization | If two users share a filesystem, a user who knows a block's hash can infer whether another user's file contains that block (hash oracle attack) | Do not expose block hashes externally; all access through POSIX file interface only |
-| No integrity verification on block read | Silent data corruption from storage-layer bit rot is undetectable | Verify block hash on every read in "verify" mode; implement a background scrub command |
+| Streaming fallback to full buffer on any non-sequential write | Memory usage identical to v1.0 for workloads with any `pwrite` | Detect truly-sequential writes early and stream; buffer only for mixed patterns | Any tool that pre-seeks or writes metadata headers first (e.g., MP4 muxers) |
+| Lock contention on `dict: Arc<Mutex<Dictionary>>` during streaming push | Dictionary lock held for the entire streaming duration; concurrent reads block | Stream into a thread-local `Dictionary` accumulator; merge into the global dict at flush | Any filesystem with concurrent read + write on different inodes |
+| Re-reading and re-hashing v1.0 blocks during migration to compute raw digest | Migration takes O(N × block size) time and reads all blocks | Only re-hash blocks that are actually being re-written; leave untouched blocks in v1.0 format | Stores with > 100GB of v1.0 data |
+| O(n) snapshot scan on every mount | Mount latency grows with snapshot count; automated snapshots make this worse | Index snapshots by version number in the metadata store | > 50 snapshots |
+| `statfs` computing free space by reading all block refcounts | `df` becomes an O(blocks) operation | Maintain a running physical_blocks_used counter; update on each CAS write/delete | Stores with > 1M blocks |
 
 ---
 
 ## "Looks Done But Isn't" Checklist
 
-- [ ] **Write path:** Appears to write correctly in single-threaded tests — verify concurrent writes with two threads writing the same block simultaneously without producing refcount > 2 or corruption.
-- [ ] **Delete path:** Files delete successfully in tests — verify that GC actually reclaims storage after delete and that refcounts reach zero correctly.
-- [ ] **Crash consistency:** Filesystem mounts and reads after clean unmount — verify it mounts and reads correctly after `kill -9` during a write, and after `kill -9` during GC.
-- [ ] **Dedup ratio:** Reports dedup savings — verify the savings are real by reading back deduplicated files and comparing content with original.
-- [ ] **macOS compatibility:** FUSE-T mounts successfully — verify `mmap` write visibility, `flock` behavior, and large directory listing do not silently fail.
-- [ ] **Windows compatibility:** WinFSP mounts successfully — verify delete-while-open, `rename` atomicity, and close-open consistency.
-- [ ] **Memory bounds:** Runs for 10 minutes in tests — verify memory usage is bounded after writing 100GB of unique data (index must not grow unboundedly).
-- [ ] **Recovery:** Starts up after crash — verify the orphan block scanner runs and produces no false positives on a clean filesystem.
+- [ ] **Streaming writes:** Writes sequential content and reads it back correctly — verify with `pwrite(2)` at non-sequential offsets (e.g., write tail first, then head) and confirm content is correct.
+- [ ] **Streaming writes:** Works for a 10GB file — verify process memory stays below 100MB during the write (O(log N) guarantee).
+- [ ] **Compression removal:** New writes produce raw blocks — verify with `hexdump` on the block store that new blocks have no AlgorithmId header byte.
+- [ ] **Compression removal:** v1.0 blocks still read correctly — verify by mounting a v1.0 store with v2.0 binary and reading all files.
+- [ ] **Mixed-version store:** No silent corruption — write a raw block whose first byte is `0x01` (the Zstd AlgorithmId) and verify it reads back correctly, byte-for-byte.
+- [ ] **Refcount overflow:** `saturating_add` is used — verify by searching for any `+= 1` or `wrapping_add` on refcount fields.
+- [ ] **Refcount overflow:** Saturation does not cause premature GC — verify a block at refcount saturation is never freed even when GC runs.
+- [ ] **statfs:** `df` reports plausible values — verify `f_bfree` decreases after writing data and increases after deleting data.
+- [ ] **Snapshot indexing:** 1,000 snapshots — verify `snapshot switch` completes in under 100ms regardless of snapshot count.
+- [ ] **Streaming + crash:** Process killed mid-stream — verify inode content on next mount is either the pre-stream content (clean rollback) or a complete post-stream content (complete commit), never a partial write.
 
 ---
 
@@ -401,13 +307,12 @@ Inline dedup is architecturally simpler (single write path, no staging area), so
 
 | Pitfall | Recovery Cost | Recovery Steps |
 |---------|---------------|----------------|
-| Reference count corruption (data loss) | HIGH | Requires offline fsck: walk all inodes, recompute correct refcounts, identify discrepancies, manually adjudicate blocks with refcount 0 but referenced by inodes |
-| GC deleted live block | HIGH | No recovery without a separate backup; offline forensic walk of block store looking for blocks that match expected hashes from metadata |
-| Crash consistency failure (orphaned blocks) | LOW | Run `slicefs fsck --orphan-gc` on next mount; orphaned blocks are safe to delete |
-| Crash consistency failure (dangling reference) | HIGH | Requires offline repair: identify inodes with dangling references, mark those inodes as corrupted, attempt content recovery from any surviving blocks |
-| Index OOM crash | LOW | Resize index memory budget in config; restart; index will be rebuilt from block store on next GC cycle if designed correctly |
-| Fragmentation-induced read slowdown | MEDIUM | Run `slicefs defrag` command; expect it to take proportionally to dataset size |
-| Block size mismatch (data format change) | HIGH | Full data migration required: mount old filesystem, copy all files to new filesystem with new block size |
+| Random-write silent corruption (wrong Merkle root) | HIGH | Offline fsck: compare expected file hash against stored manifest; identify corrupted inodes; attempt recovery from backup or re-write |
+| Inode size / manifest desync after crash | MEDIUM | `slicefs fsck --verify-manifests`: walk all inodes, compare `inode.size` to the byte count obtainable by walking the manifest's Merkle tree; flag discrepancies |
+| Mixed-version block corruption (first byte stripped) | HIGH | No automatic recovery; must restore from backup. Prevention is the only viable strategy. |
+| Refcount wrap-to-zero data loss | HIGH | Same as v1.0: offline fsck, recompute refcounts from inode scan, identify freed-but-referenced blocks |
+| statfs incorrect | LOW | Rebuild the physical block count from the block store: `slicefs stats --rebuild-index` |
+| O(n) snapshot scan timeout on mount | MEDIUM | Rebuild snapshot index: `slicefs snapshot reindex` — walk all snapshot records and write indexed form |
 
 ---
 
@@ -415,42 +320,35 @@ Inline dedup is architecturally simpler (single write path, no staging area), so
 
 | Pitfall | Prevention Phase | Verification |
 |---------|------------------|--------------|
-| Reference count corruption | Core CAS + metadata (Phase 1) | Concurrent deletion + write stress test; refcount invariant checker |
-| GC race — new write lost | GC implementation (Phase 2) | Chaos GC test: trigger GC between every write step; verify no data loss |
-| Crash inconsistency | Write path + recovery (Phase 1) | `kill -9` during write; verify clean mount and correct data on restart |
-| FUSE context-switch overhead | FUSE integration (Phase 2) | `fio` benchmark: 4K sequential writes must exceed 200MB/s on NVMe |
-| Dedup index memory explosion | Core dedup engine (Phase 1) | Write 100GB unique data; verify index memory stays within configured budget |
-| Block size locking in tradeoffs | CDC integration (owner's technology) | Dedup ratio benchmark across source code, media, VM disk image workloads |
-| "Dedup everything" trap | Write path (Phase 2) | Per-file `nodup` xattr works; benchmark write latency with and without dedup enabled |
-| FUSE-T macOS semantic gaps | macOS integration (Phase 3) | POSIX test suite: mmap, flock, atime/mtime, large directory — all passing or explicitly documented as limitations |
-| WinFSP POSIX semantic gaps | Windows integration (Phase 4) | Windows POSIX test suite: delete-while-open, rename atomicity, close-open consistency |
-| Read fragmentation accumulation | Storage layer design (Phase 1, optimization Phase 3) | Read throughput after 6-month simulated use (random deletes + writes) must not degrade more than 20% |
-| Hash collision absent handling | Core CAS engine (Phase 1) | Inject artificial collision (mock hash function); verify collision is detected and rejected |
-| Metadata store bottleneck | Metadata layer (Phase 1) | Concurrent read + write benchmark: metadata operations must not serialize |
-| Inline dedup blocking write path | Write path architecture (Phase 1) | Write callback latency must not block FUSE thread pool; verify via tokio thread starvation test |
+| State is append-only; random writes require buffer | v2.0 streaming write | `pwrite(2)` test at non-sequential offsets; sparse file write; truncate-then-write |
+| Inode size desync from Merkle root during stream | v2.0 streaming write | Crash test mid-stream; verify size and content consistency on remount |
+| Compression removal breaks hash identity v1.0 vs v2.0 | v2.0 compression-removal | Write same content in v1.0 and v2.0 mode; verify Digest224 differs (as expected); verify both read correctly |
+| Mixed-version store: first byte false-positive decompression | v2.0 compression-removal | Write raw block with AlgorithmId-valued first byte; read back without corruption |
+| Refcount overflow to zero | v2.0 bug-fix (before streaming) | Saturating increment test at u32::MAX; verify GC does not free saturated-refcount block |
+| statfs incorrect f_bfree | v2.0 bug-fix | `df` test before/after write/delete cycle; assert monotonic decrease/increase |
+| writeback_cache + out-of-order write delivery | v2.0 streaming write | Large sequential write with `writeback_cache` enabled; verify correct read-back |
+| Partial streaming state not crash-safe | v2.0 streaming write | Kill -9 during large streaming write; verify clean rollback on remount |
+| O(n) snapshot scan on mount | v2.0 snapshot-indexing | Create 1,000 snapshots; verify mount + snapshot switch under 100ms |
 
 ---
 
 ## Sources
 
-- USENIX FAST 2017: "To FUSE or Not to FUSE: Performance of User-Space File Systems" — https://www.usenix.org/system/files/conference/fast17/fast17-vangoor.pdf
-- USENIX FAST 2017: "The Logic of Physical Garbage Collection in Deduplicating Storage" — https://www.usenix.org/system/files/conference/fast17/fast17-douglis.pdf
-- USENIX FAST 2013: "Concurrent Deletion in a Distributed Content-Addressable Storage System" — https://www.usenix.org/system/files/conference/fast13/fast13-final91.pdf
-- "OpenZFS deduplication is good now and you shouldn't use it" (Rob Norris, 2024) — https://despairlabs.com/blog/posts/2024-10-27-openzfs-dedup-is-good-dont-use-it/
-- Medium: "Linux Fuse File System Performance Learning" — https://medium.com/@xiaolongjiang/linux-fuse-file-system-performance-learning-efb23a1fb83f
-- RFUSE: "Modernizing Userspace Filesystem Framework" (USENIX FAST 2024) — https://www.usenix.org/system/files/fast24-cho.pdf
-- FUSE-T GitHub: Known Issues — https://github.com/macos-fuse-t/fuse-t
-- FUSE-T HN discussion (data corruption reports) — https://news.ycombinator.com/item?id=40217493
-- WinFSP: "Native API vs FUSE" — https://winfsp.dev/doc/Native-API-vs-FUSE/
-- JuiceFS POSIX Compatibility — https://juicefs.com/docs/community/posix_compatibility/
-- Borg Backup: hash collision discussion — https://github.com/borgbackup/borg/issues/170
-- TrueNAS ZFS Deduplication reference — https://www.truenas.com/docs/references/zfsdeduplication/
-- "Files are hard" (Dan Luu, crash consistency) — https://danluu.com/file-consistency/
-- CrashMonkey: "Systematically Testing File-System Crash Consistency" (Microsoft Research) — https://www.microsoft.com/en-us/research/wp-content/uploads/2021/10/tos-crashmonkey.pdf
-- fuser crate GitHub + CHANGELOG — https://github.com/cberner/fuser
-- Tokio: "Async: What is blocking?" (Alice Ryhl) — https://ryhl.io/blog/async-what-is-blocking/
-- USENIX FAST 2015: "Design Tradeoffs for Data Deduplication Performance" — https://www.usenix.org/system/files/conference/fast15/fast15-paper-fu.pdf
+- PROJECT.md v2.0 milestone description — known bugs: refcount overflow, statfs inaccuracy, O(n) snapshot scan
+- SliceFS v1.0 codebase: `crates/slicefs-cli/src/filesystem.rs` — `OpenFileState`, `flush_buffer_to_cas`, `from_wire_bytes` fallback logic
+- SliceFS v1.0 codebase: `crates/data-id/blockset/src/content_dependant_tree.rs` — `State = Vec<Level>`, `push_digest`, `end()`
+- SliceFS v1.0 codebase: `crates/data-id/blockset/src/tree.rs` — `Tree::push_bytes`, `Tree::end` (append-only, consumes self)
+- SliceFS v1.0 codebase: `crates/slicefs-compression/src/lib.rs` — `compress_block`, `decompress_block`, 1-byte AlgorithmId header format
+- FUSE kernel mailing list: write vs getattr/lookup file size update race in FUSE kernel module — https://fuse-devel.narkive.com/5k4cf7XX/write-vs-getattr-lookup-file-size-update-race-in-fuse-kernel-module-test-proposed-fix
+- libfuse GitHub: writeback_cache inode size staleness discussion — https://github.com/libfuse/libfuse/discussions/868
+- LWN.net: "Avoiding page reference-count overflows" — https://lwn.net/Articles/786044/
+- Linux kernel `refcount.h`: saturation semantics on overflow — https://github.com/torvalds/linux/blob/master/linux/include/linux/refcount.h
+- MinIO blog: "Myths about Deduplication and Compression" — dedup on compressed data yields worse ratios — https://blog.min.io/myths-about-deduplication-and-compression/
+- Quest Community blog: "Backup Compression and Deduplication" — hash before compress ordering — https://www.quest.com/community/blogs/b/en/posts/backup-compression-and-deduplication-good-or-bad-part-i
+- ACM: "Performance and Resource Utilization of FUSE User-Space File Systems" — memory copy overhead, splicing — https://dl.acm.org/doi/fullHtml/10.1145/3310148
+- USENIX FAST 2017: "To FUSE or Not to FUSE" — writeback_cache behavior — https://www.usenix.org/system/files/conference/fast17/fast17-vangoor.pdf
+- Zcash incrementalmerkletree: append-only Merkle tree design — https://github.com/zcash/incrementalmerkletree
 
 ---
-*Pitfalls research for: Deduplicating FUSE Filesystem (DedupFS)*
-*Researched: 2026-03-27*
+*Pitfalls research for: SliceFS v2.0 — Streaming Writes & Hardening*
+*Researched: 2026-03-29*
