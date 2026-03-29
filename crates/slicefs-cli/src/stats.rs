@@ -21,7 +21,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use blockset::Dictionary;
-use metadata::segment::load_store_from_segments;
+use metadata::segment::{load_store_from_segments, migrate_legacy_store};
 use metadata::snapshot::SnapshotEntry;
 use metadata::store::DictMetadataStore;
 
@@ -75,6 +75,17 @@ pub fn run_stats(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
     let mounted = lock_path.exists();
     if mounted && !json {
         eprintln!("Note: store appears to be mounted; stats reflect closed segments only.");
+    }
+
+    // Migrate legacy format (dictionary.bin + root.bin) to segments/ if needed.
+    if store_path.join("dictionary.bin").exists() {
+        migrate_legacy_store(store_path)
+            .map_err(|e| format!("migration failed: {}", e))?;
+    } else if !store_path.join("segments").is_dir() {
+        return Err(format!(
+            "store not found at {}: no dictionary.bin or segments/ directory",
+            store_path.display()
+        ).into());
     }
 
     let segs_dir = store_path.join("segments");
@@ -223,13 +234,56 @@ fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use metadata::store::{serialize_dictionary, DictMetadataStore};
+    use metadata::wal::WalConfig;
+    use slicefs_traits::metadata::{InodeMeta, MetadataStore};
     use tempfile::TempDir;
+
+    const S_IFREG: u32 = 0o100_000;
 
     /// Create an empty segments directory so load_store_from_segments succeeds.
     fn make_empty_store() -> TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("segments")).unwrap();
         dir
+    }
+
+    /// Write a valid seeded store in legacy format (dictionary.bin + root.bin).
+    fn write_legacy_store(dir: &TempDir) {
+        let meta = DictMetadataStore::new();
+        let file_meta = InodeMeta::new_file(0, 0, 0, S_IFREG | 0o644);
+        let ino = meta.create_inode(&file_meta).unwrap();
+        meta.link(1, "hello.txt", ino).unwrap();
+        let root = meta.commit().unwrap();
+
+        let dict_bytes = {
+            let dict = meta.dict().lock().unwrap();
+            serialize_dictionary(&*dict)
+        };
+        std::fs::write(dir.path().join("dictionary.bin"), &dict_bytes).unwrap();
+
+        let mut root_bytes = Vec::with_capacity(28);
+        for word in &root {
+            root_bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        std::fs::write(dir.path().join("root.bin"), &root_bytes).unwrap();
+    }
+
+    /// Write a valid seeded store in segment format.
+    fn write_segment_store(dir: &TempDir) {
+        use metadata::wal::create_wal;
+        let segs_dir = dir.path().join("segments");
+        std::fs::create_dir_all(&segs_dir).unwrap();
+
+        let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
+        let mut meta = DictMetadataStore::new();
+        meta.set_wal(wal);
+
+        let file_meta = InodeMeta::new_file(0, 0, 0, S_IFREG | 0o644);
+        let ino = meta.create_inode(&file_meta).unwrap();
+        meta.link(1, "hello.txt", ino).unwrap();
+        meta.commit().unwrap();
+        meta.shutdown_wal().unwrap();
     }
 
     #[test]
@@ -246,6 +300,60 @@ mod tests {
         // Should produce valid JSON without panicking.
         let result = run_stats(store.path(), true);
         assert!(result.is_ok(), "stats --json on empty store should not error: {:?}", result);
+    }
+
+    #[test]
+    fn test_stats_legacy_store_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        write_legacy_store(&dir);
+        let result = run_stats(dir.path(), false);
+        assert!(result.is_ok(), "stats on legacy store should succeed: {:?}", result);
+    }
+
+    #[test]
+    fn test_stats_legacy_store_migrates_to_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        write_legacy_store(&dir);
+        run_stats(dir.path(), false).unwrap();
+        // After stats, dictionary.bin should be gone and segments/ should exist.
+        assert!(
+            !dir.path().join("dictionary.bin").exists(),
+            "dictionary.bin should be removed after migration"
+        );
+        assert!(
+            dir.path().join("segments").is_dir(),
+            "segments/ should exist after migration"
+        );
+    }
+
+    #[test]
+    fn test_stats_legacy_store_json_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        write_legacy_store(&dir);
+        let result = run_stats(dir.path(), true);
+        assert!(result.is_ok(), "stats --json on legacy store should succeed: {:?}", result);
+    }
+
+    #[test]
+    fn test_stats_segment_store_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        write_segment_store(&dir);
+        let result = run_stats(dir.path(), false);
+        assert!(result.is_ok(), "stats on segment store should succeed: {:?}", result);
+    }
+
+    #[test]
+    fn test_stats_missing_store_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // No dictionary.bin, no segments/ — should fail.
+        let result = run_stats(dir.path(), false);
+        assert!(result.is_err(), "missing store should return error");
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("store not found"),
+            "error should mention 'store not found', got: {}",
+            msg
+        );
     }
 
     #[test]
