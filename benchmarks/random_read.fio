@@ -1,0 +1,11 @@
+[global]
+ioengine=sync
+direct=1
+bs=4k
+numjobs=4
+size=1g
+group_reporting=1
+filename_format=$jobnum.$filenum
+
+[random-read]
+rw=randread

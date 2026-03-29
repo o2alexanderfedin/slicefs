@@ -1,0 +1,12 @@
+[global]
+ioengine=sync
+direct=1
+end_fsync=1
+bs=4k
+numjobs=4
+size=1g
+group_reporting=1
+filename_format=$jobnum.$filenum
+
+[sequential-write]
+rw=write
