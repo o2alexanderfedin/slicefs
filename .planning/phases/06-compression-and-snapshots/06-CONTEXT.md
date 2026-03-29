@@ -24,8 +24,9 @@ Requirements: COMP-01, COMP-02, SNAP-01, SNAP-02, SNAP-03
 - **Incompressible block detection** — if compressed output >= original size, store block uncompressed with a "raw" flag. Avoids wasting CPU on already-compressed data (JPEG, ZIP, encrypted)
 
 ### Compression + dedup ordering (COMP-02)
-- **Dedup-first-then-compress** — hash original (uncompressed) content for dedup, store compressed. Dedup decisions are based on content identity, compression is a storage optimization
-- Content hash is always computed on raw bytes — compression is transparent to the dedup layer
+- **Per-compressor dedup** — the blockset Dictionary computes Digest224 on whatever bytes it receives. Compressed bytes are fed to State::push_all, so dedup works within the same compressor configuration (same raw content + same compressor = same Digest224 = deduplicated)
+- Cross-compressor dedup is NOT achieved — same file compressed with Zstd vs LZ4 produces different Digest224 values. This is an accepted trade-off given the blockset's Merkle tree design (same approach as ZFS)
+- Compressor is typically configured once per store and rarely changed, so cross-compressor dedup loss is minimal in practice
 
 ### Snapshot metadata model
 - **Both name + auto-version** — each snapshot gets an auto-incrementing version number (u64) AND an optional user-provided name/tag
