@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 2: Metadata Engine** - Inode table, directory structure, file manifests, xattrs — separate from block store
 - [ ] **Phase 3: Read-Only FUSE** - Mount a real filesystem read-only; validate the kernel interface before write complexity
 - [x] **Phase 4: Full POSIX Write Path** - Complete read/write POSIX with inline deduplication; pjdfstest >95% on Linux (completed 2026-03-28)
-- [ ] **Phase 5: Crash Safety and GC** - WAL, refcount correctness, garbage collection, and crash recovery — the correctness layer
+- [x] **Phase 5: Crash Safety and GC** - WAL, refcount correctness, garbage collection, and crash recovery — the correctness layer (completed 2026-03-29)
 - [ ] **Phase 6: Compression and Snapshots** - Block compression and point-in-time versioning enabled by the CAS architecture
 - [ ] **Phase 7: Cross-Platform and Production Hardening** - macOS, Windows, CLI completeness, scrub, and production benchmarks
 
@@ -97,7 +97,7 @@ Plans:
   3. Orphaned blocks from an interrupted write are reclaimed by GC and do not grow the store unboundedly
   4. A block referenced by any snapshot is never deleted by GC, even when its refcount reaches zero in the live tree
   5. WAL replay on dirty mount restores the last committed state without manual intervention
-**Plans:** 3/4 plans executed
+**Plans:** 4/4 plans complete
 Plans:
 - [ ] 05-01-PLAN.md — Segment file I/O layer and WAL strategy trait with per-op and no-op implementations
 - [ ] 05-02-PLAN.md — DictMetadataStore segment integration, dirty mount detection, fsync callback, --wal-strategy CLI
@@ -139,6 +139,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 2. Metadata Engine | 2/3 | In Progress|  |
 | 3. Read-Only FUSE | 1/3 | In Progress|  |
 | 4. Full POSIX Write Path | 4/4 | Complete   | 2026-03-28 |
-| 5. Crash Safety and GC | 3/4 | In Progress|  |
+| 5. Crash Safety and GC | 4/4 | Complete   | 2026-03-29 |
 | 6. Compression and Snapshots | 0/TBD | Not started | - |
 | 7. Cross-Platform and Production Hardening | 0/TBD | Not started | - |

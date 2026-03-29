@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 05-crash-safety-and-gc/05-02-PLAN.md
-last_updated: "2026-03-29T07:21:08.470Z"
+stopped_at: Completed 05-crash-safety-and-gc/05-04-PLAN.md
+last_updated: "2026-03-29T07:33:25.233Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 17
-  completed_plans: 16
+  completed_plans: 17
   percent: 0
 ---
 
@@ -66,6 +66,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 05-crash-safety-and-gc P01 | 8min | 2 tasks | 12 files |
 | Phase 05-crash-safety-and-gc P03 | 20min | 2 tasks | 7 files |
 | Phase 05-crash-safety-and-gc P02 | 45min | 2 tasks | 12 files |
+| Phase 05-crash-safety-and-gc P04 | 6min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -127,6 +128,9 @@ Recent decisions affecting current work:
 - [Phase 05-crash-safety-and-gc]: Snapshot-delta WAL logging: BTreeSet snapshot of keys before intern_*, log new entries after — no need to modify intern_* functions
 - [Phase 05-crash-safety-and-gc]: flush_buffer_for_fsync uses mem::take to atomically remove buffer content while keeping fh in open_files
 - [Phase 05-crash-safety-and-gc]: destroy() calls shutdown_wal() replacing dictionary.bin write — WAL segment is the persistence mechanism
+- [Phase 05-crash-safety-and-gc]: set_wal() bootstraps WAL with all existing dict entries: DictMetadataStore::new() creates initial ino=1 dict entries before WAL is set; without bootstrap, crash before first explicit commit loses these entries
+- [Phase 05-crash-safety-and-gc]: Offline GC checks mount.lock before running to prevent concurrent modification with an active mount
+- [Phase 05-crash-safety-and-gc]: Background GC: GcHandle stored for FUSE session duration, shutdown() called after mount2 returns but before MountLock drops
 
 ### Pending Todos
 
@@ -142,6 +146,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-29T07:21:08.466Z
-Stopped at: Completed 05-crash-safety-and-gc/05-02-PLAN.md
+Last session: 2026-03-29T07:33:25.228Z
+Stopped at: Completed 05-crash-safety-and-gc/05-04-PLAN.md
 Resume file: None
