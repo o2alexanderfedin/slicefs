@@ -38,20 +38,20 @@ created: 2026-03-29
 
 | Task ID | Plan | Wave | Requirement | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|-----------|-------------------|-------------|--------|
-| 06-01-01 | 01 | 1 | COMP-01 | unit | `cargo test -p slicefs-compression test_zstd_compressor_reduces_size -x` | Wave 0 | ⬜ pending |
-| 06-01-02 | 01 | 1 | COMP-01 | unit | `cargo test -p slicefs-compression test_lz4_compressor_reduces_size -x` | Wave 0 | ⬜ pending |
-| 06-01-03 | 01 | 1 | COMP-01 | unit | `cargo test -p slicefs-compression test_none_compressor_passthrough -x` | Wave 0 | ⬜ pending |
-| 06-01-04 | 01 | 1 | COMP-01 | unit | `cargo test -p slicefs-compression test_incompressible_stored_raw -x` | Wave 0 | ⬜ pending |
-| 06-01-05 | 01 | 1 | COMP-01 | unit | `cargo test -p slicefs-compression test_compress_decompress_roundtrip -x` | Wave 0 | ⬜ pending |
-| 06-02-01 | 02 | 1 | COMP-02 | unit | `cargo test -p metadata test_dedup_content_hash_independent_of_compressor -x` | Wave 0 | ⬜ pending |
-| 06-02-02 | 02 | 1 | SNAP-01 | unit | `cargo test -p metadata test_create_snapshot_returns_version -x` | Wave 0 | ⬜ pending |
-| 06-02-03 | 02 | 1 | SNAP-01 | integration | `cargo test -p slicefs-cli test_snapshot_files_readable -x` | Wave 0 | ⬜ pending |
-| 06-02-04 | 02 | 1 | SNAP-02 | unit | `cargo test -p metadata test_list_snapshots_ordered -x` | Wave 0 | ⬜ pending |
-| 06-02-05 | 02 | 1 | SNAP-02 | unit | `cargo test -p metadata test_switch_root_updates_live_pointer -x` | Wave 0 | ⬜ pending |
-| 06-02-06 | 02 | 1 | SNAP-03 | unit | `cargo test -p metadata test_shared_blocks_not_double_counted -x` | Wave 0 | ⬜ pending |
-| 06-02-07 | 02 | 1 | GC-03 | unit | `cargo test -p metadata test_gc_preserves_snapshot_blocks -x` | Wave 0 | ⬜ pending |
+| 06-01-01 | 01 | 1 | COMP-01 | unit | `cargo test -p slicefs-compression test_zstd_compressor_reduces_size -x` | Wave 0 | pending |
+| 06-01-02 | 01 | 1 | COMP-01 | unit | `cargo test -p slicefs-compression test_lz4_compressor_reduces_size -x` | Wave 0 | pending |
+| 06-01-03 | 01 | 1 | COMP-01 | unit | `cargo test -p slicefs-compression test_none_compressor_passthrough -x` | Wave 0 | pending |
+| 06-01-04 | 01 | 1 | COMP-01 | unit | `cargo test -p slicefs-compression test_incompressible_stored_raw -x` | Wave 0 | pending |
+| 06-01-05 | 01 | 1 | COMP-01 | unit | `cargo test -p slicefs-compression test_compress_decompress_roundtrip -x` | Wave 0 | pending |
+| 06-02-01 | 02 | 2 | COMP-02 | unit | `cargo test -p slicefs-cli test_dedup_same_compressor_same_digest -x` | Wave 0 | pending |
+| 06-03-01 | 03 | 1 | SNAP-01 | unit | `cargo test -p metadata test_create_snapshot_returns_version -x` | Wave 0 | pending |
+| 06-03-02 | 03 | 1 | SNAP-01 | integration | `cargo test -p slicefs-cli test_snapshot_files_readable -x` | Wave 0 | pending |
+| 06-03-03 | 03 | 1 | SNAP-02 | unit | `cargo test -p metadata test_list_snapshots_ordered -x` | Wave 0 | pending |
+| 06-03-04 | 03 | 1 | SNAP-02 | unit | `cargo test -p metadata test_switch_root_updates_live_pointer -x` | Wave 0 | pending |
+| 06-03-05 | 03 | 1 | SNAP-03 | unit | `cargo test -p metadata test_shared_blocks_not_double_counted -x` | Wave 0 | pending |
+| 06-04-01 | 04 | 2 | GC-03 | unit | `cargo test -p metadata test_gc_preserves_snapshot_blocks -x` | Wave 0 | pending |
 
-*Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
+*Status: pending / green / red / flaky*
 
 ---
 
