@@ -74,7 +74,33 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **CLI-05**: Structured JSON output from all CLI commands for tooling integration
 - [x] **CLI-06**: Mount options for performance tuning (noatime, writeback cache, cache size)
 
-## v2 Requirements
+## v2.0 Requirements
+
+Requirements for streaming writes and hardening milestone.
+
+### Streaming Writes
+
+- [ ] **STRM-01**: Sequential file writes use State::push_bytes() incrementally — O(log N) memory regardless of file size
+- [ ] **STRM-02**: Non-sequential writes (pwrite at arbitrary offset) detected and fall back to Vec<u8> buffer mode with no regression
+- [ ] **STRM-03**: Read-during-write on an open streaming file handle returns correct content (clone+end materialization)
+- [ ] **STRM-04**: fsync() mid-stream commits current State, resets streaming state for subsequent writes
+- [ ] **STRM-05**: Truncate on an open streaming file handle resets State and adjusts inode size atomically
+
+### Compression Removal
+
+- [ ] **DECOMP-01**: Write path pushes raw (uncompressed) bytes to Merkle tree — no compress_block call
+- [ ] **DECOMP-02**: Store format version bumped to v3 (raw blocks, no compression header)
+- [ ] **DECOMP-03**: Read path handles all three store versions: v1 (legacy raw), v2 (compressed header), v3 (new raw)
+- [ ] **DECOMP-04**: Digest224 identity is computed on raw content — cross-file dedup works regardless of historical compressor
+
+### Correctness Fixes
+
+- [ ] **FIX-01**: Refcount increment uses saturating_add — no silent overflow to 0 on u64::MAX
+- [ ] **FIX-02**: statfs reports actual inode count (not hardcoded 1M) and tracks physical bytes accurately
+- [ ] **FIX-03**: Snapshot lookup by version is O(1) via HashMap<u64, SnapshotEntry>
+- [ ] **FIX-04**: Snapshot lookup by name is O(1) via HashMap<String, u64> index
+
+## v3 Requirements
 
 Deferred to future milestone. Tracked but not in current roadmap.
 
@@ -94,6 +120,7 @@ Deferred to future milestone. Tracked but not in current roadmap.
 - **ADV-01**: Snapshot writeable clones (branch-on-write)
 - **ADV-02**: Quota management (per-directory or per-user)
 - **ADV-03**: Online compaction/repack of block store
+- **ADV-04**: Segment-level compression (compress Dictionary entries at storage layer, dedup on raw content)
 
 ## Out of Scope
 
