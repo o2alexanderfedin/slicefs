@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-29)
 
 **Core value:** High-ratio data deduplication that works transparently as a real, daily-driver POSIX filesystem
-**Current focus:** v2.0 — Streaming Writes & Hardening (Phase 8: Correctness Fixes)
+**Current focus:** v2.0 — Streaming Writes & Hardening (Phase 7.1: FileStorage Migration)
 
 ## Current Position
 
-Phase: 8 of 11 (Correctness Fixes)
+Phase: 7.1 (FileStorage Migration — INSERTED, urgent)
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-03-29 — v2.0 roadmap created (phases 8-11)
+Last activity: 2026-03-29 — Phase 7.1 inserted before Phase 8 (FileStorage Migration)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -43,6 +43,7 @@ Progress: [░░░░░░░░░░] 0%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
+| 7.1. FileStorage Migration (INSERTED) | 0/? | - | - |
 | 8. Correctness Fixes | 0/2 | - | - |
 | 9. Compression Removal | 0/2 | - | - |
 | 10. Streaming Writes Core | 0/3 | - | - |
@@ -58,6 +59,10 @@ Progress: [░░░░░░░░░░] 0%
 - v2.0 Roadmap: Compression removal (Phase 9) before streaming — both touch flush_buffer_to_cas; sequential isolation makes regressions unambiguous
 - v2.0 Roadmap: Core streaming (Phase 10) before edge cases (Phase 11) — non-sequential fallback requires stable core to test against
 - v2.0 Roadmap: No WAL checkpointing of partial streaming state — "no intermediate manifests" invariant; truncate-on-crash is sufficient; streaming State is O(log N) so terabyte files fit in memory
+
+### Roadmap Evolution
+
+- Phase 7.1 inserted after Phase 7: FileStorage Migration (URGENT) — switch DictMetadataStore from in-memory Dictionary to file-backed FileStorageAdd/file_storage_get. Eliminates ~67 GB RAM for 1 TB stores. Structurally solves FIX-03/FIX-04. Runs before Phase 8 correctness fixes.
 
 ### Pending Todos
 

@@ -138,9 +138,25 @@ Plans:
 
 **Milestone Goal:** Remove the file size = RAM limitation via incremental Merkle streaming writes; remove write-path compression so dedup hashes raw content; fix known correctness bugs from v1.0 operation.
 
+### Phase 07.1: FileStorage Migration (INSERTED)
+
+**Goal**: Switch DictMetadataStore from in-memory Dictionary (BTreeMap) to file-backed FileStorageAdd/file_storage_get from data-id — eliminates ~67 GB RAM for 1 TB stores by using the host filesystem as a hash table; structurally solves FIX-03/FIX-04 (snapshot O(1) lookup)
+**Depends on:** Phase 7
+**Requirements**: FIX-03, FIX-04 (solved structurally)
+**Success Criteria** (what must be TRUE):
+  1. DictMetadataStore uses file-backed storage (FileStorageAdd/file_storage_get via Io trait) instead of in-memory BTreeMap<Digest224, Branches>
+  2. Memory usage for the Merkle tree is O(1) regardless of store size — hot nodes served by OS page cache, not application heap
+  3. Snapshot lookup by version or name is O(1) via filesystem path resolution
+  4. All existing tests pass with no regression — seed, mount, read, write, GC, scrub, stats, snapshots all work identically
+  5. Segment replay on mount populates file-backed storage instead of in-memory Dictionary
+**Plans**: TBD
+
+Plans:
+- [ ] TBD (run /gsd:plan-phase 07.1 to break down)
+
 #### Phase 8: Correctness Fixes
-**Goal**: Known v1.0 correctness bugs are eliminated before the invasive write-path restructuring begins — refcount overflow risk is closed, statfs reports real numbers, and snapshot lookup is O(1)
-**Depends on**: Phase 7
+**Goal**: Known v1.0 correctness bugs are eliminated before the invasive write-path restructuring begins — refcount overflow risk is closed and statfs reports real numbers with three-tier space reporting (logical, CAS, host disk)
+**Depends on**: Phase 7.1
 **Requirements**: FIX-01, FIX-02, FIX-03, FIX-04
 **Success Criteria** (what must be TRUE):
   1. Incrementing a block's refcount at u64::MAX produces u64::MAX (saturating), not 0 — no silent data loss under extreme dedup load
@@ -201,7 +217,7 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 8 -> 9 -> 10 -> 11
+Phases execute in numeric order: 7.1 -> 8 -> 9 -> 10 -> 11
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
@@ -212,6 +228,7 @@ Phases execute in numeric order: 8 -> 9 -> 10 -> 11
 | 5. Crash Safety and GC | v1.0 | 4/4 | Complete | 2026-03-29 |
 | 6. Compression and Snapshots | v1.0 | 4/4 | Complete | 2026-03-29 |
 | 7. Cross-Platform and Production Hardening | v1.0 | 3/3 | Complete | 2026-03-29 |
+| 7.1. FileStorage Migration (INSERTED) | v2.0 | 0/? | Not started | - |
 | 8. Correctness Fixes | v2.0 | 0/2 | Not started | - |
 | 9. Compression Removal | v2.0 | 0/2 | Not started | - |
 | 10. Streaming Writes Core | v2.0 | 0/3 | Not started | - |
