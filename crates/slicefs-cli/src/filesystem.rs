@@ -214,6 +214,66 @@ impl SliceFsFilesystem {
         self.flush_buffer_to_cas(ino, buf)
     }
 
+    /// Flush the write buffer for `fh` to CAS, then reset the buffer to empty.
+    ///
+    /// Unlike `test_release`, the file handle remains open after this call.
+    /// Used by `test_fsync` and the FUSE `fsync()` callback.
+    pub fn test_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
+        self.flush_buffer_for_fsync(ino, fh)?;
+        // Flush WAL to disk — ensures all pending mutations are durable
+        self.meta.flush_wal().map_err(|_| libc::EIO)?;
+        Ok(())
+    }
+
+    /// Flush the write buffer for `fh` to CAS without closing the handle.
+    ///
+    /// Reads the current buffer, flushes it via CAS pipeline, then replaces
+    /// the buffer with an empty Vec (file handle stays open for further writes).
+    /// If `fh` is not in `open_files` (read-only handle or invalid), returns Ok
+    /// without error — fsync is a no-op for read-only handles.
+    fn flush_buffer_for_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
+        // Take the buffer out, leaving nothing in open_files temporarily
+        let buf = {
+            let mut open_files = self.open_files.lock().unwrap();
+            match open_files.get_mut(&fh) {
+                Some(state) => {
+                    // Swap buffer with empty — we'll put it back after flushing
+                    let buf = std::mem::take(&mut state.buf);
+                    buf
+                }
+                None => return Ok(()), // No write handle — fsync is a no-op
+            }
+        };
+
+        // Flush buf to CAS (same logic as flush_buffer_to_cas)
+        if buf.is_empty() {
+            // Nothing to flush — no-op
+        } else {
+            let content_digest = {
+                let mut dict = self.dict.lock().unwrap();
+                State::push_all(&mut *dict, &buf)
+            };
+            self.meta.set_manifest(ino, &[content_digest]).map_err(|_| libc::EIO)?;
+            self.meta.increment_refcount(&content_digest);
+
+            // Update inode size and mtime
+            let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
+            inode.size = buf.len() as u64;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO);
+            inode.mtime_sec = now.as_secs() as i64;
+            inode.mtime_nsec = now.subsec_nanos();
+            inode.ctime_sec = inode.mtime_sec;
+            inode.ctime_nsec = inode.mtime_nsec;
+            self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
+        }
+
+        // buf is now dropped — open_files[fh].buf is already empty (mem::take above)
+        // The file handle remains open with an empty buffer ready for further writes.
+        Ok(())
+    }
+
     /// Flush `buf` to CAS, set manifest, update inode size/mtime.
     /// Shared between test_release and the FUSE release() callback.
     fn flush_buffer_to_cas(&self, ino: u64, buf: Vec<u8>) -> Result<(), i32> {
@@ -838,6 +898,26 @@ impl Filesystem for SliceFsFilesystem {
         reply: ReplyEmpty,
     ) {
         reply.ok();
+    }
+
+    /// Flush any buffered writes for `fh` to CAS and sync the WAL to disk.
+    ///
+    /// `datasync` is ignored — SliceFS treats fsync and fdatasync identically.
+    /// If `fh` has a write buffer, it is flushed through the CAS pipeline and
+    /// the buffer is reset to empty (file handle stays open for subsequent writes).
+    /// The WAL is then synced to disk to ensure durability.
+    fn fsync(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        fh: FileHandle,
+        _datasync: bool,
+        reply: ReplyEmpty,
+    ) {
+        match self.test_fsync(ino.0, fh.0) {
+            Ok(()) => reply.ok(),
+            Err(_) => reply.error(Errno::EIO),
+        }
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
