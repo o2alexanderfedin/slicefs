@@ -6,8 +6,10 @@ mod cli;
 mod filesystem;
 mod gc;
 mod mount;
+mod scrub;
 mod seed;
 mod snapshot;
+mod stats;
 mod store_io;
 mod unmount;
 
@@ -16,13 +18,15 @@ use cli::{Cli, Cmd};
 
 fn main() {
     let cli = Cli::parse();
+    let json = cli.json;
 
     match cli.command {
-        Cmd::Mount { mountpoint, store, noatime, cache_size, wal_strategy, compressor, compressor_level, snapshot, auto_snapshot, .. } => {
+        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, compressor, compressor_level, snapshot, auto_snapshot } => {
             if let Err(e) = mount::run_mount(
                 &store,
                 &mountpoint,
                 noatime,
+                allow_other,
                 cache_size,
                 wal_strategy.as_deref(),
                 &compressor,
@@ -30,31 +34,71 @@ fn main() {
                 snapshot.as_deref(),
                 auto_snapshot,
             ) {
-                eprintln!("slicefs mount error: {e}");
+                if json {
+                    eprintln!("{{\"error\": \"{e}\"}}");
+                } else {
+                    eprintln!("slicefs mount error: {e}");
+                }
                 std::process::exit(1);
             }
         }
         Cmd::Unmount { mountpoint } => {
             if let Err(e) = unmount::run_unmount(&mountpoint) {
-                eprintln!("slicefs unmount error: {e}");
+                if json {
+                    eprintln!("{{\"error\": \"{e}\"}}");
+                } else {
+                    eprintln!("slicefs unmount error: {e}");
+                }
                 std::process::exit(1);
             }
         }
         Cmd::Seed { store, source_dir } => {
             if let Err(e) = seed::run_seed(&store, &source_dir) {
-                eprintln!("slicefs seed error: {e}");
+                if json {
+                    eprintln!("{{\"error\": \"{e}\"}}");
+                } else {
+                    eprintln!("slicefs seed error: {e}");
+                }
                 std::process::exit(1);
             }
         }
         Cmd::Gc { store } => {
             if let Err(e) = gc::run_gc(&store) {
-                eprintln!("slicefs gc error: {e}");
+                if json {
+                    eprintln!("{{\"error\": \"{e}\"}}");
+                } else {
+                    eprintln!("slicefs gc error: {e}");
+                }
                 std::process::exit(1);
             }
         }
         Cmd::Snapshot { action } => {
             if let Err(e) = snapshot::run_snapshot(action) {
-                eprintln!("slicefs snapshot error: {e}");
+                if json {
+                    eprintln!("{{\"error\": \"{e}\"}}");
+                } else {
+                    eprintln!("slicefs snapshot error: {e}");
+                }
+                std::process::exit(1);
+            }
+        }
+        Cmd::Stats { store } => {
+            if let Err(e) = stats::run_stats(&store, json) {
+                if json {
+                    eprintln!("{{\"error\": \"{e}\"}}");
+                } else {
+                    eprintln!("slicefs stats error: {e}");
+                }
+                std::process::exit(1);
+            }
+        }
+        Cmd::Scrub { store } => {
+            if let Err(e) = scrub::run_scrub(&store, json) {
+                if json {
+                    eprintln!("{{\"error\": \"{e}\"}}");
+                } else {
+                    eprintln!("slicefs scrub error: {e}");
+                }
                 std::process::exit(1);
             }
         }

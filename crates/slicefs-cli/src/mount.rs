@@ -148,8 +148,12 @@ pub(crate) fn next_segment_id(segs_dir: &Path) -> u64 {
 ///
 /// Always includes: `FSName("slicefs")`, `DefaultPermissions`.
 /// Adds `NoAtime` when `noatime` is true.
+/// Adds `AllowOther` when `allow_other` is true.
+/// On macOS, adds `CUSTOM("direct_io")` to bypass the NFS page cache that
+/// FUSE-T uses internally; without this, reads return stale data after writes
+/// (FUSE-T issue #45).
 /// ACL defaults to `Owner` (only the mounting user can access the filesystem).
-pub fn build_mount_options(noatime: bool) -> Config {
+pub fn build_mount_options(noatime: bool, allow_other: bool) -> Config {
     let mut mount_options = vec![
         MountOption::FSName("slicefs".to_string()),
         MountOption::DefaultPermissions,
@@ -157,9 +161,20 @@ pub fn build_mount_options(noatime: bool) -> Config {
     if noatime {
         mount_options.push(MountOption::NoAtime);
     }
+    // FUSE-T (macOS) translates FUSE operations to NFSv4. The NFS client
+    // caches reads and can return stale data after a write because the NFS
+    // server (FUSE-T) has not yet committed the data. direct_io bypasses
+    // the NFS page cache, making every read/write go directly to the
+    // FUSE handler.  This is harmless on other FUSE implementations.
+    if cfg!(target_os = "macos") {
+        mount_options.push(MountOption::CUSTOM("direct_io".to_string()));
+    }
     let mut cfg = Config::default();
     cfg.mount_options = mount_options;
-    cfg.acl = SessionACL::Owner;
+    // fuser 0.17 uses SessionACL to control allow_other: SessionACL::All
+    // passes `allow_other` to the kernel, SessionACL::Owner restricts access
+    // to the mounting user only.
+    cfg.acl = if allow_other { SessionACL::All } else { SessionACL::Owner };
     cfg
 }
 
@@ -182,6 +197,7 @@ pub fn parse_wal_config(strategy: Option<&str>) -> WalConfig {
 /// or `slicefs unmount`).
 ///
 /// `_cache_size` is accepted but unused in Phase 3. Placeholder for Phase 4.
+/// `allow_other` passes the `allow_other` FUSE mount option (multi-user access).
 /// `compressor_name` selects the block compressor ("zstd", "lz4", "none"; default "none").
 /// `compressor_level` overrides the compression level (Zstd only; default 3).
 /// `snapshot_ref` mounts a specific snapshot read-only (by version number or name).
@@ -191,6 +207,7 @@ pub fn run_mount(
     store_path: &Path,
     mountpoint: &Path,
     noatime: bool,
+    allow_other: bool,
     _cache_size: usize,
     wal_strategy: Option<&str>,
     compressor_name: &str,
@@ -214,11 +231,11 @@ pub fn run_mount(
             DictMetadataStore::load_from_root(dict, &snap.root)
                 .map_err(|e| format!("failed to load snapshot root: {}", e))?
         };
-        let mut cfg = build_mount_options(noatime);
+        let mut cfg = build_mount_options(noatime, allow_other);
         cfg.mount_options.push(MountOption::RO);
         (snap_meta, cfg)
     } else {
-        let cfg = build_mount_options(noatime);
+        let cfg = build_mount_options(noatime, allow_other);
         (meta, cfg)
     };
 
@@ -422,7 +439,7 @@ mod tests {
 
     #[test]
     fn test_build_mount_options_with_noatime() {
-        let config = build_mount_options(true);
+        let config = build_mount_options(true, false);
         assert!(
             !config.mount_options.contains(&MountOption::RO),
             "RO must NOT be present (mount is read-write)"
@@ -439,7 +456,7 @@ mod tests {
 
     #[test]
     fn test_build_mount_options_without_noatime() {
-        let config = build_mount_options(false);
+        let config = build_mount_options(false, false);
         assert!(
             !config.mount_options.contains(&MountOption::RO),
             "RO must NOT be present (mount is read-write)"
@@ -451,6 +468,47 @@ mod tests {
         assert!(
             config.mount_options.contains(&MountOption::DefaultPermissions),
             "DefaultPermissions must always be present"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_build_mount_options_macos_direct_io() {
+        // On macOS, direct_io must be present to bypass FUSE-T NFS page cache.
+        let config = build_mount_options(false, false);
+        assert!(
+            config.mount_options.contains(&MountOption::CUSTOM("direct_io".to_string())),
+            "CUSTOM(direct_io) must be present on macOS to fix FUSE-T write visibility"
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn test_build_mount_options_linux_no_direct_io() {
+        // On Linux, direct_io must NOT be present (it is a macOS-only workaround).
+        let config = build_mount_options(false, false);
+        assert!(
+            !config.mount_options.contains(&MountOption::CUSTOM("direct_io".to_string())),
+            "CUSTOM(direct_io) must NOT be present on Linux"
+        );
+    }
+
+    #[test]
+    fn test_build_mount_options_allow_other() {
+        // fuser 0.17 uses SessionACL::All to implement allow_other.
+        let config = build_mount_options(false, true);
+        assert!(
+            matches!(config.acl, SessionACL::All),
+            "SessionACL must be All when allow_other=true"
+        );
+    }
+
+    #[test]
+    fn test_build_mount_options_no_allow_other() {
+        let config = build_mount_options(false, false);
+        assert!(
+            matches!(config.acl, SessionACL::Owner),
+            "SessionACL must be Owner when allow_other=false"
         );
     }
 
