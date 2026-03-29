@@ -373,3 +373,145 @@ mod background_gc_tests {
         handle.shutdown();
     }
 }
+
+// ─── Snapshot-aware GC integration tests ────────────────────────────────────
+
+/// Blocks reachable from a snapshot must survive GC even when deleted from the live tree.
+///
+/// Scenario:
+/// 1. Create a store, add a file with content, commit, take snapshot.
+/// 2. Delete the file from the live tree, commit.
+/// 3. Run GC with snapshot_roots() — snapshot-reachable blocks must survive.
+/// 4. Reconstruct store from snapshot root — file data still accessible.
+#[test]
+fn test_gc_preserves_snapshot_blocks() {
+    use metadata::gc::GarbageCollector;
+    use metadata::segment::load_store_from_segments;
+    use metadata::store::DictMetadataStore;
+    use metadata::wal::{WalConfig, create_wal};
+    use slicefs_traits::metadata::{InodeMeta, MetadataStore};
+    use tempfile::TempDir;
+
+    const S_IFREG: u32 = 0o100_000;
+
+    let store_dir = TempDir::new().unwrap();
+    let segs_dir = store_dir.path().join("segments");
+    std::fs::create_dir_all(&segs_dir).unwrap();
+
+    // Step 1: Create store, add file, commit, take snapshot.
+    {
+        let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
+        let mut meta = DictMetadataStore::new();
+        meta.set_wal(wal);
+
+        let file_meta = InodeMeta::new_file(0, 0, 0, S_IFREG | 0o644);
+        let ino = meta.create_inode(&file_meta).unwrap();
+        meta.link(1, "data.txt", ino).unwrap();
+        meta.commit().unwrap();
+
+        // Take snapshot — captures current root (with data.txt).
+        let snap = meta.create_snapshot(Some("before-delete".to_string())).unwrap();
+        assert_eq!(snap.version, 1);
+
+        meta.shutdown_wal().unwrap();
+    }
+
+    // Step 2: Reload store, delete the file, commit.
+    {
+        let (dict, root_opt, snapshots) = load_store_from_segments(&segs_dir).unwrap();
+        let root = root_opt.expect("must have root after step 1");
+        let mut meta = DictMetadataStore::load_from_root(dict, &root).unwrap();
+        meta.set_snapshots(snapshots);
+
+        let wal = create_wal(WalConfig::PerOp, store_dir.path(), 10).unwrap();
+        meta.set_wal(wal);
+
+        // Find and unlink the file.
+        let ino = meta.lookup(1, "data.txt").expect("data.txt must exist");
+        meta.unlink(1, "data.txt").unwrap();
+        meta.delete_inode(ino).unwrap();
+        meta.commit().unwrap();
+        meta.shutdown_wal().unwrap();
+    }
+
+    // Step 3: Run GC using snapshot_roots() — snapshot root keeps old blocks alive.
+    {
+        let (dict, root_opt, snapshots) = load_store_from_segments(&segs_dir).unwrap();
+
+        // Reconstruct store to get snapshot_roots().
+        if let Some(root) = root_opt {
+            let mut meta = DictMetadataStore::load_from_root(dict.clone(), &root).unwrap();
+            meta.set_snapshots(snapshots.clone());
+
+            let roots = meta.snapshot_roots();
+            assert!(roots.len() >= 2, "must have at least snapshot root + live root");
+
+            let gc = GarbageCollector::new(segs_dir.clone());
+            let stats = gc.run_gc(&dict, &roots).unwrap();
+
+            // GC should have run without removing snapshot-referenced blocks.
+            // (entries_removed may be > 0 for orphaned non-snapshot data, but 0 is fine too.)
+            let _ = stats; // not asserting on exact counts
+        }
+    }
+
+    // Step 4: Reload from snapshot root — data.txt must be accessible.
+    {
+        let (dict, _root_opt, snapshots) = load_store_from_segments(&segs_dir).unwrap();
+        assert!(!snapshots.is_empty(), "snapshot must survive GC");
+
+        let snap = &snapshots[0];
+        assert_eq!(snap.name.as_deref(), Some("before-delete"));
+
+        // Reconstruct metadata from the snapshot root.
+        let meta = DictMetadataStore::load_from_root(dict, &snap.root).unwrap();
+        let ino = meta.lookup(1, "data.txt");
+        assert!(
+            ino.is_ok(),
+            "data.txt must be accessible via snapshot root after GC"
+        );
+    }
+}
+
+/// snapshot_roots() returns both snapshot roots and current live root.
+#[test]
+fn test_snapshot_roots_includes_all_anchors() {
+    use metadata::store::DictMetadataStore;
+    use metadata::wal::{WalConfig, create_wal};
+    use slicefs_traits::metadata::{InodeMeta, MetadataStore};
+    use tempfile::TempDir;
+
+    const S_IFREG: u32 = 0o100_000;
+
+    let store_dir = TempDir::new().unwrap();
+    let segs_dir = store_dir.path().join("segments");
+    std::fs::create_dir_all(&segs_dir).unwrap();
+
+    let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
+    let mut meta = DictMetadataStore::new();
+    meta.set_wal(wal);
+
+    let file_meta = InodeMeta::new_file(0, 0, 0, S_IFREG | 0o644);
+    let ino = meta.create_inode(&file_meta).unwrap();
+    meta.link(1, "a.txt", ino).unwrap();
+    let root1 = meta.commit().unwrap();
+
+    // Before snapshot: only live root
+    let roots_before = meta.snapshot_roots();
+    assert!(roots_before.contains(&root1));
+
+    // Create snapshot — now snapshot root + live root
+    meta.create_snapshot(None).unwrap();
+    let roots_after = meta.snapshot_roots();
+    // snapshot root == root1 (create_snapshot calls commit() first)
+    assert!(
+        roots_after.contains(&root1),
+        "snapshot root must be in snapshot_roots()"
+    );
+    assert!(
+        roots_after.len() >= 1,
+        "must have at least one root after snapshot"
+    );
+
+    meta.shutdown_wal().unwrap();
+}

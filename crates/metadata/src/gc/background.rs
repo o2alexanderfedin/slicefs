@@ -82,11 +82,9 @@ pub fn spawn_background_gc(
             let orphan_count = count_orphans(&store);
 
             if orphan_count > orphan_threshold {
-                // Collect live set from current root (Phase 5: no snapshots yet)
-                let roots = match store.current_root() {
-                    Some(root) => vec![root],
-                    None => vec![],
-                };
+                // Collect all GC roots: current live root + all snapshot roots.
+                // snapshot_roots() returns all snapshot roots plus current_root() if set.
+                let roots = store.snapshot_roots();
 
                 let dict = store.dict().lock().unwrap();
                 let _ = gc.run_gc(&dict, &roots);
