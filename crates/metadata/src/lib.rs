@@ -12,3 +12,5 @@ pub mod xattr;
 pub mod store;
 pub mod segment;
 pub mod wal;
+pub mod mount_lock;
+pub mod gc;

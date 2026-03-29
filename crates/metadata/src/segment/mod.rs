@@ -16,11 +16,118 @@
 
 pub mod writer;
 pub mod reader;
+pub mod compaction;
 
 pub use writer::SegmentWriter;
 pub use reader::SegmentReader;
 
+use std::path::Path;
 use slicefs_traits::digest::{Branches, Digest224};
+use blockset::Dictionary;
+use thiserror::Error;
+
+/// Errors returned by segment-level operations.
+#[derive(Debug, Error)]
+pub enum SegmentError {
+    #[error("segment I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("missing root.bin in legacy store at {0}")]
+    MissingRootBin(String),
+    #[error("invalid root.bin: expected 28 bytes, got {0}")]
+    InvalidRootBin(usize),
+    #[error("migration failed: {0}")]
+    Migration(String),
+}
+
+/// Load all segment files from `segments_dir`, replay them into a `Dictionary`,
+/// and return the last `RootUpdate` digest seen.
+///
+/// Segment files are read in ascending order by segment_id (encoded in the filename
+/// as `segment-{id:06}.seg`). DictEntry records are inserted into the Dictionary;
+/// RootUpdate records update the `last_root` tracker.
+///
+/// Returns `(dictionary, Option<last_root_digest>)`.
+pub fn load_store_from_segments(
+    segments_dir: &Path,
+) -> Result<(Dictionary, Option<Digest224>), SegmentError> {
+    let mut dict = Dictionary::new();
+    let mut last_root: Option<Digest224> = None;
+
+    // Collect segment files and sort by name (which encodes segment_id numerically)
+    let mut seg_paths: Vec<std::path::PathBuf> = std::fs::read_dir(segments_dir)?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("segment-") && name.ends_with(".seg") {
+                Some(entry.path())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Sort lexicographically — segment-000001.seg < segment-000002.seg etc.
+    seg_paths.sort();
+
+    for path in &seg_paths {
+        let reader = SegmentReader::open(path)?;
+        for entry in reader {
+            match entry {
+                SegmentEntry::DictEntry { key, branches } => {
+                    dict.insert(key, branches);
+                }
+                SegmentEntry::RootUpdate { root } => {
+                    last_root = Some(root);
+                }
+            }
+        }
+    }
+
+    Ok((dict, last_root))
+}
+
+/// Migrate a legacy store (dictionary.bin + root.bin) to segment format.
+///
+/// Reads `<store_path>/root.bin` and `<store_path>/dictionary.bin`, writes all
+/// entries into a single segment file at `<store_path>/segments/segment-000001.seg`,
+/// then removes `dictionary.bin` and `root.bin`.
+pub fn migrate_legacy_store(store_path: &Path) -> Result<(), SegmentError> {
+    use crate::store::{deserialize_dictionary, serialize_dictionary as _};
+
+    let root_bytes = std::fs::read(store_path.join("root.bin"))
+        .map_err(|_| SegmentError::MissingRootBin(store_path.display().to_string()))?;
+    if root_bytes.len() != 28 {
+        return Err(SegmentError::InvalidRootBin(root_bytes.len()));
+    }
+    let mut root: Digest224 = [0u32; 7];
+    for (i, word) in root.iter_mut().enumerate() {
+        *word = u32::from_le_bytes(root_bytes[i * 4..i * 4 + 4].try_into().unwrap());
+    }
+
+    let dict_bytes = std::fs::read(store_path.join("dictionary.bin"))
+        .map_err(|e| SegmentError::Migration(format!("failed to read dictionary.bin: {}", e)))?;
+    let dict = deserialize_dictionary(&dict_bytes)
+        .map_err(|e| SegmentError::Migration(format!("failed to deserialize dictionary.bin: {}", e)))?;
+
+    // Create segments directory
+    let segs_dir = store_path.join("segments");
+    std::fs::create_dir_all(&segs_dir)?;
+
+    // Write all dict entries + root update into segment-000001.seg
+    let seg_path = segs_dir.join("segment-000001.seg");
+    let mut writer = SegmentWriter::new(&seg_path, 1)?;
+    for (key, branches) in &dict {
+        writer.write_entry(&SegmentEntry::DictEntry { key: *key, branches: *branches })?;
+    }
+    writer.write_entry(&SegmentEntry::RootUpdate { root })?;
+    writer.close()?;
+
+    // Remove legacy files
+    let _ = std::fs::remove_file(store_path.join("dictionary.bin"));
+    let _ = std::fs::remove_file(store_path.join("root.bin"));
+
+    Ok(())
+}
 
 /// Magic bytes identifying a SliceFS segment file: "SLSG"
 pub const SEGMENT_MAGIC: [u8; 4] = [0x53, 0x4C, 0x53, 0x47];

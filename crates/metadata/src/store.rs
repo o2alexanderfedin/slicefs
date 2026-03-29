@@ -17,6 +17,8 @@ use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, MetadataStore};
 use blockset::{Dictionary, State, Tree};
 
+use crate::wal::{WalEntry, WalError, WalStrategy};
+
 use crate::inode::{intern_inode, load_inode};
 use crate::inode_map::{InodeMap, intern_inode_map};
 use crate::directory::{create_dir_entries, add_dir_entry, remove_dir_entry,
@@ -61,6 +63,12 @@ pub struct DictMetadataStore {
     /// Updated atomically in `create_inode` (+size), `update_inode` (delta),
     /// and `delete_inode` (-size).  Never goes below 0.
     logical_bytes: AtomicU64,
+    /// Optional WAL strategy — routes all Dictionary mutations to durable storage.
+    ///
+    /// Set via `set_wal()` after construction. When None, mutations are not logged.
+    wal: Mutex<Option<Box<dyn WalStrategy>>>,
+    /// Last committed root digest — updated by `commit()`, used by GC to determine live roots.
+    last_root: Mutex<Option<Digest224>>,
 }
 
 impl DictMetadataStore {
@@ -93,6 +101,8 @@ impl DictMetadataStore {
             xattr_data: Mutex::new(BTreeMap::new()),
             refcounts: Mutex::new(BTreeMap::new()),
             logical_bytes: AtomicU64::new(0),
+            wal: Mutex::new(None),
+            last_root: Mutex::new(None),
         }
     }
 }
@@ -148,6 +158,53 @@ impl DictMetadataStore {
     /// Dividing logical_bytes by (dict.len() * 92) gives the dedup ratio.
     pub fn logical_bytes(&self) -> u64 {
         self.logical_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Set the WAL strategy. Must be called before any mutations if durability is desired.
+    ///
+    /// Replaces any previously set WAL (the old one is dropped; not flushed).
+    pub fn set_wal(&mut self, wal: Box<dyn WalStrategy>) {
+        *self.wal.lock().unwrap() = Some(wal);
+    }
+
+    /// Flush all buffered WAL mutations to disk and call sync_all.
+    ///
+    /// This is called by the fsync FUSE callback to ensure durability.
+    /// Returns Ok(()) when no WAL is configured.
+    pub fn flush_wal(&self) -> Result<(), WalError> {
+        if let Some(ref w) = *self.wal.lock().unwrap() {
+            w.flush_and_sync()?;
+        }
+        Ok(())
+    }
+
+    /// Flush remaining mutations and shut down the WAL cleanly.
+    ///
+    /// Should be called before dropping the store (e.g., in `destroy()`).
+    pub fn shutdown_wal(&self) -> Result<(), WalError> {
+        if let Some(ref w) = *self.wal.lock().unwrap() {
+            w.shutdown()?;
+        }
+        Ok(())
+    }
+
+    /// Log a single WAL entry if a WAL strategy is configured.
+    ///
+    /// IMPORTANT: Do NOT hold any other Mutex when calling this — WAL I/O
+    /// may block and holding dict/inode_map locks would cause deadlocks.
+    fn log_wal_entry(&self, entry: &WalEntry) {
+        if let Some(ref w) = *self.wal.lock().unwrap() {
+            // Ignore WAL errors during mutation logging — the in-memory state
+            // is already correct. WAL failures are surfaced via flush_wal/shutdown_wal.
+            let _ = w.log_mutation(entry);
+        }
+    }
+
+    /// Return the last committed root digest, or `None` if `commit()` has not been called yet.
+    ///
+    /// Used by the background GC thread to determine which root to use as the live-set anchor.
+    pub fn current_root(&self) -> Option<Digest224> {
+        *self.last_root.lock().unwrap()
     }
 }
 
@@ -507,6 +564,9 @@ impl MetadataStore for DictMetadataStore {
 
         assert_eq!(root_bytes.len(), 184, "root record must be 184 bytes");
         let root_digest = State::push_all(&mut *dict, &root_bytes);
+        drop(dict);
+        // Update last_root so background GC can use it
+        *self.last_root.lock().unwrap() = Some(root_digest);
         Ok(root_digest)
     }
 }
@@ -664,6 +724,8 @@ impl DictMetadataStore {
             xattr_data: Mutex::new(xattr_data),
             refcounts: Mutex::new(refcounts),
             logical_bytes: AtomicU64::new(initial_logical_bytes),
+            wal: Mutex::new(None),
+            last_root: Mutex::new(Some(*root)),
         })
     }
 }
