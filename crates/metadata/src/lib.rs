@@ -11,3 +11,4 @@ pub mod manifest;
 pub mod xattr;
 pub mod store;
 pub mod segment;
+pub mod wal;
