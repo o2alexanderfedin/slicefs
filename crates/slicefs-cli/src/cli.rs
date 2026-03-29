@@ -36,6 +36,14 @@ pub enum Cmd {
         /// Allow other users to access the mount (passes allow_other to FUSE).
         #[arg(long, default_value_t = false)]
         allow_other: bool,
+        /// WAL durability strategy: per-op, periodic, flush-on-fsync, or no-wal.
+        ///
+        /// - per-op (default): sync to disk after every mutation (strongest durability)
+        /// - flush-on-fsync: buffer mutations; flush on explicit fsync
+        /// - periodic: buffer mutations; flush on background timer or shutdown
+        /// - no-wal: no write-ahead log (testing only; data loss on crash)
+        #[arg(long, value_name = "STRATEGY")]
+        wal_strategy: Option<String>,
     },
 
     /// Unmount a SliceFS filesystem mounted at the given path.

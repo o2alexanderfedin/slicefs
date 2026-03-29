@@ -66,22 +66,28 @@ pub trait WalStrategy: Send + Sync {
 }
 
 /// Factory: create a boxed `WalStrategy` from a `WalConfig`.
+///
+/// Segment files are written to `<store_path>/segments/segment-{segment_id:06}.seg`.
+/// The `segments/` subdirectory must already exist before calling this function.
 pub fn create_wal(
     config: WalConfig,
     store_path: &Path,
     segment_id: u64,
 ) -> Result<Box<dyn WalStrategy>, WalError> {
+    let seg_path = store_path
+        .join("segments")
+        .join(format!("segment-{:06}.seg", segment_id));
     match config {
         WalConfig::PerOp => {
-            let wal = PerOpWal::new(store_path, segment_id)?;
+            let wal = PerOpWal::new(&seg_path, segment_id)?;
             Ok(Box::new(wal))
         }
         WalConfig::FlushOnFsync => {
-            let wal = FlushOnFsyncWal::new(store_path, segment_id)?;
+            let wal = FlushOnFsyncWal::new(&seg_path, segment_id)?;
             Ok(Box::new(wal))
         }
         WalConfig::Periodic { .. } => {
-            let wal = PeriodicWal::new(store_path, segment_id)?;
+            let wal = PeriodicWal::new(&seg_path, segment_id)?;
             Ok(Box::new(wal))
         }
         WalConfig::NoWal => Ok(Box::new(NoWal)),

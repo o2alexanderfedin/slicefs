@@ -20,7 +20,7 @@ use fuser::{
     ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
     ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
-use metadata::store::{DictMetadataStore, serialize_dictionary};
+use metadata::store::DictMetadataStore;
 use slicefs_traits::digest::from_digest224;
 use slicefs_traits::metadata::{InodeMeta, MetaError, MetadataStore};
 
@@ -672,18 +672,12 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn destroy(&mut self) {
-        if let Ok(root) = self.meta.commit() {
-            let dict = self.dict.lock().unwrap();
-            let bytes = serialize_dictionary(&*dict);
-            drop(dict);
-            if let Some(ref store_path) = self.store_path {
-                let _ = std::fs::write(store_path.join("dictionary.bin"), &bytes);
-                let mut root_bytes = Vec::with_capacity(28);
-                for word in &root {
-                    root_bytes.extend_from_slice(&word.to_le_bytes());
-                }
-                let _ = std::fs::write(store_path.join("root.bin"), &root_bytes);
-            }
+        // Commit the final root — this logs all remaining dict entries and a RootUpdate
+        // to the WAL segment, making the state recoverable after restart.
+        if let Ok(_root) = self.meta.commit() {
+            // Flush and close the WAL — writes EofMarker and calls sync_all.
+            // The mount.lock file is removed by the MountLock RAII guard in run_mount.
+            let _ = self.meta.shutdown_wal();
         }
     }
 

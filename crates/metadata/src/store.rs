@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
 
-use slicefs_traits::digest::Digest224;
+use slicefs_traits::digest::{Branches, Digest224};
 use slicefs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, MetadataStore};
 use blockset::{Dictionary, State, Tree};
 
@@ -200,6 +200,17 @@ impl DictMetadataStore {
         }
     }
 
+    /// Log all newly added Dictionary entries to the WAL.
+    ///
+    /// Call this AFTER an intern_* operation with the dict lock DROPPED.
+    /// `new_entries` is a Vec of (key, branches) pairs collected from the dict
+    /// after the operation.
+    fn log_new_dict_entries(&self, new_entries: Vec<(Digest224, Branches)>) {
+        for (key, branches) in new_entries {
+            self.log_wal_entry(&WalEntry::DictionaryAppend { key, branches });
+        }
+    }
+
     /// Return the last committed root digest, or `None` if `commit()` has not been called yet.
     ///
     /// Used by the background GC thread to determine which root to use as the live-set anchor.
@@ -215,9 +226,16 @@ impl MetadataStore for DictMetadataStore {
         let mut full_meta = meta.clone();
         full_meta.ino = ino;
 
-        let mut dict = self.dict.lock().unwrap();
-        let digest = intern_inode(&mut *dict, &full_meta);
-        drop(dict);
+        let (digest, new_entries) = {
+            let mut dict = self.dict.lock().unwrap();
+            let prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
+            let digest = intern_inode(&mut *dict, &full_meta);
+            let new_entries: Vec<_> = dict.iter()
+                .filter(|(k, _)| !prev_keys.contains(*k))
+                .map(|(k, v)| (*k, *v))
+                .collect();
+            (digest, new_entries)
+        };
 
         inode_map.insert(ino, digest);
         self.inode_data.lock().unwrap().insert(ino, digest);
@@ -226,6 +244,9 @@ impl MetadataStore for DictMetadataStore {
         if full_meta.size > 0 {
             self.logical_bytes.fetch_add(full_meta.size, Ordering::Relaxed);
         }
+
+        // Log new dict entries to WAL (after releasing dict lock)
+        self.log_new_dict_entries(new_entries);
         Ok(ino)
     }
 
@@ -250,9 +271,16 @@ impl MetadataStore for DictMetadataStore {
             load_inode(&*dict, &old_digest).map(|m| m.size).unwrap_or(0)
         };
 
-        let mut dict = self.dict.lock().unwrap();
-        let new_digest = intern_inode(&mut *dict, meta);
-        drop(dict);
+        let (new_digest, new_entries) = {
+            let mut dict = self.dict.lock().unwrap();
+            let prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
+            let new_digest = intern_inode(&mut *dict, meta);
+            let new_entries: Vec<_> = dict.iter()
+                .filter(|(k, _)| !prev_keys.contains(*k))
+                .map(|(k, v)| (*k, *v))
+                .collect();
+            (new_digest, new_entries)
+        };
 
         self.inode_data.lock().unwrap().insert(ino, new_digest);
         self.inode_map.lock().unwrap().insert(ino, new_digest);
@@ -266,6 +294,9 @@ impl MetadataStore for DictMetadataStore {
                 Some(cur.saturating_sub(old_size - new_size))
             }).ok();
         }
+
+        // Log new dict entries to WAL (after releasing dict lock)
+        self.log_new_dict_entries(new_entries);
         Ok(())
     }
 
@@ -319,19 +350,26 @@ impl MetadataStore for DictMetadataStore {
             dir_meta.mode |= S_IFDIR;
         }
 
-        let mut dict = self.dict.lock().unwrap();
+        let (dir_inode_digest, dir_entry_digest, new_parent_dir_digest, new_entries) = {
+            let mut dict = self.dict.lock().unwrap();
+            let prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
 
-        // Create new directory's inode
-        let dir_inode_digest = intern_inode(&mut *dict, &dir_meta);
+            // Create new directory's inode
+            let dir_inode_digest = intern_inode(&mut *dict, &dir_meta);
 
-        // Create . and .. entries for new directory
-        let dir_entry_digest = create_dir_entries(&mut *dict, ino, parent_ino);
+            // Create . and .. entries for new directory
+            let dir_entry_digest = create_dir_entries(&mut *dict, ino, parent_ino);
 
-        // Add name entry in parent directory
-        let parent_dir_digest = *self.dir_data.lock().unwrap().get(&parent_ino).unwrap();
-        let new_parent_dir_digest = add_dir_entry(&mut *dict, &parent_dir_digest, name, ino)?;
+            // Add name entry in parent directory
+            let parent_dir_digest = *self.dir_data.lock().unwrap().get(&parent_ino).unwrap();
+            let new_parent_dir_digest = add_dir_entry(&mut *dict, &parent_dir_digest, name, ino)?;
 
-        drop(dict);
+            let new_entries: Vec<_> = dict.iter()
+                .filter(|(k, _)| !prev_keys.contains(*k))
+                .map(|(k, v)| (*k, *v))
+                .collect();
+            (dir_inode_digest, dir_entry_digest, new_parent_dir_digest, new_entries)
+        };
 
         // Update maps
         inode_map.insert(ino, dir_inode_digest);
@@ -340,6 +378,9 @@ impl MetadataStore for DictMetadataStore {
         self.inode_data.lock().unwrap().insert(ino, dir_inode_digest);
         self.dir_data.lock().unwrap().insert(ino, dir_entry_digest);
         self.dir_data.lock().unwrap().insert(parent_ino, new_parent_dir_digest);
+
+        // Log new dict entries to WAL (after releasing dict lock)
+        self.log_new_dict_entries(new_entries);
 
         // Increment parent nlinks (for the .. backlink from new subdir)
         let mut parent_meta = self.get_inode(parent_ino)?;
@@ -373,11 +414,19 @@ impl MetadataStore for DictMetadataStore {
         let dir_digest = dir_data.get(&parent_ino).copied().ok_or(MetaError::NotADirectory(parent_ino))?;
         drop(dir_data);
 
-        let mut dict = self.dict.lock().unwrap();
-        let new_dir_digest = add_dir_entry(&mut *dict, &dir_digest, name, ino)?;
-        drop(dict);
+        let (new_dir_digest, new_entries) = {
+            let mut dict = self.dict.lock().unwrap();
+            let prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
+            let new_dir_digest = add_dir_entry(&mut *dict, &dir_digest, name, ino)?;
+            let new_entries: Vec<_> = dict.iter()
+                .filter(|(k, _)| !prev_keys.contains(*k))
+                .map(|(k, v)| (*k, *v))
+                .collect();
+            (new_dir_digest, new_entries)
+        };
 
         self.dir_data.lock().unwrap().insert(parent_ino, new_dir_digest);
+        self.log_new_dict_entries(new_entries);
         Ok(())
     }
 
@@ -386,19 +435,35 @@ impl MetadataStore for DictMetadataStore {
         let dir_digest = dir_data.get(&parent_ino).copied().ok_or(MetaError::NotADirectory(parent_ino))?;
         drop(dir_data);
 
-        let mut dict = self.dict.lock().unwrap();
-        let new_dir_digest = remove_dir_entry(&mut *dict, &dir_digest, name)?;
-        drop(dict);
+        let (new_dir_digest, new_entries) = {
+            let mut dict = self.dict.lock().unwrap();
+            let prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
+            let new_dir_digest = remove_dir_entry(&mut *dict, &dir_digest, name)?;
+            let new_entries: Vec<_> = dict.iter()
+                .filter(|(k, _)| !prev_keys.contains(*k))
+                .map(|(k, v)| (*k, *v))
+                .collect();
+            (new_dir_digest, new_entries)
+        };
 
         self.dir_data.lock().unwrap().insert(parent_ino, new_dir_digest);
+        self.log_new_dict_entries(new_entries);
         Ok(())
     }
 
     fn set_manifest(&self, ino: InodeId, blocks: &[Digest224]) -> Result<(), MetaError> {
-        let mut dict = self.dict.lock().unwrap();
-        let digest = intern_manifest(&mut *dict, blocks);
-        drop(dict);
+        let (digest, new_entries) = {
+            let mut dict = self.dict.lock().unwrap();
+            let prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
+            let digest = intern_manifest(&mut *dict, blocks);
+            let new_entries: Vec<_> = dict.iter()
+                .filter(|(k, _)| !prev_keys.contains(*k))
+                .map(|(k, v)| (*k, *v))
+                .collect();
+            (digest, new_entries)
+        };
         self.manifest_data.lock().unwrap().insert(ino, digest);
+        self.log_new_dict_entries(new_entries);
         Ok(())
     }
 
@@ -426,11 +491,19 @@ impl MetadataStore for DictMetadataStore {
 
         set_xattr_entry(&mut xattrs, name, value);
 
-        let mut dict = self.dict.lock().unwrap();
-        let new_digest = intern_xattrs(&mut *dict, &xattrs);
-        drop(dict);
+        let (new_digest, new_entries) = {
+            let mut dict = self.dict.lock().unwrap();
+            let prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
+            let new_digest = intern_xattrs(&mut *dict, &xattrs);
+            let new_entries: Vec<_> = dict.iter()
+                .filter(|(k, _)| !prev_keys.contains(*k))
+                .map(|(k, v)| (*k, *v))
+                .collect();
+            (new_digest, new_entries)
+        };
 
         self.xattr_data.lock().unwrap().insert(ino, new_digest);
+        self.log_new_dict_entries(new_entries);
         Ok(())
     }
 
@@ -480,11 +553,19 @@ impl MetadataStore for DictMetadataStore {
             return Err(MetaError::NotFound(ino));
         }
 
-        let mut dict = self.dict.lock().unwrap();
-        let new_digest = intern_xattrs(&mut *dict, &xattrs);
-        drop(dict);
+        let (new_digest, new_entries) = {
+            let mut dict = self.dict.lock().unwrap();
+            let prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
+            let new_digest = intern_xattrs(&mut *dict, &xattrs);
+            let new_entries: Vec<_> = dict.iter()
+                .filter(|(k, _)| !prev_keys.contains(*k))
+                .map(|(k, v)| (*k, *v))
+                .collect();
+            (new_digest, new_entries)
+        };
 
         self.xattr_data.lock().unwrap().insert(ino, new_digest);
+        self.log_new_dict_entries(new_entries);
         Ok(())
     }
 
@@ -506,6 +587,9 @@ impl MetadataStore for DictMetadataStore {
         // Backward compat: root records of exactly 156 bytes are old format (no refcounts).
         let inode_map = self.inode_map.lock().unwrap();
         let mut dict = self.dict.lock().unwrap();
+
+        // Snapshot keys BEFORE any intern operations so we can log all new entries.
+        let commit_prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
 
         let inode_map_digest = intern_inode_map(&mut *dict, &inode_map);
         let next_ino = inode_map.next_ino();
@@ -564,9 +648,19 @@ impl MetadataStore for DictMetadataStore {
 
         assert_eq!(root_bytes.len(), 184, "root record must be 184 bytes");
         let root_digest = State::push_all(&mut *dict, &root_bytes);
+        // Collect ALL entries added during commit (interns + root push)
+        let new_entries: Vec<_> = dict.iter()
+            .filter(|(k, _)| !commit_prev_keys.contains(*k))
+            .map(|(k, v)| (*k, *v))
+            .collect();
         drop(dict);
         // Update last_root so background GC can use it
         *self.last_root.lock().unwrap() = Some(root_digest);
+
+        // Log all new dict entries and the RootUpdate to WAL
+        self.log_new_dict_entries(new_entries);
+        self.log_wal_entry(&WalEntry::RootUpdate { root: root_digest });
+
         Ok(root_digest)
     }
 }

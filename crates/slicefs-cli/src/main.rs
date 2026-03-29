@@ -16,8 +16,8 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Cmd::Mount { mountpoint, store, noatime, cache_size, .. } => {
-            if let Err(e) = mount::run_mount(&store, &mountpoint, noatime, cache_size) {
+        Cmd::Mount { mountpoint, store, noatime, cache_size, wal_strategy, .. } => {
+            if let Err(e) = mount::run_mount(&store, &mountpoint, noatime, cache_size, wal_strategy.as_deref()) {
                 eprintln!("slicefs mount error: {e}");
                 std::process::exit(1);
             }
