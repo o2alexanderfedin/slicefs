@@ -92,7 +92,7 @@ pub fn load_store_from_segments(
 /// entries into a single segment file at `<store_path>/segments/segment-000001.seg`,
 /// then removes `dictionary.bin` and `root.bin`.
 pub fn migrate_legacy_store(store_path: &Path) -> Result<(), SegmentError> {
-    use crate::store::{deserialize_dictionary, serialize_dictionary as _};
+    use crate::store::deserialize_dictionary;
 
     let root_bytes = std::fs::read(store_path.join("root.bin"))
         .map_err(|_| SegmentError::MissingRootBin(store_path.display().to_string()))?;

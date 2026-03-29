@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 05-crash-safety-and-gc/05-03-PLAN.md
-last_updated: "2026-03-29T07:10:58.987Z"
+stopped_at: Completed 05-crash-safety-and-gc/05-02-PLAN.md
+last_updated: "2026-03-29T07:21:08.470Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
   completed_phases: 4
   total_plans: 17
-  completed_plans: 15
+  completed_plans: 16
   percent: 0
 ---
 
@@ -65,6 +65,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 04-full-posix-write-path P04 | 20 | 2 tasks | 5 files |
 | Phase 05-crash-safety-and-gc P01 | 8min | 2 tasks | 12 files |
 | Phase 05-crash-safety-and-gc P03 | 20min | 2 tasks | 7 files |
+| Phase 05-crash-safety-and-gc P02 | 45min | 2 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -123,6 +124,9 @@ Recent decisions affecting current work:
 - [Phase 05-crash-safety-and-gc]: GC mark_reachable uses blockset::to_digest224 for Digest256→Digest224 child conversion, filtering data leaves automatically
 - [Phase 05-crash-safety-and-gc]: current_root() uses Mutex<Option<Digest224>> last_root field in DictMetadataStore, updated by commit()
 - [Phase 05-crash-safety-and-gc]: GcHandle::drop sets shutdown flag but does not join — avoids blocking in drop(); explicit shutdown() joins
+- [Phase 05-crash-safety-and-gc]: Snapshot-delta WAL logging: BTreeSet snapshot of keys before intern_*, log new entries after — no need to modify intern_* functions
+- [Phase 05-crash-safety-and-gc]: flush_buffer_for_fsync uses mem::take to atomically remove buffer content while keeping fh in open_files
+- [Phase 05-crash-safety-and-gc]: destroy() calls shutdown_wal() replacing dictionary.bin write — WAL segment is the persistence mechanism
 
 ### Pending Todos
 
@@ -138,6 +142,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-29T07:10:58.984Z
-Stopped at: Completed 05-crash-safety-and-gc/05-03-PLAN.md
+Last session: 2026-03-29T07:21:08.466Z
+Stopped at: Completed 05-crash-safety-and-gc/05-02-PLAN.md
 Resume file: None
