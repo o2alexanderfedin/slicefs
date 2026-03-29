@@ -67,6 +67,7 @@ pub struct SliceFsFilesystem {
     store_path: Option<PathBuf>,
     compressor: Arc<dyn Compressor>,
     store_version: u32,
+    auto_snapshot: bool,
 }
 
 impl SliceFsFilesystem {
@@ -97,7 +98,13 @@ impl SliceFsFilesystem {
             store_path,
             compressor,
             store_version,
+            auto_snapshot: false,
         }
+    }
+
+    /// Enable auto-snapshot on clean unmount.
+    pub fn set_auto_snapshot(&mut self, enabled: bool) {
+        self.auto_snapshot = enabled;
     }
 
     /// Access the metadata store (used by the mount command after unmount).
@@ -830,6 +837,10 @@ impl Filesystem for SliceFsFilesystem {
         // Commit the final root — this logs all remaining dict entries and a RootUpdate
         // to the WAL segment, making the state recoverable after restart.
         if let Ok(_root) = self.meta.commit() {
+            // Auto-snapshot on clean unmount if enabled via --auto-snapshot.
+            if self.auto_snapshot {
+                let _ = self.meta.create_snapshot(Some("auto-unmount".to_string()));
+            }
             // Flush and close the WAL — writes EofMarker and calls sync_all.
             // The mount.lock file is removed by the MountLock RAII guard in run_mount.
             let _ = self.meta.shutdown_wal();

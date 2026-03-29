@@ -185,7 +185,7 @@ pub fn parse_wal_config(strategy: Option<&str>) -> WalConfig {
 /// `compressor_name` selects the block compressor ("zstd", "lz4", "none"; default "none").
 /// `compressor_level` overrides the compression level (Zstd only; default 3).
 /// `snapshot_ref` mounts a specific snapshot read-only (by version number or name).
-/// `_auto_snapshot` is reserved for future use (auto-snapshot on clean unmount).
+/// `auto_snapshot` enables auto-snapshot on clean unmount (--auto-snapshot flag).
 #[allow(clippy::too_many_arguments)]
 pub fn run_mount(
     store_path: &Path,
@@ -196,7 +196,7 @@ pub fn run_mount(
     compressor_name: &str,
     compressor_level: Option<i32>,
     snapshot_ref: Option<&str>,
-    _auto_snapshot: bool,
+    auto_snapshot: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let wal_config = parse_wal_config(wal_strategy);
     let compressor: Arc<dyn Compressor> = Arc::from(parse_compressor(compressor_name, compressor_level));
@@ -222,13 +222,14 @@ pub fn run_mount(
         (meta, cfg)
     };
 
-    let fs = SliceFsFilesystem::new(
+    let mut fs = SliceFsFilesystem::new(
         final_meta,
         content_dict,
         Some(store_path.to_path_buf()),
         compressor,
         2, // Phase-6 store format: all new blocks carry compression header
     );
+    fs.set_auto_snapshot(auto_snapshot);
 
     // Spawn background GC thread.
     // The GC thread holds a Weak<DictMetadataStore> so it exits automatically when
