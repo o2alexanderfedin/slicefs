@@ -14,3 +14,4 @@ pub mod segment;
 pub mod wal;
 pub mod mount_lock;
 pub mod gc;
+pub mod snapshot;

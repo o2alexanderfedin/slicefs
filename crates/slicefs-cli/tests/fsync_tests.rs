@@ -120,7 +120,7 @@ fn test_fsync_crash_durability() {
 
     // Reload from segment files
     let segs_dir = store_dir.path().join("segments");
-    let (dict, loaded_root) = load_store_from_segments(&segs_dir)
+    let (dict, loaded_root, _snapshots) = load_store_from_segments(&segs_dir)
         .expect("should be able to load segments after crash");
 
     assert!(loaded_root.is_some(), "a RootUpdate should have been written by fsync+commit");

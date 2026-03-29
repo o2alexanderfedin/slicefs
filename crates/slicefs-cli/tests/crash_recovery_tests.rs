@@ -38,7 +38,7 @@ fn make_fs_per_op(store_dir: &TempDir) -> SliceFsFilesystem {
 /// Returns `(DictMetadataStore, root_digest)`. Panics if no committed root found.
 fn reload_store(store_dir: &TempDir) -> DictMetadataStore {
     let segs_dir = store_dir.path().join("segments");
-    let (dict, root_opt) = load_store_from_segments(&segs_dir)
+    let (dict, root_opt, _snapshots) = load_store_from_segments(&segs_dir)
         .expect("should load segments after crash");
     let root = root_opt.expect("should have a committed root");
     DictMetadataStore::load_from_root(dict, &root)
@@ -77,7 +77,7 @@ fn test_sc1_crash_during_write_filesystem_consistent() {
 
     // Remount from segments (WAL replay is implicit — re-loading is idempotent)
     let segs_dir = store_dir.path().join("segments");
-    let (dict, root_opt) = load_store_from_segments(&segs_dir)
+    let (dict, root_opt, _snapshots) = load_store_from_segments(&segs_dir)
         .expect("should load segments after crash");
 
     // Should have a committed root (from the commit() after existing.txt)
@@ -129,7 +129,7 @@ fn test_sc2_fsync_guarantees_durability() {
 
     // Reload from segments
     let segs_dir = store_dir.path().join("segments");
-    let (dict, root_opt) = load_store_from_segments(&segs_dir)
+    let (dict, root_opt, _snapshots) = load_store_from_segments(&segs_dir)
         .expect("should load segments after crash");
 
     assert!(root_opt.is_some(), "root should be present after fsync + crash");
@@ -182,7 +182,7 @@ fn test_sc3_orphaned_blocks_reclaimed_by_gc() {
 
     // Reload from segments to get the current state for GC
     let segs_dir = store_dir.path().join("segments");
-    let (dict, root_opt) = load_store_from_segments(&segs_dir)
+    let (dict, root_opt, _snapshots) = load_store_from_segments(&segs_dir)
         .expect("should load segments");
     let root = root_opt.expect("root should exist");
 
@@ -197,7 +197,7 @@ fn test_sc3_orphaned_blocks_reclaimed_by_gc() {
     assert!(stats.segments_compacted >= 1, "at least one segment should have been compacted");
 
     // After GC, the store should still be loadable and live.txt accessible
-    let (dict2, root2_opt) = load_store_from_segments(&segs_dir)
+    let (dict2, root2_opt, _snapshots2) = load_store_from_segments(&segs_dir)
         .expect("segments should be loadable after GC");
     let root2 = root2_opt.expect("root should still be present after GC");
     let rebuilt = DictMetadataStore::load_from_root(dict2, &root2)

@@ -110,7 +110,7 @@ fn test_run_gc_with_dead_entries_compacts() {
 
     // After GC, store should still be loadable and the live file still reachable
     let segs_dir = store_dir.path().join("segments");
-    let (dict, root_opt) = load_store_from_segments(&segs_dir)
+    let (dict, root_opt, _snapshots) = load_store_from_segments(&segs_dir)
         .expect("segments should be loadable after GC");
     let root = root_opt.expect("root should be present after GC");
 

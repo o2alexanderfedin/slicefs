@@ -80,6 +80,13 @@ impl Iterator for SegmentReader {
                     }
                     return None;
                 }
+                Some(RecordType::SnapshotRecord) => {
+                    let payload = read_exact_or_none(&mut self.inner, payload_len)?;
+                    if let Some(entry) = SegmentEntry::parse_snapshot_record(&payload) {
+                        return Some(entry);
+                    }
+                    return None;
+                }
                 None => {
                     // Unknown type — skip payload_len bytes and continue
                     let _ = read_exact_or_none(&mut self.inner, payload_len)?;

@@ -75,7 +75,7 @@ fn test_load_store_from_segments_restores_inodes() {
 
     // Load from segments
     let segs_dir = store_dir.path().join("segments");
-    let (dict, loaded_root) = load_store_from_segments(&segs_dir).unwrap();
+    let (dict, loaded_root, _snapshots) = load_store_from_segments(&segs_dir).unwrap();
     assert!(loaded_root.is_some(), "should have a RootUpdate digest");
     assert_eq!(loaded_root.unwrap(), root_digest, "loaded root must match committed root");
 
@@ -134,7 +134,7 @@ fn test_legacy_store_auto_migration() {
     assert!(!seg_files.is_empty(), "at least one segment file must exist");
 
     // Load from segments and verify the inode is recoverable
-    let (dict, loaded_root) = load_store_from_segments(&segs_dir).unwrap();
+    let (dict, loaded_root, _snapshots) = load_store_from_segments(&segs_dir).unwrap();
     assert!(loaded_root.is_some(), "migrated store must have a RootUpdate");
     let rebuilt = DictMetadataStore::load_from_root(dict, &loaded_root.unwrap()).unwrap();
     let found_ino = rebuilt.lookup(1, "migrated.txt").unwrap();

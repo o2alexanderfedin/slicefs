@@ -12,6 +12,7 @@
 //!
 //! DictEntry payload: 92 bytes — Digest224 as 7×u32 LE (28 bytes) + Branches as 2×8×u32 LE (64 bytes)
 //! RootUpdate payload: 28 bytes — Digest224 as 7×u32 LE
+//! SnapshotRecord payload: 48+ bytes — version(8) + root(28) + created_at(8) + name_len(4) + name_bytes(variable)
 //! EofMarker: no payload (payload_len = 0), terminates iteration
 
 pub mod writer;
@@ -25,6 +26,8 @@ use std::path::Path;
 use slicefs_traits::digest::{Branches, Digest224};
 use blockset::Dictionary;
 use thiserror::Error;
+
+use crate::snapshot::SnapshotEntry;
 
 /// Errors returned by segment-level operations.
 #[derive(Debug, Error)]
@@ -40,18 +43,20 @@ pub enum SegmentError {
 }
 
 /// Load all segment files from `segments_dir`, replay them into a `Dictionary`,
-/// and return the last `RootUpdate` digest seen.
+/// and return the last `RootUpdate` digest seen along with all `SnapshotRecord` entries.
 ///
 /// Segment files are read in ascending order by segment_id (encoded in the filename
 /// as `segment-{id:06}.seg`). DictEntry records are inserted into the Dictionary;
-/// RootUpdate records update the `last_root` tracker.
+/// RootUpdate records update the `last_root` tracker;
+/// SnapshotRecord entries are collected into the returned Vec.
 ///
-/// Returns `(dictionary, Option<last_root_digest>)`.
+/// Returns `(dictionary, Option<last_root_digest>, Vec<SnapshotEntry>)`.
 pub fn load_store_from_segments(
     segments_dir: &Path,
-) -> Result<(Dictionary, Option<Digest224>), SegmentError> {
+) -> Result<(Dictionary, Option<Digest224>, Vec<SnapshotEntry>), SegmentError> {
     let mut dict = Dictionary::new();
     let mut last_root: Option<Digest224> = None;
+    let mut snapshots: Vec<SnapshotEntry> = Vec::new();
 
     // Collect segment files and sort by name (which encodes segment_id numerically)
     let mut seg_paths: Vec<std::path::PathBuf> = std::fs::read_dir(segments_dir)?
@@ -79,11 +84,16 @@ pub fn load_store_from_segments(
                 SegmentEntry::RootUpdate { root } => {
                     last_root = Some(root);
                 }
+                ref snap @ SegmentEntry::SnapshotRecord { .. } => {
+                    if let Some(snap_entry) = snap.as_snapshot_entry() {
+                        snapshots.push(snap_entry);
+                    }
+                }
             }
         }
     }
 
-    Ok((dict, last_root))
+    Ok((dict, last_root, snapshots))
 }
 
 /// Migrate a legacy store (dictionary.bin + root.bin) to segment format.
@@ -139,9 +149,10 @@ pub const SEGMENT_VERSION: u32 = 1;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordType {
-    DictEntry  = 0x01,
-    RootUpdate = 0x02,
-    EofMarker  = 0xFF,
+    DictEntry      = 0x01,
+    RootUpdate     = 0x02,
+    SnapshotRecord = 0x03,
+    EofMarker      = 0xFF,
 }
 
 impl RecordType {
@@ -149,6 +160,7 @@ impl RecordType {
         match v {
             0x01 => Some(RecordType::DictEntry),
             0x02 => Some(RecordType::RootUpdate),
+            0x03 => Some(RecordType::SnapshotRecord),
             0xFF => Some(RecordType::EofMarker),
             _ => None,
         }
@@ -199,15 +211,17 @@ impl SegmentHeader {
 /// A logical entry in a segment file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SegmentEntry {
-    DictEntry  { key: Digest224, branches: Branches },
-    RootUpdate { root: Digest224 },
+    DictEntry      { key: Digest224, branches: Branches },
+    RootUpdate     { root: Digest224 },
+    SnapshotRecord { version: u64, root: Digest224, created_at: u64, name: Option<String> },
 }
 
 impl SegmentEntry {
     pub fn record_type(&self) -> RecordType {
         match self {
-            SegmentEntry::DictEntry  { .. } => RecordType::DictEntry,
-            SegmentEntry::RootUpdate { .. } => RecordType::RootUpdate,
+            SegmentEntry::DictEntry      { .. } => RecordType::DictEntry,
+            SegmentEntry::RootUpdate     { .. } => RecordType::RootUpdate,
+            SegmentEntry::SnapshotRecord { .. } => RecordType::SnapshotRecord,
         }
     }
 
@@ -231,6 +245,24 @@ impl SegmentEntry {
                 for v in root {
                     buf.extend_from_slice(&v.to_le_bytes());
                 }
+                buf
+            }
+            SegmentEntry::SnapshotRecord { version, root, created_at, name } => {
+                let name_bytes = name.as_deref().unwrap_or("").as_bytes();
+                let name_len = name_bytes.len() as u32;
+                let mut buf = Vec::with_capacity(48 + name_bytes.len());
+                // version: u64 LE (8 bytes)
+                buf.extend_from_slice(&version.to_le_bytes());
+                // root: 7×u32 LE (28 bytes)
+                for v in root {
+                    buf.extend_from_slice(&v.to_le_bytes());
+                }
+                // created_at: u64 LE (8 bytes)
+                buf.extend_from_slice(&created_at.to_le_bytes());
+                // name_len: u32 LE (4 bytes)
+                buf.extend_from_slice(&name_len.to_le_bytes());
+                // name bytes (0 or more)
+                buf.extend_from_slice(name_bytes);
                 buf
             }
         }
@@ -258,5 +290,42 @@ impl SegmentEntry {
             u32::from_le_bytes(payload[i*4..i*4+4].try_into().unwrap())
         });
         Some(SegmentEntry::RootUpdate { root })
+    }
+
+    /// Parse a SnapshotRecord from a payload.
+    ///
+    /// Layout: version(8) + root(28) + created_at(8) + name_len(4) + name_bytes(name_len)
+    /// Minimum 48 bytes (name_len = 0).
+    pub fn parse_snapshot_record(payload: &[u8]) -> Option<Self> {
+        if payload.len() < 48 { return None; }
+        let version = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+        let root: Digest224 = std::array::from_fn(|i| {
+            u32::from_le_bytes(payload[8 + i*4..8 + i*4 + 4].try_into().unwrap())
+        });
+        let created_at = u64::from_le_bytes(payload[36..44].try_into().unwrap());
+        let name_len = u32::from_le_bytes(payload[44..48].try_into().unwrap()) as usize;
+        if payload.len() < 48 + name_len { return None; }
+        let name = if name_len == 0 {
+            None
+        } else {
+            let name_bytes = &payload[48..48 + name_len];
+            Some(String::from_utf8(name_bytes.to_vec()).ok()?)
+        };
+        Some(SegmentEntry::SnapshotRecord { version, root, created_at, name })
+    }
+
+    /// Convert this entry to a `SnapshotEntry` if it is a `SnapshotRecord`.
+    pub fn as_snapshot_entry(&self) -> Option<SnapshotEntry> {
+        match self {
+            SegmentEntry::SnapshotRecord { version, root, created_at, name } => {
+                Some(SnapshotEntry {
+                    version: *version,
+                    name: name.clone(),
+                    root: *root,
+                    created_at: *created_at,
+                })
+            }
+            _ => None,
+        }
     }
 }

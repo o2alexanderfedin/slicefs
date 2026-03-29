@@ -28,7 +28,7 @@ pub struct CompactionResult {
 }
 
 /// Compact `segment_path`, keeping only `DictEntry` records whose key is in
-/// `live_set` (all `RootUpdate` records are always kept).
+/// `live_set` (all `RootUpdate` and `SnapshotRecord` records are always kept).
 ///
 /// The compacted segment is written to `output_dir/segment-{output_segment_id}.seg`.
 /// Steps:
@@ -70,6 +70,11 @@ pub fn compact_segment(
             }
             SegmentEntry::RootUpdate { .. } => {
                 // Always keep root update records
+                writer.write_entry(&entry)?;
+            }
+            SegmentEntry::SnapshotRecord { .. } => {
+                // Always keep snapshot records — they are immutable pointers
+                // to committed roots that may be referenced by the GC or CLI.
                 writer.write_entry(&entry)?;
             }
         }

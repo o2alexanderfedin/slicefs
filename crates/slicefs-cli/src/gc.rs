@@ -43,12 +43,16 @@ pub fn run_gc(store_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let segs_dir = store_path.join("segments");
 
     // Step 2: Load dictionary + last committed root from segment files.
-    let (dict, root_opt) = load_store_from_segments(&segs_dir)
+    let (dict, root_opt, snapshots) = load_store_from_segments(&segs_dir)
         .map_err(|e| format!("failed to load segments: {}", e))?;
 
-    // Collect roots: use last committed root if present.
-    // Phase 6 will add snapshot root discovery; for now a single root suffices.
-    let roots: Vec<_> = root_opt.into_iter().collect();
+    // Collect roots: current live root + all snapshot roots.
+    // Snapshot roots must be included so GC does not reclaim blocks still
+    // referenced by a snapshot that predates the most recent commit.
+    let mut roots: Vec<_> = root_opt.into_iter().collect();
+    for snap in &snapshots {
+        roots.push(snap.root);
+    }
 
     // Step 3: Run GC engine.
     let gc = GarbageCollector::new(segs_dir);

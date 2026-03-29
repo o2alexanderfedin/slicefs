@@ -88,7 +88,7 @@ pub fn load_store(
 
     // Step 3: Load state from segment files.
     let segs_dir = store_path.join("segments");
-    let (dict, last_root) = load_store_from_segments(&segs_dir)
+    let (dict, last_root, snapshots) = load_store_from_segments(&segs_dir)
         .map_err(|e| format!("failed to load segments: {}", e))?;
 
     let root = last_root.ok_or_else(|| {
@@ -101,6 +101,9 @@ pub fn load_store(
     let content_dict = dict.clone();
     let mut meta = DictMetadataStore::load_from_root(dict, &root)
         .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;
+
+    // Restore snapshot list from segment replay.
+    meta.set_snapshots(snapshots);
 
     // Step 5: Create WAL and attach to store.
     // Determine next segment_id from existing segments.
