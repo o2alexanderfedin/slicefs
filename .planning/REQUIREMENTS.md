@@ -62,8 +62,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **PLAT-01**: macOS support via FUSE-T + fuser
 - [x] **PLAT-02**: Linux support via libfuse + fuser
-- [ ] **PLAT-03**: Windows support via WinFSP (note: GPL-3 license implications)
-- [ ] **PLAT-04**: Platform-specific POSIX compliance testing on each target
+- [x] **PLAT-03**: Windows support via WinFSP (note: GPL-3 license implications)
+- [x] **PLAT-04**: Platform-specific POSIX compliance testing on each target
 
 ### CLI & Operations
 
@@ -147,8 +147,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | COMP-02 | Phase 6 | Complete |
 | PLAT-01 | Phase 7 | Complete |
 | PLAT-02 | Phase 3 | Complete |
-| PLAT-03 | Phase 7 | Pending |
-| PLAT-04 | Phase 7 | Pending |
+| PLAT-03 | Phase 7 | Complete |
+| PLAT-04 | Phase 7 | Complete |
 | CLI-01 | Phase 3 | Complete |
 | CLI-02 | Phase 3 | Complete |
 | CLI-03 | Phase 7 | Complete |

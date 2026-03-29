@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 07-02-PLAN.md - stats/scrub CLI commands
-last_updated: "2026-03-29T20:47:25.063Z"
+stopped_at: Completed 07-03-PLAN.md - CI pipeline and benchmark infrastructure
+last_updated: "2026-03-29T20:52:00.714Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 24
-  completed_plans: 23
+  completed_plans: 24
   percent: 0
 ---
 
@@ -73,6 +73,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 06-compression-and-snapshots P02 | 863s | 2 tasks | 12 files |
 | Phase 07-cross-platform-and-production-hardening P01 | 149s | 2 tasks | 4 files |
 | Phase 07-cross-platform-and-production-hardening P02 | 421s | 2 tasks | 7 files |
+| Phase 07-cross-platform-and-production-hardening P03 | 155s | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -152,6 +153,9 @@ Recent decisions affecting current work:
 - [Phase 07-cross-platform-and-production-hardening]: direct_io via MountOption::CUSTOM on macOS only to fix FUSE-T NFS page cache staleness (issue #45)
 - [Phase 07-cross-platform-and-production-hardening]: SHA-224 verification in scrub uses SHA224.compress directly: blockset::compress does data concatenation for small inputs, not SHA-224; all dictionary keys are always SHA-224 hashes
 - [Phase 07-cross-platform-and-production-hardening]: Stats works on mounted stores (read-only scan, warns on mount.lock): allows monitoring live filesystems without lock refusal
+- [Phase 07-cross-platform-and-production-hardening]: pjdfstest uses -p PATH CLI flag; no --skip; root-only tests auto-skip; pass rate denominator excludes skipped tests
+- [Phase 07-cross-platform-and-production-hardening]: macos-14 pinned in CI (not macos-latest) to prevent FUSE-T breakage on macOS 15
+- [Phase 07-cross-platform-and-production-hardening]: Benchmark targets documented (not CI-gated): 200 MB/s sequential write, hardware variance precludes automation
 
 ### Pending Todos
 
@@ -167,6 +171,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-29T20:47:25.060Z
-Stopped at: Completed 07-02-PLAN.md - stats/scrub CLI commands
+Last session: 2026-03-29T20:52:00.711Z
+Stopped at: Completed 07-03-PLAN.md - CI pipeline and benchmark infrastructure
 Resume file: None
