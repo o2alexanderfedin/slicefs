@@ -60,7 +60,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Cross-Platform
 
-- [ ] **PLAT-01**: macOS support via FUSE-T + fuser
+- [x] **PLAT-01**: macOS support via FUSE-T + fuser
 - [x] **PLAT-02**: Linux support via libfuse + fuser
 - [ ] **PLAT-03**: Windows support via WinFSP (note: GPL-3 license implications)
 - [ ] **PLAT-04**: Platform-specific POSIX compliance testing on each target
@@ -145,7 +145,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SNAP-03 | Phase 6 | Complete |
 | COMP-01 | Phase 6 | Complete |
 | COMP-02 | Phase 6 | Complete |
-| PLAT-01 | Phase 7 | Pending |
+| PLAT-01 | Phase 7 | Complete |
 | PLAT-02 | Phase 3 | Complete |
 | PLAT-03 | Phase 7 | Pending |
 | PLAT-04 | Phase 7 | Pending |

@@ -131,7 +131,7 @@ Plans:
   3. The stats command outputs dedup ratio, logical bytes, physical bytes, and block count in both human-readable and JSON formats
   4. The scrub command walks all stored blocks, re-verifies their hashes, and reports any corrupted blocks without modifying the store
   5. Sequential write throughput on NVMe meets or exceeds 200 MB/s as measured by fio with 4K writes; dedup index memory stays below the configured cap under 100 GB unique data load
-**Plans:** 3 plans
+**Plans:** 1/3 plans executed
 Plans:
 - [ ] 07-01-PLAN.md — FUSE-T write path fix + macOS build ergonomics (direct_io, .cargo/config.toml, build.rs)
 - [ ] 07-02-PLAN.md — Global --json flag + stats and scrub CLI commands with human and JSON output
@@ -150,4 +150,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 4. Full POSIX Write Path | 4/4 | Complete   | 2026-03-28 |
 | 5. Crash Safety and GC | 4/4 | Complete   | 2026-03-29 |
 | 6. Compression and Snapshots | 4/4 | Complete   | 2026-03-29 |
-| 7. Cross-Platform and Production Hardening | 0/3 | Not started | - |
+| 7. Cross-Platform and Production Hardening | 1/3 | In Progress|  |

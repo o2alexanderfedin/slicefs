@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Phase 7 planning complete - 3 plans in 2 waves
-last_updated: "2026-03-29T20:37:33.765Z"
+stopped_at: Completed 07-01-PLAN.md
+last_updated: "2026-03-29T20:42:27.455Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
   completed_phases: 6
   total_plans: 24
-  completed_plans: 21
+  completed_plans: 22
   percent: 0
 ---
 
@@ -71,6 +71,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 06-compression-and-snapshots P03 | 8min | 2 tasks | 14 files |
 | Phase 06-compression-and-snapshots P04 | 14min | 2 tasks | 9 files |
 | Phase 06-compression-and-snapshots P02 | 863s | 2 tasks | 12 files |
+| Phase 07-cross-platform-and-production-hardening P01 | 149s | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -146,6 +147,8 @@ Recent decisions affecting current work:
 - [Phase 06-compression-and-snapshots]: Background GC uses snapshot_roots() replacing current_root(): single-line change; snapshot_roots() returns current root + all snapshot roots
 - [Phase 06-compression-and-snapshots]: store_version gates both write and read paths: <2 = raw, >=2 = compression header
 - [Phase 06-compression-and-snapshots]: to_wire_bytes/from_wire_bytes helpers centralize store_version gating across all write/read sites
+- [Phase 07-cross-platform-and-production-hardening]: SessionACL::All used for allow_other (fuser 0.17 has no MountOption::AllowOther)
+- [Phase 07-cross-platform-and-production-hardening]: direct_io via MountOption::CUSTOM on macOS only to fix FUSE-T NFS page cache staleness (issue #45)
 
 ### Pending Todos
 
@@ -161,6 +164,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-29T20:37:33.762Z
-Stopped at: Phase 7 planning complete - 3 plans in 2 waves
-Resume file: .planning/phases/07-cross-platform-and-production-hardening/07-01-PLAN.md
+Last session: 2026-03-29T20:42:27.451Z
+Stopped at: Completed 07-01-PLAN.md
+Resume file: None
