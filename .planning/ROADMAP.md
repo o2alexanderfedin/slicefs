@@ -114,7 +114,12 @@ Plans:
   3. A snapshot command creates a read-only point-in-time view; files in the snapshot are readable and match their state at snapshot time
   4. Switching to a historical version makes the live filesystem reflect that version's file contents
   5. Two snapshots sharing blocks do not double-count physical storage; shared blocks appear once in physical usage
-**Plans**: TBD
+**Plans:** 4 plans
+Plans:
+- [ ] 06-01-PLAN.md — Compressor trait in slicefs-traits + Zstd/LZ4/None implementations in slicefs-compression crate
+- [ ] 06-02-PLAN.md — Compression wired into FUSE write/read path + CLI flags (--compressor, --compressor-level)
+- [ ] 06-03-PLAN.md — SnapshotRecord segment entry + DictMetadataStore snapshot methods (create/list/find/roots)
+- [ ] 06-04-PLAN.md — Snapshot CLI commands (create/list/switch) + snapshot mount flags + snapshot-aware GC
 
 ### Phase 7: Cross-Platform and Production Hardening
 **Goal**: The filesystem runs on macOS and Windows in addition to Linux; the CLI is complete with stats, scrub, and structured output; benchmark baselines confirm daily-driver performance; the system is validated as production-ready
@@ -140,5 +145,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 3. Read-Only FUSE | 1/3 | In Progress|  |
 | 4. Full POSIX Write Path | 4/4 | Complete   | 2026-03-28 |
 | 5. Crash Safety and GC | 4/4 | Complete   | 2026-03-29 |
-| 6. Compression and Snapshots | 0/TBD | Not started | - |
+| 6. Compression and Snapshots | 0/4 | Not started | - |
 | 7. Cross-Platform and Production Hardening | 0/TBD | Not started | - |
