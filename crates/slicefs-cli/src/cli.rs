@@ -6,6 +6,8 @@
 //! - `seed`     — ingest files from a source directory into a store
 //! - `gc`       — run offline garbage collection
 //! - `snapshot` — create, list, and switch snapshots
+//! - `stats`    — show store statistics (dedup ratio, block counts, etc.)
+//! - `scrub`    — verify integrity of all stored blocks by re-hashing
 
 use std::path::PathBuf;
 
@@ -15,6 +17,10 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(name = "slicefs", version, about = "SliceFS deduplicating filesystem")]
 pub struct Cli {
+    /// Output structured JSON instead of human-readable text.
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Cmd,
 }
@@ -90,6 +96,22 @@ pub enum Cmd {
     Snapshot {
         #[command(subcommand)]
         action: SnapshotAction,
+    },
+
+    /// Show store statistics: dedup ratio, block counts, snapshot info, refcount distribution.
+    ///
+    /// Works on both mounted and unmounted stores (read-only scan).
+    Stats {
+        /// Path to the SliceFS block store directory.
+        store: PathBuf,
+    },
+
+    /// Verify integrity of all stored blocks by re-hashing content.
+    ///
+    /// Exits 0 on a clean store, non-zero if any corruption is detected.
+    Scrub {
+        /// Path to the SliceFS block store directory.
+        store: PathBuf,
     },
 }
 
@@ -337,5 +359,60 @@ mod tests {
             }
             _ => panic!("expected Mount"),
         }
+    }
+
+    // ── Stats / Scrub / JSON CLI tests ───────────────────────────────────────
+
+    #[test]
+    fn test_stats_subcommand() {
+        let cli = Cli::try_parse_from(["slicefs", "stats", "/data"]).unwrap();
+        match cli.command {
+            Cmd::Stats { store } => {
+                assert_eq!(store, PathBuf::from("/data"));
+            }
+            _ => panic!("expected Stats"),
+        }
+    }
+
+    #[test]
+    fn test_scrub_subcommand() {
+        let cli = Cli::try_parse_from(["slicefs", "scrub", "/data"]).unwrap();
+        match cli.command {
+            Cmd::Scrub { store } => {
+                assert_eq!(store, PathBuf::from("/data"));
+            }
+            _ => panic!("expected Scrub"),
+        }
+    }
+
+    #[test]
+    fn test_json_flag_global() {
+        let cli = Cli::try_parse_from(["slicefs", "--json", "stats", "/data"]).unwrap();
+        assert!(cli.json, "expected --json to be true");
+        match cli.command {
+            Cmd::Stats { store } => {
+                assert_eq!(store, PathBuf::from("/data"));
+            }
+            _ => panic!("expected Stats"),
+        }
+    }
+
+    #[test]
+    fn test_json_flag_after_subcommand() {
+        // Global flags work after the subcommand name too.
+        let cli = Cli::try_parse_from(["slicefs", "stats", "--json", "/data"]).unwrap();
+        assert!(cli.json, "expected --json to be true");
+        match cli.command {
+            Cmd::Stats { store } => {
+                assert_eq!(store, PathBuf::from("/data"));
+            }
+            _ => panic!("expected Stats after --json"),
+        }
+    }
+
+    #[test]
+    fn test_no_json_flag_default() {
+        let cli = Cli::try_parse_from(["slicefs", "stats", "/data"]).unwrap();
+        assert!(!cli.json, "expected --json to default to false");
     }
 }
