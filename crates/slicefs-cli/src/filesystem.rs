@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use blockset::{Dictionary, GetBytes, GetData, State, Tree};
 use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
-    Generation, INodeNo, KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr,
+    Generation, INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr,
     ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
     ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
@@ -36,9 +36,22 @@ const S_IFLNK: u32 = 0o120_000;
 ///
 /// Created on `open()` when `O_WRONLY` or `O_RDWR` flags are present.
 /// Removed on `release()`. The write buffer accumulates data until flush.
+///
+/// `cas_committed` tracks whether data has already been durably committed to the CAS
+/// by a prior `flush()`/`fsync()` call. When `true` and `buf` is empty at `release()`
+/// time, the `release()` path skips the redundant `set_manifest(ino, &[])` that would
+/// otherwise overwrite the committed manifest with an empty one.
+///
+/// Lifecycle:
+/// - Created with `cas_committed = false` (no data committed yet).
+/// - Set to `true` when `flush_buffer_for_fsync` pushes a non-empty buffer to CAS.
+/// - Set to `false` again when new writes arrive (buffer is dirty again).
 struct OpenFileState {
     ino: u64,
     buf: Vec<u8>,
+    /// True if the manifest was committed to CAS by a prior flush/fsync and the
+    /// buffer has not been dirtied by subsequent writes.
+    cas_committed: bool,
 }
 
 /// FUSE filesystem adapter backed by a [`DictMetadataStore`].
@@ -221,7 +234,7 @@ impl SliceFsFilesystem {
             return Err(meta_error_to_errno(&e));
         }
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
-        self.open_files.lock().unwrap().insert(fh, OpenFileState { ino, buf: Vec::new() });
+        self.open_files.lock().unwrap().insert(fh, OpenFileState { ino, buf: Vec::new(), cas_committed: false });
         Ok((ino, fh))
     }
 
@@ -235,6 +248,8 @@ impl SliceFsFilesystem {
             state.buf.resize(end, 0);
         }
         state.buf[offset as usize..end].copy_from_slice(data);
+        // New writes invalidate any prior CAS-committed state.
+        state.cas_committed = false;
         Ok(data.len() as u32)
     }
 
@@ -242,10 +257,17 @@ impl SliceFsFilesystem {
     /// Used by integration tests to bypass the FUSE request/reply layer.
     pub fn test_release(&self, ino: u64, fh: u64) -> Result<(), i32> {
         let state = self.open_files.lock().unwrap().remove(&fh);
-        let buf = match state {
-            Some(s) => s.buf,
+        let (buf, cas_committed) = match state {
+            Some(s) => (s.buf, s.cas_committed),
             None => return Ok(()), // Already closed
         };
+        // If the buffer is empty and data was already committed to CAS by a prior
+        // flush()/fsync() call (cas_committed=true), skip the redundant write. Without
+        // this guard, release() would call set_manifest(ino, &[]) and overwrite the
+        // committed manifest with an empty one — erasing all written data.
+        if buf.is_empty() && cas_committed {
+            return Ok(());
+        }
         self.flush_buffer_to_cas(ino, buf)
     }
 
@@ -318,14 +340,24 @@ impl SliceFsFilesystem {
     /// the buffer with an empty Vec (file handle stays open for further writes).
     /// If `fh` is not in `open_files` (read-only handle or invalid), returns Ok
     /// without error — fsync is a no-op for read-only handles.
+    ///
+    /// After flushing, `dirty` is cleared to `false` on the open file state so that
+    /// a subsequent `release()` with an empty buffer does not overwrite the committed manifest.
     fn flush_buffer_for_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        // Take the buffer out, leaving nothing in open_files temporarily
+        // Take the buffer out, leaving nothing in open_files temporarily.
+        // Also clear dirty — data is about to be committed (or was already empty).
         let buf = {
             let mut open_files = self.open_files.lock().unwrap();
             match open_files.get_mut(&fh) {
                 Some(state) => {
-                    // Swap buffer with empty — we'll put it back after flushing
+                    // Swap buffer with empty — we'll put it back after flushing.
+                    // If the buffer is non-empty, mark cas_committed=true so that a
+                    // subsequent release() with an empty buffer skips the redundant
+                    // set_manifest([], ...) that would erase the just-committed data.
                     let buf = std::mem::take(&mut state.buf);
+                    if !buf.is_empty() {
+                        state.cas_committed = true;
+                    }
                     buf
                 }
                 None => return Ok(()), // No write handle — fsync is a no-op
@@ -422,8 +454,14 @@ impl SliceFsFilesystem {
             }
         }
 
-        // Case B: closed file — read from CAS, truncate/extend, re-push
-        let old_manifest = self.meta.get_manifest(ino).map_err(|_| libc::EIO)?;
+        // Case B: closed file (or open file without FATTR_FH) — read from CAS, truncate/extend,
+        // re-push. NotFound from get_manifest means the inode exists but has no content yet
+        // (brand-new file created by create() before any write/release). Treat as empty content.
+        let old_manifest = match self.meta.get_manifest(ino) {
+            Ok(m) => m,
+            Err(MetaError::NotFound(_)) => vec![],
+            Err(_) => return Err(libc::EIO),
+        };
 
         // Read current content (decompresses from wire bytes)
         let mut content: Vec<u8> = if old_manifest.is_empty() {
@@ -829,7 +867,14 @@ impl SliceFsFilesystem {
 }
 
 impl Filesystem for SliceFsFilesystem {
-    fn init(&mut self, _req: &Request, _config: &mut KernelConfig) -> io::Result<()> {
+    fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> io::Result<()> {
+        // Advertise FUSE_ATOMIC_O_TRUNC so that FUSE-T passes O_TRUNC directly in
+        // the create()/open() flags rather than sending a separate setattr(size=0)
+        // after the create. Without this, FUSE-T sends setattr(size=0) for every
+        // O_CREAT|O_TRUNC open, which fails with EIO on a brand-new inode (no manifest
+        // entry yet) and causes FUSE-T's NFS layer to stall/hang indefinitely.
+        let _ = config.add_capabilities(InitFlags::FUSE_ATOMIC_O_TRUNC);
+        eprintln!("[FUSE-TRACE] init: FUSE_ATOMIC_O_TRUNC advertised");
         Ok(())
     }
 
@@ -849,13 +894,16 @@ impl Filesystem for SliceFsFilesystem {
 
     // ── Read operations ───────────────────────────────────────────────────────
 
-    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+    fn getattr(&self, _req: &Request, ino: INodeNo, fh: Option<FileHandle>, reply: ReplyAttr) {
+        eprintln!("[FUSE-TRACE] getattr: ino={} fh={:?}", ino.0, fh.map(|f| f.0));
         match self.meta.get_inode(ino.0) {
             Ok(meta) => {
                 let attr = inode_to_file_attr(&meta);
+                eprintln!("[FUSE-TRACE] getattr: ino={} -> size={} kind={:?}", ino.0, attr.size, attr.kind);
                 reply.attr(&TTL, &attr);
             }
             Err(e) => {
+                eprintln!("[FUSE-TRACE] getattr: ino={} -> error={:?}", ino.0, meta_error_to_fuse_errno(&e));
                 reply.error(meta_error_to_fuse_errno(&e));
             }
         }
@@ -863,15 +911,23 @@ impl Filesystem for SliceFsFilesystem {
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let name_str = name.to_str().unwrap_or("");
+        eprintln!("[FUSE-TRACE] lookup: parent={} name={:?}", parent.0, name_str);
         match self.meta.lookup(parent.0, name_str) {
             Ok(child_ino) => match self.meta.get_inode(child_ino) {
                 Ok(meta) => {
                     let attr = inode_to_file_attr(&meta);
+                    eprintln!("[FUSE-TRACE] lookup: parent={} name={:?} -> ino={}", parent.0, name_str, child_ino);
                     reply.entry(&TTL, &attr, Generation(0));
                 }
-                Err(e) => reply.error(meta_error_to_fuse_errno(&e)),
+                Err(e) => {
+                    eprintln!("[FUSE-TRACE] lookup: parent={} name={:?} -> getattr error={:?}", parent.0, name_str, e);
+                    reply.error(meta_error_to_fuse_errno(&e));
+                }
             },
-            Err(e) => reply.error(meta_error_to_fuse_errno(&e)),
+            Err(e) => {
+                eprintln!("[FUSE-TRACE] lookup: parent={} name={:?} -> not found", parent.0, name_str);
+                reply.error(meta_error_to_fuse_errno(&e));
+            }
         }
     }
 
@@ -957,7 +1013,17 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        eprintln!("[FUSE-TRACE] open: ino={} flags={:#x} (O_RDONLY=0 O_WRONLY=1 O_RDWR=2 O_TRUNC={:#x})",
+            ino.0, flags.0, libc::O_TRUNC);
         use fuser::OpenAccMode;
+        // On macOS with FUSE-T, FOPEN_PURGE_UBC instructs the macOS Unified Buffer Cache
+        // to discard any cached data for this file handle on open. Without this, the NFS
+        // client may serve stale reads from UBC even after new writes have been committed.
+        #[cfg(target_os = "macos")]
+        let base_flags = FopenFlags::FOPEN_PURGE_UBC;
+        #[cfg(not(target_os = "macos"))]
+        let base_flags = FopenFlags::empty();
+
         let mode = flags.acc_mode();
         if mode == OpenAccMode::O_WRONLY || mode == OpenAccMode::O_RDWR {
             let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
@@ -966,11 +1032,28 @@ impl Filesystem for SliceFsFilesystem {
                 OpenFileState {
                     ino: ino.0,
                     buf: Vec::new(),
+                    cas_committed: false,
                 },
             );
-            reply.opened(FileHandle(fh), FopenFlags::empty());
+
+            // FUSE_ATOMIC_O_TRUNC: when we advertise this capability in init(), the kernel
+            // passes O_TRUNC directly here. Handle it by truncating the inode to size 0.
+            // For an existing file opened with O_TRUNC this empties the content immediately
+            // so subsequent reads on the open handle see an empty file.
+            if flags.0 & libc::O_TRUNC != 0 {
+                if let Err(e) = self.test_setattr_size(ino.0, Some(fh), 0) {
+                    reply.error(Errno::from_i32(e));
+                    // Clean up the fh we just inserted
+                    self.open_files.lock().unwrap().remove(&fh);
+                    return;
+                }
+            }
+
+            eprintln!("[FUSE-TRACE] open: ino={} -> fh={} (write handle)", ino.0, fh);
+            reply.opened(FileHandle(fh), base_flags);
         } else {
-            reply.opened(FileHandle(0), FopenFlags::empty());
+            eprintln!("[FUSE-TRACE] open: ino={} -> fh=0 (read-only handle)", ino.0);
+            reply.opened(FileHandle(0), base_flags);
         }
     }
 
@@ -985,16 +1068,24 @@ impl Filesystem for SliceFsFilesystem {
         fh: FileHandle,
         _flags: OpenFlags,
         _lock_owner: Option<LockOwner>,
-        _flush: bool,
+        flush: bool,
         reply: ReplyEmpty,
     ) {
+        eprintln!("[FUSE-TRACE] release: ino={} fh={} flush={}", ino.0, fh.0, flush);
         if fh.0 == 0 {
             // Read-only handle — nothing to flush
+            eprintln!("[FUSE-TRACE] release: ino={} fh=0 read-only -> ok", ino.0);
             return reply.ok();
         }
         match self.test_release(ino.0, fh.0) {
-            Ok(()) => reply.ok(),
-            Err(_) => reply.error(Errno::EIO),
+            Ok(()) => {
+                eprintln!("[FUSE-TRACE] release: ino={} fh={} -> ok", ino.0, fh.0);
+                reply.ok();
+            }
+            Err(e) => {
+                eprintln!("[FUSE-TRACE] release: ino={} fh={} -> error={}", ino.0, fh.0, e);
+                reply.error(Errno::EIO);
+            }
         }
     }
 
@@ -1007,6 +1098,40 @@ impl Filesystem for SliceFsFilesystem {
         reply: ReplyEmpty,
     ) {
         reply.ok();
+    }
+
+    /// Flush any buffered writes for `fh` to CAS in response to a `close(2)` syscall.
+    ///
+    /// Under FUSE-T on macOS, the NFS layer translates the NFS4 CLOSE operation into a
+    /// FUSE flush call. Returning ENOSYS (the fuser default) causes the macOS NFS client
+    /// to stall indefinitely, making every write hang. This implementation flushes the
+    /// write buffer through the CAS pipeline and replies ok(), unblocking the NFS CLOSE.
+    ///
+    /// Unlike `fsync`, the WAL is NOT synced here — durability is provided by a subsequent
+    /// `release` or explicit `fsync`. `flush` may be called multiple times for the same
+    /// file handle (once per dup'd fd that is closed), so the buffer is preserved
+    /// (reset to empty) rather than the handle being removed.
+    fn flush(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        fh: FileHandle,
+        _lock_owner: LockOwner,
+        reply: ReplyEmpty,
+    ) {
+        eprintln!("[FUSE-TRACE] flush: ino={} fh={}", ino.0, fh.0);
+        // flush_buffer_for_fsync flushes the write buffer to CAS and resets it to empty,
+        // leaving the file handle open for further writes (correct flush semantics).
+        match self.flush_buffer_for_fsync(ino.0, fh.0) {
+            Ok(()) => {
+                eprintln!("[FUSE-TRACE] flush: ino={} fh={} -> ok", ino.0, fh.0);
+                reply.ok();
+            }
+            Err(e) => {
+                eprintln!("[FUSE-TRACE] flush: ino={} fh={} -> error={}", ino.0, fh.0, e);
+                reply.error(Errno::EIO);
+            }
+        }
     }
 
     /// Flush any buffered writes for `fh` to CAS and sync the WAL to disk.
@@ -1102,12 +1227,57 @@ impl Filesystem for SliceFsFilesystem {
         }
     }
 
+    fn setxattr(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        name: &OsStr,
+        value: &[u8],
+        _flags: i32,
+        _position: u32,
+        reply: ReplyEmpty,
+    ) {
+        let name_str = name.to_str().unwrap_or("");
+        eprintln!("[FUSE-TRACE] setxattr: ino={} name={:?} len={}", ino.0, name_str, value.len());
+        match self.meta.set_xattr(ino.0, name_str, value) {
+            Ok(()) => {
+                eprintln!("[FUSE-TRACE] setxattr: ino={} name={:?} -> ok", ino.0, name_str);
+                reply.ok();
+            }
+            Err(e) => {
+                eprintln!("[FUSE-TRACE] setxattr: ino={} name={:?} -> error={:?}", ino.0, name_str, e);
+                reply.error(meta_error_to_fuse_errno(&e));
+            }
+        }
+    }
+
+    fn removexattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let name_str = name.to_str().unwrap_or("");
+        eprintln!("[FUSE-TRACE] removexattr: ino={} name={:?}", ino.0, name_str);
+        match self.meta.remove_xattr(ino.0, name_str) {
+            Ok(()) => {
+                eprintln!("[FUSE-TRACE] removexattr: ino={} name={:?} -> ok", ino.0, name_str);
+                reply.ok();
+            }
+            Err(MetaError::NotFound(_)) => {
+                // Attribute did not exist — POSIX says ENOATTR (same value as ENODATA on Linux).
+                // fuser exports this as Errno::NO_XATTR on macOS.
+                eprintln!("[FUSE-TRACE] removexattr: ino={} name={:?} -> NO_XATTR", ino.0, name_str);
+                reply.error(Errno::NO_XATTR);
+            }
+            Err(e) => {
+                eprintln!("[FUSE-TRACE] removexattr: ino={} name={:?} -> error={:?}", ino.0, name_str, e);
+                reply.error(meta_error_to_fuse_errno(&e));
+            }
+        }
+    }
+
     // ── Write operations ───────────────────────────────────────────────────────
 
     fn write(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         fh: FileHandle,
         offset: u64,
         data: &[u8],
@@ -1116,9 +1286,16 @@ impl Filesystem for SliceFsFilesystem {
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
+        eprintln!("[FUSE-TRACE] write: ino={} fh={} offset={} len={}", ino.0, fh.0, offset, data.len());
         match self.test_write(fh.0, offset, data) {
-            Ok(n) => reply.written(n),
-            Err(_) => reply.error(Errno::EBADF),
+            Ok(n) => {
+                eprintln!("[FUSE-TRACE] write: ino={} fh={} -> written={}", ino.0, fh.0, n);
+                reply.written(n);
+            }
+            Err(e) => {
+                eprintln!("[FUSE-TRACE] write: ino={} fh={} -> error={}", ino.0, fh.0, e);
+                reply.error(Errno::EBADF);
+            }
         }
     }
 
@@ -1129,24 +1306,54 @@ impl Filesystem for SliceFsFilesystem {
         name: &OsStr,
         mode: u32,
         umask: u32,
-        _flags: i32,
+        flags: i32,
         reply: ReplyCreate,
     ) {
+        eprintln!("[FUSE-TRACE] create: parent={} name={:?} mode={:#o} umask={:#o} flags={:#x}",
+            parent.0, name, mode, umask, flags);
+        // On macOS with FUSE-T, FOPEN_PURGE_UBC ensures the NFS UBC discards any
+        // previously cached data for this inode when the file is created/opened.
+        #[cfg(target_os = "macos")]
+        let fopen_flags = FopenFlags::FOPEN_PURGE_UBC;
+        #[cfg(not(target_os = "macos"))]
+        let fopen_flags = FopenFlags::empty();
+
         let name_str = match name.to_str() {
             Some(s) => s,
             None => return reply.error(Errno::EINVAL),
         };
         match self.test_create(parent.0, name_str, mode, umask, req.uid(), req.gid()) {
             Ok((ino, fh)) => {
+                eprintln!("[FUSE-TRACE] create: parent={} name={:?} -> ino={} fh={}", parent.0, name_str, ino, fh);
+                // With FUSE_ATOMIC_O_TRUNC advertised, the kernel passes O_TRUNC in
+                // create() flags. For a new file this is a no-op (nothing to truncate),
+                // but we handle it explicitly for correctness and to avoid a separate
+                // setattr(size=0) from FUSE-T.
+                if flags & libc::O_TRUNC != 0 {
+                    eprintln!("[FUSE-TRACE] create: O_TRUNC set in flags, truncating ino={} fh={}", ino, fh);
+                    if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
+                        eprintln!("[FUSE-TRACE] create: O_TRUNC truncate failed: {}", e);
+                        reply.error(Errno::from_i32(e));
+                        self.open_files.lock().unwrap().remove(&fh);
+                        return;
+                    }
+                }
                 match self.meta.get_inode(ino) {
                     Ok(meta) => {
                         let attr = inode_to_file_attr(&meta);
-                        reply.created(&TTL, &attr, Generation(0), FileHandle(fh), FopenFlags::empty());
+                        eprintln!("[FUSE-TRACE] create: replying created ino={} fh={} size={}", ino, fh, attr.size);
+                        reply.created(&TTL, &attr, Generation(0), FileHandle(fh), fopen_flags);
                     }
-                    Err(e) => reply.error(meta_error_to_fuse_errno(&e)),
+                    Err(e) => {
+                        eprintln!("[FUSE-TRACE] create: get_inode failed: {:?}", e);
+                        reply.error(meta_error_to_fuse_errno(&e));
+                    }
                 }
             }
-            Err(errno) => reply.error(Errno::from_i32(errno)),
+            Err(errno) => {
+                eprintln!("[FUSE-TRACE] create: test_create failed: {}", errno);
+                reply.error(Errno::from_i32(errno));
+            }
         }
     }
 
@@ -1313,6 +1520,8 @@ impl Filesystem for SliceFsFilesystem {
         _flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
+        eprintln!("[FUSE-TRACE] setattr: ino={} mode={:?} uid={:?} gid={:?} size={:?} fh={:?}",
+            ino.0, mode, uid, gid, size, fh.map(|f| f.0));
         let mut inode = match self.meta.get_inode(ino.0) {
             Ok(m) => m,
             Err(e) => return reply.error(meta_error_to_fuse_errno(&e)),
@@ -1360,6 +1569,7 @@ impl Filesystem for SliceFsFilesystem {
         }
 
         let attr = inode_to_file_attr(&inode);
+        eprintln!("[FUSE-TRACE] setattr: ino={} -> ok size={}", ino.0, attr.size);
         reply.attr(&TTL, &attr);
     }
 

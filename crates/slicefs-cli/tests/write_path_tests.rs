@@ -286,3 +286,76 @@ fn test_mknod_returns_enosys() {
     let err = result.unwrap_err();
     assert_eq!(err, libc::ENOSYS, "mknod must return ENOSYS");
 }
+
+/// Regression test for O_CREAT|O_TRUNC hang (second bug).
+///
+/// When FUSE_ATOMIC_O_TRUNC is NOT advertised, FUSE-T sends `setattr(size=0)`
+/// after `create()` for every O_CREAT|O_TRUNC open. Before this fix, a newly
+/// created file had no manifest entry yet — `get_manifest()` returned NotFound
+/// which was mapped to EIO. FUSE-T's NFS layer would then stall waiting for a
+/// successful setattr response, causing the open() call to hang indefinitely.
+///
+/// The fix: (1) treat NotFound from get_manifest as an empty manifest in
+/// test_setattr_size Case B; (2) advertise FUSE_ATOMIC_O_TRUNC in init() so
+/// FUSE-T never sends the separate setattr in the first place.
+#[test]
+fn test_setattr_size_zero_on_new_file_without_manifest() {
+    let fs = fresh_fs();
+
+    // Simulate: echo "test" > /mount/newfile.txt with FUSE_ATOMIC_O_TRUNC NOT set.
+    // FUSE-T calls create() then setattr(size=0) for new files with O_TRUNC.
+    let (ino, fh) = fs.test_create(1, "otrunc.txt", S_IFREG | 0o644, 0o022, 0, 0)
+        .expect("create should succeed");
+
+    // At this point: inode exists, directory entry exists, open handle exists,
+    // but manifest_data has NO entry for this inode yet (no write has happened).
+    // Before the fix: this returned EIO, causing FUSE-T to hang.
+    fs.test_setattr_size(ino, None, 0)
+        .expect("setattr(size=0) on new file without manifest must succeed");
+
+    // Inode size must be 0
+    let meta = fs.meta().get_inode(ino).unwrap();
+    assert_eq!(meta.size, 0);
+
+    // Normal write + release after the setattr must still work
+    fs.test_write(fh, 0, b"hello").expect("write should succeed");
+    fs.test_release(ino, fh).expect("release should succeed");
+
+    let content = read_content(&fs, ino);
+    assert_eq!(content, b"hello");
+}
+
+/// Regression test for FUSE-T write hang.
+///
+/// Under FUSE-T, macOS maps NFS4 CLOSE → FUSE flush.  If flush returns ENOSYS
+/// the NFS client stalls indefinitely.  The flush callback now calls
+/// `flush_buffer_for_fsync` which flushes the buffer to CAS without closing the
+/// handle, then returns ok().  This test exercises that exact path via
+/// `test_fsync` (which shares the same helper).
+#[test]
+fn test_flush_write_read_roundtrip() {
+    let fs = fresh_fs();
+
+    // Simulate: echo "test" > /mount/newfile.txt
+    // Step 1: create (NFS4 OPEN CREATE → FUSE create)
+    let (ino, fh) = fs.test_create(1, "newfile.txt", S_IFREG | 0o644, 0o022, 0, 0)
+        .expect("create should succeed");
+
+    // Step 2: write (NFS4 WRITE → FUSE write)
+    fs.test_write(fh, 0, b"test\n").expect("write should succeed");
+
+    // Step 3: flush (NFS4 CLOSE → FUSE flush)
+    // flush_buffer_for_fsync is the same helper used by the flush() callback
+    fs.test_fsync(ino, fh).expect("flush (via test_fsync) must not return ENOSYS");
+
+    // Step 4: release (NFS4 final close → FUSE release)
+    fs.test_release(ino, fh).expect("release should succeed");
+
+    // Step 5: read back (cat /mount/newfile.txt → FUSE read)
+    let content = read_content(&fs, ino);
+    assert_eq!(content, b"test\n", "written content must be readable after flush+release");
+
+    // Inode size must reflect the written data
+    let meta = fs.meta().get_inode(ino).unwrap();
+    assert_eq!(meta.size, 5, "inode size must equal written byte count");
+}
