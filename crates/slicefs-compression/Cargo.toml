@@ -1,0 +1,11 @@
+[package]
+name = "slicefs-compression"
+version = "0.1.0"
+edition = "2021"
+description = "Pluggable compression implementations for SliceFS (Zstd, LZ4, None)"
+
+[dependencies]
+slicefs-traits = { path = "../slicefs-traits" }
+thiserror.workspace = true
+zstd.workspace = true
+lz4_flex.workspace = true

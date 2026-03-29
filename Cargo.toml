@@ -4,6 +4,7 @@ members = [
     "crates/cas-local",
     "crates/metadata",
     "crates/slicefs-cli",
+    "crates/slicefs-compression",
 ]
 resolver = "2"
 
@@ -27,3 +28,5 @@ fastcdc    = "3.2"
 tokio      = { version = "1", features = ["full"] }
 libc       = "0.2"
 anyhow     = "1"
+zstd       = "0.13"
+lz4_flex   = "0.11"
