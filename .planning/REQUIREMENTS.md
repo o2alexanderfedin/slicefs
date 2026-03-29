@@ -49,9 +49,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Snapshots & Versioning
 
-- [ ] **SNAP-01**: Read-only point-in-time snapshots (frozen metadata tree, shared CAS blocks)
-- [ ] **SNAP-02**: Filesystem version history with ability to switch between historical versions
-- [ ] **SNAP-03**: Efficient version switching at block level (leveraging CAS architecture)
+- [x] **SNAP-01**: Read-only point-in-time snapshots (frozen metadata tree, shared CAS blocks)
+- [x] **SNAP-02**: Filesystem version history with ability to switch between historical versions
+- [x] **SNAP-03**: Efficient version switching at block level (leveraging CAS architecture)
 
 ### Compression
 
@@ -140,9 +140,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | META-01 | Phase 5 | Complete |
 | META-02 | Phase 3 | Complete |
 | META-03 | Phase 2 | Complete |
-| SNAP-01 | Phase 6 | Pending |
-| SNAP-02 | Phase 6 | Pending |
-| SNAP-03 | Phase 6 | Pending |
+| SNAP-01 | Phase 6 | Complete |
+| SNAP-02 | Phase 6 | Complete |
+| SNAP-03 | Phase 6 | Complete |
 | COMP-01 | Phase 6 | Complete |
 | COMP-02 | Phase 6 | Complete |
 | PLAT-01 | Phase 7 | Pending |

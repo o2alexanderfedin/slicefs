@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 06-01-PLAN.md - Compressor trait and slicefs-compression crate
-last_updated: "2026-03-29T18:41:31.922Z"
+stopped_at: Completed 06-03-PLAN.md
+last_updated: "2026-03-29T18:48:38.646Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
   completed_phases: 5
   total_plans: 21
-  completed_plans: 18
+  completed_plans: 19
   percent: 0
 ---
 
@@ -68,6 +68,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 05-crash-safety-and-gc P02 | 45min | 2 tasks | 12 files |
 | Phase 05-crash-safety-and-gc P04 | 6min | 2 tasks | 7 files |
 | Phase 06-compression-and-snapshots P01 | 202s | 2 tasks | 8 files |
+| Phase 06-compression-and-snapshots P03 | 8min | 2 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -135,6 +136,9 @@ Recent decisions affecting current work:
 - [Phase 06-compression-and-snapshots]: AlgorithmId::Raw for incompressible data: blocks never inflated even when compressor is active
 - [Phase 06-compression-and-snapshots]: compress_block falls back to Raw on compress error: wire format always writable
 - [Phase 06-compression-and-snapshots]: NoneCompressor rejects Zstd/Lz4 in decompress: explicit error for cross-compressor reads
+- [Phase 06-compression-and-snapshots]: SnapshotRecord as SegmentEntry variant (0x03): crash-safe via WAL, no new file format
+- [Phase 06-compression-and-snapshots]: load_store_from_segments returns 3-tuple (dict, root, snapshots): reconstructed on replay
+- [Phase 06-compression-and-snapshots]: snapshot_roots() for GC multi-root anchoring: all snapshot roots + current live root
 
 ### Pending Todos
 
@@ -150,6 +154,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-29T18:41:31.918Z
-Stopped at: Completed 06-01-PLAN.md - Compressor trait and slicefs-compression crate
+Last session: 2026-03-29T18:48:38.641Z
+Stopped at: Completed 06-03-PLAN.md
 Resume file: None
