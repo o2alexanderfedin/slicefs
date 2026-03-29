@@ -59,5 +59,11 @@ pub(crate) fn wal_entry_to_segment(entry: &WalEntry) -> SegmentEntry {
             branches: *branches,
         },
         WalEntry::RootUpdate { root } => SegmentEntry::RootUpdate { root: *root },
+        WalEntry::Snapshot { version, root, created_at, name } => SegmentEntry::SnapshotRecord {
+            version: *version,
+            root: *root,
+            created_at: *created_at,
+            name: name.clone(),
+        },
     }
 }

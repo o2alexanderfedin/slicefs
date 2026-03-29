@@ -31,6 +31,8 @@ pub enum WalEntry {
     DictionaryAppend { key: Digest224, branches: Branches },
     /// Update the filesystem root digest.
     RootUpdate { root: Digest224 },
+    /// Persist a snapshot record with version, root, timestamp, and optional name.
+    Snapshot { version: u64, root: Digest224, created_at: u64, name: Option<String> },
 }
 
 /// Errors returned by WAL operations.

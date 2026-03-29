@@ -17,6 +17,7 @@ use slicefs_traits::digest::{Branches, Digest224};
 use slicefs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, MetadataStore};
 use blockset::{Dictionary, State, Tree};
 
+use crate::snapshot::SnapshotEntry;
 use crate::wal::{WalEntry, WalError, WalStrategy};
 
 use crate::inode::{intern_inode, load_inode};
@@ -69,6 +70,9 @@ pub struct DictMetadataStore {
     wal: Mutex<Option<Box<dyn WalStrategy>>>,
     /// Last committed root digest — updated by `commit()`, used by GC to determine live roots.
     last_root: Mutex<Option<Digest224>>,
+    /// Snapshot list — populated by `set_snapshots()` on store reconstruction
+    /// and appended by `create_snapshot()`. Sorted by version.
+    snapshots: Mutex<Vec<SnapshotEntry>>,
 }
 
 impl DictMetadataStore {
@@ -103,6 +107,7 @@ impl DictMetadataStore {
             logical_bytes: AtomicU64::new(0),
             wal: Mutex::new(None),
             last_root: Mutex::new(None),
+            snapshots: Mutex::new(Vec::new()),
         }
     }
 }
@@ -230,6 +235,90 @@ impl DictMetadataStore {
     /// Used by the background GC thread to determine which root to use as the live-set anchor.
     pub fn current_root(&self) -> Option<Digest224> {
         *self.last_root.lock().unwrap()
+    }
+
+    /// Load a snapshot list after store reconstruction from segment replay.
+    ///
+    /// Called by `mount.rs::load_store` after `load_store_from_segments` returns
+    /// the snapshot list. Replaces whatever is in memory (typically empty).
+    pub fn set_snapshots(&mut self, snapshots: Vec<SnapshotEntry>) {
+        let mut guard = self.snapshots.lock().unwrap();
+        *guard = snapshots;
+        // Ensure sorted by version for consistent list_snapshots output.
+        guard.sort_by_key(|s| s.version);
+    }
+
+    /// Create a snapshot of the current committed state.
+    ///
+    /// Calls `commit()` first to flush all in-memory mutations into the Dictionary,
+    /// then writes a `SnapshotRecord` to the WAL, and returns the new `SnapshotEntry`.
+    ///
+    /// Version numbers auto-increment from the max existing version + 1 (starting at 1).
+    pub fn create_snapshot(&self, name: Option<String>) -> Result<SnapshotEntry, MetaError> {
+        // Flush in-memory state to get a stable root.
+        let root = self.commit()?;
+
+        // Compute next version.
+        let version = {
+            let snaps = self.snapshots.lock().unwrap();
+            snaps.iter().map(|s| s.version).max().unwrap_or(0) + 1
+        };
+
+        // Capture creation timestamp.
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let entry = SnapshotEntry { version, name: name.clone(), root, created_at };
+
+        // Write SnapshotRecord to WAL (same path as commit writes RootUpdate).
+        self.log_wal_entry(&WalEntry::Snapshot {
+            version,
+            root,
+            created_at,
+            name,
+        });
+
+        // Append to in-memory list.
+        self.snapshots.lock().unwrap().push(entry.clone());
+
+        Ok(entry)
+    }
+
+    /// Return all snapshots sorted by version ascending.
+    pub fn list_snapshots(&self) -> Vec<SnapshotEntry> {
+        let mut snaps = self.snapshots.lock().unwrap().clone();
+        snaps.sort_by_key(|s| s.version);
+        snaps
+    }
+
+    /// Find a snapshot by version number or name.
+    ///
+    /// - If `reference` parses as `u64`, search by version.
+    /// - Otherwise search by name.
+    ///
+    /// Returns the first match, or `None`.
+    pub fn find_snapshot(&self, reference: &str) -> Option<SnapshotEntry> {
+        let snaps = self.snapshots.lock().unwrap();
+        if let Ok(version) = reference.parse::<u64>() {
+            snaps.iter().find(|s| s.version == version).cloned()
+        } else {
+            snaps.iter().find(|s| s.name.as_deref() == Some(reference)).cloned()
+        }
+    }
+
+    /// Return all roots that GC must treat as live-set anchors.
+    ///
+    /// Includes every snapshot root plus the current committed root (if any).
+    /// Used by both background GC and offline `slicefs gc`.
+    pub fn snapshot_roots(&self) -> Vec<Digest224> {
+        let snaps = self.snapshots.lock().unwrap();
+        let mut roots: Vec<Digest224> = snaps.iter().map(|s| s.root).collect();
+        if let Some(root) = self.current_root() {
+            roots.push(root);
+        }
+        roots
     }
 }
 
@@ -834,6 +923,7 @@ impl DictMetadataStore {
             logical_bytes: AtomicU64::new(initial_logical_bytes),
             wal: Mutex::new(None),
             last_root: Mutex::new(Some(*root)),
+            snapshots: Mutex::new(Vec::new()),
         })
     }
 }
@@ -1477,6 +1567,188 @@ mod tests {
         let digest256 = from_digest224(&content_digest);
         let read_back: Vec<u8> = GetBytes::new(GetData::new(&*dict, &digest256)).collect();
         assert_eq!(read_back, content.as_slice());
+    }
+
+    // ── Snapshot method tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_create_snapshot_returns_entry() {
+        use crate::wal::{WalConfig, create_wal};
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+        let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
+        let mut store = DictMetadataStore::new();
+        store.set_wal(wal);
+
+        let snap = store.create_snapshot(None).expect("create_snapshot should succeed");
+        assert_eq!(snap.version, 1, "first snapshot must have version 1");
+        assert!(snap.name.is_none(), "no name expected");
+        assert_ne!(snap.root, [0u32; 7], "snapshot root must not be zero");
+    }
+
+    #[test]
+    fn test_create_snapshot_auto_increments_version() {
+        use crate::wal::{WalConfig, create_wal};
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+        let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
+        let mut store = DictMetadataStore::new();
+        store.set_wal(wal);
+
+        let snap1 = store.create_snapshot(None).unwrap();
+        let snap2 = store.create_snapshot(Some("v2".to_string())).unwrap();
+        assert_eq!(snap1.version, 1);
+        assert_eq!(snap2.version, 2);
+        assert_eq!(snap2.name.as_deref(), Some("v2"));
+    }
+
+    #[test]
+    fn test_list_snapshots_sorted_by_version() {
+        use crate::wal::{WalConfig, create_wal};
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+        let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
+        let mut store = DictMetadataStore::new();
+        store.set_wal(wal);
+
+        store.create_snapshot(None).unwrap();
+        store.create_snapshot(None).unwrap();
+        store.create_snapshot(None).unwrap();
+
+        let list = store.list_snapshots();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].version, 1);
+        assert_eq!(list[1].version, 2);
+        assert_eq!(list[2].version, 3);
+    }
+
+    #[test]
+    fn test_find_snapshot_by_version_string() {
+        use crate::wal::{WalConfig, create_wal};
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+        let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
+        let mut store = DictMetadataStore::new();
+        store.set_wal(wal);
+
+        store.create_snapshot(None).unwrap();
+        store.create_snapshot(Some("production".to_string())).unwrap();
+
+        let found = store.find_snapshot("2").expect("should find by version string");
+        assert_eq!(found.version, 2);
+        assert_eq!(found.name.as_deref(), Some("production"));
+    }
+
+    #[test]
+    fn test_find_snapshot_by_name() {
+        use crate::wal::{WalConfig, create_wal};
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+        let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
+        let mut store = DictMetadataStore::new();
+        store.set_wal(wal);
+
+        store.create_snapshot(Some("release-1.0".to_string())).unwrap();
+
+        let found = store.find_snapshot("release-1.0").expect("should find by name");
+        assert_eq!(found.name.as_deref(), Some("release-1.0"));
+    }
+
+    #[test]
+    fn test_find_snapshot_returns_none_for_unknown() {
+        use crate::wal::{WalConfig, create_wal};
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+        let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
+        let mut store = DictMetadataStore::new();
+        store.set_wal(wal);
+
+        store.create_snapshot(None).unwrap();
+        assert!(store.find_snapshot("nonexistent").is_none());
+        assert!(store.find_snapshot("99").is_none());
+    }
+
+    #[test]
+    fn test_snapshot_roots_includes_all_roots() {
+        use crate::wal::{WalConfig, create_wal};
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+        let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
+        let mut store = DictMetadataStore::new();
+        store.set_wal(wal);
+
+        store.create_snapshot(None).unwrap();
+        store.create_snapshot(None).unwrap();
+
+        let roots = store.snapshot_roots();
+        // snapshot_roots must include snapshot roots + current live root
+        assert!(roots.len() >= 2, "should include at least 2 roots: {:?}", roots);
+    }
+
+    #[test]
+    fn test_snapshot_roots_no_snapshots_returns_current_root() {
+        use crate::wal::{WalConfig, create_wal};
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+        let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
+        let mut store = DictMetadataStore::new();
+        store.set_wal(wal);
+
+        // Commit to establish a root, but no snapshots
+        store.commit().unwrap();
+        let roots = store.snapshot_roots();
+        assert_eq!(roots.len(), 1, "with no snapshots, roots should contain only current_root");
+    }
+
+    #[test]
+    fn test_snapshots_survive_segment_replay() {
+        use crate::wal::{WalConfig, create_wal};
+        use crate::segment::load_store_from_segments;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+
+        // Create a store with a snapshot
+        {
+            let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
+            let mut store = DictMetadataStore::new();
+            store.set_wal(wal);
+            store.create_snapshot(Some("replay-test".to_string())).unwrap();
+            store.shutdown_wal().unwrap();
+        }
+
+        // Reload from segments
+        let segs_dir = dir.path().join("segments");
+        let (_dict, _root, snapshots) = load_store_from_segments(&segs_dir).unwrap();
+        assert_eq!(snapshots.len(), 1, "snapshot must survive WAL replay");
+        assert_eq!(snapshots[0].version, 1);
+        assert_eq!(snapshots[0].name.as_deref(), Some("replay-test"));
+    }
+
+    #[test]
+    fn test_set_snapshots_loads_snapshot_list() {
+        use crate::snapshot::SnapshotEntry;
+        let store = DictMetadataStore::new();
+        let snap = SnapshotEntry {
+            version: 5,
+            name: Some("loaded".to_string()),
+            root: [1u32; 7],
+            created_at: 12345,
+        };
+        // set_snapshots must load them so list_snapshots returns them
+        let mut store = store;
+        store.set_snapshots(vec![snap.clone()]);
+        let list = store.list_snapshots();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].version, 5);
     }
 }
 
