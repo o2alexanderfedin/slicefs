@@ -114,7 +114,7 @@ Plans:
   3. A snapshot command creates a read-only point-in-time view; files in the snapshot are readable and match their state at snapshot time
   4. Switching to a historical version makes the live filesystem reflect that version's file contents
   5. Two snapshots sharing blocks do not double-count physical storage; shared blocks appear once in physical usage
-**Plans:** 4 plans
+**Plans:** 1/4 plans executed
 Plans:
 - [ ] 06-01-PLAN.md — Compressor trait in slicefs-traits + Zstd/LZ4/None implementations in slicefs-compression crate
 - [ ] 06-02-PLAN.md — Compression wired into FUSE write/read path + CLI flags (--compressor, --compressor-level)
@@ -145,5 +145,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 3. Read-Only FUSE | 1/3 | In Progress|  |
 | 4. Full POSIX Write Path | 4/4 | Complete   | 2026-03-28 |
 | 5. Crash Safety and GC | 4/4 | Complete   | 2026-03-29 |
-| 6. Compression and Snapshots | 0/4 | Not started | - |
+| 6. Compression and Snapshots | 1/4 | In Progress|  |
 | 7. Cross-Platform and Production Hardening | 0/TBD | Not started | - |

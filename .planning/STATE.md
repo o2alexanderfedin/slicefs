@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Phase 6 planning complete - 4 plans in 2 waves
-last_updated: "2026-03-29T18:25:08.283Z"
+stopped_at: Completed 06-01-PLAN.md - Compressor trait and slicefs-compression crate
+last_updated: "2026-03-29T18:41:31.922Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
   completed_phases: 5
   total_plans: 21
-  completed_plans: 17
+  completed_plans: 18
   percent: 0
 ---
 
@@ -67,6 +67,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 05-crash-safety-and-gc P03 | 20min | 2 tasks | 7 files |
 | Phase 05-crash-safety-and-gc P02 | 45min | 2 tasks | 12 files |
 | Phase 05-crash-safety-and-gc P04 | 6min | 2 tasks | 7 files |
+| Phase 06-compression-and-snapshots P01 | 202s | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -131,6 +132,9 @@ Recent decisions affecting current work:
 - [Phase 05-crash-safety-and-gc]: set_wal() bootstraps WAL with all existing dict entries: DictMetadataStore::new() creates initial ino=1 dict entries before WAL is set; without bootstrap, crash before first explicit commit loses these entries
 - [Phase 05-crash-safety-and-gc]: Offline GC checks mount.lock before running to prevent concurrent modification with an active mount
 - [Phase 05-crash-safety-and-gc]: Background GC: GcHandle stored for FUSE session duration, shutdown() called after mount2 returns but before MountLock drops
+- [Phase 06-compression-and-snapshots]: AlgorithmId::Raw for incompressible data: blocks never inflated even when compressor is active
+- [Phase 06-compression-and-snapshots]: compress_block falls back to Raw on compress error: wire format always writable
+- [Phase 06-compression-and-snapshots]: NoneCompressor rejects Zstd/Lz4 in decompress: explicit error for cross-compressor reads
 
 ### Pending Todos
 
@@ -146,6 +150,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-29T18:25:08.279Z
-Stopped at: Phase 6 planning complete - 4 plans in 2 waves
-Resume file: .planning/phases/06-compression-and-snapshots/06-01-PLAN.md
+Last session: 2026-03-29T18:41:31.918Z
+Stopped at: Completed 06-01-PLAN.md - Compressor trait and slicefs-compression crate
+Resume file: None

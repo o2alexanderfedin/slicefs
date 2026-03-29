@@ -55,8 +55,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Compression
 
-- [ ] **COMP-01**: Compression of stored blocks (pluggable compressor, e.g., LZ4 for speed, Zstd for ratio)
-- [ ] **COMP-02**: Dedup-first-then-compress ordering (hash original content, store compressed)
+- [x] **COMP-01**: Compression of stored blocks (pluggable compressor, e.g., LZ4 for speed, Zstd for ratio)
+- [x] **COMP-02**: Dedup-first-then-compress ordering (hash original content, store compressed)
 
 ### Cross-Platform
 
@@ -143,8 +143,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SNAP-01 | Phase 6 | Pending |
 | SNAP-02 | Phase 6 | Pending |
 | SNAP-03 | Phase 6 | Pending |
-| COMP-01 | Phase 6 | Pending |
-| COMP-02 | Phase 6 | Pending |
+| COMP-01 | Phase 6 | Complete |
+| COMP-02 | Phase 6 | Complete |
 | PLAT-01 | Phase 7 | Pending |
 | PLAT-02 | Phase 3 | Complete |
 | PLAT-03 | Phase 7 | Pending |
