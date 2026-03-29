@@ -41,11 +41,11 @@ created: 2026-03-29
 | 07-01-01 | 01 | 1 | PLAT-01 | smoke | `PKG_CONFIG_PATH=.pkgconfig cargo build -p slicefs-cli` | existing | pending |
 | 07-01-02 | 01 | 1 | PLAT-01 | unit | `cargo test -p slicefs-cli --test posix_compliance_tests` | existing | pending |
 | 07-01-03 | 01 | 1 | PLAT-01 | manual | mount + write + read on macOS | manual | pending |
-| 07-02-01 | 02 | 1 | CLI-03 | unit | `cargo test -p slicefs-cli --test stats_tests` | Wave 0 | pending |
-| 07-02-02 | 02 | 1 | CLI-04 | unit | `cargo test -p slicefs-cli --test scrub_tests` | Wave 0 | pending |
-| 07-02-03 | 02 | 1 | CLI-05 | unit | `cargo test -p slicefs-cli --test json_output_tests` | Wave 0 | pending |
+| 07-02-01 | 02 | 1 | CLI-03 | unit | `cargo test -p slicefs-cli -- test_stats` | inline `#[cfg(test)]` in stats.rs | pending |
+| 07-02-02 | 02 | 1 | CLI-04 | unit | `cargo test -p slicefs-cli -- test_scrub` | inline `#[cfg(test)]` in scrub.rs | pending |
+| 07-02-03 | 02 | 1 | CLI-05 | unit | `cargo test -p slicefs-cli -- test_json_flag` | inline `#[cfg(test)]` in cli.rs | pending |
 | 07-03-01 | 03 | 2 | PLAT-04 | smoke | GitHub Actions CI on push | Wave 0 | pending |
-| 07-03-02 | 03 | 2 | PLAT-04 | integration | `cargo test --workspace` on both platforms | Wave 0 | pending |
+| 07-03-02 | 03 | 2 | PLAT-04 | integration | pjdfstest on Linux CI (>95% compliance gate) | Wave 0 | pending |
 
 *Status: pending / green / red / flaky*
 
@@ -54,10 +54,10 @@ created: 2026-03-29
 ## Wave 0 Requirements
 
 - [ ] `crates/slicefs-cli/build.rs` — macOS rpath automation (PLAT-01)
-- [ ] `crates/slicefs-cli/tests/stats_tests.rs` — stats command tests (CLI-03)
-- [ ] `crates/slicefs-cli/tests/scrub_tests.rs` — scrub command tests (CLI-04)
-- [ ] `crates/slicefs-cli/tests/json_output_tests.rs` — JSON output tests (CLI-05)
-- [ ] `.github/workflows/ci.yml` — Linux + macOS CI (PLAT-04)
+- [ ] `crates/slicefs-cli/src/stats.rs` — stats command with inline `#[cfg(test)]` module (CLI-03)
+- [ ] `crates/slicefs-cli/src/scrub.rs` — scrub command with inline `#[cfg(test)]` module (CLI-04)
+- [ ] `crates/slicefs-cli/src/cli.rs` — JSON flag tests in inline `#[cfg(test)]` module (CLI-05)
+- [ ] `.github/workflows/ci.yml` — Linux (with pjdfstest) + macOS CI (PLAT-04)
 
 ---
 
