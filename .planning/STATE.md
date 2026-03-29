@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Phase 5 context gathered
-last_updated: "2026-03-29T06:07:10.831Z"
+stopped_at: Completed 05-crash-safety-and-gc/05-01-PLAN.md
+last_updated: "2026-03-29T06:55:26.169Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
   completed_phases: 4
-  total_plans: 13
-  completed_plans: 13
+  total_plans: 17
+  completed_plans: 14
   percent: 0
 ---
 
@@ -63,6 +63,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 04-full-posix-write-path P03 | 273 | 2 tasks | 2 files |
 | Phase 04-full-posix-write-path P02 | 15 | 2 tasks | 3 files |
 | Phase 04-full-posix-write-path P04 | 20 | 2 tasks | 5 files |
+| Phase 05-crash-safety-and-gc P01 | 8min | 2 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -115,6 +116,9 @@ Recent decisions affecting current work:
 - [Phase 04-full-posix-write-path]: logical_bytes uses AtomicU64 for lock-free counter maintenance; update_inode reads old size before overwriting digest for delta tracking
 - [Phase 04-full-posix-write-path]: fuser 0.17 getlk/setlk already return ENOSYS by default — no explicit stubs needed for POSIX locking
 - [Phase 04-full-posix-write-path]: statfs bfree = u64::MAX/4 — dedup filesystem is effectively unlimited; physical = dict.len() * 92 bytes
+- [Phase 05-crash-safety-and-gc]: SegmentEntry defined in segment/mod.rs (not reader.rs) — single source of truth for segment types
+- [Phase 05-crash-safety-and-gc]: PerOpWal uses Mutex<SegmentWriter> — WalStrategy requires Send+Sync; Mutex provides interior mutability
+- [Phase 05-crash-safety-and-gc]: PeriodicWal structurally identical to FlushOnFsyncWal — background timer wiring deferred to Plan 04 GC thread
 
 ### Pending Todos
 
@@ -130,6 +134,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-29T06:07:10.828Z
-Stopped at: Phase 5 context gathered
-Resume file: .planning/phases/05-crash-safety-and-gc/05-CONTEXT.md
+Last session: 2026-03-29T06:55:26.165Z
+Stopped at: Completed 05-crash-safety-and-gc/05-01-PLAN.md
+Resume file: None

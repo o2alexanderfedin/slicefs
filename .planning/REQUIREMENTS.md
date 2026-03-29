@@ -43,7 +43,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Metadata & Crash Safety
 
-- [ ] **META-01**: Atomic metadata commits (crash-safe root pointer update)
+- [x] **META-01**: Atomic metadata commits (crash-safe root pointer update)
 - [x] **META-02**: Clean mount/unmount with graceful SIGTERM handling and pending write flush
 - [x] **META-03**: Metadata storage separated from block storage (independent stores)
 
@@ -137,7 +137,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | POSIX-13 | Phase 3 | Complete |
 | POSIX-14 | Phase 4 | Complete |
 | POSIX-15 | Phase 3 | Complete |
-| META-01 | Phase 5 | Pending |
+| META-01 | Phase 5 | Complete |
 | META-02 | Phase 3 | Complete |
 | META-03 | Phase 2 | Complete |
 | SNAP-01 | Phase 6 | Pending |
