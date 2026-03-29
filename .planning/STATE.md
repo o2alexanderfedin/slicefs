@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 06-04-PLAN.md
-last_updated: "2026-03-29T19:10:53.647Z"
+stopped_at: Completed 06-02-PLAN.md
+last_updated: "2026-03-29T19:11:39.819Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
@@ -70,6 +70,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 06-compression-and-snapshots P01 | 202s | 2 tasks | 8 files |
 | Phase 06-compression-and-snapshots P03 | 8min | 2 tasks | 14 files |
 | Phase 06-compression-and-snapshots P04 | 14min | 2 tasks | 9 files |
+| Phase 06-compression-and-snapshots P02 | 863s | 2 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -143,6 +144,8 @@ Recent decisions affecting current work:
 - [Phase 06-compression-and-snapshots]: commit_root() on DictMetadataStore writes RootUpdate WAL entry without full re-commit: enables snapshot switch to redirect live root cheaply
 - [Phase 06-compression-and-snapshots]: to_wire_bytes/from_wire_bytes helpers centralise store_version gating: fix v1 write path that incorrectly added compression header byte
 - [Phase 06-compression-and-snapshots]: Background GC uses snapshot_roots() replacing current_root(): single-line change; snapshot_roots() returns current root + all snapshot roots
+- [Phase 06-compression-and-snapshots]: store_version gates both write and read paths: <2 = raw, >=2 = compression header
+- [Phase 06-compression-and-snapshots]: to_wire_bytes/from_wire_bytes helpers centralize store_version gating across all write/read sites
 
 ### Pending Todos
 
@@ -158,6 +161,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-29T19:10:53.542Z
-Stopped at: Completed 06-04-PLAN.md
+Last session: 2026-03-29T19:11:39.810Z
+Stopped at: Completed 06-02-PLAN.md
 Resume file: None
