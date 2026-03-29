@@ -874,7 +874,6 @@ impl Filesystem for SliceFsFilesystem {
         // O_CREAT|O_TRUNC open, which fails with EIO on a brand-new inode (no manifest
         // entry yet) and causes FUSE-T's NFS layer to stall/hang indefinitely.
         let _ = config.add_capabilities(InitFlags::FUSE_ATOMIC_O_TRUNC);
-        eprintln!("[FUSE-TRACE] init: FUSE_ATOMIC_O_TRUNC advertised");
         Ok(())
     }
 
@@ -894,16 +893,13 @@ impl Filesystem for SliceFsFilesystem {
 
     // ── Read operations ───────────────────────────────────────────────────────
 
-    fn getattr(&self, _req: &Request, ino: INodeNo, fh: Option<FileHandle>, reply: ReplyAttr) {
-        eprintln!("[FUSE-TRACE] getattr: ino={} fh={:?}", ino.0, fh.map(|f| f.0));
+    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         match self.meta.get_inode(ino.0) {
             Ok(meta) => {
                 let attr = inode_to_file_attr(&meta);
-                eprintln!("[FUSE-TRACE] getattr: ino={} -> size={} kind={:?}", ino.0, attr.size, attr.kind);
                 reply.attr(&TTL, &attr);
             }
             Err(e) => {
-                eprintln!("[FUSE-TRACE] getattr: ino={} -> error={:?}", ino.0, meta_error_to_fuse_errno(&e));
                 reply.error(meta_error_to_fuse_errno(&e));
             }
         }
@@ -911,21 +907,17 @@ impl Filesystem for SliceFsFilesystem {
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let name_str = name.to_str().unwrap_or("");
-        eprintln!("[FUSE-TRACE] lookup: parent={} name={:?}", parent.0, name_str);
         match self.meta.lookup(parent.0, name_str) {
             Ok(child_ino) => match self.meta.get_inode(child_ino) {
                 Ok(meta) => {
                     let attr = inode_to_file_attr(&meta);
-                    eprintln!("[FUSE-TRACE] lookup: parent={} name={:?} -> ino={}", parent.0, name_str, child_ino);
                     reply.entry(&TTL, &attr, Generation(0));
                 }
                 Err(e) => {
-                    eprintln!("[FUSE-TRACE] lookup: parent={} name={:?} -> getattr error={:?}", parent.0, name_str, e);
                     reply.error(meta_error_to_fuse_errno(&e));
                 }
             },
             Err(e) => {
-                eprintln!("[FUSE-TRACE] lookup: parent={} name={:?} -> not found", parent.0, name_str);
                 reply.error(meta_error_to_fuse_errno(&e));
             }
         }
@@ -1013,8 +1005,6 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
-        eprintln!("[FUSE-TRACE] open: ino={} flags={:#x} (O_RDONLY=0 O_WRONLY=1 O_RDWR=2 O_TRUNC={:#x})",
-            ino.0, flags.0, libc::O_TRUNC);
         use fuser::OpenAccMode;
         // On macOS with FUSE-T, FOPEN_PURGE_UBC instructs the macOS Unified Buffer Cache
         // to discard any cached data for this file handle on open. Without this, the NFS
@@ -1049,10 +1039,8 @@ impl Filesystem for SliceFsFilesystem {
                 }
             }
 
-            eprintln!("[FUSE-TRACE] open: ino={} -> fh={} (write handle)", ino.0, fh);
             reply.opened(FileHandle(fh), base_flags);
         } else {
-            eprintln!("[FUSE-TRACE] open: ino={} -> fh=0 (read-only handle)", ino.0);
             reply.opened(FileHandle(0), base_flags);
         }
     }
@@ -1071,19 +1059,15 @@ impl Filesystem for SliceFsFilesystem {
         flush: bool,
         reply: ReplyEmpty,
     ) {
-        eprintln!("[FUSE-TRACE] release: ino={} fh={} flush={}", ino.0, fh.0, flush);
         if fh.0 == 0 {
             // Read-only handle — nothing to flush
-            eprintln!("[FUSE-TRACE] release: ino={} fh=0 read-only -> ok", ino.0);
             return reply.ok();
         }
         match self.test_release(ino.0, fh.0) {
             Ok(()) => {
-                eprintln!("[FUSE-TRACE] release: ino={} fh={} -> ok", ino.0, fh.0);
                 reply.ok();
             }
-            Err(e) => {
-                eprintln!("[FUSE-TRACE] release: ino={} fh={} -> error={}", ino.0, fh.0, e);
+            Err(_) => {
                 reply.error(Errno::EIO);
             }
         }
@@ -1119,16 +1103,13 @@ impl Filesystem for SliceFsFilesystem {
         _lock_owner: LockOwner,
         reply: ReplyEmpty,
     ) {
-        eprintln!("[FUSE-TRACE] flush: ino={} fh={}", ino.0, fh.0);
         // flush_buffer_for_fsync flushes the write buffer to CAS and resets it to empty,
         // leaving the file handle open for further writes (correct flush semantics).
         match self.flush_buffer_for_fsync(ino.0, fh.0) {
             Ok(()) => {
-                eprintln!("[FUSE-TRACE] flush: ino={} fh={} -> ok", ino.0, fh.0);
                 reply.ok();
             }
-            Err(e) => {
-                eprintln!("[FUSE-TRACE] flush: ino={} fh={} -> error={}", ino.0, fh.0, e);
+            Err(_) => {
                 reply.error(Errno::EIO);
             }
         }
@@ -1238,14 +1219,11 @@ impl Filesystem for SliceFsFilesystem {
         reply: ReplyEmpty,
     ) {
         let name_str = name.to_str().unwrap_or("");
-        eprintln!("[FUSE-TRACE] setxattr: ino={} name={:?} len={}", ino.0, name_str, value.len());
         match self.meta.set_xattr(ino.0, name_str, value) {
             Ok(()) => {
-                eprintln!("[FUSE-TRACE] setxattr: ino={} name={:?} -> ok", ino.0, name_str);
                 reply.ok();
             }
             Err(e) => {
-                eprintln!("[FUSE-TRACE] setxattr: ino={} name={:?} -> error={:?}", ino.0, name_str, e);
                 reply.error(meta_error_to_fuse_errno(&e));
             }
         }
@@ -1253,20 +1231,16 @@ impl Filesystem for SliceFsFilesystem {
 
     fn removexattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let name_str = name.to_str().unwrap_or("");
-        eprintln!("[FUSE-TRACE] removexattr: ino={} name={:?}", ino.0, name_str);
         match self.meta.remove_xattr(ino.0, name_str) {
             Ok(()) => {
-                eprintln!("[FUSE-TRACE] removexattr: ino={} name={:?} -> ok", ino.0, name_str);
                 reply.ok();
             }
             Err(MetaError::NotFound(_)) => {
                 // Attribute did not exist — POSIX says ENOATTR (same value as ENODATA on Linux).
                 // fuser exports this as Errno::NO_XATTR on macOS.
-                eprintln!("[FUSE-TRACE] removexattr: ino={} name={:?} -> NO_XATTR", ino.0, name_str);
                 reply.error(Errno::NO_XATTR);
             }
             Err(e) => {
-                eprintln!("[FUSE-TRACE] removexattr: ino={} name={:?} -> error={:?}", ino.0, name_str, e);
                 reply.error(meta_error_to_fuse_errno(&e));
             }
         }
@@ -1286,14 +1260,11 @@ impl Filesystem for SliceFsFilesystem {
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
-        eprintln!("[FUSE-TRACE] write: ino={} fh={} offset={} len={}", ino.0, fh.0, offset, data.len());
         match self.test_write(fh.0, offset, data) {
             Ok(n) => {
-                eprintln!("[FUSE-TRACE] write: ino={} fh={} -> written={}", ino.0, fh.0, n);
                 reply.written(n);
             }
-            Err(e) => {
-                eprintln!("[FUSE-TRACE] write: ino={} fh={} -> error={}", ino.0, fh.0, e);
+            Err(_) => {
                 reply.error(Errno::EBADF);
             }
         }
@@ -1309,8 +1280,6 @@ impl Filesystem for SliceFsFilesystem {
         flags: i32,
         reply: ReplyCreate,
     ) {
-        eprintln!("[FUSE-TRACE] create: parent={} name={:?} mode={:#o} umask={:#o} flags={:#x}",
-            parent.0, name, mode, umask, flags);
         // On macOS with FUSE-T, FOPEN_PURGE_UBC ensures the NFS UBC discards any
         // previously cached data for this inode when the file is created/opened.
         #[cfg(target_os = "macos")]
@@ -1324,15 +1293,12 @@ impl Filesystem for SliceFsFilesystem {
         };
         match self.test_create(parent.0, name_str, mode, umask, req.uid(), req.gid()) {
             Ok((ino, fh)) => {
-                eprintln!("[FUSE-TRACE] create: parent={} name={:?} -> ino={} fh={}", parent.0, name_str, ino, fh);
                 // With FUSE_ATOMIC_O_TRUNC advertised, the kernel passes O_TRUNC in
                 // create() flags. For a new file this is a no-op (nothing to truncate),
                 // but we handle it explicitly for correctness and to avoid a separate
                 // setattr(size=0) from FUSE-T.
                 if flags & libc::O_TRUNC != 0 {
-                    eprintln!("[FUSE-TRACE] create: O_TRUNC set in flags, truncating ino={} fh={}", ino, fh);
                     if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
-                        eprintln!("[FUSE-TRACE] create: O_TRUNC truncate failed: {}", e);
                         reply.error(Errno::from_i32(e));
                         self.open_files.lock().unwrap().remove(&fh);
                         return;
@@ -1341,17 +1307,14 @@ impl Filesystem for SliceFsFilesystem {
                 match self.meta.get_inode(ino) {
                     Ok(meta) => {
                         let attr = inode_to_file_attr(&meta);
-                        eprintln!("[FUSE-TRACE] create: replying created ino={} fh={} size={}", ino, fh, attr.size);
                         reply.created(&TTL, &attr, Generation(0), FileHandle(fh), fopen_flags);
                     }
                     Err(e) => {
-                        eprintln!("[FUSE-TRACE] create: get_inode failed: {:?}", e);
                         reply.error(meta_error_to_fuse_errno(&e));
                     }
                 }
             }
             Err(errno) => {
-                eprintln!("[FUSE-TRACE] create: test_create failed: {}", errno);
                 reply.error(Errno::from_i32(errno));
             }
         }
@@ -1520,8 +1483,6 @@ impl Filesystem for SliceFsFilesystem {
         _flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
-        eprintln!("[FUSE-TRACE] setattr: ino={} mode={:?} uid={:?} gid={:?} size={:?} fh={:?}",
-            ino.0, mode, uid, gid, size, fh.map(|f| f.0));
         let mut inode = match self.meta.get_inode(ino.0) {
             Ok(m) => m,
             Err(e) => return reply.error(meta_error_to_fuse_errno(&e)),
@@ -1569,7 +1530,6 @@ impl Filesystem for SliceFsFilesystem {
         }
 
         let attr = inode_to_file_attr(&inode);
-        eprintln!("[FUSE-TRACE] setattr: ino={} -> ok size={}", ino.0, attr.size);
         reply.attr(&TTL, &attr);
     }
 
