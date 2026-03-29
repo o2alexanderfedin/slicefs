@@ -9,14 +9,16 @@
 use blockset::Dictionary;
 use metadata::store::DictMetadataStore;
 use slicefs_cli::filesystem::SliceFsFilesystem;
+use slicefs_compression::NoneCompressor;
 use slicefs_traits::metadata::MetadataStore;
+use std::sync::Arc;
 
 const S_IFREG: u32 = 0o100_000;
 
 fn fresh_fs() -> SliceFsFilesystem {
     let meta = DictMetadataStore::new();
     let dict = Dictionary::default();
-    SliceFsFilesystem::new(meta, dict, None)
+    SliceFsFilesystem::new(meta, dict, None, Arc::new(NoneCompressor::new()), 1)
 }
 
 // ── Logical bytes tests ───────────────────────────────────────────────────────

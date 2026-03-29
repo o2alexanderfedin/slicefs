@@ -10,7 +10,9 @@ use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
 use metadata::wal::{WalConfig, create_wal};
 use slicefs_cli::filesystem::SliceFsFilesystem;
+use slicefs_compression::NoneCompressor;
 use slicefs_traits::metadata::MetadataStore;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 const S_IFREG: u32 = 0o100_000;
@@ -22,7 +24,7 @@ fn make_fs(store_dir: &TempDir, wal_config: WalConfig) -> SliceFsFilesystem {
     let mut meta = DictMetadataStore::new();
     meta.set_wal(wal);
     let dict = meta.dict().lock().unwrap().clone();
-    SliceFsFilesystem::new(meta, dict, Some(store_dir.path().to_path_buf()))
+    SliceFsFilesystem::new(meta, dict, Some(store_dir.path().to_path_buf()), Arc::new(NoneCompressor::new()), 1)
 }
 
 // ── Test 1: fsync with buffered writes flushes to CAS ───────────────────────

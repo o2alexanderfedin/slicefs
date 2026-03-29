@@ -16,8 +16,10 @@
 use blockset::{Dictionary, GetBytes, GetData};
 use metadata::store::DictMetadataStore;
 use slicefs_cli::filesystem::SliceFsFilesystem;
+use slicefs_compression::NoneCompressor;
 use slicefs_traits::digest::from_digest224;
 use slicefs_traits::metadata::MetadataStore;
+use std::sync::Arc;
 
 const S_IFREG: u32 = 0o100_000;
 const S_IFDIR: u32 = 0o040_000;
@@ -25,7 +27,7 @@ const S_IFDIR: u32 = 0o040_000;
 fn fresh_fs() -> SliceFsFilesystem {
     let meta = DictMetadataStore::new();
     let dict = Dictionary::default();
-    SliceFsFilesystem::new(meta, dict, None)
+    SliceFsFilesystem::new(meta, dict, None, Arc::new(NoneCompressor::new()), 1)
 }
 
 /// Read file content via manifest + GetBytes (same pipeline as real FUSE read)

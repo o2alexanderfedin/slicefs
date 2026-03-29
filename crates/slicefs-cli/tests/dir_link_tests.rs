@@ -9,7 +9,9 @@
 use blockset::{Dictionary, GetBytes, GetData, State, Tree};
 use metadata::store::DictMetadataStore;
 use slicefs_cli::filesystem::SliceFsFilesystem;
+use slicefs_compression::NoneCompressor;
 use slicefs_traits::metadata::{InodeMeta, MetadataStore};
+use std::sync::Arc;
 
 const S_IFREG: u32 = 0o100_000;
 const S_IFDIR: u32 = 0o040_000;
@@ -18,7 +20,7 @@ const S_IFLNK: u32 = 0o120_000;
 fn fresh_fs() -> SliceFsFilesystem {
     let meta = DictMetadataStore::new();
     let dict = Dictionary::default();
-    SliceFsFilesystem::new(meta, dict, None)
+    SliceFsFilesystem::new(meta, dict, None, Arc::new(NoneCompressor::new()), 1)
 }
 
 /// Create a regular file directly via metadata store (no write handle needed).

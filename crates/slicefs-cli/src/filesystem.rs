@@ -21,6 +21,8 @@ use fuser::{
     ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
 use metadata::store::DictMetadataStore;
+use slicefs_compression::{compress_block, decompress_block};
+use slicefs_traits::compressor::Compressor;
 use slicefs_traits::digest::from_digest224;
 use slicefs_traits::metadata::{InodeMeta, MetaError, MetadataStore};
 
@@ -47,12 +49,24 @@ struct OpenFileState {
 ///
 /// `open_files` tracks per-handle write buffers; `next_fh` allocates unique handles.
 /// `store_path` is the on-disk store root used by `destroy()` to persist state.
+///
+/// `compressor` is the active block compressor. All new blocks are compressed with it.
+/// `store_version` tracks whether this store has been upgraded to Phase-6 wire format:
+/// - version < 2: blocks have no compression header (pre-Phase-6 raw bytes)
+/// - version >= 2: blocks have a 1-byte `AlgorithmId` header followed by the payload
+///
+/// Note on dedup: Digest224 is computed on compressed wire bytes, so dedup is
+/// per-compressor. Same raw content + same compressor = identical Digest224 = dedup.
+/// Cross-compressor dedup is not achieved (acceptable: users configure one compressor
+/// per mount; changing compressor mid-store is rare).
 pub struct SliceFsFilesystem {
     pub(crate) meta: Arc<DictMetadataStore>,
     pub(crate) dict: Arc<Mutex<Dictionary>>,
     open_files: Mutex<HashMap<u64, OpenFileState>>,
     next_fh: AtomicU64,
     store_path: Option<PathBuf>,
+    compressor: Arc<dyn Compressor>,
+    store_version: u32,
 }
 
 impl SliceFsFilesystem {
@@ -61,14 +75,28 @@ impl SliceFsFilesystem {
     /// `meta` provides metadata.
     /// `dict` is a clone of the content dictionary (used for `GetBytes` reads).
     /// `store_path` is the on-disk store root; when `Some`, `destroy()` persists
-    /// `dictionary.bin` and `root.bin` after the FUSE session ends.
-    pub fn new(meta: DictMetadataStore, dict: Dictionary, store_path: Option<PathBuf>) -> Self {
+    /// state after the FUSE session ends.
+    /// `compressor` is the block compressor used for all new writes.
+    /// `store_version` gates read-path decompression:
+    ///   - `< 2`: blocks are raw (pre-Phase-6); read path returns them as-is.
+    ///   - `>= 2`: blocks have a 1-byte header; read path calls `decompress_block`.
+    ///             On decompression failure the read path falls back to raw bytes,
+    ///             allowing mixed old/new blocks during the migration window.
+    pub fn new(
+        meta: DictMetadataStore,
+        dict: Dictionary,
+        store_path: Option<PathBuf>,
+        compressor: Arc<dyn Compressor>,
+        store_version: u32,
+    ) -> Self {
         Self {
             meta: Arc::new(meta),
             dict: Arc::new(Mutex::new(dict)),
             open_files: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(0),
             store_path,
+            compressor,
+            store_version,
         }
     }
 
@@ -225,6 +253,58 @@ impl SliceFsFilesystem {
         Ok(())
     }
 
+    /// Read `size` bytes from inode `ino` starting at `offset`.
+    ///
+    /// Fetches wire bytes from the dictionary, decompresses them according to
+    /// `store_version`, and returns the requested slice. Falls back to raw bytes
+    /// if decompression fails (pre-Phase-6 block compatibility).
+    ///
+    /// Used by integration tests to bypass the FUSE request/reply layer.
+    pub fn test_read(&self, ino: u64, offset: u64, size: u32) -> Result<Vec<u8>, i32> {
+        let manifest = self.meta.get_manifest(ino).map_err(|_| libc::EIO)?;
+        if manifest.is_empty() {
+            return Ok(vec![]);
+        }
+        let root256 = from_digest224(&manifest[0]);
+        let wire_bytes: Vec<u8> = {
+            let dict = self.dict.lock().unwrap();
+            let get_data = GetData::new(&*dict, &root256);
+            GetBytes::new(get_data).collect()
+        };
+        let raw_bytes = self.from_wire_bytes(wire_bytes);
+        let start = (offset as usize).min(raw_bytes.len());
+        let end = (start + size as usize).min(raw_bytes.len());
+        Ok(raw_bytes[start..end].to_vec())
+    }
+
+    /// Compress `raw` bytes to wire format if `store_version >= 2`.
+    ///
+    /// - store_version < 2: returns `raw` unchanged (pre-Phase-6 raw format).
+    /// - store_version >= 2: calls `compress_block` to prepend `AlgorithmId` header.
+    fn to_wire_bytes(&self, raw: &[u8]) -> Vec<u8> {
+        if self.store_version >= 2 {
+            compress_block(&*self.compressor, raw)
+        } else {
+            raw.to_vec()
+        }
+    }
+
+    /// Decompress `wire` bytes from stored format if `store_version >= 2`.
+    ///
+    /// - store_version < 2: returns `wire` unchanged (pre-Phase-6 raw format).
+    /// - store_version >= 2: calls `decompress_block`; on failure falls back to
+    ///   returning `wire` unchanged (handles old blocks in a migrated store).
+    fn from_wire_bytes(&self, wire: Vec<u8>) -> Vec<u8> {
+        if self.store_version >= 2 {
+            match decompress_block(&*self.compressor, &wire) {
+                Ok(raw) => raw,
+                Err(_) => wire, // fallback: old block without header
+            }
+        } else {
+            wire // pre-Phase-6: raw bytes, no header
+        }
+    }
+
     /// Flush the write buffer for `fh` to CAS without closing the handle.
     ///
     /// Reads the current buffer, flushes it via CAS pipeline, then replaces
@@ -249,9 +329,11 @@ impl SliceFsFilesystem {
         if buf.is_empty() {
             // Nothing to flush — no-op
         } else {
+            // Compress raw bytes if store_version >= 2 (Phase-6 wire format)
+            let wire_bytes = self.to_wire_bytes(&buf);
             let content_digest = {
                 let mut dict = self.dict.lock().unwrap();
-                State::push_all(&mut *dict, &buf)
+                State::push_all(&mut *dict, &wire_bytes)
             };
             self.meta.set_manifest(ino, &[content_digest]).map_err(|_| libc::EIO)?;
             self.meta.increment_refcount(&content_digest);
@@ -276,15 +358,21 @@ impl SliceFsFilesystem {
 
     /// Flush `buf` to CAS, set manifest, update inode size/mtime.
     /// Shared between test_release and the FUSE release() callback.
+    ///
+    /// Write path: raw `buf` → compress_block → State::push_all(wire_bytes).
+    /// The manifest stores the Digest224 of the *compressed* wire bytes.
+    /// `inode.size` is always set to `buf.len()` (raw uncompressed size).
     fn flush_buffer_to_cas(&self, ino: u64, buf: Vec<u8>) -> Result<(), i32> {
         if buf.is_empty() {
             // Empty file: set empty manifest
             self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
         } else {
-            // Push content through CDC — acquire dict, push, release BEFORE any meta call
+            // to_wire_bytes: apply compress_block if store_version >= 2, else raw
+            let wire_bytes = self.to_wire_bytes(&buf);
+            // Push wire_bytes into Dictionary Merkle tree
             let content_digest = {
                 let mut dict = self.dict.lock().unwrap();
-                State::push_all(&mut *dict, &buf)
+                State::push_all(&mut *dict, &wire_bytes)
                 // dict lock dropped here
             };
             self.meta.set_manifest(ino, &[content_digest]).map_err(|_| libc::EIO)?;
@@ -330,14 +418,17 @@ impl SliceFsFilesystem {
         // Case B: closed file — read from CAS, truncate/extend, re-push
         let old_manifest = self.meta.get_manifest(ino).map_err(|_| libc::EIO)?;
 
-        // Read current content
+        // Read current content (decompresses from wire bytes)
         let mut content: Vec<u8> = if old_manifest.is_empty() {
             Vec::new()
         } else {
             let root256 = from_digest224(&old_manifest[0]);
-            let dict = self.dict.lock().unwrap();
-            let get_data = GetData::new(&*dict, &root256);
-            GetBytes::new(get_data).collect()
+            let wire_bytes: Vec<u8> = {
+                let dict = self.dict.lock().unwrap();
+                let get_data = GetData::new(&*dict, &root256);
+                GetBytes::new(get_data).collect()
+            };
+            self.from_wire_bytes(wire_bytes)
         };
 
         // Decrement old refcount
@@ -348,13 +439,14 @@ impl SliceFsFilesystem {
         // Truncate or zero-extend
         content.resize(new_size as usize, 0);
 
-        // Push new content
+        // Push new content (via to_wire_bytes)
         if content.is_empty() {
             self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
         } else {
+            let wire_bytes = self.to_wire_bytes(&content);
             let new_digest = {
                 let mut dict = self.dict.lock().unwrap();
-                State::push_all(&mut *dict, &content)
+                State::push_all(&mut *dict, &wire_bytes)
             };
             self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
             self.meta.increment_refcount(&new_digest);
@@ -691,17 +783,18 @@ impl SliceFsFilesystem {
             return Err(meta_error_to_errno(&e));
         }
 
-        // Store target as CAS content
+        // Store target as CAS content (compressed if store_version >= 2)
+        let wire_bytes = self.to_wire_bytes(target_bytes);
         let content_digest = {
             let mut dict = self.dict.lock().unwrap();
-            State::push_all(&mut *dict, target_bytes)
+            State::push_all(&mut *dict, &wire_bytes)
         };
         self.meta
             .set_manifest(ino, &[content_digest])
             .map_err(|_| libc::EIO)?;
         self.meta.increment_refcount(&content_digest);
 
-        // Update inode size to target length
+        // Update inode size to raw target length (uncompressed)
         let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
         inode.size = target_bytes.len() as u64;
         self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
@@ -711,18 +804,20 @@ impl SliceFsFilesystem {
 
     /// Read the target of a symbolic link inode.
     ///
-    /// Loads the manifest, reads content bytes from the dictionary, and returns them as a String.
+    /// Loads the manifest, reads wire bytes from the dictionary, decompresses, and returns as String.
     pub fn simulate_readlink(&self, ino: u64) -> Result<String, i32> {
         let manifest = self.meta.get_manifest(ino).map_err(|_| libc::EINVAL)?;
         if manifest.is_empty() {
             return Ok(String::new());
         }
         let root256 = from_digest224(&manifest[0]);
-        let dict = self.dict.lock().unwrap();
-        let get_data = GetData::new(&*dict, &root256);
-        let bytes: Vec<u8> = GetBytes::new(get_data).collect();
-        drop(dict);
-        String::from_utf8(bytes).map_err(|_| libc::EINVAL)
+        let wire_bytes: Vec<u8> = {
+            let dict = self.dict.lock().unwrap();
+            let get_data = GetData::new(&*dict, &root256);
+            GetBytes::new(get_data).collect()
+        };
+        let raw_bytes = self.from_wire_bytes(wire_bytes);
+        String::from_utf8(raw_bytes).map_err(|_| libc::EINVAL)
     }
 }
 
@@ -836,15 +931,18 @@ impl Filesystem for SliceFsFilesystem {
         let root_digest224 = manifest[0];
         let root_digest256 = from_digest224(&root_digest224);
 
-        let dict = self.dict.lock().unwrap();
-        let get_data = GetData::new(&*dict, &root_digest256);
-        let bytes: Vec<u8> = GetBytes::new(get_data)
-            .skip(offset as usize)
-            .take(size as usize)
-            .collect();
-        drop(dict);
+        // Collect all wire bytes then decompress — cannot seek into compressed data
+        let wire_bytes: Vec<u8> = {
+            let dict = self.dict.lock().unwrap();
+            let get_data = GetData::new(&*dict, &root_digest256);
+            GetBytes::new(get_data).collect()
+        };
 
-        reply.data(&bytes);
+        let raw_bytes = self.from_wire_bytes(wire_bytes);
+
+        let start = (offset as usize).min(raw_bytes.len());
+        let end = (start + size as usize).min(raw_bytes.len());
+        reply.data(&raw_bytes[start..end]);
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
@@ -1273,6 +1371,7 @@ mod tests {
     use super::*;
     use blockset::{Dictionary, State, Tree};
     use metadata::store::DictMetadataStore;
+    use slicefs_compression::NoneCompressor;
     use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 
     const S_IFDIR_TEST: u32 = 0o040_000;
@@ -1281,7 +1380,7 @@ mod tests {
     fn fresh_fs() -> SliceFsFilesystem {
         let meta = DictMetadataStore::new();
         let dict = Dictionary::default();
-        SliceFsFilesystem::new(meta, dict, None)
+        SliceFsFilesystem::new(meta, dict, None, Arc::new(NoneCompressor::new()), 1)
     }
 
     #[test]
@@ -1351,7 +1450,7 @@ mod tests {
         meta_store.link(1, "testfile", ino).unwrap();
         meta_store.set_manifest(ino, &[root_digest224]).unwrap();
 
-        let fs = SliceFsFilesystem::new(meta_store, dict, None);
+        let fs = SliceFsFilesystem::new(meta_store, dict, None, Arc::new(NoneCompressor::new()), 1);
 
         let manifest = fs.meta.get_manifest(ino).unwrap();
         assert!(!manifest.is_empty());
@@ -1377,7 +1476,7 @@ mod tests {
         let ino = meta_store.create_inode(&file_meta).unwrap();
         meta_store.set_manifest(ino, &[root_digest224]).unwrap();
 
-        let fs = SliceFsFilesystem::new(meta_store, dict, None);
+        let fs = SliceFsFilesystem::new(meta_store, dict, None, Arc::new(NoneCompressor::new()), 1);
 
         let manifest = fs.meta.get_manifest(ino).unwrap();
         let root256 = from_digest224(&manifest[0]);

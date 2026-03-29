@@ -9,9 +9,10 @@ name = "slicefs"
 path = "src/main.rs"
 
 [dependencies]
-slicefs-traits = { path = "../slicefs-traits" }
-metadata       = { path = "../metadata" }
-blockset       = { path = "../data-id/blockset" }
+slicefs-traits       = { path = "../slicefs-traits" }
+slicefs-compression  = { path = "../slicefs-compression" }
+metadata             = { path = "../metadata" }
+blockset             = { path = "../data-id/blockset" }
 
 clap      = { workspace = true }
 fuser     = { workspace = true }
