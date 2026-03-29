@@ -164,6 +164,20 @@ impl DictMetadataStore {
     ///
     /// Replaces any previously set WAL (the old one is dropped; not flushed).
     pub fn set_wal(&mut self, wal: Box<dyn WalStrategy>) {
+        // Bootstrap WAL: log all existing dict entries so a crash after set_wal
+        // but before any explicit commit still produces a recoverable segment.
+        // This covers the case where DictMetadataStore::new() populates the dict
+        // before the WAL is attached — those initial entries would otherwise be
+        // absent from the WAL and unrecoverable on reload.
+        {
+            let dict = self.dict.lock().unwrap();
+            for (key, branches) in dict.iter() {
+                let _ = wal.log_mutation(&WalEntry::DictionaryAppend {
+                    key: *key,
+                    branches: *branches,
+                });
+            }
+        }
         *self.wal.lock().unwrap() = Some(wal);
     }
 
