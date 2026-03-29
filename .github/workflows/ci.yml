@@ -1,0 +1,106 @@
+# Windows CI (PLAT-03): Deferred to v2.
+# Reason: winfsp-rs is GPL-3, incompatible with most commercial licensing.
+# Alternatives to evaluate in v2: dokan-rs (MIT), Windows ProjFS (native).
+# See: .planning/phases/07-cross-platform-and-production-hardening/07-CONTEXT.md
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  linux:
+    name: Linux (cargo test + pjdfstest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y libfuse-dev fuse
+
+      - name: Enable FUSE access
+        run: |
+          sudo modprobe fuse
+          sudo chmod 666 /dev/fuse
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      - name: Build slicefs binary
+        run: cargo build -p slicefs-cli --release
+
+      - name: Install pjdfstest
+        run: |
+          sudo apt-get install -y libacl1-dev acl
+          cargo install pjdfstest
+
+      - name: pjdfstest POSIX compliance (>95% gate)
+        run: |
+          # Create a temporary store and mount point
+          STORE_DIR=$(mktemp -d)
+          MOUNT_DIR=$(mktemp -d)
+
+          # Mount SliceFS in the background
+          ./target/release/slicefs mount "$MOUNT_DIR" --store "$STORE_DIR" &
+          SLICEFS_PID=$!
+          sleep 2
+
+          # Verify mount is live
+          if ! mountpoint -q "$MOUNT_DIR"; then
+            echo "FUSE mount failed"
+            kill $SLICEFS_PID 2>/dev/null || true
+            exit 1
+          fi
+
+          # Run pjdfstest against the mount point.
+          # Without root, tests requiring CAP_CHOWN/CAP_MKNOD/CAP_FOWNER auto-skip
+          # (chown root-only, mknod for special files, sticky bit enforcement).
+          # These expected <5% skips keep us above the 95% compliance gate.
+          # pjdfstest uses -p <path> for the test target directory.
+          pjdfstest -p "$MOUNT_DIR" 2>&1 | tee pjdfstest-results.txt
+
+          # Unmount
+          fusermount -u "$MOUNT_DIR" || kill $SLICEFS_PID 2>/dev/null || true
+          wait $SLICEFS_PID 2>/dev/null || true
+          rm -rf "$STORE_DIR" "$MOUNT_DIR"
+
+          # Count results: lines ending in " ok" (pass) or " FAILED" (fail)
+          # Skipped lines end in " skipped" and do not count toward the denominator
+          PASS=$(grep -c " ok$" pjdfstest-results.txt || echo 0)
+          FAIL=$(grep -c " FAILED$" pjdfstest-results.txt || echo 0)
+          TOTAL=$(( PASS + FAIL ))
+
+          echo "pjdfstest results: $PASS passed, $FAIL failed, $TOTAL total (skipped excluded)"
+
+          if [ "$TOTAL" -gt 0 ]; then
+            RATE=$(( PASS * 100 / TOTAL ))
+            echo "pjdfstest compliance: $PASS/$TOTAL ($RATE%)"
+            if [ "$RATE" -lt 95 ]; then
+              echo "FAIL: pjdfstest compliance $RATE% is below 95% gate"
+              exit 1
+            fi
+            echo "PASS: pjdfstest compliance $RATE% meets >=95% gate"
+          else
+            echo "WARNING: No pjdfstest results found (all tests may have been skipped)"
+            exit 1
+          fi
+
+  macos:
+    name: macOS (cargo test + FUSE-T build)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install FUSE-T
+        run: brew install fuse-t
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      - name: Build slicefs binary (FUSE-T linkage)
+        run: cargo build -p slicefs-cli
