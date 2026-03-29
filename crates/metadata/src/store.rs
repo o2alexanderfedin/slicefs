@@ -320,6 +320,20 @@ impl DictMetadataStore {
         }
         roots
     }
+
+    /// Write a `RootUpdate` WAL entry for an already-committed root.
+    ///
+    /// Used by `snapshot switch` to redirect the live root to a snapshot's root
+    /// without re-serializing all inode data. On next mount, segment replay will
+    /// see this `RootUpdate` as the last root, so `load_store_from_segments` will
+    /// return this root and the store will be reconstructed from the snapshot state.
+    ///
+    /// Also updates `last_root` so `current_root()` reflects the change immediately.
+    pub fn commit_root(&self, root: Digest224) -> Result<(), MetaError> {
+        *self.last_root.lock().unwrap() = Some(root);
+        self.log_wal_entry(&WalEntry::RootUpdate { root });
+        Ok(())
+    }
 }
 
 impl MetadataStore for DictMetadataStore {

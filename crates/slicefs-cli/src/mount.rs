@@ -32,6 +32,8 @@ use metadata::mount_lock::{acquire_mount_lock, MountLock, MountLockError};
 use metadata::segment::{load_store_from_segments, migrate_legacy_store};
 use metadata::store::DictMetadataStore;
 use metadata::wal::{WalConfig, create_wal};
+use slicefs_compression::parse_compressor;
+use slicefs_traits::compressor::Compressor;
 
 use crate::filesystem::SliceFsFilesystem;
 
@@ -119,7 +121,7 @@ pub fn load_store(
 /// Determine the next segment ID by scanning existing segment files.
 ///
 /// Returns `max_existing_id + 1`, or `1` if no segments exist.
-fn next_segment_id(segs_dir: &Path) -> u64 {
+pub(crate) fn next_segment_id(segs_dir: &Path) -> u64 {
     let max_id = std::fs::read_dir(segs_dir)
         .ok()
         .map(|entries| {
@@ -180,17 +182,53 @@ pub fn parse_wal_config(strategy: Option<&str>) -> WalConfig {
 /// or `slicefs unmount`).
 ///
 /// `_cache_size` is accepted but unused in Phase 3. Placeholder for Phase 4.
+/// `compressor_name` selects the block compressor ("zstd", "lz4", "none"; default "none").
+/// `compressor_level` overrides the compression level (Zstd only; default 3).
+/// `snapshot_ref` mounts a specific snapshot read-only (by version number or name).
+/// `_auto_snapshot` is reserved for future use (auto-snapshot on clean unmount).
+#[allow(clippy::too_many_arguments)]
 pub fn run_mount(
     store_path: &Path,
     mountpoint: &Path,
     noatime: bool,
     _cache_size: usize,
     wal_strategy: Option<&str>,
+    compressor_name: &str,
+    compressor_level: Option<i32>,
+    snapshot_ref: Option<&str>,
+    _auto_snapshot: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let wal_config = parse_wal_config(wal_strategy);
+    let compressor: Arc<dyn Compressor> = Arc::from(parse_compressor(compressor_name, compressor_level));
+
     let (meta, content_dict, _mount_lock) = load_store(store_path, wal_config)?;
-    let fs = SliceFsFilesystem::new(meta, content_dict, Some(store_path.to_path_buf()));
-    let config = build_mount_options(noatime);
+
+    // If mounting a snapshot: resolve it and load from snapshot root (read-only).
+    let (final_meta, config) = if let Some(snap_ref) = snapshot_ref {
+        let snap = meta.find_snapshot(snap_ref).ok_or_else(|| {
+            format!("snapshot not found: {}", snap_ref)
+        })?;
+        println!("Mounting snapshot {} (read-only)", snap.version);
+        let snap_meta = {
+            let dict = meta.dict().lock().unwrap().clone();
+            DictMetadataStore::load_from_root(dict, &snap.root)
+                .map_err(|e| format!("failed to load snapshot root: {}", e))?
+        };
+        let mut cfg = build_mount_options(noatime);
+        cfg.mount_options.push(MountOption::RO);
+        (snap_meta, cfg)
+    } else {
+        let cfg = build_mount_options(noatime);
+        (meta, cfg)
+    };
+
+    let fs = SliceFsFilesystem::new(
+        final_meta,
+        content_dict,
+        Some(store_path.to_path_buf()),
+        compressor,
+        2, // Phase-6 store format: all new blocks carry compression header
+    );
 
     // Spawn background GC thread.
     // The GC thread holds a Weak<DictMetadataStore> so it exits automatically when
@@ -207,7 +245,7 @@ pub fn run_mount(
         Arc::clone(&gc_shutdown),
     );
 
-    println!("SliceFS mounted at {}", mountpoint.display());
+    println!("SliceFS mounted at {} (compressor: {})", mountpoint.display(), compressor_name);
 
     mount2(fs, mountpoint, &config)?;
 
