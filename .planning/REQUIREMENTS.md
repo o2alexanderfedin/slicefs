@@ -19,9 +19,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Garbage Collection
 
-- [ ] **GC-01**: Crash-safe garbage collection of zero-refcount blocks
-- [ ] **GC-02**: Two-phase mark-and-sweep or WAL-based refcount with deferred physical deletion
-- [ ] **GC-03**: Snapshot-aware GC (blocks reachable from any snapshot are live)
+- [x] **GC-01**: Crash-safe garbage collection of zero-refcount blocks
+- [x] **GC-02**: Two-phase mark-and-sweep or WAL-based refcount with deferred physical deletion
+- [x] **GC-03**: Snapshot-aware GC (blocks reachable from any snapshot are live)
 
 ### POSIX Filesystem
 
@@ -119,9 +119,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CAS-05 | Phase 1 | Complete |
 | CAS-06 | Phase 4 | Complete |
 | CAS-07 | Phase 1 | Complete |
-| GC-01 | Phase 5 | Pending |
-| GC-02 | Phase 5 | Pending |
-| GC-03 | Phase 5 | Pending |
+| GC-01 | Phase 5 | Complete |
+| GC-02 | Phase 5 | Complete |
+| GC-03 | Phase 5 | Complete |
 | POSIX-01 | Phase 4 | Complete |
 | POSIX-02 | Phase 4 | Complete |
 | POSIX-03 | Phase 4 | Complete |

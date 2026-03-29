@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 05-crash-safety-and-gc/05-01-PLAN.md
-last_updated: "2026-03-29T06:55:26.169Z"
+stopped_at: Completed 05-crash-safety-and-gc/05-03-PLAN.md
+last_updated: "2026-03-29T07:10:58.987Z"
 last_activity: 2026-03-27 — Roadmap created; ready for Phase 1 planning
 progress:
   total_phases: 7
   completed_phases: 4
   total_plans: 17
-  completed_plans: 14
+  completed_plans: 15
   percent: 0
 ---
 
@@ -64,6 +64,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 04-full-posix-write-path P02 | 15 | 2 tasks | 3 files |
 | Phase 04-full-posix-write-path P04 | 20 | 2 tasks | 5 files |
 | Phase 05-crash-safety-and-gc P01 | 8min | 2 tasks | 12 files |
+| Phase 05-crash-safety-and-gc P03 | 20min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -119,6 +120,9 @@ Recent decisions affecting current work:
 - [Phase 05-crash-safety-and-gc]: SegmentEntry defined in segment/mod.rs (not reader.rs) — single source of truth for segment types
 - [Phase 05-crash-safety-and-gc]: PerOpWal uses Mutex<SegmentWriter> — WalStrategy requires Send+Sync; Mutex provides interior mutability
 - [Phase 05-crash-safety-and-gc]: PeriodicWal structurally identical to FlushOnFsyncWal — background timer wiring deferred to Plan 04 GC thread
+- [Phase 05-crash-safety-and-gc]: GC mark_reachable uses blockset::to_digest224 for Digest256→Digest224 child conversion, filtering data leaves automatically
+- [Phase 05-crash-safety-and-gc]: current_root() uses Mutex<Option<Digest224>> last_root field in DictMetadataStore, updated by commit()
+- [Phase 05-crash-safety-and-gc]: GcHandle::drop sets shutdown flag but does not join — avoids blocking in drop(); explicit shutdown() joins
 
 ### Pending Todos
 
@@ -134,6 +138,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-29T06:55:26.165Z
-Stopped at: Completed 05-crash-safety-and-gc/05-01-PLAN.md
+Last session: 2026-03-29T07:10:58.984Z
+Stopped at: Completed 05-crash-safety-and-gc/05-03-PLAN.md
 Resume file: None
