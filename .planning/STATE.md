@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Streaming Writes & Hardening
 status: executing
-stopped_at: "Phase 9 Plan 01 complete: compression removed from production code, slicefs-cli --lib builds cleanly"
-last_updated: "2026-03-30T04:31:18.256Z"
+stopped_at: "Phase 9 Plan 02 complete: test suite updated, compression_tests.rs deleted, v3_store_tests.rs added"
+last_updated: "2026-03-30T04:41:20.152Z"
 last_activity: "2026-03-29 — Plan 03 complete: all CLI consumers migrated to file-backed StoreIo; zero Dictionary references remain"
 progress:
   total_phases: 12
-  completed_phases: 9
+  completed_phases: 10
   total_plans: 30
-  completed_plans: 29
+  completed_plans: 30
   percent: 0
 ---
 
@@ -55,6 +55,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 07.1-filestorage-migration P03 | ~60 | 2 tasks | 19 files |
 | Phase 08-correctness-fixes P01 | 20 | 2 tasks | 6 files |
 | Phase 09-compression-removal P01 | 14 | 2 tasks | 6 files |
+| Phase 09-compression-removal P02 | 7 | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -78,6 +79,8 @@ Progress: [░░░░░░░░░░] 0%
 - [Phase 08-01]: compute_statfs extracted to regular impl block (not Filesystem trait) to allow pub visibility and test_statfs_values() helper
 - [Phase 09-01]: v3 store format: raw bytes pushed directly to State::push_all, no compression header, no backward compat
 - [Phase 09-01]: StoreStats.compressor field kept for JSON API stability; value changed to none (v3 raw)
+- [Phase 09-02]: compression_tests.rs deleted entirely — tests v1/v2 wire format behavior that no longer exists; no migration tests needed
+- [Phase 09-02]: cli.rs compressor unit tests removed — CLI flags (--compressor, --compressor-level) were removed in Plan 01
 
 ### Roadmap Evolution
 
@@ -95,6 +98,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-30T04:31:18.249Z
-Stopped at: Phase 9 Plan 01 complete: compression removed from production code, slicefs-cli --lib builds cleanly
+Last session: 2026-03-30T04:41:20.145Z
+Stopped at: Phase 9 Plan 02 complete: test suite updated, compression_tests.rs deleted, v3_store_tests.rs added
 Resume file: None
