@@ -280,113 +280,55 @@ impl SliceFsFilesystem {
         Ok(data.len() as u32)
     }
 
-    /// Release file handle `fh`, flushing streaming state to CAS and updating the inode.
+    /// Release file handle `fh`, finalizing streaming state to CAS and updating the inode.
     /// Used by integration tests to bypass the FUSE request/reply layer.
     ///
-    /// Temporary bridge: materializes State to Vec<u8> via end() + file_storage_get,
-    /// then delegates to flush_buffer_to_cas. Plan 02 will rewrite this to use
-    /// State-based release directly.
+    /// Consumes the State via `state.end()` (this is release — handle is closing).
+    /// If the final digest matches `last_committed_root` (fsync already committed this
+    /// exact state), skips redundant manifest write and refcount increment.
+    ///
+    /// Refcount lifecycle: decrements old committed root if different from new digest,
+    /// increments new digest. Empty files (byte_count==0) set empty manifest without CAS push.
     pub fn test_release(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        let s = self.open_files.lock().unwrap().remove(&fh);
-        let s = match s {
-            Some(s) => s,
+        let (state, byte_count, cas_committed, last_committed_root) = match self.open_files.lock().unwrap().remove(&fh) {
+            Some(s) => (s.state, s.byte_count, s.cas_committed, s.last_committed_root),
             None => return Ok(()), // Already closed
         };
 
-        // If no bytes were written and data was already committed by prior flush/fsync,
-        // skip the redundant write to avoid overwriting the committed manifest.
-        if s.byte_count == 0 && s.cas_committed {
+        // Empty file: set empty manifest (unless already committed via fsync)
+        if byte_count == 0 {
+            if !cas_committed {
+                self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
+            }
             return Ok(());
         }
 
-        // Materialize State to Vec<u8> (temporary shim — Plan 02 rewrites this)
-        let buf: Vec<u8> = if s.byte_count == 0 {
-            Vec::new()
-        } else {
-            let d224 = {
-                let mut io = self.io.lock().unwrap();
-                let mut fsa = FileStorageAdd::new(&mut *io);
-                let d256 = s.state.end(&mut fsa);
-                fsa.end(&d256)
-            };
-            let mut io = self.io.lock().unwrap();
-            file_storage_get(&mut *io, &d224).unwrap_or_default()
-        };
-
-        self.flush_buffer_to_cas(ino, buf)
-    }
-
-    /// Flush the write buffer for `fh` to CAS, then reset the buffer to empty.
-    ///
-    /// Unlike `test_release`, the file handle remains open after this call.
-    /// Used by `test_fsync` and the FUSE `fsync()` callback.
-    pub fn test_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        self.flush_buffer_for_fsync(ino, fh)?;
-        // Flush WAL to disk — ensures all pending mutations are durable
-        self.meta.flush_wal().map_err(|_| libc::EIO)?;
-        Ok(())
-    }
-
-    /// Read `size` bytes from inode `ino` starting at `offset`.
-    ///
-    /// Fetches raw bytes from file storage and returns the requested slice.
-    ///
-    /// Used by integration tests to bypass the FUSE request/reply layer.
-    pub fn test_read(&self, ino: u64, offset: u64, size: u32) -> Result<Vec<u8>, i32> {
-        let manifest = self.meta.get_manifest(ino).map_err(|_| libc::EIO)?;
-        if manifest.is_empty() {
-            return Ok(vec![]);
-        }
-        let root_digest = manifest[0];
-        let raw_bytes: Vec<u8> = {
-            let mut io = self.io.lock().unwrap();
-            file_storage_get(&mut *io, &root_digest)
-                .ok_or(libc::EIO)?
-        };
-        let start = (offset as usize).min(raw_bytes.len());
-        let end = (start + size as usize).min(raw_bytes.len());
-        Ok(raw_bytes[start..end].to_vec())
-    }
-
-    /// Flush the streaming state for `fh` to CAS without closing the handle.
-    ///
-    /// Uses clone+end pattern: clones the in-progress State, calls end() on the
-    /// clone to produce a Digest224 snapshot, sets manifest, keeps original State
-    /// alive for further writes. After fsync, subsequent writes continue appending
-    /// to the same State accumulator.
-    ///
-    /// If `fh` is not in `open_files` (read-only handle or invalid), returns Ok
-    /// without error — fsync is a no-op for read-only handles.
-    fn flush_buffer_for_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        // Clone state under open_files lock, then release lock before io ops
-        let (state_clone, byte_count) = {
-            let mut open_files = self.open_files.lock().unwrap();
-            match open_files.get_mut(&fh) {
-                Some(s) => {
-                    if s.byte_count == 0 {
-                        // Nothing to flush — no-op
-                        return Ok(());
-                    }
-                    // Clone state — original continues accumulating after fsync
-                    let sc = s.state.clone();
-                    let bc = s.byte_count;
-                    s.cas_committed = true;
-                    (sc, bc)
-                }
-                None => return Ok(()), // No write handle — fsync is a no-op
-            }
-        };
-
-        // End the clone to produce a content digest (lock ordering: open_files released, now io)
-        let content_digest = {
+        // Finalize the State (consumes it -- this is release, handle is closing)
+        let new_digest: Digest224 = {
             let mut io = self.io.lock().unwrap();
             let mut fsa = FileStorageAdd::new(&mut *io);
-            let d256 = state_clone.end(&mut fsa);
+            let d256 = state.end(&mut fsa);
             fsa.end(&d256)
         };
 
-        self.meta.set_manifest(ino, &[content_digest]).map_err(|_| libc::EIO)?;
-        self.meta.increment_refcount(&content_digest);
+        // If the digest matches last committed root (fsync already committed this exact state),
+        // skip redundant manifest write and refcount increment
+        if last_committed_root == Some(new_digest) && cas_committed {
+            return Ok(());
+        }
+
+        // Decrement old committed root if different
+        if let Some(old) = last_committed_root {
+            if old != new_digest {
+                self.meta.decrement_refcount(&old);
+            }
+        }
+
+        // Set manifest and increment refcount
+        self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
+        if last_committed_root != Some(new_digest) {
+            self.meta.increment_refcount(&new_digest);
+        }
 
         // Update inode size and mtime
         let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
@@ -403,32 +345,124 @@ impl SliceFsFilesystem {
         Ok(())
     }
 
-    /// Flush `buf` to CAS, set manifest, update inode size/mtime.
-    /// Shared between test_release and the FUSE release() callback.
+    /// Flush the write buffer for `fh` to CAS, then reset the buffer to empty.
     ///
-    /// Write path: raw `buf` → State::push_all(&buf) directly.
-    /// The manifest stores the Digest224 of the raw bytes (v3 format — no compression).
-    /// `inode.size` is set to `buf.len()`.
-    fn flush_buffer_to_cas(&self, ino: u64, buf: Vec<u8>) -> Result<(), i32> {
-        if buf.is_empty() {
-            // Empty file: set empty manifest
-            self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
-        } else {
-            // Push raw bytes directly into FileStorage Merkle tree (v3 format — no compression)
-            let content_digest = {
+    /// Unlike `test_release`, the file handle remains open after this call.
+    /// Used by `test_fsync` and the FUSE `fsync()` callback.
+    pub fn test_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
+        self.flush_buffer_for_fsync(ino, fh)?;
+        // Flush WAL to disk — ensures all pending mutations are durable
+        self.meta.flush_wal().map_err(|_| libc::EIO)?;
+        Ok(())
+    }
+
+    /// Read `size` bytes from inode `ino` starting at `offset`.
+    ///
+    /// Supports read-during-write (STRM-03): checks for open write handles on
+    /// the inode and materializes uncommitted content via clone+end+file_storage_get.
+    /// Cross-handle reads work — a read-only handle sees uncommitted writes from
+    /// a separate write handle on the same inode.
+    ///
+    /// Falls back to committed manifest when no open write handle exists.
+    ///
+    /// Lock ordering: open_files (clone State) -> io (materialize/read).
+    ///
+    /// Used by integration tests to bypass the FUSE request/reply layer.
+    pub fn test_read(&self, ino: u64, offset: u64, size: u32) -> Result<Vec<u8>, i32> {
+        // Check for open write handles on this inode (cross-handle read support)
+        let writer_state: Option<(State, u64)> = {
+            let open_files = self.open_files.lock().unwrap();
+            open_files.values()
+                .find(|s| s.ino == ino && s.byte_count > 0)
+                .map(|s| (s.state.clone(), s.byte_count))
+        };
+        // open_files lock released
+
+        let raw_bytes: Vec<u8> = if let Some((snapshot, _byte_count)) = writer_state {
+            // Materialize uncommitted content via clone+end+file_storage_get
+            let digest: Digest224 = {
                 let mut io = self.io.lock().unwrap();
                 let mut fsa = FileStorageAdd::new(&mut *io);
-                let digest = State::push_all(&mut fsa, &buf);
-                drop(fsa);
-                digest
+                let d256 = snapshot.end(&mut fsa);
+                fsa.end(&d256)
             };
-            self.meta.set_manifest(ino, &[content_digest]).map_err(|_| libc::EIO)?;
-            self.meta.increment_refcount(&content_digest);
+            let mut io = self.io.lock().unwrap();
+            file_storage_get(&mut *io, &digest).ok_or(libc::EIO)?
+        } else {
+            // Fall back to committed manifest
+            let manifest = self.meta.get_manifest(ino).map_err(|_| libc::EIO)?;
+            if manifest.is_empty() { return Ok(vec![]); }
+            let mut io = self.io.lock().unwrap();
+            file_storage_get(&mut *io, &manifest[0]).ok_or(libc::EIO)?
+        };
+
+        let start = (offset as usize).min(raw_bytes.len());
+        let end = (start + size as usize).min(raw_bytes.len());
+        Ok(raw_bytes[start..end].to_vec())
+    }
+
+    /// Flush the streaming state for `fh` to CAS without closing the handle.
+    ///
+    /// Uses clone+end pattern: clones the in-progress State, calls end() on the
+    /// clone to produce a Digest224 snapshot, sets manifest, keeps original State
+    /// alive for further writes. After fsync, subsequent writes continue appending
+    /// to the same State accumulator.
+    ///
+    /// Refcount lifecycle: decrements old committed root (if any and different),
+    /// increments new root. Tracks `last_committed_root` for next decrement.
+    ///
+    /// If `fh` is not in `open_files` (read-only handle or invalid), returns Ok
+    /// without error — fsync is a no-op for read-only handles.
+    fn flush_buffer_for_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
+        // 1. Clone state snapshot under open_files lock
+        let (state_snapshot, byte_count, old_root) = {
+            let mut open_files = self.open_files.lock().unwrap();
+            match open_files.get_mut(&fh) {
+                Some(s) => {
+                    if s.byte_count == 0 {
+                        // Empty file -- nothing to flush
+                        return Ok(());
+                    }
+                    s.cas_committed = true;
+                    (s.state.clone(), s.byte_count, s.last_committed_root)
+                }
+                None => return Ok(()), // No write handle -- fsync is a no-op
+            }
+        };
+        // open_files lock released here
+
+        // 2. Materialize clone under io lock
+        let new_digest: Digest224 = {
+            let mut io = self.io.lock().unwrap();
+            let mut fsa = FileStorageAdd::new(&mut *io);
+            let d256 = state_snapshot.end(&mut fsa);
+            fsa.end(&d256)
+        };
+
+        // 3. Decrement old committed root if any
+        if let Some(old) = old_root {
+            if old != new_digest {
+                self.meta.decrement_refcount(&old);
+            }
         }
 
-        // Update inode size and mtime
+        // 4. Set manifest and increment refcount (skip increment if same as old -- already counted)
+        self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
+        if old_root != Some(new_digest) {
+            self.meta.increment_refcount(&new_digest);
+        }
+
+        // 5. Update last_committed_root
+        {
+            let mut open_files = self.open_files.lock().unwrap();
+            if let Some(s) = open_files.get_mut(&fh) {
+                s.last_committed_root = Some(new_digest);
+            }
+        }
+
+        // 6. Update inode size and mtime
         let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-        inode.size = buf.len() as u64;
+        inode.size = byte_count;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO);
@@ -437,8 +471,10 @@ impl SliceFsFilesystem {
         inode.ctime_sec = inode.mtime_sec;
         inode.ctime_nsec = inode.mtime_nsec;
         self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
+
         Ok(())
     }
+
 
     /// Truncate/extend a file to `new_size` bytes. If `fh` is Some and open,
     /// operates on the in-flight buffer; otherwise reads from CAS, adjusts, re-pushes.
@@ -1053,71 +1089,17 @@ impl Filesystem for SliceFsFilesystem {
         &self,
         _req: &Request,
         ino: INodeNo,
-        fh: FileHandle,
+        _fh: FileHandle,
         offset: u64,
         size: u32,
         _flags: OpenFlags,
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        // Read-after-write within the same open session: materialize from in-flight State.
-        // Temporary shim: clone State under open_files lock, drop lock, materialize under io lock.
-        // Plan 02 will optimize this path.
-        if fh.0 > 0 {
-            let state_snapshot = {
-                let open_files = self.open_files.lock().unwrap();
-                open_files.get(&fh.0).and_then(|s| {
-                    if s.byte_count > 0 {
-                        Some(s.state.clone())
-                    } else {
-                        None
-                    }
-                })
-            };
-            if let Some(snapshot) = state_snapshot {
-                let raw_bytes = {
-                    let d224 = {
-                        let mut io = self.io.lock().unwrap();
-                        let mut fsa = FileStorageAdd::new(&mut *io);
-                        let d256 = snapshot.end(&mut fsa);
-                        fsa.end(&d256)
-                    };
-                    let mut io = self.io.lock().unwrap();
-                    match file_storage_get(&mut *io, &d224) {
-                        Some(bytes) => bytes,
-                        None => return reply.error(Errno::EIO),
-                    }
-                };
-                let start = (offset as usize).min(raw_bytes.len());
-                let end = (offset as usize + size as usize).min(raw_bytes.len());
-                return reply.data(&raw_bytes[start..end]);
-            }
+        match self.test_read(ino.0, offset, size) {
+            Ok(data) => reply.data(&data),
+            Err(e) => reply.error(Errno::from_i32(e)),
         }
-
-        let manifest = match self.meta.get_manifest(ino.0) {
-            Ok(m) => m,
-            Err(e) => return reply.error(meta_error_to_fuse_errno(&e)),
-        };
-
-        if manifest.is_empty() {
-            return reply.data(&[]);
-        }
-
-        // The manifest contains exactly one Digest224 — the CDC content root
-        let root_digest = manifest[0];
-
-        // Read raw bytes from CAS (v3 format — no compression)
-        let raw_bytes: Vec<u8> = {
-            let mut io = self.io.lock().unwrap();
-            match file_storage_get(&mut *io, &root_digest) {
-                Some(bytes) => bytes,
-                None => return reply.error(Errno::EIO),
-            }
-        };
-
-        let start = (offset as usize).min(raw_bytes.len());
-        let end = (start + size as usize).min(raw_bytes.len());
-        reply.data(&raw_bytes[start..end]);
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
