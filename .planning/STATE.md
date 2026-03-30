@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-03-29)
 
 ## Current Position
 
-Phase: 7.1 (FileStorage Migration — INSERTED, urgent)
-Plan: 03 complete (phase COMPLETE)
+Phase: 10 (Streaming Writes Core)
+Plan: 01 of 3 complete
 Status: In progress
-Last activity: 2026-03-29 — Plan 03 complete: all CLI consumers migrated to file-backed StoreIo; zero Dictionary references remain
+Last activity: 2026-03-30 — Plan 01 complete: OpenFileState redesigned from Vec<u8> to State accumulator with push_bytes streaming
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [######░░░░] 60%
 
 ## Performance Metrics
 
@@ -56,6 +56,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 08-correctness-fixes P01 | 20 | 2 tasks | 6 files |
 | Phase 09-compression-removal P01 | 14 | 2 tasks | 6 files |
 | Phase 09-compression-removal P02 | 7 | 2 tasks | 9 files |
+| Phase 10-streaming-writes-core P01 | 12 | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -81,6 +82,10 @@ Progress: [░░░░░░░░░░] 0%
 - [Phase 09-01]: StoreStats.compressor field kept for JSON API stability; value changed to none (v3 raw)
 - [Phase 09-02]: compression_tests.rs deleted entirely — tests v1/v2 wire format behavior that no longer exists; no migration tests needed
 - [Phase 09-02]: cli.rs compressor unit tests removed — CLI flags (--compressor, --compressor-level) were removed in Plan 01
+- [Phase 10-01]: FSA Drop flush + disk-read extend for streaming writes — FileStorageAdd now flushes pending internal nodes on drop and reads from disk in extend() when entries missing from map, enabling push_bytes/end across separate FSA sessions
+- [Phase 10-01]: flush_buffer_for_fsync uses clone+end pattern — clone State, end the clone for CAS commit, keep original alive; no State reset on fsync
+- [Phase 10-01]: Digest224 re-exported from blockset crate — was private module, now publicly accessible
+- [Phase 10-01]: 2 non-sequential offset tests ignored for Phase 11 (STRM-02) — test_write_with_gap_zero_pads, test_file_write_at_offset_zero_pads
 
 ### Roadmap Evolution
 
@@ -98,6 +103,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-30T05:24:33.526Z
-Stopped at: Phase 10 context gathered
-Resume file: .planning/phases/10-streaming-writes-core/10-CONTEXT.md
+Last session: 2026-03-30T07:23:23Z
+Stopped at: Phase 10 Plan 01 complete
+Resume file: .planning/phases/10-streaming-writes-core/10-01-SUMMARY.md
