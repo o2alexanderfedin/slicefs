@@ -186,3 +186,147 @@ fn test_sequential_large_write() {
     let inode = fs.meta().get_inode(ino).expect("get inode should succeed");
     assert_eq!(inode.size, total_size as u64);
 }
+
+// ── Test 7: truncate to 0 on open handle resets to empty, further writes work (STRM-05) ──
+
+#[test]
+fn test_truncate_to_zero_on_open_handle() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "trunc0.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+        .expect("create should succeed");
+
+    // Write "hello world"
+    fs.test_write(fh, 0, b"hello world").expect("write should succeed");
+
+    // Truncate to 0
+    fs.test_setattr_size(ino, Some(fh), 0).expect("truncate to 0 should succeed");
+
+    // Write new content
+    fs.test_write(fh, 0, b"new content").expect("write after truncate should succeed");
+
+    // Release
+    fs.test_release(ino, fh).expect("release should succeed");
+
+    // Read -- should be "new content"
+    let content = fs.test_read(ino, 0, 1024).expect("read should succeed");
+    assert_eq!(content, b"new content");
+}
+
+// ── Test 8: truncate to N>0 materializes and resizes correctly (STRM-05) ──
+
+#[test]
+fn test_truncate_midstream_nonzero() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "trunc5.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+        .expect("create should succeed");
+
+    // Write "hello world" (11 bytes)
+    fs.test_write(fh, 0, b"hello world").expect("write should succeed");
+
+    // Truncate to 5
+    fs.test_setattr_size(ino, Some(fh), 5).expect("truncate to 5 should succeed");
+
+    // Release
+    fs.test_release(ino, fh).expect("release should succeed");
+
+    // Read -- should be "hello" (5 bytes)
+    let content = fs.test_read(ino, 0, 1024).expect("read should succeed");
+    assert_eq!(content, b"hello");
+}
+
+// ── Test 9: truncate extends beyond current size with zero padding (STRM-05) ──
+
+#[test]
+fn test_truncate_extend_beyond() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "extend.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+        .expect("create should succeed");
+
+    // Write "hi" (2 bytes)
+    fs.test_write(fh, 0, b"hi").expect("write should succeed");
+
+    // Truncate to 10 (extend with zeros)
+    fs.test_setattr_size(ino, Some(fh), 10).expect("truncate to 10 should succeed");
+
+    // Release
+    fs.test_release(ino, fh).expect("release should succeed");
+
+    // Read -- should be "hi" followed by 8 zero bytes (10 bytes total)
+    let content = fs.test_read(ino, 0, 1024).expect("read should succeed");
+    assert_eq!(content.len(), 10);
+    assert_eq!(&content[..2], b"hi");
+    assert_eq!(&content[2..], &[0u8; 8]);
+}
+
+// ── Test 10: truncate after fsync decrements old committed root (STRM-05) ──
+
+#[test]
+fn test_truncate_after_fsync_decrements_refcount() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "fsync_trunc.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+        .expect("create should succeed");
+
+    // Write "data" and fsync (commits root)
+    fs.test_write(fh, 0, b"data").expect("write should succeed");
+    fs.test_fsync(ino, fh).expect("fsync should succeed");
+
+    // Truncate to 0 (should decrement old committed root)
+    fs.test_setattr_size(ino, Some(fh), 0).expect("truncate to 0 should succeed");
+
+    // Write new data
+    fs.test_write(fh, 0, b"new data").expect("write after truncate should succeed");
+
+    // Release
+    fs.test_release(ino, fh).expect("release should succeed");
+
+    // Read -- should be "new data" (no errors means refcount lifecycle is correct)
+    let content = fs.test_read(ino, 0, 1024).expect("read should succeed");
+    assert_eq!(content, b"new data");
+}
+
+// ── Test 11: cas_committed guard -- fsync then release without further writes (STRM-04) ──
+
+#[test]
+fn test_cas_committed_guard_fsync_then_release() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "guard.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+        .expect("create should succeed");
+
+    // Write "committed data"
+    fs.test_write(fh, 0, b"committed data").expect("write should succeed");
+
+    // fsync commits the data
+    fs.test_fsync(ino, fh).expect("fsync should succeed");
+
+    // Release WITHOUT further writes (cas_committed guard prevents empty overwrite)
+    fs.test_release(ino, fh).expect("release should succeed");
+
+    // Read -- should still be "committed data"
+    let content = fs.test_read(ino, 0, 1024).expect("read should succeed");
+    assert_eq!(content, b"committed data");
+}
+
+// ── Test 12: write after fsync produces correct final content (STRM-04) ──
+
+#[test]
+fn test_write_after_fsync_produces_correct_final() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "append.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+        .expect("create should succeed");
+
+    // Write "part1"
+    fs.test_write(fh, 0, b"part1").expect("write 1 should succeed");
+
+    // fsync
+    fs.test_fsync(ino, fh).expect("fsync should succeed");
+
+    // Write "part2" (appended)
+    fs.test_write(fh, 5, b"part2").expect("write 2 should succeed");
+
+    // Release
+    fs.test_release(ino, fh).expect("release should succeed");
+
+    // Read -- should be "part1part2"
+    let content = fs.test_read(ino, 0, 1024).expect("read should succeed");
+    assert_eq!(content, b"part1part2");
+}
