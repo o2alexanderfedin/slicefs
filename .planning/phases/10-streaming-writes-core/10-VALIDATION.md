@@ -19,7 +19,7 @@ created: 2026-03-30
 |----------|-------|
 | **Framework** | Rust `cargo test` + integration tests |
 | **Config file** | Cargo.toml (workspace) |
-| **Quick run command** | `cargo test -p slicefs-fuse` |
+| **Quick run command** | `cargo test -p slicefs-cli` |
 | **Full suite command** | `cargo test --workspace` |
 | **Estimated runtime** | ~60 seconds |
 
@@ -27,7 +27,7 @@ created: 2026-03-30
 
 ## Sampling Rate
 
-- **After every task commit:** Run `cargo test -p slicefs-fuse`
+- **After every task commit:** Run `cargo test -p slicefs-cli`
 - **After every plan wave:** Run `cargo test --workspace`
 - **Before `/gsd:verify-work`:** Full suite must be green
 - **Max feedback latency:** 60 seconds
@@ -38,11 +38,11 @@ created: 2026-03-30
 
 | Task ID | Plan | Wave | Requirement | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|-----------|-------------------|-------------|--------|
-| 10-01-01 | 01 | 1 | STRM-01 | unit | `cargo test -p slicefs-fuse open_file_state` | ❌ W0 | ⬜ pending |
-| 10-02-01 | 02 | 2 | STRM-03 | integration | `cargo test -p slicefs-fuse flush_buffer` | ❌ W0 | ⬜ pending |
-| 10-02-02 | 02 | 2 | STRM-04 | integration | `cargo test -p slicefs-fuse fsync_midstream` | ❌ W0 | ⬜ pending |
-| 10-02-03 | 02 | 2 | STRM-05 | integration | `cargo test -p slicefs-fuse read_during_write` | ❌ W0 | ⬜ pending |
-| 10-03-01 | 03 | 2 | STRM-03 | integration | `cargo test -p slicefs-fuse truncate_streaming` | ❌ W0 | ⬜ pending |
+| 10-01-01 | 01 | 1 | STRM-01 | unit | `cargo test -p slicefs-cli open_file_state` | ❌ W0 | ⬜ pending |
+| 10-02-01 | 02 | 2 | STRM-03 | integration | `cargo test -p slicefs-cli flush_buffer` | ❌ W0 | ⬜ pending |
+| 10-02-02 | 02 | 2 | STRM-04 | integration | `cargo test -p slicefs-cli fsync_midstream` | ❌ W0 | ⬜ pending |
+| 10-02-03 | 02 | 2 | STRM-05 | integration | `cargo test -p slicefs-cli read_during_write` | ❌ W0 | ⬜ pending |
+| 10-03-01 | 03 | 2 | STRM-03 | integration | `cargo test -p slicefs-cli truncate_streaming` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
