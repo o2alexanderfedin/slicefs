@@ -95,8 +95,8 @@ Requirements for streaming writes and hardening milestone.
 
 ### Correctness Fixes
 
-- [ ] **FIX-01**: Refcount increment uses saturating_add — no silent overflow to 0 on u64::MAX
-- [ ] **FIX-02**: statfs reports actual inode count (not hardcoded 1M) and tracks physical bytes accurately
+- [x] **FIX-01**: Refcount increment uses saturating_add — no silent overflow to 0 on u64::MAX
+- [x] **FIX-02**: statfs reports actual inode count (not hardcoded 1M) and tracks physical bytes accurately
 - [x] **FIX-03**: Snapshot lookup by version is O(1) via HashMap<u64, SnapshotEntry>
 - [x] **FIX-04**: Snapshot lookup by name is O(1) via HashMap<String, u64> index
 
@@ -182,8 +182,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CLI-04 | Phase 7 | Complete |
 | CLI-05 | Phase 7 | Complete |
 | CLI-06 | Phase 3 | Complete |
-| FIX-01 | Phase 8 | Pending |
-| FIX-02 | Phase 8 | Pending |
+| FIX-01 | Phase 8 | Complete |
+| FIX-02 | Phase 8 | Complete |
 | FIX-03 | Phase 8 | Complete |
 | FIX-04 | Phase 8 | Complete |
 | DECOMP-01 | Phase 9 | Pending |

@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Streaming Writes & Hardening
 status: executing
-stopped_at: Phase 8 planned (1 plan, 1 wave, verified)
-last_updated: "2026-03-30T03:36:54.380Z"
+stopped_at: "Phase 08-01 complete: correctness fixes (refcount saturation + three-tier statfs + scrub saturated reporting)"
+last_updated: "2026-03-30T03:54:51.619Z"
 last_activity: "2026-03-29 — Plan 03 complete: all CLI consumers migrated to file-backed StoreIo; zero Dictionary references remain"
 progress:
   total_phases: 12
-  completed_phases: 8
+  completed_phases: 9
   total_plans: 28
-  completed_plans: 27
+  completed_plans: 28
   percent: 0
 ---
 
@@ -53,6 +53,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 07.1-filestorage-migration P01 | 7 | 2 tasks | 7 files |
 | Phase 07.1-filestorage-migration P02 | ~180 | 3 tasks | 11 files |
 | Phase 07.1-filestorage-migration P03 | ~60 | 2 tasks | 19 files |
+| Phase 08-correctness-fixes P01 | 20 | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -71,6 +72,9 @@ Progress: [░░░░░░░░░░] 0%
 - [Phase 07.1-03]: collect_live_set simplified to empty stub — FileStorage orphan file GC deferred (no DictEntry in segments to filter)
 - [Phase 07.1-03]: Legacy store (dictionary.bin) → Re-seed error everywhere — no in-place migration
 - [Phase 07.1-03]: statfs physical bytes from dir_size(vt0/) — replaces dict.len() * 92 formula
+- [Phase 08-01]: saturating refcount: increment_refcount saturates at u64::MAX with tracing::warn; decrement is no-op at MAX (immortal blocks never GC'd)
+- [Phase 08-01]: statfs three-tier: libc::statvfs for blocks/bfree/bavail; inode_count() for files; fallback to zeros when store_path is None
+- [Phase 08-01]: compute_statfs extracted to regular impl block (not Filesystem trait) to allow pub visibility and test_statfs_values() helper
 
 ### Roadmap Evolution
 
@@ -88,6 +92,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-30T03:36:54.377Z
-Stopped at: Phase 8 planned (1 plan, 1 wave, verified)
-Resume file: .planning/phases/08-correctness-fixes/08-01-PLAN.md
+Last session: 2026-03-30T03:54:51.616Z
+Stopped at: Phase 08-01 complete: correctness fixes (refcount saturation + three-tier statfs + scrub saturated reporting)
+Resume file: None
