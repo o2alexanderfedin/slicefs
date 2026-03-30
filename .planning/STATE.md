@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Streaming Writes & Hardening
 status: planning
-stopped_at: Phase 7.1 planned (3 plans, 3 waves, verified)
-last_updated: "2026-03-30T00:51:54.423Z"
+stopped_at: Phase 07.1 Plan 01 complete — blockset API exposed, intern_* generalized, O(1) snapshot indexes
+last_updated: "2026-03-30T01:01:54.907Z"
 last_activity: 2026-03-29 — Phase 7.1 inserted before Phase 8 (FileStorage Migration)
 progress:
   total_phases: 12
   completed_phases: 7
   total_plans: 27
-  completed_plans: 24
+  completed_plans: 25
   percent: 0
 ---
 
@@ -50,6 +50,7 @@ Progress: [░░░░░░░░░░] 0%
 | 11. Non-Sequential Write Handling | 0/2 | - | - |
 
 *Updated after each plan completion*
+| Phase 07.1-filestorage-migration P01 | 7 | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -59,6 +60,8 @@ Progress: [░░░░░░░░░░] 0%
 - v2.0 Roadmap: Compression removal (Phase 9) before streaming — both touch flush_buffer_to_cas; sequential isolation makes regressions unambiguous
 - v2.0 Roadmap: Core streaming (Phase 10) before edge cases (Phase 11) — non-sequential fallback requires stable core to test against
 - v2.0 Roadmap: No WAL checkpointing of partial streaming state — "no intermediate manifests" invariant; truncate-on-crash is sufficient; streaming State is O(log N) so terabyte files fit in memory
+- [Phase 07.1-01]: directory.rs mixed read/write functions use S: StorageAdd + StorageGet combined bound (not split params) to avoid borrow conflict on same Dictionary
+- [Phase 07.1-01]: Snapshot storage: dual HashMap indexes (by_version + by_name) for O(1) multi-key lookup vs prior O(N) Vec scan
 
 ### Roadmap Evolution
 
@@ -76,6 +79,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-30T00:51:54.420Z
-Stopped at: Phase 7.1 planned (3 plans, 3 waves, verified)
-Resume file: .planning/phases/07.1-filestorage-migration/07.1-01-PLAN.md
+Last session: 2026-03-30T01:01:54.904Z
+Stopped at: Phase 07.1 Plan 01 complete — blockset API exposed, intern_* generalized, O(1) snapshot indexes
+Resume file: None
