@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Streaming Writes & Hardening
 status: planning
-stopped_at: Phase 07.1 Plan 02 complete — DictMetadataStore migrated to file-backed StoreIo
+stopped_at: Phase 07.1 Plan 03 complete — all CLI consumers migrated to file-backed StoreIo
 last_updated: "2026-03-30T03:00:00.000Z"
 last_activity: 2026-03-29 — Phase 7.1 inserted before Phase 8 (FileStorage Migration)
 progress:
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-03-29)
 ## Current Position
 
 Phase: 7.1 (FileStorage Migration — INSERTED, urgent)
-Plan: 02 complete (next: 03)
+Plan: 03 complete (phase COMPLETE)
 Status: In progress
-Last activity: 2026-03-30 — Plan 02 complete: DictMetadataStore migrated to file-backed StoreIo
+Last activity: 2026-03-29 — Plan 03 complete: all CLI consumers migrated to file-backed StoreIo; zero Dictionary references remain
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -52,6 +52,7 @@ Progress: [░░░░░░░░░░] 0%
 *Updated after each plan completion*
 | Phase 07.1-filestorage-migration P01 | 7 | 2 tasks | 7 files |
 | Phase 07.1-filestorage-migration P02 | ~180 | 3 tasks | 11 files |
+| Phase 07.1-filestorage-migration P03 | ~60 | 2 tasks | 19 files |
 
 ## Accumulated Context
 
@@ -67,6 +68,9 @@ Progress: [░░░░░░░░░░] 0%
 - [Phase 07.1-02]: Read-then-write pattern for directory ops: file_storage_get releases borrow before FileStorageAdd::new(io)
 - [Phase 07.1-02]: GC background thread uses run_gc_roots_only() — Dictionary-free; live-set filtering from file storage deferred
 - [Phase 07.1-02]: Crash-safe commit: FSA drop (flushes node files) THEN WAL RootUpdate write
+- [Phase 07.1-03]: collect_live_set simplified to empty stub — FileStorage orphan file GC deferred (no DictEntry in segments to filter)
+- [Phase 07.1-03]: Legacy store (dictionary.bin) → Re-seed error everywhere — no in-place migration
+- [Phase 07.1-03]: statfs physical bytes from dir_size(vt0/) — replaces dict.len() * 92 formula
 
 ### Roadmap Evolution
 
@@ -84,6 +88,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-30T03:00:00.000Z
-Stopped at: Phase 07.1 Plan 02 complete — DictMetadataStore migrated to file-backed StoreIo
+Last session: 2026-03-29T00:00:00.000Z
+Stopped at: Phase 07.1 Plan 03 complete — all CLI consumers migrated to file-backed StoreIo
 Resume file: None
