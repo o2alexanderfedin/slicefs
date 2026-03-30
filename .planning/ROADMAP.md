@@ -209,11 +209,11 @@ Plans:
   1. pwrite(2) at a non-sequential offset on an open file handle produces a correct file after release — no corruption, no silent data loss
   2. Enabling writeback_cache on a mount with in-flight writes produces correct files — out-of-order FUSE write callbacks do not corrupt the Merkle root
   3. A file written via a tool that uses non-sequential access patterns (vim, sqlite, cp --sparse) is byte-identical to the source after release
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 11-01-PLAN.md — next_expected_offset tracking + WriteMode enum; fallback to Vec<u8> on non-sequential offset
-- [ ] 11-02-PLAN.md — writeback_cache integration test; pwrite and sparse-file correctness tests
+- [ ] 11-01-PLAN.md — WriteMode enum + dual dispatch across 5 write-path methods in filesystem.rs
+- [ ] 11-02-PLAN.md — Non-sequential write integration tests + un-ignore Phase 10 deferred tests
 
 ## Progress
 
