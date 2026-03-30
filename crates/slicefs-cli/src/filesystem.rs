@@ -350,14 +350,15 @@ impl SliceFsFilesystem {
 
     /// Flush the streaming state for `fh` to CAS without closing the handle.
     ///
-    /// Temporary bridge: clones State, materializes to Vec<u8> via end() +
-    /// file_storage_get, pushes via push_all, then resets State to default.
-    /// Plan 02 will rewrite this to use clone+end directly (no materialization).
+    /// Uses clone+end pattern: clones the in-progress State, calls end() on the
+    /// clone to produce a Digest224 snapshot, sets manifest, keeps original State
+    /// alive for further writes. After fsync, subsequent writes continue appending
+    /// to the same State accumulator.
     ///
     /// If `fh` is not in `open_files` (read-only handle or invalid), returns Ok
     /// without error — fsync is a no-op for read-only handles.
     fn flush_buffer_for_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        // Clone state and get byte_count under lock, then release lock before io ops
+        // Clone state under open_files lock, then release lock before io ops
         let (state_clone, byte_count) = {
             let mut open_files = self.open_files.lock().unwrap();
             match open_files.get_mut(&fh) {
@@ -366,11 +367,9 @@ impl SliceFsFilesystem {
                         // Nothing to flush — no-op
                         return Ok(());
                     }
+                    // Clone state — original continues accumulating after fsync
                     let sc = s.state.clone();
                     let bc = s.byte_count;
-                    // Reset state for further writes
-                    s.state = State::default();
-                    s.byte_count = 0;
                     s.cas_committed = true;
                     (sc, bc)
                 }
@@ -378,42 +377,28 @@ impl SliceFsFilesystem {
             }
         };
 
-        // Materialize State to Vec<u8> (temporary shim — Plan 02 rewrites this)
-        let buf: Vec<u8> = {
-            let d224 = {
-                let mut io = self.io.lock().unwrap();
-                let mut fsa = FileStorageAdd::new(&mut *io);
-                let d256 = state_clone.end(&mut fsa);
-                fsa.end(&d256)
-            };
+        // End the clone to produce a content digest (lock ordering: open_files released, now io)
+        let content_digest = {
             let mut io = self.io.lock().unwrap();
-            file_storage_get(&mut *io, &d224).unwrap_or_default()
+            let mut fsa = FileStorageAdd::new(&mut *io);
+            let d256 = state_clone.end(&mut fsa);
+            fsa.end(&d256)
         };
 
-        // Push materialized bytes back through CAS pipeline
-        if !buf.is_empty() {
-            let content_digest = {
-                let mut io = self.io.lock().unwrap();
-                let mut fsa = FileStorageAdd::new(&mut *io);
-                let digest = State::push_all(&mut fsa, &buf);
-                drop(fsa);
-                digest
-            };
-            self.meta.set_manifest(ino, &[content_digest]).map_err(|_| libc::EIO)?;
-            self.meta.increment_refcount(&content_digest);
+        self.meta.set_manifest(ino, &[content_digest]).map_err(|_| libc::EIO)?;
+        self.meta.increment_refcount(&content_digest);
 
-            // Update inode size and mtime
-            let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-            inode.size = byte_count;
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or(Duration::ZERO);
-            inode.mtime_sec = now.as_secs() as i64;
-            inode.mtime_nsec = now.subsec_nanos();
-            inode.ctime_sec = inode.mtime_sec;
-            inode.ctime_nsec = inode.mtime_nsec;
-            self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
-        }
+        // Update inode size and mtime
+        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
+        inode.size = byte_count;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
+        inode.mtime_sec = now.as_secs() as i64;
+        inode.mtime_nsec = now.subsec_nanos();
+        inode.ctime_sec = inode.mtime_sec;
+        inode.ctime_nsec = inode.mtime_nsec;
+        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
 
         Ok(())
     }
