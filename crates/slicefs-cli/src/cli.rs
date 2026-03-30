@@ -297,64 +297,6 @@ mod tests {
         }
     }
 
-    // ── Compressor CLI tests ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_mount_default_compressor_is_zstd() {
-        let cli = Cli::try_parse_from(["slicefs", "mount", "/mnt", "--store", "/data"]).unwrap();
-        match cli.command {
-            Cmd::Mount { compressor, compressor_level, .. } => {
-                assert_eq!(compressor, "zstd", "default compressor should be zstd");
-                assert!(compressor_level.is_none(), "default level should be None");
-            }
-            _ => panic!("expected Mount"),
-        }
-    }
-
-    #[test]
-    fn test_mount_compressor_lz4() {
-        let cli = Cli::try_parse_from([
-            "slicefs", "mount", "/mnt", "--store", "/data", "--compressor", "lz4",
-        ])
-        .unwrap();
-        match cli.command {
-            Cmd::Mount { compressor, .. } => {
-                assert_eq!(compressor, "lz4");
-            }
-            _ => panic!("expected Mount"),
-        }
-    }
-
-    #[test]
-    fn test_mount_compressor_none() {
-        let cli = Cli::try_parse_from([
-            "slicefs", "mount", "/mnt", "--store", "/data", "--compressor", "none",
-        ])
-        .unwrap();
-        match cli.command {
-            Cmd::Mount { compressor, .. } => {
-                assert_eq!(compressor, "none");
-            }
-            _ => panic!("expected Mount"),
-        }
-    }
-
-    #[test]
-    fn test_mount_compressor_zstd_with_level() {
-        let cli = Cli::try_parse_from([
-            "slicefs", "mount", "/mnt", "--store", "/data",
-            "--compressor", "zstd", "--compressor-level", "9",
-        ])
-        .unwrap();
-        match cli.command {
-            Cmd::Mount { compressor, compressor_level, .. } => {
-                assert_eq!(compressor, "zstd");
-                assert_eq!(compressor_level, Some(9));
-            }
-            _ => panic!("expected Mount"),
-        }
-    }
-
     // ── Stats / Scrub / JSON CLI tests ───────────────────────────────────────
 
     #[test]

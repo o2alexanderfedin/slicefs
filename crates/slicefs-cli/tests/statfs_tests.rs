@@ -9,7 +9,6 @@
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use slicefs_cli::filesystem::SliceFsFilesystem;
-use slicefs_compression::NoneCompressor;
 use slicefs_traits::metadata::MetadataStore;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
@@ -20,7 +19,7 @@ fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
     let meta = DictMetadataStore::new(io.clone());
-    let fs = SliceFsFilesystem::new(meta, io, None, Arc::new(NoneCompressor::new()), 1);
+    let fs = SliceFsFilesystem::new(meta, io, None);
     (fs, dir)
 }
 
@@ -274,8 +273,6 @@ fn test_statfs_blocks_from_host() {
         meta,
         io,
         Some(dir.path().to_path_buf()),
-        Arc::new(NoneCompressor::new()),
-        1,
     );
 
     // Verify statfs via the filesystem's statfs_values() test helper
@@ -301,8 +298,6 @@ fn test_statfs_fallback_no_store_path() {
         meta,
         io,
         None, // No store path
-        Arc::new(NoneCompressor::new()),
-        1,
     );
 
     let (blocks, bfree, bavail, _files, _ffree, _bsize) = fs.test_statfs_values();

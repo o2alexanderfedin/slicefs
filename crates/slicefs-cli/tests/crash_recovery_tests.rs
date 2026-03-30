@@ -17,7 +17,6 @@ use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
 use slicefs_cli::filesystem::SliceFsFilesystem;
-use slicefs_compression::NoneCompressor;
 use slicefs_traits::metadata::MetadataStore;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
@@ -33,7 +32,7 @@ fn make_fs_per_op(store_dir: &TempDir) -> SliceFsFilesystem {
     let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
     let mut meta = DictMetadataStore::new(io.clone());
     meta.set_wal(wal);
-    SliceFsFilesystem::new(meta, io, Some(store_dir.path().to_path_buf()), Arc::new(NoneCompressor::new()), 1)
+    SliceFsFilesystem::new(meta, io, Some(store_dir.path().to_path_buf()))
 }
 
 /// Reload the store from segment files (simulates remount after crash).

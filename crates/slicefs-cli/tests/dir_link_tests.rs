@@ -10,7 +10,6 @@ use blockset::{State, Tree, FileStorageAdd, file_storage_get};
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use slicefs_cli::filesystem::SliceFsFilesystem;
-use slicefs_compression::NoneCompressor;
 use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
@@ -23,7 +22,7 @@ fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
     let meta = DictMetadataStore::new(io.clone());
-    let fs = SliceFsFilesystem::new(meta, io, None, Arc::new(NoneCompressor::new()), 1);
+    let fs = SliceFsFilesystem::new(meta, io, None);
     (fs, dir)
 }
 

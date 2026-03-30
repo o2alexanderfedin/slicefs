@@ -1544,7 +1544,6 @@ mod tests {
     use blockset::file_storage_get;
     use metadata::store::DictMetadataStore;
     use metadata::store_io::StoreIo;
-    use slicefs_compression::NoneCompressor;
     use slicefs_traits::metadata::{InodeMeta, MetadataStore};
     use tempfile::TempDir;
 
@@ -1555,7 +1554,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
         let meta = DictMetadataStore::new(io.clone());
-        let fs = SliceFsFilesystem::new(meta, io, None, Arc::new(NoneCompressor::new()), 1);
+        let fs = SliceFsFilesystem::new(meta, io, None);
         (fs, dir)
     }
 
@@ -1634,7 +1633,7 @@ mod tests {
         meta_store.link(1, "testfile", ino).unwrap();
         meta_store.set_manifest(ino, &[root_digest224]).unwrap();
 
-        let fs = SliceFsFilesystem::new(meta_store, io.clone(), None, Arc::new(NoneCompressor::new()), 1);
+        let fs = SliceFsFilesystem::new(meta_store, io.clone(), None);
 
         let manifest = fs.meta.get_manifest(ino).unwrap();
         assert!(!manifest.is_empty());
@@ -1665,7 +1664,7 @@ mod tests {
         let ino = meta_store.create_inode(&file_meta).unwrap();
         meta_store.set_manifest(ino, &[root_digest224]).unwrap();
 
-        let fs = SliceFsFilesystem::new(meta_store, io.clone(), None, Arc::new(NoneCompressor::new()), 1);
+        let fs = SliceFsFilesystem::new(meta_store, io.clone(), None);
 
         let manifest = fs.meta.get_manifest(ino).unwrap();
         let bytes = {
@@ -1691,8 +1690,6 @@ mod tests {
             meta,
             io,
             Some(dir.path().to_path_buf()),
-            Arc::new(slicefs_compression::NoneCompressor::new()),
-            1,
         );
         let (_blocks, _bfree, _bavail, files, _ffree, _bsize) = fs.test_statfs_values();
         assert_ne!(files, 1_000_000, "files must not be hardcoded 1_000_000");
