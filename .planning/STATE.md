@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Streaming Writes & Hardening
 status: executing
-stopped_at: Phase 10 context gathered
-last_updated: "2026-03-30T05:24:33.530Z"
-last_activity: "2026-03-29 — Plan 03 complete: all CLI consumers migrated to file-backed StoreIo; zero Dictionary references remain"
+stopped_at: Completed 10-02-PLAN.md
+last_updated: "2026-03-30T07:31:22.918Z"
+last_activity: "2026-03-30 — Plan 02 complete: flush/release/read paths rewritten to use streaming State directly with refcount lifecycle"
 progress:
   total_phases: 12
   completed_phases: 10
-  total_plans: 30
-  completed_plans: 30
-  percent: 0
+  total_plans: 33
+  completed_plans: 32
+  percent: 97
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-29)
 ## Current Position
 
 Phase: 10 (Streaming Writes Core)
-Plan: 01 of 3 complete
+Plan: 02 of 3 complete
 Status: In progress
-Last activity: 2026-03-30 — Plan 01 complete: OpenFileState redesigned from Vec<u8> to State accumulator with push_bytes streaming
+Last activity: 2026-03-30 — Plan 02 complete: flush/release/read paths rewritten to use streaming State directly with refcount lifecycle
 
-Progress: [######░░░░] 60%
+Progress: [██████████] 97%
 
 ## Performance Metrics
 
@@ -57,6 +57,7 @@ Progress: [######░░░░] 60%
 | Phase 09-compression-removal P01 | 14 | 2 tasks | 6 files |
 | Phase 09-compression-removal P02 | 7 | 2 tasks | 9 files |
 | Phase 10-streaming-writes-core P01 | 12 | 2 tasks | 6 files |
+| Phase 10 P02 | 4 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -86,6 +87,11 @@ Progress: [######░░░░] 60%
 - [Phase 10-01]: flush_buffer_for_fsync uses clone+end pattern — clone State, end the clone for CAS commit, keep original alive; no State reset on fsync
 - [Phase 10-01]: Digest224 re-exported from blockset crate — was private module, now publicly accessible
 - [Phase 10-01]: 2 non-sequential offset tests ignored for Phase 11 (STRM-02) — test_write_with_gap_zero_pads, test_file_write_at_offset_zero_pads
+- [Phase 10]: [Phase 10-02]: flush_buffer_for_fsync tracks last_committed_root for decrement-on-overwrite refcount lifecycle
+- [Phase 10]: [Phase 10-02]: test_release skips redundant manifest write when final digest matches last_committed_root (dedup optimization)
+- [Phase 10]: [Phase 10-02]: test_read scans open_files values for matching ino (O(n) acceptable for typical handle counts)
+- [Phase 10]: [Phase 10-02]: FUSE read() delegates entirely to test_read -- single code path for committed and uncommitted reads
+- [Phase 10]: [Phase 10-02]: flush_buffer_to_cas removed -- release path handles State.end() directly
 
 ### Roadmap Evolution
 
@@ -103,6 +109,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-30T07:23:23Z
-Stopped at: Phase 10 Plan 01 complete
-Resume file: .planning/phases/10-streaming-writes-core/10-01-SUMMARY.md
+Last session: 2026-03-30T07:31:22.915Z
+Stopped at: Completed 10-02-PLAN.md
+Resume file: None
