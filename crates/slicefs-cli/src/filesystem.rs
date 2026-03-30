@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use blockset::{State, Tree, FileStorageAdd, file_storage_get, StorageAdd, Digest224};
+use tracing::debug;
 use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
     Generation, INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr,
@@ -30,27 +31,42 @@ const S_IFREG: u32 = 0o100_000;
 const S_IFDIR: u32 = 0o040_000;
 const S_IFLNK: u32 = 0o120_000;
 
+/// Write mode for an open file handle.
+///
+/// Streaming mode is the default for sequential writes (O(log N) memory).
+/// Buffered mode is a one-way fallback for non-sequential writes (O(N) memory).
+/// Once a handle transitions to Buffered, it never reverts to Streaming.
+enum WriteMode {
+    Streaming {
+        state: State,
+        next_expected_offset: u64,
+    },
+    Buffered {
+        buf: Vec<u8>,
+    },
+}
+
 /// Per-handle state for a writable file descriptor.
 ///
 /// Created on `open()` when `O_WRONLY` or `O_RDWR` flags are present.
 /// Removed on `release()`. Writes are streamed incrementally through the
 /// blockset `State` Merkle tree accumulator — O(log N) memory regardless
-/// of file size.
+/// of file size — unless a non-sequential write triggers fallback to
+/// Buffered mode (O(N) memory).
 ///
 /// Lifecycle:
-/// - Created with `State::default()` and `byte_count = 0`.
-/// - `state.push_bytes()` called on each write, `byte_count` incremented.
+/// - Created with `WriteMode::Streaming` and `byte_count = 0`.
+/// - Sequential writes: `state.push_bytes()` called on each write, `byte_count` incremented.
+/// - Non-sequential write: one-way transition to `WriteMode::Buffered`.
 /// - `cas_committed` set to `true` after fsync/flush commits to CAS.
 /// - `cas_committed` set to `false` when new writes arrive (dirty again).
 /// - `last_committed_root` tracks the most recently committed Digest224
 ///   for refcount decrement-on-overwrite.
 struct OpenFileState {
     ino: u64,
-    /// Incremental Merkle tree accumulator — replaces the old `Vec<u8>` buffer.
-    /// Every write goes through `state.push_bytes()`.
-    state: State,
-    /// Total bytes pushed via `push_bytes`. Tracks inode size without State
-    /// introspection.
+    /// Write mode — Streaming (sequential, O(log N)) or Buffered (non-sequential, O(N)).
+    write_mode: WriteMode,
+    /// Total bytes written. Tracks inode size.
     byte_count: u64,
     /// True if the manifest was committed to CAS by a prior flush/fsync and the
     /// state has not been dirtied by subsequent writes.
@@ -245,7 +261,7 @@ impl SliceFsFilesystem {
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
         self.open_files.lock().unwrap().insert(fh, OpenFileState {
             ino,
-            state: State::default(),
+            write_mode: WriteMode::Streaming { state: State::default(), next_expected_offset: 0 },
             byte_count: 0,
             cas_committed: false,
             last_committed_root: None,
@@ -1136,7 +1152,7 @@ impl Filesystem for SliceFsFilesystem {
                 fh,
                 OpenFileState {
                     ino: ino.0,
-                    state: State::default(),
+                    write_mode: WriteMode::Streaming { state: State::default(), next_expected_offset: 0 },
                     byte_count: 0,
                     cas_committed: false,
                     last_committed_root: None,
