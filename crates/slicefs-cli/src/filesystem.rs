@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use blockset::{State, Tree, FileStorageAdd, file_storage_get};
+use blockset::{State, Tree, FileStorageAdd, file_storage_get, StorageAdd, Digest224};
 use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
     Generation, INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr,
@@ -33,23 +33,31 @@ const S_IFLNK: u32 = 0o120_000;
 /// Per-handle state for a writable file descriptor.
 ///
 /// Created on `open()` when `O_WRONLY` or `O_RDWR` flags are present.
-/// Removed on `release()`. The write buffer accumulates data until flush.
-///
-/// `cas_committed` tracks whether data has already been durably committed to the CAS
-/// by a prior `flush()`/`fsync()` call. When `true` and `buf` is empty at `release()`
-/// time, the `release()` path skips the redundant `set_manifest(ino, &[])` that would
-/// otherwise overwrite the committed manifest with an empty one.
+/// Removed on `release()`. Writes are streamed incrementally through the
+/// blockset `State` Merkle tree accumulator — O(log N) memory regardless
+/// of file size.
 ///
 /// Lifecycle:
-/// - Created with `cas_committed = false` (no data committed yet).
-/// - Set to `true` when `flush_buffer_for_fsync` pushes a non-empty buffer to CAS.
-/// - Set to `false` again when new writes arrive (buffer is dirty again).
+/// - Created with `State::default()` and `byte_count = 0`.
+/// - `state.push_bytes()` called on each write, `byte_count` incremented.
+/// - `cas_committed` set to `true` after fsync/flush commits to CAS.
+/// - `cas_committed` set to `false` when new writes arrive (dirty again).
+/// - `last_committed_root` tracks the most recently committed Digest224
+///   for refcount decrement-on-overwrite.
 struct OpenFileState {
     ino: u64,
-    buf: Vec<u8>,
+    /// Incremental Merkle tree accumulator — replaces the old `Vec<u8>` buffer.
+    /// Every write goes through `state.push_bytes()`.
+    state: State,
+    /// Total bytes pushed via `push_bytes`. Tracks inode size without State
+    /// introspection.
+    byte_count: u64,
     /// True if the manifest was committed to CAS by a prior flush/fsync and the
-    /// buffer has not been dirtied by subsequent writes.
+    /// state has not been dirtied by subsequent writes.
     cas_committed: bool,
+    /// The most recently committed Digest224 root. Used to decrement refcount
+    /// when a new root is committed (fsync or release), preventing refcount leaks.
+    last_committed_root: Option<Digest224>,
 }
 
 /// FUSE filesystem adapter backed by a [`DictMetadataStore`].
@@ -235,40 +243,76 @@ impl SliceFsFilesystem {
             return Err(meta_error_to_errno(&e));
         }
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
-        self.open_files.lock().unwrap().insert(fh, OpenFileState { ino, buf: Vec::new(), cas_committed: false });
+        self.open_files.lock().unwrap().insert(fh, OpenFileState {
+            ino,
+            state: State::default(),
+            byte_count: 0,
+            cas_committed: false,
+            last_committed_root: None,
+        });
         Ok((ino, fh))
     }
 
-    /// Write `data` at `offset` into the buffer for `fh`. Returns bytes written.
-    /// Used by integration tests to bypass the FUSE request/reply layer.
+    /// Write `data` at `offset` into the streaming state for `fh`. Returns bytes written.
+    ///
+    /// Phase 10: sequential writes only. Data is always appended via `push_bytes`.
+    /// The `offset` parameter is accepted but not validated for sequential ordering;
+    /// Phase 11 (STRM-02) will add offset validation and fallback for non-sequential writes.
+    ///
+    /// Lock ordering: open_files -> io (canonical order).
     pub fn test_write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, i32> {
+        // Phase 10: sequential writes only. Non-sequential offset detection is Phase 11.
+        // For now, accept any offset — push_bytes always appends sequentially.
         let mut open_files = self.open_files.lock().unwrap();
         let state = open_files.get_mut(&fh).ok_or(libc::EBADF)?;
-        let end = offset as usize + data.len();
-        if end > state.buf.len() {
-            state.buf.resize(end, 0);
-        }
-        state.buf[offset as usize..end].copy_from_slice(data);
-        // New writes invalidate any prior CAS-committed state.
-        state.cas_committed = false;
+
+        // Lock ordering: open_files -> io is canonical.
+        // We need both locks simultaneously because push_bytes needs mutable State
+        // (held via open_files) and mutable io (for FileStorageAdd).
+        let mut io = self.io.lock().unwrap();
+        let mut fsa = FileStorageAdd::new(&mut *io);
+        state.state.push_bytes(&mut fsa, data);
+        drop(fsa);
+        drop(io);
+
+        state.byte_count += data.len() as u64;
+        state.cas_committed = false; // New writes invalidate prior CAS commit
         Ok(data.len() as u32)
     }
 
-    /// Release file handle `fh`, flushing its buffer to CAS and updating the inode.
+    /// Release file handle `fh`, flushing streaming state to CAS and updating the inode.
     /// Used by integration tests to bypass the FUSE request/reply layer.
+    ///
+    /// Temporary bridge: materializes State to Vec<u8> via end() + file_storage_get,
+    /// then delegates to flush_buffer_to_cas. Plan 02 will rewrite this to use
+    /// State-based release directly.
     pub fn test_release(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        let state = self.open_files.lock().unwrap().remove(&fh);
-        let (buf, cas_committed) = match state {
-            Some(s) => (s.buf, s.cas_committed),
+        let s = self.open_files.lock().unwrap().remove(&fh);
+        let s = match s {
+            Some(s) => s,
             None => return Ok(()), // Already closed
         };
-        // If the buffer is empty and data was already committed to CAS by a prior
-        // flush()/fsync() call (cas_committed=true), skip the redundant write. Without
-        // this guard, release() would call set_manifest(ino, &[]) and overwrite the
-        // committed manifest with an empty one — erasing all written data.
-        if buf.is_empty() && cas_committed {
+
+        // If no bytes were written and data was already committed by prior flush/fsync,
+        // skip the redundant write to avoid overwriting the committed manifest.
+        if s.byte_count == 0 && s.cas_committed {
             return Ok(());
         }
+
+        // Materialize State to Vec<u8> (temporary shim — Plan 02 rewrites this)
+        let buf: Vec<u8> = if s.byte_count == 0 {
+            Vec::new()
+        } else {
+            let d224 = {
+                let mut io = self.io.lock().unwrap();
+                let mut fsa = FileStorageAdd::new(&mut *io);
+                let d256 = s.state.end(&mut fsa);
+                fsa.end(&d256)
+            };
+            let mut io = self.io.lock().unwrap();
+            file_storage_get(&mut *io, &d224).unwrap_or_default()
+        };
+
         self.flush_buffer_to_cas(ino, buf)
     }
 
@@ -304,41 +348,50 @@ impl SliceFsFilesystem {
         Ok(raw_bytes[start..end].to_vec())
     }
 
-    /// Flush the write buffer for `fh` to CAS without closing the handle.
+    /// Flush the streaming state for `fh` to CAS without closing the handle.
     ///
-    /// Reads the current buffer, flushes it via CAS pipeline, then replaces
-    /// the buffer with an empty Vec (file handle stays open for further writes).
+    /// Temporary bridge: clones State, materializes to Vec<u8> via end() +
+    /// file_storage_get, pushes via push_all, then resets State to default.
+    /// Plan 02 will rewrite this to use clone+end directly (no materialization).
+    ///
     /// If `fh` is not in `open_files` (read-only handle or invalid), returns Ok
     /// without error — fsync is a no-op for read-only handles.
-    ///
-    /// After flushing, `dirty` is cleared to `false` on the open file state so that
-    /// a subsequent `release()` with an empty buffer does not overwrite the committed manifest.
     fn flush_buffer_for_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        // Take the buffer out, leaving nothing in open_files temporarily.
-        // Also clear dirty — data is about to be committed (or was already empty).
-        let buf = {
+        // Clone state and get byte_count under lock, then release lock before io ops
+        let (state_clone, byte_count) = {
             let mut open_files = self.open_files.lock().unwrap();
             match open_files.get_mut(&fh) {
-                Some(state) => {
-                    // Swap buffer with empty — we'll put it back after flushing.
-                    // If the buffer is non-empty, mark cas_committed=true so that a
-                    // subsequent release() with an empty buffer skips the redundant
-                    // set_manifest([], ...) that would erase the just-committed data.
-                    let buf = std::mem::take(&mut state.buf);
-                    if !buf.is_empty() {
-                        state.cas_committed = true;
+                Some(s) => {
+                    if s.byte_count == 0 {
+                        // Nothing to flush — no-op
+                        return Ok(());
                     }
-                    buf
+                    let sc = s.state.clone();
+                    let bc = s.byte_count;
+                    // Reset state for further writes
+                    s.state = State::default();
+                    s.byte_count = 0;
+                    s.cas_committed = true;
+                    (sc, bc)
                 }
                 None => return Ok(()), // No write handle — fsync is a no-op
             }
         };
 
-        // Flush buf to CAS (same logic as flush_buffer_to_cas)
-        if buf.is_empty() {
-            // Nothing to flush — no-op
-        } else {
-            // Push raw bytes directly into FileStorage Merkle tree (v3 format — no compression)
+        // Materialize State to Vec<u8> (temporary shim — Plan 02 rewrites this)
+        let buf: Vec<u8> = {
+            let d224 = {
+                let mut io = self.io.lock().unwrap();
+                let mut fsa = FileStorageAdd::new(&mut *io);
+                let d256 = state_clone.end(&mut fsa);
+                fsa.end(&d256)
+            };
+            let mut io = self.io.lock().unwrap();
+            file_storage_get(&mut *io, &d224).unwrap_or_default()
+        };
+
+        // Push materialized bytes back through CAS pipeline
+        if !buf.is_empty() {
             let content_digest = {
                 let mut io = self.io.lock().unwrap();
                 let mut fsa = FileStorageAdd::new(&mut *io);
@@ -351,7 +404,7 @@ impl SliceFsFilesystem {
 
             // Update inode size and mtime
             let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-            inode.size = buf.len() as u64;
+            inode.size = byte_count;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::ZERO);
@@ -362,8 +415,6 @@ impl SliceFsFilesystem {
             self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
         }
 
-        // buf is now dropped — open_files[fh].buf is already empty (mem::take above)
-        // The file handle remains open with an empty buffer ready for further writes.
         Ok(())
     }
 
@@ -407,13 +458,55 @@ impl SliceFsFilesystem {
     /// Truncate/extend a file to `new_size` bytes. If `fh` is Some and open,
     /// operates on the in-flight buffer; otherwise reads from CAS, adjusts, re-pushes.
     pub fn test_setattr_size(&self, ino: u64, fh: Option<u64>, new_size: u64) -> Result<(), i32> {
-        // Case A: open file handle — truncate in-flight buffer directly
+        // Case A: open file handle — truncate streaming state.
+        // Temporary shim: for new_size == 0, reset State; for new_size > 0,
+        // materialize, resize, re-push. Plan 03 will optimize this.
         if let Some(fh_val) = fh {
             let mut open_files = self.open_files.lock().unwrap();
-            if let Some(state) = open_files.get_mut(&fh_val) {
-                state.buf.resize(new_size as usize, 0);
-                // Update inode size immediately
+            if let Some(s) = open_files.get_mut(&fh_val) {
+                if new_size == 0 {
+                    // Fast path: reset to empty
+                    s.state = State::default();
+                    s.byte_count = 0;
+                    s.cas_committed = false;
+                } else {
+                    // Materialize current content, resize, re-push into fresh State
+                    let old_bytes: Vec<u8> = if s.byte_count == 0 {
+                        Vec::new()
+                    } else {
+                        let state_clone = s.state.clone();
+                        // Must drop open_files before acquiring io
+                        drop(open_files);
+                        let d224 = {
+                            let mut io = self.io.lock().unwrap();
+                            let mut fsa = FileStorageAdd::new(&mut *io);
+                            let d256 = state_clone.end(&mut fsa);
+                            fsa.end(&d256)
+                        };
+                        let raw = {
+                            let mut io = self.io.lock().unwrap();
+                            file_storage_get(&mut *io, &d224).unwrap_or_default()
+                        };
+                        // Re-acquire open_files
+                        open_files = self.open_files.lock().unwrap();
+                        raw
+                    };
+                    let mut content = old_bytes;
+                    content.resize(new_size as usize, 0);
+                    // Re-push into fresh State
+                    if let Some(s) = open_files.get_mut(&fh_val) {
+                        let mut io = self.io.lock().unwrap();
+                        let mut fsa = FileStorageAdd::new(&mut *io);
+                        s.state = State::default();
+                        s.state.push_bytes(&mut fsa, &content);
+                        drop(fsa);
+                        drop(io);
+                        s.byte_count = new_size;
+                        s.cas_committed = false;
+                    }
+                }
                 drop(open_files);
+                // Update inode size immediately
                 let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
                 inode.size = new_size;
                 let now = SystemTime::now()
@@ -982,14 +1075,37 @@ impl Filesystem for SliceFsFilesystem {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        // Read-after-write within the same open session: serve from in-flight buffer
+        // Read-after-write within the same open session: materialize from in-flight State.
+        // Temporary shim: clone State under open_files lock, drop lock, materialize under io lock.
+        // Plan 02 will optimize this path.
         if fh.0 > 0 {
-            let open_files = self.open_files.lock().unwrap();
-            if let Some(state) = open_files.get(&fh.0) {
-                let buf = &state.buf;
-                let start = (offset as usize).min(buf.len());
-                let end = (offset as usize + size as usize).min(buf.len());
-                return reply.data(&buf[start..end]);
+            let state_snapshot = {
+                let open_files = self.open_files.lock().unwrap();
+                open_files.get(&fh.0).and_then(|s| {
+                    if s.byte_count > 0 {
+                        Some(s.state.clone())
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(snapshot) = state_snapshot {
+                let raw_bytes = {
+                    let d224 = {
+                        let mut io = self.io.lock().unwrap();
+                        let mut fsa = FileStorageAdd::new(&mut *io);
+                        let d256 = snapshot.end(&mut fsa);
+                        fsa.end(&d256)
+                    };
+                    let mut io = self.io.lock().unwrap();
+                    match file_storage_get(&mut *io, &d224) {
+                        Some(bytes) => bytes,
+                        None => return reply.error(Errno::EIO),
+                    }
+                };
+                let start = (offset as usize).min(raw_bytes.len());
+                let end = (offset as usize + size as usize).min(raw_bytes.len());
+                return reply.data(&raw_bytes[start..end]);
             }
         }
 
@@ -1036,8 +1152,10 @@ impl Filesystem for SliceFsFilesystem {
                 fh,
                 OpenFileState {
                     ino: ino.0,
-                    buf: Vec::new(),
+                    state: State::default(),
+                    byte_count: 0,
                     cas_committed: false,
+                    last_committed_root: None,
                 },
             );
 
