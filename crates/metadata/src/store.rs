@@ -68,6 +68,12 @@ pub struct DictMetadataStore {
     /// Updated atomically in `create_inode` (+size), `update_inode` (delta),
     /// and `delete_inode` (-size).  Never goes below 0.
     logical_bytes: AtomicU64,
+    /// Running count of all inodes (including the root directory).
+    ///
+    /// Incremented in `create_inode` and `create_directory`, decremented in
+    /// `delete_inode`.  Initialized to `1` (root inode) on `new()`, recomputed
+    /// from `inode_data.len()` on `load_from_root()`.
+    inode_count: AtomicU64,
     /// Optional WAL strategy — routes all Dictionary mutations to durable storage.
     ///
     /// Set via `set_wal()` after construction. When None, mutations are not logged.
@@ -113,6 +119,7 @@ impl DictMetadataStore {
             xattr_data: Mutex::new(BTreeMap::new()),
             refcounts: Mutex::new(BTreeMap::new()),
             logical_bytes: AtomicU64::new(0),
+            inode_count: AtomicU64::new(1),
             wal: Mutex::new(None),
             last_root: Mutex::new(None),
             snapshots_by_version: Mutex::new(HashMap::new()),
@@ -137,18 +144,39 @@ impl DictMetadataStore {
     /// Increment the reference count for `digest` by 1.
     ///
     /// Creates the entry (starting at 1) if it does not yet exist.
+    ///
+    /// Saturates at `u64::MAX` — blocks at `u64::MAX` are *immortal* and will
+    /// never be garbage-collected.  A tracing warning is emitted the first time
+    /// a block reaches saturation.
     pub fn increment_refcount(&self, digest: &Digest224) {
         let mut rc = self.refcounts.lock().unwrap();
-        *rc.entry(*digest).or_insert(0) += 1;
+        let val = rc.entry(*digest).or_insert(0);
+        if *val == u64::MAX {
+            // Already saturated — no-op.
+            return;
+        }
+        *val += 1;
+        if *val == u64::MAX {
+            tracing::warn!(
+                "refcount saturated for block — block is now immortal and will not be GC'd"
+            );
+        }
     }
 
     /// Decrement the reference count for `digest` by 1.
     ///
     /// Removes the entry entirely when the count reaches 0.
     /// Does nothing if `digest` is not tracked.
+    ///
+    /// If the current count is `u64::MAX` (saturated / immortal), this is a
+    /// no-op — immortal blocks are never freed.
     pub fn decrement_refcount(&self, digest: &Digest224) {
         let mut rc = self.refcounts.lock().unwrap();
         if let Some(count) = rc.get_mut(digest) {
+            // Saturated blocks are immortal — decrement is a no-op.
+            if *count == u64::MAX {
+                return;
+            }
             if *count <= 1 {
                 rc.remove(digest);
             } else {
@@ -163,12 +191,31 @@ impl DictMetadataStore {
         rc.get(digest).copied().unwrap_or(0)
     }
 
+    /// Return the number of blocks whose reference count has saturated at `u64::MAX`.
+    ///
+    /// Saturated blocks are *immortal* — they will never be garbage-collected.
+    /// A non-zero count here indicates the GC dead-letter queue has accumulated
+    /// blocks; this is surfaced as a warning in `slicefs scrub`.
+    pub fn saturated_refcount_count(&self) -> usize {
+        let rc = self.refcounts.lock().unwrap();
+        rc.values().filter(|&&v| v == u64::MAX).count()
+    }
+
     /// Return the current logical byte total — the sum of all inode `size` fields.
     ///
     /// This is the "logical" space consumed by the filesystem, before deduplication.
     /// Dividing logical_bytes by (dict.len() * 92) gives the dedup ratio.
     pub fn logical_bytes(&self) -> u64 {
         self.logical_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Return the current inode count (total number of live inodes including root).
+    ///
+    /// Updated atomically in `create_inode`/`create_directory` (+1) and
+    /// `delete_inode` (-1, saturating).  Recomputed from `inode_data.len()` after
+    /// `load_from_root()`.
+    pub fn inode_count(&self) -> u64 {
+        self.inode_count.load(Ordering::Relaxed)
     }
 
     /// Set the WAL strategy. Must be called before any mutations if durability is desired.
@@ -352,6 +399,9 @@ impl MetadataStore for DictMetadataStore {
             self.logical_bytes.fetch_add(full_meta.size, Ordering::Relaxed);
         }
 
+        // Track inode count.
+        self.inode_count.fetch_add(1, Ordering::Relaxed);
+
         Ok(ino)
     }
 
@@ -420,6 +470,12 @@ impl MetadataStore for DictMetadataStore {
                 Some(cur.saturating_sub(size))
             }).ok();
         }
+
+        // Decrement inode count (saturating to avoid underflow).
+        self.inode_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+            Some(c.saturating_sub(1))
+        }).ok();
+
         Ok(())
     }
 
@@ -476,6 +532,9 @@ impl MetadataStore for DictMetadataStore {
         let mut parent_meta = self.get_inode(parent_ino)?;
         parent_meta.nlinks += 1;
         self.update_inode(&parent_meta)?;
+
+        // Track inode count for the new directory inode.
+        self.inode_count.fetch_add(1, Ordering::Relaxed);
 
         Ok(ino)
     }
@@ -857,6 +916,9 @@ impl DictMetadataStore {
             load_inode(&mut *io_guard, digest).map(|m| m.size).unwrap_or(0)
         }).sum();
 
+        // Recompute inode_count from inode_data length.
+        let initial_inode_count = inode_data.len() as u64;
+
         drop(io_guard);
 
         Ok(DictMetadataStore {
@@ -868,6 +930,7 @@ impl DictMetadataStore {
             xattr_data: Mutex::new(xattr_data),
             refcounts: Mutex::new(refcounts),
             logical_bytes: AtomicU64::new(initial_logical_bytes),
+            inode_count: AtomicU64::new(initial_inode_count),
             wal: Mutex::new(None),
             last_root: Mutex::new(Some(*root)),
             snapshots_by_version: Mutex::new(HashMap::new()),
@@ -1737,6 +1800,113 @@ mod tests {
         assert_eq!(list[0].version, 1);
         assert_eq!(list[1].version, 2);
         assert_eq!(list[2].version, 3);
+    }
+
+    // ── Saturating refcount tests (FIX-01) ────────────────────────────────────
+
+    #[test]
+    fn test_refcount_saturates() {
+        let (_dir, store) = make_store();
+        let digest: Digest224 = [0xDEu32; 7];
+
+        // Manually set refcount to u64::MAX - 1
+        {
+            let mut rc = store.refcounts.lock().unwrap();
+            rc.insert(digest, u64::MAX - 1);
+        }
+
+        // One more increment brings it to u64::MAX
+        store.increment_refcount(&digest);
+        assert_eq!(store.get_refcount(&digest), u64::MAX,
+            "refcount should be u64::MAX after increment from MAX-1");
+
+        // Another increment must stay at u64::MAX (not wrap to 0)
+        store.increment_refcount(&digest);
+        assert_eq!(store.get_refcount(&digest), u64::MAX,
+            "refcount at u64::MAX must not wrap on increment");
+    }
+
+    #[test]
+    fn test_refcount_decrement_saturated() {
+        let (_dir, store) = make_store();
+        let digest: Digest224 = [0xABu32; 7];
+
+        // Set refcount to u64::MAX directly
+        {
+            let mut rc = store.refcounts.lock().unwrap();
+            rc.insert(digest, u64::MAX);
+        }
+
+        // Decrement must be a no-op for saturated blocks
+        store.decrement_refcount(&digest);
+        assert_eq!(store.get_refcount(&digest), u64::MAX,
+            "decrement on saturated (u64::MAX) refcount must be a no-op — block is immortal");
+    }
+
+    #[test]
+    fn test_saturated_refcount_count() {
+        let (_dir, store) = make_store();
+        let d1: Digest224 = [0x01u32; 7];
+        let d2: Digest224 = [0x02u32; 7];
+        let d3: Digest224 = [0x03u32; 7];
+        let d4: Digest224 = [0x04u32; 7];
+        let d5: Digest224 = [0x05u32; 7];
+
+        {
+            let mut rc = store.refcounts.lock().unwrap();
+            rc.insert(d1, u64::MAX); // saturated
+            rc.insert(d2, u64::MAX); // saturated
+            rc.insert(d3, 5);        // normal
+            rc.insert(d4, 2);        // normal
+            rc.insert(d5, 1);        // normal
+        }
+
+        assert_eq!(store.saturated_refcount_count(), 2,
+            "should count exactly 2 saturated refcounts");
+    }
+
+    // ── inode_count AtomicU64 tests (FIX-02 store layer) ─────────────────────
+
+    #[test]
+    fn test_inode_count_empty() {
+        let (_dir, store) = make_store();
+        // Fresh store has root inode (ino=1) — count should be 1
+        assert_eq!(store.inode_count(), 1,
+            "fresh store should have inode_count == 1 (root inode)");
+    }
+
+    #[test]
+    fn test_inode_count_tracks_lifecycle() {
+        let (_dir, store) = make_store();
+        // Create 3 inodes (inos 2, 3, 4) — total = 1 root + 3 = 4
+        store.create_inode(&new_file_meta()).unwrap();
+        store.create_inode(&new_file_meta()).unwrap();
+        let ino3 = store.create_inode(&new_file_meta()).unwrap();
+        assert_eq!(store.inode_count(), 4,
+            "after creating 3 inodes, count should be 4 (root + 3)");
+
+        // Delete one -> should be 3
+        store.delete_inode(ino3).unwrap();
+        assert_eq!(store.inode_count(), 3,
+            "after deleting 1 inode, count should be 3");
+    }
+
+    #[test]
+    fn test_inode_count_after_reload() {
+        let (_dir, store) = make_store();
+        // Create 2 inodes
+        store.create_inode(&new_file_meta()).unwrap();
+        store.create_inode(&new_file_meta()).unwrap();
+        let count_before = store.inode_count();
+        assert_eq!(count_before, 3, "should have 3 inodes (root + 2)");
+
+        // Commit and reload
+        let root = store.commit().unwrap();
+        let io = Arc::clone(store.io());
+        let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
+
+        assert_eq!(reloaded.inode_count(), count_before,
+            "inode_count should match original after load_from_root round-trip");
     }
 }
 
