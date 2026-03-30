@@ -18,7 +18,7 @@
 
 use slicefs_traits::digest::{Digest224, from_digest224};
 use slicefs_traits::metadata::MetaError;
-use blockset::{State, Tree, GetBytes, GetData, Dictionary};
+use blockset::{State, Tree, GetBytes, GetData, Dictionary, StorageAdd};
 
 // ─── serialization helpers ────────────────────────────────────────────────────
 
@@ -76,14 +76,14 @@ fn deserialize_xattrs(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, MetaError>
 
 // ─── public CAS-backed functions ──────────────────────────────────────────────
 
-/// Serialize all xattr pairs and store them in the Dictionary.
+/// Serialize all xattr pairs and store them in any `StorageAdd` backend.
 ///
 /// Returns the `Digest224` key that can later be passed to `load_xattrs`.
 /// An empty list serializes to an empty byte sequence which produces a
 /// canonical empty-content `Digest224`.
-pub fn intern_xattrs(dict: &mut Dictionary, xattrs: &[(String, Vec<u8>)]) -> Digest224 {
+pub fn intern_xattrs(storage: &mut impl StorageAdd, xattrs: &[(String, Vec<u8>)]) -> Digest224 {
     let bytes = serialize_xattrs(xattrs);
-    State::push_all(dict, &bytes)
+    State::push_all(storage, &bytes)
 }
 
 /// Retrieve and deserialize all xattr pairs from the Dictionary.

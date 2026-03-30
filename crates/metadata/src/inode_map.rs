@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::MetaError;
-use blockset::{State, Tree, GetBytes, GetData, Dictionary};
+use blockset::{State, Tree, GetBytes, GetData, Dictionary, StorageAdd};
 
 /// In-memory inode number → Digest224 key mapping.
 ///
@@ -133,12 +133,12 @@ pub fn deserialize_inode_map(bytes: &[u8]) -> Result<InodeMap, MetaError> {
     })
 }
 
-/// Serialize and store an `InodeMap` into a blockset Dictionary.
+/// Serialize and store an `InodeMap` into any `StorageAdd` backend.
 ///
 /// Returns the `Digest224` key that can later be passed to `load_inode_map`.
-pub fn intern_inode_map(dict: &mut Dictionary, map: &InodeMap) -> Digest224 {
+pub fn intern_inode_map(storage: &mut impl StorageAdd, map: &InodeMap) -> Digest224 {
     let bytes = serialize_inode_map(map);
-    State::push_all(dict, &bytes)
+    State::push_all(storage, &bytes)
 }
 
 /// Retrieve and deserialize an `InodeMap` from a blockset Dictionary.

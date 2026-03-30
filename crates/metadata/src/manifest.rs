@@ -7,21 +7,21 @@
 
 use slicefs_traits::digest::{Digest224, from_digest224};
 use slicefs_traits::metadata::MetaError;
-use blockset::{State, Tree, GetBytes, GetData, Dictionary};
+use blockset::{State, Tree, GetBytes, GetData, Dictionary, StorageAdd};
 
-/// Serialize and store an ordered list of block hashes in the Dictionary.
+/// Serialize and store an ordered list of block hashes in any `StorageAdd` backend.
 ///
 /// Returns the `Digest224` key that can later be passed to `load_manifest`.
 /// An empty block list is valid and produces a deterministic key for the empty
 /// byte sequence.
-pub fn intern_manifest(dict: &mut Dictionary, blocks: &[Digest224]) -> Digest224 {
+pub fn intern_manifest(storage: &mut impl StorageAdd, blocks: &[Digest224]) -> Digest224 {
     let mut bytes = Vec::with_capacity(blocks.len() * 28);
     for block in blocks {
         for word in block {
             bytes.extend_from_slice(&word.to_le_bytes());
         }
     }
-    State::push_all(dict, &bytes)
+    State::push_all(storage, &bytes)
 }
 
 /// Retrieve and deserialize a file manifest from the Dictionary.

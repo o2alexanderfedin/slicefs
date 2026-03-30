@@ -26,16 +26,16 @@ use std::collections::BTreeMap;
 
 use slicefs_traits::digest::{Digest224, from_digest224};
 use slicefs_traits::metadata::{DirEntry, MetaError};
-use blockset::{State, Tree, GetBytes, GetData, Dictionary};
+use blockset::{State, Tree, GetBytes, GetData, StorageAdd};
 
 // ─── public primitives ────────────────────────────────────────────────────────
 
 /// Compute the CAS key (name hash) for a directory entry name.
 ///
-/// Uses `State::push_all` which stores the name bytes in the Dictionary and
+/// Uses `State::push_all` which stores the name bytes in the storage backend and
 /// returns a stable `Digest224` key.
-pub fn entry_key(dict: &mut Dictionary, name: &str) -> Digest224 {
-    State::push_all(dict, name.as_bytes())
+pub fn entry_key(storage: &mut impl StorageAdd, name: &str) -> Digest224 {
+    State::push_all(storage, name.as_bytes())
 }
 
 /// Encode an inode number as an inline `Digest256`.
@@ -138,13 +138,13 @@ fn deserialize_entry_list(bytes: &[u8]) -> Result<BTreeMap<Digest224, EntryRecor
     Ok(map)
 }
 
-fn intern_entry_list(dict: &mut Dictionary, entries: &BTreeMap<Digest224, EntryRecord>) -> Digest224 {
+fn intern_entry_list(storage: &mut impl StorageAdd, entries: &BTreeMap<Digest224, EntryRecord>) -> Digest224 {
     let bytes = serialize_entry_list(entries);
-    State::push_all(dict, &bytes)
+    State::push_all(storage, &bytes)
 }
 
-fn load_entry_list(
-    dict: &Dictionary,
+fn load_entry_list<S: blockset::storage::StorageGet>(
+    dict: &S,
     list_digest: &Digest224,
 ) -> Result<BTreeMap<Digest224, EntryRecord>, MetaError> {
     let digest256 = from_digest224(list_digest);
@@ -160,18 +160,18 @@ fn load_entry_list(
 /// Both entries are stored as part of the entry list. Returns the entry list
 /// `Digest224` which acts as the directory's identity in the metadata store.
 pub fn create_dir_entries(
-    dict: &mut Dictionary,
+    storage: &mut impl StorageAdd,
     self_ino: u64,
     parent_ino: u64,
 ) -> Digest224 {
-    let dot_key = entry_key(dict, ".");
-    let dotdot_key = entry_key(dict, "..");
+    let dot_key = entry_key(storage, ".");
+    let dotdot_key = entry_key(storage, "..");
 
     let mut entries = BTreeMap::new();
     entries.insert(dot_key, EntryRecord { key: dot_key, ino: self_ino, name: ".".to_string() });
     entries.insert(dotdot_key, EntryRecord { key: dotdot_key, ino: parent_ino, name: "..".to_string() });
 
-    intern_entry_list(dict, &entries)
+    intern_entry_list(storage, &entries)
 }
 
 /// Add a single directory entry `name → ino`.
@@ -179,8 +179,8 @@ pub fn create_dir_entries(
 /// Returns the new entry list `Digest224`.  Errors:
 /// - `MetaError::InvalidName` if `name` is `.` or `..`
 /// - `MetaError::AlreadyExists(0)` if the name is already in the directory
-pub fn add_dir_entry(
-    dict: &mut Dictionary,
+pub fn add_dir_entry<S: StorageAdd + blockset::storage::StorageGet>(
+    storage: &mut S,
     dir_digest: &Digest224,
     name: &str,
     ino: u64,
@@ -188,13 +188,13 @@ pub fn add_dir_entry(
     if name == "." || name == ".." {
         return Err(MetaError::InvalidName(name.to_string()));
     }
-    let mut entries = load_entry_list(dict, dir_digest)?;
-    let key = entry_key(dict, name);
+    let mut entries = load_entry_list(&*storage, dir_digest)?;
+    let key = entry_key(storage, name);
     if entries.contains_key(&key) {
         return Err(MetaError::AlreadyExists(ino));
     }
     entries.insert(key, EntryRecord { key, ino, name: name.to_string() });
-    Ok(intern_entry_list(dict, &entries))
+    Ok(intern_entry_list(storage, &entries))
 }
 
 /// Remove a directory entry by name.
@@ -202,33 +202,33 @@ pub fn add_dir_entry(
 /// Returns the new entry list `Digest224`.  Errors:
 /// - `MetaError::InvalidName` if `name` is `.` or `..`
 /// - `MetaError::NotFound(0)` if the name is not in the directory
-pub fn remove_dir_entry(
-    dict: &mut Dictionary,
+pub fn remove_dir_entry<S: StorageAdd + blockset::storage::StorageGet>(
+    storage: &mut S,
     dir_digest: &Digest224,
     name: &str,
 ) -> Result<Digest224, MetaError> {
     if name == "." || name == ".." {
         return Err(MetaError::InvalidName(name.to_string()));
     }
-    let mut entries = load_entry_list(dict, dir_digest)?;
-    let key = entry_key(dict, name);
+    let mut entries = load_entry_list(&*storage, dir_digest)?;
+    let key = entry_key(storage, name);
     if entries.remove(&key).is_none() {
         return Err(MetaError::NotFound(0));
     }
-    Ok(intern_entry_list(dict, &entries))
+    Ok(intern_entry_list(storage, &entries))
 }
 
 /// Look up a single directory entry by name. O(log n) in the number of entries.
 ///
 /// Errors:
 /// - `MetaError::NotFound(0)` if the name is not in the directory
-pub fn lookup_dir_entry(
-    dict: &mut Dictionary,
+pub fn lookup_dir_entry<S: StorageAdd + blockset::storage::StorageGet>(
+    storage: &mut S,
     dir_digest: &Digest224,
     name: &str,
 ) -> Result<u64, MetaError> {
-    let entries = load_entry_list(dict, dir_digest)?;
-    let key = entry_key(dict, name);
+    let entries = load_entry_list(&*storage, dir_digest)?;
+    let key = entry_key(storage, name);
     entries
         .get(&key)
         .map(|r| r.ino)
@@ -236,8 +236,8 @@ pub fn lookup_dir_entry(
 }
 
 /// List all entries in a directory.
-pub fn list_dir_entries(
-    dict: &Dictionary,
+pub fn list_dir_entries<S: blockset::storage::StorageGet>(
+    dict: &S,
     dir_digest: &Digest224,
 ) -> Result<Vec<DirEntry>, MetaError> {
     let entries = load_entry_list(dict, dir_digest)?;

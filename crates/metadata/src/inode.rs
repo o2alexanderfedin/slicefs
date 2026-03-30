@@ -3,14 +3,13 @@
 //! Provides 56-byte little-endian pack/unpack of `InodeMeta`, plus
 //! Dictionary-backed `intern_inode` and `load_inode` for CAS storage.
 //!
-//! Note: `blockset::StorageAdd` and `StorageGet` are private traits in blockset.
-//! The only publicly-accessible type that implements them is `blockset::Dictionary`
-//! (which is `BTreeMap<[u32;7], [[u32;8];2]>`). Therefore, `intern_inode` and
-//! `load_inode` work directly with `blockset::Dictionary`.
+//! `intern_inode` accepts any `blockset::StorageAdd` impl (e.g. `Dictionary` or
+//! `FileStorageAdd`). `load_inode` keeps `&Dictionary` in this plan — it will be
+//! migrated to `&mut impl Io` in Plan 02.
 
 use slicefs_traits::metadata::{InodeMeta, MetaError};
 use slicefs_traits::digest::{Digest224, Digest256, from_digest224};
-use blockset::{State, Tree, GetBytes, GetData, Dictionary};
+use blockset::{State, Tree, GetBytes, GetData, Dictionary, StorageAdd};
 
 /// Serialize `InodeMeta` to a fixed 56-byte little-endian buffer.
 ///
@@ -65,15 +64,12 @@ pub fn deserialize_inode(buf: &[u8]) -> Result<InodeMeta, MetaError> {
     })
 }
 
-/// Serialize an inode and store it in a blockset Dictionary.
+/// Serialize an inode and store it in any `StorageAdd` backend.
 ///
 /// Returns the `Digest224` key that can later be passed to `load_inode`.
-///
-/// Note: Uses `blockset::Dictionary` directly because `StorageAdd` is a private
-/// blockset trait; `Dictionary` is the only publicly-accessible implementation.
-pub fn intern_inode(dict: &mut Dictionary, meta: &InodeMeta) -> Digest224 {
+pub fn intern_inode(storage: &mut impl StorageAdd, meta: &InodeMeta) -> Digest224 {
     let bytes = serialize_inode(meta);
-    State::push_all(dict, &bytes)
+    State::push_all(storage, &bytes)
 }
 
 /// Retrieve and deserialize an inode from a blockset Dictionary.
