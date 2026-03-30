@@ -269,31 +269,105 @@ impl SliceFsFilesystem {
         Ok((ino, fh))
     }
 
-    /// Write `data` at `offset` into the streaming state for `fh`. Returns bytes written.
+    /// Write `data` at `offset` into the file handle `fh`. Returns bytes written.
     ///
-    /// Phase 10: sequential writes only. Data is always appended via `push_bytes`.
-    /// The `offset` parameter is accepted but not validated for sequential ordering;
-    /// Phase 11 (STRM-02) will add offset validation and fallback for non-sequential writes.
+    /// Dual dispatch on WriteMode:
+    /// - Streaming: sequential writes via push_bytes (O(log N) memory).
+    ///   If offset != next_expected_offset, triggers one-way fallback to Buffered.
+    /// - Buffered: standard pwrite semantics into Vec<u8> (O(N) memory).
     ///
     /// Lock ordering: open_files -> io (canonical order).
+    /// Fallback transition: release open_files before io for materialization,
+    /// re-acquire open_files to swap WriteMode. FUSE serializes per-fh writes.
     pub fn test_write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, i32> {
-        // Phase 10: sequential writes only. Non-sequential offset detection is Phase 11.
-        // For now, accept any offset — push_bytes always appends sequentially.
         let mut open_files = self.open_files.lock().unwrap();
-        let state = open_files.get_mut(&fh).ok_or(libc::EBADF)?;
+        let file_state = open_files.get_mut(&fh).ok_or(libc::EBADF)?;
 
-        // Lock ordering: open_files -> io is canonical.
-        // We need both locks simultaneously because push_bytes needs mutable State
-        // (held via open_files) and mutable io (for FileStorageAdd).
-        let mut io = self.io.lock().unwrap();
-        let mut fsa = FileStorageAdd::new(&mut *io);
-        state.state.push_bytes(&mut fsa, data);
-        drop(fsa);
-        drop(io);
+        match &mut file_state.write_mode {
+            WriteMode::Streaming { state, next_expected_offset } => {
+                if offset != *next_expected_offset {
+                    // Fallback from Streaming to Buffered mode
+                    let snapshot = state.clone();
+                    let byte_count = file_state.byte_count;
+                    let ino = file_state.ino;
+                    let old_root = file_state.last_committed_root.take();
+                    drop(open_files); // Release before io
 
-        state.byte_count += data.len() as u64;
-        state.cas_committed = false; // New writes invalidate prior CAS commit
-        Ok(data.len() as u32)
+                    debug!(
+                        fh = fh, ino = ino,
+                        offset = offset, expected = byte_count,
+                        "fallback from Streaming to Buffered mode"
+                    );
+
+                    // Materialize current streaming content (or load from committed)
+                    let mut buf = if byte_count > 0 {
+                        let digest: Digest224 = {
+                            let mut io = self.io.lock().unwrap();
+                            let mut fsa = FileStorageAdd::new(&mut *io);
+                            let d256 = snapshot.end(&mut fsa);
+                            fsa.end(&d256)
+                        };
+                        let mut io = self.io.lock().unwrap();
+                        file_storage_get(&mut *io, &digest).unwrap_or_default()
+                    } else {
+                        // No streaming content yet -- load from committed manifest
+                        // (prevents existing file content loss per Research Pitfall 1)
+                        match self.meta.get_manifest(ino) {
+                            Ok(m) if !m.is_empty() => {
+                                let mut io = self.io.lock().unwrap();
+                                file_storage_get(&mut *io, &m[0]).unwrap_or_default()
+                            }
+                            _ => Vec::new(),
+                        }
+                    };
+
+                    // Apply pwrite semantics
+                    let end = offset as usize + data.len();
+                    if end > buf.len() {
+                        buf.resize(end, 0);
+                    }
+                    buf[offset as usize..end].copy_from_slice(data);
+
+                    // Swap to Buffered mode
+                    let buf_len = buf.len() as u64;
+                    let mut open_files = self.open_files.lock().unwrap();
+                    if let Some(s) = open_files.get_mut(&fh) {
+                        s.write_mode = WriteMode::Buffered { buf };
+                        s.byte_count = buf_len;
+                        s.cas_committed = false;
+                    }
+
+                    // Decrement old committed root
+                    if let Some(old) = old_root {
+                        self.meta.decrement_refcount(&old);
+                    }
+
+                    return Ok(data.len() as u32);
+                }
+
+                // Sequential write -- continue streaming
+                let mut io = self.io.lock().unwrap();
+                let mut fsa = FileStorageAdd::new(&mut *io);
+                state.push_bytes(&mut fsa, data);
+                drop(fsa);
+                drop(io);
+                *next_expected_offset += data.len() as u64;
+                file_state.byte_count += data.len() as u64;
+                file_state.cas_committed = false;
+                Ok(data.len() as u32)
+            }
+            WriteMode::Buffered { buf } => {
+                // Standard pwrite into buffer
+                let end = offset as usize + data.len();
+                if end > buf.len() {
+                    buf.resize(end, 0);
+                }
+                buf[offset as usize..end].copy_from_slice(data);
+                file_state.byte_count = buf.len() as u64;
+                file_state.cas_committed = false;
+                Ok(data.len() as u32)
+            }
+        }
     }
 
     /// Release file handle `fh`, finalizing streaming state to CAS and updating the inode.
@@ -306,8 +380,8 @@ impl SliceFsFilesystem {
     /// Refcount lifecycle: decrements old committed root if different from new digest,
     /// increments new digest. Empty files (byte_count==0) set empty manifest without CAS push.
     pub fn test_release(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        let (state, byte_count, cas_committed, last_committed_root) = match self.open_files.lock().unwrap().remove(&fh) {
-            Some(s) => (s.state, s.byte_count, s.cas_committed, s.last_committed_root),
+        let (write_mode, byte_count, cas_committed, last_committed_root) = match self.open_files.lock().unwrap().remove(&fh) {
+            Some(s) => (s.write_mode, s.byte_count, s.cas_committed, s.last_committed_root),
             None => return Ok(()), // Already closed
         };
 
@@ -319,12 +393,22 @@ impl SliceFsFilesystem {
             return Ok(());
         }
 
-        // Finalize the State (consumes it -- this is release, handle is closing)
-        let new_digest: Digest224 = {
-            let mut io = self.io.lock().unwrap();
-            let mut fsa = FileStorageAdd::new(&mut *io);
-            let d256 = state.end(&mut fsa);
-            fsa.end(&d256)
+        // Finalize to CAS based on write mode
+        let new_digest: Digest224 = match write_mode {
+            WriteMode::Streaming { state, .. } => {
+                let mut io = self.io.lock().unwrap();
+                let mut fsa = FileStorageAdd::new(&mut *io);
+                let d256 = state.end(&mut fsa);
+                fsa.end(&d256)
+            }
+            WriteMode::Buffered { buf } => {
+                let mut io = self.io.lock().unwrap();
+                let mut fsa = FileStorageAdd::new(&mut *io);
+                let mut fresh = State::default();
+                fresh.push_bytes(&mut fsa, &buf);
+                let d256 = fresh.end(&mut fsa);
+                fsa.end(&d256)
+            }
         };
 
         // If the digest matches last committed root (fsync already committed this exact state),
@@ -385,31 +469,45 @@ impl SliceFsFilesystem {
     ///
     /// Used by integration tests to bypass the FUSE request/reply layer.
     pub fn test_read(&self, ino: u64, offset: u64, size: u32) -> Result<Vec<u8>, i32> {
-        // Check for open write handles on this inode (cross-handle read support)
-        let writer_state: Option<(State, u64)> = {
+        // Check for open write handles on this inode (cross-handle read support).
+        // In Buffered mode, clone buf directly (no CAS roundtrip needed).
+        // In Streaming mode, clone State for materialization.
+        enum WriterSnapshot {
+            Streaming(State),
+            Buffered(Vec<u8>),
+        }
+
+        let writer_snapshot: Option<WriterSnapshot> = {
             let open_files = self.open_files.lock().unwrap();
             open_files.values()
                 .find(|s| s.ino == ino && s.byte_count > 0)
-                .map(|s| (s.state.clone(), s.byte_count))
+                .map(|s| match &s.write_mode {
+                    WriteMode::Streaming { state, .. } => WriterSnapshot::Streaming(state.clone()),
+                    WriteMode::Buffered { buf } => WriterSnapshot::Buffered(buf.clone()),
+                })
         };
         // open_files lock released
 
-        let raw_bytes: Vec<u8> = if let Some((snapshot, _byte_count)) = writer_state {
-            // Materialize uncommitted content via clone+end+file_storage_get
-            let digest: Digest224 = {
+        let raw_bytes: Vec<u8> = match writer_snapshot {
+            Some(WriterSnapshot::Buffered(buf)) => buf,
+            Some(WriterSnapshot::Streaming(snapshot)) => {
+                // Materialize uncommitted content via clone+end+file_storage_get
+                let digest: Digest224 = {
+                    let mut io = self.io.lock().unwrap();
+                    let mut fsa = FileStorageAdd::new(&mut *io);
+                    let d256 = snapshot.end(&mut fsa);
+                    fsa.end(&d256)
+                };
                 let mut io = self.io.lock().unwrap();
-                let mut fsa = FileStorageAdd::new(&mut *io);
-                let d256 = snapshot.end(&mut fsa);
-                fsa.end(&d256)
-            };
-            let mut io = self.io.lock().unwrap();
-            file_storage_get(&mut *io, &digest).ok_or(libc::EIO)?
-        } else {
-            // Fall back to committed manifest
-            let manifest = self.meta.get_manifest(ino).map_err(|_| libc::EIO)?;
-            if manifest.is_empty() { return Ok(vec![]); }
-            let mut io = self.io.lock().unwrap();
-            file_storage_get(&mut *io, &manifest[0]).ok_or(libc::EIO)?
+                file_storage_get(&mut *io, &digest).ok_or(libc::EIO)?
+            }
+            None => {
+                // Fall back to committed manifest
+                let manifest = self.meta.get_manifest(ino).map_err(|_| libc::EIO)?;
+                if manifest.is_empty() { return Ok(vec![]); }
+                let mut io = self.io.lock().unwrap();
+                file_storage_get(&mut *io, &manifest[0]).ok_or(libc::EIO)?
+            }
         };
 
         let start = (offset as usize).min(raw_bytes.len());
@@ -430,8 +528,13 @@ impl SliceFsFilesystem {
     /// If `fh` is not in `open_files` (read-only handle or invalid), returns Ok
     /// without error — fsync is a no-op for read-only handles.
     fn flush_buffer_for_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        // 1. Clone state snapshot under open_files lock
-        let (state_snapshot, byte_count, old_root) = {
+        // 1. Clone state/buf snapshot under open_files lock
+        enum FsyncSnapshot {
+            Streaming(State),
+            Buffered(Vec<u8>),
+        }
+
+        let (snapshot, byte_count, old_root) = {
             let mut open_files = self.open_files.lock().unwrap();
             match open_files.get_mut(&fh) {
                 Some(s) => {
@@ -440,19 +543,33 @@ impl SliceFsFilesystem {
                         return Ok(());
                     }
                     s.cas_committed = true;
-                    (s.state.clone(), s.byte_count, s.last_committed_root)
+                    let snap = match &s.write_mode {
+                        WriteMode::Streaming { state, .. } => FsyncSnapshot::Streaming(state.clone()),
+                        WriteMode::Buffered { buf } => FsyncSnapshot::Buffered(buf.clone()),
+                    };
+                    (snap, s.byte_count, s.last_committed_root)
                 }
                 None => return Ok(()), // No write handle -- fsync is a no-op
             }
         };
         // open_files lock released here
 
-        // 2. Materialize clone under io lock
-        let new_digest: Digest224 = {
-            let mut io = self.io.lock().unwrap();
-            let mut fsa = FileStorageAdd::new(&mut *io);
-            let d256 = state_snapshot.end(&mut fsa);
-            fsa.end(&d256)
+        // 2. Materialize under io lock
+        let new_digest: Digest224 = match snapshot {
+            FsyncSnapshot::Streaming(state_snapshot) => {
+                let mut io = self.io.lock().unwrap();
+                let mut fsa = FileStorageAdd::new(&mut *io);
+                let d256 = state_snapshot.end(&mut fsa);
+                fsa.end(&d256)
+            }
+            FsyncSnapshot::Buffered(buf_clone) => {
+                let mut io = self.io.lock().unwrap();
+                let mut fsa = FileStorageAdd::new(&mut *io);
+                let mut fresh = State::default();
+                fresh.push_bytes(&mut fsa, &buf_clone);
+                let d256 = fresh.end(&mut fsa);
+                fsa.end(&d256)
+            }
         };
 
         // 3. Decrement old committed root if any
@@ -493,70 +610,98 @@ impl SliceFsFilesystem {
 
 
     /// Truncate/extend a file to `new_size` bytes. If `fh` is Some and open,
-    /// operates on the in-flight streaming State; otherwise reads from CAS, adjusts, re-pushes.
+    /// operates on the in-flight write state; otherwise reads from CAS, adjusts, re-pushes.
+    ///
+    /// Dual dispatch on WriteMode:
+    /// - Streaming: materialize via clone+end, resize, repush into fresh State.
+    /// - Buffered: simple buf.resize() (no CAS operations needed for non-zero truncate).
     pub fn test_setattr_size(&self, ino: u64, fh: Option<u64>, new_size: u64) -> Result<(), i32> {
-        // Case A: open file handle — truncate in-flight streaming State
+        // Case A: open file handle — truncate in-flight write state
         if let Some(fh_val) = fh {
             let mut open_files = self.open_files.lock().unwrap();
             if let Some(s) = open_files.get_mut(&fh_val) {
-                if new_size == 0 {
-                    // Fast path: reset to empty State
-                    let old_root = s.last_committed_root.take();
-                    s.state = State::default();
-                    s.byte_count = 0;
-                    s.cas_committed = false;
-                    drop(open_files); // Release before io/meta operations
+                match &mut s.write_mode {
+                    WriteMode::Buffered { buf } => {
+                        if new_size == 0 {
+                            let old_root = s.last_committed_root.take();
+                            *buf = Vec::new();
+                            s.byte_count = 0;
+                            s.cas_committed = false;
+                            drop(open_files);
 
-                    // Decrement old committed root if any
-                    if let Some(old) = old_root {
-                        self.meta.decrement_refcount(&old);
+                            if let Some(old) = old_root {
+                                self.meta.decrement_refcount(&old);
+                            }
+                        } else {
+                            buf.resize(new_size as usize, 0);
+                            s.byte_count = buf.len() as u64;
+                            s.cas_committed = false;
+                            drop(open_files);
+                        }
                     }
-                } else {
-                    // Materialize current content from in-progress State
-                    let snapshot = s.state.clone();
-                    let current_byte_count = s.byte_count;
-                    let old_root = s.last_committed_root.take();
-                    drop(open_files); // Release before io lock
+                    WriteMode::Streaming { state, .. } => {
+                        if new_size == 0 {
+                            // Fast path: reset to empty Streaming State
+                            let old_root = s.last_committed_root.take();
+                            s.write_mode = WriteMode::Streaming { state: State::default(), next_expected_offset: 0 };
+                            s.byte_count = 0;
+                            s.cas_committed = false;
+                            drop(open_files);
 
-                    // Materialize to bytes
-                    let mut content: Vec<u8> = if current_byte_count == 0 {
-                        Vec::new()
-                    } else {
-                        let digest = {
-                            let mut io = self.io.lock().unwrap();
-                            let mut fsa = FileStorageAdd::new(&mut *io);
-                            let d256 = snapshot.end(&mut fsa);
-                            fsa.end(&d256)
-                        };
-                        let mut io = self.io.lock().unwrap();
-                        file_storage_get(&mut *io, &digest).unwrap_or_default()
-                    };
+                            if let Some(old) = old_root {
+                                self.meta.decrement_refcount(&old);
+                            }
+                        } else {
+                            // Materialize current content from in-progress State
+                            let snapshot = state.clone();
+                            let current_byte_count = s.byte_count;
+                            let old_root = s.last_committed_root.take();
+                            drop(open_files); // Release before io lock
 
-                    // Truncate or zero-extend
-                    content.resize(new_size as usize, 0);
+                            // Materialize to bytes
+                            let mut content: Vec<u8> = if current_byte_count == 0 {
+                                Vec::new()
+                            } else {
+                                let digest = {
+                                    let mut io = self.io.lock().unwrap();
+                                    let mut fsa = FileStorageAdd::new(&mut *io);
+                                    let d256 = snapshot.end(&mut fsa);
+                                    fsa.end(&d256)
+                                };
+                                let mut io = self.io.lock().unwrap();
+                                file_storage_get(&mut *io, &digest).unwrap_or_default()
+                            };
 
-                    // Push into fresh State
-                    let new_state_and_count = {
-                        let mut io = self.io.lock().unwrap();
-                        let mut fsa = FileStorageAdd::new(&mut *io);
-                        let mut fresh = State::default();
-                        fresh.push_bytes(&mut fsa, &content);
-                        (fresh, content.len() as u64)
-                    };
+                            // Truncate or zero-extend
+                            content.resize(new_size as usize, 0);
 
-                    // Update OpenFileState
-                    let mut open_files = self.open_files.lock().unwrap();
-                    if let Some(s) = open_files.get_mut(&fh_val) {
-                        s.state = new_state_and_count.0;
-                        s.byte_count = new_state_and_count.1;
-                        s.cas_committed = false;
-                        s.last_committed_root = None;
-                    }
-                    drop(open_files);
+                            // Push into fresh State
+                            let new_state_and_count = {
+                                let mut io = self.io.lock().unwrap();
+                                let mut fsa = FileStorageAdd::new(&mut *io);
+                                let mut fresh = State::default();
+                                fresh.push_bytes(&mut fsa, &content);
+                                (fresh, content.len() as u64)
+                            };
 
-                    // Decrement old committed root if any
-                    if let Some(old) = old_root {
-                        self.meta.decrement_refcount(&old);
+                            // Update OpenFileState
+                            let mut open_files = self.open_files.lock().unwrap();
+                            if let Some(s) = open_files.get_mut(&fh_val) {
+                                s.write_mode = WriteMode::Streaming {
+                                    state: new_state_and_count.0,
+                                    next_expected_offset: new_state_and_count.1,
+                                };
+                                s.byte_count = new_state_and_count.1;
+                                s.cas_committed = false;
+                                s.last_committed_root = None;
+                            }
+                            drop(open_files);
+
+                            // Decrement old committed root if any
+                            if let Some(old) = old_root {
+                                self.meta.decrement_refcount(&old);
+                            }
+                        }
                     }
                 }
 

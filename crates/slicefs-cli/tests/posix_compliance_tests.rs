@@ -61,11 +61,8 @@ fn test_file_create_write_read() {
     assert_eq!(readback, content, "content should round-trip through CAS");
 }
 
-/// Create file, write at offset — content before offset is zero-padded.
-/// TODO(Phase 11): Re-enable when non-sequential write support (STRM-02) is implemented.
-/// Phase 10 uses push_bytes which always appends sequentially; offset is ignored.
+/// Create file, write at offset -- content before offset is zero-padded (STRM-02).
 #[test]
-#[ignore = "Phase 11: non-sequential write offset handling (STRM-02)"]
 fn test_file_write_at_offset_zero_pads() {
     let (fs, _dir) = fresh_fs();
 
