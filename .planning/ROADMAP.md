@@ -171,19 +171,19 @@ Plans:
 - [ ] 08-01-PLAN.md — Saturating refcount fix, inode_count AtomicU64, three-tier statfs, scrub saturated reporting, FIX-03/FIX-04 verification
 
 #### Phase 9: Compression Removal
-**Goal**: The write path pushes raw bytes directly into the Merkle tree with no compression header; a new store format version (v3) is introduced; the read path handles all three versions so existing stores remain readable
+**Goal**: The write path pushes raw bytes directly into the Merkle tree with no compression header; compression infrastructure is fully removed (clean break — no v1/v2 backward compatibility; no production stores exist); raw content dedup works naturally
 **Depends on**: Phase 8
 **Requirements**: DECOMP-01, DECOMP-02, DECOMP-03, DECOMP-04
 **Success Criteria** (what must be TRUE):
-  1. Writing a file to a mounted v3 store produces no compression header bytes — raw content is stored in the Merkle tree verbatim
-  2. Two files with identical raw content deduplicate correctly even if one was written before compression removal and one after
-  3. Reading a file written under v1.0 (no header), v2.0 (compression header), or v3.0 (raw, no header) all return the correct bytes without manual intervention
-  4. The store version reported by `slicefs stats` increments to 3 after the first write to a freshly created store
-**Plans**: TBD
+  1. Writing a file to a mounted store produces no compression header bytes — raw content is stored in the Merkle tree verbatim
+  2. Two files with identical raw content deduplicate correctly via same Digest224 on raw bytes
+  3. Reading a stored file returns raw bytes unchanged — no decompress call in the read path
+  4. Stats reports compressor as "none (v3 raw)"; CLI has no --compressor flags
+**Plans**: 2 plans
 
 Plans:
-- [ ] 09-01-PLAN.md — Remove to_wire_bytes from write path; gate from_wire_bytes on store_version; bump version to 3
-- [ ] 09-02-PLAN.md — Cross-version read integration tests (v1/v2/v3 blocks in same store)
+- [ ] 09-01-PLAN.md — Remove compression from production code (filesystem.rs, mount.rs, cli.rs, stats.rs, Cargo.toml)
+- [ ] 09-02-PLAN.md — Update test files, delete compression_tests.rs, create v3 store validation tests
 
 #### Phase 10: Streaming Writes Core
 **Goal**: Sequential file writes use the incremental push_bytes API so that open file handle memory is O(log N) in file size — arbitrarily large files can be written without hitting a RAM ceiling; fsync mid-stream and truncate on an open handle both work correctly
