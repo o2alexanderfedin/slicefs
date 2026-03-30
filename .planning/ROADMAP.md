@@ -149,10 +149,12 @@ Plans:
   3. Snapshot lookup by version or name is O(1) via filesystem path resolution
   4. All existing tests pass with no regression — seed, mount, read, write, GC, scrub, stats, snapshots all work identically
   5. Segment replay on mount populates file-backed storage instead of in-memory Dictionary
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] TBD (run /gsd:plan-phase 07.1 to break down)
+- [ ] 07.1-01-PLAN.md — Export blockset FileStorage API, generalize intern/load helpers, O(1) snapshot indexes (FIX-03/FIX-04)
+- [ ] 07.1-02-PLAN.md — Replace Dictionary with StoreIo in DictMetadataStore, remove DictEntry from WAL/segments
+- [ ] 07.1-03-PLAN.md — Update all CLI consumers (filesystem, mount, seed, GC, scrub, stats) to use file-backed storage
 
 #### Phase 8: Correctness Fixes
 **Goal**: Known v1.0 correctness bugs are eliminated before the invasive write-path restructuring begins — refcount overflow risk is closed and statfs reports real numbers with three-tier space reporting (logical, CAS, host disk)
@@ -228,7 +230,7 @@ Phases execute in numeric order: 7.1 -> 8 -> 9 -> 10 -> 11
 | 5. Crash Safety and GC | v1.0 | 4/4 | Complete | 2026-03-29 |
 | 6. Compression and Snapshots | v1.0 | 4/4 | Complete | 2026-03-29 |
 | 7. Cross-Platform and Production Hardening | v1.0 | 3/3 | Complete | 2026-03-29 |
-| 7.1. FileStorage Migration (INSERTED) | v2.0 | 0/? | Not started | - |
+| 7.1. FileStorage Migration (INSERTED) | v2.0 | 0/3 | Not started | - |
 | 8. Correctness Fixes | v2.0 | 0/2 | Not started | - |
 | 9. Compression Removal | v2.0 | 0/2 | Not started | - |
 | 10. Streaming Writes Core | v2.0 | 0/3 | Not started | - |
