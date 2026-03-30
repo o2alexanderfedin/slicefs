@@ -194,7 +194,7 @@ Plans:
   2. Reading a file while it is still open for writing (before release) returns the bytes written so far, consistent with what a second process would see after the write completes
   3. Calling fsync mid-stream commits all bytes written up to that point durably; subsequent writes to the same file handle continue correctly and produce a consistent final file
   4. Truncating an open file handle to a smaller size atomically resets the streaming state and adjusts inode size — the file is correct after release with no leftover bytes beyond the truncation point
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
 - [ ] 10-01-PLAN.md — OpenFileState: replace Vec<u8> buf with blockset::State + byte_count tracking
