@@ -13,33 +13,34 @@
 //!   7. Permissions (chmod, chown, mtime)
 //!   8. Dedup verification (content digest equality, refcounts)
 
-use blockset::{Dictionary, GetBytes, GetData};
+use blockset::file_storage_get;
 use metadata::store::DictMetadataStore;
+use metadata::store_io::StoreIo;
 use slicefs_cli::filesystem::SliceFsFilesystem;
 use slicefs_compression::NoneCompressor;
-use slicefs_traits::digest::from_digest224;
 use slicefs_traits::metadata::MetadataStore;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use tempfile::TempDir;
 
 const S_IFREG: u32 = 0o100_000;
 const S_IFDIR: u32 = 0o040_000;
 
-fn fresh_fs() -> SliceFsFilesystem {
-    let meta = DictMetadataStore::new();
-    let dict = Dictionary::default();
-    SliceFsFilesystem::new(meta, dict, None, Arc::new(NoneCompressor::new()), 1)
+fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let meta = DictMetadataStore::new(io.clone());
+    let fs = SliceFsFilesystem::new(meta, io, None, Arc::new(NoneCompressor::new()), 1);
+    (fs, dir)
 }
 
-/// Read file content via manifest + GetBytes (same pipeline as real FUSE read)
+/// Read file content via manifest + file_storage_get (same pipeline as real FUSE read)
 fn read_content(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
     let manifest = fs.meta().get_manifest(ino).unwrap();
     if manifest.is_empty() {
         return vec![];
     }
-    let root256 = from_digest224(&manifest[0]);
-    let dict = fs.dict().lock().unwrap();
-    let get_data = GetData::new(&*dict, &root256);
-    GetBytes::new(get_data).collect()
+    let mut io = fs.io().lock().unwrap();
+    file_storage_get(&mut *io, &manifest[0]).unwrap_or_default()
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -49,7 +50,7 @@ fn read_content(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
 /// Create file, write content, close, read back — content matches exactly.
 #[test]
 fn test_file_create_write_read() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let content = b"hello, slicefs!";
 
     let (ino, fh) = fs.test_create(1, "hello.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
@@ -64,7 +65,7 @@ fn test_file_create_write_read() {
 /// Create file, write at offset — content before offset is zero-padded.
 #[test]
 fn test_file_write_at_offset_zero_pads() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs.test_create(1, "sparse.bin", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create sparse.bin");
@@ -80,7 +81,7 @@ fn test_file_write_at_offset_zero_pads() {
 /// Create file, close without writing — empty file with size 0.
 #[test]
 fn test_file_create_empty_has_size_zero() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs.test_create(1, "empty.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create empty.txt");
@@ -96,7 +97,7 @@ fn test_file_create_empty_has_size_zero() {
 /// Delete file — lookup returns NotFound afterward.
 #[test]
 fn test_file_delete_removes_from_directory() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs.test_create(1, "delete_me.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create delete_me.txt");
@@ -115,7 +116,7 @@ fn test_file_delete_removes_from_directory() {
 /// Create file in subdirectory — nested paths work.
 #[test]
 fn test_file_create_in_subdirectory() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let subdir_ino = fs.simulate_mkdir(1, "subdir", S_IFDIR | 0o755, 0o022, 0, 0)
         .expect("mkdir subdir");
@@ -135,7 +136,7 @@ fn test_file_create_in_subdirectory() {
 /// Write content, then overwrite with different content — reads back new content.
 #[test]
 fn test_file_overwrite_content() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh1) = fs.test_create(1, "overwrite.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create");
@@ -162,7 +163,7 @@ fn test_file_overwrite_content() {
 /// mkdir creates directory with . and .. entries.
 #[test]
 fn test_dir_mkdir_has_dot_entries() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let dir_ino = fs.simulate_mkdir(1, "newdir", S_IFDIR | 0o755, 0o022, 0, 0)
         .expect("mkdir newdir");
@@ -177,7 +178,7 @@ fn test_dir_mkdir_has_dot_entries() {
 /// mkdir in subdirectory — nested mkdir works.
 #[test]
 fn test_dir_nested_mkdir() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let parent_ino = fs.simulate_mkdir(1, "parent", S_IFDIR | 0o755, 0o022, 0, 0)
         .expect("mkdir parent");
@@ -195,7 +196,7 @@ fn test_dir_nested_mkdir() {
 /// mkdir increments parent nlinks (for the .. backlink).
 #[test]
 fn test_dir_mkdir_increments_parent_nlinks() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let parent_before = fs.meta().get_inode(1).unwrap().nlinks;
     fs.simulate_mkdir(1, "newdir", S_IFDIR | 0o755, 0o022, 0, 0).expect("mkdir");
@@ -210,7 +211,7 @@ fn test_dir_mkdir_increments_parent_nlinks() {
 /// rmdir on empty directory succeeds.
 #[test]
 fn test_dir_rmdir_empty_succeeds() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     fs.simulate_mkdir(1, "removeme", S_IFDIR | 0o755, 0o022, 0, 0).expect("mkdir");
     fs.simulate_rmdir(1, "removeme").expect("rmdir should succeed on empty dir");
@@ -222,7 +223,7 @@ fn test_dir_rmdir_empty_succeeds() {
 /// rmdir on non-empty directory returns ENOTEMPTY.
 #[test]
 fn test_dir_rmdir_nonempty_returns_enotempty() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let dir_ino = fs.simulate_mkdir(1, "nonempty", S_IFDIR | 0o755, 0o022, 0, 0).expect("mkdir");
     let (fino, fh) = fs.test_create(dir_ino, "file.txt", S_IFREG | 0o644, 0o022, 0, 0)
@@ -240,7 +241,7 @@ fn test_dir_rmdir_nonempty_returns_enotempty() {
 /// rmdir on a regular file returns ENOTDIR.
 #[test]
 fn test_dir_rmdir_on_file_returns_enotdir() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs.test_create(1, "notadir.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create file");
@@ -257,7 +258,7 @@ fn test_dir_rmdir_on_file_returns_enotdir() {
 /// rmdir decrements parent nlinks.
 #[test]
 fn test_dir_rmdir_decrements_parent_nlinks() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     fs.simulate_mkdir(1, "tmpdir", S_IFDIR | 0o755, 0o022, 0, 0).expect("mkdir");
     let nlinks_after_mkdir = fs.meta().get_inode(1).unwrap().nlinks;
@@ -278,7 +279,7 @@ fn test_dir_rmdir_decrements_parent_nlinks() {
 /// Rename file within same directory — new name accessible, old name gone.
 #[test]
 fn test_rename_within_same_directory() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs.test_create(1, "old.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create old.txt");
@@ -297,7 +298,7 @@ fn test_rename_within_same_directory() {
 /// Rename file across directories — file is in new location.
 #[test]
 fn test_rename_across_directories() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let dir_a = fs.simulate_mkdir(1, "dir_a", S_IFDIR | 0o755, 0o022, 0, 0).expect("mkdir dir_a");
     let dir_b = fs.simulate_mkdir(1, "dir_b", S_IFDIR | 0o755, 0o022, 0, 0).expect("mkdir dir_b");
@@ -319,7 +320,7 @@ fn test_rename_across_directories() {
 /// Rename overwrites existing target — target inode is removed.
 #[test]
 fn test_rename_overwrites_existing_target() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (src_ino, fh1) = fs.test_create(1, "src.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create src");
@@ -349,7 +350,7 @@ fn test_rename_overwrites_existing_target() {
 /// Rename directory within same parent.
 #[test]
 fn test_rename_directory() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let dir_ino = fs.simulate_mkdir(1, "olddir", S_IFDIR | 0o755, 0o022, 0, 0).expect("mkdir");
 
@@ -365,7 +366,7 @@ fn test_rename_directory() {
 /// Editor pattern: create temp file, write, rename over original.
 #[test]
 fn test_rename_editor_pattern() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     // Create the "original" file
     let (orig_ino, fh1) = fs.test_create(1, "document.txt", S_IFREG | 0o644, 0o022, 0, 0)
@@ -398,7 +399,7 @@ fn test_rename_editor_pattern() {
 /// Create symlink, readlink returns target path.
 #[test]
 fn test_symlink_readlink_returns_target() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let sym_ino = fs.simulate_symlink(1, "link.txt", "/target/path", 0, 0)
         .expect("create symlink");
@@ -410,7 +411,7 @@ fn test_symlink_readlink_returns_target() {
 /// Symlink to non-existent target (dangling symlink) — POSIX allows this.
 #[test]
 fn test_symlink_dangling_allowed() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     // Target doesn't exist — symlink creation should still succeed
     let sym_ino = fs.simulate_symlink(1, "dangling", "/nonexistent/path/to/nowhere", 0, 0)
@@ -423,7 +424,7 @@ fn test_symlink_dangling_allowed() {
 /// Symlink inode size equals target path length.
 #[test]
 fn test_symlink_size_equals_target_length() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let target = "/usr/local/lib/libfoo.so.1";
     let sym_ino = fs.simulate_symlink(1, "libfoo.so", target, 0, 0)
@@ -439,7 +440,7 @@ fn test_symlink_size_equals_target_length() {
 /// Symlink with long target path (>256 chars) — no length limit in POSIX.
 #[test]
 fn test_symlink_long_target_path() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let long_target = "/very/long/path/".repeat(20); // 320 chars
     let sym_ino = fs.simulate_symlink(1, "longlink", &long_target, 0, 0)
@@ -453,7 +454,7 @@ fn test_symlink_long_target_path() {
 /// Symlink and regular file with same name conflict (symlink replaces if rename).
 #[test]
 fn test_symlink_and_file_are_distinct_inodes() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let sym_ino = fs.simulate_symlink(1, "link.txt", "/target", 0, 0)
         .expect("create symlink");
@@ -476,7 +477,7 @@ fn test_symlink_and_file_are_distinct_inodes() {
 /// Create hard link — nlinks increases to 2.
 #[test]
 fn test_link_nlinks_equals_two() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs.test_create(1, "original.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create original");
@@ -496,7 +497,7 @@ fn test_link_nlinks_equals_two() {
 /// Unlink one hard link — nlinks decreases to 1, file still accessible.
 #[test]
 fn test_link_unlink_one_keeps_inode() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs.test_create(1, "original.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create");
@@ -520,7 +521,7 @@ fn test_link_unlink_one_keeps_inode() {
 /// Unlink last hard link — inode deleted.
 #[test]
 fn test_link_unlink_last_deletes_inode() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs.test_create(1, "todelete.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create");
@@ -537,7 +538,7 @@ fn test_link_unlink_last_deletes_inode() {
 /// Hard link to file in a different directory.
 #[test]
 fn test_link_cross_directory() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let dir_ino = fs.simulate_mkdir(1, "subdir", S_IFDIR | 0o755, 0o022, 0, 0)
         .expect("mkdir subdir");
@@ -560,7 +561,7 @@ fn test_link_cross_directory() {
 /// Attempting hard link to directory returns EPERM.
 #[test]
 fn test_link_to_directory_returns_eperm() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let dir_ino = fs.simulate_mkdir(1, "adir", S_IFDIR | 0o755, 0o022, 0, 0).expect("mkdir");
 
@@ -579,7 +580,7 @@ fn test_link_to_directory_returns_eperm() {
 /// Truncate file to shorter length — content is trimmed.
 #[test]
 fn test_truncate_to_shorter_length() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs.test_create(1, "truncate.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create");
@@ -598,7 +599,7 @@ fn test_truncate_to_shorter_length() {
 /// Truncate file to longer length (zero extend).
 #[test]
 fn test_truncate_zero_extend() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs.test_create(1, "extend.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create");
@@ -619,7 +620,7 @@ fn test_truncate_zero_extend() {
 /// Truncate file to 0 — becomes an empty file.
 #[test]
 fn test_truncate_to_zero() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs.test_create(1, "zeroed.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create");
@@ -639,7 +640,7 @@ fn test_truncate_to_zero() {
 /// chmod changes mode bits.
 #[test]
 fn test_chmod_changes_mode_bits() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs.test_create(1, "perm.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create");
@@ -657,7 +658,7 @@ fn test_chmod_changes_mode_bits() {
 /// chown changes uid and gid.
 #[test]
 fn test_chown_changes_uid_gid() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs.test_create(1, "own.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create");
@@ -673,7 +674,7 @@ fn test_chown_changes_uid_gid() {
 /// mtime updates after write.
 #[test]
 fn test_mtime_updates_on_write() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs.test_create(1, "mtime.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create");
@@ -694,7 +695,7 @@ fn test_mtime_updates_on_write() {
 /// setattr mtime allows explicit timestamp setting.
 #[test]
 fn test_setattr_mtime_explicit() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs.test_create(1, "ts.txt", S_IFREG | 0o644, 0o022, 0, 0).expect("create");
     fs.test_release(ino, fh).expect("release");
@@ -712,7 +713,7 @@ fn test_setattr_mtime_explicit() {
 /// Write identical content to two files — same manifest digest.
 #[test]
 fn test_dedup_identical_content_same_digest() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let content = b"identical dedup content here";
 
@@ -740,7 +741,7 @@ fn test_dedup_identical_content_same_digest() {
 /// Write different content — different manifest digest.
 #[test]
 fn test_dedup_different_content_different_digest() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino1, fh1) = fs.test_create(1, "f1.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create f1");
@@ -765,7 +766,7 @@ fn test_dedup_different_content_different_digest() {
 /// Write same content twice — refcount should be 2.
 #[test]
 fn test_dedup_refcount_incremented_for_identical_content() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let content = b"shared content refcount test";
 
@@ -790,7 +791,7 @@ fn test_dedup_refcount_incremented_for_identical_content() {
 /// Overwrite file content — old refcount decremented, new refcount incremented.
 #[test]
 fn test_dedup_refcount_decremented_on_overwrite() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs.test_create(1, "overwrite_rc.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create");
@@ -814,7 +815,7 @@ fn test_dedup_refcount_decremented_on_overwrite() {
 /// logical_bytes tracks dedup correctly (two identical files counted twice logically).
 #[test]
 fn test_dedup_logical_bytes_counts_both_files() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let content = b"dedup logical bytes test data";
 

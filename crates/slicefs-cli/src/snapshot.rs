@@ -12,8 +12,11 @@
 
 use std::path::Path;
 
+use std::sync::{Arc, Mutex};
+
 use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
+use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
 
 use crate::cli::SnapshotAction;
@@ -50,19 +53,18 @@ pub fn run_snapshot_create(
 
     let segs_dir = store_path.join("segments");
 
-    // Load dictionary + last committed root + snapshot list from segment files.
-    let (dict, root_opt, snapshots) = load_store_from_segments(&segs_dir)
+    // Load last committed root + snapshot list from segment files.
+    let (root_opt, snapshots) = load_store_from_segments(&segs_dir)
         .map_err(|e| format!("failed to load segments: {}", e))?;
 
     let root = root_opt.ok_or_else(|| {
         format!("no committed state found in segments at {}", segs_dir.display())
     })?;
 
-    // Reconstruct DictMetadataStore.
-    let content_dict = dict.clone();
-    let mut meta = DictMetadataStore::load_from_root(dict, &root)
+    // Reconstruct DictMetadataStore from file-backed StoreIo.
+    let io = Arc::new(Mutex::new(StoreIo::new(store_path)));
+    let mut meta = DictMetadataStore::load_from_root(io, &root)
         .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;
-    let _ = content_dict; // not needed for snapshot ops
 
     // Restore snapshot list from segment replay.
     meta.set_snapshots(snapshots);
@@ -101,7 +103,7 @@ pub fn run_snapshot_list(store_path: &Path) -> Result<(), Box<dyn std::error::Er
     let segs_dir = store_path.join("segments");
 
     // Load snapshot list from segment replay (no need to reconstruct full store).
-    let (_dict, _root_opt, snapshots) = load_store_from_segments(&segs_dir)
+    let (_root_opt, snapshots) = load_store_from_segments(&segs_dir)
         .map_err(|e| format!("failed to load segments: {}", e))?;
 
     if snapshots.is_empty() {
@@ -158,19 +160,18 @@ pub fn run_snapshot_switch(
 
     let segs_dir = store_path.join("segments");
 
-    // Load dictionary + last committed root + snapshot list from segment files.
-    let (dict, root_opt, snapshots) = load_store_from_segments(&segs_dir)
+    // Load last committed root + snapshot list from segment files.
+    let (root_opt, snapshots) = load_store_from_segments(&segs_dir)
         .map_err(|e| format!("failed to load segments: {}", e))?;
 
     let root = root_opt.ok_or_else(|| {
         format!("no committed state found in segments at {}", segs_dir.display())
     })?;
 
-    // Reconstruct DictMetadataStore.
-    let content_dict = dict.clone();
-    let mut meta = DictMetadataStore::load_from_root(dict, &root)
+    // Reconstruct DictMetadataStore from file-backed StoreIo.
+    let io = Arc::new(Mutex::new(StoreIo::new(store_path)));
+    let mut meta = DictMetadataStore::load_from_root(io, &root)
         .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;
-    let _ = content_dict; // not needed for snapshot ops
 
     // Restore snapshot list from segment replay.
     meta.set_snapshots(snapshots);
@@ -272,12 +273,15 @@ mod tests {
 
     /// Create a valid segment-format store with a committed file.
     fn make_seeded_store(store_dir: &TempDir) {
+        use metadata::store_io::StoreIo;
         use metadata::wal::create_wal;
+        use std::sync::{Arc, Mutex};
         let segs_dir = store_dir.path().join("segments");
         std::fs::create_dir_all(&segs_dir).unwrap();
 
+        let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
         let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
-        let mut meta = DictMetadataStore::new();
+        let mut meta = DictMetadataStore::new(io);
         meta.set_wal(wal);
 
         let file_meta = InodeMeta::new_file(0, 0, 0, S_IFREG | 0o644);

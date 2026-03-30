@@ -6,21 +6,25 @@
 //! Uses `DictMetadataStore` and `SliceFsFilesystem` simulate_* methods directly —
 //! no FUSE mount required.
 
-use blockset::{Dictionary, GetBytes, GetData, State, Tree};
+use blockset::{State, Tree, FileStorageAdd, file_storage_get};
 use metadata::store::DictMetadataStore;
+use metadata::store_io::StoreIo;
 use slicefs_cli::filesystem::SliceFsFilesystem;
 use slicefs_compression::NoneCompressor;
 use slicefs_traits::metadata::{InodeMeta, MetadataStore};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use tempfile::TempDir;
 
 const S_IFREG: u32 = 0o100_000;
 const S_IFDIR: u32 = 0o040_000;
 const S_IFLNK: u32 = 0o120_000;
 
-fn fresh_fs() -> SliceFsFilesystem {
-    let meta = DictMetadataStore::new();
-    let dict = Dictionary::default();
-    SliceFsFilesystem::new(meta, dict, None, Arc::new(NoneCompressor::new()), 1)
+fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let meta = DictMetadataStore::new(io.clone());
+    let fs = SliceFsFilesystem::new(meta, io, None, Arc::new(NoneCompressor::new()), 1);
+    (fs, dir)
 }
 
 /// Create a regular file directly via metadata store (no write handle needed).
@@ -32,24 +36,21 @@ fn make_file(fs: &SliceFsFilesystem, parent_ino: u64, name: &str) -> u64 {
     ino
 }
 
-/// Read the content of a file via manifest + GetBytes.
+/// Read the content of a file via manifest + file_storage_get.
 fn read_content(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
-    use slicefs_traits::digest::from_digest224;
     let manifest = fs.meta().get_manifest(ino).unwrap_or_default();
     if manifest.is_empty() {
         return vec![];
     }
-    let root256 = from_digest224(&manifest[0]);
-    let dict = fs.dict().lock().unwrap();
-    let get_data = GetData::new(&*dict, &root256);
-    GetBytes::new(get_data).collect()
+    let mut io = fs.io().lock().unwrap();
+    file_storage_get(&mut *io, &manifest[0]).unwrap_or_default()
 }
 
 // ── Task 1: mkdir ─────────────────────────────────────────────────────────────
 
 #[test]
 fn test_mkdir_creates_directory_with_dot_entries() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let ino = fs
         .simulate_mkdir(1, "subdir", S_IFDIR | 0o755, 0o022, 0, 0)
         .expect("mkdir should succeed");
@@ -75,7 +76,7 @@ fn test_mkdir_creates_directory_with_dot_entries() {
 
 #[test]
 fn test_mkdir_creates_entry_in_parent() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let ino = fs
         .simulate_mkdir(1, "mydir", S_IFDIR | 0o755, 0o022, 0, 0)
         .expect("mkdir should succeed");
@@ -87,7 +88,7 @@ fn test_mkdir_creates_entry_in_parent() {
 
 #[test]
 fn test_mkdir_increments_parent_nlinks() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let parent_nlinks_before = fs.meta().get_inode(1).unwrap().nlinks;
 
     fs.simulate_mkdir(1, "newdir", S_IFDIR | 0o755, 0o022, 0, 0)
@@ -105,7 +106,7 @@ fn test_mkdir_increments_parent_nlinks() {
 
 #[test]
 fn test_rmdir_empty_directory_succeeds() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let ino = fs
         .simulate_mkdir(1, "emptydir", S_IFDIR | 0o755, 0o022, 0, 0)
         .unwrap();
@@ -131,7 +132,7 @@ fn test_rmdir_empty_directory_succeeds() {
 
 #[test]
 fn test_rmdir_decrements_parent_nlinks() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     fs.simulate_mkdir(1, "toremove", S_IFDIR | 0o755, 0o022, 0, 0)
         .unwrap();
 
@@ -149,7 +150,7 @@ fn test_rmdir_decrements_parent_nlinks() {
 
 #[test]
 fn test_rmdir_nonempty_returns_enotempty() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     fs.simulate_mkdir(1, "parent_dir", S_IFDIR | 0o755, 0o022, 0, 0)
         .unwrap();
     let parent_ino = fs.meta().lookup(1, "parent_dir").unwrap();
@@ -171,7 +172,7 @@ fn test_rmdir_nonempty_returns_enotempty() {
 
 #[test]
 fn test_unlink_removes_entry_and_decrements_nlinks() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let ino = make_file(&fs, 1, "tounlink.txt");
 
     let nlinks_before = fs.meta().get_inode(ino).unwrap().nlinks;
@@ -196,7 +197,7 @@ fn test_unlink_removes_entry_and_decrements_nlinks() {
 
 #[test]
 fn test_unlink_with_nlinks_1_deletes_inode_and_decrements_refcount() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     // Create file with content
     let meta = InodeMeta::new_file(0, 0, 0, S_IFREG | 0o644);
     let ino = fs.meta().create_inode(&meta).unwrap();
@@ -205,8 +206,11 @@ fn test_unlink_with_nlinks_1_deletes_inode_and_decrements_refcount() {
     // Push content and set manifest with refcount
     let content = b"hello refcount";
     let digest = {
-        let mut dict = fs.dict().lock().unwrap();
-        State::push_all(&mut *dict, content)
+        let mut io = fs.io().lock().unwrap();
+        let mut fsa = FileStorageAdd::new(&mut *io);
+        let d = State::push_all(&mut fsa, content);
+        drop(fsa);
+        d
     };
     fs.meta().set_manifest(ino, &[digest]).unwrap();
     fs.meta().increment_refcount(&digest);
@@ -230,7 +234,7 @@ fn test_unlink_with_nlinks_1_deletes_inode_and_decrements_refcount() {
 
 #[test]
 fn test_unlink_with_nlinks_2_keeps_inode() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let ino = make_file(&fs, 1, "shared.txt");
 
     // Create a hard link (second name, nlinks becomes 2)
@@ -252,7 +256,7 @@ fn test_unlink_with_nlinks_2_keeps_inode() {
 
 #[test]
 fn test_unlink_directory_returns_eisdir() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     fs.simulate_mkdir(1, "adir", S_IFDIR | 0o755, 0o022, 0, 0)
         .unwrap();
 
@@ -269,7 +273,7 @@ fn test_unlink_directory_returns_eisdir() {
 
 #[test]
 fn test_link_creates_second_directory_entry() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let ino = make_file(&fs, 1, "original.txt");
 
     fs.simulate_link(ino, 1, "hardlink.txt")
@@ -282,7 +286,7 @@ fn test_link_creates_second_directory_entry() {
 
 #[test]
 fn test_link_increments_nlinks() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let ino = make_file(&fs, 1, "orig.txt");
     let nlinks_before = fs.meta().get_inode(ino).unwrap().nlinks;
 
@@ -298,7 +302,7 @@ fn test_link_increments_nlinks() {
 
 #[test]
 fn test_link_to_directory_returns_eperm() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     fs.simulate_mkdir(1, "dirlink", S_IFDIR | 0o755, 0o022, 0, 0)
         .unwrap();
     let dir_ino = fs.meta().lookup(1, "dirlink").unwrap();
@@ -314,7 +318,7 @@ fn test_link_to_directory_returns_eperm() {
 
 #[test]
 fn test_link_accessible_from_both_paths() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     // Create file with content via manifest
     let meta = InodeMeta::new_file(0, 0, 0, S_IFREG | 0o644);
     let ino = fs.meta().create_inode(&meta).unwrap();
@@ -322,8 +326,11 @@ fn test_link_accessible_from_both_paths() {
 
     let content = b"shared content";
     let digest = {
-        let mut dict = fs.dict().lock().unwrap();
-        State::push_all(&mut *dict, content)
+        let mut io = fs.io().lock().unwrap();
+        let mut fsa = FileStorageAdd::new(&mut *io);
+        let d = State::push_all(&mut fsa, content);
+        drop(fsa);
+        d
     };
     fs.meta().set_manifest(ino, &[digest]).unwrap();
 
@@ -344,7 +351,7 @@ fn test_link_accessible_from_both_paths() {
 
 #[test]
 fn test_rename_within_same_directory() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let ino = make_file(&fs, 1, "old_name.txt");
 
     fs.simulate_rename(1, "old_name.txt", 1, "new_name.txt", 0)
@@ -358,7 +365,7 @@ fn test_rename_within_same_directory() {
 
 #[test]
 fn test_rename_across_directories() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let dir_ino = fs
         .simulate_mkdir(1, "subdir", S_IFDIR | 0o755, 0o022, 0, 0)
         .unwrap();
@@ -376,7 +383,7 @@ fn test_rename_across_directories() {
 
 #[test]
 fn test_rename_overwrites_existing_target() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let src_ino = make_file(&fs, 1, "src.txt");
     let _dst_ino = make_file(&fs, 1, "dst.txt");
 
@@ -393,7 +400,7 @@ fn test_rename_overwrites_existing_target() {
 
 #[test]
 fn test_rename_noreplace_returns_eexist_if_target_exists() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     make_file(&fs, 1, "alpha.txt");
     make_file(&fs, 1, "beta.txt");
 
@@ -409,7 +416,7 @@ fn test_rename_noreplace_returns_eexist_if_target_exists() {
 
 #[test]
 fn test_rename_exchange_returns_enosys() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     make_file(&fs, 1, "x.txt");
     make_file(&fs, 1, "y.txt");
 
@@ -425,7 +432,7 @@ fn test_rename_exchange_returns_enosys() {
 
 #[test]
 fn test_rename_nonexistent_source_returns_enoent() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let result = fs.simulate_rename(1, "ghost.txt", 1, "new.txt", 0);
     assert!(result.is_err(), "rename of non-existent source must fail");
@@ -440,7 +447,7 @@ fn test_rename_nonexistent_source_returns_enoent() {
 
 #[test]
 fn test_symlink_creates_slnk_inode() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let ino = fs
         .simulate_symlink(1, "mylink", "/some/target/path", 0, 0)
         .expect("symlink should succeed");
@@ -455,7 +462,7 @@ fn test_symlink_creates_slnk_inode() {
 
 #[test]
 fn test_symlink_readlink_returns_target() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let target = "/usr/local/share/myfile";
     let ino = fs
         .simulate_symlink(1, "link_to_myfile", target, 0, 0)
@@ -470,7 +477,7 @@ fn test_symlink_readlink_returns_target() {
 
 #[test]
 fn test_symlink_target_in_parent_directory() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let ino = fs
         .simulate_symlink(1, "relative_link", "../sibling/file", 0, 0)
         .expect("symlink should succeed");
@@ -482,7 +489,7 @@ fn test_symlink_target_in_parent_directory() {
 
 #[test]
 fn test_symlink_stores_target_as_cas_content() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let target = "/absolute/path/to/target";
     let ino = fs
         .simulate_symlink(1, "cas_link", target, 0, 0)
@@ -499,7 +506,7 @@ fn test_symlink_stores_target_as_cas_content() {
 
 #[test]
 fn test_symlink_inode_size_equals_target_length() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let target = "/some/path";
     let ino = fs
         .simulate_symlink(1, "sized_link", target, 0, 0)

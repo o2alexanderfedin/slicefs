@@ -18,8 +18,9 @@
 
 use std::path::Path;
 
-use metadata::gc::{GarbageCollector, GcStats};
+use metadata::gc::GarbageCollector;
 use metadata::segment::load_store_from_segments;
+use metadata::store_io::StoreIo;
 
 /// Run offline garbage collection on the store at `store_path`.
 ///
@@ -42,8 +43,8 @@ pub fn run_gc(store_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     let segs_dir = store_path.join("segments");
 
-    // Step 2: Load dictionary + last committed root from segment files.
-    let (dict, root_opt, snapshots) = load_store_from_segments(&segs_dir)
+    // Step 2: Load last committed root from segment files (no Dictionary needed).
+    let (root_opt, snapshots) = load_store_from_segments(&segs_dir)
         .map_err(|e| format!("failed to load segments: {}", e))?;
 
     // Collect roots: current live root + all snapshot roots.
@@ -54,9 +55,10 @@ pub fn run_gc(store_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         roots.push(snap.root);
     }
 
-    // Step 3: Run GC engine.
+    // Step 3: Run GC engine using file-backed Io (Dictionary-free).
+    let mut io = StoreIo::new(store_path);
     let gc = GarbageCollector::new(segs_dir);
-    let stats: GcStats = gc.run_gc(&dict, &roots)
+    let stats = gc.run_gc(&mut io, &roots)
         .map_err(|e| format!("GC failed: {}", e))?;
 
     // Step 4: Report statistics.

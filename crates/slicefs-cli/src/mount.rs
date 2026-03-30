@@ -21,29 +21,29 @@
 //! The command blocks until the FUSE session ends (SIGTERM, Ctrl+C, or `slicefs unmount`).
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use blockset::Dictionary;
 use fuser::{mount2, Config, MountOption, SessionACL};
 use metadata::gc::background::spawn_background_gc;
 use metadata::mount_lock::{acquire_mount_lock, MountLock, MountLockError};
-use metadata::segment::{load_store_from_segments, migrate_legacy_store};
+use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
+use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
 use slicefs_compression::parse_compressor;
 use slicefs_traits::compressor::Compressor;
 
 use crate::filesystem::SliceFsFilesystem;
 
-/// Load a seeded store from disk, returning `(DictMetadataStore, Dictionary, MountLock)`.
+/// Load a seeded store from disk, returning `(DictMetadataStore, Arc<Mutex<StoreIo>>, MountLock)`.
 ///
 /// The returned `MountLock` must be kept alive for the duration of the mount;
 /// dropping it removes `mount.lock` from the store directory.
 ///
 /// Steps:
-/// 1. If `dictionary.bin` exists, auto-migrate to segment format.
+/// 1. Reject legacy `dictionary.bin` stores — re-seed required.
 /// 2. Acquire `mount.lock` (returns `DirtyMount` if previous mount crashed).
 ///    On dirty mount, segment-based WAL replay is implicit (re-loading segments
 ///    replays all mutations that were durably written before the crash).
@@ -53,21 +53,16 @@ use crate::filesystem::SliceFsFilesystem;
 pub fn load_store(
     store_path: &Path,
     wal_config: WalConfig,
-) -> Result<(DictMetadataStore, Dictionary, MountLock), Box<dyn std::error::Error>> {
-    // Step 1: Migrate legacy dictionary.bin if present
+) -> Result<(DictMetadataStore, Arc<Mutex<StoreIo>>, MountLock), Box<dyn std::error::Error>> {
+    // Step 1: Reject legacy format — migration path removed.
     if store_path.join("dictionary.bin").exists() {
-        migrate_legacy_store(store_path)
-            .map_err(|e| format!("migration failed: {}", e))?;
-    } else if !store_path.join("segments").is_dir() {
-        // Neither legacy nor segment format found — check for partial store state
-        if store_path.join("root.bin").exists() {
-            return Err(format!(
-                "failed to read dictionary.bin in {}: No such file or directory (os error 2)",
-                store_path.display()
-            ).into());
-        }
         return Err(format!(
-            "store not found at {}: no dictionary.bin or segments/ directory",
+            "legacy store format detected at {}. Re-seed required: slicefs seed <store> <source>",
+            store_path.display()
+        ).into());
+    } else if !store_path.join("segments").is_dir() {
+        return Err(format!(
+            "store not found at {}: no segments/ directory",
             store_path.display()
         ).into());
     }
@@ -90,18 +85,16 @@ pub fn load_store(
 
     // Step 3: Load state from segment files.
     let segs_dir = store_path.join("segments");
-    let (dict, last_root, snapshots) = load_store_from_segments(&segs_dir)
+    let (last_root, snapshots) = load_store_from_segments(&segs_dir)
         .map_err(|e| format!("failed to load segments: {}", e))?;
 
     let root = last_root.ok_or_else(|| {
         format!("no committed state found in segments at {}", segs_dir.display())
     })?;
 
-    // Step 4: Reconstruct metadata store.
-    // Clone dict before load_from_root (which consumes it) — the clone is used
-    // for content reads in SliceFsFilesystem.
-    let content_dict = dict.clone();
-    let mut meta = DictMetadataStore::load_from_root(dict, &root)
+    // Step 4: Reconstruct metadata store using file-backed StoreIo.
+    let io = Arc::new(Mutex::new(StoreIo::new(store_path)));
+    let mut meta = DictMetadataStore::load_from_root(io.clone(), &root)
         .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;
 
     // Restore snapshot list from segment replay.
@@ -115,7 +108,7 @@ pub fn load_store(
         .map_err(|e| format!("failed to create WAL: {}", e))?;
     meta.set_wal(wal);
 
-    Ok((meta, content_dict, mount_lock))
+    Ok((meta, io, mount_lock))
 }
 
 /// Determine the next segment ID by scanning existing segment files.
@@ -218,30 +211,28 @@ pub fn run_mount(
     let wal_config = parse_wal_config(wal_strategy);
     let compressor: Arc<dyn Compressor> = Arc::from(parse_compressor(compressor_name, compressor_level));
 
-    let (meta, content_dict, _mount_lock) = load_store(store_path, wal_config)?;
+    let (meta, io, _mount_lock) = load_store(store_path, wal_config)?;
 
     // If mounting a snapshot: resolve it and load from snapshot root (read-only).
-    let (final_meta, config) = if let Some(snap_ref) = snapshot_ref {
-        let snap = meta.find_snapshot(snap_ref).ok_or_else(|| {
-            format!("snapshot not found: {}", snap_ref)
+    let (final_meta, final_io, config) = if let Some(snap_ref) = snapshot_ref {
+        let snap = meta.find_snapshot(snap_ref).ok_or_else(|| -> Box<dyn std::error::Error> {
+            format!("snapshot not found: {}", snap_ref).into()
         })?;
         println!("Mounting snapshot {} (read-only)", snap.version);
-        let snap_meta = {
-            let dict = meta.dict().lock().unwrap().clone();
-            DictMetadataStore::load_from_root(dict, &snap.root)
-                .map_err(|e| format!("failed to load snapshot root: {}", e))?
-        };
+        let snap_io: Arc<Mutex<StoreIo>> = io.clone();
+        let snap_meta = DictMetadataStore::load_from_root(snap_io.clone(), &snap.root)
+            .map_err(|e| -> Box<dyn std::error::Error> { format!("failed to load snapshot root: {}", e).into() })?;
         let mut cfg = build_mount_options(noatime, allow_other);
         cfg.mount_options.push(MountOption::RO);
-        (snap_meta, cfg)
+        (snap_meta, snap_io, cfg)
     } else {
         let cfg = build_mount_options(noatime, allow_other);
-        (meta, cfg)
+        (meta, io, cfg)
     };
 
     let mut fs = SliceFsFilesystem::new(
         final_meta,
-        content_dict,
+        final_io,
         Some(store_path.to_path_buf()),
         compressor,
         2, // Phase-6 store format: all new blocks carry compression header
@@ -282,7 +273,8 @@ pub fn run_mount(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use metadata::store::{serialize_dictionary, DictMetadataStore};
+    use metadata::store::DictMetadataStore;
+    use metadata::store_io::StoreIo;
     use metadata::wal::WalConfig;
     use slicefs_traits::metadata::{InodeMeta, MetadataStore};
     use tempfile::TempDir;
@@ -290,36 +282,15 @@ mod tests {
     const S_IFREG: u32 = 0o100_000;
     const S_IFDIR: u32 = 0o040_000;
 
-    /// Write a valid seeded store in legacy format (dictionary.bin + root.bin).
-    fn write_seeded_store_legacy(store_dir: &TempDir) {
-        let meta = DictMetadataStore::new();
-        // Add a test file
-        let file_meta = InodeMeta::new_file(0, 0, 0, S_IFREG | 0o644);
-        let ino = meta.create_inode(&file_meta).unwrap();
-        meta.link(1, "hello.txt", ino).unwrap();
-        let root = meta.commit().unwrap();
-
-        let dict_bytes = {
-            let dict = meta.dict().lock().unwrap();
-            serialize_dictionary(&*dict)
-        };
-        std::fs::write(store_dir.path().join("dictionary.bin"), &dict_bytes).unwrap();
-
-        let mut root_bytes = Vec::with_capacity(28);
-        for word in &root {
-            root_bytes.extend_from_slice(&word.to_le_bytes());
-        }
-        std::fs::write(store_dir.path().join("root.bin"), &root_bytes).unwrap();
-    }
-
-    /// Write a valid seeded store in segment format.
+    /// Write a valid seeded store in segment format (new format only).
     fn write_seeded_store_segments(store_dir: &TempDir) {
         use metadata::wal::create_wal;
         let segs_dir = store_dir.path().join("segments");
         std::fs::create_dir_all(&segs_dir).unwrap();
 
+        let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
         let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
-        let mut meta = DictMetadataStore::new();
+        let mut meta = DictMetadataStore::new(io);
         meta.set_wal(wal);
 
         let file_meta = InodeMeta::new_file(0, 0, 0, S_IFREG | 0o644);
@@ -332,9 +303,9 @@ mod tests {
     #[test]
     fn test_load_store_returns_correct_inode_1() {
         let store_dir = tempfile::tempdir().unwrap();
-        write_seeded_store_legacy(&store_dir);
+        write_seeded_store_segments(&store_dir);
 
-        let (meta, _dict, _lock) = load_store(store_dir.path(), WalConfig::NoWal).expect("load_store failed");
+        let (meta, _io, _lock) = load_store(store_dir.path(), WalConfig::NoWal).expect("load_store failed");
 
         // Inode 1 must exist and be a directory (root)
         let root_meta = meta.get_inode(1).expect("root inode missing");
@@ -345,61 +316,41 @@ mod tests {
     #[test]
     fn test_load_store_finds_seeded_file() {
         let store_dir = tempfile::tempdir().unwrap();
-        write_seeded_store_legacy(&store_dir);
+        write_seeded_store_segments(&store_dir);
 
-        let (meta, _dict, _lock) = load_store(store_dir.path(), WalConfig::NoWal).expect("load_store failed");
+        let (meta, _io, _lock) = load_store(store_dir.path(), WalConfig::NoWal).expect("load_store failed");
 
-        // hello.txt was seeded in write_seeded_store_legacy
+        // hello.txt was seeded
         let ino = meta.lookup(1, "hello.txt").expect("hello.txt not found");
         assert!(ino > 1, "file inode should be > 1");
     }
 
     #[test]
-    fn test_load_store_rejects_missing_root_bin() {
+    fn test_load_store_rejects_legacy_format() {
         let store_dir = tempfile::tempdir().unwrap();
-        // Write only dictionary.bin, no root.bin — migration will fail with missing root.bin
+        // Write a dictionary.bin to simulate legacy format
         std::fs::write(store_dir.path().join("dictionary.bin"), b"").unwrap();
 
         let result = load_store(store_dir.path(), WalConfig::NoWal);
-        assert!(result.is_err(), "should fail with missing root.bin");
+        assert!(result.is_err(), "should reject legacy format");
         let msg = result.err().unwrap().to_string();
         assert!(
-            msg.contains("root.bin"),
-            "error should mention root.bin, got: {}",
+            msg.contains("Re-seed required") || msg.contains("legacy"),
+            "error should mention re-seed, got: {}",
             msg
         );
     }
 
     #[test]
-    fn test_load_store_rejects_missing_dictionary_bin() {
+    fn test_load_store_rejects_missing_store() {
         let store_dir = tempfile::tempdir().unwrap();
-        // Write only root.bin (valid 28 bytes), no dictionary.bin or segments/
-        let root_bytes = [0u8; 28];
-        std::fs::write(store_dir.path().join("root.bin"), &root_bytes).unwrap();
-
+        // No dictionary.bin, no segments/ — should fail.
         let result = load_store(store_dir.path(), WalConfig::NoWal);
-        assert!(result.is_err(), "should fail with missing dictionary.bin");
+        assert!(result.is_err(), "should fail with missing store");
         let msg = result.err().unwrap().to_string();
         assert!(
-            msg.contains("dictionary.bin"),
-            "error should mention dictionary.bin, got: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn test_load_store_rejects_root_bin_wrong_size() {
-        let store_dir = tempfile::tempdir().unwrap();
-        // Write root.bin with wrong size (e.g., 16 bytes instead of 28)
-        std::fs::write(store_dir.path().join("root.bin"), &[0u8; 16]).unwrap();
-        std::fs::write(store_dir.path().join("dictionary.bin"), b"").unwrap();
-
-        let result = load_store(store_dir.path(), WalConfig::NoWal);
-        assert!(result.is_err(), "should fail with wrong root.bin size");
-        let msg = result.err().unwrap().to_string();
-        assert!(
-            msg.contains("28 bytes") || msg.contains("16 bytes"),
-            "error should mention size, got: {}",
+            msg.contains("segments/") || msg.contains("store not found"),
+            "error should mention segments/, got: {}",
             msg
         );
     }
@@ -409,32 +360,12 @@ mod tests {
         let store_dir = tempfile::tempdir().unwrap();
         write_seeded_store_segments(&store_dir);
 
-        let (meta, _dict, _lock) = load_store(store_dir.path(), WalConfig::NoWal)
+        let (meta, _io, _lock) = load_store(store_dir.path(), WalConfig::NoWal)
             .expect("load_store from segments failed");
 
         // hello.txt was seeded
         let ino = meta.lookup(1, "hello.txt").expect("hello.txt not found in segment store");
         assert!(ino > 1, "file inode should be > 1");
-    }
-
-    #[test]
-    fn test_load_store_migrates_legacy_format() {
-        let store_dir = tempfile::tempdir().unwrap();
-        write_seeded_store_legacy(&store_dir);
-
-        // Load — should migrate dictionary.bin to segments/
-        let (_meta, _dict, _lock) = load_store(store_dir.path(), WalConfig::NoWal)
-            .expect("load_store migration failed");
-
-        // After migration, dictionary.bin should be gone
-        assert!(
-            !store_dir.path().join("dictionary.bin").exists(),
-            "dictionary.bin should be removed after migration"
-        );
-        assert!(
-            store_dir.path().join("segments").is_dir(),
-            "segments/ should exist after migration"
-        );
     }
 
     #[test]

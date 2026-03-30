@@ -14,11 +14,12 @@
 use metadata::gc::GarbageCollector;
 use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
+use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
 use slicefs_cli::filesystem::SliceFsFilesystem;
 use slicefs_compression::NoneCompressor;
 use slicefs_traits::metadata::MetadataStore;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 const S_IFREG: u32 = 0o100_000;
@@ -29,21 +30,22 @@ const S_IFREG: u32 = 0o100_000;
 fn make_fs_per_op(store_dir: &TempDir) -> SliceFsFilesystem {
     std::fs::create_dir_all(store_dir.path().join("segments")).unwrap();
     let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
-    let mut meta = DictMetadataStore::new();
+    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let mut meta = DictMetadataStore::new(io.clone());
     meta.set_wal(wal);
-    let dict = meta.dict().lock().unwrap().clone();
-    SliceFsFilesystem::new(meta, dict, Some(store_dir.path().to_path_buf()), Arc::new(NoneCompressor::new()), 1)
+    SliceFsFilesystem::new(meta, io, Some(store_dir.path().to_path_buf()), Arc::new(NoneCompressor::new()), 1)
 }
 
 /// Reload the store from segment files (simulates remount after crash).
 ///
-/// Returns `(DictMetadataStore, root_digest)`. Panics if no committed root found.
+/// Returns `DictMetadataStore`. Panics if no committed root found.
 fn reload_store(store_dir: &TempDir) -> DictMetadataStore {
     let segs_dir = store_dir.path().join("segments");
-    let (dict, root_opt, _snapshots) = load_store_from_segments(&segs_dir)
+    let (root_opt, _snapshots) = load_store_from_segments(&segs_dir)
         .expect("should load segments after crash");
     let root = root_opt.expect("should have a committed root");
-    DictMetadataStore::load_from_root(dict, &root)
+    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    DictMetadataStore::load_from_root(io, &root)
         .expect("should reconstruct store from root")
 }
 
@@ -79,12 +81,13 @@ fn test_sc1_crash_during_write_filesystem_consistent() {
 
     // Remount from segments (WAL replay is implicit — re-loading is idempotent)
     let segs_dir = store_dir.path().join("segments");
-    let (dict, root_opt, _snapshots) = load_store_from_segments(&segs_dir)
+    let (root_opt, _snapshots) = load_store_from_segments(&segs_dir)
         .expect("should load segments after crash");
 
     // Should have a committed root (from the commit() after existing.txt)
     let root = root_opt.expect("committed root should be present");
-    let rebuilt = DictMetadataStore::load_from_root(dict, &root)
+    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let rebuilt = DictMetadataStore::load_from_root(io, &root)
         .expect("should reconstruct store");
 
     // The committed file must be present
@@ -131,12 +134,13 @@ fn test_sc2_fsync_guarantees_durability() {
 
     // Reload from segments
     let segs_dir = store_dir.path().join("segments");
-    let (dict, root_opt, _snapshots) = load_store_from_segments(&segs_dir)
+    let (root_opt, _snapshots) = load_store_from_segments(&segs_dir)
         .expect("should load segments after crash");
 
     assert!(root_opt.is_some(), "root should be present after fsync + crash");
 
-    let rebuilt = DictMetadataStore::load_from_root(dict, &committed_root)
+    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let rebuilt = DictMetadataStore::load_from_root(io, &committed_root)
         .expect("should reconstruct store from committed root");
 
     // durable.txt must be present
@@ -184,13 +188,14 @@ fn test_sc3_orphaned_blocks_reclaimed_by_gc() {
 
     // Reload from segments to get the current state for GC
     let segs_dir = store_dir.path().join("segments");
-    let (dict, root_opt, _snapshots) = load_store_from_segments(&segs_dir)
+    let (root_opt, _snapshots) = load_store_from_segments(&segs_dir)
         .expect("should load segments");
     let root = root_opt.expect("root should exist");
 
     // Run GC with the current root as the only live root
     let gc = GarbageCollector::new(segs_dir.clone());
-    let stats = gc.run_gc(&dict, &[root])
+    let mut gc_io = StoreIo::new(store_dir.path());
+    let stats = gc.run_gc(&mut gc_io, &[root])
         .expect("GC should succeed");
 
     // GC should have scanned entries and potentially removed orphaned ones
@@ -199,10 +204,11 @@ fn test_sc3_orphaned_blocks_reclaimed_by_gc() {
     assert!(stats.segments_compacted >= 1, "at least one segment should have been compacted");
 
     // After GC, the store should still be loadable and live.txt accessible
-    let (dict2, root2_opt, _snapshots2) = load_store_from_segments(&segs_dir)
+    let (root2_opt, _snapshots2) = load_store_from_segments(&segs_dir)
         .expect("segments should be loadable after GC");
     let root2 = root2_opt.expect("root should still be present after GC");
-    let rebuilt = DictMetadataStore::load_from_root(dict2, &root2)
+    let io2 = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let rebuilt = DictMetadataStore::load_from_root(io2, &root2)
         .expect("should reconstruct store after GC");
 
     let live_ino = rebuilt.lookup(1, "live.txt")
@@ -283,7 +289,7 @@ fn test_sc5_wal_replay_on_dirty_mount() {
     std::fs::write(store_dir.path().join("mount.lock"), b"stale pid").unwrap();
 
     // load_store should detect dirty mount, remove stale lock, and reload from segments
-    let (meta, _dict, _lock) = load_store(store_dir.path(), WalConfig::PerOp)
+    let (meta, _io, _lock) = load_store(store_dir.path(), WalConfig::PerOp)
         .expect("load_store should succeed on dirty mount (WAL replay)");
 
     // Both files must be accessible — WAL replay preserved state

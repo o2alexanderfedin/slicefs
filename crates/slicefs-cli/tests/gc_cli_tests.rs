@@ -11,10 +11,12 @@ use std::path::PathBuf;
 use clap::Parser;
 use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
+use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
 use slicefs_cli::cli::{Cli, Cmd};
 use slicefs_cli::gc::run_gc;
 use slicefs_traits::metadata::{InodeMeta, MetadataStore};
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 const S_IFREG: u32 = 0o100_000;
@@ -25,7 +27,8 @@ fn make_seeded_store(store_dir: &TempDir) {
     std::fs::create_dir_all(&segs_dir).unwrap();
 
     let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
-    let mut meta = DictMetadataStore::new();
+    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let mut meta = DictMetadataStore::new(io);
     meta.set_wal(wal);
 
     let file_meta = InodeMeta::new_file(0, 0, 0, S_IFREG | 0o644);
@@ -43,7 +46,8 @@ fn make_store_with_dead_entries(store_dir: &TempDir) {
     std::fs::create_dir_all(&segs_dir).unwrap();
 
     let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
-    let mut meta = DictMetadataStore::new();
+    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let mut meta = DictMetadataStore::new(io);
     meta.set_wal(wal);
 
     // Create a live file
@@ -110,11 +114,12 @@ fn test_run_gc_with_dead_entries_compacts() {
 
     // After GC, store should still be loadable and the live file still reachable
     let segs_dir = store_dir.path().join("segments");
-    let (dict, root_opt, _snapshots) = load_store_from_segments(&segs_dir)
+    let (root_opt, _snapshots) = load_store_from_segments(&segs_dir)
         .expect("segments should be loadable after GC");
     let root = root_opt.expect("root should be present after GC");
 
-    let rebuilt = DictMetadataStore::load_from_root(dict, &root)
+    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let rebuilt = DictMetadataStore::load_from_root(io, &root)
         .expect("store should be reconstructible after GC");
     let ino = rebuilt.lookup(1, "live.txt")
         .expect("live.txt should survive GC");

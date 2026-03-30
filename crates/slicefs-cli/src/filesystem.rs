@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use blockset::{Dictionary, GetBytes, GetData, State, Tree};
+use blockset::{State, Tree, FileStorageAdd, file_storage_get};
 use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
     Generation, INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr,
@@ -21,9 +21,9 @@ use fuser::{
     ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
 use metadata::store::DictMetadataStore;
+use metadata::store_io::StoreIo;
 use slicefs_compression::{compress_block, decompress_block};
 use slicefs_traits::compressor::Compressor;
-use slicefs_traits::digest::from_digest224;
 use slicefs_traits::metadata::{InodeMeta, MetaError, MetadataStore};
 
 // POSIX inode type bits
@@ -57,8 +57,9 @@ struct OpenFileState {
 /// FUSE filesystem adapter backed by a [`DictMetadataStore`].
 ///
 /// `meta` provides all inode/directory/manifest metadata.
-/// `dict` is a clone of the dictionary used for content reads via `GetBytes`.
-/// Keeping `dict` separate avoids deadlocking with `DictMetadataStore`'s internal mutex.
+/// `io` is the shared `StoreIo` used for file content reads/writes via
+/// `file_storage_get` / `FileStorageAdd`. It is the same `Arc<Mutex<StoreIo>>`
+/// held by `meta`, accessed via `meta.io().clone()`.
 ///
 /// `open_files` tracks per-handle write buffers; `next_fh` allocates unique handles.
 /// `store_path` is the on-disk store root used by `destroy()` to persist state.
@@ -74,7 +75,7 @@ struct OpenFileState {
 /// per mount; changing compressor mid-store is rare).
 pub struct SliceFsFilesystem {
     pub(crate) meta: Arc<DictMetadataStore>,
-    pub(crate) dict: Arc<Mutex<Dictionary>>,
+    pub(crate) io: Arc<Mutex<StoreIo>>,
     open_files: Mutex<HashMap<u64, OpenFileState>>,
     next_fh: AtomicU64,
     store_path: Option<PathBuf>,
@@ -86,8 +87,8 @@ pub struct SliceFsFilesystem {
 impl SliceFsFilesystem {
     /// Construct a new filesystem.
     ///
-    /// `meta` provides metadata.
-    /// `dict` is a clone of the content dictionary (used for `GetBytes` reads).
+    /// `meta` provides metadata. `io` is the shared `StoreIo` for content reads/writes
+    /// (obtain via `meta.io().clone()` after constructing `DictMetadataStore`).
     /// `store_path` is the on-disk store root; when `Some`, `destroy()` persists
     /// state after the FUSE session ends.
     /// `compressor` is the block compressor used for all new writes.
@@ -98,14 +99,14 @@ impl SliceFsFilesystem {
     ///             allowing mixed old/new blocks during the migration window.
     pub fn new(
         meta: DictMetadataStore,
-        dict: Dictionary,
+        io: Arc<Mutex<StoreIo>>,
         store_path: Option<PathBuf>,
         compressor: Arc<dyn Compressor>,
         store_version: u32,
     ) -> Self {
         Self {
             meta: Arc::new(meta),
-            dict: Arc::new(Mutex::new(dict)),
+            io,
             open_files: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(0),
             store_path,
@@ -125,9 +126,9 @@ impl SliceFsFilesystem {
         &self.meta
     }
 
-    /// Access the content dictionary (used for serialization on unmount).
-    pub fn dict(&self) -> &Arc<Mutex<Dictionary>> {
-        &self.dict
+    /// Access the shared Io backend (used for content reads/writes).
+    pub fn io(&self) -> &Arc<Mutex<StoreIo>> {
+        &self.io
     }
 }
 
@@ -207,6 +208,25 @@ pub fn meta_error_to_errno(e: &MetaError) -> i32 {
 
 /// TTL for all fuser replies (1 second is appropriate for a write-capable snapshot).
 const TTL: Duration = Duration::from_secs(1);
+
+/// Recursively sum file sizes under `dir`.
+///
+/// Used by `statfs` to compute physical bytes from the `vt0/` CAS directory.
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    total += meta.len();
+                } else if meta.is_dir() {
+                    total += dir_size(&entry.path());
+                }
+            }
+        }
+    }
+    total
+}
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 //
@@ -294,11 +314,11 @@ impl SliceFsFilesystem {
         if manifest.is_empty() {
             return Ok(vec![]);
         }
-        let root256 = from_digest224(&manifest[0]);
+        let root_digest = manifest[0];
         let wire_bytes: Vec<u8> = {
-            let dict = self.dict.lock().unwrap();
-            let get_data = GetData::new(&*dict, &root256);
-            GetBytes::new(get_data).collect()
+            let mut io = self.io.lock().unwrap();
+            file_storage_get(&mut *io, &root_digest)
+                .ok_or(libc::EIO)?
         };
         let raw_bytes = self.from_wire_bytes(wire_bytes);
         let start = (offset as usize).min(raw_bytes.len());
@@ -371,8 +391,11 @@ impl SliceFsFilesystem {
             // Compress raw bytes if store_version >= 2 (Phase-6 wire format)
             let wire_bytes = self.to_wire_bytes(&buf);
             let content_digest = {
-                let mut dict = self.dict.lock().unwrap();
-                State::push_all(&mut *dict, &wire_bytes)
+                let mut io = self.io.lock().unwrap();
+                let mut fsa = FileStorageAdd::new(&mut *io);
+                let digest = State::push_all(&mut fsa, &wire_bytes);
+                drop(fsa);
+                digest
             };
             self.meta.set_manifest(ino, &[content_digest]).map_err(|_| libc::EIO)?;
             self.meta.increment_refcount(&content_digest);
@@ -408,11 +431,13 @@ impl SliceFsFilesystem {
         } else {
             // to_wire_bytes: apply compress_block if store_version >= 2, else raw
             let wire_bytes = self.to_wire_bytes(&buf);
-            // Push wire_bytes into Dictionary Merkle tree
+            // Push wire_bytes into FileStorage Merkle tree
             let content_digest = {
-                let mut dict = self.dict.lock().unwrap();
-                State::push_all(&mut *dict, &wire_bytes)
-                // dict lock dropped here
+                let mut io = self.io.lock().unwrap();
+                let mut fsa = FileStorageAdd::new(&mut *io);
+                let digest = State::push_all(&mut fsa, &wire_bytes);
+                drop(fsa);
+                digest
             };
             self.meta.set_manifest(ino, &[content_digest]).map_err(|_| libc::EIO)?;
             self.meta.increment_refcount(&content_digest);
@@ -467,11 +492,11 @@ impl SliceFsFilesystem {
         let mut content: Vec<u8> = if old_manifest.is_empty() {
             Vec::new()
         } else {
-            let root256 = from_digest224(&old_manifest[0]);
+            let root_digest = old_manifest[0];
             let wire_bytes: Vec<u8> = {
-                let dict = self.dict.lock().unwrap();
-                let get_data = GetData::new(&*dict, &root256);
-                GetBytes::new(get_data).collect()
+                let mut io = self.io.lock().unwrap();
+                file_storage_get(&mut *io, &root_digest)
+                    .ok_or(libc::EIO)?
             };
             self.from_wire_bytes(wire_bytes)
         };
@@ -490,8 +515,11 @@ impl SliceFsFilesystem {
         } else {
             let wire_bytes = self.to_wire_bytes(&content);
             let new_digest = {
-                let mut dict = self.dict.lock().unwrap();
-                State::push_all(&mut *dict, &wire_bytes)
+                let mut io = self.io.lock().unwrap();
+                let mut fsa = FileStorageAdd::new(&mut *io);
+                let digest = State::push_all(&mut fsa, &wire_bytes);
+                drop(fsa);
+                digest
             };
             self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
             self.meta.increment_refcount(&new_digest);
@@ -831,8 +859,11 @@ impl SliceFsFilesystem {
         // Store target as CAS content (compressed if store_version >= 2)
         let wire_bytes = self.to_wire_bytes(target_bytes);
         let content_digest = {
-            let mut dict = self.dict.lock().unwrap();
-            State::push_all(&mut *dict, &wire_bytes)
+            let mut io = self.io.lock().unwrap();
+            let mut fsa = FileStorageAdd::new(&mut *io);
+            let digest = State::push_all(&mut fsa, &wire_bytes);
+            drop(fsa);
+            digest
         };
         self.meta
             .set_manifest(ino, &[content_digest])
@@ -855,11 +886,11 @@ impl SliceFsFilesystem {
         if manifest.is_empty() {
             return Ok(String::new());
         }
-        let root256 = from_digest224(&manifest[0]);
+        let root_digest = manifest[0];
         let wire_bytes: Vec<u8> = {
-            let dict = self.dict.lock().unwrap();
-            let get_data = GetData::new(&*dict, &root256);
-            GetBytes::new(get_data).collect()
+            let mut io = self.io.lock().unwrap();
+            file_storage_get(&mut *io, &root_digest)
+                .ok_or(libc::EINVAL)?
         };
         let raw_bytes = self.from_wire_bytes(wire_bytes);
         String::from_utf8(raw_bytes).map_err(|_| libc::EINVAL)
@@ -987,14 +1018,15 @@ impl Filesystem for SliceFsFilesystem {
         }
 
         // The manifest contains exactly one Digest224 — the CDC content root
-        let root_digest224 = manifest[0];
-        let root_digest256 = from_digest224(&root_digest224);
+        let root_digest = manifest[0];
 
         // Collect all wire bytes then decompress — cannot seek into compressed data
         let wire_bytes: Vec<u8> = {
-            let dict = self.dict.lock().unwrap();
-            let get_data = GetData::new(&*dict, &root_digest256);
-            GetBytes::new(get_data).collect()
+            let mut io = self.io.lock().unwrap();
+            match file_storage_get(&mut *io, &root_digest) {
+                Some(bytes) => bytes,
+                None => return reply.error(Errno::EIO),
+            }
         };
 
         let raw_bytes = self.from_wire_bytes(wire_bytes);
@@ -1138,16 +1170,16 @@ impl Filesystem for SliceFsFilesystem {
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
         // Dedup-aware statfs:
         //   logical  = sum of all inode sizes (what users see as space used)
-        //   physical = dict.len() * 92  (actual CAS storage on disk)
+        //   physical = actual bytes in vt0/ directory (CAS batch files on disk)
         //
         // Showing logical allows `df` to display dedup ratio when users compare
         // output of `du -sh` (logical) against `df -h` (physical).
         let logical = self.meta.logical_bytes();
-        let physical_entries = {
-            let dict = self.dict.lock().unwrap();
-            dict.len() as u64
+        let physical = if let Some(ref sp) = self.store_path {
+            dir_size(&sp.join("vt0"))
+        } else {
+            logical
         };
-        let physical = physical_entries * 92;
 
         let bsize: u32 = 4096;
         // blocks: logical bytes / block size (round up, minimum 1 to avoid div-by-zero on empty fs)
@@ -1550,18 +1582,22 @@ impl Filesystem for SliceFsFilesystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockset::{Dictionary, State, Tree};
+    use blockset::file_storage_get;
     use metadata::store::DictMetadataStore;
+    use metadata::store_io::StoreIo;
     use slicefs_compression::NoneCompressor;
     use slicefs_traits::metadata::{InodeMeta, MetadataStore};
+    use tempfile::TempDir;
 
     const S_IFDIR_TEST: u32 = 0o040_000;
     const S_IFREG_TEST: u32 = 0o100_000;
 
-    fn fresh_fs() -> SliceFsFilesystem {
-        let meta = DictMetadataStore::new();
-        let dict = Dictionary::default();
-        SliceFsFilesystem::new(meta, dict, None, Arc::new(NoneCompressor::new()), 1)
+    fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+        let meta = DictMetadataStore::new(io.clone());
+        let fs = SliceFsFilesystem::new(meta, io, None, Arc::new(NoneCompressor::new()), 1);
+        (fs, dir)
     }
 
     #[test]
@@ -1594,7 +1630,7 @@ mod tests {
 
     #[test]
     fn test_getattr_root_is_directory() {
-        let fs = fresh_fs();
+        let (fs, _dir) = fresh_fs();
         let meta = fs.meta.get_inode(1).unwrap();
         let attr = inode_to_file_attr(&meta);
         assert_eq!(attr.ino, INodeNo(1));
@@ -1603,7 +1639,7 @@ mod tests {
 
     #[test]
     fn test_lookup_nonexistent_returns_notfound() {
-        let fs = fresh_fs();
+        let (fs, _dir) = fresh_fs();
         let result = fs.meta.lookup(1, "nonexistent_file");
         assert!(result.is_err());
         let errno = meta_error_to_errno(&result.unwrap_err());
@@ -1612,7 +1648,7 @@ mod tests {
 
     #[test]
     fn test_readdir_root_contains_dot_entries() {
-        let fs = fresh_fs();
+        let (fs, _dir) = fresh_fs();
         let entries = fs.meta.list_directory(1).unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"."), "root must contain '.'");
@@ -1621,56 +1657,66 @@ mod tests {
 
     #[test]
     fn test_read_returns_correct_bytes() {
-        let mut dict = Dictionary::default();
+        let dir = tempfile::tempdir().unwrap();
+        let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
         let content = b"hello, SliceFS content!";
-        let root_digest224 = State::push_all(&mut dict, content);
+        // Push content into FileStorage
+        let root_digest224 = {
+            let mut io_guard = io.lock().unwrap();
+            let mut fsa = FileStorageAdd::new(&mut *io_guard);
+            let digest = State::push_all(&mut fsa, content);
+            drop(fsa);
+            digest
+        };
 
-        let meta_store = DictMetadataStore::new();
+        let meta_store = DictMetadataStore::new(io.clone());
         let file_meta = InodeMeta::new_file(0, 0, 0, S_IFREG_TEST | 0o644);
         let ino = meta_store.create_inode(&file_meta).unwrap();
         meta_store.link(1, "testfile", ino).unwrap();
         meta_store.set_manifest(ino, &[root_digest224]).unwrap();
 
-        let fs = SliceFsFilesystem::new(meta_store, dict, None, Arc::new(NoneCompressor::new()), 1);
+        let fs = SliceFsFilesystem::new(meta_store, io.clone(), None, Arc::new(NoneCompressor::new()), 1);
 
         let manifest = fs.meta.get_manifest(ino).unwrap();
         assert!(!manifest.is_empty());
 
-        let root224 = manifest[0];
-        let root256 = from_digest224(&root224);
-        let dict_guard = fs.dict.lock().unwrap();
-        let get_data = GetData::new(&*dict_guard, &root256);
-        let bytes: Vec<u8> = GetBytes::new(get_data).take(content.len()).collect();
-        drop(dict_guard);
+        let bytes = {
+            let mut io_guard = io.lock().unwrap();
+            file_storage_get(&mut *io_guard, &manifest[0]).unwrap()
+        };
 
         assert_eq!(bytes, content);
     }
 
     #[test]
     fn test_read_with_offset() {
-        let mut dict = Dictionary::default();
+        let dir = tempfile::tempdir().unwrap();
+        let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
         let content = b"hello, SliceFS offset test!";
-        let root_digest224 = State::push_all(&mut dict, content);
+        let root_digest224 = {
+            let mut io_guard = io.lock().unwrap();
+            let mut fsa = FileStorageAdd::new(&mut *io_guard);
+            let digest = State::push_all(&mut fsa, content);
+            drop(fsa);
+            digest
+        };
 
-        let meta_store = DictMetadataStore::new();
+        let meta_store = DictMetadataStore::new(io.clone());
         let file_meta = InodeMeta::new_file(0, 0, 0, S_IFREG_TEST | 0o644);
         let ino = meta_store.create_inode(&file_meta).unwrap();
         meta_store.set_manifest(ino, &[root_digest224]).unwrap();
 
-        let fs = SliceFsFilesystem::new(meta_store, dict, None, Arc::new(NoneCompressor::new()), 1);
+        let fs = SliceFsFilesystem::new(meta_store, io.clone(), None, Arc::new(NoneCompressor::new()), 1);
 
         let manifest = fs.meta.get_manifest(ino).unwrap();
-        let root256 = from_digest224(&manifest[0]);
-        let dict_guard = fs.dict.lock().unwrap();
-        let get_data = GetData::new(&*dict_guard, &root256);
+        let bytes = {
+            let mut io_guard = io.lock().unwrap();
+            file_storage_get(&mut *io_guard, &manifest[0]).unwrap()
+        };
         let offset = 7usize;
-        let bytes: Vec<u8> = GetBytes::new(get_data)
-            .skip(offset)
-            .take(content.len() - offset)
-            .collect();
-        drop(dict_guard);
+        let bytes_from_offset = &bytes[offset..];
 
-        assert_eq!(bytes, &content[offset..]);
+        assert_eq!(bytes_from_offset, &content[offset..]);
     }
 
     #[test]

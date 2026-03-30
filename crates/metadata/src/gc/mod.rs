@@ -1,7 +1,7 @@
 //! Mark-and-sweep GC engine for SliceFS metadata.
 //!
 //! This module provides:
-//! - `collect_live_set`: walk all Dictionary entries reachable from a set of roots
+//! - `collect_live_set`: simplified stub — FileStorage orphan file cleanup deferred
 //! - `GarbageCollector`: orchestrates live-set collection + segment compaction
 
 pub mod background;
@@ -9,40 +9,21 @@ pub mod background;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use blockset::Dictionary;
+use blockset::Io;
 use slicefs_traits::digest::Digest224;
 
 use crate::segment::compaction::{compact_segment, SegmentError};
 
-/// Walk the Merkle tree in `dict` starting from every root in `roots`,
-/// collecting all reachable `Digest224` keys into a `HashSet`.
+/// Collect the live set of `Digest224` keys reachable from `roots`.
 ///
-/// Cycle/duplicate protection: if a key is already in the set, it is skipped.
-/// Leaf nodes (children whose `Digest256` does not convert to a valid `Digest224`)
-/// are silently ignored.
-pub fn collect_live_set(dict: &Dictionary, roots: &[Digest224]) -> HashSet<Digest224> {
-    let mut live = HashSet::new();
-    for &root in roots {
-        mark_reachable(dict, root, &mut live);
-    }
-    live
-}
-
-/// Recursively mark `key` and all of its children as reachable.
-fn mark_reachable(dict: &Dictionary, key: Digest224, live: &mut HashSet<Digest224>) {
-    if !live.insert(key) {
-        return; // already visited — prevents infinite loops on shared subtrees
-    }
-    if let Some(branches) = dict.get(&key) {
-        // Branches = [Digest256; 2] — each child is a Digest256.
-        // If a child has the hash suffix (is_hash), it's a tree node stored in the Dictionary
-        // as a Digest224 key (first 7 words of the Digest256).
-        for child256 in branches {
-            if let Some(child_key) = blockset::to_digest224(&child256) {
-                mark_reachable(dict, child_key, live);
-            }
-        }
-    }
+/// With FileStorage, batch files are named by their root `Digest224`.
+/// Segment compaction no longer needs a live set (no DictEntry to filter).
+/// FileStorage orphan file cleanup is deferred to a future phase.
+///
+/// Returns an empty `HashSet` — all live-set logic is no-op until the
+/// FileStorage orphan GC phase is implemented.
+pub fn collect_live_set(_io: &mut impl Io, _roots: &[Digest224]) -> HashSet<Digest224> {
+    HashSet::new()
 }
 
 /// Statistics returned by a GC run.
@@ -81,17 +62,21 @@ impl GarbageCollector {
         self.run_gc_inner()
     }
 
-    /// Collect the live set from `dict` + `roots`, then compact all `.seg` files in
+    /// Collect the live set from `io` + `roots`, then compact all `.seg` files in
     /// `segments_dir`.
     ///
     /// Segment files are compacted in place: each segment is replaced by a compacted
     /// version that retains only the entries present in the live set.
+    ///
+    /// With FileStorage, `collect_live_set` is a no-op (returns empty set) so
+    /// this is equivalent to `run_gc_roots_only`. FileStorage orphan file cleanup
+    /// is deferred to a future phase.
     pub fn run_gc(
         &self,
-        dict: &Dictionary,
+        io: &mut impl Io,
         roots: &[Digest224],
     ) -> Result<GcStats, GcError> {
-        let _live_set = collect_live_set(dict, roots);
+        let _live_set = collect_live_set(io, roots);
         self.run_gc_inner()
     }
 

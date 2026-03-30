@@ -3,42 +3,44 @@
 //! Tests create/write/release pipeline, buffer mechanics, CAS flush,
 //! refcount management, deduplication, and setattr truncate.
 //!
-//! These tests use `DictMetadataStore` and `Dictionary` directly —
+//! These tests use `DictMetadataStore` and `StoreIo` directly —
 //! no FUSE mount required.
 
-use blockset::{Dictionary, GetBytes, GetData};
+use blockset::file_storage_get;
 use metadata::store::DictMetadataStore;
+use metadata::store_io::StoreIo;
 use slicefs_cli::filesystem::{SliceFsFilesystem, inode_to_file_attr};
 use slicefs_compression::NoneCompressor;
-use slicefs_traits::digest::from_digest224;
 use slicefs_traits::metadata::MetadataStore;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use tempfile::TempDir;
 
 const S_IFREG: u32 = 0o100_000;
 
-fn fresh_fs() -> SliceFsFilesystem {
-    let meta = DictMetadataStore::new();
-    let dict = Dictionary::default();
-    SliceFsFilesystem::new(meta, dict, None, Arc::new(NoneCompressor::new()), 1)
+fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let meta = DictMetadataStore::new(io.clone());
+    let fs = SliceFsFilesystem::new(meta, io, None, Arc::new(NoneCompressor::new()), 1);
+    (fs, dir)
 }
 
-/// Read file content via manifest + GetBytes
+/// Read file content via manifest + file_storage_get
 fn read_content(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
     let manifest = fs.meta().get_manifest(ino).unwrap();
     if manifest.is_empty() {
         return vec![];
     }
-    let root256 = from_digest224(&manifest[0]);
-    let dict = fs.dict().lock().unwrap();
-    let get_data = GetData::new(&*dict, &root256);
-    GetBytes::new(get_data).collect()
+    let root_digest = manifest[0];
+    let mut io = fs.io().lock().unwrap();
+    file_storage_get(&mut *io, &root_digest).unwrap_or_default()
 }
 
 // ── Task 1 tests ──────────────────────────────────────────────────────────────
 
 #[test]
 fn test_create_produces_inode_in_parent_dir() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "hello.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
@@ -57,7 +59,7 @@ fn test_create_produces_inode_in_parent_dir() {
 
 #[test]
 fn test_create_returns_valid_attr() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let (ino, _fh) = fs.test_create(1, "file.txt", S_IFREG | 0o644, 0o022, 500, 500)
         .expect("create should succeed");
     let meta = fs.meta().get_inode(ino).unwrap();
@@ -69,7 +71,7 @@ fn test_create_returns_valid_attr() {
 
 #[test]
 fn test_write_sequential_produces_correct_buffer() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "seq.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
 
@@ -87,7 +89,7 @@ fn test_write_sequential_produces_correct_buffer() {
 
 #[test]
 fn test_write_with_gap_zero_pads() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "gap.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
 
@@ -103,7 +105,7 @@ fn test_write_with_gap_zero_pads() {
 
 #[test]
 fn test_release_flushes_to_cas_content_readable() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "flush.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
     fs.test_write(fh, 0, b"flush content").expect("write should succeed");
@@ -115,7 +117,7 @@ fn test_release_flushes_to_cas_content_readable() {
 
 #[test]
 fn test_release_updates_inode_size_and_mtime() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "size.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
     fs.test_write(fh, 0, b"hello").expect("write should succeed");
@@ -129,7 +131,7 @@ fn test_release_updates_inode_size_and_mtime() {
 
 #[test]
 fn test_release_increments_refcount() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "refcount.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
     fs.test_write(fh, 0, b"refcount data").expect("write should succeed");
@@ -143,7 +145,7 @@ fn test_release_increments_refcount() {
 
 #[test]
 fn test_two_identical_files_share_content_digest() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino1, fh1) = fs.test_create(1, "a.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
@@ -165,7 +167,7 @@ fn test_two_identical_files_share_content_digest() {
 
 #[test]
 fn test_empty_file_create_release_has_empty_manifest() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "empty.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
     // No writes — just release
@@ -182,7 +184,7 @@ fn test_empty_file_create_release_has_empty_manifest() {
 
 #[test]
 fn test_setattr_truncate_smaller_on_closed_file() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "trunc.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
     fs.test_write(fh, 0, b"hello world").expect("write should succeed");
@@ -200,7 +202,7 @@ fn test_setattr_truncate_smaller_on_closed_file() {
 
 #[test]
 fn test_setattr_truncate_larger_zero_extends_closed_file() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "extend.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
     fs.test_write(fh, 0, b"hi").expect("write should succeed");
@@ -217,7 +219,7 @@ fn test_setattr_truncate_larger_zero_extends_closed_file() {
 
 #[test]
 fn test_setattr_truncate_open_file_handle_truncates_buffer() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "open_trunc.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
     fs.test_write(fh, 0, b"hello world").expect("write should succeed");
@@ -234,7 +236,7 @@ fn test_setattr_truncate_open_file_handle_truncates_buffer() {
 
 #[test]
 fn test_setattr_mode_changes_permission_bits() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "perm.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
     fs.test_release(ino, fh).expect("release should succeed");
@@ -249,7 +251,7 @@ fn test_setattr_mode_changes_permission_bits() {
 
 #[test]
 fn test_setattr_uid_gid_changes_ownership() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "owner.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
     fs.test_release(ino, fh).expect("release should succeed");
@@ -264,7 +266,7 @@ fn test_setattr_uid_gid_changes_ownership() {
 
 #[test]
 fn test_setattr_mtime_updates_timestamp() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "mtime.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
     fs.test_release(ino, fh).expect("release should succeed");
@@ -279,7 +281,7 @@ fn test_setattr_mtime_updates_timestamp() {
 
 #[test]
 fn test_mknod_returns_enosys() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
     let result = fs.test_mknod(1, "fifo", 0o10644, 0);
     assert!(result.is_err(), "mknod must return error");
     // error code should be ENOSYS
@@ -300,7 +302,7 @@ fn test_mknod_returns_enosys() {
 /// FUSE-T never sends the separate setattr in the first place.
 #[test]
 fn test_setattr_size_zero_on_new_file_without_manifest() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     // Simulate: echo "test" > /mount/newfile.txt with FUSE_ATOMIC_O_TRUNC NOT set.
     // FUSE-T calls create() then setattr(size=0) for new files with O_TRUNC.
@@ -334,7 +336,7 @@ fn test_setattr_size_zero_on_new_file_without_manifest() {
 /// `test_fsync` (which shares the same helper).
 #[test]
 fn test_flush_write_read_roundtrip() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     // Simulate: echo "test" > /mount/newfile.txt
     // Step 1: create (NFS4 OPEN CREATE → FUSE create)

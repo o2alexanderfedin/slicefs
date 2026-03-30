@@ -8,11 +8,12 @@
 
 use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
+use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
 use slicefs_cli::filesystem::SliceFsFilesystem;
 use slicefs_compression::NoneCompressor;
 use slicefs_traits::metadata::MetadataStore;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 const S_IFREG: u32 = 0o100_000;
@@ -21,10 +22,10 @@ const S_IFREG: u32 = 0o100_000;
 fn make_fs(store_dir: &TempDir, wal_config: WalConfig) -> SliceFsFilesystem {
     std::fs::create_dir_all(store_dir.path().join("segments")).unwrap();
     let wal = create_wal(wal_config, store_dir.path(), 1).unwrap();
-    let mut meta = DictMetadataStore::new();
+    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let mut meta = DictMetadataStore::new(io.clone());
     meta.set_wal(wal);
-    let dict = meta.dict().lock().unwrap().clone();
-    SliceFsFilesystem::new(meta, dict, Some(store_dir.path().to_path_buf()), Arc::new(NoneCompressor::new()), 1)
+    SliceFsFilesystem::new(meta, io, Some(store_dir.path().to_path_buf()), Arc::new(NoneCompressor::new()), 1)
 }
 
 // ── Test 1: fsync with buffered writes flushes to CAS ───────────────────────
@@ -122,13 +123,14 @@ fn test_fsync_crash_durability() {
 
     // Reload from segment files
     let segs_dir = store_dir.path().join("segments");
-    let (dict, loaded_root, _snapshots) = load_store_from_segments(&segs_dir)
+    let (loaded_root, _snapshots) = load_store_from_segments(&segs_dir)
         .expect("should be able to load segments after crash");
 
     assert!(loaded_root.is_some(), "a RootUpdate should have been written by fsync+commit");
 
     // Reconstruct the store from the committed root
-    let rebuilt = DictMetadataStore::load_from_root(dict, &root_digest)
+    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let rebuilt = DictMetadataStore::load_from_root(io, &root_digest)
         .expect("should be able to reconstruct store");
 
     let found_ino = rebuilt.lookup(1, "durable.txt")

@@ -3,22 +3,25 @@
 //! These tests verify that statfs returns real logical and physical byte counts,
 //! enabling users to see the dedup ratio directly from `df` output.
 //!
-//! Test setup: `DictMetadataStore` + `Dictionary` + `SliceFsFilesystem` directly,
+//! Test setup: `DictMetadataStore` + `StoreIo` + `SliceFsFilesystem` directly,
 //! no FUSE mount required.
 
-use blockset::Dictionary;
 use metadata::store::DictMetadataStore;
+use metadata::store_io::StoreIo;
 use slicefs_cli::filesystem::SliceFsFilesystem;
 use slicefs_compression::NoneCompressor;
 use slicefs_traits::metadata::MetadataStore;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use tempfile::TempDir;
 
 const S_IFREG: u32 = 0o100_000;
 
-fn fresh_fs() -> SliceFsFilesystem {
-    let meta = DictMetadataStore::new();
-    let dict = Dictionary::default();
-    SliceFsFilesystem::new(meta, dict, None, Arc::new(NoneCompressor::new()), 1)
+fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let meta = DictMetadataStore::new(io.clone());
+    let fs = SliceFsFilesystem::new(meta, io, None, Arc::new(NoneCompressor::new()), 1);
+    (fs, dir)
 }
 
 // ── Logical bytes tests ───────────────────────────────────────────────────────
@@ -26,14 +29,16 @@ fn fresh_fs() -> SliceFsFilesystem {
 /// Empty filesystem should have 0 logical bytes.
 #[test]
 fn test_logical_bytes_empty_store() {
-    let meta = DictMetadataStore::new();
+    let dir = tempfile::tempdir().unwrap();
+    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let meta = DictMetadataStore::new(io);
     assert_eq!(meta.logical_bytes(), 0, "empty store should have 0 logical bytes");
 }
 
 /// After creating a file with known size, logical bytes should increase.
 #[test]
 fn test_logical_bytes_increases_after_write() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let (ino, fh) = fs
         .test_create(1, "file.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
@@ -55,7 +60,7 @@ fn test_logical_bytes_increases_after_write() {
 /// Logical bytes should equal sum of all inode sizes.
 #[test]
 fn test_logical_bytes_equals_sum_of_inode_sizes() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let content1 = b"first file content";   // 18 bytes
     let content2 = b"second file data!!";   // 18 bytes
@@ -87,16 +92,15 @@ fn test_logical_bytes_equals_sum_of_inode_sizes() {
 // ── Dedup ratio tests ─────────────────────────────────────────────────────────
 
 /// Two files with identical content: both inodes report their size in logical_bytes,
-/// but the CAS dictionary stores the content only once (dedup).
+/// but the CAS stores the content only once (dedup).
 /// For large enough content, logical > physical proving the dedup ratio.
 #[test]
 fn test_dedup_ratio_with_identical_files() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
-    // Use content large enough that logical (2 * content_size) exceeds the CAS overhead
-    // from the hash tree + metadata entries in the dictionary.
-    // CAS tree adds ~10-15 dictionary entries for small files, so ~92*15 = 1380 bytes overhead.
-    // With 2048 bytes each file: logical = 4096, physical = tree_overhead * 92 << 4096.
+    // Use content large enough to demonstrate dedup effect.
+    // Both files have the same content — logical = 2 * content_size,
+    // but CAS stores it once (dedup via Digest224 equality).
     let content = vec![0x42u8; 2048];
 
     let (ino1, fh1) = fs
@@ -104,12 +108,6 @@ fn test_dedup_ratio_with_identical_files() {
         .expect("create file1");
     fs.test_write(fh1, 0, &content).expect("write file1");
     fs.test_release(ino1, fh1).expect("release file1");
-
-    // Capture dict size after first file (deduped content stored once)
-    let dict_len_after_first = {
-        let dict = fs.dict().lock().unwrap();
-        dict.len() as u64
-    };
 
     let (ino2, fh2) = fs
         .test_create(1, "file2.txt", S_IFREG | 0o644, 0o022, 0, 0)
@@ -127,25 +125,12 @@ fn test_dedup_ratio_with_identical_files() {
         2 * content.len()
     );
 
-    let dict_len_after_second = {
-        let dict = fs.dict().lock().unwrap();
-        dict.len() as u64
-    };
-
-    // Key dedup invariant: identical content means the dict grew very little (or 0)
-    // between first and second write (only manifest entry added, not content blocks).
-    let new_dict_entries = dict_len_after_second.saturating_sub(dict_len_after_first);
-    assert!(
-        new_dict_entries < dict_len_after_first,
-        "second identical write added {} new dict entries but first write added {} — dedup should limit growth",
-        new_dict_entries,
-        dict_len_after_first
-    );
-
-    let physical = dict_len_after_second * 92;
-    assert!(
-        physical > 0,
-        "physical bytes should be > 0 after writing files"
+    // Verify manifests are identical (same Digest224 → dedup confirmed)
+    let manifest1 = fs.meta().get_manifest(ino1).unwrap();
+    let manifest2 = fs.meta().get_manifest(ino2).unwrap();
+    assert_eq!(
+        manifest1, manifest2,
+        "identical content should produce identical manifests (dedup)"
     );
 
     // logical >= 2 * 2048 = 4096
@@ -156,10 +141,10 @@ fn test_dedup_ratio_with_identical_files() {
     );
 }
 
-/// Two files with different content: no dedup, ratio <= 1.0 or close to 1.
+/// Two files with different content: no dedup.
 #[test]
 fn test_distinct_files_have_low_dedup_ratio() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let content1 = b"unique content alpha";
     let content2 = b"unique content betaa"; // same length, different content
@@ -186,10 +171,10 @@ fn test_distinct_files_have_low_dedup_ratio() {
 
 // ── Physical bytes tests ──────────────────────────────────────────────────────
 
-/// Physical bytes must be dict.len() * 92.
+/// Physical bytes must be > 0 after writing a file.
 #[test]
-fn test_physical_bytes_equals_dict_len_times_92() {
-    let fs = fresh_fs();
+fn test_physical_bytes_nonzero_after_write() {
+    let (fs, dir) = fresh_fs();
 
     let (ino, fh) = fs
         .test_create(1, "data.bin", S_IFREG | 0o644, 0o022, 0, 0)
@@ -197,30 +182,34 @@ fn test_physical_bytes_equals_dict_len_times_92() {
     fs.test_write(fh, 0, b"some data content here").expect("write");
     fs.test_release(ino, fh).expect("release");
 
-    let dict_len = {
-        let dict = fs.dict().lock().unwrap();
-        dict.len() as u64
+    // Physical bytes: actual bytes in vt0/ CAS batch files on disk.
+    let vt0_path = dir.path().join("vt0");
+    let physical_bytes: u64 = if vt0_path.exists() {
+        std::fs::read_dir(&vt0_path)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.metadata().ok())
+            .filter(|m| m.is_file())
+            .map(|m| m.len())
+            .sum()
+    } else {
+        0
     };
-    let expected_physical = dict_len * 92;
 
-    // We verify the formula; the filesystem's statfs should use this same formula
     assert!(
-        expected_physical > 0,
-        "physical bytes should be > 0 after writing a file"
-    );
-    assert_eq!(
-        expected_physical,
-        dict_len * 92,
-        "physical bytes formula: dict.len() * 92"
+        physical_bytes > 0,
+        "physical bytes should be > 0 after writing a file (vt0/ must contain data)"
     );
 }
 
 // ── statfs() integration tests ────────────────────────────────────────────────
 
-/// statfs() on empty filesystem returns 0 logical_bytes (bsize=4096, blocks depends on logical).
+/// statfs() on empty filesystem returns 0 logical_bytes.
 #[test]
 fn test_statfs_empty_filesystem() {
-    let meta = DictMetadataStore::new();
+    let dir = tempfile::tempdir().unwrap();
+    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let meta = DictMetadataStore::new(io);
     assert_eq!(
         meta.logical_bytes(),
         0,
@@ -231,7 +220,7 @@ fn test_statfs_empty_filesystem() {
 /// After writing 1000+ bytes, statfs reports >= 1000 logical bytes.
 #[test]
 fn test_statfs_after_write_reports_logical_bytes() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let content = vec![0xABu8; 1000];
     let (ino, fh) = fs
@@ -251,7 +240,7 @@ fn test_statfs_after_write_reports_logical_bytes() {
 /// logical_bytes tracks write then delete correctly.
 #[test]
 fn test_logical_bytes_decremented_on_delete() {
-    let fs = fresh_fs();
+    let (fs, _dir) = fresh_fs();
 
     let content = b"content to be deleted later";
     let (ino, fh) = fs
