@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-03-29)
 
 ## Current Position
 
-Phase: 10 (Streaming Writes Core) -- COMPLETE
-Plan: 03 of 3 complete
-Status: Phase complete
-Last activity: 2026-03-30 — Plan 03 complete: streaming truncate on open handles with refcount lifecycle and 12 integration tests
+Phase: 11 (Non-Sequential Write Handling)
+Plan: 01 of 2 complete
+Status: In progress
+Last activity: 2026-03-29 — Plan 01 complete: WriteMode dual dispatch with Streaming-to-Buffered fallback for pwrite at arbitrary offsets
 
 Progress: [██████████] 100%
 
@@ -59,6 +59,7 @@ Progress: [██████████] 100%
 | Phase 10-streaming-writes-core P01 | 12 | 2 tasks | 6 files |
 | Phase 10 P02 | 4 | 2 tasks | 2 files |
 | Phase 10-streaming-writes-core P03 | 2 | 2 tasks | 2 files |
+| Phase 11-non-sequential-write-handling P01 | 1 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -97,6 +98,12 @@ Progress: [██████████] 100%
 - [Phase 10-streaming-writes-core]: Truncate to N>0 materializes via clone+end, resizes Vec, pushes into fresh State
 - [Phase 10-streaming-writes-core]: last_committed_root.take() on truncate prevents refcount leaks from prior fsyncs
 
+- [Phase 11-01]: WriteMode enum variants embed mode-specific data (State in Streaming, Vec<u8> in Buffered) making illegal states unrepresentable
+- [Phase 11-01]: Fallback transition uses lock-release-reacquire pattern: clone State under open_files, release, materialize under io, re-acquire open_files to swap
+- [Phase 11-01]: byte_count == 0 fallback loads committed manifest content to prevent existing file data loss (Research Pitfall 1)
+- [Phase 11-01]: Buffered read serves directly from buf clone (no CAS roundtrip needed)
+- [Phase 11-01]: Buffered truncate uses simple buf.resize() instead of materialize+repush
+
 ### Roadmap Evolution
 
 - Phase 7.1 inserted after Phase 7: FileStorage Migration (URGENT) — switch DictMetadataStore from in-memory Dictionary to file-backed FileStorageAdd/file_storage_get. Eliminates ~67 GB RAM for 1 TB stores. Structurally solves FIX-03/FIX-04. Runs before Phase 8 correctness fixes.
@@ -113,6 +120,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-30T07:58:09.224Z
-Stopped at: Phase 11 context gathered
-Resume file: .planning/phases/11-non-sequential-write-handling/11-CONTEXT.md
+Last session: 2026-03-29T00:00:00Z
+Stopped at: Completed 11-01-PLAN.md
+Resume file: .planning/phases/11-non-sequential-write-handling/11-01-SUMMARY.md

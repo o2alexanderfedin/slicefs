@@ -81,7 +81,7 @@ Requirements for streaming writes and hardening milestone.
 ### Streaming Writes
 
 - [x] **STRM-01**: Sequential file writes use State::push_bytes() incrementally — O(log N) memory regardless of file size
-- [ ] **STRM-02**: Non-sequential writes (pwrite at arbitrary offset) detected and fall back to Vec<u8> buffer mode with no regression
+- [x] **STRM-02**: Non-sequential writes (pwrite at arbitrary offset) detected and fall back to Vec<u8> buffer mode with no regression
 - [x] **STRM-03**: Read-during-write on an open streaming file handle returns correct content (clone+end materialization)
 - [x] **STRM-04**: fsync() mid-stream commits current State, resets streaming state for subsequent writes
 - [x] **STRM-05**: Truncate on an open streaming file handle resets State and adjusts inode size atomically
@@ -194,7 +194,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STRM-03 | Phase 10 | Complete |
 | STRM-04 | Phase 10 | Complete |
 | STRM-05 | Phase 10 | Complete |
-| STRM-02 | Phase 11 | Pending |
+| STRM-02 | Phase 11 | Complete |
 
 **Coverage:**
 - v1 requirements: 43 total, mapped to phases: 43
