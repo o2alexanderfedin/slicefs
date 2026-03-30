@@ -10,6 +10,7 @@ pub mod directory;
 pub mod manifest;
 pub mod xattr;
 pub mod store;
+pub mod store_io;
 pub mod segment;
 pub mod wal;
 pub mod mount_lock;

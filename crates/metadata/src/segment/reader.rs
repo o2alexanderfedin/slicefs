@@ -9,7 +9,8 @@ use super::{RecordType, SegmentEntry, SegmentHeader};
 /// Reads entries from a segment file.
 ///
 /// Crash-tolerant: truncated records at the end are silently skipped.
-/// Unknown record types are skipped by seeking `payload_len` bytes forward.
+/// Unknown record types (including legacy 0x01 DictEntry records) are skipped
+/// by consuming `payload_len` bytes forward.
 /// Iteration stops at EOF marker, any truncated read, or physical end of file.
 pub struct SegmentReader {
     inner: BufReader<File>,
@@ -59,18 +60,16 @@ impl Iterator for SegmentReader {
             let payload_len_buf = read_exact_or_none(&mut self.inner, 4)?;
             let payload_len = u32::from_le_bytes(payload_len_buf.try_into().unwrap()) as usize;
 
+            // 0x01 is the legacy DictEntry record type — skip its payload and continue
+            if type_buf[0] == 0x01 {
+                let _ = read_exact_or_none(&mut self.inner, payload_len)?;
+                continue;
+            }
+
             match RecordType::from_u8(type_buf[0]) {
                 Some(RecordType::EofMarker) => {
                     // Read (and discard) any payload, then stop
                     let _ = read_exact_or_none(&mut self.inner, payload_len);
-                    return None;
-                }
-                Some(RecordType::DictEntry) => {
-                    let payload = read_exact_or_none(&mut self.inner, payload_len)?;
-                    if let Some(entry) = SegmentEntry::parse_dict_entry(&payload) {
-                        return Some(entry);
-                    }
-                    // Malformed payload — treat as truncation
                     return None;
                 }
                 Some(RecordType::RootUpdate) => {

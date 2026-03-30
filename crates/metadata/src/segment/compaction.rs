@@ -4,10 +4,7 @@
 //! renamed to the final destination.  If the process crashes before the rename,
 //! the original segment is untouched.
 
-use std::collections::HashSet;
 use std::path::Path;
-
-use slicefs_traits::digest::Digest224;
 
 use super::{SegmentEntry, SegmentReader, SegmentWriter};
 
@@ -21,14 +18,15 @@ pub enum SegmentError {
 /// Result of a segment compaction pass.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CompactionResult {
-    /// Number of DictEntry records written to the compacted segment.
+    /// Number of records written to the compacted segment.
     pub entries_kept: usize,
-    /// Number of DictEntry records omitted (dead/orphaned).
+    /// Number of legacy or obsolete records omitted.
     pub entries_removed: usize,
 }
 
-/// Compact `segment_path`, keeping only `DictEntry` records whose key is in
-/// `live_set` (all `RootUpdate` and `SnapshotRecord` records are always kept).
+/// Compact `segment_path`, keeping all `RootUpdate` and `SnapshotRecord` entries.
+///
+/// Legacy `DictEntry` records (type 0x01) are silently dropped by the reader.
 ///
 /// The compacted segment is written to `output_dir/segment-{output_segment_id}.seg`.
 /// Steps:
@@ -41,7 +39,6 @@ pub struct CompactionResult {
 /// verifying the compacted output is durable.
 pub fn compact_segment(
     segment_path: &Path,
-    live_set: &HashSet<Digest224>,
     output_dir: &Path,
     output_segment_id: u64,
 ) -> Result<CompactionResult, SegmentError> {
@@ -60,22 +57,16 @@ pub fn compact_segment(
 
     for entry in input_entries {
         match &entry {
-            SegmentEntry::DictEntry { key, .. } => {
-                if live_set.contains(key) {
-                    writer.write_entry(&entry)?;
-                    result.entries_kept += 1;
-                } else {
-                    result.entries_removed += 1;
-                }
-            }
             SegmentEntry::RootUpdate { .. } => {
                 // Always keep root update records
                 writer.write_entry(&entry)?;
+                result.entries_kept += 1;
             }
             SegmentEntry::SnapshotRecord { .. } => {
                 // Always keep snapshot records — they are immutable pointers
                 // to committed roots that may be referenced by the GC or CLI.
                 writer.write_entry(&entry)?;
+                result.entries_kept += 1;
             }
         }
     }

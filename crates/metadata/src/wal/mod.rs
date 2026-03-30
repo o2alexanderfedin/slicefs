@@ -21,14 +21,12 @@ pub use flush_on_fsync::FlushOnFsyncWal;
 pub use periodic::PeriodicWal;
 
 use std::path::Path;
-use slicefs_traits::digest::{Branches, Digest224};
+use slicefs_traits::digest::Digest224;
 use thiserror::Error;
 
-/// A logical WAL entry representing a single Dictionary mutation.
+/// A logical WAL entry representing a metadata state change.
 #[derive(Debug, Clone)]
 pub enum WalEntry {
-    /// Append or update a DictEntry (key → branches).
-    DictionaryAppend { key: Digest224, branches: Branches },
     /// Update the filesystem root digest.
     RootUpdate { root: Digest224 },
     /// Persist a snapshot record with version, root, timestamp, and optional name.

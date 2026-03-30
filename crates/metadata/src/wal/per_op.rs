@@ -54,10 +54,6 @@ impl WalStrategy for PerOpWal {
 /// Convert a `WalEntry` to the corresponding `SegmentEntry`.
 pub(crate) fn wal_entry_to_segment(entry: &WalEntry) -> SegmentEntry {
     match entry {
-        WalEntry::DictionaryAppend { key, branches } => SegmentEntry::DictEntry {
-            key: *key,
-            branches: *branches,
-        },
         WalEntry::RootUpdate { root } => SegmentEntry::RootUpdate { root: *root },
         WalEntry::Snapshot { version, root, created_at, name } => SegmentEntry::SnapshotRecord {
             version: *version,
