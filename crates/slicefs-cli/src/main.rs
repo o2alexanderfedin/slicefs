@@ -21,7 +21,7 @@ fn main() {
     let json = cli.json;
 
     match cli.command {
-        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, compressor, compressor_level, snapshot, auto_snapshot } => {
+        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot } => {
             if let Err(e) = mount::run_mount(
                 &store,
                 &mountpoint,
@@ -29,8 +29,6 @@ fn main() {
                 allow_other,
                 cache_size,
                 wal_strategy.as_deref(),
-                &compressor,
-                compressor_level,
                 snapshot.as_deref(),
                 auto_snapshot,
             ) {

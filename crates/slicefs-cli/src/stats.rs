@@ -158,7 +158,7 @@ pub fn run_stats(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
     let snap_stats = build_snapshot_stats(&snapshots);
 
     // Compressor is always zstd for store_version >= 2 (Phase 6 default).
-    let compressor = "zstd (default)".to_string();
+    let compressor = "none (v3 raw)".to_string();
 
     let stats = StoreStats {
         logical_bytes,

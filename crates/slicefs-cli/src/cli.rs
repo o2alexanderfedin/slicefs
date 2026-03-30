@@ -52,12 +52,6 @@ pub enum Cmd {
         /// - no-wal: no write-ahead log (testing only; data loss on crash)
         #[arg(long, value_name = "STRATEGY")]
         wal_strategy: Option<String>,
-        /// Block compressor: zstd, lz4, or none (default: zstd).
-        #[arg(long, default_value = "zstd")]
-        compressor: String,
-        /// Compression level (zstd: 1-22, default 3; lz4: ignored).
-        #[arg(long)]
-        compressor_level: Option<i32>,
         /// Mount a specific snapshot read-only (by version number or name).
         #[arg(long)]
         snapshot: Option<String>,
