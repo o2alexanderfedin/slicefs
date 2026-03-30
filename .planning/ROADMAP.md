@@ -165,11 +165,10 @@ Plans:
   2. `df` on a mounted SliceFS volume reports the actual number of inodes in use, not a hardcoded 1,000,000
   3. Physical bytes reported by statfs reflect the real store occupancy, not an arithmetic approximation based on dict entry count
   4. Looking up a snapshot by version number or name executes in O(1) time regardless of how many snapshots exist
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 08-01-PLAN.md — saturating_add refcount fix, inode_count AtomicU64, accurate statfs bfree
-- [ ] 08-02-PLAN.md — HashMap snapshot indexes replacing Vec linear scan
+- [ ] 08-01-PLAN.md — Saturating refcount fix, inode_count AtomicU64, three-tier statfs, scrub saturated reporting, FIX-03/FIX-04 verification
 
 #### Phase 9: Compression Removal
 **Goal**: The write path pushes raw bytes directly into the Merkle tree with no compression header; a new store format version (v3) is introduced; the read path handles all three versions so existing stores remain readable
@@ -231,7 +230,7 @@ Phases execute in numeric order: 7.1 -> 8 -> 9 -> 10 -> 11
 | 6. Compression and Snapshots | v1.0 | 4/4 | Complete | 2026-03-29 |
 | 7. Cross-Platform and Production Hardening | v1.0 | 3/3 | Complete | 2026-03-29 |
 | 7.1. FileStorage Migration (INSERTED) | 3/3 | Complete |  | - |
-| 8. Correctness Fixes | v2.0 | 0/2 | Not started | - |
+| 8. Correctness Fixes | v2.0 | 0/1 | Not started | - |
 | 9. Compression Removal | v2.0 | 0/2 | Not started | - |
 | 10. Streaming Writes Core | v2.0 | 0/3 | Not started | - |
 | 11. Non-Sequential Write Handling | v2.0 | 0/2 | Not started | - |
