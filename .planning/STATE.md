@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Streaming Writes & Hardening
 status: planning
-stopped_at: Phase 07.1 Plan 01 complete — blockset API exposed, intern_* generalized, O(1) snapshot indexes
-last_updated: "2026-03-30T01:01:54.907Z"
+stopped_at: Phase 07.1 Plan 02 complete — DictMetadataStore migrated to file-backed StoreIo
+last_updated: "2026-03-30T03:00:00.000Z"
 last_activity: 2026-03-29 — Phase 7.1 inserted before Phase 8 (FileStorage Migration)
 progress:
   total_phases: 12
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-03-29)
 ## Current Position
 
 Phase: 7.1 (FileStorage Migration — INSERTED, urgent)
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-03-29 — Phase 7.1 inserted before Phase 8 (FileStorage Migration)
+Plan: 02 complete (next: 03)
+Status: In progress
+Last activity: 2026-03-30 — Plan 02 complete: DictMetadataStore migrated to file-backed StoreIo
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -51,6 +51,7 @@ Progress: [░░░░░░░░░░] 0%
 
 *Updated after each plan completion*
 | Phase 07.1-filestorage-migration P01 | 7 | 2 tasks | 7 files |
+| Phase 07.1-filestorage-migration P02 | ~180 | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -62,6 +63,10 @@ Progress: [░░░░░░░░░░] 0%
 - v2.0 Roadmap: No WAL checkpointing of partial streaming state — "no intermediate manifests" invariant; truncate-on-crash is sufficient; streaming State is O(log N) so terabyte files fit in memory
 - [Phase 07.1-01]: directory.rs mixed read/write functions use S: StorageAdd + StorageGet combined bound (not split params) to avoid borrow conflict on same Dictionary
 - [Phase 07.1-01]: Snapshot storage: dual HashMap indexes (by_version + by_name) for O(1) multi-key lookup vs prior O(N) Vec scan
+- [Phase 07.1-02]: DictMetadataStore::new() requires Arc<Mutex<StoreIo>> — Default removed; callers must provide explicit storage backing
+- [Phase 07.1-02]: Read-then-write pattern for directory ops: file_storage_get releases borrow before FileStorageAdd::new(io)
+- [Phase 07.1-02]: GC background thread uses run_gc_roots_only() — Dictionary-free; live-set filtering from file storage deferred
+- [Phase 07.1-02]: Crash-safe commit: FSA drop (flushes node files) THEN WAL RootUpdate write
 
 ### Roadmap Evolution
 
@@ -79,6 +84,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-30T01:01:54.904Z
-Stopped at: Phase 07.1 Plan 01 complete — blockset API exposed, intern_* generalized, O(1) snapshot indexes
+Last session: 2026-03-30T03:00:00.000Z
+Stopped at: Phase 07.1 Plan 02 complete — DictMetadataStore migrated to file-backed StoreIo
 Resume file: None
