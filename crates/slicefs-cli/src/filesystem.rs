@@ -592,6 +592,47 @@ impl SliceFsFilesystem {
         Err(libc::ENOSYS)
     }
 
+    /// Return `(blocks, bfree, bavail, files, ffree, bsize)` — the same values
+    /// that `statfs()` passes to the kernel. Used by integration tests.
+    pub fn test_statfs_values(&self) -> (u64, u64, u64, u64, u64, u32) {
+        self.compute_statfs()
+    }
+
+    /// Compute statfs values — extracted so both `statfs()` and unit tests can call it.
+    ///
+    /// Three-tier space reporting:
+    /// - blocks/bfree/bavail: host disk capacity via `libc::statvfs` on the store path
+    /// - files: actual live inode count from `inode_count` AtomicU64
+    /// - ffree: approximate free inode slots (u64::MAX - inode_count)
+    ///
+    /// Returns `(blocks, bfree, bavail, files, ffree, bsize)`.
+    pub fn compute_statfs(&self) -> (u64, u64, u64, u64, u64, u32) {
+        let files = self.meta.inode_count();
+        let ffree = u64::MAX.saturating_sub(files);
+
+        if let Some(ref sp) = self.store_path {
+            // Convert path to CString for libc::statvfs
+            use std::ffi::CString;
+            let path_cstr = match sp.to_str().and_then(|s| CString::new(s).ok()) {
+                Some(c) => c,
+                None => return (0, 0, 0, files, ffree, 4096),
+            };
+            let mut sv: libc::statvfs = unsafe { std::mem::zeroed() };
+            let ret = unsafe { libc::statvfs(path_cstr.as_ptr(), &mut sv) };
+            if ret == 0 {
+                let bsize = sv.f_frsize as u32;
+                let blocks = sv.f_blocks as u64;
+                let bfree = sv.f_bfree as u64;
+                let bavail = sv.f_bavail as u64;
+                return (blocks, bfree, bavail, files, ffree, bsize);
+            }
+            // statvfs failed — fall through to graceful fallback
+        }
+
+        // Graceful fallback when store_path is None or statvfs fails.
+        (0, 0, 0, files, ffree, 4096)
+    }
+
     // ── Directory and link simulate helpers (Phase 4 Plan 03) ─────────────────
 
     /// Create a subdirectory named `name` in `parent_ino`.
@@ -1168,31 +1209,7 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
-        // Dedup-aware statfs:
-        //   logical  = sum of all inode sizes (what users see as space used)
-        //   physical = actual bytes in vt0/ directory (CAS batch files on disk)
-        //
-        // Showing logical allows `df` to display dedup ratio when users compare
-        // output of `du -sh` (logical) against `df -h` (physical).
-        let logical = self.meta.logical_bytes();
-        let physical = if let Some(ref sp) = self.store_path {
-            dir_size(&sp.join("vt0"))
-        } else {
-            logical
-        };
-
-        let bsize: u32 = 4096;
-        // blocks: logical bytes / block size (round up, minimum 1 to avoid div-by-zero on empty fs)
-        let blocks = if logical == 0 { 0 } else { (logical + bsize as u64 - 1) / bsize as u64 };
-        // Physical blocks used — drives what `df` shows as "Used"
-        let blocks_used = if physical == 0 { 0 } else { (physical + bsize as u64 - 1) / bsize as u64 };
-        // CAS dedup filesystem is effectively unlimited: bfree is very large
-        let bfree = u64::MAX / 4;
-        let bavail = bfree;
-        let files = 1_000_000u64; // generous max inodes
-        // ffree: rough estimate based on blocks_used vs blocks
-        let ffree = files.saturating_sub(blocks_used);
-
+        let (blocks, bfree, bavail, files, ffree, bsize) = self.compute_statfs();
         reply.statfs(blocks, bfree, bavail, files, ffree, bsize, 255, 0);
     }
 
@@ -1720,11 +1737,23 @@ mod tests {
     }
 
     #[test]
-    fn test_statfs_returns_nonzero_blocks() {
-        // The statfs values are hardcoded constants — verify they are non-zero
-        let blocks: u64 = 1_000_000;
-        let files: u64 = 1_000_000;
-        assert!(blocks > 0);
-        assert!(files > 0);
+    fn test_statfs_files_not_hardcoded() {
+        // statfs files field should reflect actual inode count, not hardcoded 1_000_000.
+        // Fresh store has 1 inode (root), so inode_count() == 1 != 1_000_000.
+        let dir = tempfile::TempDir::new().unwrap();
+        let io = Arc::new(std::sync::Mutex::new(
+            metadata::store_io::StoreIo::new(dir.path()),
+        ));
+        let meta = metadata::store::DictMetadataStore::new(io.clone());
+        let fs = super::SliceFsFilesystem::new(
+            meta,
+            io,
+            Some(dir.path().to_path_buf()),
+            Arc::new(slicefs_compression::NoneCompressor::new()),
+            1,
+        );
+        let (_blocks, _bfree, _bavail, files, _ffree, _bsize) = fs.test_statfs_values();
+        assert_ne!(files, 1_000_000, "files must not be hardcoded 1_000_000");
+        assert_eq!(files, 1, "fresh store files must equal inode_count (1)");
     }
 }

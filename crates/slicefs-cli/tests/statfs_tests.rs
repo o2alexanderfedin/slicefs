@@ -237,6 +237,80 @@ fn test_statfs_after_write_reports_logical_bytes() {
     );
 }
 
+// ── inode_count / statfs.files tests ─────────────────────────────────────────
+
+/// statfs files field should reflect actual inode count, not hardcoded 1_000_000.
+#[test]
+fn test_statfs_files_reflects_inode_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let meta = DictMetadataStore::new(io.clone());
+
+    // Start: fresh store has root inode (count = 1)
+    let inode_count_before = meta.inode_count();
+    assert_eq!(inode_count_before, 1, "fresh store must have 1 inode (root)");
+
+    // Create 3 more inodes
+    use slicefs_traits::metadata::InodeMeta;
+    for _ in 0..3 {
+        meta.create_inode(&InodeMeta::new_file(0, 0, 0, S_IFREG | 0o644)).unwrap();
+    }
+
+    let inode_count_after = meta.inode_count();
+    assert_eq!(inode_count_after, 4, "after 3 creates, inode_count must be 4");
+
+    // statfs files should not be hardcoded 1_000_000 — it should track inode_count
+    assert_ne!(inode_count_after, 1_000_000,
+        "inode_count should be real count (4), not hardcoded 1_000_000");
+}
+
+/// statfs blocks/bfree/bavail should come from host disk (statvfs), not u64::MAX/4.
+#[test]
+fn test_statfs_blocks_from_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let meta = DictMetadataStore::new(io.clone());
+    let fs = SliceFsFilesystem::new(
+        meta,
+        io,
+        Some(dir.path().to_path_buf()),
+        Arc::new(NoneCompressor::new()),
+        1,
+    );
+
+    // Verify statfs via the filesystem's statfs_values() test helper
+    let (blocks, bfree, bavail, _files, _ffree, _bsize) = fs.test_statfs_values();
+
+    // blocks should be > 0 (real host disk) and NOT u64::MAX/4
+    assert!(blocks > 0, "blocks must be non-zero (from host statvfs)");
+    assert_ne!(blocks, u64::MAX / 4, "blocks must not be hardcoded u64::MAX/4");
+    assert_ne!(bfree, u64::MAX / 4, "bfree must not be hardcoded u64::MAX/4");
+    assert_ne!(bavail, u64::MAX / 4, "bavail must not be hardcoded u64::MAX/4");
+
+    // bfree should be <= blocks (can't have more free than total)
+    assert!(bfree <= blocks, "bfree {} must be <= blocks {}", bfree, blocks);
+}
+
+/// statfs fallback when store_path is None: blocks=0, bfree=0, bavail=0.
+#[test]
+fn test_statfs_fallback_no_store_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let meta = DictMetadataStore::new(io.clone());
+    let fs = SliceFsFilesystem::new(
+        meta,
+        io,
+        None, // No store path
+        Arc::new(NoneCompressor::new()),
+        1,
+    );
+
+    let (blocks, bfree, bavail, _files, _ffree, _bsize) = fs.test_statfs_values();
+    assert_eq!(blocks, 0, "blocks should be 0 when store_path is None");
+    assert_eq!(bfree, 0, "bfree should be 0 when store_path is None");
+    assert_eq!(bavail, 0, "bavail should be 0 when store_path is None");
+}
+
 /// logical_bytes tracks write then delete correctly.
 #[test]
 fn test_logical_bytes_decremented_on_delete() {

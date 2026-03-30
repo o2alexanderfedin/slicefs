@@ -50,7 +50,10 @@ pub struct SnapshotStats {
 #[derive(Debug, Serialize)]
 pub struct StoreStats {
     pub logical_bytes: u64,
+    /// Bytes used by vt0/ CAS batch files (deduplication savings visible here).
     pub physical_bytes: u64,
+    /// Total bytes used by the entire store directory on the host filesystem.
+    pub host_disk_bytes: u64,
     pub dedup_ratio: f64,
     pub snapshot_count: usize,
     /// Informational compressor string.
@@ -116,6 +119,9 @@ pub fn run_stats(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
     let vt0_dir = store_path.join("vt0");
     let physical_bytes = dir_size(&vt0_dir);
 
+    // Host disk bytes: total disk usage of the entire store directory.
+    let host_disk_bytes = dir_size(store_path);
+
     // Reconstruct metadata store for logical_bytes and refcount data.
     let (logical_bytes, refcount_dist) = if let Some(ref root) = root_opt {
         let io = Arc::new(Mutex::new(StoreIo::new(store_path)));
@@ -157,6 +163,7 @@ pub fn run_stats(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
     let stats = StoreStats {
         logical_bytes,
         physical_bytes,
+        host_disk_bytes,
         dedup_ratio,
         snapshot_count,
         compressor,
@@ -196,7 +203,8 @@ fn print_human_stats(stats: &StoreStats) {
     println!("SliceFS Store Statistics");
     println!("========================");
     println!("Logical bytes    : {}", format_bytes(stats.logical_bytes));
-    println!("Physical bytes   : {} (vt0/ CAS batch files)", format_bytes(stats.physical_bytes));
+    println!("CAS bytes        : {} (vt0/ CAS batch files)", format_bytes(stats.physical_bytes));
+    println!("Host disk used   : {}", format_bytes(stats.host_disk_bytes));
     println!("Dedup ratio      : {:.2}x", stats.dedup_ratio);
     println!("Snapshot count   : {}", stats.snapshot_count);
     println!("Compressor       : {}", stats.compressor);
