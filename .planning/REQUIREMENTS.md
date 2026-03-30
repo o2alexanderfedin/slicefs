@@ -88,10 +88,10 @@ Requirements for streaming writes and hardening milestone.
 
 ### Compression Removal
 
-- [ ] **DECOMP-01**: Write path pushes raw (uncompressed) bytes to Merkle tree — no compress_block call
-- [ ] **DECOMP-02**: Store format version bumped to v3 (raw blocks, no compression header)
-- [ ] **DECOMP-03**: Read path handles all three store versions: v1 (legacy raw), v2 (compressed header), v3 (new raw)
-- [ ] **DECOMP-04**: Digest224 identity is computed on raw content — cross-file dedup works regardless of historical compressor
+- [x] **DECOMP-01**: Write path pushes raw (uncompressed) bytes to Merkle tree — no compress_block call
+- [x] **DECOMP-02**: Store format version bumped to v3 (raw blocks, no compression header)
+- [x] **DECOMP-03**: Read path handles all three store versions: v1 (legacy raw), v2 (compressed header), v3 (new raw)
+- [x] **DECOMP-04**: Digest224 identity is computed on raw content — cross-file dedup works regardless of historical compressor
 
 ### Correctness Fixes
 
@@ -186,10 +186,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FIX-02 | Phase 8 | Complete |
 | FIX-03 | Phase 8 | Complete |
 | FIX-04 | Phase 8 | Complete |
-| DECOMP-01 | Phase 9 | Pending |
-| DECOMP-02 | Phase 9 | Pending |
-| DECOMP-03 | Phase 9 | Pending |
-| DECOMP-04 | Phase 9 | Pending |
+| DECOMP-01 | Phase 9 | Complete |
+| DECOMP-02 | Phase 9 | Complete |
+| DECOMP-03 | Phase 9 | Complete |
+| DECOMP-04 | Phase 9 | Complete |
 | STRM-01 | Phase 10 | Pending |
 | STRM-03 | Phase 10 | Pending |
 | STRM-04 | Phase 10 | Pending |

@@ -231,6 +231,6 @@ Phases execute in numeric order: 7.1 -> 8 -> 9 -> 10 -> 11
 | 7. Cross-Platform and Production Hardening | v1.0 | 3/3 | Complete | 2026-03-29 |
 | 7.1. FileStorage Migration (INSERTED) | 3/3 | Complete |  | - |
 | 8. Correctness Fixes | 1/1 | Complete   | 2026-03-30 | - |
-| 9. Compression Removal | v2.0 | 0/2 | Not started | - |
+| 9. Compression Removal | 1/2 | In Progress|  | - |
 | 10. Streaming Writes Core | v2.0 | 0/3 | Not started | - |
 | 11. Non-Sequential Write Handling | v2.0 | 0/2 | Not started | - |

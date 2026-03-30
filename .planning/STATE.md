@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Streaming Writes & Hardening
 status: executing
-stopped_at: Phase 9 planned (2 plans, 2 waves, verified)
-last_updated: "2026-03-30T04:16:48.214Z"
+stopped_at: "Phase 9 Plan 01 complete: compression removed from production code, slicefs-cli --lib builds cleanly"
+last_updated: "2026-03-30T04:31:18.256Z"
 last_activity: "2026-03-29 — Plan 03 complete: all CLI consumers migrated to file-backed StoreIo; zero Dictionary references remain"
 progress:
   total_phases: 12
   completed_phases: 9
   total_plans: 30
-  completed_plans: 28
+  completed_plans: 29
   percent: 0
 ---
 
@@ -54,6 +54,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 07.1-filestorage-migration P02 | ~180 | 3 tasks | 11 files |
 | Phase 07.1-filestorage-migration P03 | ~60 | 2 tasks | 19 files |
 | Phase 08-correctness-fixes P01 | 20 | 2 tasks | 6 files |
+| Phase 09-compression-removal P01 | 14 | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,8 @@ Progress: [░░░░░░░░░░] 0%
 - [Phase 08-01]: saturating refcount: increment_refcount saturates at u64::MAX with tracing::warn; decrement is no-op at MAX (immortal blocks never GC'd)
 - [Phase 08-01]: statfs three-tier: libc::statvfs for blocks/bfree/bavail; inode_count() for files; fallback to zeros when store_path is None
 - [Phase 08-01]: compute_statfs extracted to regular impl block (not Filesystem trait) to allow pub visibility and test_statfs_values() helper
+- [Phase 09-01]: v3 store format: raw bytes pushed directly to State::push_all, no compression header, no backward compat
+- [Phase 09-01]: StoreStats.compressor field kept for JSON API stability; value changed to none (v3 raw)
 
 ### Roadmap Evolution
 
@@ -92,6 +95,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-30T04:16:48.208Z
-Stopped at: Phase 9 planned (2 plans, 2 waves, verified)
-Resume file: .planning/phases/09-compression-removal/09-01-PLAN.md
+Last session: 2026-03-30T04:31:18.249Z
+Stopped at: Phase 9 Plan 01 complete: compression removed from production code, slicefs-cli --lib builds cleanly
+Resume file: None
