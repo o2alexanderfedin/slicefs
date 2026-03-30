@@ -6,13 +6,22 @@
 ///   - Lock file lifecycle (acquire creates, drop removes)
 ///   - Dirty mount detection (lock file present → DirtyMount error)
 
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 use metadata::segment::{load_store_from_segments, SegmentEntry, SegmentReader};
 use metadata::store::DictMetadataStore;
+use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
 use metadata::mount_lock::{acquire_mount_lock, MountLockError};
 use slicefs_traits::metadata::{InodeMeta, MetadataStore};
+
+fn make_store() -> (TempDir, DictMetadataStore) {
+    let dir = TempDir::new().unwrap();
+    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let store = DictMetadataStore::new(io);
+    (dir, store)
+}
 
 const S_IFREG: u32 = 0o100_000;
 
@@ -25,8 +34,8 @@ fn test_wal_logs_root_update_on_commit() {
     let store_dir = TempDir::new().unwrap();
     std::fs::create_dir_all(store_dir.path().join("segments")).unwrap();
 
+    let (_store_io_dir, mut meta) = make_store();
     let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
-    let mut meta = DictMetadataStore::new();
     meta.set_wal(wal);
 
     // Create an inode
@@ -57,8 +66,8 @@ fn test_load_store_from_segments_returns_root() {
     std::fs::create_dir_all(store_dir.path().join("segments")).unwrap();
 
     let root_digest = {
+        let (_store_io_dir, mut meta) = make_store();
         let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
-        let mut meta = DictMetadataStore::new();
         meta.set_wal(wal);
 
         let file_meta = InodeMeta::new_file(0, 0, 0, S_IFREG | 0o644);

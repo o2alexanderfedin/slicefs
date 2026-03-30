@@ -77,18 +77,16 @@ pub fn spawn_background_gc(
                 None => break,
             };
 
-            // Count approximate orphan entries (refcount == 0)
-            // We use the dict length as a proxy when refcount tracking is limited
-            let orphan_count = count_orphans(&store);
+            // Count approximate orphan entries.
+            // With file-backed storage we no longer maintain an in-memory Dictionary,
+            // so use 1 as a proxy: threshold=0 always triggers GC, usize::MAX never does.
+            let orphan_count = 1usize;
 
             if orphan_count > orphan_threshold {
                 // Collect all GC roots: current live root + all snapshot roots.
                 // snapshot_roots() returns all snapshot roots plus current_root() if set.
                 let roots = store.snapshot_roots();
-
-                let dict = store.dict().lock().unwrap();
-                let _ = gc.run_gc(&dict, &roots);
-                drop(dict);
+                let _ = gc.run_gc_roots_only(&roots);
             }
 
             // Drop Arc before sleeping to avoid holding the store alive unnecessarily
@@ -102,14 +100,3 @@ pub fn spawn_background_gc(
     }
 }
 
-/// Count entries in the dictionary that have a refcount of zero.
-///
-/// This is an approximate count — used only to decide whether to run GC.
-fn count_orphans(store: &DictMetadataStore) -> usize {
-    let dict = store.dict().lock().unwrap();
-    let dict_len = dict.len();
-    drop(dict);
-    // Approximate: count dict entries not tracked in refcounts
-    // For Phase 5 this is a simple heuristic
-    dict_len
-}

@@ -1,27 +1,31 @@
-//! `DictMetadataStore` — MetadataStore backed by a blockset `Dictionary`.
+//! `DictMetadataStore` — MetadataStore backed by file-based FileStorage (blockset Io).
 //!
 //! All state is held in-memory as `Mutex`-guarded maps; `commit()` serializes
-//! everything into the Dictionary and returns the root `Digest224`.
+//! everything via `FileStorageAdd` (flushed to disk) then writes a `RootUpdate`
+//! to the WAL for crash-safe ordering.
 //!
 //! Locking order (always acquire in this order to prevent deadlocks):
 //!   1. `inode_map`
-//!   2. `dict`
+//!   2. `io`
 //!   3. `inode_data`
 //!   4. `dir_data`
 //!   5. `manifest_data`
+//!   6. `xattr_data`
+//!   7. `refcounts`
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
+use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
 
-use slicefs_traits::digest::{Branches, Digest224};
+use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, MetadataStore};
-use blockset::{Dictionary, State, Tree};
+use blockset::{State, Tree, FileStorageAdd, file_storage_get};
 
 use crate::snapshot::SnapshotEntry;
+use crate::store_io::StoreIo;
 use crate::wal::{WalEntry, WalError, WalStrategy};
 
 use crate::inode::{intern_inode, load_inode};
-use crate::inode_map::{InodeMap, intern_inode_map};
+use crate::inode_map::{InodeMap, intern_inode_map, load_inode_map};
 use crate::directory::{create_dir_entries, add_dir_entry, remove_dir_entry,
                        lookup_dir_entry, list_dir_entries};
 use crate::manifest::{intern_manifest, load_manifest};
@@ -31,21 +35,21 @@ use crate::xattr::{intern_xattrs, load_xattrs, set_xattr_entry, get_xattr_entry,
 // S_IFDIR bit mask (POSIX directory type)
 const S_IFDIR: u32 = 0o0040_000;
 
-/// Concrete `MetadataStore` backed by a blockset `Dictionary`.
+/// Concrete `MetadataStore` backed by file-based FileStorage (blockset Io).
 ///
 /// All operations are lock-safe and `Send + Sync`.
 ///
 /// Locking order (always acquire in this order to prevent deadlocks):
 ///   1. `inode_map`
-///   2. `dict`
+///   2. `io`
 ///   3. `inode_data`
 ///   4. `dir_data`
 ///   5. `manifest_data`
 ///   6. `xattr_data`
 ///   7. `refcounts`
 pub struct DictMetadataStore {
-    /// The CAS block store — shared across all operations.
-    dict: Mutex<Dictionary>,
+    /// File-backed Io implementation — used for all FileStorageAdd/file_storage_get calls.
+    io: Arc<Mutex<StoreIo>>,
     /// Inode-number allocator + mapping table.
     inode_map: Mutex<InodeMap>,
     /// Maps inode number → current inode data `Digest224`.
@@ -78,16 +82,19 @@ pub struct DictMetadataStore {
 
 impl DictMetadataStore {
     /// Create a new store with a root directory at inode 1.
-    pub fn new() -> Self {
-        let mut dict = Dictionary::default();
+    pub fn new(io: Arc<Mutex<StoreIo>>) -> Self {
         let mut inode_map = InodeMap::new();
 
-        // Build root inode (ino=1, mode=directory 0o40755, uid=0, gid=0, nlinks=2)
-        let root_meta = InodeMeta::new_directory(1, 0, 0, S_IFDIR | 0o755);
-        let root_inode_digest = intern_inode(&mut dict, &root_meta);
-
-        // Create root dir entries: . → 1, .. → 1
-        let root_dir_digest = create_dir_entries(&mut dict, 1, 1);
+        // Build root inode + dir entries via FileStorageAdd, then flush
+        let (root_inode_digest, root_dir_digest) = {
+            let mut io_guard = io.lock().unwrap();
+            let mut fsa = FileStorageAdd::new(&mut *io_guard);
+            let root_meta = InodeMeta::new_directory(1, 0, 0, S_IFDIR | 0o755);
+            let root_inode_digest = intern_inode(&mut fsa, &root_meta);
+            let root_dir_digest = create_dir_entries(&mut fsa, 1, 1);
+            (root_inode_digest, root_dir_digest)
+            // fsa drops here, flushing files to io
+        };
 
         inode_map.insert(1, root_inode_digest);
 
@@ -98,7 +105,7 @@ impl DictMetadataStore {
         dir_data.insert(1, root_dir_digest);
 
         DictMetadataStore {
-            dict: Mutex::new(dict),
+            io,
             inode_map: Mutex::new(inode_map),
             inode_data: Mutex::new(inode_data),
             dir_data: Mutex::new(dir_data),
@@ -114,20 +121,17 @@ impl DictMetadataStore {
     }
 }
 
-impl Default for DictMetadataStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Note: Default is no longer impl'd — DictMetadataStore::new() requires an io: Arc<Mutex<StoreIo>>
 
 impl DictMetadataStore {
-    /// Access the underlying Dictionary (for content operations like `State::push_all`).
+    /// Access the underlying Io backend (for content operations like `State::push_all`
+    /// via `FileStorageAdd::new(&mut *io_guard)`).
     ///
     /// # Warning
     /// Do NOT hold this lock while calling any other `DictMetadataStore` method.
     /// Those methods acquire the same lock internally; double-locking will deadlock.
-    pub fn dict(&self) -> &Mutex<Dictionary> {
-        &self.dict
+    pub fn io(&self) -> &Arc<Mutex<StoreIo>> {
+        &self.io
     }
 
     /// Increment the reference count for `digest` by 1.
@@ -171,20 +175,6 @@ impl DictMetadataStore {
     ///
     /// Replaces any previously set WAL (the old one is dropped; not flushed).
     pub fn set_wal(&mut self, wal: Box<dyn WalStrategy>) {
-        // Bootstrap WAL: log all existing dict entries so a crash after set_wal
-        // but before any explicit commit still produces a recoverable segment.
-        // This covers the case where DictMetadataStore::new() populates the dict
-        // before the WAL is attached — those initial entries would otherwise be
-        // absent from the WAL and unrecoverable on reload.
-        {
-            let dict = self.dict.lock().unwrap();
-            for (key, branches) in dict.iter() {
-                let _ = wal.log_mutation(&WalEntry::DictionaryAppend {
-                    key: *key,
-                    branches: *branches,
-                });
-            }
-        }
         *self.wal.lock().unwrap() = Some(wal);
     }
 
@@ -218,17 +208,6 @@ impl DictMetadataStore {
             // Ignore WAL errors during mutation logging — the in-memory state
             // is already correct. WAL failures are surfaced via flush_wal/shutdown_wal.
             let _ = w.log_mutation(entry);
-        }
-    }
-
-    /// Log all newly added Dictionary entries to the WAL.
-    ///
-    /// Call this AFTER an intern_* operation with the dict lock DROPPED.
-    /// `new_entries` is a Vec of (key, branches) pairs collected from the dict
-    /// after the operation.
-    fn log_new_dict_entries(&self, new_entries: Vec<(Digest224, Branches)>) {
-        for (key, branches) in new_entries {
-            self.log_wal_entry(&WalEntry::DictionaryAppend { key, branches });
         }
     }
 
@@ -359,15 +338,10 @@ impl MetadataStore for DictMetadataStore {
         let mut full_meta = meta.clone();
         full_meta.ino = ino;
 
-        let (digest, new_entries) = {
-            let mut dict = self.dict.lock().unwrap();
-            let prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
-            let digest = intern_inode(&mut *dict, &full_meta);
-            let new_entries: Vec<_> = dict.iter()
-                .filter(|(k, _)| !prev_keys.contains(*k))
-                .map(|(k, v)| (*k, *v))
-                .collect();
-            (digest, new_entries)
+        let digest = {
+            let mut io_guard = self.io.lock().unwrap();
+            let mut fsa = FileStorageAdd::new(&mut *io_guard);
+            intern_inode(&mut fsa, &full_meta)
         };
 
         inode_map.insert(ino, digest);
@@ -378,8 +352,6 @@ impl MetadataStore for DictMetadataStore {
             self.logical_bytes.fetch_add(full_meta.size, Ordering::Relaxed);
         }
 
-        // Log new dict entries to WAL (after releasing dict lock)
-        self.log_new_dict_entries(new_entries);
         Ok(ino)
     }
 
@@ -388,8 +360,8 @@ impl MetadataStore for DictMetadataStore {
         let digest = inode_data.get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
         drop(inode_data);
 
-        let dict = self.dict.lock().unwrap();
-        load_inode(&*dict, &digest)
+        let mut io_guard = self.io.lock().unwrap();
+        load_inode(&mut *io_guard, &digest)
     }
 
     fn update_inode(&self, meta: &InodeMeta) -> Result<(), MetaError> {
@@ -400,19 +372,14 @@ impl MetadataStore for DictMetadataStore {
             let inode_data = self.inode_data.lock().unwrap();
             let old_digest = inode_data.get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
             drop(inode_data);
-            let dict = self.dict.lock().unwrap();
-            load_inode(&*dict, &old_digest).map(|m| m.size).unwrap_or(0)
+            let mut io_guard = self.io.lock().unwrap();
+            load_inode(&mut *io_guard, &old_digest).map(|m| m.size).unwrap_or(0)
         };
 
-        let (new_digest, new_entries) = {
-            let mut dict = self.dict.lock().unwrap();
-            let prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
-            let new_digest = intern_inode(&mut *dict, meta);
-            let new_entries: Vec<_> = dict.iter()
-                .filter(|(k, _)| !prev_keys.contains(*k))
-                .map(|(k, v)| (*k, *v))
-                .collect();
-            (new_digest, new_entries)
+        let new_digest = {
+            let mut io_guard = self.io.lock().unwrap();
+            let mut fsa = FileStorageAdd::new(&mut *io_guard);
+            intern_inode(&mut fsa, meta)
         };
 
         self.inode_data.lock().unwrap().insert(ino, new_digest);
@@ -428,8 +395,6 @@ impl MetadataStore for DictMetadataStore {
             }).ok();
         }
 
-        // Log new dict entries to WAL (after releasing dict lock)
-        self.log_new_dict_entries(new_entries);
         Ok(())
     }
 
@@ -439,8 +404,8 @@ impl MetadataStore for DictMetadataStore {
             let inode_data = self.inode_data.lock().unwrap();
             if let Some(digest) = inode_data.get(&ino).copied() {
                 drop(inode_data);
-                let dict = self.dict.lock().unwrap();
-                load_inode(&*dict, &digest).map(|m| m.size).unwrap_or(0)
+                let mut io_guard = self.io.lock().unwrap();
+                load_inode(&mut *io_guard, &digest).map(|m| m.size).unwrap_or(0)
             } else {
                 return Err(MetaError::NotFound(ino));
             }
@@ -483,25 +448,20 @@ impl MetadataStore for DictMetadataStore {
             dir_meta.mode |= S_IFDIR;
         }
 
-        let (dir_inode_digest, dir_entry_digest, new_parent_dir_digest, new_entries) = {
-            let mut dict = self.dict.lock().unwrap();
-            let prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
-
-            // Create new directory's inode
-            let dir_inode_digest = intern_inode(&mut *dict, &dir_meta);
-
-            // Create . and .. entries for new directory
-            let dir_entry_digest = create_dir_entries(&mut *dict, ino, parent_ino);
-
-            // Add name entry in parent directory
+        let (dir_inode_digest, dir_entry_digest, new_parent_dir_digest) = {
+            let mut io_guard = self.io.lock().unwrap();
             let parent_dir_digest = *self.dir_data.lock().unwrap().get(&parent_ino).unwrap();
-            let new_parent_dir_digest = add_dir_entry(&mut *dict, &parent_dir_digest, name, ino)?;
 
-            let new_entries: Vec<_> = dict.iter()
-                .filter(|(k, _)| !prev_keys.contains(*k))
-                .map(|(k, v)| (*k, *v))
-                .collect();
-            (dir_inode_digest, dir_entry_digest, new_parent_dir_digest, new_entries)
+            // Create new directory's inode, dir entries, and update parent — all via one FSA
+            let mut fsa = FileStorageAdd::new(&mut *io_guard);
+            let dir_inode_digest = intern_inode(&mut fsa, &dir_meta);
+            let dir_entry_digest = create_dir_entries(&mut fsa, ino, parent_ino);
+            drop(fsa);
+
+            // add_dir_entry needs &mut impl Io (reads then writes)
+            let new_parent_dir_digest = add_dir_entry(&mut *io_guard, &parent_dir_digest, name, ino)?;
+
+            (dir_inode_digest, dir_entry_digest, new_parent_dir_digest)
         };
 
         // Update maps
@@ -511,9 +471,6 @@ impl MetadataStore for DictMetadataStore {
         self.inode_data.lock().unwrap().insert(ino, dir_inode_digest);
         self.dir_data.lock().unwrap().insert(ino, dir_entry_digest);
         self.dir_data.lock().unwrap().insert(parent_ino, new_parent_dir_digest);
-
-        // Log new dict entries to WAL (after releasing dict lock)
-        self.log_new_dict_entries(new_entries);
 
         // Increment parent nlinks (for the .. backlink from new subdir)
         let mut parent_meta = self.get_inode(parent_ino)?;
@@ -528,8 +485,8 @@ impl MetadataStore for DictMetadataStore {
         let dir_digest = dir_data.get(&ino).copied().ok_or(MetaError::NotADirectory(ino))?;
         drop(dir_data);
 
-        let dict = self.dict.lock().unwrap();
-        list_dir_entries(&*dict, &dir_digest)
+        let mut io_guard = self.io.lock().unwrap();
+        list_dir_entries(&mut *io_guard, &dir_digest)
     }
 
     fn lookup(&self, parent_ino: InodeId, name: &str) -> Result<InodeId, MetaError> {
@@ -537,8 +494,8 @@ impl MetadataStore for DictMetadataStore {
         let dir_digest = dir_data.get(&parent_ino).copied().ok_or(MetaError::NotADirectory(parent_ino))?;
         drop(dir_data);
 
-        let mut dict = self.dict.lock().unwrap();
-        lookup_dir_entry(&mut *dict, &dir_digest, name)
+        let mut io_guard = self.io.lock().unwrap();
+        lookup_dir_entry(&mut *io_guard, &dir_digest, name)
             .map_err(|_| MetaError::NotFound(0))
     }
 
@@ -547,19 +504,12 @@ impl MetadataStore for DictMetadataStore {
         let dir_digest = dir_data.get(&parent_ino).copied().ok_or(MetaError::NotADirectory(parent_ino))?;
         drop(dir_data);
 
-        let (new_dir_digest, new_entries) = {
-            let mut dict = self.dict.lock().unwrap();
-            let prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
-            let new_dir_digest = add_dir_entry(&mut *dict, &dir_digest, name, ino)?;
-            let new_entries: Vec<_> = dict.iter()
-                .filter(|(k, _)| !prev_keys.contains(*k))
-                .map(|(k, v)| (*k, *v))
-                .collect();
-            (new_dir_digest, new_entries)
+        let new_dir_digest = {
+            let mut io_guard = self.io.lock().unwrap();
+            add_dir_entry(&mut *io_guard, &dir_digest, name, ino)?
         };
 
         self.dir_data.lock().unwrap().insert(parent_ino, new_dir_digest);
-        self.log_new_dict_entries(new_entries);
         Ok(())
     }
 
@@ -568,35 +518,22 @@ impl MetadataStore for DictMetadataStore {
         let dir_digest = dir_data.get(&parent_ino).copied().ok_or(MetaError::NotADirectory(parent_ino))?;
         drop(dir_data);
 
-        let (new_dir_digest, new_entries) = {
-            let mut dict = self.dict.lock().unwrap();
-            let prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
-            let new_dir_digest = remove_dir_entry(&mut *dict, &dir_digest, name)?;
-            let new_entries: Vec<_> = dict.iter()
-                .filter(|(k, _)| !prev_keys.contains(*k))
-                .map(|(k, v)| (*k, *v))
-                .collect();
-            (new_dir_digest, new_entries)
+        let new_dir_digest = {
+            let mut io_guard = self.io.lock().unwrap();
+            remove_dir_entry(&mut *io_guard, &dir_digest, name)?
         };
 
         self.dir_data.lock().unwrap().insert(parent_ino, new_dir_digest);
-        self.log_new_dict_entries(new_entries);
         Ok(())
     }
 
     fn set_manifest(&self, ino: InodeId, blocks: &[Digest224]) -> Result<(), MetaError> {
-        let (digest, new_entries) = {
-            let mut dict = self.dict.lock().unwrap();
-            let prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
-            let digest = intern_manifest(&mut *dict, blocks);
-            let new_entries: Vec<_> = dict.iter()
-                .filter(|(k, _)| !prev_keys.contains(*k))
-                .map(|(k, v)| (*k, *v))
-                .collect();
-            (digest, new_entries)
+        let digest = {
+            let mut io_guard = self.io.lock().unwrap();
+            let mut fsa = FileStorageAdd::new(&mut *io_guard);
+            intern_manifest(&mut fsa, blocks)
         };
         self.manifest_data.lock().unwrap().insert(ino, digest);
-        self.log_new_dict_entries(new_entries);
         Ok(())
     }
 
@@ -605,8 +542,8 @@ impl MetadataStore for DictMetadataStore {
         let digest = manifest_data.get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
         drop(manifest_data);
 
-        let dict = self.dict.lock().unwrap();
-        load_manifest(&*dict, &digest)
+        let mut io_guard = self.io.lock().unwrap();
+        load_manifest(&mut *io_guard, &digest)
     }
 
     fn set_xattr(&self, ino: InodeId, name: &str, value: &[u8]) -> Result<(), MetaError> {
@@ -615,8 +552,8 @@ impl MetadataStore for DictMetadataStore {
             let xattr_data = self.xattr_data.lock().unwrap();
             if let Some(digest) = xattr_data.get(&ino).copied() {
                 drop(xattr_data);
-                let dict = self.dict.lock().unwrap();
-                load_xattrs(&*dict, &digest)?
+                let mut io_guard = self.io.lock().unwrap();
+                load_xattrs(&mut *io_guard, &digest)?
             } else {
                 vec![]
             }
@@ -624,19 +561,13 @@ impl MetadataStore for DictMetadataStore {
 
         set_xattr_entry(&mut xattrs, name, value);
 
-        let (new_digest, new_entries) = {
-            let mut dict = self.dict.lock().unwrap();
-            let prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
-            let new_digest = intern_xattrs(&mut *dict, &xattrs);
-            let new_entries: Vec<_> = dict.iter()
-                .filter(|(k, _)| !prev_keys.contains(*k))
-                .map(|(k, v)| (*k, *v))
-                .collect();
-            (new_digest, new_entries)
+        let new_digest = {
+            let mut io_guard = self.io.lock().unwrap();
+            let mut fsa = FileStorageAdd::new(&mut *io_guard);
+            intern_xattrs(&mut fsa, &xattrs)
         };
 
         self.xattr_data.lock().unwrap().insert(ino, new_digest);
-        self.log_new_dict_entries(new_entries);
         Ok(())
     }
 
@@ -648,9 +579,9 @@ impl MetadataStore for DictMetadataStore {
         };
         drop(xattr_data);
 
-        let dict = self.dict.lock().unwrap();
-        let xattrs = load_xattrs(&*dict, &digest)?;
-        drop(dict);
+        let mut io_guard = self.io.lock().unwrap();
+        let xattrs = load_xattrs(&mut *io_guard, &digest)?;
+        drop(io_guard);
 
         get_xattr_entry(&xattrs, name).ok_or(MetaError::NotFound(ino))
     }
@@ -663,9 +594,9 @@ impl MetadataStore for DictMetadataStore {
         };
         drop(xattr_data);
 
-        let dict = self.dict.lock().unwrap();
-        let xattrs = load_xattrs(&*dict, &digest)?;
-        drop(dict);
+        let mut io_guard = self.io.lock().unwrap();
+        let xattrs = load_xattrs(&mut *io_guard, &digest)?;
+        drop(io_guard);
 
         Ok(list_xattr_names(&xattrs))
     }
@@ -678,27 +609,22 @@ impl MetadataStore for DictMetadataStore {
         };
         drop(xattr_data);
 
-        let dict = self.dict.lock().unwrap();
-        let mut xattrs = load_xattrs(&*dict, &digest)?;
-        drop(dict);
+        let mut xattrs = {
+            let mut io_guard = self.io.lock().unwrap();
+            load_xattrs(&mut *io_guard, &digest)?
+        };
 
         if !remove_xattr_entry(&mut xattrs, name) {
             return Err(MetaError::NotFound(ino));
         }
 
-        let (new_digest, new_entries) = {
-            let mut dict = self.dict.lock().unwrap();
-            let prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
-            let new_digest = intern_xattrs(&mut *dict, &xattrs);
-            let new_entries: Vec<_> = dict.iter()
-                .filter(|(k, _)| !prev_keys.contains(*k))
-                .map(|(k, v)| (*k, *v))
-                .collect();
-            (new_digest, new_entries)
+        let new_digest = {
+            let mut io_guard = self.io.lock().unwrap();
+            let mut fsa = FileStorageAdd::new(&mut *io_guard);
+            intern_xattrs(&mut fsa, &xattrs)
         };
 
         self.xattr_data.lock().unwrap().insert(ino, new_digest);
-        self.log_new_dict_entries(new_entries);
         Ok(())
     }
 
@@ -719,34 +645,32 @@ impl MetadataStore for DictMetadataStore {
         //
         // Backward compat: root records of exactly 156 bytes are old format (no refcounts).
         let inode_map = self.inode_map.lock().unwrap();
-        let mut dict = self.dict.lock().unwrap();
+        let mut io_guard = self.io.lock().unwrap();
+        let mut fsa = FileStorageAdd::new(&mut *io_guard);
 
-        // Snapshot keys BEFORE any intern operations so we can log all new entries.
-        let commit_prev_keys: std::collections::BTreeSet<Digest224> = dict.keys().copied().collect();
-
-        let inode_map_digest = intern_inode_map(&mut *dict, &inode_map);
+        let inode_map_digest = intern_inode_map(&mut fsa, &inode_map);
         let next_ino = inode_map.next_ino();
         drop(inode_map);
 
         let inode_data_digest = {
             let map = self.inode_data.lock().unwrap();
-            intern_u64_digest_map(&mut *dict, &map)
+            intern_u64_digest_map(&mut fsa, &map)
         };
         let dir_data_digest = {
             let map = self.dir_data.lock().unwrap();
-            intern_u64_digest_map(&mut *dict, &map)
+            intern_u64_digest_map(&mut fsa, &map)
         };
         let manifest_data_digest = {
             let map = self.manifest_data.lock().unwrap();
-            intern_u64_digest_map(&mut *dict, &map)
+            intern_u64_digest_map(&mut fsa, &map)
         };
         let xattr_data_digest = {
             let map = self.xattr_data.lock().unwrap();
-            intern_u64_digest_map(&mut *dict, &map)
+            intern_u64_digest_map(&mut fsa, &map)
         };
         let refcount_data_digest = {
             let rc = self.refcounts.lock().unwrap();
-            intern_digest224_u64_map(&mut *dict, &rc)
+            intern_digest224_u64_map(&mut fsa, &rc)
         };
 
         let mut root_bytes = Vec::with_capacity(184);
@@ -780,18 +704,17 @@ impl MetadataStore for DictMetadataStore {
         }
 
         assert_eq!(root_bytes.len(), 184, "root record must be 184 bytes");
-        let root_digest = State::push_all(&mut *dict, &root_bytes);
-        // Collect ALL entries added during commit (interns + root push)
-        let new_entries: Vec<_> = dict.iter()
-            .filter(|(k, _)| !commit_prev_keys.contains(*k))
-            .map(|(k, v)| (*k, *v))
-            .collect();
-        drop(dict);
+        let root_digest = State::push_all(&mut fsa, &root_bytes);
+        // Drop fsa first: this flushes all FileStorage blob files to disk via StoreIo
+        drop(fsa);
+        // Drop io_guard to release the lock before WAL logging
+        drop(io_guard);
+
         // Update last_root so background GC can use it
         *self.last_root.lock().unwrap() = Some(root_digest);
 
-        // Log all new dict entries and the RootUpdate to WAL
-        self.log_new_dict_entries(new_entries);
+        // Log RootUpdate to WAL AFTER all nodes are flushed to disk (crash-safe ordering).
+        // If we crash between flush and WAL write, the next mount will just re-commit.
         self.log_wal_entry(&WalEntry::RootUpdate { root: root_digest });
 
         Ok(root_digest)
@@ -800,11 +723,11 @@ impl MetadataStore for DictMetadataStore {
 
 // ─── helpers for BTreeMap<u64, Digest224> serialization ─────────────────────
 
-/// Serialize and store a `BTreeMap<u64, Digest224>` in the Dictionary.
+/// Serialize and store a `BTreeMap<u64, Digest224>` via a StorageAdd backend.
 ///
 /// Format: `[count: u64 LE][for each entry: u64 LE ino + 28 bytes Digest224]`
 /// Each entry is 36 bytes; total = 8 + count × 36.
-fn intern_u64_digest_map(dict: &mut Dictionary, map: &BTreeMap<u64, Digest224>) -> Digest224 {
+fn intern_u64_digest_map(storage: &mut impl blockset::StorageAdd, map: &BTreeMap<u64, Digest224>) -> Digest224 {
     let mut bytes = Vec::with_capacity(8 + map.len() * 36);
     bytes.extend_from_slice(&(map.len() as u64).to_le_bytes());
     for (ino, digest) in map {
@@ -813,19 +736,16 @@ fn intern_u64_digest_map(dict: &mut Dictionary, map: &BTreeMap<u64, Digest224>) 
             bytes.extend_from_slice(&word.to_le_bytes());
         }
     }
-    State::push_all(dict, &bytes)
+    State::push_all(storage, &bytes)
 }
 
-/// Retrieve and deserialize a `BTreeMap<u64, Digest224>` from the Dictionary.
+/// Retrieve and deserialize a `BTreeMap<u64, Digest224>` from file-backed storage.
 fn load_u64_digest_map(
-    dict: &Dictionary,
+    io: &mut impl blockset::Io,
     key: &Digest224,
 ) -> Result<BTreeMap<u64, Digest224>, MetaError> {
-    use slicefs_traits::digest::from_digest224;
-    use blockset::{GetBytes, GetData};
-    let digest256 = from_digest224(key);
-    let get_data = GetData::new(dict, &digest256);
-    let bytes: Vec<u8> = GetBytes::new(get_data).collect();
+    let bytes = file_storage_get(io, key)
+        .ok_or_else(|| MetaError::Corrupted(format!("missing u64-digest map node {:?}", key)))?;
 
     if bytes.len() < 8 {
         return Err(MetaError::Corrupted(format!(
@@ -857,20 +777,17 @@ fn load_u64_digest_map(
 }
 
 impl DictMetadataStore {
-    /// Reconstruct a `DictMetadataStore` from a Dictionary and a root digest
+    /// Reconstruct a `DictMetadataStore` from a file-backed Io and a root digest
     /// previously returned by `commit()`.
     ///
     /// Restores all in-memory maps (inode_data, dir_data, manifest_data, xattr_data)
     /// and inode numbering state so that subsequent operations continue seamlessly.
-    pub fn load_from_root(dict: Dictionary, root: &Digest224) -> Result<Self, MetaError> {
-        use slicefs_traits::digest::from_digest224;
-        use blockset::{GetBytes, GetData};
-        use crate::inode_map::load_inode_map;
+    pub fn load_from_root(io: Arc<Mutex<StoreIo>>, root: &Digest224) -> Result<Self, MetaError> {
+        let mut io_guard = io.lock().unwrap();
 
         // Read root record bytes
-        let digest256 = from_digest224(root);
-        let get_data = GetData::new(&dict, &digest256);
-        let bytes: Vec<u8> = GetBytes::new(get_data).collect();
+        let bytes = file_storage_get(&mut *io_guard, root)
+            .ok_or_else(|| MetaError::Corrupted("missing root node".into()))?;
 
         // Accept both old (156-byte) and new (184-byte) formats.
         let has_refcounts = match bytes.len() {
@@ -914,17 +831,15 @@ impl DictMetadataStore {
         };
 
         // Load and patch inode_map so next_ino is exactly restored.
-        // The deserialized map computes max(keys)+1 which may be lower if
-        // inodes were deleted.  The root record stores the authoritative value.
-        let mut inode_map = load_inode_map(&dict, &inode_map_digest)?;
+        let mut inode_map = load_inode_map(&mut *io_guard, &inode_map_digest)?;
         inode_map.set_next_ino(next_ino);
 
-        let inode_data = load_u64_digest_map(&dict, &inode_data_digest)?;
-        let dir_data = load_u64_digest_map(&dict, &dir_data_digest)?;
-        let manifest_data = load_u64_digest_map(&dict, &manifest_data_digest)?;
-        let xattr_data = load_u64_digest_map(&dict, &xattr_data_digest)?;
+        let inode_data = load_u64_digest_map(&mut *io_guard, &inode_data_digest)?;
+        let dir_data = load_u64_digest_map(&mut *io_guard, &dir_data_digest)?;
+        let manifest_data = load_u64_digest_map(&mut *io_guard, &manifest_data_digest)?;
+        let xattr_data = load_u64_digest_map(&mut *io_guard, &xattr_data_digest)?;
         let refcounts = if let Some(ref rc_digest) = refcount_data_digest_opt {
-            load_digest224_u64_map(&dict, rc_digest)?
+            load_digest224_u64_map(&mut *io_guard, rc_digest)?
         } else {
             BTreeMap::new()
         };
@@ -939,11 +854,13 @@ impl DictMetadataStore {
 
         // Recompute logical_bytes as the sum of all loaded inode sizes.
         let initial_logical_bytes: u64 = inode_data.values().map(|digest| {
-            load_inode(&dict, digest).map(|m| m.size).unwrap_or(0)
+            load_inode(&mut *io_guard, digest).map(|m| m.size).unwrap_or(0)
         }).sum();
 
+        drop(io_guard);
+
         Ok(DictMetadataStore {
-            dict: Mutex::new(dict),
+            io,
             inode_map: Mutex::new(inode_map),
             inode_data: Mutex::new(inode_data),
             dir_data: Mutex::new(dir_data),
@@ -959,75 +876,11 @@ impl DictMetadataStore {
     }
 }
 
-// ─── Dictionary serialization ────────────────────────────────────────────────
-//
-// blockset::serialize / blockset::deserialize are broken for small payloads
-// (< 248 bytes) stored via State::push_all / State::end().  Specifically,
-// deserialize recomputes `to_digest224(&compress(left, right))` which panics
-// when the combined data fits inline (no SHA-224 hash is generated).
-//
-// We provide our own, correct serialization:
-// Format per entry (92 bytes):
-//   key:    7 × u32 LE (28 bytes)   = Digest224
-//   left:   8 × u32 LE (32 bytes)   = Digest256 left branch
-//   right:  8 × u32 LE (32 bytes)   = Digest256 right branch
-// Total: 28 + 32 + 32 = 92 bytes per entry.
-
-const DICT_ENTRY_SIZE: usize = 92; // 28 (key) + 32 (left) + 32 (right)
-
-/// Serialize a Dictionary to a byte vector.
-///
-/// Entries are sorted by key (BTreeMap guarantees this) so serialization is
-/// deterministic.
-pub fn serialize_dictionary(dict: &Dictionary) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(dict.len() * DICT_ENTRY_SIZE);
-    for (key, branches) in dict {
-        for word in key {
-            buf.extend_from_slice(&word.to_le_bytes());
-        }
-        for digest in branches {
-            for word in digest {
-                buf.extend_from_slice(&word.to_le_bytes());
-            }
-        }
-    }
-    buf
-}
-
-/// Deserialize a Dictionary from bytes produced by `serialize_dictionary`.
-pub fn deserialize_dictionary(bytes: &[u8]) -> Result<Dictionary, MetaError> {
-    if bytes.len() % DICT_ENTRY_SIZE != 0 {
-        return Err(MetaError::Corrupted(format!(
-            "dictionary: expected multiple-of-{} bytes, got {}",
-            DICT_ENTRY_SIZE, bytes.len()
-        )));
-    }
-    let mut dict = Dictionary::new();
-    let count = bytes.len() / DICT_ENTRY_SIZE;
-    for i in 0..count {
-        let off = i * DICT_ENTRY_SIZE;
-        let mut key: Digest224 = [0u32; 7];
-        for (j, word) in key.iter_mut().enumerate() {
-            let o = off + j * 4;
-            *word = u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
-        }
-        let mut branches: [[u32; 8]; 2] = [[0u32; 8]; 2];
-        for (b, branch) in branches.iter_mut().enumerate() {
-            for (j, word) in branch.iter_mut().enumerate() {
-                let o = off + 28 + b * 32 + j * 4;
-                *word = u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
-            }
-        }
-        dict.insert(key, branches);
-    }
-    Ok(dict)
-}
-
-/// Serialize and store a `BTreeMap<Digest224, u64>` in the Dictionary.
+/// Serialize and store a `BTreeMap<Digest224, u64>` via a StorageAdd backend.
 ///
 /// Format: `[count: u64 LE][for each entry: 28 bytes Digest224 + 8 bytes u64 LE]`
 /// Each entry is 36 bytes; total = 8 + count × 36.
-fn intern_digest224_u64_map(dict: &mut Dictionary, map: &BTreeMap<Digest224, u64>) -> Digest224 {
+fn intern_digest224_u64_map(storage: &mut impl blockset::StorageAdd, map: &BTreeMap<Digest224, u64>) -> Digest224 {
     let mut bytes = Vec::with_capacity(8 + map.len() * 36);
     bytes.extend_from_slice(&(map.len() as u64).to_le_bytes());
     for (digest, count) in map {
@@ -1036,19 +889,16 @@ fn intern_digest224_u64_map(dict: &mut Dictionary, map: &BTreeMap<Digest224, u64
         }
         bytes.extend_from_slice(&count.to_le_bytes());
     }
-    State::push_all(dict, &bytes)
+    State::push_all(storage, &bytes)
 }
 
-/// Retrieve and deserialize a `BTreeMap<Digest224, u64>` from the Dictionary.
+/// Retrieve and deserialize a `BTreeMap<Digest224, u64>` from file-backed storage.
 fn load_digest224_u64_map(
-    dict: &Dictionary,
+    io: &mut impl blockset::Io,
     key: &Digest224,
 ) -> Result<BTreeMap<Digest224, u64>, MetaError> {
-    use slicefs_traits::digest::from_digest224;
-    use blockset::{GetBytes, GetData};
-    let digest256 = from_digest224(key);
-    let get_data = GetData::new(dict, &digest256);
-    let bytes: Vec<u8> = GetBytes::new(get_data).collect();
+    let bytes = file_storage_get(io, key)
+        .ok_or_else(|| MetaError::Corrupted(format!("missing digest224-u64 map node {:?}", key)))?;
 
     if bytes.len() < 8 {
         return Err(MetaError::Corrupted(format!(
@@ -1097,6 +947,7 @@ fn parse_digest224(bytes: &[u8]) -> Digest224 {
 mod tests {
     use super::*;
     use slicefs_traits::metadata::{InodeMeta, MetadataStore};
+    use tempfile::TempDir;
 
     fn new_dir_meta() -> InodeMeta {
         InodeMeta::new_directory(0, 1000, 1000, S_IFDIR | 0o755)
@@ -1106,9 +957,18 @@ mod tests {
         InodeMeta::new_file(0, 1000, 1000, 0o644)
     }
 
+    /// Create a new DictMetadataStore backed by a temporary directory.
+    /// Returns (TempDir, store) — TempDir must be kept alive while store is used.
+    fn make_store() -> (TempDir, DictMetadataStore) {
+        let dir = TempDir::new().unwrap();
+        let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+        let store = DictMetadataStore::new(io);
+        (dir, store)
+    }
+
     #[test]
     fn test_new_has_root_dir() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         assert_eq!(store.root_ino(), 1);
         let entries = store.list_directory(1).unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
@@ -1118,7 +978,7 @@ mod tests {
 
     #[test]
     fn test_inode_crud() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
 
         // Create
         let meta = new_file_meta();
@@ -1146,7 +1006,7 @@ mod tests {
 
     #[test]
     fn test_create_directory_shows_in_parent() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let dir_meta = new_dir_meta();
         let ino = store.create_directory(1, "subdir", &dir_meta).unwrap();
         assert!(ino >= 2);
@@ -1165,7 +1025,7 @@ mod tests {
 
     #[test]
     fn test_lookup_and_link() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
 
         // Create a file inode
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -1180,7 +1040,7 @@ mod tests {
 
     #[test]
     fn test_unlink_removes_entry() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
 
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
         store.link(1, "toremove", file_ino).unwrap();
@@ -1193,7 +1053,7 @@ mod tests {
 
     #[test]
     fn test_manifest_round_trip() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
 
         let blocks: Vec<Digest224> = (0..5).map(|i| [i as u32; 7]).collect();
@@ -1204,27 +1064,27 @@ mod tests {
 
     #[test]
     fn test_root_ino_is_one() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         assert_eq!(store.root_ino(), 1);
     }
 
     #[test]
     fn test_commit_returns_nonzero_digest() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let digest = store.commit().unwrap();
         assert_ne!(digest, [0u32; 7], "commit should return non-zero digest");
     }
 
     #[test]
     fn test_delete_nonexistent_returns_not_found() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let result = store.delete_inode(9999);
         assert!(matches!(result, Err(MetaError::NotFound(9999))));
     }
 
     #[test]
     fn test_create_dir_under_nonexistent_parent_returns_not_found() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let result = store.create_directory(9999, "sub", &new_dir_meta());
         // Should be NotFound since ino 9999 does not exist
         assert!(result.is_err());
@@ -1232,7 +1092,7 @@ mod tests {
 
     #[test]
     fn test_create_dir_under_file_returns_not_a_directory() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
         let result = store.create_directory(file_ino, "sub", &new_dir_meta());
         assert!(
@@ -1244,7 +1104,7 @@ mod tests {
 
     #[test]
     fn test_xattr_set_get() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
         store.set_xattr(file_ino, "user.test", b"myvalue").unwrap();
         let val = store.get_xattr(file_ino, "user.test").unwrap();
@@ -1253,7 +1113,7 @@ mod tests {
 
     #[test]
     fn test_xattr_list() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
         store.set_xattr(file_ino, "user.a", b"1").unwrap();
         store.set_xattr(file_ino, "user.b", b"2").unwrap();
@@ -1268,7 +1128,7 @@ mod tests {
 
     #[test]
     fn test_xattr_remove() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
         store.set_xattr(file_ino, "user.k", b"v").unwrap();
         store.remove_xattr(file_ino, "user.k").unwrap();
@@ -1278,7 +1138,7 @@ mod tests {
 
     #[test]
     fn test_xattr_overwrite() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
         store.set_xattr(file_ino, "user.x", b"first").unwrap();
         store.set_xattr(file_ino, "user.x", b"second").unwrap();
@@ -1288,7 +1148,7 @@ mod tests {
 
     #[test]
     fn test_xattr_on_directory() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         // Set xattr on the root directory inode (ino=1)
         store.set_xattr(1, "user.dir_attr", b"dir_val").unwrap();
         let val = store.get_xattr(1, "user.dir_attr").unwrap();
@@ -1297,7 +1157,7 @@ mod tests {
 
     #[test]
     fn test_xattr_large_value() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
         // Value > 31 bytes exercises CAS tree storage
         let large_value: Vec<u8> = (0u8..=127u8).collect();
@@ -1308,7 +1168,7 @@ mod tests {
 
     #[test]
     fn test_xattr_list_empty() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
         let names = store.list_xattrs(file_ino).unwrap();
         assert!(names.is_empty());
@@ -1316,7 +1176,7 @@ mod tests {
 
     #[test]
     fn test_xattr_get_not_found() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
         let result = store.get_xattr(file_ino, "user.missing");
         assert!(matches!(result, Err(MetaError::NotFound(_))));
@@ -1324,7 +1184,7 @@ mod tests {
 
     #[test]
     fn test_xattr_remove_not_found() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
         let result = store.remove_xattr(file_ino, "user.nonexistent");
         assert!(result.is_err());
@@ -1332,7 +1192,7 @@ mod tests {
 
     #[test]
     fn test_update_nonexistent_returns_not_found() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let mut meta = new_file_meta();
         meta.ino = 9999;
         let result = store.update_inode(&meta);
@@ -1341,7 +1201,7 @@ mod tests {
 
     #[test]
     fn test_inode_numbers_are_monotonic() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let ino1 = store.create_inode(&new_file_meta()).unwrap();
         let ino2 = store.create_inode(&new_file_meta()).unwrap();
         let ino3 = store.create_inode(&new_file_meta()).unwrap();
@@ -1351,7 +1211,7 @@ mod tests {
 
     #[test]
     fn test_link_duplicate_name_rejected() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let ino = store.create_inode(&new_file_meta()).unwrap();
         store.link(1, "dup", ino).unwrap();
         let result = store.link(1, "dup", ino);
@@ -1360,7 +1220,7 @@ mod tests {
 
     #[test]
     fn test_list_directory_non_dir_returns_error() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         // Inode 9999 doesn't exist as a directory
         let result = store.list_directory(9999);
         assert!(result.is_err());
@@ -1370,7 +1230,7 @@ mod tests {
 
     #[test]
     fn test_commit_and_reload() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
 
         // Add a file
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -1385,16 +1245,13 @@ mod tests {
         store.set_xattr(file_ino, "user.meta", b"mymetavalue").unwrap();
         store.set_xattr(dir_ino, "user.tag", b"important").unwrap();
 
-        // Commit
+        // Commit — nodes flushed to disk
         let root_digest = store.commit().unwrap();
-        // Take the Dictionary out via serialize/deserialize round-trip
-        let dict = {
-            let d = store.dict.lock().unwrap();
-            d.clone()
-        };
+        // Clone the Arc<Mutex<StoreIo>> to reload from the same on-disk files
+        let io = Arc::clone(store.io());
 
-        // Reload from the same Dictionary + root digest
-        let reloaded = DictMetadataStore::load_from_root(dict, &root_digest).unwrap();
+        // Reload from the same file storage + root digest
+        let reloaded = DictMetadataStore::load_from_root(io, &root_digest).unwrap();
 
         // Verify file inode
         let file_meta = reloaded.get_inode(file_ino).unwrap();
@@ -1419,7 +1276,7 @@ mod tests {
 
     #[test]
     fn test_inode_stability_across_reload() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
 
         // Allocate 5 file inodes (inos 2-6)
         let inos: Vec<u64> = (0..5)
@@ -1427,9 +1284,9 @@ mod tests {
             .collect();
 
         let root = store.commit().unwrap();
-        let dict = store.dict.lock().unwrap().clone();
+        let io = Arc::clone(store.io());
 
-        let reloaded = DictMetadataStore::load_from_root(dict, &root).unwrap();
+        let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
 
         // All 5 inodes still exist
         for &ino in &inos {
@@ -1448,14 +1305,14 @@ mod tests {
 
     #[test]
     fn test_directory_stable_across_reload() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let sub1 = store.create_directory(1, "alpha", &new_dir_meta()).unwrap();
         let sub2 = store.create_directory(1, "beta", &new_dir_meta()).unwrap();
         let _sub3 = store.create_directory(sub1, "gamma", &new_dir_meta()).unwrap();
 
         let root = store.commit().unwrap();
-        let dict = store.dict.lock().unwrap().clone();
-        let reloaded = DictMetadataStore::load_from_root(dict, &root).unwrap();
+        let io = Arc::clone(store.io());
+        let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
 
         let entries = reloaded.list_directory(1).unwrap();
         assert!(entries.iter().any(|e| e.name == "alpha" && e.ino == sub1));
@@ -1464,14 +1321,14 @@ mod tests {
 
     #[test]
     fn test_manifest_stable_across_reload() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
         let blocks: Vec<Digest224> = (0..10).map(|i| [i as u32; 7]).collect();
         store.set_manifest(file_ino, &blocks).unwrap();
 
         let root = store.commit().unwrap();
-        let dict = store.dict.lock().unwrap().clone();
-        let reloaded = DictMetadataStore::load_from_root(dict, &root).unwrap();
+        let io = Arc::clone(store.io());
+        let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
 
         let recovered = reloaded.get_manifest(file_ino).unwrap();
         assert_eq!(recovered, blocks);
@@ -1479,31 +1336,25 @@ mod tests {
 
     #[test]
     fn test_xattr_stable_across_reload() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
         store.set_xattr(file_ino, "user.k1", b"val1").unwrap();
         store.set_xattr(file_ino, "user.k2", b"val2").unwrap();
 
         let root = store.commit().unwrap();
-        let dict = store.dict.lock().unwrap().clone();
-        let reloaded = DictMetadataStore::load_from_root(dict, &root).unwrap();
+        let io = Arc::clone(store.io());
+        let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
 
         assert_eq!(reloaded.get_xattr(file_ino, "user.k1").unwrap(), b"val1");
         assert_eq!(reloaded.get_xattr(file_ino, "user.k2").unwrap(), b"val2");
     }
 
     #[test]
-    fn test_dictionary_persistence_round_trip() {
+    fn test_filestorage_persistence_round_trip() {
         // This test proves POSIX-10: inode numbers are stable across a full
-        // serialize/deserialize cycle of the Dictionary.
-        //
-        // Note: blockset::serialize / blockset::deserialize have a known bug for
-        // small payloads (< 248 bytes) stored via State::push_all: the round-trip
-        // panics because deserialize expects only SHA-224 hashes but end() can
-        // produce inline encodings.  We use serialize_dictionary / deserialize_dictionary
-        // from this crate which implement a correct, format-agnostic encoding.
+        // commit + load_from_root cycle backed by file storage.
 
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
         store.link(1, "file.txt", file_ino).unwrap();
         let blocks: Vec<Digest224> = vec![[0xABu32; 7]];
@@ -1511,18 +1362,10 @@ mod tests {
         store.set_xattr(file_ino, "user.tag", b"important").unwrap();
 
         let root = store.commit().unwrap();
+        let io = Arc::clone(store.io());
 
-        // Serialize Dictionary to bytes using our correct serializer
-        let bytes = {
-            let dict = store.dict.lock().unwrap();
-            serialize_dictionary(&*dict)
-        };
-
-        // Deserialize into a fresh Dictionary
-        let new_dict = deserialize_dictionary(&bytes).unwrap();
-
-        // Load metadata from the fresh Dictionary
-        let reloaded = DictMetadataStore::load_from_root(new_dict, &root).unwrap();
+        // Load metadata from the same on-disk file storage
+        let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
 
         // Verify all data intact
         let meta = reloaded.get_inode(file_ino).unwrap();
@@ -1540,11 +1383,11 @@ mod tests {
 
     #[test]
     fn test_empty_store_commit_reload() {
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let root = store.commit().unwrap();
-        let dict = store.dict.lock().unwrap().clone();
+        let io = Arc::clone(store.io());
 
-        let reloaded = DictMetadataStore::load_from_root(dict, &root).unwrap();
+        let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
 
         // Root dir still exists with . and ..
         assert_eq!(reloaded.root_ino(), 1);
@@ -1554,23 +1397,21 @@ mod tests {
         assert!(names.contains(&".."), ".. missing after reload");
     }
 
-    /// Verify that content pushed into `store.dict()` via `State::push_all` is
-    /// accessible after a commit + serialize/deserialize + `load_from_root` cycle.
+    /// Verify that content pushed into `store.io()` via `FileStorageAdd` is
+    /// accessible after a commit + `load_from_root` cycle.
     ///
     /// This proves the seed command's design is sound: file content and metadata
-    /// can share the same Dictionary, and nothing is lost on a round-trip.
+    /// can share the same Io backend, and nothing is lost on a round-trip.
     #[test]
-    fn test_dict_accessor_content_survives_reload() {
-        use blockset::{GetBytes, GetData, Tree};
-        use slicefs_traits::digest::from_digest224;
+    fn test_io_accessor_content_survives_reload() {
+        let (_dir, store) = make_store();
 
-        let store = DictMetadataStore::new();
-
-        // Push content bytes into the store's dict via the public accessor.
+        // Push content bytes into the store's io via FileStorageAdd.
         let content = b"hello, SliceFS content round-trip test!";
         let content_digest: Digest224 = {
-            let mut dict = store.dict().lock().unwrap();
-            State::push_all(&mut *dict, content)
+            let mut io_guard = store.io().lock().unwrap();
+            let mut fsa = FileStorageAdd::new(&mut *io_guard);
+            State::push_all(&mut fsa, content)
         };
 
         // Create a file inode and attach the content digest as its manifest.
@@ -1578,25 +1419,20 @@ mod tests {
         store.link(1, "content.txt", file_ino).unwrap();
         store.set_manifest(file_ino, &[content_digest]).unwrap();
 
-        // Commit, then serialize the Dictionary to bytes and deserialize fresh.
+        // Commit then reload from same file storage.
         let root = store.commit().unwrap();
-        let bytes = {
-            let dict = store.dict().lock().unwrap();
-            serialize_dictionary(&*dict)
-        };
-        let new_dict = deserialize_dictionary(&bytes).unwrap();
+        let io = Arc::clone(store.io());
 
-        // Reload the metadata store from the fresh Dictionary.
-        let reloaded = DictMetadataStore::load_from_root(new_dict, &root).unwrap();
+        // Reload the metadata store from the same file storage.
+        let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
 
         // Verify manifest lookup still returns the same digest.
         let manifest = reloaded.get_manifest(file_ino).unwrap();
         assert_eq!(manifest, vec![content_digest]);
 
-        // Verify the content bytes are retrievable from the Dictionary via GetBytes.
-        let dict = reloaded.dict().lock().unwrap();
-        let digest256 = from_digest224(&content_digest);
-        let read_back: Vec<u8> = GetBytes::new(GetData::new(&*dict, &digest256)).collect();
+        // Verify the content bytes are retrievable from the file storage via file_storage_get.
+        let mut io_guard = reloaded.io().lock().unwrap();
+        let read_back = file_storage_get(&mut *io_guard, &content_digest).expect("content missing");
         assert_eq!(read_back, content.as_slice());
     }
 
@@ -1609,7 +1445,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("segments")).unwrap();
         let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
-        let mut store = DictMetadataStore::new();
+        let (_dir, mut store) = make_store();
         store.set_wal(wal);
 
         let snap = store.create_snapshot(None).expect("create_snapshot should succeed");
@@ -1625,7 +1461,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("segments")).unwrap();
         let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
-        let mut store = DictMetadataStore::new();
+        let (_dir, mut store) = make_store();
         store.set_wal(wal);
 
         let snap1 = store.create_snapshot(None).unwrap();
@@ -1642,7 +1478,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("segments")).unwrap();
         let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
-        let mut store = DictMetadataStore::new();
+        let (_dir, mut store) = make_store();
         store.set_wal(wal);
 
         store.create_snapshot(None).unwrap();
@@ -1663,7 +1499,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("segments")).unwrap();
         let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
-        let mut store = DictMetadataStore::new();
+        let (_dir, mut store) = make_store();
         store.set_wal(wal);
 
         store.create_snapshot(None).unwrap();
@@ -1681,7 +1517,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("segments")).unwrap();
         let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
-        let mut store = DictMetadataStore::new();
+        let (_dir, mut store) = make_store();
         store.set_wal(wal);
 
         store.create_snapshot(Some("release-1.0".to_string())).unwrap();
@@ -1697,7 +1533,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("segments")).unwrap();
         let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
-        let mut store = DictMetadataStore::new();
+        let (_dir, mut store) = make_store();
         store.set_wal(wal);
 
         store.create_snapshot(None).unwrap();
@@ -1712,7 +1548,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("segments")).unwrap();
         let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
-        let mut store = DictMetadataStore::new();
+        let (_dir, mut store) = make_store();
         store.set_wal(wal);
 
         store.create_snapshot(None).unwrap();
@@ -1730,7 +1566,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("segments")).unwrap();
         let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
-        let mut store = DictMetadataStore::new();
+        let (_dir, mut store) = make_store();
         store.set_wal(wal);
 
         // Commit to establish a root, but no snapshots
@@ -1750,7 +1586,7 @@ mod tests {
         // Create a store with a snapshot
         {
             let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
-            let mut store = DictMetadataStore::new();
+            let (_dir, mut store) = make_store();
             store.set_wal(wal);
             store.create_snapshot(Some("replay-test".to_string())).unwrap();
             store.shutdown_wal().unwrap();
@@ -1758,7 +1594,7 @@ mod tests {
 
         // Reload from segments
         let segs_dir = dir.path().join("segments");
-        let (_dict, _root, snapshots) = load_store_from_segments(&segs_dir).unwrap();
+        let (_root, snapshots) = load_store_from_segments(&segs_dir).unwrap();
         assert_eq!(snapshots.len(), 1, "snapshot must survive WAL replay");
         assert_eq!(snapshots[0].version, 1);
         assert_eq!(snapshots[0].name.as_deref(), Some("replay-test"));
@@ -1767,7 +1603,7 @@ mod tests {
     #[test]
     fn test_set_snapshots_loads_snapshot_list() {
         use crate::snapshot::SnapshotEntry;
-        let store = DictMetadataStore::new();
+        let (_dir, store) = make_store();
         let snap = SnapshotEntry {
             version: 5,
             name: Some("loaded".to_string()),
@@ -1796,7 +1632,7 @@ mod tests {
     /// FIX-03: find_snapshot by version string uses O(1) lookup.
     #[test]
     fn test_hashmap_find_by_version_o1() {
-        let mut store = DictMetadataStore::new();
+        let (_dir, mut store) = make_store();
         store.set_snapshots(vec![
             make_snapshot(1, None),
             make_snapshot(2, Some("beta")),
@@ -1812,7 +1648,7 @@ mod tests {
     /// FIX-04: find_snapshot by name uses O(1) lookup.
     #[test]
     fn test_hashmap_find_by_name_o1() {
-        let mut store = DictMetadataStore::new();
+        let (_dir, mut store) = make_store();
         store.set_snapshots(vec![
             make_snapshot(1, Some("alpha")),
             make_snapshot(2, Some("beta")),
@@ -1830,7 +1666,7 @@ mod tests {
         let snaps: Vec<_> = (1u64..=10_000)
             .map(|v| make_snapshot(v, None))
             .collect();
-        let mut store = DictMetadataStore::new();
+        let (_dir, mut store) = make_store();
         store.set_snapshots(snaps);
 
         let start = std::time::Instant::now();
@@ -1853,7 +1689,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("segments")).unwrap();
         let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
-        let mut store = DictMetadataStore::new();
+        let (_dir, mut store) = make_store();
         store.set_wal(wal);
 
         store.create_snapshot(Some("my-snap".to_string())).unwrap();
@@ -1874,7 +1710,7 @@ mod tests {
             make_snapshot(20, None),
             make_snapshot(30, Some("thirty")),
         ];
-        let mut store = DictMetadataStore::new();
+        let (_dir, mut store) = make_store();
         store.set_snapshots(snaps);
 
         assert_eq!(store.find_snapshot("10").unwrap().version, 10);
@@ -1893,7 +1729,7 @@ mod tests {
             make_snapshot(1, None),
             make_snapshot(2, None),
         ];
-        let mut store = DictMetadataStore::new();
+        let (_dir, mut store) = make_store();
         store.set_snapshots(snaps);
 
         let list = store.list_snapshots();

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::MetaError;
-use blockset::{State, Tree, GetBytes, GetData, Dictionary, StorageAdd};
+use blockset::{State, Tree, StorageAdd, Io, file_storage_get};
 
 /// In-memory inode number → Digest224 key mapping.
 ///
@@ -141,12 +141,10 @@ pub fn intern_inode_map(storage: &mut impl StorageAdd, map: &InodeMap) -> Digest
     State::push_all(storage, &bytes)
 }
 
-/// Retrieve and deserialize an `InodeMap` from a blockset Dictionary.
-pub fn load_inode_map(dict: &Dictionary, key: &Digest224) -> Result<InodeMap, MetaError> {
-    use slicefs_traits::digest::from_digest224;
-    let digest256 = from_digest224(key);
-    let get_data = GetData::new(dict, &digest256);
-    let bytes: Vec<u8> = GetBytes::new(get_data).collect();
+/// Retrieve and deserialize an `InodeMap` from file-backed storage.
+pub fn load_inode_map(io: &mut impl Io, key: &Digest224) -> Result<InodeMap, MetaError> {
+    let bytes = file_storage_get(io, key)
+        .ok_or_else(|| MetaError::Corrupted(format!("missing inode_map node {:?}", key)))?;
     deserialize_inode_map(&bytes)
 }
 
@@ -155,7 +153,6 @@ pub fn load_inode_map(dict: &Dictionary, key: &Digest224) -> Result<InodeMap, Me
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockset::Dictionary;
     use proptest::prelude::*;
 
     #[test]
@@ -231,13 +228,21 @@ mod tests {
 
     #[test]
     fn test_intern_and_load_round_trip() {
-        let mut dict = Dictionary::default();
+        use crate::store_io::StoreIo;
+        use tempfile::TempDir;
+        use blockset::FileStorageAdd;
+
+        let dir = TempDir::new().unwrap();
+        let mut io = StoreIo::new(dir.path());
         let mut m = InodeMap::new();
         let d: Digest224 = [9, 8, 7, 6, 5, 4, 3];
         m.insert(2, d);
         m.insert(3, [1; 7]);
-        let key = intern_inode_map(&mut dict, &m);
-        let recovered = load_inode_map(&dict, &key).unwrap();
+        let key = {
+            let mut fsa = FileStorageAdd::new(&mut io);
+            intern_inode_map(&mut fsa, &m)
+        };
+        let recovered = load_inode_map(&mut io, &key).unwrap();
         assert_eq!(recovered.get(2), Some(&d));
         assert_eq!(recovered.get(3), Some(&[1u32; 7]));
         assert_eq!(recovered.next_ino(), 4);

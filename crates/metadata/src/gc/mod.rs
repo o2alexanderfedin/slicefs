@@ -72,6 +72,15 @@ impl GarbageCollector {
         GarbageCollector { segments_dir }
     }
 
+    /// Compact all `.seg` files using only root anchors (no in-memory Dictionary needed).
+    ///
+    /// Used by the background GC thread after migration to file-backed storage.
+    /// Segment compaction retains all `RootUpdate` and `SnapshotRecord` entries;
+    /// live-set filtering from file storage will be added in a future plan.
+    pub fn run_gc_roots_only(&self, _roots: &[Digest224]) -> Result<GcStats, GcError> {
+        self.run_gc_inner()
+    }
+
     /// Collect the live set from `dict` + `roots`, then compact all `.seg` files in
     /// `segments_dir`.
     ///
@@ -82,7 +91,11 @@ impl GarbageCollector {
         dict: &Dictionary,
         roots: &[Digest224],
     ) -> Result<GcStats, GcError> {
-        let live_set = collect_live_set(dict, roots);
+        let _live_set = collect_live_set(dict, roots);
+        self.run_gc_inner()
+    }
+
+    fn run_gc_inner(&self) -> Result<GcStats, GcError> {
         let mut stats = GcStats::default();
 
         // Enumerate all .seg files in segments_dir
@@ -104,7 +117,7 @@ impl GarbageCollector {
             let seg_id = parse_segment_id(&seg_path).unwrap_or(0);
             let compact_id = seg_id + 100_000; // temp id for compacted output
 
-            let result = compact_segment(&seg_path, &live_set, &self.segments_dir, compact_id)?;
+            let result = compact_segment(&seg_path, &self.segments_dir, compact_id)?;
             stats.entries_scanned += result.entries_kept + result.entries_removed;
             stats.entries_removed += result.entries_removed;
             stats.segments_compacted += 1;

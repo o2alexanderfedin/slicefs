@@ -1,15 +1,14 @@
 //! InodeMeta binary serialization for SliceFS.
 //!
 //! Provides 56-byte little-endian pack/unpack of `InodeMeta`, plus
-//! Dictionary-backed `intern_inode` and `load_inode` for CAS storage.
+//! Io-backed `intern_inode` and `load_inode` for CAS storage.
 //!
-//! `intern_inode` accepts any `blockset::StorageAdd` impl (e.g. `Dictionary` or
-//! `FileStorageAdd`). `load_inode` keeps `&Dictionary` in this plan — it will be
-//! migrated to `&mut impl Io` in Plan 02.
+//! `intern_inode` accepts any `blockset::StorageAdd` impl (e.g. `FileStorageAdd`).
+//! `load_inode` uses `file_storage_get` via `&mut impl Io` — works with any Io backend.
 
 use slicefs_traits::metadata::{InodeMeta, MetaError};
-use slicefs_traits::digest::{Digest224, Digest256, from_digest224};
-use blockset::{State, Tree, GetBytes, GetData, Dictionary, StorageAdd};
+use slicefs_traits::digest::{Digest224};
+use blockset::{State, Tree, StorageAdd, Io, file_storage_get};
 
 /// Serialize `InodeMeta` to a fixed 56-byte little-endian buffer.
 ///
@@ -72,13 +71,12 @@ pub fn intern_inode(storage: &mut impl StorageAdd, meta: &InodeMeta) -> Digest22
     State::push_all(storage, &bytes)
 }
 
-/// Retrieve and deserialize an inode from a blockset Dictionary.
+/// Retrieve and deserialize an inode from file-backed storage.
 ///
 /// Returns `MetaError::Corrupted` if the key is not found or the data is wrong length.
-pub fn load_inode(dict: &Dictionary, key: &Digest224) -> Result<InodeMeta, MetaError> {
-    let digest256: Digest256 = from_digest224(key);
-    let get_data = GetData::new(dict, &digest256);
-    let bytes: Vec<u8> = GetBytes::new(get_data).collect();
+pub fn load_inode(io: &mut impl Io, key: &Digest224) -> Result<InodeMeta, MetaError> {
+    let bytes = file_storage_get(io, key)
+        .ok_or_else(|| MetaError::Corrupted(format!("missing inode node {:?}", key)))?;
     deserialize_inode(&bytes)
 }
 
@@ -213,10 +211,18 @@ mod tests {
 
     #[test]
     fn test_intern_and_load_roundtrip() {
-        let mut dict = Dictionary::default();
+        use crate::store_io::StoreIo;
+        use tempfile::TempDir;
+        use blockset::FileStorageAdd;
+
+        let dir = TempDir::new().unwrap();
+        let mut io = StoreIo::new(dir.path());
         let original = sample_meta();
-        let key = intern_inode(&mut dict, &original);
-        let recovered = load_inode(&dict, &key).expect("load_inode failed");
+        let key = {
+            let mut fsa = FileStorageAdd::new(&mut io);
+            intern_inode(&mut fsa, &original)
+        };
+        let recovered = load_inode(&mut io, &key).expect("load_inode failed");
         assert_eq!(original, recovered);
     }
 }

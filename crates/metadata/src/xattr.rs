@@ -16,9 +16,9 @@
 //! An empty attribute set is represented by an empty byte sequence and is stored
 //! in the Dictionary as the canonical empty-content `Digest224`.
 
-use slicefs_traits::digest::{Digest224, from_digest224};
+use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::MetaError;
-use blockset::{State, Tree, GetBytes, GetData, Dictionary, StorageAdd};
+use blockset::{State, Tree, StorageAdd, Io, file_storage_get};
 
 // ─── serialization helpers ────────────────────────────────────────────────────
 
@@ -86,13 +86,12 @@ pub fn intern_xattrs(storage: &mut impl StorageAdd, xattrs: &[(String, Vec<u8>)]
     State::push_all(storage, &bytes)
 }
 
-/// Retrieve and deserialize all xattr pairs from the Dictionary.
+/// Retrieve and deserialize all xattr pairs from file-backed storage.
 ///
 /// Returns `MetaError::Corrupted` if the stored bytes cannot be parsed.
-pub fn load_xattrs(dict: &Dictionary, key: &Digest224) -> Result<Vec<(String, Vec<u8>)>, MetaError> {
-    let digest256 = from_digest224(key);
-    let get_data = GetData::new(dict, &digest256);
-    let bytes: Vec<u8> = GetBytes::new(get_data).collect();
+pub fn load_xattrs(io: &mut impl Io, key: &Digest224) -> Result<Vec<(String, Vec<u8>)>, MetaError> {
+    let bytes = file_storage_get(io, key)
+        .ok_or_else(|| MetaError::Corrupted(format!("missing xattr node {:?}", key)))?;
     deserialize_xattrs(&bytes)
 }
 
@@ -131,7 +130,15 @@ pub fn remove_xattr_entry(xattrs: &mut Vec<(String, Vec<u8>)>, name: &str) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockset::Dictionary;
+    use crate::store_io::StoreIo;
+    use blockset::FileStorageAdd;
+    use tempfile::TempDir;
+
+    fn make_io() -> (TempDir, StoreIo) {
+        let dir = TempDir::new().unwrap();
+        let io = StoreIo::new(dir.path());
+        (dir, io)
+    }
 
     // ── serialize/deserialize unit tests ─────────────────────────────────────
 
@@ -195,43 +202,43 @@ mod tests {
 
     #[test]
     fn test_intern_load_empty() {
-        let mut dict = Dictionary::default();
+        let (_dir, mut io) = make_io();
         let xattrs: Vec<(String, Vec<u8>)> = vec![];
-        let key = intern_xattrs(&mut dict, &xattrs);
-        let recovered = load_xattrs(&dict, &key).unwrap();
+        let key = { let mut fsa = FileStorageAdd::new(&mut io); intern_xattrs(&mut fsa, &xattrs) };
+        let recovered = load_xattrs(&mut io, &key).unwrap();
         assert!(recovered.is_empty());
     }
 
     #[test]
     fn test_intern_load_single_attr() {
-        let mut dict = Dictionary::default();
+        let (_dir, mut io) = make_io();
         let xattrs = vec![("user.test".to_string(), b"testvalue".to_vec())];
-        let key = intern_xattrs(&mut dict, &xattrs);
-        let recovered = load_xattrs(&dict, &key).unwrap();
+        let key = { let mut fsa = FileStorageAdd::new(&mut io); intern_xattrs(&mut fsa, &xattrs) };
+        let recovered = load_xattrs(&mut io, &key).unwrap();
         assert_eq!(recovered, xattrs);
     }
 
     #[test]
     fn test_intern_load_large_value() {
         // > 31 bytes triggers the CAS tree path in blockset
-        let mut dict = Dictionary::default();
+        let (_dir, mut io) = make_io();
         let value: Vec<u8> = (0..=127u8).collect(); // 128 bytes
         let xattrs = vec![("user.big".to_string(), value)];
-        let key = intern_xattrs(&mut dict, &xattrs);
-        let recovered = load_xattrs(&dict, &key).unwrap();
+        let key = { let mut fsa = FileStorageAdd::new(&mut io); intern_xattrs(&mut fsa, &xattrs) };
+        let recovered = load_xattrs(&mut io, &key).unwrap();
         assert_eq!(recovered, xattrs);
     }
 
     #[test]
     fn test_intern_load_multiple_attrs() {
-        let mut dict = Dictionary::default();
+        let (_dir, mut io) = make_io();
         let xattrs = vec![
             ("user.a".to_string(), b"val-a".to_vec()),
             ("user.b".to_string(), b"val-b".to_vec()),
             ("user.c".to_string(), b"val-c".to_vec()),
         ];
-        let key = intern_xattrs(&mut dict, &xattrs);
-        let recovered = load_xattrs(&dict, &key).unwrap();
+        let key = { let mut fsa = FileStorageAdd::new(&mut io); intern_xattrs(&mut fsa, &xattrs) };
+        let recovered = load_xattrs(&mut io, &key).unwrap();
         assert_eq!(recovered, xattrs);
     }
 
@@ -306,21 +313,25 @@ mod tests {
 
     #[test]
     fn test_multiple_attrs_coexist_independently() {
-        let mut dict = Dictionary::default();
+        let (_dir, mut io) = make_io();
         let xattrs1 = vec![("user.x".to_string(), b"foo".to_vec())];
         let xattrs2 = vec![
             ("user.x".to_string(), b"foo".to_vec()),
             ("user.y".to_string(), b"bar".to_vec()),
         ];
 
-        let key1 = intern_xattrs(&mut dict, &xattrs1);
-        let key2 = intern_xattrs(&mut dict, &xattrs2);
+        let (key1, key2) = {
+            let mut fsa = FileStorageAdd::new(&mut io);
+            let k1 = intern_xattrs(&mut fsa, &xattrs1);
+            let k2 = intern_xattrs(&mut fsa, &xattrs2);
+            (k1, k2)
+        };
 
         // Two different xattr sets produce different keys
         assert_ne!(key1, key2);
 
-        let rec1 = load_xattrs(&dict, &key1).unwrap();
-        let rec2 = load_xattrs(&dict, &key2).unwrap();
+        let rec1 = load_xattrs(&mut io, &key1).unwrap();
+        let rec2 = load_xattrs(&mut io, &key2).unwrap();
         assert_eq!(rec1.len(), 1);
         assert_eq!(rec2.len(), 2);
     }

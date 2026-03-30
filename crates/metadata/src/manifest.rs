@@ -5,9 +5,9 @@
 //! (28 bytes per block hash: 7 × u32 LE) in the blockset Dictionary via
 //! `State::push_all`, which returns a single `Digest224` key for the whole list.
 
-use slicefs_traits::digest::{Digest224, from_digest224};
+use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::MetaError;
-use blockset::{State, Tree, GetBytes, GetData, Dictionary, StorageAdd};
+use blockset::{State, Tree, StorageAdd, Io, file_storage_get};
 
 /// Serialize and store an ordered list of block hashes in any `StorageAdd` backend.
 ///
@@ -24,13 +24,12 @@ pub fn intern_manifest(storage: &mut impl StorageAdd, blocks: &[Digest224]) -> D
     State::push_all(storage, &bytes)
 }
 
-/// Retrieve and deserialize a file manifest from the Dictionary.
+/// Retrieve and deserialize a file manifest from file-backed storage.
 ///
 /// Returns `MetaError::Corrupted` if the stored byte length is not a multiple of 28.
-pub fn load_manifest(dict: &Dictionary, key: &Digest224) -> Result<Vec<Digest224>, MetaError> {
-    let digest256 = from_digest224(key);
-    let get_data = GetData::new(dict, &digest256);
-    let bytes: Vec<u8> = GetBytes::new(get_data).collect();
+pub fn load_manifest(io: &mut impl Io, key: &Digest224) -> Result<Vec<Digest224>, MetaError> {
+    let bytes = file_storage_get(io, key)
+        .ok_or_else(|| MetaError::Corrupted(format!("missing manifest node {:?}", key)))?;
 
     if bytes.len() % 28 != 0 {
         return Err(MetaError::Corrupted(format!(
@@ -58,60 +57,88 @@ pub fn load_manifest(dict: &Dictionary, key: &Digest224) -> Result<Vec<Digest224
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockset::Dictionary;
+    use crate::store_io::StoreIo;
+    use blockset::FileStorageAdd;
+    use tempfile::TempDir;
+
+    fn make_io() -> (TempDir, StoreIo) {
+        let dir = TempDir::new().unwrap();
+        let io = StoreIo::new(dir.path());
+        (dir, io)
+    }
 
     #[test]
     fn test_empty_manifest_round_trip() {
-        let mut dict = Dictionary::default();
-        let key = intern_manifest(&mut dict, &[]);
-        let blocks = load_manifest(&dict, &key).unwrap();
+        let (_dir, mut io) = make_io();
+        let key = {
+            let mut fsa = FileStorageAdd::new(&mut io);
+            intern_manifest(&mut fsa, &[])
+        };
+        let blocks = load_manifest(&mut io, &key).unwrap();
         assert!(blocks.is_empty());
     }
 
     #[test]
     fn test_single_block_round_trip() {
-        let mut dict = Dictionary::default();
+        let (_dir, mut io) = make_io();
         let block: Digest224 = [1, 2, 3, 4, 5, 6, 7];
-        let key = intern_manifest(&mut dict, &[block]);
-        let blocks = load_manifest(&dict, &key).unwrap();
+        let key = {
+            let mut fsa = FileStorageAdd::new(&mut io);
+            intern_manifest(&mut fsa, &[block])
+        };
+        let blocks = load_manifest(&mut io, &key).unwrap();
         assert_eq!(blocks, vec![block]);
     }
 
     #[test]
     fn test_multiple_blocks_round_trip() {
-        let mut dict = Dictionary::default();
+        let (_dir, mut io) = make_io();
         let b1: Digest224 = [0x01; 7];
         let b2: Digest224 = [0x02; 7];
         let b3: Digest224 = [0x03; 7];
         let b4: Digest224 = [0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56, 0x78];
         let blocks = vec![b1, b2, b3, b4];
-        let key = intern_manifest(&mut dict, &blocks);
-        let recovered = load_manifest(&dict, &key).unwrap();
+        let key = {
+            let mut fsa = FileStorageAdd::new(&mut io);
+            intern_manifest(&mut fsa, &blocks)
+        };
+        let recovered = load_manifest(&mut io, &key).unwrap();
         assert_eq!(recovered, blocks);
     }
 
     #[test]
     fn test_ordering_preserved() {
-        let mut dict = Dictionary::default();
+        let (_dir, mut io) = make_io();
         let blocks: Vec<Digest224> = (0..10).map(|i| [i as u32; 7]).collect();
-        let key = intern_manifest(&mut dict, &blocks);
-        let recovered = load_manifest(&dict, &key).unwrap();
+        let key = {
+            let mut fsa = FileStorageAdd::new(&mut io);
+            intern_manifest(&mut fsa, &blocks)
+        };
+        let recovered = load_manifest(&mut io, &key).unwrap();
         assert_eq!(recovered, blocks);
     }
 
     #[test]
     fn test_two_different_manifests_produce_different_keys() {
-        let mut dict = Dictionary::default();
-        let k1 = intern_manifest(&mut dict, &[[1u32; 7]]);
-        let k2 = intern_manifest(&mut dict, &[[2u32; 7]]);
+        let (_dir, mut io) = make_io();
+        let (k1, k2) = {
+            let mut fsa = FileStorageAdd::new(&mut io);
+            let k1 = intern_manifest(&mut fsa, &[[1u32; 7]]);
+            let k2 = intern_manifest(&mut fsa, &[[2u32; 7]]);
+            (k1, k2)
+        };
         assert_ne!(k1, k2);
     }
 
     #[test]
     fn test_empty_and_nonempty_keys_differ() {
-        let mut dict = Dictionary::default();
-        let k_empty = intern_manifest(&mut dict, &[]);
-        let k_one = intern_manifest(&mut dict, &[[0u32; 7]]);
+        let (_dir, mut io) = make_io();
+        let (k_empty, k_one) = {
+            let mut fsa = FileStorageAdd::new(&mut io);
+            let k_empty = intern_manifest(&mut fsa, &[]);
+            let k_one = intern_manifest(&mut fsa, &[[0u32; 7]]);
+            (k_empty, k_one)
+        };
         assert_ne!(k_empty, k_one);
     }
 }
