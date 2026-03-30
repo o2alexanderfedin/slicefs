@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-03-29)
 ## Current Position
 
 Phase: 11 (Non-Sequential Write Handling)
-Plan: 01 of 2 complete
-Status: In progress
-Last activity: 2026-03-29 — Plan 01 complete: WriteMode dual dispatch with Streaming-to-Buffered fallback for pwrite at arbitrary offsets
+Plan: 02 of 2 complete
+Status: Complete
+Last activity: 2026-03-30 — Plan 02 complete: 10 STRM-02 integration tests covering fallback, gap zero-fill, overlapping writes, buffered fsync/truncate/read, out-of-order delivery
 
 Progress: [██████████] 100%
 
@@ -60,6 +60,7 @@ Progress: [██████████] 100%
 | Phase 10 P02 | 4 | 2 tasks | 2 files |
 | Phase 10-streaming-writes-core P03 | 2 | 2 tasks | 2 files |
 | Phase 11-non-sequential-write-handling P01 | 1 | 2 tasks | 3 files |
+| Phase 11-non-sequential-write-handling P02 | 2 | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -103,6 +104,8 @@ Progress: [██████████] 100%
 - [Phase 11-01]: byte_count == 0 fallback loads committed manifest content to prevent existing file data loss (Research Pitfall 1)
 - [Phase 11-01]: Buffered read serves directly from buf clone (no CAS roundtrip needed)
 - [Phase 11-01]: Buffered truncate uses simple buf.resize() instead of materialize+repush
+- [Phase 11-02]: test_pwrite_existing_file_preserves_content skipped (no test_open helper for reopening committed files); new-file pwrite variant covers zero-fill path
+- [Phase 11-02]: Out-of-order writes test (STRM-02i) writes first chunk at offset 30 to trigger immediate fallback on brand new file
 
 ### Roadmap Evolution
 
@@ -115,11 +118,10 @@ None yet.
 ### Blockers/Concerns
 
 - Phase 10: Dict lock acquisition sequence during flush_buffer_to_cas needs canonical ordering to prevent lock inversion — verify in Phase 10 planning (two separate Mutex<Dictionary> clones sharing underlying Arc)
-- Phase 11: No existing test exercises writeback_cache out-of-order write delivery — must be written before Phase 11 is declared complete
 - Post-v2.0: Mixed-version stores (v1/v2/v3 blocks) have no cross-epoch dedup path; a slicefs migrate-store command may be needed in v2.1+
 
 ## Session Continuity
 
-Last session: 2026-03-29T00:00:00Z
-Stopped at: Completed 11-01-PLAN.md
-Resume file: .planning/phases/11-non-sequential-write-handling/11-01-SUMMARY.md
+Last session: 2026-03-30T08:46:52Z
+Stopped at: Completed 11-02-PLAN.md (Phase 11 complete)
+Resume file: .planning/phases/11-non-sequential-write-handling/11-02-SUMMARY.md
