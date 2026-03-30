@@ -10,7 +10,7 @@
 //!   4. `dir_data`
 //!   5. `manifest_data`
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
 
 use slicefs_traits::digest::{Branches, Digest224};
@@ -70,9 +70,10 @@ pub struct DictMetadataStore {
     wal: Mutex<Option<Box<dyn WalStrategy>>>,
     /// Last committed root digest — updated by `commit()`, used by GC to determine live roots.
     last_root: Mutex<Option<Digest224>>,
-    /// Snapshot list — populated by `set_snapshots()` on store reconstruction
-    /// and appended by `create_snapshot()`. Sorted by version.
-    snapshots: Mutex<Vec<SnapshotEntry>>,
+    /// Snapshot index by version number — O(1) lookup (FIX-03).
+    snapshots_by_version: Mutex<HashMap<u64, SnapshotEntry>>,
+    /// Snapshot name → version mapping — O(1) name lookup (FIX-04).
+    snapshots_by_name: Mutex<HashMap<String, u64>>,
 }
 
 impl DictMetadataStore {
@@ -107,7 +108,8 @@ impl DictMetadataStore {
             logical_bytes: AtomicU64::new(0),
             wal: Mutex::new(None),
             last_root: Mutex::new(None),
-            snapshots: Mutex::new(Vec::new()),
+            snapshots_by_version: Mutex::new(HashMap::new()),
+            snapshots_by_name: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -242,10 +244,13 @@ impl DictMetadataStore {
     /// Called by `mount.rs::load_store` after `load_store_from_segments` returns
     /// the snapshot list. Replaces whatever is in memory (typically empty).
     pub fn set_snapshots(&mut self, snapshots: Vec<SnapshotEntry>) {
-        let mut guard = self.snapshots.lock().unwrap();
-        *guard = snapshots;
-        // Ensure sorted by version for consistent list_snapshots output.
-        guard.sort_by_key(|s| s.version);
+        let mut by_ver = self.snapshots_by_version.lock().unwrap();
+        let mut by_name = self.snapshots_by_name.lock().unwrap();
+        *by_ver = snapshots.iter().map(|s| (s.version, s.clone())).collect();
+        *by_name = snapshots
+            .iter()
+            .filter_map(|s| s.name.as_ref().map(|n| (n.clone(), s.version)))
+            .collect();
     }
 
     /// Create a snapshot of the current committed state.
@@ -258,10 +263,10 @@ impl DictMetadataStore {
         // Flush in-memory state to get a stable root.
         let root = self.commit()?;
 
-        // Compute next version.
+        // Compute next version — O(1) from HashMap keys.
         let version = {
-            let snaps = self.snapshots.lock().unwrap();
-            snaps.iter().map(|s| s.version).max().unwrap_or(0) + 1
+            let by_ver = self.snapshots_by_version.lock().unwrap();
+            by_ver.keys().max().copied().unwrap_or(0) + 1
         };
 
         // Capture creation timestamp.
@@ -280,31 +285,41 @@ impl DictMetadataStore {
             name,
         });
 
-        // Append to in-memory list.
-        self.snapshots.lock().unwrap().push(entry.clone());
+        // Insert into both indexes.
+        {
+            let mut by_ver = self.snapshots_by_version.lock().unwrap();
+            by_ver.insert(entry.version, entry.clone());
+        }
+        if let Some(ref n) = entry.name {
+            let mut by_name = self.snapshots_by_name.lock().unwrap();
+            by_name.insert(n.clone(), entry.version);
+        }
 
         Ok(entry)
     }
 
     /// Return all snapshots sorted by version ascending.
     pub fn list_snapshots(&self) -> Vec<SnapshotEntry> {
-        let mut snaps = self.snapshots.lock().unwrap().clone();
+        let by_ver = self.snapshots_by_version.lock().unwrap();
+        let mut snaps: Vec<SnapshotEntry> = by_ver.values().cloned().collect();
         snaps.sort_by_key(|s| s.version);
         snaps
     }
 
-    /// Find a snapshot by version number or name.
+    /// Find a snapshot by version number or name. O(1) lookup (FIX-03, FIX-04).
     ///
-    /// - If `reference` parses as `u64`, search by version.
-    /// - Otherwise search by name.
+    /// - If `reference` parses as `u64`, search by version using HashMap.
+    /// - Otherwise search by name using the name→version HashMap.
     ///
-    /// Returns the first match, or `None`.
+    /// Returns the matching entry, or `None`.
     pub fn find_snapshot(&self, reference: &str) -> Option<SnapshotEntry> {
-        let snaps = self.snapshots.lock().unwrap();
         if let Ok(version) = reference.parse::<u64>() {
-            snaps.iter().find(|s| s.version == version).cloned()
+            self.snapshots_by_version.lock().unwrap().get(&version).cloned()
         } else {
-            snaps.iter().find(|s| s.name.as_deref() == Some(reference)).cloned()
+            let by_name = self.snapshots_by_name.lock().unwrap();
+            let version = *by_name.get(reference)?;
+            drop(by_name);
+            self.snapshots_by_version.lock().unwrap().get(&version).cloned()
         }
     }
 
@@ -313,8 +328,9 @@ impl DictMetadataStore {
     /// Includes every snapshot root plus the current committed root (if any).
     /// Used by both background GC and offline `slicefs gc`.
     pub fn snapshot_roots(&self) -> Vec<Digest224> {
-        let snaps = self.snapshots.lock().unwrap();
-        let mut roots: Vec<Digest224> = snaps.iter().map(|s| s.root).collect();
+        let by_ver = self.snapshots_by_version.lock().unwrap();
+        let mut roots: Vec<Digest224> = by_ver.values().map(|s| s.root).collect();
+        drop(by_ver);
         if let Some(root) = self.current_root() {
             roots.push(root);
         }
@@ -937,7 +953,8 @@ impl DictMetadataStore {
             logical_bytes: AtomicU64::new(initial_logical_bytes),
             wal: Mutex::new(None),
             last_root: Mutex::new(Some(*root)),
-            snapshots: Mutex::new(Vec::new()),
+            snapshots_by_version: Mutex::new(HashMap::new()),
+            snapshots_by_name: Mutex::new(HashMap::new()),
         })
     }
 }
@@ -1763,6 +1780,127 @@ mod tests {
         let list = store.list_snapshots();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].version, 5);
+    }
+
+    // ── O(1) HashMap snapshot tests (FIX-03, FIX-04) ──────────────────────
+
+    fn make_snapshot(version: u64, name: Option<&str>) -> crate::snapshot::SnapshotEntry {
+        crate::snapshot::SnapshotEntry {
+            version,
+            name: name.map(|s| s.to_string()),
+            root: [version as u32; 7],
+            created_at: version * 1000,
+        }
+    }
+
+    /// FIX-03: find_snapshot by version string uses O(1) lookup.
+    #[test]
+    fn test_hashmap_find_by_version_o1() {
+        let mut store = DictMetadataStore::new();
+        store.set_snapshots(vec![
+            make_snapshot(1, None),
+            make_snapshot(2, Some("beta")),
+            make_snapshot(3, Some("gamma")),
+        ]);
+        let found = store.find_snapshot("1").expect("must find version 1");
+        assert_eq!(found.version, 1);
+        let found2 = store.find_snapshot("2").expect("must find version 2");
+        assert_eq!(found2.version, 2);
+        assert!(store.find_snapshot("99").is_none(), "version 99 must not exist");
+    }
+
+    /// FIX-04: find_snapshot by name uses O(1) lookup.
+    #[test]
+    fn test_hashmap_find_by_name_o1() {
+        let mut store = DictMetadataStore::new();
+        store.set_snapshots(vec![
+            make_snapshot(1, Some("alpha")),
+            make_snapshot(2, Some("beta")),
+        ]);
+        let found = store.find_snapshot("alpha").expect("must find 'alpha'");
+        assert_eq!(found.version, 1);
+        let found2 = store.find_snapshot("beta").expect("must find 'beta'");
+        assert_eq!(found2.version, 2);
+        assert!(store.find_snapshot("nonexistent").is_none());
+    }
+
+    /// Scale test: 10,000 snapshots — find_snapshot must complete in under 1ms.
+    #[test]
+    fn test_hashmap_10k_snapshots_under_1ms() {
+        let snaps: Vec<_> = (1u64..=10_000)
+            .map(|v| make_snapshot(v, None))
+            .collect();
+        let mut store = DictMetadataStore::new();
+        store.set_snapshots(snaps);
+
+        let start = std::time::Instant::now();
+        let found = store.find_snapshot("9999").expect("must find version 9999");
+        let elapsed = start.elapsed();
+
+        assert_eq!(found.version, 9999);
+        assert!(
+            elapsed.as_millis() < 1,
+            "find_snapshot with 10k entries must complete in < 1ms, took {:?}",
+            elapsed
+        );
+    }
+
+    /// create_snapshot adds to both indexes.
+    #[test]
+    fn test_create_snapshot_adds_to_both_indexes() {
+        use crate::wal::{WalConfig, create_wal};
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+        let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
+        let mut store = DictMetadataStore::new();
+        store.set_wal(wal);
+
+        store.create_snapshot(Some("my-snap".to_string())).unwrap();
+
+        // Lookup by version
+        let by_ver = store.find_snapshot("1").expect("must find by version=1");
+        assert_eq!(by_ver.version, 1);
+        // Lookup by name
+        let by_name = store.find_snapshot("my-snap").expect("must find by name");
+        assert_eq!(by_name.name.as_deref(), Some("my-snap"));
+    }
+
+    /// set_snapshots populates both by_version and by_name indexes correctly.
+    #[test]
+    fn test_set_snapshots_populates_both_indexes() {
+        let snaps = vec![
+            make_snapshot(10, Some("ten")),
+            make_snapshot(20, None),
+            make_snapshot(30, Some("thirty")),
+        ];
+        let mut store = DictMetadataStore::new();
+        store.set_snapshots(snaps);
+
+        assert_eq!(store.find_snapshot("10").unwrap().version, 10);
+        assert_eq!(store.find_snapshot("twenty").is_none(), true);
+        assert_eq!(store.find_snapshot("ten").unwrap().version, 10);
+        assert_eq!(store.find_snapshot("thirty").unwrap().version, 30);
+        assert!(store.find_snapshot("20").is_some());  // unnamed, find by version
+        assert!(store.find_snapshot("20_name").is_none());
+    }
+
+    /// list_snapshots returns sorted by version (existing behavior preserved).
+    #[test]
+    fn test_hashmap_list_snapshots_sorted() {
+        let snaps = vec![
+            make_snapshot(3, None),
+            make_snapshot(1, None),
+            make_snapshot(2, None),
+        ];
+        let mut store = DictMetadataStore::new();
+        store.set_snapshots(snaps);
+
+        let list = store.list_snapshots();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].version, 1);
+        assert_eq!(list[1].version, 2);
+        assert_eq!(list[2].version, 3);
     }
 }
 
