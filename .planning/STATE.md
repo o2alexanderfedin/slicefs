@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Streaming Writes & Hardening
 status: executing
-stopped_at: Completed 10-02-PLAN.md
-last_updated: "2026-03-30T07:31:22.918Z"
+stopped_at: Completed 10-03-PLAN.md
+last_updated: "2026-03-30T07:35:37.939Z"
 last_activity: "2026-03-30 — Plan 02 complete: flush/release/read paths rewritten to use streaming State directly with refcount lifecycle"
 progress:
   total_phases: 12
-  completed_phases: 10
+  completed_phases: 11
   total_plans: 33
-  completed_plans: 32
+  completed_plans: 33
   percent: 97
 ---
 
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-03-29)
 
 ## Current Position
 
-Phase: 10 (Streaming Writes Core)
-Plan: 02 of 3 complete
-Status: In progress
-Last activity: 2026-03-30 — Plan 02 complete: flush/release/read paths rewritten to use streaming State directly with refcount lifecycle
+Phase: 10 (Streaming Writes Core) -- COMPLETE
+Plan: 03 of 3 complete
+Status: Phase complete
+Last activity: 2026-03-30 — Plan 03 complete: streaming truncate on open handles with refcount lifecycle and 12 integration tests
 
-Progress: [██████████] 97%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -58,6 +58,7 @@ Progress: [██████████] 97%
 | Phase 09-compression-removal P02 | 7 | 2 tasks | 9 files |
 | Phase 10-streaming-writes-core P01 | 12 | 2 tasks | 6 files |
 | Phase 10 P02 | 4 | 2 tasks | 2 files |
+| Phase 10-streaming-writes-core P03 | 2 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -92,6 +93,9 @@ Progress: [██████████] 97%
 - [Phase 10]: [Phase 10-02]: test_read scans open_files values for matching ino (O(n) acceptable for typical handle counts)
 - [Phase 10]: [Phase 10-02]: FUSE read() delegates entirely to test_read -- single code path for committed and uncommitted reads
 - [Phase 10]: [Phase 10-02]: flush_buffer_to_cas removed -- release path handles State.end() directly
+- [Phase 10-streaming-writes-core]: Truncate to 0 is a fast path: State::default() reset without materialization
+- [Phase 10-streaming-writes-core]: Truncate to N>0 materializes via clone+end, resizes Vec, pushes into fresh State
+- [Phase 10-streaming-writes-core]: last_committed_root.take() on truncate prevents refcount leaks from prior fsyncs
 
 ### Roadmap Evolution
 
@@ -109,6 +113,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-30T07:31:22.915Z
-Stopped at: Completed 10-02-PLAN.md
+Last session: 2026-03-30T07:35:37.935Z
+Stopped at: Completed 10-03-PLAN.md
 Resume file: None
