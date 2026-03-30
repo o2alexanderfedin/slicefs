@@ -477,56 +477,73 @@ impl SliceFsFilesystem {
 
 
     /// Truncate/extend a file to `new_size` bytes. If `fh` is Some and open,
-    /// operates on the in-flight buffer; otherwise reads from CAS, adjusts, re-pushes.
+    /// operates on the in-flight streaming State; otherwise reads from CAS, adjusts, re-pushes.
     pub fn test_setattr_size(&self, ino: u64, fh: Option<u64>, new_size: u64) -> Result<(), i32> {
-        // Case A: open file handle — truncate streaming state.
-        // Temporary shim: for new_size == 0, reset State; for new_size > 0,
-        // materialize, resize, re-push. Plan 03 will optimize this.
+        // Case A: open file handle — truncate in-flight streaming State
         if let Some(fh_val) = fh {
             let mut open_files = self.open_files.lock().unwrap();
             if let Some(s) = open_files.get_mut(&fh_val) {
                 if new_size == 0 {
-                    // Fast path: reset to empty
+                    // Fast path: reset to empty State
+                    let old_root = s.last_committed_root.take();
                     s.state = State::default();
                     s.byte_count = 0;
                     s.cas_committed = false;
+                    drop(open_files); // Release before io/meta operations
+
+                    // Decrement old committed root if any
+                    if let Some(old) = old_root {
+                        self.meta.decrement_refcount(&old);
+                    }
                 } else {
-                    // Materialize current content, resize, re-push into fresh State
-                    let old_bytes: Vec<u8> = if s.byte_count == 0 {
+                    // Materialize current content from in-progress State
+                    let snapshot = s.state.clone();
+                    let current_byte_count = s.byte_count;
+                    let old_root = s.last_committed_root.take();
+                    drop(open_files); // Release before io lock
+
+                    // Materialize to bytes
+                    let mut content: Vec<u8> = if current_byte_count == 0 {
                         Vec::new()
                     } else {
-                        let state_clone = s.state.clone();
-                        // Must drop open_files before acquiring io
-                        drop(open_files);
-                        let d224 = {
+                        let digest = {
                             let mut io = self.io.lock().unwrap();
                             let mut fsa = FileStorageAdd::new(&mut *io);
-                            let d256 = state_clone.end(&mut fsa);
+                            let d256 = snapshot.end(&mut fsa);
                             fsa.end(&d256)
                         };
-                        let raw = {
-                            let mut io = self.io.lock().unwrap();
-                            file_storage_get(&mut *io, &d224).unwrap_or_default()
-                        };
-                        // Re-acquire open_files
-                        open_files = self.open_files.lock().unwrap();
-                        raw
+                        let mut io = self.io.lock().unwrap();
+                        file_storage_get(&mut *io, &digest).unwrap_or_default()
                     };
-                    let mut content = old_bytes;
+
+                    // Truncate or zero-extend
                     content.resize(new_size as usize, 0);
-                    // Re-push into fresh State
-                    if let Some(s) = open_files.get_mut(&fh_val) {
+
+                    // Push into fresh State
+                    let new_state_and_count = {
                         let mut io = self.io.lock().unwrap();
                         let mut fsa = FileStorageAdd::new(&mut *io);
-                        s.state = State::default();
-                        s.state.push_bytes(&mut fsa, &content);
-                        drop(fsa);
-                        drop(io);
-                        s.byte_count = new_size;
+                        let mut fresh = State::default();
+                        fresh.push_bytes(&mut fsa, &content);
+                        (fresh, content.len() as u64)
+                    };
+
+                    // Update OpenFileState
+                    let mut open_files = self.open_files.lock().unwrap();
+                    if let Some(s) = open_files.get_mut(&fh_val) {
+                        s.state = new_state_and_count.0;
+                        s.byte_count = new_state_and_count.1;
                         s.cas_committed = false;
+                        s.last_committed_root = None;
+                    }
+                    drop(open_files);
+
+                    // Decrement old committed root if any
+                    if let Some(old) = old_root {
+                        self.meta.decrement_refcount(&old);
                     }
                 }
-                drop(open_files);
+
                 // Update inode size immediately
                 let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
                 inode.size = new_size;
