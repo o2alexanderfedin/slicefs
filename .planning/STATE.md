@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Streaming Writes & Hardening
 status: completed
-stopped_at: Completed 10-03-PLAN.md
-last_updated: "2026-03-30T07:39:27.245Z"
+stopped_at: Phase 11 context gathered
+last_updated: "2026-03-30T07:58:09.229Z"
 last_activity: "2026-03-30 — Plan 03 complete: streaming truncate on open handles with refcount lifecycle and 12 integration tests"
 progress:
   total_phases: 12
@@ -113,6 +113,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-30T07:35:37.935Z
-Stopped at: Completed 10-03-PLAN.md
-Resume file: None
+Last session: 2026-03-30T07:58:09.224Z
+Stopped at: Phase 11 context gathered
+Resume file: .planning/phases/11-non-sequential-write-handling/11-CONTEXT.md
