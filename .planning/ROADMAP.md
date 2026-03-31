@@ -215,10 +215,28 @@ Plans:
 - [ ] 11-01-PLAN.md — WriteMode enum + dual dispatch across 5 write-path methods in filesystem.rs
 - [ ] 11-02-PLAN.md — Non-sequential write integration tests + un-ignore Phase 10 deferred tests
 
+### Phase 12: Add SMB/FSKit backend support for FUSE-T
+
+**Goal**: Configure FUSE-T to use the SMB or FSKit backend instead of the broken NFS backend on macOS -- auto-detect best backend at mount time (FSKit > SMB > NFS), add CLI override, block NFS by default, add mount protection (signal handler + watchdog), and enhance unmount with multi-step cleanup
+**Depends on:** Phase 11
+**Requirements**: FUSET-01, FUSET-02, FUSET-03, FUSET-04, FUSET-05, FUSET-06, FUSET-07, FUSET-08
+**Success Criteria** (what must be TRUE):
+  1. `slicefs mount` on macOS auto-selects SMB backend (or FSKit when available) without user intervention
+  2. `--backend=nfs` without `--force` is rejected with a clear error explaining the macOS kernel bug
+  3. FUSE-T version < 1.0.35 is rejected with a clear upgrade message
+  4. Mount startup log shows backend name and FUSE-T version
+  5. Signal handler + watchdog protect against stuck mounts and daemon crashes
+  6. `slicefs unmount` reliably cleans up stuck mounts via soft -> kill -> force -> mount.lock sequence
+**Plans**: 2 plans
+
+Plans:
+- [ ] 12-01-PLAN.md — Backend detection module, CLI flags (--backend, --force, --store), enhanced unmount
+- [ ] 12-02-PLAN.md — Wire backend into mount lifecycle: signal handler, watchdog, startup logging, fuse-t.ini fallback
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 7.1 -> 8 -> 9 -> 10 -> 11
+Phases execute in numeric order: 7.1 -> 8 -> 9 -> 10 -> 11 -> 12
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
@@ -234,3 +252,4 @@ Phases execute in numeric order: 7.1 -> 8 -> 9 -> 10 -> 11
 | 9. Compression Removal | 1/2 | In Progress|  | - |
 | 10. Streaming Writes Core | 3/3 | Complete    | 2026-03-30 | - |
 | 11. Non-Sequential Write Handling | 2/2 | Complete    | 2026-03-30 | - |
+| 12. SMB/FSKit Backend Support | 0/2 | Planned | - | - |

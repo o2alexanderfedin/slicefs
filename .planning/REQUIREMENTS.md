@@ -100,6 +100,17 @@ Requirements for streaming writes and hardening milestone.
 - [x] **FIX-03**: Snapshot lookup by version is O(1) via HashMap<u64, SnapshotEntry>
 - [x] **FIX-04**: Snapshot lookup by name is O(1) via HashMap<String, u64> index
 
+### FUSE-T Backend Selection (Phase 12)
+
+- [ ] **FUSET-01**: Auto-detect best FUSE-T backend at mount time with priority FSKit > SMB > NFS
+- [ ] **FUSET-02**: `--backend=nfs|smb|fskit` CLI flag overrides auto-detection
+- [ ] **FUSET-03**: NFS backend blocked by default; refuses to mount unless `--backend=nfs` or `--force` explicitly passed
+- [ ] **FUSET-04**: FUSE-T version detected from dylib filename; minimum 1.0.35 required (SMB availability)
+- [ ] **FUSET-05**: Signal handler (SIGTERM/SIGINT) + watchdog thread for mount protection and graceful shutdown
+- [ ] **FUSET-06**: Enhanced unmount: soft umount -> kill processes -> force umount -> clean mount.lock
+- [ ] **FUSET-07**: Startup log includes backend name and FUSE-T version on every mount
+- [ ] **FUSET-08**: fuse-t.ini fallback for FUSE-T versions that do not support mount-level backend option
+
 ## v3 Requirements
 
 Deferred to future milestone. Tracked but not in current roadmap.
@@ -195,12 +206,21 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STRM-04 | Phase 10 | Complete |
 | STRM-05 | Phase 10 | Complete |
 | STRM-02 | Phase 11 | Complete |
+| FUSET-01 | Phase 12 | Planned |
+| FUSET-02 | Phase 12 | Planned |
+| FUSET-03 | Phase 12 | Planned |
+| FUSET-04 | Phase 12 | Planned |
+| FUSET-05 | Phase 12 | Planned |
+| FUSET-06 | Phase 12 | Planned |
+| FUSET-07 | Phase 12 | Planned |
+| FUSET-08 | Phase 12 | Planned |
 
 **Coverage:**
 - v1 requirements: 43 total, mapped to phases: 43
 - v2.0 requirements: 13 total, mapped to phases: 13
+- Phase 12 requirements: 8 total, mapped to phase: 8
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-27*
-*Last updated: 2026-03-29 after v2.0 roadmap creation — all 13 v2.0 requirements mapped to phases 8-11*
+*Last updated: 2026-03-31 after Phase 12 planning — 8 FUSET requirements added for FUSE-T backend selection*
