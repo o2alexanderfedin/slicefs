@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Streaming Writes & Hardening
 status: completed
-stopped_at: Completed 11-02-PLAN.md (Phase 11 complete)
-last_updated: "2026-03-30T08:53:52.294Z"
+stopped_at: Phase 12 context gathered
+last_updated: "2026-03-31T23:05:45.160Z"
 last_activity: "2026-03-30 — Plan 02 complete: 10 STRM-02 integration tests covering fallback, gap zero-fill, overlapping writes, buffered fsync/truncate/read, out-of-order delivery"
 progress:
-  total_phases: 12
+  total_phases: 13
   completed_phases: 12
   total_plans: 35
   completed_plans: 35
@@ -110,6 +110,7 @@ Progress: [██████████] 100%
 ### Roadmap Evolution
 
 - Phase 7.1 inserted after Phase 7: FileStorage Migration (URGENT) — switch DictMetadataStore from in-memory Dictionary to file-backed FileStorageAdd/file_storage_get. Eliminates ~67 GB RAM for 1 TB stores. Structurally solves FIX-03/FIX-04. Runs before Phase 8 correctness fixes.
+- Phase 12 added: Add SMB/FSKit backend support for FUSE-T — FUSE-T NFS backend has confirmed macOS kernel bug (Issue #45) causing cp hangs. SMB backend (1.0.35+) and FSKit backend (macOS 26, 1.2.0) bypass this.
 
 ### Pending Todos
 
@@ -122,6 +123,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-30T08:46:52Z
-Stopped at: Completed 11-02-PLAN.md (Phase 11 complete)
-Resume file: .planning/phases/11-non-sequential-write-handling/11-02-SUMMARY.md
+Last session: 2026-03-31T23:05:45.152Z
+Stopped at: Phase 12 context gathered
+Resume file: .planning/phases/12-add-smb-fskit-backend-support-for-fuse-t/12-CONTEXT.md
