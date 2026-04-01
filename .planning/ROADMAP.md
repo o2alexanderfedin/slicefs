@@ -252,4 +252,4 @@ Phases execute in numeric order: 7.1 -> 8 -> 9 -> 10 -> 11 -> 12
 | 9. Compression Removal | 1/2 | In Progress|  | - |
 | 10. Streaming Writes Core | 3/3 | Complete    | 2026-03-30 | - |
 | 11. Non-Sequential Write Handling | 2/2 | Complete    | 2026-03-30 | - |
-| 12. SMB/FSKit Backend Support | 0/2 | Planned | - | - |
+| 12. SMB/FSKit Backend Support | 1/2 | In Progress|  | - |

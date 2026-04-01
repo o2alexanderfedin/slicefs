@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Streaming Writes & Hardening
 status: completed
-stopped_at: Phase 12 context gathered
-last_updated: "2026-03-31T23:05:45.160Z"
+stopped_at: Completed 12-01-PLAN.md
+last_updated: "2026-04-01T01:29:55.997Z"
 last_activity: "2026-03-30 — Plan 02 complete: 10 STRM-02 integration tests covering fallback, gap zero-fill, overlapping writes, buffered fsync/truncate/read, out-of-order delivery"
 progress:
   total_phases: 13
   completed_phases: 12
-  total_plans: 35
-  completed_plans: 35
+  total_plans: 37
+  completed_plans: 36
   percent: 100
 ---
 
@@ -61,6 +61,7 @@ Progress: [██████████] 100%
 | Phase 10-streaming-writes-core P03 | 2 | 2 tasks | 2 files |
 | Phase 11-non-sequential-write-handling P01 | 1 | 2 tasks | 3 files |
 | Phase 11-non-sequential-write-handling P02 | 2 | 2 tasks | 1 files |
+| Phase 12 P01 | 301 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -106,6 +107,9 @@ Progress: [██████████] 100%
 - [Phase 11-01]: Buffered truncate uses simple buf.resize() instead of materialize+repush
 - [Phase 11-02]: test_pwrite_existing_file_preserves_content skipped (no test_open helper for reopening committed files); new-file pwrite variant covers zero-fill path
 - [Phase 11-02]: Out-of-order writes test (STRM-02i) writes first chunk at offset 30 to trigger immediate fallback on brand new file
+- [Phase 12]: FuseTBackend selection is pure (takes version + fskit_available as params) for full unit testability
+- [Phase 12]: NFS blocked by default; force=true overrides (explicit user intent required)
+- [Phase 12]: confirm_fallback_with_tty takes is_tty bool for testability; production confirm_fallback calls is_interactive()
 
 ### Roadmap Evolution
 
@@ -123,6 +127,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-31T23:05:45.152Z
-Stopped at: Phase 12 context gathered
-Resume file: .planning/phases/12-add-smb-fskit-backend-support-for-fuse-t/12-CONTEXT.md
+Last session: 2026-04-01T01:29:55.993Z
+Stopped at: Completed 12-01-PLAN.md
+Resume file: None
