@@ -23,8 +23,6 @@ fn main() {
 
     match cli.command {
         Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force } => {
-            // backend and force will be wired into run_mount in Plan 02.
-            let _ = (&backend, &force);
             if let Err(e) = mount::run_mount(
                 &store,
                 &mountpoint,
@@ -34,6 +32,8 @@ fn main() {
                 wal_strategy.as_deref(),
                 snapshot.as_deref(),
                 auto_snapshot,
+                backend.as_deref(),
+                force,
             ) {
                 if json {
                     eprintln!("{{\"error\": \"{e}\"}}");

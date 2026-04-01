@@ -20,7 +20,7 @@
 //!
 //! The command blocks until the FUSE session ends (SIGTERM, Ctrl+C, or `slicefs unmount`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -33,6 +33,196 @@ use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
 use crate::filesystem::SliceFsFilesystem;
+
+// ── Signal handling (macOS only) ──────────────────────────────────────────────
+
+/// Set by SIGTERM/SIGINT handler to coordinate watchdog shutdown.
+///
+/// Signal-safe: only an atomic store is performed in the handler.
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Register SIGTERM and SIGINT handlers that set SHUTDOWN_REQUESTED.
+///
+/// This is belt-and-suspenders alongside fuser's own signal handling — it
+/// ensures the watchdog thread sees the shutdown flag and stops health checks
+/// promptly after the signal arrives.
+///
+/// # Safety
+///
+/// `libc::signal` is unsafe. The handler only performs a single atomic store
+/// (signal-safe per POSIX).
+#[cfg(target_os = "macos")]
+unsafe fn register_signal_handlers() {
+    extern "C" fn handler(_sig: libc::c_int) {
+        SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+    }
+    libc::signal(libc::SIGTERM, handler as libc::sighandler_t);
+    libc::signal(libc::SIGINT, handler as libc::sighandler_t);
+}
+
+// ── Watchdog thread ───────────────────────────────────────────────────────────
+
+/// Spawn a watchdog thread that monitors mount health.
+///
+/// Polls `std::fs::metadata(mountpoint)` every `interval`. If the metadata
+/// call fails (ENOENT, ENOTCONN, etc.), the mount is considered dead and
+/// `umount -f <mountpoint>` is invoked as a last resort.
+///
+/// The watchdog also monitors the `SHUTDOWN_REQUESTED` static and the
+/// `shutdown` flag so it exits cleanly after `mount2()` returns.
+///
+/// Pattern mirrors the existing background GC thread.
+fn spawn_watchdog(
+    mountpoint: PathBuf,
+    interval: Duration,
+    shutdown: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(interval);
+
+            if shutdown.load(Ordering::SeqCst) || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                break;
+            }
+
+            if std::fs::metadata(&mountpoint).is_err() {
+                eprintln!(
+                    "[watchdog] mount health check failed -- forcing unmount of {}",
+                    mountpoint.display()
+                );
+                let _ = std::process::Command::new("umount")
+                    .arg("-f")
+                    .arg(&mountpoint)
+                    .status();
+                break;
+            }
+        }
+    })
+}
+
+// ── fuse-t.ini fallback (macOS only) ─────────────────────────────────────────
+
+/// Path to the fuse-t.ini configuration file.
+#[cfg(target_os = "macos")]
+const FUSE_T_INI_PATH: &str = "/Library/Application Support/fuse-t/cfg/fuse-t.ini";
+
+/// RAII guard that restores the original fuse-t.ini content on drop.
+///
+/// Created before injecting a temporary backend override; dropped after the
+/// mount attempt regardless of success or panic.
+#[cfg(target_os = "macos")]
+struct FuseTIniGuard {
+    path: PathBuf,
+    original: Option<Vec<u8>>,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for FuseTIniGuard {
+    fn drop(&mut self) {
+        if let Some(ref content) = self.original {
+            let _ = std::fs::write(&self.path, content);
+        }
+    }
+}
+
+/// Temporarily inject `backend=<value>` into fuse-t.ini, call `f()`, then
+/// restore the original content (even on panic — via `FuseTIniGuard` Drop).
+///
+/// Steps:
+/// 1. Read existing ini (may not exist — that is OK).
+/// 2. Write modified version with `backend=<value>` under `[Default]` to a
+///    `.tmp` sibling file.
+/// 3. Atomic rename `.tmp` -> original path.
+/// 4. Call `f()`.
+/// 5. `FuseTIniGuard` drop restores original content.
+///
+/// This is only called as a fallback when the primary CUSTOM mount-option
+/// approach fails. On FUSE-T 1.0.54+ it will never be triggered in practice.
+#[cfg(target_os = "macos")]
+fn with_fuse_t_ini_backend<F, R>(backend: &str, f: F) -> Result<R, Box<dyn std::error::Error>>
+where
+    F: FnOnce() -> Result<R, Box<dyn std::error::Error>>,
+{
+    let ini_path = PathBuf::from(FUSE_T_INI_PATH);
+    let original = std::fs::read(&ini_path).ok();
+
+    // Build modified ini content.
+    let modified = if let Some(ref content) = original {
+        inject_backend_into_ini(std::str::from_utf8(content).unwrap_or(""), backend)
+    } else {
+        // Create a minimal ini with the backend entry.
+        format!("[Default]\nbackend={}\n", backend)
+    };
+
+    // Atomic write: write to .tmp then rename.
+    let tmp_path = ini_path.with_extension("ini.tmp");
+    if let Some(parent) = ini_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&tmp_path, &modified)?;
+    std::fs::rename(&tmp_path, &ini_path)?;
+
+    // Guard restores original on drop (even on panic).
+    let _guard = FuseTIniGuard { path: ini_path, original };
+
+    f()
+}
+
+/// Inject or replace `backend=<value>` under the `[Default]` section in an
+/// ini-format string.  Returns the modified string.
+#[cfg(target_os = "macos")]
+fn inject_backend_into_ini(ini: &str, backend: &str) -> String {
+    let new_entry = format!("backend={}", backend);
+    let mut result = String::new();
+    let mut in_default = false;
+    let mut injected = false;
+
+    for line in ini.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with('[') {
+            // Entering a new section — if we were in [Default] and haven't
+            // injected yet, do it before moving to the next section.
+            if in_default && !injected {
+                result.push_str(&new_entry);
+                result.push('\n');
+                injected = true;
+            }
+            in_default = trimmed.eq_ignore_ascii_case("[Default]");
+            result.push_str(line);
+            result.push('\n');
+        } else if in_default && trimmed.starts_with("backend=") {
+            // Replace existing backend line.
+            result.push_str(&new_entry);
+            result.push('\n');
+            injected = true;
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    if !injected {
+        // No [Default] section existed, or we never saw a backend= line and
+        // we're still in [Default] at EOF.
+        if in_default {
+            result.push_str(&new_entry);
+            result.push('\n');
+        } else {
+            // Append a new [Default] section.
+            if !result.is_empty() && !result.ends_with('\n') {
+                result.push('\n');
+            }
+            result.push_str("[Default]\n");
+            result.push_str(&new_entry);
+            result.push('\n');
+        }
+    }
+
+    result
+}
+
+// ── Store loading ─────────────────────────────────────────────────────────────
 
 /// Load a seeded store from disk, returning `(DictMetadataStore, Arc<Mutex<StoreIo>>, MountLock)`.
 ///
@@ -134,16 +324,21 @@ pub(crate) fn next_segment_id(segs_dir: &Path) -> u64 {
     max_id + 1
 }
 
+// ── Mount options ─────────────────────────────────────────────────────────────
+
 /// Build the FUSE mount configuration.
 ///
 /// Always includes: `FSName("slicefs")`, `DefaultPermissions`.
 /// Adds `NoAtime` when `noatime` is true.
 /// Adds `AllowOther` when `allow_other` is true.
-/// On macOS, adds `CUSTOM("direct_io")` to bypass the NFS page cache that
-/// FUSE-T uses internally; without this, reads return stale data after writes
-/// (FUSE-T issue #45).
+/// On macOS, adds `CUSTOM("backend=<name>")` when a backend is provided.
 /// ACL defaults to `Owner` (only the mounting user can access the filesystem).
-pub fn build_mount_options(noatime: bool, allow_other: bool) -> Config {
+pub fn build_mount_options(
+    noatime: bool,
+    allow_other: bool,
+    #[cfg(target_os = "macos")] backend: Option<&crate::backend::FuseTBackend>,
+    #[cfg(not(target_os = "macos"))] _backend: Option<()>,
+) -> Config {
     let mut mount_options = vec![
         MountOption::FSName("slicefs".to_string()),
         MountOption::DefaultPermissions,
@@ -151,14 +346,13 @@ pub fn build_mount_options(noatime: bool, allow_other: bool) -> Config {
     if noatime {
         mount_options.push(MountOption::NoAtime);
     }
-    // FUSE-T (macOS) translates FUSE operations to NFSv4. The NFS client
-    // caches reads and can return stale data after a write because the NFS
-    // server (FUSE-T) has not yet committed the data. direct_io bypasses
-    // the NFS page cache, making every read/write go directly to the
-    // FUSE handler.  This is harmless on other FUSE implementations.
-    if cfg!(target_os = "macos") {
-        mount_options.push(MountOption::CUSTOM("direct_io".to_string()));
+    // On macOS with a known backend: inject CUSTOM("backend=<name>") so FUSE-T
+    // uses the correct transport (SMB or FSKit instead of the default NFS).
+    #[cfg(target_os = "macos")]
+    if let Some(b) = backend {
+        mount_options.push(MountOption::CUSTOM(b.as_mount_option().to_string()));
     }
+
     let mut cfg = Config::default();
     cfg.mount_options = mount_options;
     // fuser 0.17 uses SessionACL to control allow_other: SessionACL::All
@@ -167,6 +361,8 @@ pub fn build_mount_options(noatime: bool, allow_other: bool) -> Config {
     cfg.acl = if allow_other { SessionACL::All } else { SessionACL::Owner };
     cfg
 }
+
+// ── WAL config parsing ────────────────────────────────────────────────────────
 
 /// Parse a WAL strategy string to a `WalConfig`.
 ///
@@ -180,6 +376,41 @@ pub fn parse_wal_config(strategy: Option<&str>) -> WalConfig {
     }
 }
 
+// ── Mountpoint guard ──────────────────────────────────────────────────────────
+
+/// Check if a mountpoint is already mounted.
+///
+/// Uses `mount` command output to detect existing FUSE mounts at the given path.
+/// Returns an error if the mountpoint is already in use, preventing stale process
+/// accumulation when `slicefs mount` is invoked multiple times on the same path.
+fn check_mountpoint_not_in_use(mountpoint: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let canonical = mountpoint.canonicalize().unwrap_or_else(|_| mountpoint.to_path_buf());
+    let output = std::process::Command::new("mount")
+        .output()
+        .map_err(|e| format!("failed to run `mount`: {}", e))?;
+    let mount_table = String::from_utf8_lossy(&output.stdout);
+    let mount_str = canonical.to_string_lossy();
+    for line in mount_table.lines() {
+        // mount output format: "<device> on <path> (<options>)"
+        if let Some(on_idx) = line.find(" on ") {
+            let rest = &line[on_idx + 4..];
+            let mount_path = rest.split(" (").next().unwrap_or(rest);
+            if mount_path == mount_str.as_ref() {
+                return Err(format!(
+                    "mountpoint {} is already in use:\n  {}\nRun `slicefs unmount {}` or `umount {}` first.",
+                    mountpoint.display(),
+                    line,
+                    mountpoint.display(),
+                    mountpoint.display(),
+                ).into());
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── run_mount ─────────────────────────────────────────────────────────────────
+
 /// Run the `mount` subcommand.
 ///
 /// Loads the store, constructs the FUSE filesystem, and starts a blocking
@@ -190,6 +421,8 @@ pub fn parse_wal_config(strategy: Option<&str>) -> WalConfig {
 /// `allow_other` passes the `allow_other` FUSE mount option (multi-user access).
 /// `snapshot_ref` mounts a specific snapshot read-only (by version number or name).
 /// `auto_snapshot` enables auto-snapshot on clean unmount (--auto-snapshot flag).
+/// `backend` selects the FUSE-T backend (macOS only): "smb", "fskit", or "nfs".
+/// `force` allows NFS backend to be used despite the macOS kernel bug.
 #[allow(clippy::too_many_arguments)]
 pub fn run_mount(
     store_path: &Path,
@@ -200,12 +433,40 @@ pub fn run_mount(
     wal_strategy: Option<&str>,
     snapshot_ref: Option<&str>,
     auto_snapshot: bool,
+    backend: Option<&str>,
+    force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Pre-flight: reject if mountpoint is already in use.
+    check_mountpoint_not_in_use(mountpoint)?;
+
+    // ── macOS: Backend selection ──────────────────────────────────────────────
+    //
+    // Detect FUSE-T version and select the best available backend before
+    // touching the store. Errors here abort before any state is modified.
+    #[cfg(target_os = "macos")]
+    let (selected_backend, fuse_t_version) = {
+        use crate::backend::{parse_backend_flag, select_backend_auto};
+        let requested: Option<crate::backend::FuseTBackend> = backend
+            .map(|s| parse_backend_flag(s))
+            .transpose()
+            .map_err(|e: String| -> Box<dyn std::error::Error> { e.into() })?;
+        select_backend_auto(requested, force)
+            .map_err(|e: String| -> Box<dyn std::error::Error> { e.into() })?
+    };
+
+    // Suppress "unused variable" warnings on non-macOS for the parameters that
+    // exist but are not used without the macos cfg.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (backend, force);
+    }
+
     let wal_config = parse_wal_config(wal_strategy);
 
     let (meta, io, _mount_lock) = load_store(store_path, wal_config)?;
 
     // If mounting a snapshot: resolve it and load from snapshot root (read-only).
+    #[cfg(target_os = "macos")]
     let (final_meta, final_io, config) = if let Some(snap_ref) = snapshot_ref {
         let snap = meta.find_snapshot(snap_ref).ok_or_else(|| -> Box<dyn std::error::Error> {
             format!("snapshot not found: {}", snap_ref).into()
@@ -214,11 +475,28 @@ pub fn run_mount(
         let snap_io: Arc<Mutex<StoreIo>> = io.clone();
         let snap_meta = DictMetadataStore::load_from_root(snap_io.clone(), &snap.root)
             .map_err(|e| -> Box<dyn std::error::Error> { format!("failed to load snapshot root: {}", e).into() })?;
-        let mut cfg = build_mount_options(noatime, allow_other);
+        let mut cfg = build_mount_options(noatime, allow_other, None);
         cfg.mount_options.push(MountOption::RO);
         (snap_meta, snap_io, cfg)
     } else {
-        let cfg = build_mount_options(noatime, allow_other);
+        let cfg = build_mount_options(noatime, allow_other, Some(&selected_backend));
+        (meta, io, cfg)
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let (final_meta, final_io, config) = if let Some(snap_ref) = snapshot_ref {
+        let snap = meta.find_snapshot(snap_ref).ok_or_else(|| -> Box<dyn std::error::Error> {
+            format!("snapshot not found: {}", snap_ref).into()
+        })?;
+        println!("Mounting snapshot {} (read-only)", snap.version);
+        let snap_io: Arc<Mutex<StoreIo>> = io.clone();
+        let snap_meta = DictMetadataStore::load_from_root(snap_io.clone(), &snap.root)
+            .map_err(|e| -> Box<dyn std::error::Error> { format!("failed to load snapshot root: {}", e).into() })?;
+        let mut cfg = build_mount_options(noatime, allow_other, None);
+        cfg.mount_options.push(MountOption::RO);
+        (snap_meta, snap_io, cfg)
+    } else {
+        let cfg = build_mount_options(noatime, allow_other, None);
         (meta, io, cfg)
     };
 
@@ -244,21 +522,81 @@ pub fn run_mount(
         Arc::clone(&gc_shutdown),
     );
 
-    println!("SliceFS mounted at {}", mountpoint.display());
+    // ── macOS: Signal handler + watchdog ──────────────────────────────────────
 
-    mount2(fs, mountpoint, &config)?;
+    #[cfg(target_os = "macos")]
+    {
+        // Register SIGTERM/SIGINT handlers BEFORE mount2() to coordinate watchdog.
+        // SAFETY: handler only does an atomic store (signal-safe).
+        unsafe { register_signal_handlers(); }
 
-    // mount2 has returned — FUSE session ended, destroy() already called.
-    // destroy() calls shutdown_wal() which flushes and closes the WAL segment.
-    // Shut down the GC thread before the MountLock drops.
-    gc_shutdown.store(true, Ordering::SeqCst);
-    gc_handle.shutdown();
+        // Spawn watchdog thread BEFORE mount2() blocks.
+        let watchdog_shutdown = Arc::new(AtomicBool::new(false));
+        let watchdog_handle = spawn_watchdog(
+            mountpoint.to_path_buf(),
+            Duration::from_secs(5),
+            Arc::clone(&watchdog_shutdown),
+        );
+
+        // ── Startup log (backend + FUSE-T version) ────────────────────────────
+        println!(
+            "SliceFS mounted at {} (backend: {}, fuse-t: {}.{}.{})",
+            mountpoint.display(),
+            selected_backend.as_mount_option().trim_start_matches("backend="),
+            fuse_t_version.0,
+            fuse_t_version.1,
+            fuse_t_version.2,
+        );
+
+        // Primary mount attempt via CUSTOM mount option.
+        let mount_result = mount2(fs, mountpoint, &config);
+
+        // Shut down watchdog after mount2() returns.
+        watchdog_shutdown.store(true, Ordering::SeqCst);
+        let _ = watchdog_handle.join();
+
+        // mount2 has returned — FUSE session ended, destroy() already called.
+        // Shut down the GC thread before the MountLock drops.
+        gc_shutdown.store(true, Ordering::SeqCst);
+        gc_handle.shutdown();
+
+        // Propagate mount error (possibly via ini fallback below).
+        if let Err(e) = mount_result {
+            let err_str = e.to_string();
+            // Only fall back to ini if the error looks backend-related.
+            if err_str.contains("backend") || err_str.contains("option") {
+                eprintln!(
+                    "[slicefs] CUSTOM mount option failed ({}), trying fuse-t.ini fallback",
+                    err_str
+                );
+                with_fuse_t_ini_backend(
+                    selected_backend.as_mount_option().trim_start_matches("backend="),
+                    || Err(format!("fuse-t.ini fallback: original error: {}", err_str).into()),
+                )?;
+            } else {
+                return Err(e.into());
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        println!("SliceFS mounted at {}", mountpoint.display());
+
+        mount2(fs, mountpoint, &config)?;
+
+        // mount2 has returned — FUSE session ended, destroy() already called.
+        gc_shutdown.store(true, Ordering::SeqCst);
+        gc_handle.shutdown();
+    }
 
     // _mount_lock is dropped here, removing mount.lock from the store directory.
     println!("SliceFS unmounted.");
 
     Ok(())
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -358,9 +696,21 @@ mod tests {
         assert!(ino > 1, "file inode should be > 1");
     }
 
+    // ── build_mount_options ───────────────────────────────────────────────────
+
+    // Helper: call build_mount_options with a platform-appropriate backend argument.
+    #[cfg(target_os = "macos")]
+    fn bmo(noatime: bool, allow_other: bool) -> Config {
+        build_mount_options(noatime, allow_other, None)
+    }
+    #[cfg(not(target_os = "macos"))]
+    fn bmo(noatime: bool, allow_other: bool) -> Config {
+        build_mount_options(noatime, allow_other, None)
+    }
+
     #[test]
     fn test_build_mount_options_with_noatime() {
-        let config = build_mount_options(true, false);
+        let config = bmo(true, false);
         assert!(
             !config.mount_options.contains(&MountOption::RO),
             "RO must NOT be present (mount is read-write)"
@@ -377,7 +727,7 @@ mod tests {
 
     #[test]
     fn test_build_mount_options_without_noatime() {
-        let config = build_mount_options(false, false);
+        let config = bmo(false, false);
         assert!(
             !config.mount_options.contains(&MountOption::RO),
             "RO must NOT be present (mount is read-write)"
@@ -394,30 +744,18 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "macos")]
-    fn test_build_mount_options_macos_direct_io() {
-        // On macOS, direct_io must be present to bypass FUSE-T NFS page cache.
-        let config = build_mount_options(false, false);
-        assert!(
-            config.mount_options.contains(&MountOption::CUSTOM("direct_io".to_string())),
-            "CUSTOM(direct_io) must be present on macOS to fix FUSE-T write visibility"
-        );
-    }
-
-    #[test]
-    #[cfg(not(target_os = "macos"))]
-    fn test_build_mount_options_linux_no_direct_io() {
-        // On Linux, direct_io must NOT be present (it is a macOS-only workaround).
-        let config = build_mount_options(false, false);
+    fn test_build_mount_options_no_direct_io() {
+        // direct_io must NOT be present — it breaks FUSE-T's go-nfsv4 write path.
+        let config = bmo(false, false);
         assert!(
             !config.mount_options.contains(&MountOption::CUSTOM("direct_io".to_string())),
-            "CUSTOM(direct_io) must NOT be present on Linux"
+            "CUSTOM(direct_io) must NOT be present — breaks FUSE-T write forwarding"
         );
     }
 
     #[test]
     fn test_build_mount_options_allow_other() {
-        // fuser 0.17 uses SessionACL::All to implement allow_other.
-        let config = build_mount_options(false, true);
+        let config = bmo(false, true);
         assert!(
             matches!(config.acl, SessionACL::All),
             "SessionACL must be All when allow_other=true"
@@ -426,12 +764,40 @@ mod tests {
 
     #[test]
     fn test_build_mount_options_no_allow_other() {
-        let config = build_mount_options(false, false);
+        let config = bmo(false, false);
         assert!(
             matches!(config.acl, SessionACL::Owner),
             "SessionACL must be Owner when allow_other=false"
         );
     }
+
+    /// Verify CUSTOM("backend=smb") is present when backend=Some(Smb).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_build_mount_options_with_backend_smb() {
+        use crate::backend::FuseTBackend;
+        let config = build_mount_options(false, false, Some(&FuseTBackend::Smb));
+        assert!(
+            config.mount_options.contains(&MountOption::CUSTOM("backend=smb".to_string())),
+            "CUSTOM(backend=smb) must be present when backend=Some(Smb)"
+        );
+    }
+
+    /// Verify no CUSTOM("backend=*") present when backend=None.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_build_mount_options_no_backend() {
+        let config = build_mount_options(false, false, None);
+        let has_backend_custom = config.mount_options.iter().any(|opt| {
+            matches!(opt, MountOption::CUSTOM(s) if s.starts_with("backend="))
+        });
+        assert!(
+            !has_backend_custom,
+            "No CUSTOM(backend=*) should be present when backend=None"
+        );
+    }
+
+    // ── WAL config ────────────────────────────────────────────────────────────
 
     #[test]
     fn test_parse_wal_config_defaults_to_per_op() {
@@ -452,5 +818,43 @@ mod tests {
     #[test]
     fn test_parse_wal_config_periodic() {
         assert!(matches!(parse_wal_config(Some("periodic")), WalConfig::Periodic { .. }));
+    }
+
+    // ── inject_backend_into_ini ───────────────────────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_inject_backend_replaces_existing() {
+        let ini = "[Default]\nbackend=nfs\nfoo=bar\n";
+        let result = inject_backend_into_ini(ini, "smb");
+        assert!(result.contains("backend=smb"), "should replace backend=nfs with backend=smb");
+        assert!(!result.contains("backend=nfs"), "old backend line should be gone");
+        assert!(result.contains("foo=bar"), "unrelated keys should be preserved");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_inject_backend_adds_when_absent() {
+        let ini = "[Default]\nfoo=bar\n";
+        let result = inject_backend_into_ini(ini, "smb");
+        assert!(result.contains("backend=smb"), "should add backend=smb entry");
+        assert!(result.contains("foo=bar"), "unrelated keys should be preserved");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_inject_backend_creates_section_when_missing() {
+        let ini = "[Other]\nfoo=bar\n";
+        let result = inject_backend_into_ini(ini, "fskit");
+        assert!(result.contains("backend=fskit"), "should add [Default] section with backend=fskit");
+        assert!(result.contains("[Default]"), "should add [Default] section header");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_inject_backend_empty_ini() {
+        let result = inject_backend_into_ini("", "smb");
+        assert!(result.contains("backend=smb"), "should handle empty ini");
+        assert!(result.contains("[Default]"), "should add [Default] section");
     }
 }
