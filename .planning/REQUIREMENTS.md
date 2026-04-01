@@ -106,10 +106,10 @@ Requirements for streaming writes and hardening milestone.
 - [x] **FUSET-02**: `--backend=nfs|smb|fskit` CLI flag overrides auto-detection
 - [x] **FUSET-03**: NFS backend blocked by default; refuses to mount unless `--backend=nfs` or `--force` explicitly passed
 - [x] **FUSET-04**: FUSE-T version detected from dylib filename; minimum 1.0.35 required (SMB availability)
-- [ ] **FUSET-05**: Signal handler (SIGTERM/SIGINT) + watchdog thread for mount protection and graceful shutdown
+- [x] **FUSET-05**: Signal handler (SIGTERM/SIGINT) + watchdog thread for mount protection and graceful shutdown
 - [x] **FUSET-06**: Enhanced unmount: soft umount -> kill processes -> force umount -> clean mount.lock
-- [ ] **FUSET-07**: Startup log includes backend name and FUSE-T version on every mount
-- [ ] **FUSET-08**: fuse-t.ini fallback for FUSE-T versions that do not support mount-level backend option
+- [x] **FUSET-07**: Startup log includes backend name and FUSE-T version on every mount
+- [x] **FUSET-08**: fuse-t.ini fallback for FUSE-T versions that do not support mount-level backend option
 
 ## v3 Requirements
 

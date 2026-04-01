@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Streaming Writes & Hardening
 status: completed
-stopped_at: Completed 12-01-PLAN.md
-last_updated: "2026-04-01T01:29:55.997Z"
+stopped_at: Completed 12-02-PLAN.md
+last_updated: "2026-04-01T01:37:18.985Z"
 last_activity: "2026-03-30 — Plan 02 complete: 10 STRM-02 integration tests covering fallback, gap zero-fill, overlapping writes, buffered fsync/truncate/read, out-of-order delivery"
 progress:
   total_phases: 13
-  completed_phases: 12
+  completed_phases: 13
   total_plans: 37
-  completed_plans: 36
+  completed_plans: 37
   percent: 100
 ---
 
@@ -62,6 +62,7 @@ Progress: [██████████] 100%
 | Phase 11-non-sequential-write-handling P01 | 1 | 2 tasks | 3 files |
 | Phase 11-non-sequential-write-handling P02 | 2 | 2 tasks | 1 files |
 | Phase 12 P01 | 301 | 2 tasks | 5 files |
+| Phase 12-add-smb-fskit-backend-support-for-fuse-t P02 | 309 | 1 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -110,6 +111,7 @@ Progress: [██████████] 100%
 - [Phase 12]: FuseTBackend selection is pure (takes version + fskit_available as params) for full unit testability
 - [Phase 12]: NFS blocked by default; force=true overrides (explicit user intent required)
 - [Phase 12]: confirm_fallback_with_tty takes is_tty bool for testability; production confirm_fallback calls is_interactive()
+- [Phase 12]: build_mount_options uses #[cfg] on parameter for platform-conditional backend; fuse-t.ini fallback uses RAII Drop guard; lib.rs exposes backend as pub mod
 
 ### Roadmap Evolution
 
@@ -127,6 +129,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-01T01:29:55.993Z
-Stopped at: Completed 12-01-PLAN.md
+Last session: 2026-04-01T01:37:18.981Z
+Stopped at: Completed 12-02-PLAN.md
 Resume file: None
