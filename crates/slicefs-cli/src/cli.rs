@@ -58,6 +58,13 @@ pub enum Cmd {
         /// Automatically create a snapshot on clean unmount.
         #[arg(long, default_value_t = false)]
         auto_snapshot: bool,
+        /// FUSE-T backend: nfs, smb, or fskit (default: auto-detect, prefers fskit > smb).
+        /// NFS is blocked by default due to macOS kernel bug; use --force to override.
+        #[arg(long, value_name = "BACKEND")]
+        backend: Option<String>,
+        /// Force use of a blocked backend (e.g., --backend=nfs --force).
+        #[arg(long, default_value_t = false)]
+        force: bool,
     },
 
     /// Unmount a SliceFS filesystem mounted at the given path.

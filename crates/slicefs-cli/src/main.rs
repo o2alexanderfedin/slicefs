@@ -2,6 +2,7 @@
 //!
 //! Parses the CLI arguments and dispatches to the appropriate subcommand.
 
+mod backend;
 mod cli;
 mod filesystem;
 mod gc;
@@ -21,7 +22,9 @@ fn main() {
     let json = cli.json;
 
     match cli.command {
-        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot } => {
+        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force } => {
+            // backend and force will be wired into run_mount in Plan 02.
+            let _ = (&backend, &force);
             if let Err(e) = mount::run_mount(
                 &store,
                 &mountpoint,
