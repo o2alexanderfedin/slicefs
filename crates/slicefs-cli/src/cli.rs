@@ -71,6 +71,9 @@ pub enum Cmd {
     Unmount {
         /// Mountpoint to unmount.
         mountpoint: PathBuf,
+        /// Path to the SliceFS store (optional; enables mount.lock cleanup).
+        #[arg(long)]
+        store: Option<PathBuf>,
     },
 
     /// Seed a source directory tree into a SliceFS block store.
@@ -163,10 +166,24 @@ mod tests {
     fn test_unmount() {
         let cli = Cli::try_parse_from(["slicefs", "unmount", "/mnt"]).unwrap();
         match cli.command {
-            Cmd::Unmount { mountpoint } => {
+            Cmd::Unmount { mountpoint, store } => {
                 assert_eq!(mountpoint, PathBuf::from("/mnt"));
+                assert!(store.is_none());
             }
             _ => panic!("expected Unmount"),
+        }
+    }
+
+    #[test]
+    fn test_unmount_with_store() {
+        let cli =
+            Cli::try_parse_from(["slicefs", "unmount", "/mnt", "--store", "/data"]).unwrap();
+        match cli.command {
+            Cmd::Unmount { mountpoint, store } => {
+                assert_eq!(mountpoint, PathBuf::from("/mnt"));
+                assert_eq!(store.as_deref(), Some(PathBuf::from("/data").as_path()));
+            }
+            _ => panic!("expected Unmount with --store"),
         }
     }
 

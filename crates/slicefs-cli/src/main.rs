@@ -43,8 +43,8 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Cmd::Unmount { mountpoint } => {
-            if let Err(e) = unmount::run_unmount(&mountpoint) {
+        Cmd::Unmount { mountpoint, store } => {
+            if let Err(e) = unmount::run_unmount(&mountpoint, store.as_deref()) {
                 if json {
                     eprintln!("{{\"error\": \"{e}\"}}");
                 } else {
