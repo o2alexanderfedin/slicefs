@@ -3,6 +3,8 @@
 pub mod backend;
 pub mod cli;
 pub mod filesystem;
+mod fuse_callbacks;
+pub(crate) mod handlers;
 pub mod gc;
 pub mod mount;
 pub mod snapshot;

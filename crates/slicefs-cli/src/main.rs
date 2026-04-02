@@ -5,6 +5,8 @@
 mod backend;
 mod cli;
 mod filesystem;
+mod fuse_callbacks;
+mod handlers;
 mod gc;
 mod mount;
 mod scrub;
