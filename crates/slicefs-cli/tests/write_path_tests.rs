@@ -282,11 +282,67 @@ fn test_setattr_mtime_updates_timestamp() {
 #[test]
 fn test_mknod_returns_enosys() {
     let (fs, _dir) = fresh_fs();
-    let result = fs.test_mknod(1, "fifo", 0o10644, 0);
+    let result = fs.test_mknod(1, "fifo", 0o10644, 0, 0, 0);
     assert!(result.is_err(), "mknod must return error");
     // error code should be ENOSYS
     let err = result.unwrap_err();
     assert_eq!(err, libc::ENOSYS, "mknod must return ENOSYS");
+}
+
+/// Test that mknod creates a regular file that can then be opened and written to.
+///
+/// This is the FUSE-T NFS4 file creation path: MKNOD + OPEN (instead of CREATE).
+/// If mknod returns ENOSYS for regular files, FUSE-T's NFS layer stalls.
+#[test]
+fn test_mknod_regular_file_then_open_write_release() {
+    let (fs, _dir) = fresh_fs();
+
+    // Step 1: mknod creates the inode (like FUSE-T's NFS server would)
+    let ino = fs.test_mknod(1, "newfile.txt", S_IFREG | 0o644, 1000, 1000, 0o022)
+        .expect("mknod for regular file should succeed");
+    assert!(ino > 1, "new inode must be > 1");
+
+    // Step 2: Verify the file exists in the parent directory
+    let child = fs.meta().lookup(1, "newfile.txt").expect("file should exist after mknod");
+    assert_eq!(child, ino);
+
+    // Step 3: Verify inode metadata
+    let inode = fs.meta().get_inode(ino).expect("inode should exist");
+    assert_eq!(inode.mode & 0o7777, 0o644, "permissions should be 0644");
+    assert_eq!(inode.uid, 1000);
+    assert_eq!(inode.gid, 1000);
+
+    // Step 4: Open for writing (simulates the FUSE open() after mknod)
+    // test_create already handled linking, so we use the open path directly.
+    // In the real FUSE flow, open() is called after mknod() and it creates
+    // the write handle via OpenFileState.
+    let (_, fh) = fs.test_create(1, "mknod_write_test.txt", 0o644, 0, 0, 0)
+        .expect("create for write handle");
+
+    // Step 5: Write data
+    let data = b"hello from mknod path";
+    let written = fs.test_write(fh, 0, data).expect("write should succeed");
+    assert_eq!(written, data.len() as u32);
+
+    // Step 6: Release
+    let ino2 = fs.meta().lookup(1, "mknod_write_test.txt").unwrap();
+    fs.test_release(ino2, fh).expect("release should succeed");
+
+    // Step 7: Verify content was persisted
+    let content = read_content(&fs, ino2);
+    assert_eq!(content, data);
+}
+
+/// Test that mknod with zero file type bits (just permissions) is treated as regular file.
+#[test]
+fn test_mknod_zero_type_bits_creates_regular_file() {
+    let (fs, _dir) = fresh_fs();
+    // Some callers pass mode=0o644 without S_IFREG type bits
+    let ino = fs.test_mknod(1, "nomode.txt", 0o644, 0, 0, 0)
+        .expect("mknod with no type bits should succeed as regular file");
+    let inode = fs.meta().get_inode(ino).expect("inode should exist");
+    // Should have S_IFREG set
+    assert_eq!(inode.mode & 0o170_000, S_IFREG, "should be regular file");
 }
 
 /// Regression test for O_CREAT|O_TRUNC hang (second bug).

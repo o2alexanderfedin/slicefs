@@ -303,4 +303,68 @@ mod tests {
         assert_eq!(report.saturated_blocks, 5,
             "saturated_blocks field must be present and readable in ScrubReport");
     }
+
+    // ── mounted store warning path ────────────────────────────────────────────
+
+    #[test]
+    fn test_scrub_mounted_store_emits_warning_but_continues() {
+        // Create a store with a mount.lock to simulate a mounted store.
+        let dir = tempfile::tempdir().unwrap();
+        write_segment_store(&dir);
+        std::fs::write(dir.path().join("mount.lock"), b"locked").unwrap();
+
+        // scrub should still succeed (just warns) for a clean store.
+        let result = run_scrub(dir.path(), false);
+        assert!(result.is_ok(), "scrub on mounted store should still return Ok for clean data: {:?}", result);
+    }
+
+    #[test]
+    fn test_scrub_mounted_store_json_mode_warning() {
+        // Same as above but in JSON mode — warning goes to stderr.
+        let dir = tempfile::tempdir().unwrap();
+        write_segment_store(&dir);
+        std::fs::write(dir.path().join("mount.lock"), b"locked").unwrap();
+
+        let result = run_scrub(dir.path(), true);
+        assert!(result.is_ok(), "scrub --json on mounted store should succeed for clean data: {:?}", result);
+    }
+
+    // ── ScrubReport JSON serialization ────────────────────────────────────────
+
+    #[test]
+    fn test_scrub_report_serializes_to_json() {
+        let report = ScrubReport {
+            roots_verified: 2,
+            corrupted_roots: 1,
+            status: "corrupted (1 error(s))".to_string(),
+            mounted: true,
+            errors: vec!["missing or corrupt root abcdef01234567".to_string()],
+            saturated_blocks: 0,
+        };
+        let json = serde_json::to_string(&report).expect("ScrubReport should serialize to JSON");
+        assert!(json.contains("roots_verified"), "JSON should contain roots_verified");
+        assert!(json.contains("corrupted_roots"), "JSON should contain corrupted_roots");
+        assert!(json.contains("saturated_blocks"), "JSON should contain saturated_blocks");
+    }
+
+    // ── scrub segment store json output ──────────────────────────────────────
+
+    #[test]
+    fn test_scrub_segment_store_json_output() {
+        let dir = tempfile::tempdir().unwrap();
+        write_segment_store(&dir);
+        let result = run_scrub(dir.path(), true);
+        assert!(result.is_ok(), "segment store --json scrub should succeed: {:?}", result);
+    }
+
+    // ── empty segments directory (no committed state) ─────────────────────────
+
+    #[test]
+    fn test_scrub_empty_segments_dir_is_clean() {
+        // An empty segments/ directory (no WAL files) is valid — just no roots.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+        let result = run_scrub(dir.path(), false);
+        assert!(result.is_ok(), "empty segments dir should scrub clean: {:?}", result);
+    }
 }

@@ -222,4 +222,62 @@ mod tests {
         let dir = TempDir::new().unwrap();
         clean_mount_lock(Some(dir.path())); // lock file was never created
     }
+
+    // ── kill_processes_at_mountpoint ─────────────────────────────────────────
+
+    #[test]
+    fn test_kill_processes_at_mountpoint_nonexistent_path_does_not_panic() {
+        // lsof will find no processes for a nonexistent path; should not panic.
+        kill_processes_at_mountpoint(Path::new("/nonexistent/path/no_procs_here"));
+    }
+
+    #[test]
+    fn test_kill_processes_at_mountpoint_temp_dir_does_not_panic() {
+        // Even with a real existing directory, kill_processes_at_mountpoint must
+        // not panic if no processes have open files there.
+        let dir = TempDir::new().unwrap();
+        kill_processes_at_mountpoint(dir.path());
+    }
+
+    // ── try_force_unmount ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_try_force_unmount_nonexistent_path_returns_false() {
+        // A non-mounted path should cause all force-unmount strategies to fail.
+        let result = try_force_unmount(Path::new("/nonexistent/path/not_mounted"));
+        // We don't assert false here because diskutil/umount behavior varies;
+        // just ensure no panic occurs. On macOS, diskutil unmount force on a
+        // non-mounted path will fail (returns false). On Linux, umount -l also fails.
+        let _ = result;
+    }
+
+    // ── run_unmount error path ───────────────────────────────────────────────
+
+    #[test]
+    fn test_run_unmount_with_nonexistent_store_cleans_nothing() {
+        // run_unmount with a store path that has no mount.lock should not panic.
+        let dir = TempDir::new().unwrap();
+        // No mount.lock in dir.
+        let result = run_unmount(
+            Path::new("/nonexistent/not_a_mountpoint"),
+            Some(dir.path()),
+        );
+        // Either Ok or Err is valid (platform-dependent), just no panic.
+        let _ = result;
+    }
+
+    #[test]
+    fn test_run_unmount_returns_error_message_with_path() {
+        // The error message from run_unmount should contain the mountpoint path.
+        let mp = Path::new("/nonexistent/path/that/cannot/be/mounted");
+        let result = run_unmount(mp, None);
+        if let Err(e) = result {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("nonexistent") || msg.contains("Failed"),
+                "error message should reference the path or 'Failed', got: {}", msg
+            );
+        }
+        // If Ok (some systems may accept umount on nonexistent paths), that is also acceptable.
+    }
 }

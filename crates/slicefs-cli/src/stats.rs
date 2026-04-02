@@ -345,4 +345,123 @@ mod tests {
         let s = format_bytes(2048);
         assert!(s.contains("KiB"), "expected KiB in '{}'", s);
     }
+
+    #[test]
+    fn test_format_bytes_mib() {
+        let s = format_bytes(2 * 1024 * 1024);
+        assert!(s.contains("MiB"), "expected MiB in '{}'", s);
+    }
+
+    #[test]
+    fn test_format_bytes_gib() {
+        let s = format_bytes(3 * 1024 * 1024 * 1024);
+        assert!(s.contains("GiB"), "expected GiB in '{}'", s);
+    }
+
+    #[test]
+    fn test_format_bytes_exact_1_byte() {
+        assert_eq!(format_bytes(1), "1 B");
+    }
+
+    #[test]
+    fn test_format_bytes_1023_bytes() {
+        let s = format_bytes(1023);
+        assert!(s.contains(" B"), "1023 bytes should display as bytes, got '{}'", s);
+        assert!(!s.contains("KiB"), "1023 bytes should not display as KiB, got '{}'", s);
+    }
+
+    // ── build_snapshot_stats ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_snapshot_stats_empty() {
+        let result = build_snapshot_stats(&[]);
+        assert!(result.is_empty(), "empty snapshots should produce empty stats");
+    }
+
+    #[test]
+    fn test_build_snapshot_stats_preserves_fields() {
+        use metadata::snapshot::SnapshotEntry;
+        let snap = SnapshotEntry {
+            version: 42,
+            name: Some("release-1.0".to_string()),
+            created_at: 1700000000,
+            root: [0u32; 7],
+        };
+        let stats = build_snapshot_stats(&[snap]);
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].version, 42);
+        assert_eq!(stats[0].name.as_deref(), Some("release-1.0"));
+        assert_eq!(stats[0].created_at, 1700000000);
+        assert_eq!(stats[0].reachable_roots, 1);
+    }
+
+    #[test]
+    fn test_build_snapshot_stats_unnamed() {
+        use metadata::snapshot::SnapshotEntry;
+        let snap = SnapshotEntry {
+            version: 1,
+            name: None,
+            created_at: 0,
+            root: [0u32; 7],
+        };
+        let stats = build_snapshot_stats(&[snap]);
+        assert_eq!(stats.len(), 1);
+        assert!(stats[0].name.is_none(), "unnamed snapshot should have None name");
+    }
+
+    // ── mounted store path ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_stats_mounted_store_succeeds() {
+        // Create a valid store with a mount.lock to simulate a mounted store.
+        let dir = tempfile::tempdir().unwrap();
+        write_segment_store(&dir);
+        std::fs::write(dir.path().join("mount.lock"), b"locked").unwrap();
+
+        // stats should still work on a mounted store (read-only scan of segments).
+        let result = run_stats(dir.path(), false);
+        assert!(result.is_ok(), "stats on mounted store should succeed: {:?}", result);
+    }
+
+    #[test]
+    fn test_stats_mounted_store_json_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        write_segment_store(&dir);
+        std::fs::write(dir.path().join("mount.lock"), b"locked").unwrap();
+
+        let result = run_stats(dir.path(), true);
+        assert!(result.is_ok(), "stats --json on mounted store should succeed: {:?}", result);
+    }
+
+    // ── StoreStats JSON serialization ────────────────────────────────────────
+
+    #[test]
+    fn test_store_stats_serializes_to_json() {
+        let stats = StoreStats {
+            logical_bytes: 1024,
+            physical_bytes: 512,
+            host_disk_bytes: 2048,
+            dedup_ratio: 2.0,
+            snapshot_count: 3,
+            compressor: "none (v3 raw)".to_string(),
+            refcount_distribution: RefcountDist { unique: 10, shared_2x: 5, shared_3plus: 2 },
+            snapshots: vec![],
+            mounted: false,
+        };
+        let json = serde_json::to_string(&stats).expect("StoreStats should serialize to JSON");
+        assert!(json.contains("logical_bytes"), "JSON should contain logical_bytes");
+        assert!(json.contains("physical_bytes"), "JSON should contain physical_bytes");
+        assert!(json.contains("dedup_ratio"), "JSON should contain dedup_ratio");
+        assert!(json.contains("snapshot_count"), "JSON should contain snapshot_count");
+    }
+
+    // ── segment store json output ────────────────────────────────────────────
+
+    #[test]
+    fn test_stats_segment_store_json_output() {
+        let dir = tempfile::tempdir().unwrap();
+        write_segment_store(&dir);
+        let result = run_stats(dir.path(), true);
+        assert!(result.is_ok(), "stats --json on segment store should succeed: {:?}", result);
+    }
 }
