@@ -8,6 +8,6 @@ pub(crate) mod handlers;
 pub mod gc;
 pub mod mount;
 pub mod snapshot;
-mod seed;
+pub mod seed;
 mod store_io;
 mod unmount;
