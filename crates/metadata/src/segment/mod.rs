@@ -69,6 +69,16 @@ pub fn load_store_from_segments(
     seg_paths.sort();
 
     for path in &seg_paths {
+        // Skip empty segment files (created by WAL init but never written to,
+        // e.g. when the mount is killed before any commits).
+        let file_len = std::fs::metadata(path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if file_len < 16 {
+            // Too small to contain even the 16-byte header — skip silently.
+            continue;
+        }
+
         let reader = SegmentReader::open(path)?;
         for entry in reader {
             match entry {

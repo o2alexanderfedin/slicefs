@@ -35,6 +35,17 @@ pub fn run_seed(store_path: &Path, source_dir: &Path) -> Result<(), Box<dyn std:
     let io = Arc::new(Mutex::new(StoreIo::new(store_path)));
     let meta_store = DictMetadataStore::new(io.clone());
 
+    // Update root inode (ino=1) permissions from source directory.
+    // DictMetadataStore::new() creates it with uid=0/gid=0/0o755 by default,
+    // which blocks non-root writes when DefaultPermissions is used.
+    let source_meta = std::fs::metadata(source_dir)?;
+    let root_inode_meta = dir_inode_meta(&source_meta);
+    let mut root_inode = meta_store.get_inode(1)?;
+    root_inode.mode = root_inode_meta.mode;
+    root_inode.uid = root_inode_meta.uid;
+    root_inode.gid = root_inode_meta.gid;
+    meta_store.update_inode(&root_inode)?;
+
     // Walk source_dir: root maps to inode 1 (the pre-created root dir).
     walk_dir(source_dir, 1, &meta_store, &io)?;
 

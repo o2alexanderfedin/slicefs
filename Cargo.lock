@@ -447,10 +447,12 @@ name = "metadata"
 version = "0.1.0"
 dependencies = [
  "blockset",
+ "libc",
  "proptest",
  "slicefs-traits",
  "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -830,7 +832,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2-compress",
- "slicefs-compression",
  "slicefs-traits",
  "tempfile",
  "thiserror",

@@ -95,7 +95,14 @@ impl DictMetadataStore {
         let (root_inode_digest, root_dir_digest) = {
             let mut io_guard = io.lock().unwrap();
             let mut fsa = FileStorageAdd::new(&mut *io_guard);
-            let root_meta = InodeMeta::new_directory(1, 0, 0, S_IFDIR | 0o755);
+            // Use current process uid/gid so the mounting user can write to root.
+            // On non-unix, falls back to 0/0 (callers like `seed` update root inode
+            // from the source directory metadata afterwards).
+            #[cfg(unix)]
+            let (uid, gid) = (unsafe { libc::getuid() }, unsafe { libc::getgid() });
+            #[cfg(not(unix))]
+            let (uid, gid) = (0u32, 0u32);
+            let root_meta = InodeMeta::new_directory(1, uid, gid, S_IFDIR | 0o755);
             let root_inode_digest = intern_inode(&mut fsa, &root_meta);
             let root_dir_digest = create_dir_entries(&mut fsa, 1, 1);
             (root_inode_digest, root_dir_digest)
@@ -504,9 +511,15 @@ impl MetadataStore for DictMetadataStore {
             dir_meta.mode |= S_IFDIR;
         }
 
+        // Read parent_dir_digest before acquiring io — avoids panic-under-lock
+        // if the entry is unexpectedly missing (TOCTOU with concurrent unlink).
+        let parent_dir_digest = match self.dir_data.lock().unwrap().get(&parent_ino).copied() {
+            Some(d) => d,
+            None => return Err(MetaError::NotADirectory(parent_ino)),
+        };
+
         let (dir_inode_digest, dir_entry_digest, new_parent_dir_digest) = {
             let mut io_guard = self.io.lock().unwrap();
-            let parent_dir_digest = *self.dir_data.lock().unwrap().get(&parent_ino).unwrap();
 
             // Create new directory's inode, dir entries, and update parent — all via one FSA
             let mut fsa = FileStorageAdd::new(&mut *io_guard);

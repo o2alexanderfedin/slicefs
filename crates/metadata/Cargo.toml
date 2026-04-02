@@ -8,6 +8,7 @@ slicefs-traits = { path = "../slicefs-traits" }
 blockset = { path = "../data-id/blockset" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

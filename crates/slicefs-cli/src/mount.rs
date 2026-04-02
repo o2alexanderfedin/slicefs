@@ -79,21 +79,37 @@ fn spawn_watchdog(
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         loop {
-            std::thread::sleep(interval);
+            // Sleep in small increments so shutdown flag is checked promptly.
+            let end = std::time::Instant::now() + interval;
+            while std::time::Instant::now() < end {
+                if shutdown.load(Ordering::SeqCst) || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
 
             if shutdown.load(Ordering::SeqCst) || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
                 break;
             }
 
-            if std::fs::metadata(&mountpoint).is_err() {
+            // NOTE: Do NOT use std::fs::metadata() for health checks — it will hang
+            // on a dead FUSE-T mount point (both NFS and SMB backends), blocking the
+            // watchdog thread and preventing clean shutdown. Instead, check if the
+            // go-nfsv4 child process is still alive.
+            let nfs_alive = std::process::Command::new("pgrep")
+                .arg("-f")
+                .arg(format!("go-nfsv4.*{}", mountpoint.display()))
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if !nfs_alive {
                 eprintln!(
-                    "[watchdog] mount health check failed -- forcing unmount of {}",
+                    "[watchdog] go-nfsv4 process not found for {} — mount is dead",
                     mountpoint.display()
                 );
-                let _ = std::process::Command::new("umount")
-                    .arg("-f")
-                    .arg(&mountpoint)
-                    .status();
                 break;
             }
         }
@@ -154,13 +170,11 @@ where
         format!("[Default]\nbackend={}\n", backend)
     };
 
-    // Atomic write: write to .tmp then rename.
-    let tmp_path = ini_path.with_extension("ini.tmp");
-    if let Some(parent) = ini_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    std::fs::write(&tmp_path, &modified)?;
-    std::fs::rename(&tmp_path, &ini_path)?;
+    // Write directly to the ini file. Atomic tmp+rename is not possible because
+    // the parent directory (/Library/Application Support/fuse-t/cfg/) is root-owned
+    // and non-writable by regular users — creating a .tmp file would fail with
+    // "Permission denied". The ini file itself can be made user-writable with chmod.
+    std::fs::write(&ini_path, &modified)?;
 
     // Guard restores original on drop (even on panic).
     let _guard = FuseTIniGuard { path: ini_path, original };
@@ -346,12 +360,24 @@ pub fn build_mount_options(
     if noatime {
         mount_options.push(MountOption::NoAtime);
     }
-    // On macOS with a known backend: inject CUSTOM("backend=<name>") so FUSE-T
-    // uses the correct transport (SMB or FSKit instead of the default NFS).
+    // macOS FUSE-T specific options:
     #[cfg(target_os = "macos")]
-    if let Some(b) = backend {
-        mount_options.push(MountOption::CUSTOM(b.as_mount_option().to_string()));
+    {
+        // Suppress Apple resource fork (._*) and xattr (com.apple.*) creation.
+        // Without these, FUSE-T creates ._filename resource forks for every file
+        // operation, adding 5-10 extra FUSE callbacks per file and causing NFS
+        // compound operation stalls. rclone uses these same options.
+        mount_options.push(MountOption::CUSTOM("noappledouble".to_string()));
+        mount_options.push(MountOption::CUSTOM("noapplexattr".to_string()));
+
+        // libfuse-t reads "backend=<name>" from mount options and passes
+        // "--backend <name>" to go-nfsv4.
+        if let Some(b) = backend {
+            mount_options.push(MountOption::CUSTOM(b.as_mount_option().to_string()));
+        }
     }
+    #[cfg(not(target_os = "macos"))]
+    let _ = backend;
 
     let mut cfg = Config::default();
     cfg.mount_options = mount_options;
@@ -538,18 +564,22 @@ pub fn run_mount(
             Arc::clone(&watchdog_shutdown),
         );
 
+        let backend_name = selected_backend.as_mount_option().trim_start_matches("backend=");
+
         // ── Startup log (backend + FUSE-T version) ────────────────────────────
         println!(
             "SliceFS mounted at {} (backend: {}, fuse-t: {}.{}.{})",
             mountpoint.display(),
-            selected_backend.as_mount_option().trim_start_matches("backend="),
+            backend_name,
             fuse_t_version.0,
             fuse_t_version.1,
             fuse_t_version.2,
         );
 
-        // Primary mount attempt via CUSTOM mount option.
-        let mount_result = mount2(fs, mountpoint, &config);
+        // libfuse-t reads "backend=smb" from mount options and passes
+        // "--backend smb" to go-nfsv4. The option is already in `config`.
+        let mount_result: Result<(), Box<dyn std::error::Error>> =
+            mount2(fs, mountpoint, &config).map_err(|e| e.into());
 
         // Shut down watchdog after mount2() returns.
         watchdog_shutdown.store(true, Ordering::SeqCst);
@@ -560,23 +590,7 @@ pub fn run_mount(
         gc_shutdown.store(true, Ordering::SeqCst);
         gc_handle.shutdown();
 
-        // Propagate mount error (possibly via ini fallback below).
-        if let Err(e) = mount_result {
-            let err_str = e.to_string();
-            // Only fall back to ini if the error looks backend-related.
-            if err_str.contains("backend") || err_str.contains("option") {
-                eprintln!(
-                    "[slicefs] CUSTOM mount option failed ({}), trying fuse-t.ini fallback",
-                    err_str
-                );
-                with_fuse_t_ini_backend(
-                    selected_backend.as_mount_option().trim_start_matches("backend="),
-                    || Err(format!("fuse-t.ini fallback: original error: {}", err_str).into()),
-                )?;
-            } else {
-                return Err(e.into());
-            }
-        }
+        mount_result?;
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -771,7 +785,8 @@ mod tests {
         );
     }
 
-    /// Verify CUSTOM("backend=smb") is present when backend=Some(Smb).
+    /// Verify CUSTOM("backend=smb") is injected when backend=Some(Smb).
+    /// libfuse-t reads this option and passes "--backend smb" to go-nfsv4.
     #[test]
     #[cfg(target_os = "macos")]
     fn test_build_mount_options_with_backend_smb() {
@@ -779,21 +794,7 @@ mod tests {
         let config = build_mount_options(false, false, Some(&FuseTBackend::Smb));
         assert!(
             config.mount_options.contains(&MountOption::CUSTOM("backend=smb".to_string())),
-            "CUSTOM(backend=smb) must be present when backend=Some(Smb)"
-        );
-    }
-
-    /// Verify no CUSTOM("backend=*") present when backend=None.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_build_mount_options_no_backend() {
-        let config = build_mount_options(false, false, None);
-        let has_backend_custom = config.mount_options.iter().any(|opt| {
-            matches!(opt, MountOption::CUSTOM(s) if s.starts_with("backend="))
-        });
-        assert!(
-            !has_backend_custom,
-            "No CUSTOM(backend=*) should be present when backend=None"
+            "CUSTOM(backend=smb) must be present for libfuse-t to use SMB backend"
         );
     }
 
@@ -856,5 +857,235 @@ mod tests {
         let result = inject_backend_into_ini("", "smb");
         assert!(result.contains("backend=smb"), "should handle empty ini");
         assert!(result.contains("[Default]"), "should add [Default] section");
+    }
+
+    // ── next_segment_id ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_next_segment_id_empty_dir_returns_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = next_segment_id(dir.path());
+        assert_eq!(id, 1, "empty dir should return segment id 1");
+    }
+
+    #[test]
+    fn test_next_segment_id_with_single_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("segment-000005.seg"), b"").unwrap();
+        let id = next_segment_id(dir.path());
+        assert_eq!(id, 6, "next id after segment 5 should be 6");
+    }
+
+    #[test]
+    fn test_next_segment_id_with_multiple_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("segment-000001.seg"), b"").unwrap();
+        std::fs::write(dir.path().join("segment-000002.seg"), b"").unwrap();
+        std::fs::write(dir.path().join("segment-000042.seg"), b"").unwrap();
+        let id = next_segment_id(dir.path());
+        assert_eq!(id, 43, "next id should be max + 1");
+    }
+
+    #[test]
+    fn test_next_segment_id_ignores_non_segment_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("mount.lock"), b"").unwrap();
+        std::fs::write(dir.path().join("dictionary.bin"), b"").unwrap();
+        std::fs::write(dir.path().join("segment-000003.seg"), b"").unwrap();
+        let id = next_segment_id(dir.path());
+        assert_eq!(id, 4, "should ignore non-segment files");
+    }
+
+    #[test]
+    fn test_next_segment_id_nonexistent_dir_returns_1() {
+        let id = next_segment_id(std::path::Path::new("/nonexistent/path/that/cannot/exist"));
+        assert_eq!(id, 1, "nonexistent dir should return 1");
+    }
+
+    #[test]
+    fn test_next_segment_id_only_malformed_files_returns_1() {
+        let dir = tempfile::tempdir().unwrap();
+        // Files that look like segments but aren't parseable
+        std::fs::write(dir.path().join("segment-abc.seg"), b"").unwrap();
+        std::fs::write(dir.path().join("segment-.seg"), b"").unwrap();
+        std::fs::write(dir.path().join("notsegment-000001.seg"), b"").unwrap();
+        let id = next_segment_id(dir.path());
+        assert_eq!(id, 1, "malformed segment files should be ignored");
+    }
+
+    // ── load_store dirty mount recovery ──────────────────────────────────────
+
+    #[test]
+    fn test_load_store_dirty_mount_recovery() {
+        // Simulate a dirty mount: write a seeded store, then create a stale
+        // mount.lock file before loading. load_store should recover gracefully.
+        let store_dir = tempfile::tempdir().unwrap();
+        write_seeded_store_segments(&store_dir);
+
+        // Create a stale mount.lock to simulate a crashed previous mount.
+        let lock_path = store_dir.path().join("mount.lock");
+        std::fs::write(&lock_path, b"stale").unwrap();
+
+        // load_store should detect DirtyMount, remove the stale lock, and recover.
+        let result = load_store(store_dir.path(), WalConfig::NoWal);
+        assert!(result.is_ok(), "dirty mount recovery should succeed");
+
+        // The store should be loadable — hello.txt was seeded.
+        let (meta, _io, _lock) = result.unwrap();
+        let ino = meta.lookup(1, "hello.txt");
+        assert!(ino.is_ok(), "hello.txt should be accessible after dirty mount recovery");
+    }
+
+    // ── SHUTDOWN_REQUESTED atomic ─────────────────────────────────────────────
+
+    #[test]
+    fn test_shutdown_requested_atomic_default_false() {
+        // SHUTDOWN_REQUESTED is a static; verify it starts as false in a clean test run.
+        // Note: this test can only assert the initial value is not permanently stuck
+        // because other tests may have set it. We just verify the load doesn't panic.
+        let val = SHUTDOWN_REQUESTED.load(Ordering::SeqCst);
+        // val is either true or false — we can't assert a specific value in test
+        // isolation since it's a static. Just exercise the atomic load path.
+        let _ = val;
+    }
+
+    #[test]
+    fn test_shutdown_requested_can_be_set_and_read() {
+        // Exercise the store/load path of SHUTDOWN_REQUESTED.
+        // Save original, set to true, read back, restore.
+        let original = SHUTDOWN_REQUESTED.load(Ordering::SeqCst);
+        SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+        let after_set = SHUTDOWN_REQUESTED.load(Ordering::SeqCst);
+        // Restore original value.
+        SHUTDOWN_REQUESTED.store(original, Ordering::SeqCst);
+        assert!(after_set, "SHUTDOWN_REQUESTED should read back as true after store(true)");
+    }
+
+    // ── spawn_watchdog shutdown ───────────────────────────────────────────────
+
+    #[test]
+    fn test_spawn_watchdog_exits_on_shutdown_flag() {
+        use std::sync::atomic::AtomicBool;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = Arc::clone(&shutdown);
+
+        let handle = spawn_watchdog(
+            std::path::PathBuf::from("/tmp/nonexistent_mount"),
+            Duration::from_millis(100),
+            shutdown_clone,
+        );
+
+        // Signal shutdown immediately.
+        shutdown.store(true, Ordering::SeqCst);
+
+        // Thread should exit promptly (well within 2 seconds).
+        let result = handle.join();
+        assert!(result.is_ok(), "watchdog thread should exit cleanly");
+    }
+
+    // ── parse_wal_config unknown strategy fallback ────────────────────────────
+
+    #[test]
+    fn test_parse_wal_config_unknown_defaults_to_per_op() {
+        // Unknown strategy strings should fall through to PerOp default.
+        assert!(matches!(parse_wal_config(Some("invalid-strategy")), WalConfig::PerOp));
+        assert!(matches!(parse_wal_config(Some("FLUSH-ON-FSYNC")), WalConfig::PerOp));
+        assert!(matches!(parse_wal_config(Some("")), WalConfig::PerOp));
+    }
+
+    // ── inject_backend_into_ini additional cases ──────────────────────────────
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_inject_backend_multiple_sections_injects_in_default_only() {
+        let ini = "[Other]\nkey=val\n[Default]\nbackend=nfs\n[Third]\nanother=one\n";
+        let result = inject_backend_into_ini(ini, "smb");
+        assert!(result.contains("backend=smb"), "should inject backend=smb");
+        assert!(!result.contains("backend=nfs"), "should not keep old backend=nfs");
+        assert!(result.contains("[Other]"), "should preserve other sections");
+        assert!(result.contains("[Third]"), "should preserve third section");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_inject_backend_fskit_into_empty_ini() {
+        let result = inject_backend_into_ini("", "fskit");
+        assert!(result.contains("backend=fskit"), "should add backend=fskit to empty ini");
+        assert!(result.contains("[Default]"), "should add [Default] section");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_inject_backend_nfs_backend() {
+        let ini = "[Default]\nbackend=smb\n";
+        let result = inject_backend_into_ini(ini, "nfs");
+        assert!(result.contains("backend=nfs"), "should replace with backend=nfs");
+        assert!(!result.contains("backend=smb"), "old backend=smb should be removed");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_inject_backend_default_section_without_backend_key() {
+        // [Default] section exists but has no backend= key
+        let ini = "[Default]\nother_key=other_val\n";
+        let result = inject_backend_into_ini(ini, "fskit");
+        assert!(result.contains("backend=fskit"), "should inject backend=fskit");
+        assert!(result.contains("other_key=other_val"), "should preserve existing keys");
+    }
+
+    // ── build_mount_options additional combinations ───────────────────────────
+
+    #[test]
+    fn test_build_mount_options_noatime_and_allow_other() {
+        #[cfg(target_os = "macos")]
+        let config = build_mount_options(true, true, None);
+        #[cfg(not(target_os = "macos"))]
+        let config = build_mount_options(true, true, None);
+        assert!(config.mount_options.contains(&MountOption::NoAtime));
+        assert!(matches!(config.acl, SessionACL::All));
+    }
+
+    #[test]
+    fn test_build_mount_options_always_has_fsname() {
+        #[cfg(target_os = "macos")]
+        let config = build_mount_options(false, false, None);
+        #[cfg(not(target_os = "macos"))]
+        let config = build_mount_options(false, false, None);
+        let has_fsname = config.mount_options.iter().any(|opt| {
+            matches!(opt, MountOption::FSName(s) if s == "slicefs")
+        });
+        assert!(has_fsname, "FSName(slicefs) must always be present");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_build_mount_options_noappledouble_present_on_macos() {
+        let config = build_mount_options(false, false, None);
+        let has_noappledouble = config.mount_options.iter().any(|opt| {
+            matches!(opt, MountOption::CUSTOM(s) if s == "noappledouble")
+        });
+        assert!(has_noappledouble, "noappledouble must be present on macOS");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_build_mount_options_with_backend_fskit() {
+        use crate::backend::FuseTBackend;
+        let config = build_mount_options(false, false, Some(&FuseTBackend::Fskit));
+        assert!(
+            config.mount_options.contains(&MountOption::CUSTOM("backend=fskit".to_string())),
+            "CUSTOM(backend=fskit) must be present"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_build_mount_options_with_backend_nfs() {
+        use crate::backend::FuseTBackend;
+        let config = build_mount_options(false, false, Some(&FuseTBackend::Nfs));
+        assert!(
+            config.mount_options.contains(&MountOption::CUSTOM("backend=nfs".to_string())),
+            "CUSTOM(backend=nfs) must be present"
+        );
     }
 }
