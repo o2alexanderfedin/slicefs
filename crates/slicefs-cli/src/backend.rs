@@ -170,21 +170,19 @@ pub fn select_backend(
         ),
         Some(backend) => Ok(backend),
         None => {
-            // Auto-detect: prefer FSKit > SMB > NFS.
-            // SMB requires Bonjour service discovery which may not work on all machines.
-            // NFS has a known macOS kernel bug (Issue #45) for cp, but simple writes work.
+            // Default to NFS. FSKit and SMB are opt-in via --backend flag because:
+            // - FSKit requires the system extension to be enabled in System Settings
+            //   (can't detect reliably — fuse-t.app existing != extension enabled)
+            // - SMB requires Bonjour service discovery which fails on many machines
+            // NFS has a known macOS kernel bug (Issue #45) for cp, but simple
+            // writes work. noappledouble/noapplexattr mount options mitigate.
             if fskit_available {
-                Ok(FuseTBackend::Fskit)
-            } else {
-                // Default to NFS — SMB Bonjour discovery fails on many machines.
-                // cp may hang due to macOS kernel NFS client bug (Issue #45).
-                // Users can try --backend=smb if Bonjour is working.
                 eprintln!(
-                    "note: using NFS backend. cp/compound operations may hang (macOS kernel bug). \
-                     Try --backend=smb if Bonjour is available, or --backend=fskit on macOS 26+."
+                    "note: FSKit backend available. Use --backend=fskit for best performance \
+                     (requires FSKit extension enabled in System Settings > Privacy & Security)."
                 );
-                Ok(FuseTBackend::Nfs)
             }
+            Ok(FuseTBackend::Nfs)
         }
     }
 }
@@ -357,9 +355,11 @@ mod tests {
     }
 
     #[test]
-    fn test_select_backend_auto_fskit_available_returns_fskit() {
+    fn test_select_backend_auto_defaults_to_nfs_even_with_fskit() {
+        // Auto-detect always defaults to NFS because FSKit extension enablement
+        // can't be reliably detected. Users opt-in via --backend=fskit.
         let result = select_backend(None, false, (1, 0, 54), true);
-        assert_eq!(result, Ok(FuseTBackend::Fskit));
+        assert_eq!(result, Ok(FuseTBackend::Nfs));
     }
 
     #[test]

@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::util::ts;
+
 use blockset::{State, Tree, FileStorageAdd, file_storage_get, StorageAdd, Digest224};
 use tracing::debug;
 use fuser::{Errno, FileAttr, FileType, INodeNo};
@@ -352,7 +354,7 @@ impl SliceFsFilesystem {
                         err
                     };
                     if let Some(e) = io_err {
-                        eprintln!("[FUSE] test_write: CAS I/O error during push_bytes: {}", e);
+                        eprintln!("[{}][FUSE] test_write: CAS I/O error during push_bytes: {}", ts(), e);
                         // Re-insert state before returning error
                         self.open_files.lock().unwrap().insert(fh, file_state);
                         return Err(libc::EIO);

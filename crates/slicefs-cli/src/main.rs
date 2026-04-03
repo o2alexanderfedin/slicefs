@@ -15,6 +15,7 @@ mod snapshot;
 mod stats;
 mod store_io;
 mod unmount;
+mod util;
 
 use clap::Parser;
 use cli::{Cli, Cmd};

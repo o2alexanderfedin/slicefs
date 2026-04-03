@@ -10,4 +10,5 @@ pub mod mount;
 pub mod snapshot;
 pub mod seed;
 mod store_io;
+pub(crate) mod util;
 mod unmount;

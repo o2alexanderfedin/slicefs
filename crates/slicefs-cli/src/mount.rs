@@ -33,6 +33,7 @@ use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
 use crate::filesystem::SliceFsFilesystem;
+use crate::util::ts;
 
 // ── Signal handling (macOS only) ──────────────────────────────────────────────
 
@@ -107,8 +108,8 @@ fn spawn_watchdog(
 
             if !nfs_alive {
                 eprintln!(
-                    "[watchdog] go-nfsv4 process not found for {} — mount is dead",
-                    mountpoint.display()
+                    "[{}][watchdog] go-nfsv4 process not found for {} — mount is dead",
+                    ts(), mountpoint.display()
                 );
                 break;
             }
@@ -361,22 +362,10 @@ pub fn build_mount_options(
         mount_options.push(MountOption::NoAtime);
     }
     // macOS FUSE-T specific options:
-    #[cfg(target_os = "macos")]
-    {
-        // Suppress Apple resource fork (._*) and xattr (com.apple.*) creation.
-        // Without these, FUSE-T creates ._filename resource forks for every file
-        // operation, adding 5-10 extra FUSE callbacks per file and causing NFS
-        // compound operation stalls. rclone uses these same options.
-        mount_options.push(MountOption::CUSTOM("noappledouble".to_string()));
-        mount_options.push(MountOption::CUSTOM("noapplexattr".to_string()));
-
-        // libfuse-t reads "backend=<name>" from mount options and passes
-        // "--backend <name>" to go-nfsv4.
-        if let Some(b) = backend {
-            mount_options.push(MountOption::CUSTOM(b.as_mount_option().to_string()));
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
+    // NOTE: Do NOT pass CUSTOM mount options to FUSE-T 1.2.0 — unknown options
+    // cause "Invalid request" or silent session termination. noappledouble and
+    // noapplexattr are handled internally by FUSE-T's go-nfsv4 (--namedattr flag).
+    // Backend selection is also handled internally via fuse-t.ini or NFS default.
     let _ = backend;
 
     let mut cfg = Config::default();
@@ -462,6 +451,12 @@ pub fn run_mount(
     backend: Option<&str>,
     force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Pre-flight: create mountpoint directory if it doesn't exist.
+    if !mountpoint.exists() {
+        std::fs::create_dir_all(mountpoint)
+            .map_err(|e| format!("failed to create mountpoint {}: {}", mountpoint.display(), e))?;
+    }
+
     // Pre-flight: reject if mountpoint is already in use.
     check_mountpoint_not_in_use(mountpoint)?;
 
@@ -548,25 +543,11 @@ pub fn run_mount(
         Arc::clone(&gc_shutdown),
     );
 
-    // ── macOS: Signal handler + watchdog ──────────────────────────────────────
+    // ── Mount + startup log ────────────────────────────────────────────────────
 
     #[cfg(target_os = "macos")]
     {
-        // Register SIGTERM/SIGINT handlers BEFORE mount2() to coordinate watchdog.
-        // SAFETY: handler only does an atomic store (signal-safe).
-        unsafe { register_signal_handlers(); }
-
-        // Spawn watchdog thread BEFORE mount2() blocks.
-        let watchdog_shutdown = Arc::new(AtomicBool::new(false));
-        let watchdog_handle = spawn_watchdog(
-            mountpoint.to_path_buf(),
-            Duration::from_secs(5),
-            Arc::clone(&watchdog_shutdown),
-        );
-
         let backend_name = selected_backend.as_mount_option().trim_start_matches("backend=");
-
-        // ── Startup log (backend + FUSE-T version) ────────────────────────────
         println!(
             "SliceFS mounted at {} (backend: {}, fuse-t: {}.{}.{})",
             mountpoint.display(),
@@ -575,34 +556,19 @@ pub fn run_mount(
             fuse_t_version.1,
             fuse_t_version.2,
         );
-
-        // libfuse-t reads "backend=smb" from mount options and passes
-        // "--backend smb" to go-nfsv4. The option is already in `config`.
-        let mount_result: Result<(), Box<dyn std::error::Error>> =
-            mount2(fs, mountpoint, &config).map_err(|e| e.into());
-
-        // Shut down watchdog after mount2() returns.
-        watchdog_shutdown.store(true, Ordering::SeqCst);
-        let _ = watchdog_handle.join();
-
-        // mount2 has returned — FUSE session ended, destroy() already called.
-        // Shut down the GC thread before the MountLock drops.
-        gc_shutdown.store(true, Ordering::SeqCst);
-        gc_handle.shutdown();
-
-        mount_result?;
     }
 
     #[cfg(not(target_os = "macos"))]
-    {
-        println!("SliceFS mounted at {}", mountpoint.display());
+    println!("SliceFS mounted at {}", mountpoint.display());
 
-        mount2(fs, mountpoint, &config)?;
+    // mount2 blocks until the FUSE session ends (SIGTERM, Ctrl+C, or unmount).
+    // fuser handles signal registration internally — do NOT override with
+    // libc::signal as it replaces fuser's session-exit handler.
+    mount2(fs, mountpoint, &config)?;
 
-        // mount2 has returned — FUSE session ended, destroy() already called.
-        gc_shutdown.store(true, Ordering::SeqCst);
-        gc_handle.shutdown();
-    }
+    // mount2 has returned — FUSE session ended, destroy() already called.
+    gc_shutdown.store(true, Ordering::SeqCst);
+    gc_handle.shutdown();
 
     // _mount_lock is dropped here, removing mount.lock from the store directory.
     println!("SliceFS unmounted.");
@@ -786,16 +752,18 @@ mod tests {
     }
 
     /// Verify CUSTOM("backend=smb") is injected when backend=Some(Smb).
-    /// libfuse-t reads this option and passes "--backend smb" to go-nfsv4.
+    /// CUSTOM mount options are NOT passed to FUSE-T 1.2.0 — they cause
+    /// "Invalid request" or silent session termination. Backend selection
+    /// is handled via fuse-t.ini or NFS default.
     #[test]
     #[cfg(target_os = "macos")]
-    fn test_build_mount_options_with_backend_smb() {
+    fn test_build_mount_options_no_custom_options_on_macos() {
         use crate::backend::FuseTBackend;
         let config = build_mount_options(false, false, Some(&FuseTBackend::Smb));
-        assert!(
-            config.mount_options.contains(&MountOption::CUSTOM("backend=smb".to_string())),
-            "CUSTOM(backend=smb) must be present for libfuse-t to use SMB backend"
-        );
+        let has_custom = config.mount_options.iter().any(|opt| {
+            matches!(opt, MountOption::CUSTOM(_))
+        });
+        assert!(!has_custom, "No CUSTOM options should be passed to FUSE-T 1.2.0");
     }
 
     // ── WAL config ────────────────────────────────────────────────────────────
@@ -1059,33 +1027,13 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "macos")]
-    fn test_build_mount_options_noappledouble_present_on_macos() {
+    fn test_build_mount_options_no_noappledouble_on_macos() {
+        // FUSE-T 1.2.0 rejects unknown CUSTOM options. noappledouble is handled
+        // internally by go-nfsv4's --namedattr flag.
         let config = build_mount_options(false, false, None);
-        let has_noappledouble = config.mount_options.iter().any(|opt| {
-            matches!(opt, MountOption::CUSTOM(s) if s == "noappledouble")
+        let has_custom = config.mount_options.iter().any(|opt| {
+            matches!(opt, MountOption::CUSTOM(_))
         });
-        assert!(has_noappledouble, "noappledouble must be present on macOS");
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_build_mount_options_with_backend_fskit() {
-        use crate::backend::FuseTBackend;
-        let config = build_mount_options(false, false, Some(&FuseTBackend::Fskit));
-        assert!(
-            config.mount_options.contains(&MountOption::CUSTOM("backend=fskit".to_string())),
-            "CUSTOM(backend=fskit) must be present"
-        );
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_build_mount_options_with_backend_nfs() {
-        use crate::backend::FuseTBackend;
-        let config = build_mount_options(false, false, Some(&FuseTBackend::Nfs));
-        assert!(
-            config.mount_options.contains(&MountOption::CUSTOM("backend=nfs".to_string())),
-            "CUSTOM(backend=nfs) must be present"
-        );
+        assert!(!has_custom, "No CUSTOM options on macOS — FUSE-T rejects them");
     }
 }
