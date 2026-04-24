@@ -115,7 +115,12 @@ For deep detail, see `.planning/PROJECT.md` and the per-phase artifacts under `.
 
 ## License
 
-Not yet specified for this repository. The upstream `blockset` crate (submodule at `crates/data-id/blockset`) is **GPL-3.0-or-later**; any license chosen here must be compatible with that.
+SliceFS is **dual-licensed**:
+
+- **AGPL-3.0-or-later** for open-source and internal use — see [LICENSE](./LICENSE).
+- **Commercial license** for organizations that need to avoid AGPL's source-disclosure obligations (e.g. embedding in closed-source products or offering a proprietary hosted service) — see [COMMERCIAL-LICENSE.md](./COMMERCIAL-LICENSE.md).
+
+The upstream `blockset` crate (`crates/data-id/blockset`) is GPL-3.0-or-later; AGPL-3.0-or-later is compatible with it via GPLv3 §13.
 
 ## Contributors
 

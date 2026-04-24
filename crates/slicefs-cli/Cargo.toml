@@ -3,6 +3,7 @@ name = "slicefs-cli"
 version = "0.1.0"
 edition = "2024"
 authors = ["Alexander Fedin <af@o2.services>", "Sergey Shandar"]
+license = "AGPL-3.0-or-later"
 description = "SliceFS FUSE binary — mounts, seeds, and manages SliceFS volumes"
 
 [[bin]]

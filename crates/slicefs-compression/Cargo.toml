@@ -3,6 +3,7 @@ name = "slicefs-compression"
 version = "0.1.0"
 edition = "2024"
 authors = ["Alexander Fedin <af@o2.services>", "Sergey Shandar"]
+license = "AGPL-3.0-or-later"
 description = "Pluggable compression implementations for SliceFS (Zstd, LZ4, None)"
 
 [dependencies]
