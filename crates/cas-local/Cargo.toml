@@ -1,7 +1,8 @@
 [package]
 name = "cas-local"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+authors = ["Alexander Fedin <af@o2.services>", "Sergey Shandar"]
 description = "Stub/test implementations of SliceFS CAS traits (Blake3 hasher, fixed chunker, in-memory and disk block stores, in-memory dedup index)"
 
 [dependencies]
