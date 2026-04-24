@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Alexander Fedin <af@o2.services>", "Sergey Shandar"]
 license = "AGPL-3.0-or-later"
-description = "Stub/test implementations of SliceFS CAS traits (Blake3 hasher, fixed chunker, in-memory and disk block stores, in-memory dedup index)"
+description = "Local CAS primitives for SliceFS: Blake3 hasher, fixed chunker, on-disk and in-memory block stores, and a bloom-filtered in-memory DedupIndex (test-only)"
 
 [dependencies]
 slicefs-traits = { path = "../slicefs-traits" }
