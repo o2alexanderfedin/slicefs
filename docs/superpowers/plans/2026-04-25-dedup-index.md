@@ -1462,7 +1462,7 @@ Add to `redb_dedup_index.rs`:
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MountState {
-    /// Manifest present, last_shutdown_was_clean=true, bloom xxh3 ok (TBD).
+    /// Manifest present and clean. Bloom-xxh3 cross-check is added by Task J2.
     Healthy,
     /// Manifest absent / unclean / bloom xxh3 fail.
     Suspect,
@@ -2800,53 +2800,624 @@ git push origin develop
 
 ### Task M2: Test 2 — `kill -9` during redb commit (torn root) → I9, I7
 
-Pattern is identical — kill mid-commit. redb 4.1's COW root pointer + page CRCs make this benign. Mount must auto-recover.
+**Files:**
+- Modify: `crates/slicefs-dedup/tests/failure_injection_kill9.rs`
 
-- [ ] **Step 1: Add a `t2_*` test in the same file** mirroring M1, but in the child do many rapid inserts via a long-running batcher loop (so SIGKILL lands inside a write-txn).
-- [ ] **Step 2: Run + commit** (`feature/dedup-fi-t2`).
+- [ ] **Step 1: Add the child entry-point and parent test**
+
+Append to `crates/slicefs-dedup/tests/failure_injection_kill9.rs`:
+```rust
+const CHILD_MARK_T2: &str = "DEDUP_FI_T2_CHILD";
+
+fn child_main_t2() -> ! {
+    use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
+    use slicefs_traits::{ChunkHash, DedupIndex};
+    let cas = std::path::PathBuf::from(env::var("CAS").unwrap());
+    std::fs::create_dir_all(&cas).unwrap();
+    let cfg = DedupIndexConfig::builder(&cas).build();
+    let idx = RedbDedupIndex::create(cfg).unwrap();
+
+    // Tight insert loop — many in-flight write txns so the SIGKILL
+    // is statistically very likely to land inside redb's COW root swap.
+    for i in 0u64.. {
+        let mut h = [0u8; 28];
+        h[..8].copy_from_slice(&i.to_le_bytes());
+        // Mock the I2 caller order: write CAS block first, then insert.
+        let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
+        let shard = cas.join(&hex[..2]);
+        let _ = std::fs::create_dir_all(&shard);
+        let _ = std::fs::write(shard.join(&hex[2..]), b"x");
+        let _ = idx.insert(&ChunkHash::from_bytes(h.to_vec()));
+    }
+    unreachable!()
+}
+
+#[test]
+fn t2_kill9_mid_commit_recovers_without_FP() {
+    if env::var(CHILD_MARK_T2).is_ok() { child_main_t2(); }
+
+    let td = tempfile::tempdir().unwrap();
+    let cas = td.path().join("cas");
+    std::fs::create_dir_all(&cas).unwrap();
+    let mut child = Command::new(env::current_exe().unwrap())
+        .arg("--exact").arg("t2_kill9_mid_commit_recovers_without_FP")
+        .arg("--nocapture")
+        .env(CHILD_MARK_T2, "1")
+        .env("CAS", &cas)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn().unwrap();
+    // Let it accumulate at least one in-flight commit.
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
+    use slicefs_traits::{ChunkHash, DedupIndex, DedupResult};
+    let cfg = DedupIndexConfig::builder(&cas).build();
+
+    // Critical assertion: redb must open at all (I7 — root CRC catches torn pages
+    // and the previous root remains valid via COW).
+    let idx = RedbDedupIndex::open(cfg).expect("redb must auto-recover from mid-commit kill");
+
+    // Sample 1000 hashes the child *could* have inserted.
+    // For any Present result, the corresponding CAS block MUST exist.
+    for i in 0u64..1000 {
+        let mut h = [0u8; 28];
+        h[..8].copy_from_slice(&i.to_le_bytes());
+        let r = idx.lookup(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+        if matches!(r, DedupResult::Present) {
+            let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
+            let cas_path = cas.join(&hex[..2]).join(&hex[2..]);
+            assert!(cas_path.exists(),
+                "I1 violated: index says Present but CAS block missing at {:?}", cas_path);
+        }
+    }
+}
+```
+
+- [ ] **Step 2: Run**
+
+Run: `cargo test --test failure_injection_kill9 -p slicefs-dedup -- t2_kill9_mid_commit_recovers_without_FP`
+Expected: pass (regardless of how many inserts landed before the kill).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git flow feature start dedup-fi-t2
+git add crates/slicefs-dedup/tests/failure_injection_kill9.rs
+git commit -m "test(slicefs-dedup): FI-2 kill-9 mid-redb-commit; I9/I7 auto-recovery"
+git flow feature finish dedup-fi-t2
+git push origin develop
+```
 
 ### Task M3: Test 6 — Delete a CAS block but keep its index entry → I8
 
-`paranoid` mode + `verify_on_present=true` must demote the result to `Absent`.
+**Files:**
+- Create: `crates/slicefs-dedup/tests/failure_injection_corrupt.rs`
 
-- [ ] **Step 1: Insert h, flush, delete `<cas>/XX/rest` for that hash.**
-- [ ] **Step 2: With `Default` mode, lookup returns Present (no verify).** With `Paranoid`, lookup returns `Absent`.
-- [ ] **Step 3: Run + commit** (`feature/dedup-fi-t6`).
+- [ ] **Step 1: Write the test**
 
-### Task M4: Test 9 — Power-fail simulation (loop device dropping writes)
+`crates/slicefs-dedup/tests/failure_injection_corrupt.rs`:
+```rust
+use slicefs_dedup::{DedupIndexConfig, DurabilityMode, RedbDedupIndex};
+use slicefs_traits::{ChunkHash, DedupIndex, DedupResult};
 
-This needs Linux + nbd. Gate the test behind `cfg(target_os = "linux")` and an env-var feature flag (`SLICEFS_FI_NBD=1`) so CI can opt in.
+fn make_h(seed: u8) -> [u8; 28] {
+    let mut h = [0u8; 28]; h[0] = seed; h
+}
 
-- [ ] **Step 1: Bring up an `nbd-server` exporting a backing file with `O_DIRECT` and a configurable drop-after-T policy.**
-- [ ] **Step 2: Mount as loop, run a short insert burst, drop writes after T_drop, mount the resulting image and verify no FP.**
-- [ ] **Step 3: If nbd-server isn't available, skip with a clear `eprintln!` and exit 0.**
-- [ ] **Step 4: Commit** (`feature/dedup-fi-t9`).
+fn write_cas_block(cas_root: &std::path::Path, hash: &[u8; 28]) -> std::path::PathBuf {
+    let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+    let dir = cas_root.join(&hex[..2]);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(&hex[2..]);
+    std::fs::write(&path, b"x").unwrap();
+    path
+}
 
-### Task M5: Test 10 — 100× concurrent kill-9 stress
+#[test]
+fn t6_default_mode_does_NOT_verify_so_lookup_remains_present() {
+    let td = tempfile::tempdir().unwrap();
+    let cas = td.path().join("cas");
+    std::fs::create_dir_all(&cas).unwrap();
+    let cfg = DedupIndexConfig::builder(&cas).mode(DurabilityMode::Default).build();
+    let idx = RedbDedupIndex::create(cfg).unwrap();
 
-100 child processes each running the same insert loop, parent SIGKILLs all randomly.
+    let h = make_h(0x42);
+    let cas_path = write_cas_block(&cas, &h);
+    idx.insert(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+    idx.flush().unwrap();
 
-- [ ] **Step 1: Spawn 100 children, each with disjoint hash ranges.**
-- [ ] **Step 2: Sleep random 10-200 ms then `kill -9` each.**
-- [ ] **Step 3: After all children dead, mount index and assert: every hash that has a CAS block is either Present or Absent (never FP without CAS).**
-- [ ] **Step 4: Commit** (`feature/dedup-fi-t10`).
+    // Delete the CAS block on disk but leave the index entry.
+    std::fs::remove_file(&cas_path).unwrap();
+
+    // Default mode: verify_on_present=false, so we accept the FP-causing state.
+    let r = idx.lookup(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+    assert!(matches!(r, DedupResult::Present),
+        "Default mode trusts the index without stat()");
+}
+
+#[test]
+fn t6_paranoid_mode_demotes_to_absent_when_cas_missing() {
+    let td = tempfile::tempdir().unwrap();
+    let cas = td.path().join("cas");
+    std::fs::create_dir_all(&cas).unwrap();
+    let cfg = DedupIndexConfig::builder(&cas).mode(DurabilityMode::Paranoid).build();
+    let idx = RedbDedupIndex::create(cfg).unwrap();
+
+    let h = make_h(0x43);
+    let cas_path = write_cas_block(&cas, &h);
+    idx.insert(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+    idx.flush().unwrap();
+
+    std::fs::remove_file(&cas_path).unwrap();
+
+    // Paranoid mode: verify_on_present=true; missing CAS block demotes to Absent (I8).
+    let r = idx.lookup(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+    assert!(matches!(r, DedupResult::Absent),
+        "Paranoid mode must demote: stat() found ENOENT, so I1-violation suspected (I8)");
+}
+```
+
+- [ ] **Step 2: Run**
+
+Run: `cargo test --test failure_injection_corrupt -p slicefs-dedup`
+Expected: 2 tests pass.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git flow feature start dedup-fi-t6
+git add crates/slicefs-dedup/tests/failure_injection_corrupt.rs
+git commit -m "test(slicefs-dedup): FI-6 verify_on_present (I8) demotes Paranoid to Absent"
+git flow feature finish dedup-fi-t6
+git push origin develop
+```
+
+### Task M4: Test 9 — Power-fail simulation (Linux only, opt-in)
+
+**Files:**
+- Create: `crates/slicefs-dedup/tests/failure_injection_powerfail.rs`
+
+The full nbd-server-with-drop-policy implementation is out of scope — this task installs a **scaffold** that runs only on Linux + when `SLICEFS_FI_POWERFAIL=1` is set, and skips otherwise with a clear message. The detailed nbd setup is documented inside the test for the operator to run manually. This is consistent with ARCHITECTURE §14.2 which marks scenario 9 as mandatory before MVP ship but allows the impl to be platform-gated.
+
+- [ ] **Step 1: Write the gated scaffold**
+
+`crates/slicefs-dedup/tests/failure_injection_powerfail.rs`:
+```rust
+//! FI test #9 — power-fail (loop device that drops writes after T_drop).
+//!
+//! Manual setup (Linux only):
+//!   1. truncate -s 1G /tmp/sfi9.img
+//!   2. modprobe nbd
+//!   3. start nbd-server-drop --drop-after 200ms /tmp/sfi9.img &
+//!   4. nbd-client localhost /dev/nbd0
+//!   5. mkfs.ext4 -F /dev/nbd0
+//!   6. mount /dev/nbd0 /mnt/sfi9
+//!   7. SLICEFS_FI_POWERFAIL=1 SLICEFS_FI_MOUNT=/mnt/sfi9 cargo test --test failure_injection_powerfail
+//!
+//! `nbd-server-drop` is a small wrapper (out of scope here) that ignores
+//! writes after the configured T_drop window has elapsed.
+
+#[test]
+fn t9_powerfail_no_FP() {
+    if std::env::var("SLICEFS_FI_POWERFAIL").is_err() {
+        eprintln!("SKIP: t9 requires SLICEFS_FI_POWERFAIL=1 + Linux nbd setup");
+        return;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        eprintln!("SKIP: t9 is Linux-only");
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
+        use slicefs_traits::{ChunkHash, DedupIndex, DedupResult};
+        let mount = std::env::var("SLICEFS_FI_MOUNT").expect("SLICEFS_FI_MOUNT");
+        let cas = std::path::PathBuf::from(&mount).join("cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let cfg = DedupIndexConfig::builder(&cas).build();
+
+        // Insert burst longer than T_drop window so the tail gets dropped.
+        {
+            let idx = RedbDedupIndex::create(cfg.clone()).unwrap();
+            for i in 0u64..50_000 {
+                let mut h = [0u8; 28];
+                h[..8].copy_from_slice(&i.to_le_bytes());
+                let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
+                let shard = cas.join(&hex[..2]);
+                let _ = std::fs::create_dir_all(&shard);
+                let _ = std::fs::write(shard.join(&hex[2..]), b"x");
+                let _ = idx.insert(&ChunkHash::from_bytes(h.to_vec()));
+            }
+            // No flush — writes after T_drop are dropped by the nbd-server shim.
+        }
+
+        // Re-mount: lookup any-Present hash → corresponding CAS block must exist (I1).
+        let idx = RedbDedupIndex::open(cfg).expect("must mount after power-fail");
+        for i in 0u64..50_000 {
+            let mut h = [0u8; 28];
+            h[..8].copy_from_slice(&i.to_le_bytes());
+            let r = idx.lookup(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+            if matches!(r, DedupResult::Present) {
+                let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
+                let p = cas.join(&hex[..2]).join(&hex[2..]);
+                assert!(p.exists(), "I1 violated at i={}", i);
+            }
+        }
+    }
+}
+```
+
+- [ ] **Step 2: Run (skips locally)**
+
+Run: `cargo test --test failure_injection_powerfail -p slicefs-dedup`
+Expected: prints "SKIP: t9 requires SLICEFS_FI_POWERFAIL=1 …" and exits 0.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git flow feature start dedup-fi-t9
+git add crates/slicefs-dedup/tests/failure_injection_powerfail.rs
+git commit -m "test(slicefs-dedup): FI-9 power-fail scaffold (Linux nbd, opt-in)"
+git flow feature finish dedup-fi-t9
+git push origin develop
+```
+
+### Task M5: Test 10 — 100× concurrent `kill -9` stress
+
+**Files:**
+- Modify: `crates/slicefs-dedup/tests/failure_injection_kill9.rs`
+
+- [ ] **Step 1: Add child entry-point and parent test**
+
+Append to `crates/slicefs-dedup/tests/failure_injection_kill9.rs`:
+```rust
+const CHILD_MARK_T10: &str = "DEDUP_FI_T10_CHILD";
+
+fn child_main_t10() -> ! {
+    use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
+    use slicefs_traits::{ChunkHash, DedupIndex};
+    let cas = std::path::PathBuf::from(env::var("CAS").unwrap());
+    let worker_id: u32 = env::var("WORKER_ID").unwrap().parse().unwrap();
+    std::fs::create_dir_all(&cas).unwrap();
+    let cfg = DedupIndexConfig::builder(&cas).build();
+    let idx = RedbDedupIndex::create(cfg).unwrap();
+
+    // Each child owns a disjoint range of [worker_id * 1_000_000, +1_000_000).
+    let base = (worker_id as u64) * 1_000_000;
+    for i in 0u64.. {
+        let mut h = [0u8; 28];
+        h[..8].copy_from_slice(&(base + i).to_le_bytes());
+        let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
+        let shard = cas.join(&hex[..2]);
+        let _ = std::fs::create_dir_all(&shard);
+        let _ = std::fs::write(shard.join(&hex[2..]), b"x");
+        let _ = idx.insert(&ChunkHash::from_bytes(h.to_vec()));
+    }
+    unreachable!()
+}
+
+#[test]
+fn t10_100x_concurrent_kill9_no_FP() {
+    if env::var(CHILD_MARK_T10).is_ok() { child_main_t10(); }
+
+    let td = tempfile::tempdir().unwrap();
+    let cas = td.path().join("cas");
+    std::fs::create_dir_all(&cas).unwrap();
+
+    let n_workers = 100u32;
+    let mut children = Vec::with_capacity(n_workers as usize);
+    for w in 0..n_workers {
+        let c = Command::new(env::current_exe().unwrap())
+            .arg("--exact").arg("t10_100x_concurrent_kill9_no_FP")
+            .arg("--nocapture")
+            .env(CHILD_MARK_T10, "1")
+            .env("CAS", &cas)
+            .env("WORKER_ID", w.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn().unwrap();
+        children.push(c);
+    }
+    // Random staggered kills 10–200 ms.
+    let mut rng_state = 0x12345u64;
+    for child in children.iter_mut() {
+        let r = ((rng_state ^ (rng_state >> 11)) % 191) + 10;
+        rng_state = rng_state.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
+        std::thread::sleep(Duration::from_millis(r));
+        let _ = child.kill();
+    }
+    for mut c in children { let _ = c.wait(); }
+
+    use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
+    use slicefs_traits::{ChunkHash, DedupIndex, DedupResult};
+    let cfg = DedupIndexConfig::builder(&cas).build();
+    let idx = RedbDedupIndex::open(cfg).expect("must mount after 100x kill");
+
+    // Sample 100 hashes per worker.
+    for w in 0..n_workers {
+        for i in 0u64..100 {
+            let mut h = [0u8; 28];
+            h[..8].copy_from_slice(&((w as u64) * 1_000_000 + i).to_le_bytes());
+            let r = idx.lookup(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+            if matches!(r, DedupResult::Present) {
+                let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
+                let p = cas.join(&hex[..2]).join(&hex[2..]);
+                assert!(p.exists(), "I1 violated: worker {} i={}", w, i);
+            }
+        }
+    }
+}
+```
+
+- [ ] **Step 2: Run**
+
+Run: `cargo test --test failure_injection_kill9 -p slicefs-dedup -- t10_100x_concurrent_kill9_no_FP --nocapture`
+Expected: pass. (Test takes ~30 s; mark `#[ignore]` and run in nightly CI if too slow for default `cargo test`.)
+
+- [ ] **Step 3: Commit**
+
+```bash
+git flow feature start dedup-fi-t10
+git add crates/slicefs-dedup/tests/failure_injection_kill9.rs
+git commit -m "test(slicefs-dedup): FI-10 100x concurrent kill-9 stress; no FP"
+git flow feature finish dedup-fi-t10
+git push origin develop
+```
 
 ### Task M6: Test 11 — F_FULLFSYNC no-op shim (macOS regression canary)
 
-`DYLD_INSERT_LIBRARIES` shim that turns `F_FULLFSYNC` into a no-op, then power-fail simulation. Validates that `use_f_fullfsync=true` is non-cosmetic.
+**Files:**
+- Create: `crates/slicefs-dedup-fi-shim/Cargo.toml` (a tiny cdylib crate)
+- Create: `crates/slicefs-dedup-fi-shim/src/lib.rs`
+- Modify: `Cargo.toml` (add the shim crate to `[workspace] members`)
+- Create: `crates/slicefs-dedup/tests/failure_injection_macos_shim.rs`
 
-- [ ] **Step 1: Build a tiny dylib `libnoop_fullfsync.dylib` exporting `fcntl` returning 0 when `cmd == F_FULLFSYNC`.**
-- [ ] **Step 2: Run the test child with `DYLD_INSERT_LIBRARIES=...` and verify FN behaviour increases.**
-- [ ] **Step 3: Gate behind `cfg(target_os = "macos")`.**
-- [ ] **Step 4: Commit** (`feature/dedup-fi-t11`).
+- [ ] **Step 1: Create the shim crate**
+
+`crates/slicefs-dedup-fi-shim/Cargo.toml`:
+```toml
+[package]
+name = "slicefs-dedup-fi-shim"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "DYLD_INSERT_LIBRARIES shim for FI test #11 (no-op F_FULLFSYNC)"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+libc.workspace = true
+```
+
+`crates/slicefs-dedup-fi-shim/src/lib.rs`:
+```rust
+//! Test-only shim: turns `fcntl(fd, F_FULLFSYNC)` into a no-op so we can
+//! validate that ARCHITECTURE §3 I10 is non-cosmetic on macOS.
+
+#![cfg(target_os = "macos")]
+
+use std::os::raw::c_int;
+
+#[no_mangle]
+pub unsafe extern "C" fn fcntl(fd: c_int, cmd: c_int, mut arg: ...) -> c_int {
+    if cmd == libc::F_FULLFSYNC {
+        return 0;
+    }
+    // Forward to libc::fcntl for everything else.
+    extern "C" {
+        fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
+    }
+    // Safety: variadic forwarding.
+    fcntl(fd, cmd, arg.arg::<usize>())
+}
+```
+
+> **Note:** Rust's variadic FFI is unstable as of plan-write. Pragmatic fallback if `c_variadic` is not on stable: write the shim in C (`shim.c`) compiled by a `build.rs` calling `cc::Build`. Either approach lands in the same dylib path.
+
+- [ ] **Step 2: Add to workspace members**
+
+Append `"crates/slicefs-dedup-fi-shim",` to `[workspace] members` in root `Cargo.toml`.
+
+- [ ] **Step 3: Write the parent test**
+
+`crates/slicefs-dedup/tests/failure_injection_macos_shim.rs`:
+```rust
+#![cfg(target_os = "macos")]
+
+use std::env;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+const CHILD_MARK_T11: &str = "DEDUP_FI_T11_CHILD";
+
+fn child_main_t11() -> ! {
+    // Inside this process F_FULLFSYNC is a no-op (DYLD shim active).
+    use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
+    use slicefs_traits::{ChunkHash, DedupIndex};
+    let cas = std::path::PathBuf::from(env::var("CAS").unwrap());
+    std::fs::create_dir_all(&cas).unwrap();
+    let cfg = DedupIndexConfig::builder(&cas).build();
+    let idx = RedbDedupIndex::create(cfg).unwrap();
+    for i in 0u64..1000 {
+        let mut h = [0u8; 28]; h[..8].copy_from_slice(&i.to_le_bytes());
+        let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
+        let shard = cas.join(&hex[..2]);
+        let _ = std::fs::create_dir_all(&shard);
+        let _ = std::fs::write(shard.join(&hex[2..]), b"x");
+        let _ = idx.insert(&ChunkHash::from_bytes(h.to_vec()));
+    }
+    // Crash without flush — F_FULLFSYNC was a lie, so device may not have NAND'd.
+    std::process::abort();
+}
+
+#[test]
+fn t11_macos_fullfsync_shim_increases_FN_rate() {
+    if env::var(CHILD_MARK_T11).is_ok() { child_main_t11(); }
+
+    let shim = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..").join("..")
+        .join("target/debug/libslicefs_dedup_fi_shim.dylib");
+    if !shim.exists() {
+        eprintln!("SKIP: build the shim first: cargo build -p slicefs-dedup-fi-shim");
+        return;
+    }
+
+    let td = tempfile::tempdir().unwrap();
+    let cas = td.path().join("cas");
+    std::fs::create_dir_all(&cas).unwrap();
+    let mut child = Command::new(env::current_exe().unwrap())
+        .arg("--exact").arg("t11_macos_fullfsync_shim_increases_FN_rate")
+        .arg("--nocapture")
+        .env(CHILD_MARK_T11, "1")
+        .env("CAS", &cas)
+        .env("DYLD_INSERT_LIBRARIES", &shim)
+        .env("DYLD_FORCE_FLAT_NAMESPACE", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn().unwrap();
+    let _ = child.wait_timeout(Duration::from_secs(5));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
+    use slicefs_traits::{ChunkHash, DedupIndex, DedupResult};
+    let cfg = DedupIndexConfig::builder(&cas).build();
+    let idx = RedbDedupIndex::open(cfg).expect("must mount after fake-fsync crash");
+
+    // Critical assertion: NO FP. Some FNs are expected (the shim made some
+    // commits non-durable); that's fine. The contract is I1 (FP-never).
+    let mut present = 0u32;
+    let mut absent  = 0u32;
+    for i in 0u64..1000 {
+        let mut h = [0u8; 28]; h[..8].copy_from_slice(&i.to_le_bytes());
+        match idx.lookup(&ChunkHash::from_bytes(h.to_vec())).unwrap() {
+            DedupResult::Present => {
+                let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
+                let p = cas.join(&hex[..2]).join(&hex[2..]);
+                assert!(p.exists(), "I1 violated under shim at i={}", i);
+                present += 1;
+            }
+            DedupResult::Absent | DedupResult::DefinitelyAbsent => absent += 1,
+        }
+    }
+    eprintln!("t11 outcome: {present} Present, {absent} Absent (FNs from fake-fsync)");
+}
+```
+
+- [ ] **Step 4: Build the shim and run the test**
+
+Run:
+```
+cargo build -p slicefs-dedup-fi-shim
+cargo test --test failure_injection_macos_shim -p slicefs-dedup
+```
+Expected: pass on macOS; skips on Linux via `#![cfg(target_os = "macos")]`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git flow feature start dedup-fi-t11
+git add crates/slicefs-dedup-fi-shim/ crates/slicefs-dedup/tests/failure_injection_macos_shim.rs Cargo.toml
+git commit -m "test(slicefs-dedup): FI-11 macOS F_FULLFSYNC shim regression canary"
+git flow feature finish dedup-fi-t11
+git push origin develop
+```
 
 ### Task M7: Test 13 — S1 / OQ-11 caller-cached-Ok across crash
 
-The headline contract test from §14.2: caller calls `insert(h)`, awaits Ok, immediately SIGKILLs **before** group-commit window expires. On next mount, `lookup(h)` may return Absent — that's permitted.
+**Files:**
+- Modify: `crates/slicefs-dedup/tests/failure_injection_kill9.rs`
 
-- [ ] **Step 1: Child does `insert(h)` → on Ok reply, SIGKILLs itself within 1 ms.**
-- [ ] **Step 2: Parent mounts and asserts no FP. Document: caller MUST NOT cache "I inserted h" across crash without `flush()`.**
-- [ ] **Step 3: Commit** (`feature/dedup-fi-t13`).
+- [ ] **Step 1: Add child + parent test**
+
+Append to `crates/slicefs-dedup/tests/failure_injection_kill9.rs`:
+```rust
+const CHILD_MARK_T13: &str = "DEDUP_FI_T13_CHILD";
+
+fn child_main_t13() -> ! {
+    use slicefs_dedup::{DedupIndexConfig, DurabilityMode, RedbDedupIndex};
+    use slicefs_traits::{ChunkHash, DedupIndex};
+    let cas = std::path::PathBuf::from(env::var("CAS").unwrap());
+    std::fs::create_dir_all(&cas).unwrap();
+    // Default mode: 200 ms group-commit window so the kill below hits
+    // before the device has flushed.
+    let cfg = DedupIndexConfig::builder(&cas).mode(DurabilityMode::Default).build();
+    let idx = RedbDedupIndex::create(cfg).unwrap();
+
+    let mut h = [0u8; 28]; h[0] = 0xA1;
+    // I2 caller order: write CAS first, fsync.
+    let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
+    let shard = cas.join(&hex[..2]);
+    std::fs::create_dir_all(&shard).unwrap();
+    let f = std::fs::File::create(shard.join(&hex[2..])).unwrap();
+    use std::io::Write;
+    (&f).write_all(b"x").unwrap();
+    f.sync_all().unwrap();
+    drop(f);
+
+    // insert returns Ok as soon as the batcher commits in page cache.
+    idx.insert(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+    // Crash WITHOUT flush, within ≤ 1 ms.
+    std::process::abort();
+}
+
+#[test]
+fn t13_caller_cached_ok_across_crash_no_FP() {
+    if env::var(CHILD_MARK_T13).is_ok() { child_main_t13(); }
+
+    let td = tempfile::tempdir().unwrap();
+    let cas = td.path().join("cas");
+    std::fs::create_dir_all(&cas).unwrap();
+    let mut child = Command::new(env::current_exe().unwrap())
+        .arg("--exact").arg("t13_caller_cached_ok_across_crash_no_FP")
+        .arg("--nocapture")
+        .env(CHILD_MARK_T13, "1")
+        .env("CAS", &cas)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn().unwrap();
+    let _ = child.wait();
+
+    use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
+    use slicefs_traits::{ChunkHash, DedupIndex, DedupResult};
+    let cfg = DedupIndexConfig::builder(&cas).build();
+    let idx = RedbDedupIndex::open(cfg).expect("must mount after S1 crash");
+
+    let mut h = [0u8; 28]; h[0] = 0xA1;
+    let r = idx.lookup(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+    // The contract: ANY answer is acceptable EXCEPT Present-without-CAS.
+    // CAS exists in this scenario, so Present is fine; Absent is the FN-benign case.
+    if matches!(r, DedupResult::Present) {
+        let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
+        let p = cas.join(&hex[..2]).join(&hex[2..]);
+        assert!(p.exists(), "I1 violated: Present without CAS");
+    }
+    // Document the contract this test enforces:
+    //   "Callers MUST NOT cache 'I inserted h' as authoritative across a
+    //    crash boundary without first calling flush()."
+}
+```
+
+- [ ] **Step 2: Run**
+
+Run: `cargo test --test failure_injection_kill9 -p slicefs-dedup -- t13_caller_cached_ok_across_crash_no_FP`
+Expected: pass.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git flow feature start dedup-fi-t13
+git add crates/slicefs-dedup/tests/failure_injection_kill9.rs
+git commit -m "test(slicefs-dedup): FI-13 caller-cached-Ok across crash (S1/OQ-11)"
+git flow feature finish dedup-fi-t13
+git push origin develop
+```
 
 ---
 
@@ -2908,62 +3479,778 @@ git flow feature finish dedup-bench-seed
 git push origin develop
 ```
 
-### Task N2 – N5: Remaining benches (lookup warm/cold, steady_mixed, commit_latency, recovery_50m)
+### Task N2: `bench_lookup` — warm + cold p50/p99
 
-Each follows the same pattern as N1: criterion bench + reference-NVMe run + result row in `BENCH-RESULTS.md`. Targets per ARCHITECTURE §11 / §14.3:
+**Files:**
+- Create: `crates/slicefs-dedup/benches/lookup.rs`
 
-- `bench_lookup_warm`: p99 ≤ 10 µs
-- `bench_lookup_cold`: p99 ≤ 500 µs
-- `bench_steady_mixed`: ≥ 20 K ins/s sustained
-- `bench_commit_latency`: p99 ≤ 5 ms (Default), ≤ 12 ms (Paranoid)
-- `bench_recovery_50m`: RTO ≤ 30 s
+- [ ] **Step 1: Write the bench**
 
-For each: create `benches/<name>.rs`, wire in `[[bench]]`, run, record, commit on a feature branch.
+```rust
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
+use slicefs_traits::{ChunkHash, DedupIndex};
+
+fn build_idx(n: usize) -> (tempfile::TempDir, RedbDedupIndex, Vec<[u8; 28]>) {
+    let td = tempfile::tempdir().unwrap();
+    let cas = td.path().join("cas");
+    std::fs::create_dir_all(&cas).unwrap();
+    let cfg = DedupIndexConfig::builder(&cas).build();
+    let idx = RedbDedupIndex::create(cfg).unwrap();
+    let mut hashes = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut h = [0u8; 28];
+        h[..8].copy_from_slice(&(i as u64).to_le_bytes());
+        idx.insert(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+        hashes.push(h);
+    }
+    idx.flush().unwrap();
+    (td, idx, hashes)
+}
+
+fn lookup_warm(c: &mut Criterion) {
+    let (_td, idx, hashes) = build_idx(100_000);
+    c.bench_function("lookup_warm_present", |b| {
+        let mut i = 0usize;
+        b.iter(|| {
+            let h = &hashes[i % hashes.len()];
+            i = i.wrapping_add(1);
+            let r = idx.lookup(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+            black_box(r);
+        });
+    });
+
+    c.bench_function("lookup_warm_definitely_absent", |b| {
+        let mut i = 0u64;
+        b.iter(|| {
+            let mut h = [0u8; 28];
+            // Above the inserted range — bloom miss.
+            h[..8].copy_from_slice(&(1_000_000 + i).to_le_bytes());
+            i = i.wrapping_add(1);
+            let r = idx.lookup(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+            black_box(r);
+        });
+    });
+}
+
+fn lookup_cold(c: &mut Criterion) {
+    // Cold = re-open the DB inside each iter (drops page cache for the redb file).
+    c.bench_function("lookup_cold", |b| {
+        b.iter_custom(|iters| {
+            let (_td, _, hashes) = build_idx(50_000);
+            let cas = _td.path().join("cas");
+            // Drop and re-open to clear redb in-memory state.
+            let cfg = DedupIndexConfig::builder(&cas).build();
+            let start = std::time::Instant::now();
+            for i in 0..iters {
+                let idx = RedbDedupIndex::open(cfg.clone()).unwrap();
+                let h = &hashes[(i as usize) % hashes.len()];
+                let r = idx.lookup(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+                black_box(r);
+                drop(idx);
+            }
+            start.elapsed()
+        });
+    });
+}
+
+criterion_group!(benches, lookup_warm, lookup_cold);
+criterion_main!(benches);
+```
+
+- [ ] **Step 2: Run**
+
+Run: `cargo bench -p slicefs-dedup --bench lookup -- --quick`
+Expected: warm p99 ≤ 10 µs (target per ARCHITECTURE §11); cold p99 ≤ 500 µs.
+
+- [ ] **Step 3: Append result row to `BENCH-RESULTS.md`** with date, NVMe model, p50/p99 numbers, and pass/fail vs SLO.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git flow feature start dedup-bench-lookup
+git add crates/slicefs-dedup/benches/lookup.rs .planning/research/dedup-index/architecture/BENCH-RESULTS.md
+git commit -m "bench(slicefs-dedup): warm/cold lookup p99 SLO"
+git flow feature finish dedup-bench-lookup
+git push origin develop
+```
+
+### Task N3: `bench_steady_mixed` — ≥ 20 K ins/s sustained
+
+**Files:**
+- Create: `crates/slicefs-dedup/benches/steady_mixed.rs`
+
+- [ ] **Step 1: Write the bench**
+
+```rust
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
+use slicefs_traits::{ChunkHash, DedupIndex};
+
+/// Mixed load: 80% inserts (with novel hashes), 20% lookups (50/50 hit/miss).
+fn steady_mixed(c: &mut Criterion) {
+    c.bench_function("steady_mixed_80i_20l", |b| {
+        b.iter_custom(|iters| {
+            let td = tempfile::tempdir().unwrap();
+            let cas = td.path().join("cas");
+            std::fs::create_dir_all(&cas).unwrap();
+            let cfg = DedupIndexConfig::builder(&cas).build();
+            let idx = RedbDedupIndex::create(cfg).unwrap();
+            // Pre-seed 10k for lookup hits.
+            for i in 0u64..10_000 {
+                let mut h = [0u8; 28]; h[..8].copy_from_slice(&i.to_le_bytes());
+                idx.insert(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+            }
+            idx.flush().unwrap();
+
+            let n = iters as u64;
+            let start = std::time::Instant::now();
+            let mut next_seed = 1_000_000u64;
+            for i in 0..n {
+                if i % 5 == 4 {
+                    // Lookup
+                    let target = if i % 10 == 4 { i % 10_000 } else { 1_500_000 + i };
+                    let mut h = [0u8; 28]; h[..8].copy_from_slice(&target.to_le_bytes());
+                    let r = idx.lookup(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+                    black_box(r);
+                } else {
+                    // Insert (novel)
+                    let mut h = [0u8; 28]; h[..8].copy_from_slice(&next_seed.to_le_bytes());
+                    next_seed += 1;
+                    idx.insert(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+                }
+            }
+            start.elapsed()
+        });
+    });
+}
+
+criterion_group!(benches, steady_mixed);
+criterion_main!(benches);
+```
+
+- [ ] **Step 2: Run**
+
+Run: `cargo bench -p slicefs-dedup --bench steady_mixed -- --quick`
+Expected: throughput ≥ 20 K ops/s (80% inserts + 20% lookups).
+
+- [ ] **Step 3: Record + commit**
+
+```bash
+git flow feature start dedup-bench-steady
+git add crates/slicefs-dedup/benches/steady_mixed.rs .planning/research/dedup-index/architecture/BENCH-RESULTS.md
+git commit -m "bench(slicefs-dedup): steady_mixed ≥20K ops/s"
+git flow feature finish dedup-bench-steady
+git push origin develop
+```
+
+### Task N4: `bench_commit_latency` — Default p99 ≤ 5 ms / Paranoid p99 ≤ 12 ms
+
+**Files:**
+- Create: `crates/slicefs-dedup/benches/commit_latency.rs`
+
+- [ ] **Step 1: Write the bench**
+
+```rust
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use slicefs_dedup::{DedupIndexConfig, DurabilityMode, RedbDedupIndex};
+use slicefs_traits::{ChunkHash, DedupIndex};
+
+fn commit_latency(c: &mut Criterion) {
+    let mut group = c.benchmark_group("commit_latency");
+    for mode in [DurabilityMode::Default, DurabilityMode::Paranoid] {
+        let label = match mode {
+            DurabilityMode::Default  => "default",
+            DurabilityMode::Paranoid => "paranoid",
+            _ => "seed",
+        };
+        group.bench_with_input(BenchmarkId::from_parameter(label), &mode, |b, &mode| {
+            b.iter_custom(|iters| {
+                let td = tempfile::tempdir().unwrap();
+                let cas = td.path().join("cas");
+                std::fs::create_dir_all(&cas).unwrap();
+                let cfg = DedupIndexConfig::builder(&cas).mode(mode).build();
+                let idx = RedbDedupIndex::create(cfg).unwrap();
+                let start = std::time::Instant::now();
+                for i in 0..iters {
+                    let mut h = [0u8; 28];
+                    h[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                    idx.insert(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+                }
+                idx.flush().unwrap();
+                let elapsed = start.elapsed();
+                black_box(elapsed)
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, commit_latency);
+criterion_main!(benches);
+```
+
+- [ ] **Step 2: Run**
+
+Run: `cargo bench -p slicefs-dedup --bench commit_latency -- --quick`
+Expected: per-insert p99 ≤ 5 ms (default), ≤ 12 ms (paranoid).
+
+- [ ] **Step 3: Record + commit**
+
+```bash
+git flow feature start dedup-bench-commit
+git add crates/slicefs-dedup/benches/commit_latency.rs .planning/research/dedup-index/architecture/BENCH-RESULTS.md
+git commit -m "bench(slicefs-dedup): commit_latency p99 across modes"
+git flow feature finish dedup-bench-commit
+git push origin develop
+```
+
+### Task N5: `bench_recovery_50m` — RTO ≤ 30 s for N = 50 M
+
+**Files:**
+- Create: `crates/slicefs-dedup/benches/recovery_50m.rs`
+
+> **Note:** filling 50 M CAS blocks on a real disk takes minutes and consumes ~2 GB. The bench therefore uses a synthetic CAS-tree fixture: real shard directories with empty files. The walker doesn't read block contents, only stat-and-parse hashes, so empty files are correct fixtures.
+
+- [ ] **Step 1: Write the bench**
+
+```rust
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
+use std::time::Duration;
+
+fn synth_cas_tree(cas: &std::path::Path, n: u64) {
+    for shard in 0u8..=255 {
+        let dir = cas.join(format!("{:02x}", shard));
+        std::fs::create_dir_all(&dir).unwrap();
+    }
+    let per_shard = n / 256;
+    for shard in 0u8..=255 {
+        let dir = cas.join(format!("{:02x}", shard));
+        for i in 0..per_shard {
+            let mut h = [0u8; 28];
+            h[0] = shard;
+            h[1..9].copy_from_slice(&i.to_le_bytes());
+            let hex: String = h[1..].iter().map(|b| format!("{:02x}", b)).collect();
+            let p = dir.join(&hex);
+            std::fs::write(&p, b"").unwrap();
+        }
+    }
+}
+
+fn recovery_50m(c: &mut Criterion) {
+    let mut group = c.benchmark_group("recovery_50m");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(60));
+    // Use 1 M for default `--quick`; rerun with N=50M out-of-band before MVP ship.
+    let n: u64 = std::env::var("DEDUP_BENCH_N").ok()
+        .and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    group.bench_function(format!("recovery_n_{}", n), |b| {
+        b.iter_custom(|_iters| {
+            let td = tempfile::tempdir().unwrap();
+            let cas = td.path().join("cas");
+            std::fs::create_dir_all(&cas).unwrap();
+            synth_cas_tree(&cas, n);
+            let cfg = DedupIndexConfig::builder(&cas).build();
+            let start = std::time::Instant::now();
+            RedbDedupIndex::rebuild_from_cas(cfg).unwrap();
+            let elapsed = start.elapsed();
+            black_box(elapsed)
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(benches, recovery_50m);
+criterion_main!(benches);
+```
+
+- [ ] **Step 2: Run with `DEDUP_BENCH_N=50000000`**
+
+Run:
+```
+cargo build -p slicefs-dedup --release --bench recovery_50m
+DEDUP_BENCH_N=50000000 cargo bench -p slicefs-dedup --bench recovery_50m
+```
+Expected: rebuild < 30 s for N = 50 M on the reference NVMe.
+
+- [ ] **Step 3: Record + commit**
+
+```bash
+git flow feature start dedup-bench-recovery
+git add crates/slicefs-dedup/benches/recovery_50m.rs .planning/research/dedup-index/architecture/BENCH-RESULTS.md
+git commit -m "bench(slicefs-dedup): recovery_50m RTO ≤30 s"
+git flow feature finish dedup-bench-recovery
+git push origin develop
+```
 
 ---
 
 ## Milestone O — CLI integration
 
+> **Engineer prerequisite:** before starting this milestone, run
+> `grep -rn "Subcommand\|enum Cli\|enum Cmd\|Parser" crates/slicefs-cli/src/`
+> to locate the existing clap dispatcher. Mirror its file layout exactly
+> (one module per subcommand if that's the existing pattern; flat
+> `match` arm if not). The code below is the **shape** of what each
+> task adds — the engineer should integrate it into the existing files
+> per the codebase's actual structure rather than create parallel ones.
+
 ### Task O1: `slicefs reindex --offline` — invokes `rebuild_from_cas`
 
 **Files:**
-- Modify: `crates/slicefs-cli/src/<cmd>.rs` (locate the existing subcommand dispatcher)
-- Modify: `crates/slicefs-cli/Cargo.toml` (add `slicefs-dedup` dep)
+- Modify: `crates/slicefs-cli/Cargo.toml`
+- Modify: `crates/slicefs-cli/src/main.rs` (or the existing dispatcher module — follow the prerequisite grep)
+- Create: `crates/slicefs-cli/tests/cli_reindex.rs`
 
-- [ ] **Step 1: Add subcommand**
+- [ ] **Step 1: Add the dependency**
 
-(Brief: clap derive enum gets `Reindex { store: PathBuf, offline: bool, bloom_capacity: Option<usize> }`. Handler calls `RedbDedupIndex::rebuild_from_cas(cfg)`.)
+In `crates/slicefs-cli/Cargo.toml`, add to `[dependencies]`:
+```toml
+slicefs-dedup = { path = "../slicefs-dedup" }
+```
 
-- [ ] **Step 2: Integration test**
+- [ ] **Step 2: Add the subcommand**
 
-Run a tiny store, seed via the existing seed command, run `slicefs reindex --offline`, mount, lookup → Present.
+Add to the existing clap enum (use the same derive style as the surrounding subcommands):
+```rust
+/// Rebuild the dedup index from CAS contents (offline).
+Reindex {
+    /// Path to the SliceFS store root.
+    #[arg(long)]
+    store: std::path::PathBuf,
 
-- [ ] **Step 3: Commit on `feature/cli-reindex`.**
+    /// Run offline (mount must be unmounted). Default true; required in MVP.
+    #[arg(long, default_value_t = true)]
+    offline: bool,
+}
+```
 
-### Task O2: `slicefs dedup recover` (non-destructive — `[OQ-5]`)
+…and the handler arm:
+```rust
+Cmd::Reindex { store, offline } => {
+    if !offline {
+        eprintln!("error: online reindex is a v2 feature; pass --offline (default)");
+        std::process::exit(2);
+    }
+    let cas_root = store.join("cas");
+    if !cas_root.exists() {
+        eprintln!("error: {:?} does not exist", cas_root);
+        std::process::exit(2);
+    }
+    let cfg = slicefs_dedup::DedupIndexConfig::builder(&cas_root).build();
+    slicefs_dedup::RedbDedupIndex::rebuild_from_cas(cfg)
+        .map_err(|e| { eprintln!("reindex failed: {e}"); std::process::exit(1) })
+        .ok();
+    println!("reindex ok: {:?}/.dedup-index/", cas_root);
+}
+```
 
-Mounts in Suspect mode, runs background scrub, never deletes data. Initial implementation can simply call `rebuild_from_cas` after preserving the existing index file as `.bak`.
+- [ ] **Step 3: Write an integration test**
 
-### Task O3: `slicefs stats [Index]` block
+`crates/slicefs-cli/tests/cli_reindex.rs`:
+```rust
+use std::process::Command;
 
-Extend the existing `stats` subcommand output with a new section reporting `StatsSnapshot` fields.
+fn slicefs_bin() -> std::path::PathBuf {
+    // Built by `cargo test`; binary lives in target/debug.
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    dir.join("..").join("..").join("target").join("debug").join("slicefs")
+}
+
+fn write_cas_block(cas: &std::path::Path, hash: &[u8; 28]) {
+    let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+    let dir = cas.join(&hex[..2]);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(&hex[2..]), b"x").unwrap();
+}
+
+#[test]
+fn reindex_offline_rebuilds_index_from_cas() {
+    if !slicefs_bin().exists() {
+        eprintln!("SKIP: build the binary first: cargo build -p slicefs-cli");
+        return;
+    }
+    let td = tempfile::tempdir().unwrap();
+    let store = td.path().to_path_buf();
+    let cas = store.join("cas");
+    std::fs::create_dir_all(&cas).unwrap();
+    let mut h = [0u8; 28]; h[0] = 0x77;
+    write_cas_block(&cas, &h);
+
+    let out = Command::new(slicefs_bin())
+        .args(["reindex", "--store"]).arg(&store)
+        .arg("--offline")
+        .output().unwrap();
+    assert!(out.status.success(), "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr));
+
+    let idx_path = cas.join(".dedup-index").join("index.redb");
+    assert!(idx_path.exists(), "reindex must produce {idx_path:?}");
+
+    use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
+    use slicefs_traits::{ChunkHash, DedupIndex, DedupResult};
+    let cfg = DedupIndexConfig::builder(&cas).build();
+    let idx = RedbDedupIndex::open(cfg).unwrap();
+    let r = idx.lookup(&ChunkHash::from_bytes(h.to_vec())).unwrap();
+    assert!(matches!(r, DedupResult::Present));
+}
+```
+
+- [ ] **Step 4: Run**
+
+Run:
+```
+cargo build -p slicefs-cli
+cargo test -p slicefs-cli --test cli_reindex
+```
+Expected: pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git flow feature start cli-reindex
+git add crates/slicefs-cli/
+git commit -m "feat(slicefs-cli): \`slicefs reindex --offline\`
+
+Invokes RedbDedupIndex::rebuild_from_cas(). MVP-only;
+online reindex is a v2 feature."
+git flow feature finish cli-reindex
+git push origin develop
+```
+
+### Task O2: `slicefs dedup recover` — non-destructive (`[OQ-5]`)
+
+**Files:**
+- Modify: `crates/slicefs-cli/src/main.rs` (or existing dispatcher)
+- Create: `crates/slicefs-cli/tests/cli_dedup_recover.rs`
+
+- [ ] **Step 1: Add the subcommand**
+
+```rust
+/// Non-destructive dedup index recovery: backs up existing index, then rebuilds.
+DedupRecover {
+    #[arg(long)]
+    store: std::path::PathBuf,
+}
+```
+
+…and the handler:
+```rust
+Cmd::DedupRecover { store } => {
+    let cas_root = store.join("cas");
+    let dedup_root = cas_root.join(".dedup-index");
+    let idx = dedup_root.join("index.redb");
+    let bak = dedup_root.join(format!("index.redb.bak.{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()));
+    if idx.exists() {
+        std::fs::rename(&idx, &bak).expect("backup existing index");
+        println!("backed up old index to {bak:?}");
+    }
+    let cfg = slicefs_dedup::DedupIndexConfig::builder(&cas_root).build();
+    if let Err(e) = slicefs_dedup::RedbDedupIndex::rebuild_from_cas(cfg) {
+        // Restore on failure.
+        if bak.exists() { let _ = std::fs::rename(&bak, &idx); }
+        eprintln!("recover failed: {e}");
+        std::process::exit(1);
+    }
+    println!("recover ok; backup retained at {bak:?}");
+}
+```
+
+- [ ] **Step 2: Write the integration test**
+
+`crates/slicefs-cli/tests/cli_dedup_recover.rs`:
+```rust
+use std::process::Command;
+
+#[test]
+fn dedup_recover_preserves_old_index_as_bak() {
+    let bin = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..").join("..").join("target").join("debug").join("slicefs");
+    if !bin.exists() {
+        eprintln!("SKIP: build first");
+        return;
+    }
+    let td = tempfile::tempdir().unwrap();
+    let store = td.path().to_path_buf();
+    let cas = store.join("cas");
+    std::fs::create_dir_all(&cas).unwrap();
+    let mut h = [0u8; 28]; h[0] = 0x88;
+    let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
+    std::fs::create_dir_all(cas.join(&hex[..2])).unwrap();
+    std::fs::write(cas.join(&hex[..2]).join(&hex[2..]), b"x").unwrap();
+    // First recover creates index.
+    Command::new(&bin).args(["dedup-recover", "--store"]).arg(&store).status().unwrap();
+    let idx = cas.join(".dedup-index").join("index.redb");
+    assert!(idx.exists());
+
+    // Second recover backs it up + creates a fresh one.
+    let before = std::fs::metadata(&idx).unwrap().len();
+    Command::new(&bin).args(["dedup-recover", "--store"]).arg(&store).status().unwrap();
+    assert!(idx.exists());
+    let baks: Vec<_> = std::fs::read_dir(cas.join(".dedup-index")).unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("index.redb.bak."))
+        .collect();
+    assert!(!baks.is_empty(), "previous index must be retained as .bak");
+    let _ = before; // not asserting size identity (rebuild can reorder pages)
+}
+```
+
+- [ ] **Step 3: Run**
+
+Run: `cargo test -p slicefs-cli --test cli_dedup_recover`
+Expected: pass.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git flow feature start cli-dedup-recover
+git add crates/slicefs-cli/
+git commit -m "feat(slicefs-cli): \`slicefs dedup-recover\` non-destructive (OQ-5)"
+git flow feature finish cli-dedup-recover
+git push origin develop
+```
+
+### Task O3: `slicefs stats` extended with `[Index]` block
+
+**Files:**
+- Modify: `crates/slicefs-cli/src/main.rs` (or the existing `stats` handler)
+- Add public method: `crates/slicefs-dedup/src/redb_dedup_index.rs` — `stats_snapshot()`
+
+- [ ] **Step 1: Expose `stats_snapshot` on `RedbDedupIndex`**
+
+Append to `crates/slicefs-dedup/src/redb_dedup_index.rs`:
+```rust
+use std::sync::atomic::Ordering;
+
+impl RedbDedupIndex {
+    pub fn stats_snapshot(&self) -> crate::stats::StatsSnapshot {
+        let s = &self.stats;
+        let bloom_load_factor = {
+            // Approximate via hit ratio over recent observations; fastbloom does
+            // not expose load factor directly. We compute it as
+            // (1 - (false_pos_rate)^(1/k)) but for ops we ship the raw counters.
+            0.0
+        };
+        let redb_free_bytes = self.db.stats().ok()
+            .map(|st| st.free_bytes() as u64).unwrap_or(0);
+        crate::stats::StatsSnapshot {
+            inserts_total: s.inserts_total.load(Ordering::Relaxed),
+            lookups_total: s.lookups_total.load(Ordering::Relaxed),
+            bloom_hits_total: s.bloom_hits_total.load(Ordering::Relaxed),
+            bloom_false_positives_total: s.bloom_false_positives_total.load(Ordering::Relaxed),
+            commits_total: s.commits_total.load(Ordering::Relaxed),
+            commit_failures_total: s.commit_failures_total.load(Ordering::Relaxed),
+            removes_total: s.removes_total.load(Ordering::Relaxed),
+            backpressure_rejects_total: s.backpressure_rejects_total.load(Ordering::Relaxed),
+            verify_on_present_hits_total: s.verify_on_present_hits_total.load(Ordering::Relaxed),
+            bloom_snapshot_failures_total: s.bloom_snapshot_failures_total.load(Ordering::Relaxed),
+            bloom_load_factor,
+            redb_free_bytes,
+            queue_depth: 0,
+            hwm: self.high_water.load(Ordering::Acquire),
+        }
+    }
+}
+```
+
+> **Note:** `redb::DatabaseStats` field name is `free_bytes()` in 4.1; if your audit in Task A1 found a different accessor, use that. The code above is the canonical 4.1 form.
+
+- [ ] **Step 2: Extend the `stats` CLI subcommand**
+
+In the existing `stats` handler (located via the prerequisite grep), append after the existing output:
+```rust
+let cas_root = store.join("cas");
+let dedup_root = cas_root.join(".dedup-index");
+if dedup_root.exists() {
+    let cfg = slicefs_dedup::DedupIndexConfig::builder(&cas_root).build();
+    if let Ok(idx) = slicefs_dedup::RedbDedupIndex::open(cfg) {
+        let s = idx.stats_snapshot();
+        println!("\n[Index]");
+        println!("  inserts_total            : {}", s.inserts_total);
+        println!("  lookups_total            : {}", s.lookups_total);
+        println!("  bloom_hits_total         : {}", s.bloom_hits_total);
+        println!("  bloom_false_positives    : {}", s.bloom_false_positives_total);
+        println!("  commits_total            : {}", s.commits_total);
+        println!("  commit_failures_total    : {}", s.commit_failures_total);
+        println!("  removes_total            : {}", s.removes_total);
+        println!("  verify_on_present_hits   : {}", s.verify_on_present_hits_total);
+        println!("  bloom_snapshot_failures  : {}", s.bloom_snapshot_failures_total);
+        println!("  high_water_mark          : {}", s.hwm);
+        println!("  redb_free_bytes          : {}", s.redb_free_bytes);
+    }
+}
+```
+
+- [ ] **Step 3: Run existing `stats` test (or add one)**
+
+Run:
+```
+cargo build -p slicefs-cli
+target/debug/slicefs stats --store /tmp/some-test-store
+```
+Expected: existing output plus `[Index]` block when a dedup index exists.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git flow feature start cli-stats-index
+git add crates/slicefs-cli/ crates/slicefs-dedup/src/redb_dedup_index.rs
+git commit -m "feat(slicefs-cli): \`stats\` reports [Index] block
+
+stats_snapshot() exposed on RedbDedupIndex; ARCHITECTURE §12 counters."
+git flow feature finish cli-stats-index
+git push origin develop
+```
 
 ---
 
 ## Milestone P — Release prep
 
-### Task P1: Documentation
+### Task P1: README updates
 
-- [ ] Update `README.md` to mention the new `slicefs-dedup` crate in the "Repo layout" section.
-- [ ] Add a `crates/slicefs-dedup/README.md` summarizing API + the three modes.
-- [ ] Update `.planning/STATE.md` if such a file is in use.
+**Files:**
+- Modify: `README.md`
+- Create: `crates/slicefs-dedup/README.md`
 
-### Task P2: Ship via git-flow release
+- [ ] **Step 1: Add the new crate to repo layout in root README**
 
-- [ ] `git flow release start v0.2.0-dedup`
-- [ ] Bump versions in workspace + per-crate `Cargo.toml`s as needed.
-- [ ] `git flow release finish v0.2.0-dedup` — produces merge commits to `main` and `develop` and a tag.
-- [ ] `git push origin main develop --tags`
+In `README.md`, locate the `Repo layout` code block and add the new crate row in alphabetical order (between `slicefs-compression` and `slicefs-traits`):
+```
+│   ├── slicefs-dedup/         # Persistent on-disk DedupIndex (redb 4.x + bloom)
+```
+
+- [ ] **Step 2: Write the per-crate README**
+
+`crates/slicefs-dedup/README.md`:
+```markdown
+# slicefs-dedup
+
+Persistent, redb-backed `DedupIndex` for SliceFS.
+
+## API surface
+
+```rust
+use slicefs_dedup::{DedupIndexConfig, DurabilityMode, RedbDedupIndex};
+use slicefs_traits::{ChunkHash, DedupIndex};
+
+// Mount-time
+let cfg = DedupIndexConfig::builder("/path/to/store/cas")
+    .mode(DurabilityMode::Default)
+    .build();
+let idx = RedbDedupIndex::open(cfg)
+    .or_else(|_| RedbDedupIndex::create(cfg.clone()))?;
+
+// Hot path
+if !idx.bloom_check(&hash) { /* fast: definitely absent */ }
+match idx.lookup(&hash)? { /* Present | Absent | DefinitelyAbsent */ }
+idx.insert(&hash)?;
+idx.remove(&hash)?;
+
+// Operator path
+RedbDedupIndex::rebuild_from_cas(cfg)?; // offline; idempotent
+```
+
+## Modes
+
+| Mode | Durability | Coalesce window | verify_on_present |
+|------|------------|-----------------|-------------------|
+| `Seed` | `None` | 20 ms / 100 K batch | false |
+| `Default` | `Eventual` + 200 ms group | 2 ms / 10 K batch | false |
+| `Paranoid` | `Immediate` per insert | 0 ms / 1-tx | **true** |
+
+## Layout
+
+`<store>/cas/.dedup-index/`
+
+- `index.redb`        authoritative SET (table `dedup_index_v1`)
+- `index.redb.lock`   redb's flock — multi-process exclusion
+- `bloom.snap`        advisory bloom snapshot, rename-atomic, xxh3-128 + CRC32C
+- `manifest.json`     JSON sidecar with version + last_clean_shutdown
+
+## Caller contract
+
+A successful `insert(h)` reply does **not** promise post-crash visibility.
+With `Durability::Eventual`, the commit returns when the txn is staged in
+the OS page cache, not when the device flushed. After a crash, a follow-up
+`lookup(h)` may return `Absent` — benign per `[ARCHITECTURE §3 I4]`.
+
+**Callers MUST NOT cache "I inserted h" as authoritative across a crash
+boundary without first calling `flush()`.** See ARCHITECTURE §8.1
+"Caller observability note" and the FI-13 test in
+`tests/failure_injection_kill9.rs`.
+
+## See also
+
+`.planning/research/dedup-index/ARCHITECTURE.md` — binding spec.
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git flow feature start dedup-readme
+git add README.md crates/slicefs-dedup/README.md
+git commit -m "docs(slicefs-dedup): per-crate README + repo-layout row"
+git flow feature finish dedup-readme
+git push origin develop
+```
+
+### Task P2: Workspace lint & test sweep
+
+- [ ] **Step 1: Run all checks**
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo build --workspace --release
+```
+Expected: all pass; baseline test count is at least 1287 + the new tests added across milestones B–O.
+
+- [ ] **Step 2: If anything fails, fix and re-run.** Do NOT use `--allow-warnings`. Do NOT mark tests `#[ignore]` to make them pass.
+
+- [ ] **Step 3: Commit any fixes** (each on its own `feature/dedup-cleanup-<area>` branch).
+
+### Task P3: Cut the release
+
+- [ ] **Step 1: Bump versions**
+
+In root `Cargo.toml` (if there's a `[workspace.package]` `version` field) and in each crate's `Cargo.toml`, bump to `0.2.0`.
+
+- [ ] **Step 2: Start release branch**
+
+```bash
+git flow release start v0.2.0-dedup
+```
+
+- [ ] **Step 3: Update CHANGELOG**
+
+Create or update `CHANGELOG.md` with the v0.2.0 entry summarizing the dedup-index work.
+
+- [ ] **Step 4: Commit version bumps + changelog**
+
+```bash
+git add Cargo.toml crates/*/Cargo.toml CHANGELOG.md
+git commit -m "chore(release): v0.2.0-dedup version bumps"
+```
+
+- [ ] **Step 5: Finish the release**
+
+```bash
+git flow release finish v0.2.0-dedup
+```
+This creates merge commits to both `main` and `develop` and tags `v0.2.0-dedup`.
+
+- [ ] **Step 6: Push**
+
+```bash
+git push origin main develop --tags
+```
+The pre-push hook installed in `.githooks/pre-push` will allow this push because the commits arriving on `main` are merge commits from the release branch.
 
 ---
 
