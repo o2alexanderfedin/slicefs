@@ -642,7 +642,7 @@ sequenceDiagram
         T2-->>T2: DedupResult::DefinitelyAbsent
     end
 
-    Note over W,DB: writer arrives; readers continue against snapshot S0
+    Note over W,DB: writer arrives, readers continue against snapshot S0
     W->>DB: begin_write()
     DB-->>W: write txn (acquired single-writer slot)
     W->>DB: table.insert(h_c, ())

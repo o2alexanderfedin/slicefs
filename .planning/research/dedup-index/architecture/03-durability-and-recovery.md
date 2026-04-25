@@ -65,7 +65,7 @@ sequenceDiagram
     participant DRV as NVMe device
 
     Caller->>CAS: put(h, bytes)
-    CAS->>FS: write(tmp) ; rename(tmp -> final)
+    CAS->>FS: write(tmp), rename(tmp -> final)
     CAS->>FS: fsync(block_fd)
     alt macOS
         FS->>DRV: fcntl(F_FULLFSYNC) — FLUSH CACHE
@@ -88,7 +88,7 @@ sequenceDiagram
     IDX-->>Caller: Ok(())
 
     rect rgba(255,240,200,0.4)
-    Note over IDX: every N inserts, fork bloom snapshot<br/>(opportunistic; I6)
+    Note over IDX: every N inserts, fork bloom snapshot<br/>(opportunistic, I6)
     end
 ```
 
@@ -113,7 +113,7 @@ sequenceDiagram
     IDX->>Bloom: contains(h)
     alt Bloom miss
         Bloom-->>IDX: false
-        IDX-->>Caller: DefinitelyAbsent (I6 OK; FN never)
+        IDX-->>Caller: DefinitelyAbsent (I6 OK, FN never)
     else Bloom hit
         Bloom-->>IDX: true (maybe)
         IDX->>Redb: read_txn.get(h)
@@ -152,12 +152,12 @@ flowchart TD
     classDef bad fill:#fdd,stroke:#c00,color:#000
 
     Start([insert begins]) --> P1
-    P1{P1: crash after CAS write,<br/>before fsync(block)}
-    P2{P2: crash after fsync(block),<br/>before fsync(parent_dir)}
-    P3{P3: crash after parent fsync,<br/>before redb.commit}
-    P4{P4: crash mid-redb.commit<br/>(torn root pointer)}
-    P5{P5: crash after commit ack,<br/>before bloom.set}
-    P6{P6: crash after bloom.set,<br/>before return Ok}
+    P1{"P1: crash after CAS write,<br/>before fsync(block)"}
+    P2{"P2: crash after fsync(block),<br/>before fsync(parent_dir)"}
+    P3{"P3: crash after parent fsync,<br/>before redb.commit"}
+    P4{"P4: crash mid-redb.commit<br/>(torn root pointer)"}
+    P5{"P5: crash after commit ack,<br/>before bloom.set"}
+    P6{"P6: crash after bloom.set,<br/>before return Ok"}
 
     Start --> P1
     P1 -->|".tmp file or partial block on disk;<br/>no rename, no idx, no bloom"| R1["State: clean ∅<br/>Action: rm *.tmp on next mount;<br/>caller will retry — idempotent"]
@@ -197,13 +197,13 @@ stateDiagram-v2
     [*] --> Closed
     Closed --> Probing : open(cas/.dedup-index/)
     Probing --> Healthy : redb root CRC ok ∧ bloom.snap xxh3 ok ∧ manifest.last_clean_shutdown=true
-    Probing --> Suspect : any of: bloom xxh3 fail / manifest missing or "unclean" / redb open warning / --force-rebuild
+    Probing --> Suspect : bloom xxh3 fail / manifest missing or "unclean" / redb open warning / --force-rebuild
     Probing --> Rebuilding : redb root CRC fail ∨ redb file truncated ∨ manifest version mismatch
     Suspect --> Rebuilding : scrubber on Suspect mount detects stale entries beyond threshold
     Suspect --> Healthy : background scrub completes, no anomalies
     Rebuilding --> Healthy : walk(cas/) → bulk-load redb → rebuild bloom → atomic-rename → fsync(parent)
     Healthy --> [*] : umount (writes manifest.last_clean_shutdown=true + bloom.snap)
-    Suspect --> [*] : umount (writes manifest with last_clean_shutdown=false; next mount goes Suspect again)
+    Suspect --> [*] : umount (writes manifest with last_clean_shutdown=false, next mount goes Suspect again)
     Rebuilding --> [*] : crash during rebuild — next mount restarts at Probing → Rebuilding (I7 idempotent)
 ```
 

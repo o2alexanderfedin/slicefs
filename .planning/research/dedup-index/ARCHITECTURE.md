@@ -80,7 +80,7 @@ flowchart LR
 ## 4. Architecture overview
 
 ```mermaid
-graph LR
+graph TB
     subgraph FUSE [FUSE / chunker / GC]
       Chunk[Chunker]
       GC[GC engine]
@@ -101,7 +101,7 @@ graph LR
 
     subgraph Disk [&lt;store&gt;/cas/.dedup-index/]
       Manifest[manifest.json<br/>+ manifest.json.tmp]
-      IDB[(index.redb<br/>+ index.redb.lock — redb flock)]
+      IDB[("index.redb<br/>+ index.redb.lock — redb flock")]
       Snap[bloom.snap<br/>+ bloom.snap.tmp]
     end
 
@@ -111,7 +111,7 @@ graph LR
     end
 
     subgraph StoreRoot [&lt;store&gt;/]
-      MountLock[mount.lock<br/>(dirty-canary; NOT exclusion lock)]
+      MountLock["mount.lock<br/>(dirty-canary; NOT exclusion lock)"]
     end
 
     subgraph Mem [In-memory]
@@ -358,7 +358,7 @@ sequenceDiagram
     participant DRV as NVMe device
 
     Caller->>CAS: put(h, bytes)
-    CAS->>FS: write(tmp) ; rename(tmp -> final)
+    CAS->>FS: write(tmp), rename(tmp -> final)
     CAS->>FS: fsync(block_fd)
     alt macOS
         FS->>DRV: fcntl(F_FULLFSYNC) — FLUSH CACHE
@@ -376,13 +376,13 @@ sequenceDiagram
     IDX->>IDX: redb.write_txn → table.insert(h, ()) × N
     IDX->>FS: redb.commit(durability=Eventual)
     FS-->>IDX: ok
-    Note over IDX: ▼ COMMIT BARRIER (I5) ▼<br/>{bloom.set_all, HWM.fetch_add} are<br/>both happen-AFTER commit; their relative<br/>order is unobservable to correctness
+    Note over IDX: ▼ COMMIT BARRIER (I5) ▼<br/>{bloom.set_all, HWM.fetch_add} are<br/>both happen-AFTER commit, their relative<br/>order is unobservable to correctness
     IDX->>IDX: bloom.set_all(hashes)  (lock-free)
     IDX->>IDX: HWM.fetch_add(N, AcqRel)
     IDX-->>Caller: oneshot reply Ok(())
 
     rect rgba(255,240,200,0.4)
-    Note over IDX: every 100k inserts (default),<br/>fork bloom snapshot (opportunistic; I6)
+    Note over IDX: every 100k inserts (default),<br/>fork bloom snapshot (opportunistic, I6)
     end
 ```
 
@@ -399,13 +399,13 @@ sequenceDiagram
     participant IDX as RedbDedupIndex
     participant Bloom as fastbloom (RAM)
     participant Redb as redb (mmap)
-    participant CAS as &lt;store&gt;/cas/ (FS)
+    participant CAS as <store>/cas/ (FS)
 
     Caller->>IDX: lookup(&h)
     IDX->>Bloom: contains(h)
     alt Bloom miss
         Bloom-->>IDX: false
-        IDX-->>Caller: DefinitelyAbsent  /* I6 OK; FN never */
+        IDX-->>Caller: DefinitelyAbsent  /* I6 OK, FN never */
     else Bloom hit
         Bloom-->>IDX: true (maybe)
         IDX->>Redb: read_txn.get(h)
@@ -440,7 +440,7 @@ sequenceDiagram
     participant GC
     participant IDX as RedbDedupIndex
     participant Redb as redb
-    participant CAS as &lt;store&gt;/cas/
+    participant CAS as <store>/cas/
 
     GC->>IDX: remove(&h)
     IDX->>Redb: write_txn → table.remove(h)

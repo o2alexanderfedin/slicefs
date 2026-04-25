@@ -59,7 +59,7 @@ sequenceDiagram
     loop For each req
         B->>DB: table.insert(hash, ())
     end
-    B->>DB: commit()  [Eventual durability; group fsync]
+    B->>DB: commit()  [Eventual durability, group fsync]
     DB-->>B: Ok(commit_id)
     B->>Bf: bloom.insert_all(hashes)
     B->>Bf: HWM.store(commit_id)
@@ -67,7 +67,7 @@ sequenceDiagram
     par fanout reply
         B-->>C1: reply_tx.send(Ok)
     end
-    Note over C1: Caller wakes; insert is now durable<br/>and bloom-visible (I2 satisfied)
+    Note over C1: Caller wakes, insert is now durable<br/>and bloom-visible (I2 satisfied)
 ```
 
 The batcher is a single OS thread; CPU bound only at >500 K req/s, where redb commit cost dominates anyway.
@@ -255,9 +255,9 @@ sequenceDiagram
         end
         Bn->>Bf: atomic swap (Arc::store)
         Bn->>Idx: snapshot bloom_new to bloom.snap.tmp
-        Bn->>Idx: rename → bloom.snap; fsync dir
+        Bn->>Idx: rename → bloom.snap, fsync dir
     else below threshold
-        Note over Idx: defer; emit gauge bloom_drift_ratio
+        Note over Idx: defer, emit gauge bloom_drift_ratio
     end
 ```
 

@@ -214,7 +214,7 @@ The smallest atomic on-disk unit is **one redb commit** for the index proper, an
 sequenceDiagram
     autonumber
     participant Caller
-    participant CAS as cas/XX/&lt;hash&gt;
+    participant CAS as cas/XX/<hash>
     participant Redb as index.redb
     participant Bloom as AtomicBloomFilter (RAM)
     participant HWM as HWM (atomic u64)
