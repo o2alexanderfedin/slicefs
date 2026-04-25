@@ -507,12 +507,29 @@ Steps (idempotent per I7) `[03 §6]`:
 ### 9.3 Rebuild cost (single-thread walker, cold cache)
 
 ```mermaid
+---
+config:
+  themeVariables:
+    xyChart:
+      plotColorPalette: "#1d4ed8"
+---
 xychart-beta
-    title "Rebuild time vs N entries (cold; single-thread walker)"
+    title "Rebuild time vs N entries (cold, single-thread walker)"
     x-axis "N (millions)" [0.01, 1, 10, 50, 100, 500, 1000]
     y-axis "seconds" 0 --> 4500
+    bar [0.1, 3.5, 25, 140, 300, 1800, 4320]
     line [0.1, 3.5, 25, 140, 300, 1800, 4320]
 ```
+
+| N (millions) | Rebuild time (cold, s) |
+|-------------:|-----------------------:|
+|         0.01 |                    0.1 |
+|            1 |                    3.5 |
+|           10 |                     25 |
+|           50 |                    140 |
+|          100 |                    300 |
+|          500 |                  1 800 |
+|        1 000 |                  4 320 |
 
 `[03 §6]`. N ≤ 50 M: blocks the mount (acceptable per `[SYNTHESIS §N5]`). N > 50 M: deferred to v2 (online rebuild with Suspect-mode partial reads). `[COORDINATOR-LOG OQ-8]`.
 

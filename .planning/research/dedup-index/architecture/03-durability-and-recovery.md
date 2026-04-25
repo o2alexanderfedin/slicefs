@@ -257,12 +257,29 @@ Source-of-truth definition (per `crates/cas-local/src/disk_block_store.rs`):
 |         1 B |             ~1.2 h  | ~12 min | per-shard parallel walker; v2 |
 
 ```mermaid
+---
+config:
+  themeVariables:
+    xyChart:
+      plotColorPalette: "#1d4ed8"
+---
 xychart-beta
-    title "Rebuild time vs N entries (cold; single-thread walker)"
+    title "Rebuild time vs N entries (cold, single-thread walker)"
     x-axis "N (millions)" [0.01, 1, 10, 50, 100, 500, 1000]
     y-axis "seconds" 0 --> 4500
+    bar [0.1, 3.5, 25, 140, 300, 1800, 4320]
     line [0.1, 3.5, 25, 140, 300, 1800, 4320]
 ```
+
+| N (millions) | Rebuild time (cold, s) |
+|-------------:|-----------------------:|
+|         0.01 |                    0.1 |
+|            1 |                    3.5 |
+|           10 |                     25 |
+|           50 |                    140 |
+|          100 |                    300 |
+|          500 |                  1 800 |
+|        1 000 |                  4 320 |
 
 **Online vs offline:**
 - N ≤ 50 M: rebuild blocks the mount. Acceptable per `SYNTHESIS.md` N5.
