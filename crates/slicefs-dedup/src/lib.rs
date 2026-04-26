@@ -32,3 +32,6 @@ mod manifest;
 pub use manifest::Manifest;
 
 mod bloom_snapshot;
+
+mod redb_dedup_index;
+pub use redb_dedup_index::{DEDUP_TABLE, RedbDedupIndex};

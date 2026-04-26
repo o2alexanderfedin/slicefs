@@ -5,6 +5,8 @@ use thiserror::Error;
 pub enum DedupIndexError {
     #[error("redb error: {0}")]
     Redb(#[from] redb::Error),
+    #[error("redb database error: {0}")]
+    Database(#[from] redb::DatabaseError),
     #[error("redb storage error: {0}")]
     Storage(#[from] redb::StorageError),
     #[error("redb transaction error: {0}")]
