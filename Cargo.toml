@@ -23,7 +23,7 @@ clap       = { version = "4", features = ["derive"] }
 
 # Not used in Phase 1 but wired up for later phases:
 fuser      = { version = "0.17" }
-redb       = "3.1"
+redb       = "4.1"
 fastcdc    = "3.2"
 tokio      = { version = "1", features = ["full"] }
 libc       = "0.2"
