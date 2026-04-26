@@ -1,5 +1,6 @@
-// Wired up by F1/J1/J2; until then keep items dead-code-friendly.
-#![allow(dead_code)]
+// J1 wires write_atomic into the batcher and the Drop path. `load` is
+// still consumed only by J2 (open() bloom restore) and tests; allow on
+// that single item rather than the whole module.
 
 use crate::error::DedupIndexError;
 use crate::paths::DedupRoot;
@@ -70,6 +71,7 @@ pub fn write_atomic(
     Ok(())
 }
 
+#[allow(dead_code)] // consumed by J2 open() and the snapshot tests below
 pub fn load(root: &DedupRoot) -> Result<(BloomSnapshotMeta, Vec<u8>), DedupIndexError> {
     let mut f = File::open(root.bloom())?;
     let mut header = [0u8; HEADER_LEN];

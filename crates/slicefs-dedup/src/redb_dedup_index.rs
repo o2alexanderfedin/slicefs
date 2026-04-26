@@ -282,6 +282,24 @@ impl Drop for RedbDedupIndex {
         if let Some(bw) = self.batch_writer.take() {
             bw.shutdown(std::time::Duration::from_secs(5));
         }
+
+        // J1: final snapshot, regardless of N. Best-effort. Done BEFORE
+        // the redb durable_sync so a snapshot failure does not block
+        // device-level durability of the index file.
+        let payload = self.bloom.to_bytes();
+        let meta = crate::bloom_snapshot::BloomSnapshotMeta {
+            bloom_capacity: self.config.bloom.capacity as u64,
+            bloom_fpr_bits: self.config.bloom.fpr,
+            entries_at_snapshot: self
+                .stats
+                .inserts_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            redb_hwm_at_snapshot: self
+                .high_water
+                .load(std::sync::atomic::Ordering::Acquire),
+        };
+        let _ = crate::bloom_snapshot::write_atomic(&self.root, &meta, &payload);
+
         let _ = std::fs::File::open(self.root.redb())
             .and_then(|f| crate::platform::durable_sync(&f));
 
@@ -468,5 +486,26 @@ mod insert_tests {
         let m = crate::manifest::Manifest::read(&DedupRoot::new(&dedup_root)).unwrap();
         assert!(m.last_shutdown_was_clean);
         assert_eq!(m.entries_high_water_mark, 1);
+    }
+
+    #[test]
+    fn snapshot_after_threshold_inserts() {
+        let td = tempfile::tempdir().unwrap();
+        let cas = td.path().join("cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let mut cfg = DedupIndexConfig::builder(&cas).build();
+        cfg.bloom.snapshot_every = 10;
+        let dedup_root = cfg.dedup_root.clone();
+        {
+            let idx = RedbDedupIndex::create(cfg).unwrap();
+            for i in 0..15u8 {
+                idx.insert(&make_hash(i)).unwrap();
+            }
+            idx.flush().unwrap();
+        } // Drop triggers final snapshot.
+        assert!(
+            DedupRoot::new(&dedup_root).bloom().exists(),
+            "bloom.snap must exist after threshold inserts + drop"
+        );
     }
 }

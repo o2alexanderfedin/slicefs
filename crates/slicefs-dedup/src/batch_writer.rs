@@ -105,6 +105,12 @@ impl BatchWriter {
         let hw = Arc::clone(&high_water);
         let stats_for_thread = Arc::clone(&stats);
 
+        // Capture snapshot-related extras OUTSIDE the loop so we don't
+        // re-clone every iteration. `cfg.bloom` is `Copy`; only the
+        // `dedup_root` `PathBuf` needs an explicit clone.
+        let bloom_cfg = cfg.bloom;
+        let dedup_root = cfg.dedup_root.clone();
+
         let handle = std::thread::Builder::new()
             .name("slicefs-dedup-batcher".into())
             .spawn(move || {
@@ -166,6 +172,45 @@ impl BatchWriter {
                         stats_for_thread
                             .inserts_total
                             .fetch_add(batch.len() as u64, Ordering::Relaxed);
+
+                        // J1: snapshot trigger. Fire one bloom snapshot
+                        // when the cumulative inserts counter crosses an
+                        // N-multiple boundary (N = bloom.snapshot_every).
+                        //
+                        // Performance note: `to_bytes()` clones the
+                        // entire bit-array (~1.2 GB at N=10^9). For MVP
+                        // this is acceptable since snapshots happen every
+                        // 100K inserts (Default mode). For higher
+                        // throughput we'd hand a clone of the
+                        // `Arc<RwLock<BloomFilter>>` to a separate
+                        // snapshotter thread instead of doing it in the
+                        // batcher hot path.
+                        let total_after =
+                            stats_for_thread.inserts_total.load(Ordering::Relaxed);
+                        let total_before = total_after - batch.len() as u64;
+                        let n = bloom_cfg.snapshot_every as u64;
+                        if n > 0 && n != u64::MAX {
+                            let prev_window = total_before / n;
+                            let now_window = total_after / n;
+                            if now_window > prev_window {
+                                let payload = bloom_for_thread.to_bytes();
+                                let meta = crate::bloom_snapshot::BloomSnapshotMeta {
+                                    bloom_capacity: bloom_cfg.capacity as u64,
+                                    bloom_fpr_bits: bloom_cfg.fpr,
+                                    entries_at_snapshot: total_after,
+                                    redb_hwm_at_snapshot: hw.load(Ordering::Acquire),
+                                };
+                                let root = crate::paths::DedupRoot::new(&dedup_root);
+                                if let Err(e) = crate::bloom_snapshot::write_atomic(
+                                    &root, &meta, &payload,
+                                ) {
+                                    tracing::warn!("bloom snapshot failed: {e}");
+                                    stats_for_thread
+                                        .bloom_snapshot_failures_total
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
                     }
 
                     // Build a cloneable reply outcome. We turn the
