@@ -36,3 +36,19 @@ criterion.workspace = true
 [[bench]]
 name = "seed_burst"
 harness = false
+
+[[bench]]
+name = "lookup"
+harness = false
+
+[[bench]]
+name = "steady_mixed"
+harness = false
+
+[[bench]]
+name = "commit_latency"
+harness = false
+
+[[bench]]
+name = "recovery_50m"
+harness = false
