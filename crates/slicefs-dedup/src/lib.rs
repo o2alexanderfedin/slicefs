@@ -23,7 +23,10 @@ pub use verify::VerifyReport;
 mod paths;
 pub use paths::DedupRoot;
 
+// platform: durable_sync / fsync_parent_dir consumed by manifest.rs (D3) and
+// bloom_snapshot.rs (D4); see ARCHITECTURE §3 I10. Submodules import directly
+// via `crate::platform::...`, so no crate-level re-export is needed.
 mod platform;
-// Consumed by manifest.rs (D3) and bloom_snapshot.rs (D4); see ARCHITECTURE §3 I10.
-#[allow(unused_imports)]
-pub(crate) use platform::{durable_sync, fsync_parent_dir};
+
+mod manifest;
+pub use manifest::Manifest;

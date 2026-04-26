@@ -6,7 +6,6 @@ use std::os::fd::AsRawFd;
 /// macOS: F_FULLFSYNC (plain fsync is a no-op on Apple SSDs).
 /// Linux: fdatasync.
 /// Other Unix: best-effort fsync.
-#[allow(dead_code)] // Consumed by manifest.rs (D3) and bloom_snapshot.rs (D4).
 pub fn durable_sync(file: &File) -> io::Result<()> {
     let fd = file.as_raw_fd();
     #[cfg(target_os = "macos")]
@@ -34,7 +33,6 @@ pub fn durable_sync(file: &File) -> io::Result<()> {
 
 /// Open a directory and full-sync it. Used after rename(2) and after
 /// creating files to make the directory entry durable.
-#[allow(dead_code)] // Consumed by manifest.rs (D3) and bloom_snapshot.rs (D4).
 pub fn fsync_parent_dir(dir: &std::path::Path) -> io::Result<()> {
     let f = File::open(dir)?;
     durable_sync(&f)
