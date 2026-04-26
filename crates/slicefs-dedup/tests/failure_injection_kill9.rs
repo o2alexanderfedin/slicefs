@@ -142,3 +142,98 @@ fn t1_kill9_post_cas_pre_commit_yields_no_fp() {
         r
     );
 }
+
+const CHILD_MARK_T2: &str = "DEDUP_FI_T2_CHILD";
+const TEST_NAME_T2: &str = "t2_kill9_mid_commit_recovers_without_fp";
+
+/// Child entrypoint for T2. Runs a tight insert loop to maximize
+/// the probability of SIGKILL landing during redb's COW root swap.
+fn child_main_t2() -> ! {
+    use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
+    use slicefs_traits::{ChunkHash, DedupIndex};
+
+    let cas = std::path::PathBuf::from(env::var("CAS").expect("CAS env var"));
+    std::fs::create_dir_all(&cas).expect("create cas root");
+
+    let cfg = DedupIndexConfig::builder(&cas).build();
+    let idx = RedbDedupIndex::create(cfg).expect("create index");
+
+    // Tight insert loop — many in-flight write txns so the SIGKILL
+    // is statistically very likely to land inside redb's COW root swap.
+    for i in 0u64.. {
+        let mut h = [0u8; 28];
+        h[..8].copy_from_slice(&i.to_le_bytes());
+        // Mock the I2 caller order: write CAS block first, then insert.
+        let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
+        let shard = cas.join(&hex[..2]);
+        let _ = std::fs::create_dir_all(&shard);
+        let _ = std::fs::write(shard.join(&hex[2..]), b"x");
+        let _ = idx.insert(&ChunkHash::from_bytes(h.to_vec()));
+    }
+    unreachable!()
+}
+
+#[test]
+fn t2_kill9_mid_commit_recovers_without_fp() {
+    // Child branch: detected by the CHILD_MARK_T2 env var. Diverges
+    // before any test assertions run.
+    if env::var(CHILD_MARK_T2).is_ok() {
+        child_main_t2();
+    }
+
+    let td = tempfile::tempdir().expect("tempdir");
+    let cas = td.path().join("cas");
+    std::fs::create_dir_all(&cas).expect("create cas");
+
+    // Spawn the same test binary, filtered to just this test, with
+    // CHILD_MARK_T2 set so it dives into child_main_t2 before reaching
+    // the parent assertions.
+    let mut child = Command::new(env::current_exe().expect("current_exe"))
+        .arg("--exact")
+        .arg(TEST_NAME_T2)
+        .arg("--nocapture")
+        .env(CHILD_MARK_T2, "1")
+        .env("CAS", &cas)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn child");
+
+    // Let it accumulate at least one in-flight commit. 150 ms gives
+    // the tight loop ample time to have multiple batches in flight.
+    std::thread::sleep(Duration::from_millis(150));
+
+    // SIGKILL. child.kill() is non-blocking; child.wait() reaps.
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // Re-mount the index and verify NO false positive.
+    use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
+    use slicefs_traits::{ChunkHash, DedupIndex, DedupResult};
+
+    let cfg = DedupIndexConfig::builder(&cas).build();
+
+    // Critical assertion: redb must open at all (I7 — root CRC catches torn pages
+    // and the previous root remains valid via COW).
+    let idx = RedbDedupIndex::open(cfg).expect("redb must auto-recover from mid-commit kill");
+
+    // Sample 1000 hashes the child *could* have inserted.
+    // For any Present result, the corresponding CAS block MUST exist.
+    for i in 0u64..1000 {
+        let mut h = [0u8; 28];
+        h[..8].copy_from_slice(&i.to_le_bytes());
+        let r = idx
+            .lookup(&ChunkHash::from_bytes(h.to_vec()))
+            .expect("lookup after kill");
+
+        if matches!(r, DedupResult::Present) {
+            let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
+            let cas_path = cas.join(&hex[..2]).join(&hex[2..]);
+            assert!(
+                cas_path.exists(),
+                "I1 violated: index says Present but CAS block missing at {:?}",
+                cas_path
+            );
+        }
+    }
+}
