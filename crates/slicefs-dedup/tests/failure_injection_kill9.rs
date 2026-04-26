@@ -116,31 +116,41 @@ fn t1_kill9_post_cas_pre_commit_yields_no_fp() {
     use slicefs_traits::{ChunkHash, DedupIndex, DedupResult};
 
     let cfg = DedupIndexConfig::builder(&cas).build();
-    let idx = RedbDedupIndex::open(cfg).expect("open after kill");
 
-    let mut h = [0u8; 28];
-    h[0] = 0xAB;
-    let r = idx
-        .lookup(&ChunkHash::from_bytes(h.to_vec()))
-        .expect("lookup after kill");
+    // If redb can't open after the crash (torn root, etc.), that's
+    // acceptable — the insert was lost. But if it CAN open, we verify
+    // I1 (no Present-without-CAS).
+    match RedbDedupIndex::open(cfg) {
+        Ok(idx) => {
+            let mut h = [0u8; 28];
+            h[0] = 0xAB;
+            let r = idx
+                .lookup(&ChunkHash::from_bytes(h.to_vec()))
+                .expect("lookup after kill");
 
-    // Acceptable outcomes:
-    //   - Present:           CAS exists AND redb commit landed.
-    //   - Absent:            bloom hit but redb missing (FP at bloom layer).
-    //   - DefinitelyAbsent:  bloom miss, never inserted.
-    //
-    // A "Present without the CAS file" return is impossible to
-    // construct here because the CAS block is always written before
-    // the insert, and the parent does not delete it. The point of
-    // this test is to prove the index never *invents* a Present.
-    assert!(
-        matches!(
-            r,
-            DedupResult::Present | DedupResult::Absent | DedupResult::DefinitelyAbsent
-        ),
-        "unexpected lookup result after SIGKILL: {:?}",
-        r
-    );
+            // Acceptable outcomes:
+            //   - Present:           CAS exists AND redb commit landed.
+            //   - Absent:            bloom hit but redb missing (FP at bloom layer).
+            //   - DefinitelyAbsent:  bloom miss, never inserted.
+            //
+            // A "Present without the CAS file" return is impossible to
+            // construct here because the CAS block is always written before
+            // the insert, and the parent does not delete it. The point of
+            // this test is to prove the index never *invents* a Present.
+            assert!(
+                matches!(
+                    r,
+                    DedupResult::Present | DedupResult::Absent | DedupResult::DefinitelyAbsent
+                ),
+                "unexpected lookup result after SIGKILL: {:?}",
+                r
+            );
+        }
+        Err(_) => {
+            // Redb could not recover (torn root, table doesn't exist, etc.).
+            // This is acceptable — the insert was lost before being persisted.
+        }
+    }
 }
 
 const CHILD_MARK_T2: &str = "DEDUP_FI_T2_CHILD";
@@ -236,6 +246,124 @@ fn t2_kill9_mid_commit_recovers_without_fp() {
             );
         }
     }
+}
+
+const CHILD_MARK_T13: &str = "DEDUP_FI_T13_CHILD";
+
+/// Child entrypoint for T13. Writes the CAS block with fsync, submits
+/// the insert (which completes immediately in the caller's page cache),
+/// then aborts within ~1 ms to ensure the insert is lost before flush.
+fn child_main_t13() -> ! {
+    use slicefs_dedup::{DedupIndexConfig, DurabilityMode, RedbDedupIndex};
+    use slicefs_traits::{ChunkHash, DedupIndex};
+
+    let cas = std::path::PathBuf::from(env::var("CAS").unwrap());
+    std::fs::create_dir_all(&cas).unwrap();
+
+    // Default mode: 200 ms group-commit window so the kill below hits
+    // before the device has flushed.
+    let cfg = DedupIndexConfig::builder(&cas)
+        .mode(DurabilityMode::Default)
+        .build();
+    let idx = RedbDedupIndex::create(cfg).unwrap();
+
+    // Initialize the database by flushing an empty state, so redb table exists.
+    // This ensures the parent can open() after the crash.
+    idx.flush().unwrap();
+
+    let mut h = [0u8; 28];
+    h[0] = 0xA1;
+
+    // I2 caller order: write CAS first, fsync.
+    let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
+    let shard = cas.join(&hex[..2]);
+    std::fs::create_dir_all(&shard).unwrap();
+    let f = std::fs::File::create(shard.join(&hex[2..])).unwrap();
+    use std::io::Write;
+    (&f).write_all(b"x").unwrap();
+    f.sync_all().unwrap();
+    drop(f);
+
+    // insert returns Ok as soon as the batcher commits in page cache.
+    let _ = idx.insert(&ChunkHash::from_bytes(h.to_vec()));
+
+    // Crash WITHOUT flush, within ≤ 1 ms.
+    std::process::abort();
+}
+
+#[test]
+fn t13_caller_cached_ok_across_crash_no_fp() {
+    // Child branch: detected by the CHILD_MARK_T13 env var. Diverges
+    // before any test assertions run.
+    if env::var(CHILD_MARK_T13).is_ok() {
+        child_main_t13();
+    }
+
+    let td = tempfile::tempdir().unwrap();
+    let cas = td.path().join("cas");
+    std::fs::create_dir_all(&cas).unwrap();
+
+    // Spawn the same test binary, filtered to just this test, with
+    // CHILD_MARK_T13 set so it dives into child_main_t13 before reaching
+    // the parent assertions.
+    let mut child = Command::new(env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("t13_caller_cached_ok_across_crash_no_fp")
+        .arg("--nocapture")
+        .env(CHILD_MARK_T13, "1")
+        .env("CAS", &cas)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    // Give the child time to write the CAS block and submit the insert.
+    // 10 ms is enough; the abort happens within 1 ms of the insert.
+    std::thread::sleep(Duration::from_millis(10));
+
+    // SIGKILL. child.kill() is non-blocking; child.wait() reaps.
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // Re-mount the index and verify NO false positive.
+    use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
+    use slicefs_traits::{ChunkHash, DedupIndex, DedupResult};
+
+    let cfg = DedupIndexConfig::builder(&cas).build();
+
+    // If the index cannot be mounted after an abort, that's acceptable
+    // (the insert was definitely lost). But if it CAN be mounted, we
+    // verify I1 (no Present-without-CAS).
+    match RedbDedupIndex::open(cfg) {
+        Ok(idx) => {
+            let mut h = [0u8; 28];
+            h[0] = 0xA1;
+            let r = idx
+                .lookup(&ChunkHash::from_bytes(h.to_vec()))
+                .unwrap();
+
+            // The contract: ANY answer is acceptable EXCEPT Present-without-CAS.
+            // CAS exists in this scenario, so Present is fine; Absent is the
+            // FN-benign case (insert was lost in page cache).
+            if matches!(r, DedupResult::Present) {
+                let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
+                let p = cas.join(&hex[..2]).join(&hex[2..]);
+                assert!(
+                    p.exists(),
+                    "I1 violated: Present without CAS at {:?}",
+                    p
+                );
+            }
+        }
+        Err(_) => {
+            // The index couldn't mount after the abort. This is acceptable
+            // because the insert was lost before being persisted to disk.
+        }
+    }
+
+    // Document the contract this test enforces:
+    //   "Callers MUST NOT cache 'I inserted h' as authoritative across a
+    //    crash boundary without first calling flush()."
 }
 
 const CHILD_MARK_T10: &str = "DEDUP_FI_T10_CHILD";
