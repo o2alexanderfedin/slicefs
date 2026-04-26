@@ -36,6 +36,7 @@ Windows is deferred because `winfsp-rs` is GPL-3; native Projected FS or Dokan a
 │   ├── slicefs-traits/        # CAS trait contracts (ContentHasher, Chunker, BlockStore, DedupIndex)
 │   ├── cas-local/             # Local/test impls: Blake3 hasher, fixed chunker, disk + in-memory stores
 │   ├── slicefs-compression/   # Pluggable compressors: Zstd, LZ4, None
+│   ├── slicefs-dedup/         # Persistent on-disk DedupIndex (redb 4.x + bloom)
 │   ├── metadata/              # Inode / directory / xattr metadata layer
 │   ├── slicefs-cli/           # `slicefs` binary — mount, unmount, seed, gc, snapshot, stats, scrub
 │   └── data-id/               # [git submodule] blockset — upstream Merkle-CAS engine (Sergey Shandar)
