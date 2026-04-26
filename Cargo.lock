@@ -193,7 +193,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cas-local"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "fastbloom",
@@ -912,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "metadata"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blockset",
  "libc",
@@ -1603,7 +1603,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slicefs-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blockset",
  "clap",
@@ -1622,7 +1622,7 @@ dependencies = [
 
 [[package]]
 name = "slicefs-compression"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "lz4_flex",
  "slicefs-traits",
@@ -1632,7 +1632,7 @@ dependencies = [
 
 [[package]]
 name = "slicefs-dedup"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cas-local",
  "crc32c",
@@ -1656,14 +1656,14 @@ dependencies = [
 
 [[package]]
 name = "slicefs-dedup-fi-shim"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "slicefs-traits"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blockset",
  "thiserror 2.0.18",
