@@ -1,6 +1,6 @@
 [package]
 name = "slicefs-dedup"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Alexander Fedin <af@o2.services>", "Sergey Shandar"]
 license = "AGPL-3.0-or-later"

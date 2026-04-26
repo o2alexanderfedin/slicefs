@@ -1,6 +1,6 @@
 [package]
 name = "slicefs-dedup-fi-shim"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 description = "DYLD_INSERT_LIBRARIES shim for FI test #11 (no-op F_FULLFSYNC)"
