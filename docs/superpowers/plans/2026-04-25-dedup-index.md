@@ -220,27 +220,9 @@ proptest.workspace = true
 tempfile.workspace = true
 cas-local          = { path = "../cas-local" }
 criterion.workspace = true
-
-[[bench]]
-name = "seed_burst"
-harness = false
-
-[[bench]]
-name = "lookup"
-harness = false
-
-[[bench]]
-name = "steady_mixed"
-harness = false
-
-[[bench]]
-name = "commit_latency"
-harness = false
-
-[[bench]]
-name = "recovery_50m"
-harness = false
 ```
+
+**Note:** the `[[bench]]` declarations are added incrementally in tasks N1–N5 alongside each bench source file (one per task) to avoid stub files.
 
 - [ ] **Step 2: Create lib.rs**
 
@@ -3460,6 +3442,16 @@ criterion_group!(benches, seed_burst);
 criterion_main!(benches);
 ```
 
+- [ ] **Step 1b: Register the bench in `Cargo.toml`**
+
+Append to `crates/slicefs-dedup/Cargo.toml`:
+```toml
+
+[[bench]]
+name = "seed_burst"
+harness = false
+```
+
 - [ ] **Step 2: Run on the reference NVMe**
 
 Run: `cargo bench -p slicefs-dedup --bench seed_burst -- --quick`
@@ -3558,6 +3550,16 @@ criterion_group!(benches, lookup_warm, lookup_cold);
 criterion_main!(benches);
 ```
 
+- [ ] **Step 1b: Register the bench in `Cargo.toml`**
+
+Append to `crates/slicefs-dedup/Cargo.toml`:
+```toml
+
+[[bench]]
+name = "lookup"
+harness = false
+```
+
 - [ ] **Step 2: Run**
 
 Run: `cargo bench -p slicefs-dedup --bench lookup -- --quick`
@@ -3629,6 +3631,16 @@ criterion_group!(benches, steady_mixed);
 criterion_main!(benches);
 ```
 
+- [ ] **Step 1b: Register the bench in `Cargo.toml`**
+
+Append to `crates/slicefs-dedup/Cargo.toml`:
+```toml
+
+[[bench]]
+name = "steady_mixed"
+harness = false
+```
+
 - [ ] **Step 2: Run**
 
 Run: `cargo bench -p slicefs-dedup --bench steady_mixed -- --quick`
@@ -3688,6 +3700,16 @@ fn commit_latency(c: &mut Criterion) {
 
 criterion_group!(benches, commit_latency);
 criterion_main!(benches);
+```
+
+- [ ] **Step 1b: Register the bench in `Cargo.toml`**
+
+Append to `crates/slicefs-dedup/Cargo.toml`:
+```toml
+
+[[bench]]
+name = "commit_latency"
+harness = false
 ```
 
 - [ ] **Step 2: Run**
@@ -3763,6 +3785,16 @@ fn recovery_50m(c: &mut Criterion) {
 
 criterion_group!(benches, recovery_50m);
 criterion_main!(benches);
+```
+
+- [ ] **Step 1b: Register the bench in `Cargo.toml`**
+
+Append to `crates/slicefs-dedup/Cargo.toml`:
+```toml
+
+[[bench]]
+name = "recovery_50m"
+harness = false
 ```
 
 - [ ] **Step 2: Run with `DEDUP_BENCH_N=50000000`**
