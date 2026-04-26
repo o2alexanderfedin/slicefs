@@ -245,9 +245,23 @@ impl DedupIndex for RedbDedupIndex {
         Ok(DedupResult::Present)
     }
 
-    fn remove(&self, _hash: &ChunkHash) -> Result<(), CasError> {
-        // Filled in by Task H2.
-        unimplemented!("Task H2")
+    fn remove(&self, hash: &ChunkHash) -> Result<(), CasError> {
+        let h = Self::hash28(hash)?;
+        let mut txn = self.db.begin_write().map_err(|e| {
+            CasError::Index(format!("redb begin_write: {e}"))
+        })?;
+        let _ = txn.set_durability(match self.config.durability {
+            crate::config::DurabilityMode::Seed     => redb::Durability::None,
+            crate::config::DurabilityMode::Default  => redb::Durability::Immediate,
+            crate::config::DurabilityMode::Paranoid => redb::Durability::Immediate,
+        });
+        {
+            let mut t = txn.open_table(DEDUP_TABLE).map_err(|e| CasError::Index(format!("open: {e}")))?;
+            t.remove(&h).map_err(|e| CasError::Index(format!("remove: {e}")))?;
+        }
+        txn.commit().map_err(|e| CasError::Index(format!("commit: {e}")))?;
+        self.stats.removes_total.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -386,6 +400,23 @@ mod insert_tests {
         let r = idx.lookup(&h).unwrap();
         assert!(matches!(r, DedupResult::Present));
 
+        shutdown_then_drop(idx);
+    }
+
+    #[test]
+    fn remove_makes_lookup_absent_but_bloom_still_hits() {
+        let td = tempfile::tempdir().unwrap();
+        let cas = td.path().join("cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let cfg = DedupIndexConfig::builder(&cas).build();
+        let idx = RedbDedupIndex::create(cfg).unwrap();
+        let h = make_hash(9);
+        idx.insert(&h).unwrap();
+        idx.remove(&h).unwrap();
+        assert!(matches!(idx.lookup(&h).unwrap(), DedupResult::Absent),
+            "lookup must be Absent after remove (bloom hit + redb miss = false positive)");
+        assert!(idx.bloom_check(&h),
+            "bloom must NOT be updated on remove (I3 — drift is benign)");
         shutdown_then_drop(idx);
     }
 }
