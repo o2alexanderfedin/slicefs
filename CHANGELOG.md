@@ -1,6 +1,11 @@
 # Changelog
 
-## [v0.2.0] — 2026-04-26
+## [v2.0.0-dedup-index.1] — 2026-04-26
+
+> SliceFS v2.0 milestone alpha — first ship of the persistent on-disk
+> `DedupIndex`. Per-crate versions are `0.2.0`; this tag locates the
+> milestone in the v2.0 line. Subsequent v2.0 milestones use the same
+> pattern (e.g. `v2.0.0-streaming-writes.1`).
 
 ### Added
 - New `slicefs-dedup` crate: persistent on-disk `DedupIndex` backed by redb 4.x.
