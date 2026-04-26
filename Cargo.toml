@@ -6,6 +6,7 @@ members = [
     "crates/slicefs-cli",
     "crates/slicefs-compression",
     "crates/slicefs-dedup",
+    "crates/slicefs-dedup-fi-shim",
 ]
 resolver = "2"
 
