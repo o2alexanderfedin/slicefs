@@ -1,6 +1,6 @@
 /// Tests for the segment file format: writer, reader, crash-tolerance.
 use metadata::segment::{
-    SegmentEntry, SegmentReader, SegmentWriter, SEGMENT_MAGIC, SEGMENT_VERSION,
+    SEGMENT_MAGIC, SEGMENT_VERSION, SegmentEntry, SegmentReader, SegmentWriter,
 };
 use slicefs_traits::digest::Digest224;
 use tempfile::TempDir;
@@ -35,10 +35,7 @@ fn test_round_trip_root_update_entries() {
     assert_eq!(read_back.len(), 3);
     for (expected, actual) in entries.iter().zip(read_back.iter()) {
         match (expected, actual) {
-            (
-                SegmentEntry::RootUpdate { root: r1 },
-                SegmentEntry::RootUpdate { root: r2 },
-            ) => {
+            (SegmentEntry::RootUpdate { root: r1 }, SegmentEntry::RootUpdate { root: r2 }) => {
                 assert_eq!(r1, r2);
             }
             _ => panic!("entry type mismatch"),
@@ -55,7 +52,9 @@ fn test_round_trip_root_update() {
 
     {
         let mut writer = SegmentWriter::new(&path, 1).unwrap();
-        writer.write_entry(&SegmentEntry::RootUpdate { root }).unwrap();
+        writer
+            .write_entry(&SegmentEntry::RootUpdate { root })
+            .unwrap();
         writer.close().unwrap();
     }
 
@@ -79,13 +78,18 @@ fn test_truncated_record_is_skipped() {
 
     {
         let mut writer = SegmentWriter::new(&path, 2).unwrap();
-        writer.write_entry(&SegmentEntry::RootUpdate { root: make_key(1) }).unwrap();
+        writer
+            .write_entry(&SegmentEntry::RootUpdate { root: make_key(1) })
+            .unwrap();
         // Intentionally do NOT call close() — just drop; no EOF marker
     }
 
     // Append partial record header to simulate truncation
     {
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         // Write partial record: type=RootUpdate(0x02), partial len bytes
         file.write_all(&[0x02, 0x1C, 0x00, 0x00]).unwrap(); // type + partial len
     }
@@ -116,7 +120,8 @@ fn test_unknown_record_type_skipped() {
         // Unknown record type 0xFE with a 4-byte payload
         let payload: [u8; 4] = [0xAA, 0xBB, 0xCC, 0xDD];
         file.write_all(&[0xFE]).unwrap(); // type
-        file.write_all(&(payload.len() as u32).to_le_bytes()).unwrap(); // payload_len
+        file.write_all(&(payload.len() as u32).to_le_bytes())
+            .unwrap(); // payload_len
         file.write_all(&payload).unwrap();
 
         // Valid RootUpdate record after it: type(1) + payload_len(4) + root(28)
@@ -131,7 +136,11 @@ fn test_unknown_record_type_skipped() {
     let reader = SegmentReader::open(&path).unwrap();
     let entries: Vec<SegmentEntry> = reader.collect();
 
-    assert_eq!(entries.len(), 1, "should skip unknown type and read valid entry");
+    assert_eq!(
+        entries.len(),
+        1,
+        "should skip unknown type and read valid entry"
+    );
     match &entries[0] {
         SegmentEntry::RootUpdate { root } => assert_eq!(root, &make_key(7)),
         _ => panic!("expected RootUpdate"),
@@ -214,12 +223,12 @@ fn test_segment_header_magic_and_version() {
     file.read_exact(&mut magic).unwrap();
     file.read_exact(&mut version_bytes).unwrap();
 
-    assert_eq!(&magic, &[0x53, 0x4C, 0x53, 0x47], "magic bytes must be SLSG");
     assert_eq!(
-        u32::from_le_bytes(version_bytes),
-        1,
-        "version must be 1"
+        &magic,
+        &[0x53, 0x4C, 0x53, 0x47],
+        "magic bytes must be SLSG"
     );
+    assert_eq!(u32::from_le_bytes(version_bytes), 1, "version must be 1");
     assert_eq!(&magic, &SEGMENT_MAGIC);
     assert_eq!(u32::from_le_bytes(version_bytes), SEGMENT_VERSION);
 }

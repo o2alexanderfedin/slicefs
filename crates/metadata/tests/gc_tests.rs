@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use slicefs_traits::digest::Digest224;
 
-use metadata::gc::{collect_live_set, GarbageCollector};
+use metadata::gc::{GarbageCollector, collect_live_set};
 use metadata::segment::compaction::compact_segment;
 use metadata::segment::{SegmentEntry, SegmentReader, SegmentWriter};
 
@@ -43,7 +43,7 @@ fn test_collect_live_set_includes_all_descendants() {
 
     let live = collect_live_set(&mut io, &[root]);
     // Stub always returns empty — just verify it doesn't panic.
-    assert!(live.len() >= 0);
+    let _ = live.len();
 }
 
 /// collect_live_set stub: multiple roots — still returns empty.
@@ -97,7 +97,7 @@ fn test_unreachable_entry_not_in_live_set() {
 // ─── Task 1 tests: compact_segment ──────────────────────────────────────────
 
 fn make_root_key(v: u32) -> Digest224 {
-    [v, v+1, v+2, v+3, v+4, v+5, v+6]
+    [v, v + 1, v + 2, v + 3, v + 4, v + 5, v + 6]
 }
 
 /// compact_segment retains RootUpdate and SnapshotRecord entries.
@@ -113,13 +113,17 @@ fn test_compact_segment_retains_all_entries() {
 
     // Write segment with a RootUpdate and SnapshotRecord
     let mut writer = SegmentWriter::new(&seg_path, 1).unwrap();
-    writer.write_entry(&SegmentEntry::RootUpdate { root: root1 }).unwrap();
-    writer.write_entry(&SegmentEntry::SnapshotRecord {
-        version: 1,
-        root: root2,
-        created_at: 12345,
-        name: Some("snap1".to_string()),
-    }).unwrap();
+    writer
+        .write_entry(&SegmentEntry::RootUpdate { root: root1 })
+        .unwrap();
+    writer
+        .write_entry(&SegmentEntry::SnapshotRecord {
+            version: 1,
+            root: root2,
+            created_at: 12345,
+            name: Some("snap1".to_string()),
+        })
+        .unwrap();
     writer.close().unwrap();
 
     let out_dir = tmp.path().join("compacted");
@@ -144,7 +148,7 @@ fn test_compact_segment_empty_produces_empty_output() {
     let tmp = TempDir::new().unwrap();
     let seg_path = tmp.path().join("segment-001.seg");
 
-    let mut writer = SegmentWriter::new(&seg_path, 1).unwrap();
+    let writer = SegmentWriter::new(&seg_path, 1).unwrap();
     writer.close().unwrap();
 
     let out_dir = tmp.path().join("out");
@@ -171,7 +175,9 @@ fn test_compact_segment_crash_safety_atomic_rename() {
 
     let root = make_root_key(1);
     let mut writer = SegmentWriter::new(&seg_path, 1).unwrap();
-    writer.write_entry(&SegmentEntry::RootUpdate { root }).unwrap();
+    writer
+        .write_entry(&SegmentEntry::RootUpdate { root })
+        .unwrap();
     writer.close().unwrap();
 
     // Record original content
@@ -192,7 +198,10 @@ fn test_compact_segment_crash_safety_atomic_rename() {
     }
     // New segment must exist
     let out_path = out_dir.join("segment-002.seg");
-    assert!(out_path.exists(), "compacted segment must exist at output path");
+    assert!(
+        out_path.exists(),
+        "compacted segment must exist at output path"
+    );
 }
 
 // ─── Task 2 tests: Background GC thread ─────────────────────────────────────
@@ -200,7 +209,7 @@ fn test_compact_segment_crash_safety_atomic_rename() {
 #[cfg(test)]
 mod background_gc_tests {
     use super::*;
-    use metadata::gc::background::{spawn_background_gc, GcHandle};
+    use metadata::gc::background::{GcHandle, spawn_background_gc};
     use metadata::store::DictMetadataStore;
     use metadata::store_io::StoreIo;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -237,8 +246,8 @@ mod background_gc_tests {
     /// Background GC thread runs at least one cycle when threshold=0 and interval is short.
     #[test]
     fn test_background_gc_runs_cycle() {
-        use tempfile::TempDir;
         use std::sync::atomic::AtomicUsize;
+        use tempfile::TempDir;
 
         let tmp_gc = TempDir::new().unwrap();
         let (_tmp_store, store) = make_store();
@@ -311,8 +320,8 @@ fn test_gc_preserves_snapshot_blocks() {
 
     // Create a store, add a file, commit, take snapshot — all written to WAL.
     {
-        use std::sync::Mutex;
         use metadata::store_io::StoreIo;
+        use std::sync::Mutex;
         let store_io_dir = TempDir::new().unwrap();
         let io = std::sync::Arc::new(Mutex::new(StoreIo::new(store_io_dir.path())));
         let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
@@ -325,7 +334,9 @@ fn test_gc_preserves_snapshot_blocks() {
         meta.commit().unwrap();
 
         // Take snapshot — writes SnapshotRecord to WAL.
-        let snap = meta.create_snapshot(Some("before-delete".to_string())).unwrap();
+        let snap = meta
+            .create_snapshot(Some("before-delete".to_string()))
+            .unwrap();
         assert_eq!(snap.version, 1);
 
         meta.shutdown_wal().unwrap();
@@ -333,7 +344,10 @@ fn test_gc_preserves_snapshot_blocks() {
 
     // Reload from segments — snapshot must survive.
     let (_root_opt, snapshots) = load_store_from_segments(&segs_dir).unwrap();
-    assert!(!snapshots.is_empty(), "snapshot must survive segment replay");
+    assert!(
+        !snapshots.is_empty(),
+        "snapshot must survive segment replay"
+    );
     assert_eq!(snapshots[0].name.as_deref(), Some("before-delete"));
     assert_eq!(snapshots[0].version, 1);
 }
@@ -354,8 +368,8 @@ fn test_snapshot_roots_includes_all_anchors() {
 
     let store_io_dir = TempDir::new().unwrap();
     let io = {
-        use std::sync::{Arc, Mutex};
         use metadata::store_io::StoreIo;
+        use std::sync::{Arc, Mutex};
         Arc::new(Mutex::new(StoreIo::new(store_io_dir.path())))
     };
     let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
@@ -380,7 +394,7 @@ fn test_snapshot_roots_includes_all_anchors() {
         "snapshot root must be in snapshot_roots()"
     );
     assert!(
-        roots_after.len() >= 1,
+        !roots_after.is_empty(),
         "must have at least one root after snapshot"
     );
 

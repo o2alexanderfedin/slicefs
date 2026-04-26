@@ -101,12 +101,14 @@ pub fn run_stats(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
         return Err(format!(
             "legacy store format detected at {}. Re-seed required: slicefs seed <store> <source>",
             store_path.display()
-        ).into());
+        )
+        .into());
     } else if !store_path.join("segments").is_dir() {
         return Err(format!(
             "store not found at {}: no segments/ directory",
             store_path.display()
-        ).into());
+        )
+        .into());
     }
 
     let segs_dir = store_path.join("segments");
@@ -142,7 +144,11 @@ pub fn run_stats(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
         (logical, refcount_dist)
     } else {
         // No committed root — store is fresh or empty.
-        let dist = RefcountDist { unique: 0, shared_2x: 0, shared_3plus: 0 };
+        let dist = RefcountDist {
+            unique: 0,
+            shared_2x: 0,
+            shared_3plus: 0,
+        };
         (0u64, dist)
     };
 
@@ -205,12 +211,21 @@ fn print_index_block_if_present(store_path: &Path) {
             println!("  inserts_total            : {}", s.inserts_total);
             println!("  lookups_total            : {}", s.lookups_total);
             println!("  bloom_hits_total         : {}", s.bloom_hits_total);
-            println!("  bloom_false_positives    : {}", s.bloom_false_positives_total);
+            println!(
+                "  bloom_false_positives    : {}",
+                s.bloom_false_positives_total
+            );
             println!("  commits_total            : {}", s.commits_total);
             println!("  commit_failures_total    : {}", s.commit_failures_total);
             println!("  removes_total            : {}", s.removes_total);
-            println!("  verify_on_present_hits   : {}", s.verify_on_present_hits_total);
-            println!("  bloom_snapshot_failures  : {}", s.bloom_snapshot_failures_total);
+            println!(
+                "  verify_on_present_hits   : {}",
+                s.verify_on_present_hits_total
+            );
+            println!(
+                "  bloom_snapshot_failures  : {}",
+                s.bloom_snapshot_failures_total
+            );
             println!("  high_water_mark          : {}", s.hwm);
             println!("  redb_free_bytes          : {}", s.redb_free_bytes);
         }
@@ -240,12 +255,18 @@ fn print_human_stats(stats: &StoreStats) {
     println!("SliceFS Store Statistics");
     println!("========================");
     println!("Logical bytes    : {}", format_bytes(stats.logical_bytes));
-    println!("CAS bytes        : {} (vt0/ CAS batch files)", format_bytes(stats.physical_bytes));
+    println!(
+        "CAS bytes        : {} (vt0/ CAS batch files)",
+        format_bytes(stats.physical_bytes)
+    );
     println!("Host disk used   : {}", format_bytes(stats.host_disk_bytes));
     println!("Dedup ratio      : {:.2}x", stats.dedup_ratio);
     println!("Snapshot count   : {}", stats.snapshot_count);
     println!("Compressor       : {}", stats.compressor);
-    println!("Mounted          : {}", if stats.mounted { "yes" } else { "no" });
+    println!(
+        "Mounted          : {}",
+        if stats.mounted { "yes" } else { "no" }
+    );
 
     if !stats.snapshots.is_empty() {
         println!();
@@ -253,8 +274,10 @@ fn print_human_stats(stats: &StoreStats) {
         println!("---------");
         for snap in &stats.snapshots {
             let name = snap.name.as_deref().unwrap_or("<unnamed>");
-            println!("  v{}: {} (created {})",
-                snap.version, name, snap.created_at);
+            println!(
+                "  v{}: {} (created {})",
+                snap.version, name, snap.created_at
+            );
         }
     }
 }
@@ -285,8 +308,8 @@ mod tests {
     use metadata::store_io::StoreIo;
     use metadata::wal::WalConfig;
     use slicefs_traits::metadata::{InodeMeta, MetadataStore};
-    use tempfile::TempDir;
     use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
 
     const S_IFREG: u32 = 0o100_000;
 
@@ -320,7 +343,11 @@ mod tests {
         let store = make_empty_store();
         let result = run_stats(store.path(), false);
         // Empty store (no segments) should succeed with zero stats.
-        assert!(result.is_ok(), "stats on empty store should not error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "stats on empty store should not error: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -328,7 +355,11 @@ mod tests {
         let store = make_empty_store();
         // Should produce valid JSON without panicking.
         let result = run_stats(store.path(), true);
-        assert!(result.is_ok(), "stats --json on empty store should not error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "stats --json on empty store should not error: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -350,7 +381,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_segment_store(&dir);
         let result = run_stats(dir.path(), false);
-        assert!(result.is_ok(), "stats on segment store should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "stats on segment store should succeed: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -403,8 +438,16 @@ mod tests {
     #[test]
     fn test_format_bytes_1023_bytes() {
         let s = format_bytes(1023);
-        assert!(s.contains(" B"), "1023 bytes should display as bytes, got '{}'", s);
-        assert!(!s.contains("KiB"), "1023 bytes should not display as KiB, got '{}'", s);
+        assert!(
+            s.contains(" B"),
+            "1023 bytes should display as bytes, got '{}'",
+            s
+        );
+        assert!(
+            !s.contains("KiB"),
+            "1023 bytes should not display as KiB, got '{}'",
+            s
+        );
     }
 
     // ── build_snapshot_stats ─────────────────────────────────────────────────
@@ -412,7 +455,10 @@ mod tests {
     #[test]
     fn test_build_snapshot_stats_empty() {
         let result = build_snapshot_stats(&[]);
-        assert!(result.is_empty(), "empty snapshots should produce empty stats");
+        assert!(
+            result.is_empty(),
+            "empty snapshots should produce empty stats"
+        );
     }
 
     #[test]
@@ -443,7 +489,10 @@ mod tests {
         };
         let stats = build_snapshot_stats(&[snap]);
         assert_eq!(stats.len(), 1);
-        assert!(stats[0].name.is_none(), "unnamed snapshot should have None name");
+        assert!(
+            stats[0].name.is_none(),
+            "unnamed snapshot should have None name"
+        );
     }
 
     // ── mounted store path ───────────────────────────────────────────────────
@@ -457,7 +506,11 @@ mod tests {
 
         // stats should still work on a mounted store (read-only scan of segments).
         let result = run_stats(dir.path(), false);
-        assert!(result.is_ok(), "stats on mounted store should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "stats on mounted store should succeed: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -467,7 +520,11 @@ mod tests {
         std::fs::write(dir.path().join("mount.lock"), b"locked").unwrap();
 
         let result = run_stats(dir.path(), true);
-        assert!(result.is_ok(), "stats --json on mounted store should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "stats --json on mounted store should succeed: {:?}",
+            result
+        );
     }
 
     // ── StoreStats JSON serialization ────────────────────────────────────────
@@ -481,15 +538,31 @@ mod tests {
             dedup_ratio: 2.0,
             snapshot_count: 3,
             compressor: "none (v3 raw)".to_string(),
-            refcount_distribution: RefcountDist { unique: 10, shared_2x: 5, shared_3plus: 2 },
+            refcount_distribution: RefcountDist {
+                unique: 10,
+                shared_2x: 5,
+                shared_3plus: 2,
+            },
             snapshots: vec![],
             mounted: false,
         };
         let json = serde_json::to_string(&stats).expect("StoreStats should serialize to JSON");
-        assert!(json.contains("logical_bytes"), "JSON should contain logical_bytes");
-        assert!(json.contains("physical_bytes"), "JSON should contain physical_bytes");
-        assert!(json.contains("dedup_ratio"), "JSON should contain dedup_ratio");
-        assert!(json.contains("snapshot_count"), "JSON should contain snapshot_count");
+        assert!(
+            json.contains("logical_bytes"),
+            "JSON should contain logical_bytes"
+        );
+        assert!(
+            json.contains("physical_bytes"),
+            "JSON should contain physical_bytes"
+        );
+        assert!(
+            json.contains("dedup_ratio"),
+            "JSON should contain dedup_ratio"
+        );
+        assert!(
+            json.contains("snapshot_count"),
+            "JSON should contain snapshot_count"
+        );
     }
 
     // ── segment store json output ────────────────────────────────────────────
@@ -499,6 +572,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_segment_store(&dir);
         let result = run_stats(dir.path(), true);
-        assert!(result.is_ok(), "stats --json on segment store should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "stats --json on segment store should succeed: {:?}",
+            result
+        );
     }
 }

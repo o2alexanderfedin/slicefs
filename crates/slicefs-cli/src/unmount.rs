@@ -9,6 +9,10 @@
 //!
 //! Returns `Ok(())` on successful unmount, `Err` with actionable message otherwise.
 
+// `cargo build --lib` flags these as dead because the only non-test caller is the
+// `slicefs` binary in main.rs, which is a separate compilation target.
+#![allow(dead_code)]
+
 use std::path::Path;
 use std::process::Command;
 use std::thread;
@@ -71,10 +75,10 @@ fn try_soft_unmount(mountpoint: &Path) -> bool {
             cmd.arg(arg);
         }
         cmd.arg(mp.as_ref());
-        if let Ok(status) = cmd.status() {
-            if status.success() {
-                return true;
-            }
+        if let Ok(status) = cmd.status()
+            && status.success()
+        {
+            return true;
         }
     }
     false
@@ -95,12 +99,12 @@ pub(crate) fn kill_processes_at_mountpoint(mountpoint: &Path) {
         for line in stdout.lines().skip(1) {
             // lsof output: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
             let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() >= 2 {
-                if let Ok(pid) = fields[1].parse::<i32>() {
-                    // SAFETY: kill is a safe POSIX syscall when given a valid pid.
-                    unsafe {
-                        libc::kill(pid, libc::SIGTERM);
-                    }
+            if fields.len() >= 2
+                && let Ok(pid) = fields[1].parse::<i32>()
+            {
+                // SAFETY: kill is a safe POSIX syscall when given a valid pid.
+                unsafe {
+                    libc::kill(pid, libc::SIGTERM);
                 }
             }
         }
@@ -127,16 +131,15 @@ pub(crate) fn try_force_unmount(mountpoint: &Path) -> bool {
         if let Ok(status) = Command::new("diskutil")
             .args(["unmount", "force", mp.as_ref()])
             .status()
+            && status.success()
         {
-            if status.success() {
-                return true;
-            }
+            return true;
         }
         // Fallback: umount -f.
-        if let Ok(status) = Command::new("umount").args(["-f", mp.as_ref()]).status() {
-            if status.success() {
-                return true;
-            }
+        if let Ok(status) = Command::new("umount").args(["-f", mp.as_ref()]).status()
+            && status.success()
+        {
+            return true;
         }
     }
 
@@ -154,10 +157,10 @@ pub(crate) fn try_force_unmount(mountpoint: &Path) -> bool {
                 cmd.arg(arg);
             }
             cmd.arg(mp.as_ref());
-            if let Ok(status) = cmd.status() {
-                if status.success() {
-                    return true;
-                }
+            if let Ok(status) = cmd.status()
+                && status.success()
+            {
+                return true;
             }
         }
     }
@@ -207,7 +210,10 @@ mod tests {
         // Call clean_mount_lock directly (the integration with run_unmount
         // can't be tested without a real mountpoint).
         clean_mount_lock(Some(dir.path()));
-        assert!(!lock_path.exists(), "mount.lock should be removed after cleanup");
+        assert!(
+            !lock_path.exists(),
+            "mount.lock should be removed after cleanup"
+        );
     }
 
     #[test]
@@ -258,10 +264,7 @@ mod tests {
         // run_unmount with a store path that has no mount.lock should not panic.
         let dir = TempDir::new().unwrap();
         // No mount.lock in dir.
-        let result = run_unmount(
-            Path::new("/nonexistent/not_a_mountpoint"),
-            Some(dir.path()),
-        );
+        let result = run_unmount(Path::new("/nonexistent/not_a_mountpoint"), Some(dir.path()));
         // Either Ok or Err is valid (platform-dependent), just no panic.
         let _ = result;
     }
@@ -275,7 +278,8 @@ mod tests {
             let msg = e.to_string();
             assert!(
                 msg.contains("nonexistent") || msg.contains("Failed"),
-                "error message should reference the path or 'Failed', got: {}", msg
+                "error message should reference the path or 'Failed', got: {}",
+                msg
             );
         }
         // If Ok (some systems may accept umount on nonexistent paths), that is also acceptable.

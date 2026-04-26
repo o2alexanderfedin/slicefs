@@ -8,6 +8,12 @@ members = [
     "crates/slicefs-dedup",
     "crates/slicefs-dedup-fi-shim",
 ]
+# `blockset` lives under crates/data-id as an upstream submodule. Excluding it
+# keeps `cargo clippy --workspace` and `cargo test --workspace` from running
+# upstream lints/tests we cannot edit. Path dependencies still resolve.
+exclude = [
+    "crates/data-id/blockset",
+]
 resolver = "2"
 
 [workspace.dependencies]

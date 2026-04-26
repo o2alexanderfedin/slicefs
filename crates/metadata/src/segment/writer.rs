@@ -4,7 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
-use super::{SegmentEntry, SegmentHeader, RecordType};
+use super::{RecordType, SegmentEntry, SegmentHeader};
 
 /// Writes records to a segment file in append-only fashion.
 ///

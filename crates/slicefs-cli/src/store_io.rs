@@ -1,8 +1,10 @@
 //! `StoreIo` re-export — delegates to `metadata::store_io`.
 //!
-//! All CLI code continues importing `StoreIo` from `crate::store_io::StoreIo`.
-//! The actual implementation lives in the metadata crate to be shared with
-//! `DictMetadataStore`.
+//! Kept as a thin re-export module for historical reasons; current code imports
+//! directly from `metadata::store_io::*`. Marked `#[allow(unused_imports)]` so
+//! the re-exports remain available without tripping clippy.
 
-pub use metadata::store_io::StoreIo;
+#[allow(unused_imports)]
 pub use metadata::store_io::EmptyArgs;
+#[allow(unused_imports)]
+pub use metadata::store_io::StoreIo;

@@ -5,7 +5,6 @@
 /// - `run_gc` on a clean store (no dead entries) reports 0 removed
 /// - `run_gc` on a locked store (mount.lock present) refuses to run
 /// - CLI parses `gc` subcommand with store path argument
-
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -76,7 +75,11 @@ fn test_run_gc_clean_store_reports_zero_removed() {
     make_seeded_store(&store_dir);
 
     let result = run_gc(store_dir.path());
-    assert!(result.is_ok(), "run_gc should succeed on clean store: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "run_gc should succeed on clean store: {:?}",
+        result.err()
+    );
 }
 
 // ── Test 2: run_gc on locked store refuses to run ────────────────────────────
@@ -110,18 +113,23 @@ fn test_run_gc_with_dead_entries_compacts() {
     make_store_with_dead_entries(&store_dir);
 
     let result = run_gc(store_dir.path());
-    assert!(result.is_ok(), "run_gc should succeed on store with dead entries: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "run_gc should succeed on store with dead entries: {:?}",
+        result.err()
+    );
 
     // After GC, store should still be loadable and the live file still reachable
     let segs_dir = store_dir.path().join("segments");
-    let (root_opt, _snapshots) = load_store_from_segments(&segs_dir)
-        .expect("segments should be loadable after GC");
+    let (root_opt, _snapshots) =
+        load_store_from_segments(&segs_dir).expect("segments should be loadable after GC");
     let root = root_opt.expect("root should be present after GC");
 
     let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
     let rebuilt = DictMetadataStore::load_from_root(io, &root)
         .expect("store should be reconstructible after GC");
-    let ino = rebuilt.lookup(1, "live.txt")
+    let ino = rebuilt
+        .lookup(1, "live.txt")
         .expect("live.txt should survive GC");
     assert!(ino > 1, "live.txt inode should be valid");
 }
@@ -131,8 +139,8 @@ fn test_run_gc_with_dead_entries_compacts() {
 /// `slicefs gc /path/to/store` should parse correctly.
 #[test]
 fn test_cli_parses_gc_subcommand() {
-    let cli = Cli::try_parse_from(["slicefs", "gc", "/data/store"])
-        .expect("gc subcommand should parse");
+    let cli =
+        Cli::try_parse_from(["slicefs", "gc", "/data/store"]).expect("gc subcommand should parse");
 
     match cli.command {
         Cmd::Gc { store } => {

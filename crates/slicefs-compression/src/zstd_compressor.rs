@@ -40,11 +40,7 @@ impl Compressor for ZstdCompressor {
         }
     }
 
-    fn decompress(
-        &self,
-        algorithm: AlgorithmId,
-        input: &[u8],
-    ) -> Result<Vec<u8>, CompressorError> {
+    fn decompress(&self, algorithm: AlgorithmId, input: &[u8]) -> Result<Vec<u8>, CompressorError> {
         match algorithm {
             AlgorithmId::Zstd => {
                 let mut buf = Vec::new();

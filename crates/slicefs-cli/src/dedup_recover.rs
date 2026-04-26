@@ -88,7 +88,11 @@ mod tests {
         let baks: Vec<_> = std::fs::read_dir(&dedup)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with("index.redb.bak."))
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("index.redb.bak.")
+            })
             .collect();
         assert!(baks.is_empty(), "no backup expected on first recover");
     }

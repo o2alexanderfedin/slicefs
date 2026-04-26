@@ -14,26 +14,32 @@
 //!   7. `refcounts`
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 
+use blockset::{FileStorageAdd, State, Tree, file_storage_get};
 use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, MetadataStore};
-use blockset::{State, Tree, FileStorageAdd, file_storage_get};
 
 use crate::snapshot::SnapshotEntry;
 use crate::store_io::StoreIo;
 use crate::wal::{WalEntry, WalError, WalStrategy};
 
+use crate::directory::{
+    add_dir_entry, create_dir_entries, list_dir_entries, lookup_dir_entry, remove_dir_entry,
+};
 use crate::inode::{intern_inode, load_inode};
 use crate::inode_map::{InodeMap, intern_inode_map, load_inode_map};
-use crate::directory::{create_dir_entries, add_dir_entry, remove_dir_entry,
-                       lookup_dir_entry, list_dir_entries};
 use crate::manifest::{intern_manifest, load_manifest};
-use crate::xattr::{intern_xattrs, load_xattrs, set_xattr_entry, get_xattr_entry,
-                   list_xattr_names, remove_xattr_entry};
+use crate::xattr::{
+    get_xattr_entry, intern_xattrs, list_xattr_names, load_xattrs, remove_xattr_entry,
+    set_xattr_entry,
+};
 
 // S_IFDIR bit mask (POSIX directory type)
-const S_IFDIR: u32 = 0o0040_000;
+const S_IFDIR: u32 = 0o040_000;
 
 /// Concrete `MetadataStore` backed by file-based FileStorage (blockset Io).
 ///
@@ -308,7 +314,12 @@ impl DictMetadataStore {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let entry = SnapshotEntry { version, name: name.clone(), root, created_at };
+        let entry = SnapshotEntry {
+            version,
+            name: name.clone(),
+            root,
+            created_at,
+        };
 
         // Write SnapshotRecord to WAL (same path as commit writes RootUpdate).
         self.log_wal_entry(&WalEntry::Snapshot {
@@ -347,12 +358,20 @@ impl DictMetadataStore {
     /// Returns the matching entry, or `None`.
     pub fn find_snapshot(&self, reference: &str) -> Option<SnapshotEntry> {
         if let Ok(version) = reference.parse::<u64>() {
-            self.snapshots_by_version.lock().unwrap().get(&version).cloned()
+            self.snapshots_by_version
+                .lock()
+                .unwrap()
+                .get(&version)
+                .cloned()
         } else {
             let by_name = self.snapshots_by_name.lock().unwrap();
             let version = *by_name.get(reference)?;
             drop(by_name);
-            self.snapshots_by_version.lock().unwrap().get(&version).cloned()
+            self.snapshots_by_version
+                .lock()
+                .unwrap()
+                .get(&version)
+                .cloned()
         }
     }
 
@@ -403,7 +422,8 @@ impl MetadataStore for DictMetadataStore {
 
         // Track logical bytes: add this inode's size to running total.
         if full_meta.size > 0 {
-            self.logical_bytes.fetch_add(full_meta.size, Ordering::Relaxed);
+            self.logical_bytes
+                .fetch_add(full_meta.size, Ordering::Relaxed);
         }
 
         // Track inode count.
@@ -414,7 +434,10 @@ impl MetadataStore for DictMetadataStore {
 
     fn get_inode(&self, ino: InodeId) -> Result<InodeMeta, MetaError> {
         let inode_data = self.inode_data.lock().unwrap();
-        let digest = inode_data.get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
+        let digest = inode_data
+            .get(&ino)
+            .copied()
+            .ok_or(MetaError::NotFound(ino))?;
         drop(inode_data);
 
         let mut io_guard = self.io.lock().unwrap();
@@ -427,10 +450,15 @@ impl MetadataStore for DictMetadataStore {
         // Capture old size before replacing the digest, so we can adjust logical_bytes.
         let old_size = {
             let inode_data = self.inode_data.lock().unwrap();
-            let old_digest = inode_data.get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
+            let old_digest = inode_data
+                .get(&ino)
+                .copied()
+                .ok_or(MetaError::NotFound(ino))?;
             drop(inode_data);
             let mut io_guard = self.io.lock().unwrap();
-            load_inode(&mut *io_guard, &old_digest).map(|m| m.size).unwrap_or(0)
+            load_inode(&mut *io_guard, &old_digest)
+                .map(|m| m.size)
+                .unwrap_or(0)
         };
 
         let new_digest = {
@@ -445,11 +473,14 @@ impl MetadataStore for DictMetadataStore {
         // Adjust logical_bytes by the size delta (saturating arithmetic prevents underflow).
         let new_size = meta.size;
         if new_size > old_size {
-            self.logical_bytes.fetch_add(new_size - old_size, Ordering::Relaxed);
+            self.logical_bytes
+                .fetch_add(new_size - old_size, Ordering::Relaxed);
         } else if old_size > new_size {
-            self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                Some(cur.saturating_sub(old_size - new_size))
-            }).ok();
+            self.logical_bytes
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                    Some(cur.saturating_sub(old_size - new_size))
+                })
+                .ok();
         }
 
         Ok(())
@@ -462,7 +493,9 @@ impl MetadataStore for DictMetadataStore {
             if let Some(digest) = inode_data.get(&ino).copied() {
                 drop(inode_data);
                 let mut io_guard = self.io.lock().unwrap();
-                load_inode(&mut *io_guard, &digest).map(|m| m.size).unwrap_or(0)
+                load_inode(&mut *io_guard, &digest)
+                    .map(|m| m.size)
+                    .unwrap_or(0)
             } else {
                 return Err(MetaError::NotFound(ino));
             }
@@ -473,15 +506,19 @@ impl MetadataStore for DictMetadataStore {
 
         // Decrement logical_bytes by the deleted inode's size.
         if size > 0 {
-            self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                Some(cur.saturating_sub(size))
-            }).ok();
+            self.logical_bytes
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                    Some(cur.saturating_sub(size))
+                })
+                .ok();
         }
 
         // Decrement inode count (saturating to avoid underflow).
-        self.inode_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
-            Some(c.saturating_sub(1))
-        }).ok();
+        self.inode_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+                Some(c.saturating_sub(1))
+            })
+            .ok();
 
         Ok(())
     }
@@ -528,7 +565,8 @@ impl MetadataStore for DictMetadataStore {
             drop(fsa);
 
             // add_dir_entry needs &mut impl Io (reads then writes)
-            let new_parent_dir_digest = add_dir_entry(&mut *io_guard, &parent_dir_digest, name, ino)?;
+            let new_parent_dir_digest =
+                add_dir_entry(&mut *io_guard, &parent_dir_digest, name, ino)?;
 
             (dir_inode_digest, dir_entry_digest, new_parent_dir_digest)
         };
@@ -537,9 +575,15 @@ impl MetadataStore for DictMetadataStore {
         inode_map.insert(ino, dir_inode_digest);
         drop(inode_map);
 
-        self.inode_data.lock().unwrap().insert(ino, dir_inode_digest);
+        self.inode_data
+            .lock()
+            .unwrap()
+            .insert(ino, dir_inode_digest);
         self.dir_data.lock().unwrap().insert(ino, dir_entry_digest);
-        self.dir_data.lock().unwrap().insert(parent_ino, new_parent_dir_digest);
+        self.dir_data
+            .lock()
+            .unwrap()
+            .insert(parent_ino, new_parent_dir_digest);
 
         // Increment parent nlinks (for the .. backlink from new subdir)
         let mut parent_meta = self.get_inode(parent_ino)?;
@@ -554,7 +598,10 @@ impl MetadataStore for DictMetadataStore {
 
     fn list_directory(&self, ino: InodeId) -> Result<Vec<DirEntry>, MetaError> {
         let dir_data = self.dir_data.lock().unwrap();
-        let dir_digest = dir_data.get(&ino).copied().ok_or(MetaError::NotADirectory(ino))?;
+        let dir_digest = dir_data
+            .get(&ino)
+            .copied()
+            .ok_or(MetaError::NotADirectory(ino))?;
         drop(dir_data);
 
         let mut io_guard = self.io.lock().unwrap();
@@ -563,17 +610,22 @@ impl MetadataStore for DictMetadataStore {
 
     fn lookup(&self, parent_ino: InodeId, name: &str) -> Result<InodeId, MetaError> {
         let dir_data = self.dir_data.lock().unwrap();
-        let dir_digest = dir_data.get(&parent_ino).copied().ok_or(MetaError::NotADirectory(parent_ino))?;
+        let dir_digest = dir_data
+            .get(&parent_ino)
+            .copied()
+            .ok_or(MetaError::NotADirectory(parent_ino))?;
         drop(dir_data);
 
         let mut io_guard = self.io.lock().unwrap();
-        lookup_dir_entry(&mut *io_guard, &dir_digest, name)
-            .map_err(|_| MetaError::NotFound(0))
+        lookup_dir_entry(&mut *io_guard, &dir_digest, name).map_err(|_| MetaError::NotFound(0))
     }
 
     fn link(&self, parent_ino: InodeId, name: &str, ino: InodeId) -> Result<(), MetaError> {
         let dir_data = self.dir_data.lock().unwrap();
-        let dir_digest = dir_data.get(&parent_ino).copied().ok_or(MetaError::NotADirectory(parent_ino))?;
+        let dir_digest = dir_data
+            .get(&parent_ino)
+            .copied()
+            .ok_or(MetaError::NotADirectory(parent_ino))?;
         drop(dir_data);
 
         let new_dir_digest = {
@@ -581,13 +633,19 @@ impl MetadataStore for DictMetadataStore {
             add_dir_entry(&mut *io_guard, &dir_digest, name, ino)?
         };
 
-        self.dir_data.lock().unwrap().insert(parent_ino, new_dir_digest);
+        self.dir_data
+            .lock()
+            .unwrap()
+            .insert(parent_ino, new_dir_digest);
         Ok(())
     }
 
     fn unlink(&self, parent_ino: InodeId, name: &str) -> Result<(), MetaError> {
         let dir_data = self.dir_data.lock().unwrap();
-        let dir_digest = dir_data.get(&parent_ino).copied().ok_or(MetaError::NotADirectory(parent_ino))?;
+        let dir_digest = dir_data
+            .get(&parent_ino)
+            .copied()
+            .ok_or(MetaError::NotADirectory(parent_ino))?;
         drop(dir_data);
 
         let new_dir_digest = {
@@ -595,7 +653,10 @@ impl MetadataStore for DictMetadataStore {
             remove_dir_entry(&mut *io_guard, &dir_digest, name)?
         };
 
-        self.dir_data.lock().unwrap().insert(parent_ino, new_dir_digest);
+        self.dir_data
+            .lock()
+            .unwrap()
+            .insert(parent_ino, new_dir_digest);
         Ok(())
     }
 
@@ -611,7 +672,10 @@ impl MetadataStore for DictMetadataStore {
 
     fn get_manifest(&self, ino: InodeId) -> Result<Vec<Digest224>, MetaError> {
         let manifest_data = self.manifest_data.lock().unwrap();
-        let digest = manifest_data.get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
+        let digest = manifest_data
+            .get(&ino)
+            .copied()
+            .ok_or(MetaError::NotFound(ino))?;
         drop(manifest_data);
 
         let mut io_guard = self.io.lock().unwrap();
@@ -799,7 +863,10 @@ impl MetadataStore for DictMetadataStore {
 ///
 /// Format: `[count: u64 LE][for each entry: u64 LE ino + 28 bytes Digest224]`
 /// Each entry is 36 bytes; total = 8 + count × 36.
-fn intern_u64_digest_map(storage: &mut impl blockset::StorageAdd, map: &BTreeMap<u64, Digest224>) -> Digest224 {
+fn intern_u64_digest_map(
+    storage: &mut impl blockset::StorageAdd,
+    map: &BTreeMap<u64, Digest224>,
+) -> Digest224 {
     let mut bytes = Vec::with_capacity(8 + map.len() * 36);
     bytes.extend_from_slice(&(map.len() as u64).to_le_bytes());
     for (ino, digest) in map {
@@ -830,7 +897,9 @@ fn load_u64_digest_map(
     if bytes.len() != expected {
         return Err(MetaError::Corrupted(format!(
             "u64-digest map: expected {} bytes for {} entries, got {}",
-            expected, count, bytes.len()
+            expected,
+            count,
+            bytes.len()
         )));
     }
 
@@ -865,10 +934,12 @@ impl DictMetadataStore {
         let has_refcounts = match bytes.len() {
             156 => false, // v1 format — no refcounts field
             184 => true,  // v2 format — includes refcount_data_digest
-            n => return Err(MetaError::Corrupted(format!(
-                "root record: expected 156 or 184 bytes, got {}",
-                n
-            ))),
+            n => {
+                return Err(MetaError::Corrupted(format!(
+                    "root record: expected 156 or 184 bytes, got {}",
+                    n
+                )));
+            }
         };
 
         // Parse the 7 fixed-width fields
@@ -925,9 +996,14 @@ impl DictMetadataStore {
         }
 
         // Recompute logical_bytes as the sum of all loaded inode sizes.
-        let initial_logical_bytes: u64 = inode_data.values().map(|digest| {
-            load_inode(&mut *io_guard, digest).map(|m| m.size).unwrap_or(0)
-        }).sum();
+        let initial_logical_bytes: u64 = inode_data
+            .values()
+            .map(|digest| {
+                load_inode(&mut *io_guard, digest)
+                    .map(|m| m.size)
+                    .unwrap_or(0)
+            })
+            .sum();
 
         // Recompute inode_count from inode_data length.
         let initial_inode_count = inode_data.len() as u64;
@@ -956,7 +1032,10 @@ impl DictMetadataStore {
 ///
 /// Format: `[count: u64 LE][for each entry: 28 bytes Digest224 + 8 bytes u64 LE]`
 /// Each entry is 36 bytes; total = 8 + count × 36.
-fn intern_digest224_u64_map(storage: &mut impl blockset::StorageAdd, map: &BTreeMap<Digest224, u64>) -> Digest224 {
+fn intern_digest224_u64_map(
+    storage: &mut impl blockset::StorageAdd,
+    map: &BTreeMap<Digest224, u64>,
+) -> Digest224 {
     let mut bytes = Vec::with_capacity(8 + map.len() * 36);
     bytes.extend_from_slice(&(map.len() as u64).to_le_bytes());
     for (digest, count) in map {
@@ -987,7 +1066,9 @@ fn load_digest224_u64_map(
     if bytes.len() != expected {
         return Err(MetaError::Corrupted(format!(
             "digest224-u64 map: expected {} bytes for {} entries, got {}",
-            expected, count, bytes.len()
+            expected,
+            count,
+            bytes.len()
         )));
     }
 
@@ -1015,7 +1096,6 @@ fn parse_digest224(bytes: &[u8]) -> Digest224 {
     }
     d
 }
-
 
 // ─── tests ────────────────────────────────────────────────────────────────────
 
@@ -1089,7 +1169,9 @@ mod tests {
 
         // Parent should contain the new dir
         let parent_entries = store.list_directory(1).unwrap();
-        let found = parent_entries.iter().any(|e| e.name == "subdir" && e.ino == ino);
+        let found = parent_entries
+            .iter()
+            .any(|e| e.name == "subdir" && e.ino == ino);
         assert!(found, "subdir not found in parent: {:?}", parent_entries);
 
         // New dir should have . and ..
@@ -1315,10 +1397,14 @@ mod tests {
         store.set_manifest(file_ino, &blocks).unwrap();
 
         // Add a subdirectory
-        let dir_ino = store.create_directory(1, "subdir", &new_dir_meta()).unwrap();
+        let dir_ino = store
+            .create_directory(1, "subdir", &new_dir_meta())
+            .unwrap();
 
         // Add xattrs
-        store.set_xattr(file_ino, "user.meta", b"mymetavalue").unwrap();
+        store
+            .set_xattr(file_ino, "user.meta", b"mymetavalue")
+            .unwrap();
         store.set_xattr(dir_ino, "user.tag", b"important").unwrap();
 
         // Commit — nodes flushed to disk
@@ -1340,8 +1426,16 @@ mod tests {
 
         // Verify directory
         let entries = reloaded.list_directory(1).unwrap();
-        assert!(entries.iter().any(|e| e.name == "myfile" && e.ino == file_ino));
-        assert!(entries.iter().any(|e| e.name == "subdir" && e.ino == dir_ino));
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.name == "myfile" && e.ino == file_ino)
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.name == "subdir" && e.ino == dir_ino)
+        );
 
         // Verify xattrs
         let val = reloaded.get_xattr(file_ino, "user.meta").unwrap();
@@ -1366,7 +1460,11 @@ mod tests {
 
         // All 5 inodes still exist
         for &ino in &inos {
-            assert!(reloaded.get_inode(ino).is_ok(), "ino {} missing after reload", ino);
+            assert!(
+                reloaded.get_inode(ino).is_ok(),
+                "ino {} missing after reload",
+                ino
+            );
         }
 
         // Next allocated inode continues from where it left off (no reuse)
@@ -1376,7 +1474,12 @@ mod tests {
         }
         // next_ino must be > max of previous inos
         let max_ino = *inos.iter().max().unwrap();
-        assert!(next_ino > max_ino, "next_ino {} not > max_ino {}", next_ino, max_ino);
+        assert!(
+            next_ino > max_ino,
+            "next_ino {} not > max_ino {}",
+            next_ino,
+            max_ino
+        );
     }
 
     #[test]
@@ -1384,7 +1487,9 @@ mod tests {
         let (_dir, store) = make_store();
         let sub1 = store.create_directory(1, "alpha", &new_dir_meta()).unwrap();
         let sub2 = store.create_directory(1, "beta", &new_dir_meta()).unwrap();
-        let _sub3 = store.create_directory(sub1, "gamma", &new_dir_meta()).unwrap();
+        let _sub3 = store
+            .create_directory(sub1, "gamma", &new_dir_meta())
+            .unwrap();
 
         let root = store.commit().unwrap();
         let io = Arc::clone(store.io());
@@ -1524,7 +1629,9 @@ mod tests {
         let (_dir, mut store) = make_store();
         store.set_wal(wal);
 
-        let snap = store.create_snapshot(None).expect("create_snapshot should succeed");
+        let snap = store
+            .create_snapshot(None)
+            .expect("create_snapshot should succeed");
         assert_eq!(snap.version, 1, "first snapshot must have version 1");
         assert!(snap.name.is_none(), "no name expected");
         assert_ne!(snap.root, [0u32; 7], "snapshot root must not be zero");
@@ -1579,9 +1686,13 @@ mod tests {
         store.set_wal(wal);
 
         store.create_snapshot(None).unwrap();
-        store.create_snapshot(Some("production".to_string())).unwrap();
+        store
+            .create_snapshot(Some("production".to_string()))
+            .unwrap();
 
-        let found = store.find_snapshot("2").expect("should find by version string");
+        let found = store
+            .find_snapshot("2")
+            .expect("should find by version string");
         assert_eq!(found.version, 2);
         assert_eq!(found.name.as_deref(), Some("production"));
     }
@@ -1596,9 +1707,13 @@ mod tests {
         let (_dir, mut store) = make_store();
         store.set_wal(wal);
 
-        store.create_snapshot(Some("release-1.0".to_string())).unwrap();
+        store
+            .create_snapshot(Some("release-1.0".to_string()))
+            .unwrap();
 
-        let found = store.find_snapshot("release-1.0").expect("should find by name");
+        let found = store
+            .find_snapshot("release-1.0")
+            .expect("should find by name");
         assert_eq!(found.name.as_deref(), Some("release-1.0"));
     }
 
@@ -1632,7 +1747,11 @@ mod tests {
 
         let roots = store.snapshot_roots();
         // snapshot_roots must include snapshot roots + current live root
-        assert!(roots.len() >= 2, "should include at least 2 roots: {:?}", roots);
+        assert!(
+            roots.len() >= 2,
+            "should include at least 2 roots: {:?}",
+            roots
+        );
     }
 
     #[test]
@@ -1648,13 +1767,17 @@ mod tests {
         // Commit to establish a root, but no snapshots
         store.commit().unwrap();
         let roots = store.snapshot_roots();
-        assert_eq!(roots.len(), 1, "with no snapshots, roots should contain only current_root");
+        assert_eq!(
+            roots.len(),
+            1,
+            "with no snapshots, roots should contain only current_root"
+        );
     }
 
     #[test]
     fn test_snapshots_survive_segment_replay() {
-        use crate::wal::{WalConfig, create_wal};
         use crate::segment::load_store_from_segments;
+        use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("segments")).unwrap();
@@ -1664,7 +1787,9 @@ mod tests {
             let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
             let (_dir, mut store) = make_store();
             store.set_wal(wal);
-            store.create_snapshot(Some("replay-test".to_string())).unwrap();
+            store
+                .create_snapshot(Some("replay-test".to_string()))
+                .unwrap();
             store.shutdown_wal().unwrap();
         }
 
@@ -1718,7 +1843,10 @@ mod tests {
         assert_eq!(found.version, 1);
         let found2 = store.find_snapshot("2").expect("must find version 2");
         assert_eq!(found2.version, 2);
-        assert!(store.find_snapshot("99").is_none(), "version 99 must not exist");
+        assert!(
+            store.find_snapshot("99").is_none(),
+            "version 99 must not exist"
+        );
     }
 
     /// FIX-04: find_snapshot by name uses O(1) lookup.
@@ -1739,9 +1867,7 @@ mod tests {
     /// Scale test: 10,000 snapshots — find_snapshot must complete in under 1ms.
     #[test]
     fn test_hashmap_10k_snapshots_under_1ms() {
-        let snaps: Vec<_> = (1u64..=10_000)
-            .map(|v| make_snapshot(v, None))
-            .collect();
+        let snaps: Vec<_> = (1u64..=10_000).map(|v| make_snapshot(v, None)).collect();
         let (_dir, mut store) = make_store();
         store.set_snapshots(snaps);
 
@@ -1790,10 +1916,10 @@ mod tests {
         store.set_snapshots(snaps);
 
         assert_eq!(store.find_snapshot("10").unwrap().version, 10);
-        assert_eq!(store.find_snapshot("twenty").is_none(), true);
+        assert!(store.find_snapshot("twenty").is_none());
         assert_eq!(store.find_snapshot("ten").unwrap().version, 10);
         assert_eq!(store.find_snapshot("thirty").unwrap().version, 30);
-        assert!(store.find_snapshot("20").is_some());  // unnamed, find by version
+        assert!(store.find_snapshot("20").is_some()); // unnamed, find by version
         assert!(store.find_snapshot("20_name").is_none());
     }
 
@@ -1830,13 +1956,19 @@ mod tests {
 
         // One more increment brings it to u64::MAX
         store.increment_refcount(&digest);
-        assert_eq!(store.get_refcount(&digest), u64::MAX,
-            "refcount should be u64::MAX after increment from MAX-1");
+        assert_eq!(
+            store.get_refcount(&digest),
+            u64::MAX,
+            "refcount should be u64::MAX after increment from MAX-1"
+        );
 
         // Another increment must stay at u64::MAX (not wrap to 0)
         store.increment_refcount(&digest);
-        assert_eq!(store.get_refcount(&digest), u64::MAX,
-            "refcount at u64::MAX must not wrap on increment");
+        assert_eq!(
+            store.get_refcount(&digest),
+            u64::MAX,
+            "refcount at u64::MAX must not wrap on increment"
+        );
     }
 
     #[test]
@@ -1852,8 +1984,11 @@ mod tests {
 
         // Decrement must be a no-op for saturated blocks
         store.decrement_refcount(&digest);
-        assert_eq!(store.get_refcount(&digest), u64::MAX,
-            "decrement on saturated (u64::MAX) refcount must be a no-op — block is immortal");
+        assert_eq!(
+            store.get_refcount(&digest),
+            u64::MAX,
+            "decrement on saturated (u64::MAX) refcount must be a no-op — block is immortal"
+        );
     }
 
     #[test]
@@ -1869,13 +2004,16 @@ mod tests {
             let mut rc = store.refcounts.lock().unwrap();
             rc.insert(d1, u64::MAX); // saturated
             rc.insert(d2, u64::MAX); // saturated
-            rc.insert(d3, 5);        // normal
-            rc.insert(d4, 2);        // normal
-            rc.insert(d5, 1);        // normal
+            rc.insert(d3, 5); // normal
+            rc.insert(d4, 2); // normal
+            rc.insert(d5, 1); // normal
         }
 
-        assert_eq!(store.saturated_refcount_count(), 2,
-            "should count exactly 2 saturated refcounts");
+        assert_eq!(
+            store.saturated_refcount_count(),
+            2,
+            "should count exactly 2 saturated refcounts"
+        );
     }
 
     // ── inode_count AtomicU64 tests (FIX-02 store layer) ─────────────────────
@@ -1884,8 +2022,11 @@ mod tests {
     fn test_inode_count_empty() {
         let (_dir, store) = make_store();
         // Fresh store has root inode (ino=1) — count should be 1
-        assert_eq!(store.inode_count(), 1,
-            "fresh store should have inode_count == 1 (root inode)");
+        assert_eq!(
+            store.inode_count(),
+            1,
+            "fresh store should have inode_count == 1 (root inode)"
+        );
     }
 
     #[test]
@@ -1895,13 +2036,19 @@ mod tests {
         store.create_inode(&new_file_meta()).unwrap();
         store.create_inode(&new_file_meta()).unwrap();
         let ino3 = store.create_inode(&new_file_meta()).unwrap();
-        assert_eq!(store.inode_count(), 4,
-            "after creating 3 inodes, count should be 4 (root + 3)");
+        assert_eq!(
+            store.inode_count(),
+            4,
+            "after creating 3 inodes, count should be 4 (root + 3)"
+        );
 
         // Delete one -> should be 3
         store.delete_inode(ino3).unwrap();
-        assert_eq!(store.inode_count(), 3,
-            "after deleting 1 inode, count should be 3");
+        assert_eq!(
+            store.inode_count(),
+            3,
+            "after deleting 1 inode, count should be 3"
+        );
     }
 
     #[test]
@@ -1918,8 +2065,10 @@ mod tests {
         let io = Arc::clone(store.io());
         let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
 
-        assert_eq!(reloaded.inode_count(), count_before,
-            "inode_count should match original after load_from_root round-trip");
+        assert_eq!(
+            reloaded.inode_count(),
+            count_before,
+            "inode_count should match original after load_from_root round-trip"
+        );
     }
 }
-

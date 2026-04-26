@@ -5,9 +5,9 @@
 //! (28 bytes per block hash: 7 × u32 LE) in the blockset Dictionary via
 //! `State::push_all`, which returns a single `Digest224` key for the whole list.
 
+use blockset::{Io, State, StorageAdd, Tree, file_storage_get};
 use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::MetaError;
-use blockset::{State, Tree, StorageAdd, Io, file_storage_get};
 
 /// Serialize and store an ordered list of block hashes in any `StorageAdd` backend.
 ///

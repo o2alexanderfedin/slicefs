@@ -231,10 +231,7 @@ fn test_posix_timestamps_set_on_create() {
     let meta = fs.meta().get_inode(ino).unwrap();
     // ctime is set on creation -- verify it has a reasonable value
     // (may be 0 if system clock returns epoch, so just verify inode exists)
-    assert!(
-        meta.ctime_sec >= 0,
-        "ctime_sec must be non-negative"
-    );
+    assert!(meta.ctime_sec >= 0, "ctime_sec must be non-negative");
 }
 
 #[test]
@@ -287,7 +284,10 @@ fn test_posix_rename_noreplace_existing_target_fails() {
 
     // RENAME_NOREPLACE = 1, target exists -> must fail
     let result = fs.simulate_rename(1, "src_nr.txt", 1, "dst_nr.txt", 1);
-    assert!(result.is_err(), "RENAME_NOREPLACE with existing target must fail");
+    assert!(
+        result.is_err(),
+        "RENAME_NOREPLACE with existing target must fail"
+    );
 }
 
 #[test]
@@ -405,8 +405,8 @@ fn test_dedup_5_copies_delete_3_verify_refcount_2() {
 
     // All must share the same digest
     let m0 = fs.meta().get_manifest(inodes[0]).unwrap();
-    for i in 1..5 {
-        let mi = fs.meta().get_manifest(inodes[i]).unwrap();
+    for (i, ino) in inodes.iter().enumerate().take(5).skip(1) {
+        let mi = fs.meta().get_manifest(*ino).unwrap();
         assert_eq!(m0, mi, "file {} must share digest with file 0", i);
     }
 
@@ -421,8 +421,8 @@ fn test_dedup_5_copies_delete_3_verify_refcount_2() {
     }
 
     // Remaining 2 files must still be readable
-    for i in 3..5 {
-        let content_read = fs.test_read(inodes[i], 0, 1024).unwrap();
+    for (i, ino) in inodes.iter().enumerate().take(5).skip(3) {
+        let content_read = fs.test_read(*ino, 0, 1024).unwrap();
         assert_eq!(content_read, content, "file {} must still be readable", i);
     }
 
@@ -463,7 +463,10 @@ fn test_dedup_overwrite_one_copy_does_not_affect_others() {
     // The old digest's refcount may remain at 2 if the truncate path
     // does not explicitly decrement it (file B still holds one ref).
     let rc = fs.meta().get_refcount(&m_before[0]);
-    assert!(rc >= 1, "old digest refcount must be at least 1 (B still uses it)");
+    assert!(
+        rc >= 1,
+        "old digest refcount must be at least 1 (B still uses it)"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -498,7 +501,12 @@ fn test_concurrent_5_files_open_simultaneously() {
     for (idx, &(ino, _)) in handles.iter().enumerate() {
         let expected = format!("data for file {}", idx);
         let content = fs.test_read(ino, 0, 1024).unwrap();
-        assert_eq!(content, expected.as_bytes(), "file {} content mismatch", idx);
+        assert_eq!(
+            content,
+            expected.as_bytes(),
+            "file {} content mismatch",
+            idx
+        );
     }
 }
 
@@ -564,10 +572,7 @@ fn test_edge_deep_nesting_25_levels() {
     }
     let found = fs.meta().lookup(cur, "bottom.txt").unwrap();
     assert_eq!(found, ino);
-    assert_eq!(
-        fs.test_read(ino, 0, 100).unwrap(),
-        b"25 levels deep"
-    );
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"25 levels deep");
 }
 
 #[test]
@@ -588,20 +593,11 @@ fn test_edge_500_entries_in_one_directory() {
 
     // Spot check first, middle, last
     let first = fs.meta().lookup(dir_ino, "f0000.txt").unwrap();
-    assert_eq!(
-        fs.test_read(first, 0, 100).unwrap(),
-        b"f0000.txt"
-    );
+    assert_eq!(fs.test_read(first, 0, 100).unwrap(), b"f0000.txt");
     let mid = fs.meta().lookup(dir_ino, "f0250.txt").unwrap();
-    assert_eq!(
-        fs.test_read(mid, 0, 100).unwrap(),
-        b"f0250.txt"
-    );
+    assert_eq!(fs.test_read(mid, 0, 100).unwrap(), b"f0250.txt");
     let last = fs.meta().lookup(dir_ino, "f0499.txt").unwrap();
-    assert_eq!(
-        fs.test_read(last, 0, 100).unwrap(),
-        b"f0499.txt"
-    );
+    assert_eq!(fs.test_read(last, 0, 100).unwrap(), b"f0499.txt");
 }
 
 #[test]
@@ -693,10 +689,13 @@ fn test_error_read_nonexistent_inode() {
     let (fs, _dir) = fresh_fs();
     let result = fs.test_read(99999, 0, 100);
     // Should either return error or empty (depending on implementation)
-    match result {
-        Ok(data) => assert!(data.is_empty(), "reading non-existent inode must return empty"),
-        Err(_) => {} // Error is also acceptable
+    if let Ok(data) = result {
+        assert!(
+            data.is_empty(),
+            "reading non-existent inode must return empty"
+        );
     }
+    // Err(_) is also acceptable
 }
 
 #[test]
@@ -798,19 +797,13 @@ fn test_snapshot_multiple_preserves_each_point_in_time() {
 
     // Version 1
     let ino = create_file(&fs, 1, "evolving.txt", b"state_v1");
-    let snap1 = fs
-        .meta()
-        .create_snapshot(Some("v1".to_string()))
-        .unwrap();
+    let snap1 = fs.meta().create_snapshot(Some("v1".to_string())).unwrap();
 
     // Version 2
     let (fh, _) = fs.test_open(ino, libc::O_WRONLY | libc::O_TRUNC).unwrap();
     fs.test_write(fh, 0, b"state_v2").unwrap();
     fs.test_release(ino, fh).unwrap();
-    let snap2 = fs
-        .meta()
-        .create_snapshot(Some("v2".to_string()))
-        .unwrap();
+    let snap2 = fs.meta().create_snapshot(Some("v2".to_string())).unwrap();
 
     // Version 3
     let (fh, _) = fs.test_open(ino, libc::O_WRONLY | libc::O_TRUNC).unwrap();
@@ -830,7 +823,10 @@ fn test_snapshot_multiple_preserves_each_point_in_time() {
         let mut io_g = fs.io().lock().unwrap();
         file_storage_get(&mut *io_g, &snap1_manifest[0]).unwrap()
     };
-    assert_eq!(snap1_content, b"state_v1", "snapshot v1 must preserve v1 state");
+    assert_eq!(
+        snap1_content, b"state_v1",
+        "snapshot v1 must preserve v1 state"
+    );
 
     // Verify snapshot v2
     let io2 = Arc::new(Mutex::new(StoreIo::new(dir.path())));
@@ -841,7 +837,10 @@ fn test_snapshot_multiple_preserves_each_point_in_time() {
         let mut io_g = fs.io().lock().unwrap();
         file_storage_get(&mut *io_g, &snap2_manifest[0]).unwrap()
     };
-    assert_eq!(snap2_content, b"state_v2", "snapshot v2 must preserve v2 state");
+    assert_eq!(
+        snap2_content, b"state_v2",
+        "snapshot v2 must preserve v2 state"
+    );
 }
 
 #[test]
@@ -1029,7 +1028,9 @@ fn test_destroy_with_auto_snapshot() {
     // Should have created an auto-unmount snapshot
     let snaps = fs.meta().list_snapshots();
     assert!(
-        snaps.iter().any(|s| s.name == Some("auto-unmount".to_string())),
+        snaps
+            .iter()
+            .any(|s| s.name == Some("auto-unmount".to_string())),
         "auto-unmount snapshot must be created"
     );
 }
@@ -1438,7 +1439,11 @@ fn test_seed_empty_directory() {
 
     // Root should exist -- verify it's a valid store with a root inode
     let root_meta = store.get_inode(1).unwrap();
-    assert_eq!(root_meta.mode & S_IFDIR, S_IFDIR, "root must be a directory");
+    assert_eq!(
+        root_meta.mode & S_IFDIR,
+        S_IFDIR,
+        "root must be a directory"
+    );
 }
 
 #[test]

@@ -10,12 +10,9 @@
 //! Tests in this module exercise every handler on both success and error paths
 //! without requiring fuser types (which cannot be constructed in unit tests).
 
-use std::time::SystemTime;
-
 use fuser::FileAttr;
-use slicefs_traits::metadata::InodeMeta;
 
-use crate::filesystem::{inode_to_file_attr, SliceFsFilesystem};
+use crate::filesystem::{SliceFsFilesystem, inode_to_file_attr};
 
 // ── Result enums ─────────────────────────────────────────────────────────────
 
@@ -119,11 +116,7 @@ pub(crate) fn handle_lookup(fs: &SliceFsFilesystem, parent: u64, name: &str) -> 
 }
 
 /// Handle `readdir`: list entries in directory `ino` starting at `offset`.
-pub(crate) fn handle_readdir(
-    fs: &SliceFsFilesystem,
-    ino: u64,
-    offset: u64,
-) -> ReaddirResult {
+pub(crate) fn handle_readdir(fs: &SliceFsFilesystem, ino: u64, offset: u64) -> ReaddirResult {
     match fs.test_readdir(ino, offset) {
         Ok(entries) => ReaddirResult::Ok(entries),
         Err(errno) => ReaddirResult::Error(errno),
@@ -131,12 +124,7 @@ pub(crate) fn handle_readdir(
 }
 
 /// Handle `read`: read `size` bytes from `ino` starting at `offset`.
-pub(crate) fn handle_read(
-    fs: &SliceFsFilesystem,
-    ino: u64,
-    offset: u64,
-    size: u32,
-) -> DataResult {
+pub(crate) fn handle_read(fs: &SliceFsFilesystem, ino: u64, offset: u64, size: u32) -> DataResult {
     match fs.test_read(ino, offset, size) {
         Ok(data) => DataResult::Ok(data),
         Err(errno) => DataResult::Error(errno),
@@ -203,11 +191,7 @@ pub(crate) fn handle_getxattr(
 
 /// Handle `listxattr`: list all extended attribute names for inode `ino`.
 /// When `size == 0` the caller asks for the total buffer size only.
-pub(crate) fn handle_listxattr(
-    fs: &SliceFsFilesystem,
-    ino: u64,
-    size: u32,
-) -> XattrResult {
+pub(crate) fn handle_listxattr(fs: &SliceFsFilesystem, ino: u64, size: u32) -> XattrResult {
     match fs.test_listxattr(ino) {
         Ok(buf) => {
             if size == 0 {
@@ -234,11 +218,7 @@ pub(crate) fn handle_setxattr(
 }
 
 /// Handle `removexattr`: remove extended attribute `name` from inode `ino`.
-pub(crate) fn handle_removexattr(
-    fs: &SliceFsFilesystem,
-    ino: u64,
-    name: &str,
-) -> EmptyResult {
+pub(crate) fn handle_removexattr(fs: &SliceFsFilesystem, ino: u64, name: &str) -> EmptyResult {
     match fs.test_removexattr(ino, name) {
         Ok(()) => EmptyResult::Ok,
         Err(e) if e == libc::ENOENT => EmptyResult::Error(libc::ENODATA),
@@ -260,6 +240,7 @@ pub(crate) fn handle_write(
 }
 
 /// Handle `create`: create a new file named `name` in `parent` and open it.
+#[allow(clippy::too_many_arguments)] // mirrors the FUSE create signature
 pub(crate) fn handle_create(
     fs: &SliceFsFilesystem,
     parent: u64,
@@ -345,11 +326,7 @@ pub(crate) fn handle_link(
 }
 
 /// Handle `unlink`: remove the directory entry `name` from `parent`.
-pub(crate) fn handle_unlink(
-    fs: &SliceFsFilesystem,
-    parent: u64,
-    name: &str,
-) -> EmptyResult {
+pub(crate) fn handle_unlink(fs: &SliceFsFilesystem, parent: u64, name: &str) -> EmptyResult {
     match fs.simulate_unlink(parent, name) {
         Ok(()) => EmptyResult::Ok,
         Err(errno) => EmptyResult::Error(errno),
@@ -357,11 +334,7 @@ pub(crate) fn handle_unlink(
 }
 
 /// Handle `rmdir`: remove the empty directory `name` from `parent`.
-pub(crate) fn handle_rmdir(
-    fs: &SliceFsFilesystem,
-    parent: u64,
-    name: &str,
-) -> EmptyResult {
+pub(crate) fn handle_rmdir(fs: &SliceFsFilesystem, parent: u64, name: &str) -> EmptyResult {
     match fs.simulate_rmdir(parent, name) {
         Ok(()) => EmptyResult::Ok,
         Err(errno) => EmptyResult::Error(errno),
@@ -386,6 +359,7 @@ pub(crate) fn handle_rename(
 /// Handle `setattr`: update inode attributes for `ino`.
 ///
 /// `mtime` is `Some((sec, nsec))` if mtime should be updated.
+#[allow(clippy::too_many_arguments)] // mirrors the FUSE setattr signature
 pub(crate) fn handle_setattr(
     fs: &SliceFsFilesystem,
     ino: u64,
@@ -403,11 +377,7 @@ pub(crate) fn handle_setattr(
 }
 
 /// Handle `getlk`: always report no conflicting lock (F_UNLCK).
-pub(crate) fn handle_getlk(
-    start: u64,
-    end: u64,
-    pid: u32,
-) -> LockResult {
+pub(crate) fn handle_getlk(start: u64, end: u64, pid: u32) -> LockResult {
     LockResult::Ok(start, end, libc::F_UNLCK as i32, pid)
 }
 
@@ -985,7 +955,8 @@ mod tests {
             EntryResult::Ok(ino, _) => ino,
             _ => panic!("mkdir lookup failed"),
         };
-        fs.test_create(dir_ino, "child.txt", 0o644, 0, 0, 0).unwrap();
+        fs.test_create(dir_ino, "child.txt", 0o644, 0, 0, 0)
+            .unwrap();
         match handle_rmdir(&fs, 1, "fulldir") {
             EmptyResult::Error(e) => assert_eq!(e, libc::ENOTEMPTY),
             EmptyResult::Ok => panic!("expected ENOTEMPTY"),

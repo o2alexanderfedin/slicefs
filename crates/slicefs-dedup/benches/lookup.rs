@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
 use slicefs_traits::{ChunkHash, DedupIndex};
 

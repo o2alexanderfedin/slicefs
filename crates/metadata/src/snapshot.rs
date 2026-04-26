@@ -85,7 +85,11 @@ mod tests {
         };
         let payload = entry.payload_bytes();
         // 48 + len("test")=4 = 52 bytes
-        assert_eq!(payload.len(), 52, "named payload must be 48 + name_len bytes");
+        assert_eq!(
+            payload.len(),
+            52,
+            "named payload must be 48 + name_len bytes"
+        );
 
         let parsed = SegmentEntry::parse_snapshot_record(&payload)
             .expect("parse_snapshot_record with name must succeed");

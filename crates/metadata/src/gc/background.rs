@@ -6,12 +6,12 @@
 //!   - The `Weak<DictMetadataStore>` can no longer be upgraded (filesystem unmounted).
 
 use std::path::PathBuf;
-use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use super::GarbageCollector;
 use crate::store::DictMetadataStore;
-use super::{GarbageCollector};
 
 /// Handle to a background GC thread.
 ///
@@ -99,4 +99,3 @@ pub fn spawn_background_gc(
         handle: Some(handle),
     }
 }
-

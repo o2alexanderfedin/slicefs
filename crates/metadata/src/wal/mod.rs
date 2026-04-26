@@ -10,18 +10,18 @@
 //! | Periodic        | On timer/shutdown   | Highest    |
 //! | NoWal           | None (testing only) | N/A        |
 
+pub mod flush_on_fsync;
 pub mod no_wal;
 pub mod per_op;
-pub mod flush_on_fsync;
 pub mod periodic;
 
+pub use flush_on_fsync::FlushOnFsyncWal;
 pub use no_wal::NoWal;
 pub use per_op::PerOpWal;
-pub use flush_on_fsync::FlushOnFsyncWal;
 pub use periodic::PeriodicWal;
 
-use std::path::Path;
 use slicefs_traits::digest::Digest224;
+use std::path::Path;
 use thiserror::Error;
 
 /// A logical WAL entry representing a metadata state change.
@@ -30,7 +30,12 @@ pub enum WalEntry {
     /// Update the filesystem root digest.
     RootUpdate { root: Digest224 },
     /// Persist a snapshot record with version, root, timestamp, and optional name.
-    Snapshot { version: u64, root: Digest224, created_at: u64, name: Option<String> },
+    Snapshot {
+        version: u64,
+        root: Digest224,
+        created_at: u64,
+        name: Option<String>,
+    },
 }
 
 /// Errors returned by WAL operations.

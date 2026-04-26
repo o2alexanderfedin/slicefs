@@ -13,12 +13,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::util::ts;
 
-use blockset::{State, Tree, FileStorageAdd, file_storage_get, StorageAdd, Digest224};
-use tracing::debug;
+use blockset::{Digest224, FileStorageAdd, State, StorageAdd, Tree, file_storage_get};
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use slicefs_traits::metadata::{InodeMeta, MetaError, MetadataStore};
+use tracing::debug;
 
 // POSIX inode type bits
 const S_IFMT: u32 = 0o170_000;
@@ -127,6 +127,7 @@ impl SliceFsFilesystem {
     }
 
     /// Access the shared Io backend (used for content reads/writes).
+    #[allow(dead_code)] // public lib API; consumed by tests + future code paths
     pub fn io(&self) -> &Arc<Mutex<StoreIo>> {
         &self.io
     }
@@ -144,7 +145,7 @@ pub fn inode_to_file_attr(meta: &InodeMeta) -> FileAttr {
     };
 
     let perm = (meta.mode & 0o7777) as u16;
-    let blocks = (meta.size + 511) / 512;
+    let blocks = meta.size.div_ceil(512);
 
     let mtime = if meta.mtime_sec >= 0 {
         UNIX_EPOCH + Duration::new(meta.mtime_sec as u64, meta.mtime_nsec)
@@ -178,6 +179,7 @@ pub fn inode_to_file_attr(meta: &InodeMeta) -> FileAttr {
 }
 
 /// Map a [`MetaError`] to a fuser [`Errno`].
+#[allow(dead_code)] // public lib API; consumed by tests
 pub fn meta_error_to_fuse_errno(e: &MetaError) -> Errno {
     match e {
         MetaError::NotFound(_) => Errno::ENOENT,
@@ -212,6 +214,7 @@ pub(crate) const TTL: Duration = Duration::from_secs(1);
 /// Recursively sum file sizes under `dir`.
 ///
 /// Used by `statfs` to compute physical bytes from the `vt0/` CAS directory.
+#[allow(dead_code)] // referenced by future statfs path; retained for symmetry
 fn dir_size(dir: &std::path::Path) -> u64 {
     let mut total = 0u64;
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -248,19 +251,28 @@ impl SliceFsFilesystem {
     ) -> Result<(u64, u64), i32> {
         let file_mode = S_IFREG | (mode & !umask & 0o7777);
         let file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
-        let ino = self.meta.create_inode(&file_meta).map_err(|e| meta_error_to_errno(&e))?;
+        let ino = self
+            .meta
+            .create_inode(&file_meta)
+            .map_err(|e| meta_error_to_errno(&e))?;
         if let Err(e) = self.meta.link(parent_ino, name, ino) {
             let _ = self.meta.delete_inode(ino);
             return Err(meta_error_to_errno(&e));
         }
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
-        self.open_files.lock().unwrap().insert(fh, OpenFileState {
-            ino,
-            write_mode: WriteMode::Streaming { state: State::default(), next_expected_offset: 0 },
-            byte_count: 0,
-            cas_committed: false,
-            last_committed_root: None,
-        });
+        self.open_files.lock().unwrap().insert(
+            fh,
+            OpenFileState {
+                ino,
+                write_mode: WriteMode::Streaming {
+                    state: State::default(),
+                    next_expected_offset: 0,
+                },
+                byte_count: 0,
+                cas_committed: false,
+                last_committed_root: None,
+            },
+        );
         Ok((ino, fh))
     }
 
@@ -286,7 +298,10 @@ impl SliceFsFilesystem {
         // open_files lock is released here.
 
         let result = match &mut file_state.write_mode {
-            WriteMode::Streaming { state, next_expected_offset } => {
+            WriteMode::Streaming {
+                state,
+                next_expected_offset,
+            } => {
                 if offset != *next_expected_offset {
                     // Fallback from Streaming to Buffered mode
                     let snapshot = state.clone();
@@ -295,8 +310,10 @@ impl SliceFsFilesystem {
                     let old_root = file_state.last_committed_root.take();
 
                     debug!(
-                        fh = fh, ino = ino,
-                        offset = offset, expected = byte_count,
+                        fh = fh,
+                        ino = ino,
+                        offset = offset,
+                        expected = byte_count,
                         "fallback from Streaming to Buffered mode"
                     );
 
@@ -354,7 +371,11 @@ impl SliceFsFilesystem {
                         err
                     };
                     if let Some(e) = io_err {
-                        eprintln!("[{}][FUSE] test_write: CAS I/O error during push_bytes: {}", ts(), e);
+                        eprintln!(
+                            "[{}][FUSE] test_write: CAS I/O error during push_bytes: {}",
+                            ts(),
+                            e
+                        );
                         // Re-insert state before returning error
                         self.open_files.lock().unwrap().insert(fh, file_state);
                         return Err(libc::EIO);
@@ -393,10 +414,16 @@ impl SliceFsFilesystem {
     /// Refcount lifecycle: decrements old committed root if different from new digest,
     /// increments new digest. Empty files (byte_count==0) set empty manifest without CAS push.
     pub fn test_release(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        let (write_mode, byte_count, cas_committed, last_committed_root) = match self.open_files.lock().unwrap().remove(&fh) {
-            Some(s) => (s.write_mode, s.byte_count, s.cas_committed, s.last_committed_root),
-            None => return Ok(()), // Already closed
-        };
+        let (write_mode, byte_count, cas_committed, last_committed_root) =
+            match self.open_files.lock().unwrap().remove(&fh) {
+                Some(s) => (
+                    s.write_mode,
+                    s.byte_count,
+                    s.cas_committed,
+                    s.last_committed_root,
+                ),
+                None => return Ok(()), // Already closed
+            };
 
         // No bytes written through this handle.
         // Only set empty manifest if this is a genuinely new file (no existing manifest).
@@ -405,7 +432,9 @@ impl SliceFsFilesystem {
         if byte_count == 0 {
             if !cas_committed {
                 // Check if the file already has content — if so, don't overwrite it.
-                let has_existing = self.meta.get_manifest(ino)
+                let has_existing = self
+                    .meta
+                    .get_manifest(ino)
                     .map(|m| !m.is_empty())
                     .unwrap_or(false);
                 if !has_existing {
@@ -440,14 +469,16 @@ impl SliceFsFilesystem {
         }
 
         // Decrement old committed root if different
-        if let Some(old) = last_committed_root {
-            if old != new_digest {
-                self.meta.decrement_refcount(&old);
-            }
+        if let Some(old) = last_committed_root
+            && old != new_digest
+        {
+            self.meta.decrement_refcount(&old);
         }
 
         // Set manifest and increment refcount
-        self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
+        self.meta
+            .set_manifest(ino, &[new_digest])
+            .map_err(|_| libc::EIO)?;
         if last_committed_root != Some(new_digest) {
             self.meta.increment_refcount(&new_digest);
         }
@@ -501,7 +532,8 @@ impl SliceFsFilesystem {
 
         let writer_snapshot: Option<WriterSnapshot> = {
             let open_files = self.open_files.lock().unwrap();
-            open_files.values()
+            open_files
+                .values()
                 .find(|s| s.ino == ino && s.byte_count > 0)
                 .map(|s| match &s.write_mode {
                     WriteMode::Streaming { state, .. } => WriterSnapshot::Streaming(state.clone()),
@@ -526,7 +558,9 @@ impl SliceFsFilesystem {
             None => {
                 // Fall back to committed manifest
                 let manifest = self.meta.get_manifest(ino).map_err(|_| libc::EIO)?;
-                if manifest.is_empty() { return Ok(vec![]); }
+                if manifest.is_empty() {
+                    return Ok(vec![]);
+                }
                 let mut io = self.io.lock().unwrap();
                 file_storage_get(&mut *io, &manifest[0]).ok_or(libc::EIO)?
             }
@@ -566,7 +600,9 @@ impl SliceFsFilesystem {
                     }
                     s.cas_committed = true;
                     let snap = match &s.write_mode {
-                        WriteMode::Streaming { state, .. } => FsyncSnapshot::Streaming(state.clone()),
+                        WriteMode::Streaming { state, .. } => {
+                            FsyncSnapshot::Streaming(state.clone())
+                        }
                         WriteMode::Buffered { buf } => FsyncSnapshot::Buffered(buf.clone()),
                     };
                     (snap, s.byte_count, s.last_committed_root)
@@ -595,14 +631,16 @@ impl SliceFsFilesystem {
         };
 
         // 3. Decrement old committed root if any
-        if let Some(old) = old_root {
-            if old != new_digest {
-                self.meta.decrement_refcount(&old);
-            }
+        if let Some(old) = old_root
+            && old != new_digest
+        {
+            self.meta.decrement_refcount(&old);
         }
 
         // 4. Set manifest and increment refcount (skip increment if same as old -- already counted)
-        self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
+        self.meta
+            .set_manifest(ino, &[new_digest])
+            .map_err(|_| libc::EIO)?;
         if old_root != Some(new_digest) {
             self.meta.increment_refcount(&new_digest);
         }
@@ -629,7 +667,6 @@ impl SliceFsFilesystem {
 
         Ok(())
     }
-
 
     /// Truncate/extend a file to `new_size` bytes. If `fh` is Some and open,
     /// operates on the in-flight write state; otherwise reads from CAS, adjusts, re-pushes.
@@ -665,7 +702,10 @@ impl SliceFsFilesystem {
                         if new_size == 0 {
                             // Fast path: reset to empty Streaming State
                             let old_root = s.last_committed_root.take();
-                            s.write_mode = WriteMode::Streaming { state: State::default(), next_expected_offset: 0 };
+                            s.write_mode = WriteMode::Streaming {
+                                state: State::default(),
+                                next_expected_offset: 0,
+                            };
                             s.byte_count = 0;
                             s.cas_committed = false;
                             drop(open_files);
@@ -756,8 +796,7 @@ impl SliceFsFilesystem {
             let root_digest = old_manifest[0];
             let raw_bytes: Vec<u8> = {
                 let mut io = self.io.lock().unwrap();
-                file_storage_get(&mut *io, &root_digest)
-                    .ok_or(libc::EIO)?
+                file_storage_get(&mut *io, &root_digest).ok_or(libc::EIO)?
             };
             raw_bytes
         };
@@ -781,7 +820,9 @@ impl SliceFsFilesystem {
                 drop(fsa);
                 digest
             };
-            self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
+            self.meta
+                .set_manifest(ino, &[new_digest])
+                .map_err(|_| libc::EIO)?;
             self.meta.increment_refcount(&new_digest);
         }
 
@@ -798,6 +839,7 @@ impl SliceFsFilesystem {
     }
 
     /// Update permission bits (preserving file type bits) for an inode.
+    #[allow(dead_code)] // public lib API; consumed by tests
     pub fn test_setattr_mode(&self, ino: u64, mode: u32) -> Result<(), i32> {
         let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
         inode.mode = (inode.mode & S_IFMT) | (mode & 0o7777);
@@ -811,6 +853,7 @@ impl SliceFsFilesystem {
     }
 
     /// Update uid and/or gid for an inode.
+    #[allow(dead_code)] // public lib API; consumed by tests
     pub fn test_setattr_uid_gid(
         &self,
         ino: u64,
@@ -834,6 +877,7 @@ impl SliceFsFilesystem {
     }
 
     /// Update mtime for an inode to a specific (sec, nsec).
+    #[allow(dead_code)] // public lib API; consumed by tests
     pub fn test_setattr_mtime(&self, ino: u64, mtime_sec: i64, mtime_nsec: u32) -> Result<(), i32> {
         let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
         inode.mtime_sec = mtime_sec;
@@ -854,14 +898,25 @@ impl SliceFsFilesystem {
     /// Returns the new inode number on success.
     ///
     /// Non-regular file types (device nodes, FIFOs) return ENOSYS.
-    pub fn test_mknod(&self, parent: u64, name: &str, mode: u32, uid: u32, gid: u32, umask: u32) -> Result<u64, i32> {
+    pub fn test_mknod(
+        &self,
+        parent: u64,
+        name: &str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        umask: u32,
+    ) -> Result<u64, i32> {
         let file_type = mode & S_IFMT;
         if file_type != S_IFREG && file_type != 0 {
             return Err(libc::ENOSYS);
         }
         let file_mode = S_IFREG | (mode & !umask & 0o7777);
         let file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
-        let ino = self.meta.create_inode(&file_meta).map_err(|e| meta_error_to_errno(&e))?;
+        let ino = self
+            .meta
+            .create_inode(&file_meta)
+            .map_err(|e| meta_error_to_errno(&e))?;
         if let Err(e) = self.meta.link(parent, name, ino) {
             let _ = self.meta.delete_inode(ino);
             return Err(meta_error_to_errno(&e));
@@ -871,6 +926,7 @@ impl SliceFsFilesystem {
 
     /// Return `(blocks, bfree, bavail, files, ffree, bsize)` — the same values
     /// that `statfs()` passes to the kernel. Used by integration tests.
+    #[allow(dead_code)] // public lib API; consumed by tests
     pub fn test_statfs_values(&self) -> (u64, u64, u64, u64, u64, u32) {
         self.compute_statfs()
     }
@@ -897,7 +953,11 @@ impl SliceFsFilesystem {
             let mut sv: libc::statvfs = unsafe { std::mem::zeroed() };
             let ret = unsafe { libc::statvfs(path_cstr.as_ptr(), &mut sv) };
             if ret == 0 {
-                let bsize = if sv.f_frsize > 0 { sv.f_frsize as u32 } else { 4096 };
+                let bsize = if sv.f_frsize > 0 {
+                    sv.f_frsize as u32
+                } else {
+                    4096
+                };
                 let blocks = sv.f_blocks as u64;
                 let bfree = sv.f_bfree as u64;
                 let bavail = sv.f_bavail as u64;
@@ -913,7 +973,11 @@ impl SliceFsFilesystem {
             let mut sf: libc::statfs = unsafe { std::mem::zeroed() };
             let ret2 = unsafe { libc::statfs(path_cstr.as_ptr(), &mut sf) };
             if ret2 == 0 && sf.f_blocks > 0 {
-                let bsize = if sf.f_bsize > 0 { sf.f_bsize as u32 } else { 4096 };
+                let bsize = if sf.f_bsize > 0 {
+                    sf.f_bsize as u32
+                } else {
+                    4096
+                };
                 let blocks = sf.f_blocks as u64;
                 let bfree = sf.f_bfree as u64;
                 let bavail = sf.f_bavail as u64;
@@ -962,7 +1026,10 @@ impl SliceFsFilesystem {
             .map_err(|e| meta_error_to_errno(&e))?;
 
         // Verify it is a directory
-        let inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        let inode = self
+            .meta
+            .get_inode(ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
         if inode.mode & S_IFDIR == 0 {
             return Err(libc::ENOTDIR);
         }
@@ -973,7 +1040,10 @@ impl SliceFsFilesystem {
             .list_directory(ino)
             .map_err(|e| meta_error_to_errno(&e))?;
         // . and .. always present — anything beyond that is ENOTEMPTY
-        let real_entries = entries.iter().filter(|e| e.name != "." && e.name != "..").count();
+        let real_entries = entries
+            .iter()
+            .filter(|e| e.name != "." && e.name != "..")
+            .count();
         if real_entries > 0 {
             return Err(libc::ENOTEMPTY);
         }
@@ -982,7 +1052,9 @@ impl SliceFsFilesystem {
         self.meta
             .unlink(parent_ino, name)
             .map_err(|e| meta_error_to_errno(&e))?;
-        self.meta.delete_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        self.meta
+            .delete_inode(ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
 
         // Decrement parent nlinks (removing the .. backlink from the deleted subdir)
         let mut parent_inode = self
@@ -991,7 +1063,9 @@ impl SliceFsFilesystem {
             .map_err(|e| meta_error_to_errno(&e))?;
         if parent_inode.nlinks > 0 {
             parent_inode.nlinks -= 1;
-            self.meta.update_inode(&parent_inode).map_err(|e| meta_error_to_errno(&e))?;
+            self.meta
+                .update_inode(&parent_inode)
+                .map_err(|e| meta_error_to_errno(&e))?;
         }
         Ok(())
     }
@@ -1012,7 +1086,10 @@ impl SliceFsFilesystem {
             .map_err(|e| meta_error_to_errno(&e))?;
 
         // Get inode
-        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        let mut inode = self
+            .meta
+            .get_inode(ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
 
         // Must not be a directory
         if inode.mode & S_IFDIR != 0 {
@@ -1040,7 +1117,9 @@ impl SliceFsFilesystem {
             let _ = self.meta.delete_inode(ino);
         } else {
             // Hard links still exist — just persist the decremented nlinks
-            self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
+            self.meta
+                .update_inode(&inode)
+                .map_err(|e| meta_error_to_errno(&e))?;
         }
         Ok(())
     }
@@ -1051,7 +1130,10 @@ impl SliceFsFilesystem {
     /// Returns the new inode number (same as `ino`).
     pub fn simulate_link(&self, ino: u64, newparent_ino: u64, newname: &str) -> Result<u64, i32> {
         // Get source inode
-        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        let mut inode = self
+            .meta
+            .get_inode(ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
 
         // Disallow hard links to directories
         if inode.mode & S_IFDIR != 0 {
@@ -1070,7 +1152,9 @@ impl SliceFsFilesystem {
             .unwrap_or(Duration::ZERO);
         inode.ctime_sec = now.as_secs() as i64;
         inode.ctime_nsec = now.subsec_nanos();
-        self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
+        self.meta
+            .update_inode(&inode)
+            .map_err(|e| meta_error_to_errno(&e))?;
 
         Ok(ino)
     }
@@ -1102,15 +1186,16 @@ impl SliceFsFilesystem {
 
         // RENAME_NOREPLACE: fail if target already exists
         let target_ino = self.meta.lookup(newparent_ino, newname).ok();
-        if flags & 1 != 0 {
-            if target_ino.is_some() {
-                return Err(libc::EEXIST);
-            }
+        if flags & 1 != 0 && target_ino.is_some() {
+            return Err(libc::EEXIST);
         }
 
         // If target exists and we're doing a normal rename, remove the old target
         if let Some(dst_ino) = target_ino {
-            let dst_inode = self.meta.get_inode(dst_ino).map_err(|e| meta_error_to_errno(&e))?;
+            let dst_inode = self
+                .meta
+                .get_inode(dst_ino)
+                .map_err(|e| meta_error_to_errno(&e))?;
             self.meta
                 .unlink(newparent_ino, newname)
                 .map_err(|e| meta_error_to_errno(&e))?;
@@ -1141,13 +1226,18 @@ impl SliceFsFilesystem {
             .map_err(|e| meta_error_to_errno(&e))?;
 
         // Update ctime on moved inode
-        let mut src_inode = self.meta.get_inode(src_ino).map_err(|e| meta_error_to_errno(&e))?;
+        let mut src_inode = self
+            .meta
+            .get_inode(src_ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO);
         src_inode.ctime_sec = now.as_secs() as i64;
         src_inode.ctime_nsec = now.subsec_nanos();
-        self.meta.update_inode(&src_inode).map_err(|e| meta_error_to_errno(&e))?;
+        self.meta
+            .update_inode(&src_inode)
+            .map_err(|e| meta_error_to_errno(&e))?;
 
         Ok(())
     }
@@ -1222,8 +1312,7 @@ impl SliceFsFilesystem {
         let root_digest = manifest[0];
         let raw_bytes: Vec<u8> = {
             let mut io = self.io.lock().unwrap();
-            file_storage_get(&mut *io, &root_digest)
-                .ok_or(libc::EINVAL)?
+            file_storage_get(&mut *io, &root_digest).ok_or(libc::EINVAL)?
         };
         String::from_utf8(raw_bytes).map_err(|_| libc::EINVAL)
     }
@@ -1237,15 +1326,24 @@ impl SliceFsFilesystem {
 
     /// Lookup a name in a directory. Returns `(child_ino, InodeMeta)` on success.
     pub fn test_lookup(&self, parent: u64, name: &str) -> Result<(u64, InodeMeta), i32> {
-        let child_ino = self.meta.lookup(parent, name).map_err(|e| meta_error_to_errno(&e))?;
-        let meta = self.meta.get_inode(child_ino).map_err(|e| meta_error_to_errno(&e))?;
+        let child_ino = self
+            .meta
+            .lookup(parent, name)
+            .map_err(|e| meta_error_to_errno(&e))?;
+        let meta = self
+            .meta
+            .get_inode(child_ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
         Ok((child_ino, meta))
     }
 
     /// List directory entries starting at `offset`.
     /// Returns `Vec<(ino, kind, name)>` tuples.
     pub fn test_readdir(&self, ino: u64, offset: u64) -> Result<Vec<(u64, FileType, String)>, i32> {
-        let entries = self.meta.list_directory(ino).map_err(|e| meta_error_to_errno(&e))?;
+        let entries = self
+            .meta
+            .list_directory(ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
         let mut result = Vec::new();
         for entry in entries.iter().skip(offset as usize) {
             let kind = match self.meta.get_inode(entry.ino) {
@@ -1274,7 +1372,10 @@ impl SliceFsFilesystem {
                 fh,
                 OpenFileState {
                     ino,
-                    write_mode: WriteMode::Streaming { state: State::default(), next_expected_offset: 0 },
+                    write_mode: WriteMode::Streaming {
+                        state: State::default(),
+                        next_expected_offset: 0,
+                    },
                     byte_count: 0,
                     cas_committed: false,
                     last_committed_root: None,
@@ -1282,11 +1383,11 @@ impl SliceFsFilesystem {
             );
 
             // FUSE_ATOMIC_O_TRUNC
-            if flags & libc::O_TRUNC != 0 {
-                if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
-                    self.open_files.lock().unwrap().remove(&fh);
-                    return Err(e);
-                }
+            if flags & libc::O_TRUNC != 0
+                && let Err(e) = self.test_setattr_size(ino, Some(fh), 0)
+            {
+                self.open_files.lock().unwrap().remove(&fh);
+                return Err(e);
             }
         }
 
@@ -1301,7 +1402,10 @@ impl SliceFsFilesystem {
     /// List extended attribute names for an inode.
     /// Returns a null-separated byte buffer of attribute names.
     pub fn test_listxattr(&self, ino: u64) -> Result<Vec<u8>, i32> {
-        let names = self.meta.list_xattrs(ino).map_err(|e| meta_error_to_errno(&e))?;
+        let names = self
+            .meta
+            .list_xattrs(ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
         let mut buf = Vec::new();
         for name in &names {
             buf.extend_from_slice(name.as_bytes());
@@ -1312,16 +1416,21 @@ impl SliceFsFilesystem {
 
     /// Set an extended attribute.
     pub fn test_setxattr(&self, ino: u64, name: &str, value: &[u8]) -> Result<(), i32> {
-        self.meta.set_xattr(ino, name, value).map_err(|e| meta_error_to_errno(&e))
+        self.meta
+            .set_xattr(ino, name, value)
+            .map_err(|e| meta_error_to_errno(&e))
     }
 
     /// Remove an extended attribute.
     pub fn test_removexattr(&self, ino: u64, name: &str) -> Result<(), i32> {
-        self.meta.remove_xattr(ino, name).map_err(|e| meta_error_to_errno(&e))
+        self.meta
+            .remove_xattr(ino, name)
+            .map_err(|e| meta_error_to_errno(&e))
     }
 
     /// Combined setattr: apply mode, uid, gid, mtime, and size changes.
     /// Returns the updated `InodeMeta`.
+    #[allow(clippy::too_many_arguments)] // mirrors the FUSE setattr signature
     pub fn test_setattr(
         &self,
         ino: u64,
@@ -1332,7 +1441,10 @@ impl SliceFsFilesystem {
         fh: Option<u64>,
         mtime: Option<(i64, u32)>,
     ) -> Result<InodeMeta, i32> {
-        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        let mut inode = self
+            .meta
+            .get_inode(ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
 
         if let Some(m) = mode {
             inode.mode = (inode.mode & S_IFMT) | (m & 0o7777);
@@ -1348,11 +1460,12 @@ impl SliceFsFilesystem {
             inode.mtime_nsec = nsec;
         }
         if let Some(new_size) = size {
-            if let Err(e) = self.test_setattr_size(ino, fh, new_size) {
-                return Err(e);
-            }
+            self.test_setattr_size(ino, fh, new_size)?;
             // Re-load inode after size change
-            inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+            inode = self
+                .meta
+                .get_inode(ino)
+                .map_err(|e| meta_error_to_errno(&e))?;
         }
 
         // Always update ctime
@@ -1362,7 +1475,9 @@ impl SliceFsFilesystem {
         inode.ctime_sec = now.as_secs() as i64;
         inode.ctime_nsec = now.subsec_nanos();
 
-        self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
+        self.meta
+            .update_inode(&inode)
+            .map_err(|e| meta_error_to_errno(&e))?;
         Ok(inode)
     }
 
@@ -1374,6 +1489,7 @@ impl SliceFsFilesystem {
 
     /// Create a file and return `(ino, fh, InodeMeta)`.
     /// Handles `O_TRUNC` flag atomically.
+    #[allow(clippy::too_many_arguments)] // mirrors the FUSE create signature
     pub fn test_create_full(
         &self,
         parent: u64,
@@ -1385,13 +1501,16 @@ impl SliceFsFilesystem {
         flags: i32,
     ) -> Result<(u64, u64, InodeMeta), i32> {
         let (ino, fh) = self.test_create(parent, name, mode, umask, uid, gid)?;
-        if flags & libc::O_TRUNC != 0 {
-            if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
-                self.open_files.lock().unwrap().remove(&fh);
-                return Err(e);
-            }
+        if flags & libc::O_TRUNC != 0
+            && let Err(e) = self.test_setattr_size(ino, Some(fh), 0)
+        {
+            self.open_files.lock().unwrap().remove(&fh);
+            return Err(e);
         }
-        let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        let meta = self
+            .meta
+            .get_inode(ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
         Ok((ino, fh, meta))
     }
 
@@ -1406,7 +1525,10 @@ impl SliceFsFilesystem {
         gid: u32,
     ) -> Result<(u64, InodeMeta), i32> {
         let ino = self.simulate_mkdir(parent, name, mode, umask, uid, gid)?;
-        let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        let meta = self
+            .meta
+            .get_inode(ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
         Ok((ino, meta))
     }
 
@@ -1421,7 +1543,10 @@ impl SliceFsFilesystem {
         umask: u32,
     ) -> Result<(u64, InodeMeta), i32> {
         let ino = self.test_mknod(parent, name, mode, uid, gid, umask)?;
-        let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        let meta = self
+            .meta
+            .get_inode(ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
         Ok((ino, meta))
     }
 
@@ -1435,7 +1560,10 @@ impl SliceFsFilesystem {
         gid: u32,
     ) -> Result<(u64, InodeMeta), i32> {
         let ino = self.simulate_symlink(parent, link_name, target, uid, gid)?;
-        let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        let meta = self
+            .meta
+            .get_inode(ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
         Ok((ino, meta))
     }
 
@@ -1447,7 +1575,10 @@ impl SliceFsFilesystem {
         newname: &str,
     ) -> Result<(u64, InodeMeta), i32> {
         let new_ino = self.simulate_link(ino, newparent, newname)?;
-        let meta = self.meta.get_inode(new_ino).map_err(|e| meta_error_to_errno(&e))?;
+        let meta = self
+            .meta
+            .get_inode(new_ino)
+            .map_err(|e| meta_error_to_errno(&e))?;
         Ok((new_ino, meta))
     }
 
@@ -1479,7 +1610,6 @@ impl SliceFsFilesystem {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1523,10 +1653,22 @@ mod tests {
     fn test_meta_error_to_errno() {
         use slicefs_traits::metadata::MetaError;
         assert_eq!(meta_error_to_errno(&MetaError::NotFound(0)), libc::ENOENT);
-        assert_eq!(meta_error_to_errno(&MetaError::AlreadyExists(0)), libc::EEXIST);
-        assert_eq!(meta_error_to_errno(&MetaError::NotADirectory(0)), libc::ENOTDIR);
-        assert_eq!(meta_error_to_errno(&MetaError::IsADirectory(0)), libc::EISDIR);
-        assert_eq!(meta_error_to_errno(&MetaError::Corrupted("x".into())), libc::EIO);
+        assert_eq!(
+            meta_error_to_errno(&MetaError::AlreadyExists(0)),
+            libc::EEXIST
+        );
+        assert_eq!(
+            meta_error_to_errno(&MetaError::NotADirectory(0)),
+            libc::ENOTDIR
+        );
+        assert_eq!(
+            meta_error_to_errno(&MetaError::IsADirectory(0)),
+            libc::EISDIR
+        );
+        assert_eq!(
+            meta_error_to_errno(&MetaError::Corrupted("x".into())),
+            libc::EIO
+        );
     }
 
     #[test]
@@ -1625,15 +1767,11 @@ mod tests {
         // statfs files field should reflect actual inode count, not hardcoded 1_000_000.
         // Fresh store has 1 inode (root), so inode_count() == 1 != 1_000_000.
         let dir = tempfile::TempDir::new().unwrap();
-        let io = Arc::new(std::sync::Mutex::new(
-            metadata::store_io::StoreIo::new(dir.path()),
-        ));
+        let io = Arc::new(std::sync::Mutex::new(metadata::store_io::StoreIo::new(
+            dir.path(),
+        )));
         let meta = metadata::store::DictMetadataStore::new(io.clone());
-        let fs = super::SliceFsFilesystem::new(
-            meta,
-            io,
-            Some(dir.path().to_path_buf()),
-        );
+        let fs = super::SliceFsFilesystem::new(meta, io, Some(dir.path().to_path_buf()));
         let (_blocks, _bfree, _bavail, files, _ffree, _bsize) = fs.test_statfs_values();
         assert_ne!(files, 1_000_000, "files must not be hardcoded 1_000_000");
         assert_eq!(files, 1, "fresh store files must equal inode_count (1)");
@@ -1707,7 +1845,9 @@ mod tests {
     #[test]
     fn test_getattr_created_file() {
         let (fs, _dir) = fresh_fs();
-        let (ino, _fh) = fs.test_create(1, "hello.txt", 0o644, 0, 1000, 1000).unwrap();
+        let (ino, _fh) = fs
+            .test_create(1, "hello.txt", 0o644, 0, 1000, 1000)
+            .unwrap();
         let meta = fs.test_getattr(ino).unwrap();
         assert_eq!(meta.uid, 1000);
         assert_eq!(meta.gid, 1000);
@@ -1856,7 +1996,7 @@ mod tests {
 
         // List
         let list = fs.test_listxattr(ino).unwrap();
-        assert!(list.len() > 0);
+        assert!(!list.is_empty());
         // Should contain "user.key\0"
         let expected = b"user.key\0";
         assert!(list.windows(expected.len()).any(|w| w == expected));
@@ -1890,7 +2030,9 @@ mod tests {
         let (fs, _dir) = fresh_fs();
         let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
         let _ = fs.test_release(ino, fh);
-        let meta = fs.test_setattr(ino, Some(0o755), None, None, None, None, None).unwrap();
+        let meta = fs
+            .test_setattr(ino, Some(0o755), None, None, None, None, None)
+            .unwrap();
         assert_eq!(meta.mode & 0o7777, 0o755);
     }
 
@@ -1899,7 +2041,9 @@ mod tests {
         let (fs, _dir) = fresh_fs();
         let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
         let _ = fs.test_release(ino, fh);
-        let meta = fs.test_setattr(ino, None, Some(500), Some(600), None, None, None).unwrap();
+        let meta = fs
+            .test_setattr(ino, None, Some(500), Some(600), None, None, None)
+            .unwrap();
         assert_eq!(meta.uid, 500);
         assert_eq!(meta.gid, 600);
     }
@@ -1909,7 +2053,9 @@ mod tests {
         let (fs, _dir) = fresh_fs();
         let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
         let _ = fs.test_release(ino, fh);
-        let meta = fs.test_setattr(ino, None, None, None, None, None, Some((12345, 678))).unwrap();
+        let meta = fs
+            .test_setattr(ino, None, None, None, None, None, Some((12345, 678)))
+            .unwrap();
         assert_eq!(meta.mtime_sec, 12345);
         assert_eq!(meta.mtime_nsec, 678);
     }
@@ -1921,7 +2067,9 @@ mod tests {
         fs.test_write(fh, 0, b"hello world").unwrap();
         fs.test_release(ino, fh).unwrap();
         // Truncate to 5 bytes
-        let meta = fs.test_setattr(ino, None, None, None, Some(5), None, None).unwrap();
+        let meta = fs
+            .test_setattr(ino, None, None, None, Some(5), None, None)
+            .unwrap();
         assert_eq!(meta.size, 5);
         // Read back
         let data = fs.test_read(ino, 0, 100).unwrap();
@@ -1935,7 +2083,9 @@ mod tests {
         fs.test_write(fh, 0, b"hi").unwrap();
         fs.test_release(ino, fh).unwrap();
         // Extend to 10 bytes
-        let meta = fs.test_setattr(ino, None, None, None, Some(10), None, None).unwrap();
+        let meta = fs
+            .test_setattr(ino, None, None, None, Some(10), None, None)
+            .unwrap();
         assert_eq!(meta.size, 10);
         let data = fs.test_read(ino, 0, 100).unwrap();
         assert_eq!(data.len(), 10);
@@ -1950,7 +2100,9 @@ mod tests {
         let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
         fs.test_write(fh, 0, b"data").unwrap();
         fs.test_release(ino, fh).unwrap();
-        let meta = fs.test_setattr(ino, None, None, None, Some(0), None, None).unwrap();
+        let meta = fs
+            .test_setattr(ino, None, None, None, Some(0), None, None)
+            .unwrap();
         assert_eq!(meta.size, 0);
     }
 
@@ -2049,7 +2201,9 @@ mod tests {
     #[test]
     fn test_mknod_creates_file_without_fh() {
         let (fs, _dir) = fresh_fs();
-        let ino = fs.test_mknod(1, "node", S_IFREG_TEST | 0o644, 0, 0, 0).unwrap();
+        let ino = fs
+            .test_mknod(1, "node", S_IFREG_TEST | 0o644, 0, 0, 0)
+            .unwrap();
         let meta = fs.test_getattr(ino).unwrap();
         assert_ne!(meta.mode & S_IFREG, 0);
     }
@@ -2058,7 +2212,9 @@ mod tests {
     fn test_mknod_non_regular_file_returns_enosys() {
         let (fs, _dir) = fresh_fs();
         // S_IFCHR = 0o020_000
-        let err = fs.test_mknod(1, "chardev", 0o020_000 | 0o644, 0, 0, 0).unwrap_err();
+        let err = fs
+            .test_mknod(1, "chardev", 0o020_000 | 0o644, 0, 0, 0)
+            .unwrap_err();
         assert_eq!(err, libc::ENOSYS);
     }
 
@@ -2453,16 +2609,25 @@ mod tests {
         let _ = meta_error_to_fuse_errno(&MetaError::NotEmpty(0));
         let _ = meta_error_to_fuse_errno(&MetaError::InvalidName("x".into()));
         let _ = meta_error_to_fuse_errno(&MetaError::Corrupted("x".into()));
-        let _ = meta_error_to_fuse_errno(&MetaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "x")));
+        let _ = meta_error_to_fuse_errno(&MetaError::Io(std::io::Error::other("x")));
     }
 
     // ── meta_error_to_errno full coverage ────────────────────────────────────
 
     #[test]
     fn test_meta_error_to_errno_all_variants() {
-        assert_eq!(meta_error_to_errno(&MetaError::NotEmpty(0)), libc::ENOTEMPTY);
-        assert_eq!(meta_error_to_errno(&MetaError::InvalidName("x".into())), libc::EINVAL);
-        assert_eq!(meta_error_to_errno(&MetaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "x"))), libc::EIO);
+        assert_eq!(
+            meta_error_to_errno(&MetaError::NotEmpty(0)),
+            libc::ENOTEMPTY
+        );
+        assert_eq!(
+            meta_error_to_errno(&MetaError::InvalidName("x".into())),
+            libc::EINVAL
+        );
+        assert_eq!(
+            meta_error_to_errno(&MetaError::Io(std::io::Error::other("x"))),
+            libc::EIO
+        );
     }
 
     // ── Buffered mode write tests ────────────────────────────────────────────
@@ -2634,7 +2799,8 @@ mod tests {
         let dir_b = fs.simulate_mkdir(1, "b", 0o755, 0, 0, 0).unwrap();
         let (ino, fh) = fs.test_create(dir_a, "file", 0o644, 0, 0, 0).unwrap();
         fs.test_release(ino, fh).unwrap();
-        fs.simulate_rename(dir_a, "file", dir_b, "moved", 0).unwrap();
+        fs.simulate_rename(dir_a, "file", dir_b, "moved", 0)
+            .unwrap();
         assert_eq!(fs.test_lookup(dir_a, "file").unwrap_err(), libc::ENOENT);
         let (found, _) = fs.test_lookup(dir_b, "moved").unwrap();
         assert_eq!(found, ino);
@@ -2647,15 +2813,17 @@ mod tests {
         let (fs, _dir) = fresh_fs();
         let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
         fs.test_release(ino, fh).unwrap();
-        let meta = fs.test_setattr(
-            ino,
-            Some(0o755),
-            Some(100),
-            Some(200),
-            None,
-            None,
-            Some((1234567890, 42)),
-        ).unwrap();
+        let meta = fs
+            .test_setattr(
+                ino,
+                Some(0o755),
+                Some(100),
+                Some(200),
+                None,
+                None,
+                Some((1234567890, 42)),
+            )
+            .unwrap();
         assert_eq!(meta.mode & 0o7777, 0o755);
         assert_eq!(meta.uid, 100);
         assert_eq!(meta.gid, 200);
@@ -2672,26 +2840,14 @@ mod tests {
         // Note: when size is set, test_setattr re-loads the inode after the
         // size change, so mode/uid/gid changes applied before the reload are
         // overwritten. Test size separately.
-        let meta = fs.test_setattr(
-            ino,
-            None,
-            None,
-            None,
-            Some(5),
-            None,
-            None,
-        ).unwrap();
+        let meta = fs
+            .test_setattr(ino, None, None, None, Some(5), None, None)
+            .unwrap();
         assert_eq!(meta.size, 5);
         // Now apply mode/uid/gid separately
-        let meta2 = fs.test_setattr(
-            ino,
-            Some(0o755),
-            Some(100),
-            Some(200),
-            None,
-            None,
-            None,
-        ).unwrap();
+        let meta2 = fs
+            .test_setattr(ino, Some(0o755), Some(100), Some(200), None, None, None)
+            .unwrap();
         assert_eq!(meta2.mode & 0o7777, 0o755);
         assert_eq!(meta2.uid, 100);
         assert_eq!(meta2.gid, 200);
@@ -2701,7 +2857,9 @@ mod tests {
     #[test]
     fn test_setattr_nonexistent_inode() {
         let (fs, _dir) = fresh_fs();
-        let err = fs.test_setattr(999, Some(0o755), None, None, None, None, None).unwrap_err();
+        let err = fs
+            .test_setattr(999, Some(0o755), None, None, None, None, None)
+            .unwrap_err();
         assert_ne!(err, 0);
     }
 
@@ -2714,8 +2872,14 @@ mod tests {
         let sym_meta = InodeMeta {
             ino: 0,
             mode: S_IFLNK | 0o777,
-            uid: 0, gid: 0, nlinks: 1, size: 0,
-            mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0,
+            uid: 0,
+            gid: 0,
+            nlinks: 1,
+            size: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            ctime_sec: 0,
+            ctime_nsec: 0,
         };
         let ino = fs.meta.create_inode(&sym_meta).unwrap();
         fs.meta.link(1, "emptylink", ino).unwrap();
@@ -2730,7 +2894,9 @@ mod tests {
     fn test_setattr_size_no_manifest() {
         let (fs, _dir) = fresh_fs();
         // Create a file via mknod (no manifest, no open handle)
-        let ino = fs.test_mknod(1, "newfile", S_IFREG | 0o644, 0, 0, 0).unwrap();
+        let ino = fs
+            .test_mknod(1, "newfile", S_IFREG | 0o644, 0, 0, 0)
+            .unwrap();
         // Extend to 10 bytes (no manifest yet -- should handle NotFound gracefully)
         fs.test_setattr_size(ino, None, 10).unwrap();
         let meta = fs.test_getattr(ino).unwrap();
@@ -2760,7 +2926,9 @@ mod tests {
     #[test]
     fn test_create_full_basic() {
         let (fs, _dir) = fresh_fs();
-        let (ino, fh, meta) = fs.test_create_full(1, "file.txt", 0o644, 0, 0, 0, 0).unwrap();
+        let (ino, fh, meta) = fs
+            .test_create_full(1, "file.txt", 0o644, 0, 0, 0, 0)
+            .unwrap();
         assert!(ino > 1);
         assert!(fh > 0);
         assert_ne!(meta.mode & S_IFREG, 0);
@@ -2770,7 +2938,9 @@ mod tests {
     #[test]
     fn test_create_full_with_o_trunc() {
         let (fs, _dir) = fresh_fs();
-        let (ino, fh, meta) = fs.test_create_full(1, "f", 0o644, 0, 0, 0, libc::O_TRUNC).unwrap();
+        let (ino, fh, meta) = fs
+            .test_create_full(1, "f", 0o644, 0, 0, 0, libc::O_TRUNC)
+            .unwrap();
         assert_eq!(meta.size, 0);
         fs.test_release(ino, fh).unwrap();
     }
@@ -2794,7 +2964,9 @@ mod tests {
     #[test]
     fn test_mknod_full_basic() {
         let (fs, _dir) = fresh_fs();
-        let (ino, meta) = fs.test_mknod_full(1, "node", S_IFREG_TEST | 0o644, 0, 0, 0).unwrap();
+        let (ino, meta) = fs
+            .test_mknod_full(1, "node", S_IFREG_TEST | 0o644, 0, 0, 0)
+            .unwrap();
         assert!(ino > 1);
         assert_ne!(meta.mode & S_IFREG, 0);
     }

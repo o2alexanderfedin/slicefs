@@ -70,12 +70,14 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
         return Err(format!(
             "legacy store format detected at {}. Re-seed required: slicefs seed <store> <source>",
             store_path.display()
-        ).into());
+        )
+        .into());
     } else if !store_path.join("segments").is_dir() {
         return Err(format!(
             "store not found at {}: no segments/ directory",
             store_path.display()
-        ).into());
+        )
+        .into());
     }
 
     let segs_dir = store_path.join("segments");
@@ -105,7 +107,8 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
                 // Root resolves — Merkle chain is intact.
             }
             None => {
-                let hex: String = root.iter()
+                let hex: String = root
+                    .iter()
                     .flat_map(|w| w.to_le_bytes())
                     .map(|b| format!("{:02x}", b))
                     .collect();
@@ -153,10 +156,7 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
     }
 
     if report.corrupted_roots > 0 {
-        Err(format!(
-            "scrub found {} error(s)",
-            report.corrupted_roots
-        ).into())
+        Err(format!("scrub found {} error(s)", report.corrupted_roots).into())
     } else {
         Ok(())
     }
@@ -169,7 +169,10 @@ fn print_human_report(report: &ScrubReport) {
     println!("Roots verified   : {}", report.roots_verified);
     println!("Corrupted roots  : {}", report.corrupted_roots);
     println!("Status           : {}", report.status);
-    println!("Mounted          : {}", if report.mounted { "yes" } else { "no" });
+    println!(
+        "Mounted          : {}",
+        if report.mounted { "yes" } else { "no" }
+    );
     println!("Saturated blocks : {}", report.saturated_blocks);
 
     if report.saturated_blocks > 0 {
@@ -196,8 +199,8 @@ mod tests {
     use metadata::store_io::StoreIo;
     use metadata::wal::WalConfig;
     use slicefs_traits::metadata::{InodeMeta, MetadataStore};
-    use tempfile::TempDir;
     use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
 
     const S_IFREG: u32 = 0o100_000;
 
@@ -230,14 +233,22 @@ mod tests {
     fn test_scrub_empty_store_is_clean() {
         let store = make_empty_store();
         let result = run_scrub(store.path(), false);
-        assert!(result.is_ok(), "empty store should scrub clean: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "empty store should scrub clean: {:?}",
+            result
+        );
     }
 
     #[test]
     fn test_scrub_empty_store_json_is_clean() {
         let store = make_empty_store();
         let result = run_scrub(store.path(), true);
-        assert!(result.is_ok(), "empty store --json scrub should be clean: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "empty store --json scrub should be clean: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -245,7 +256,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_segment_store(&dir);
         let result = run_scrub(dir.path(), false);
-        assert!(result.is_ok(), "segment store should scrub clean: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "segment store should scrub clean: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -286,7 +301,11 @@ mod tests {
         // Capture the report via JSON output to inspect the field.
         // run_scrub succeeds (clean store) and saturated_blocks should be 0.
         let result = run_scrub(dir.path(), false);
-        assert!(result.is_ok(), "clean store scrub should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "clean store scrub should succeed: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -300,8 +319,10 @@ mod tests {
             errors: vec![],
             saturated_blocks: 5, // non-zero to verify the field is read correctly
         };
-        assert_eq!(report.saturated_blocks, 5,
-            "saturated_blocks field must be present and readable in ScrubReport");
+        assert_eq!(
+            report.saturated_blocks, 5,
+            "saturated_blocks field must be present and readable in ScrubReport"
+        );
     }
 
     // ── mounted store warning path ────────────────────────────────────────────
@@ -315,7 +336,11 @@ mod tests {
 
         // scrub should still succeed (just warns) for a clean store.
         let result = run_scrub(dir.path(), false);
-        assert!(result.is_ok(), "scrub on mounted store should still return Ok for clean data: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "scrub on mounted store should still return Ok for clean data: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -326,7 +351,11 @@ mod tests {
         std::fs::write(dir.path().join("mount.lock"), b"locked").unwrap();
 
         let result = run_scrub(dir.path(), true);
-        assert!(result.is_ok(), "scrub --json on mounted store should succeed for clean data: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "scrub --json on mounted store should succeed for clean data: {:?}",
+            result
+        );
     }
 
     // ── ScrubReport JSON serialization ────────────────────────────────────────
@@ -342,9 +371,18 @@ mod tests {
             saturated_blocks: 0,
         };
         let json = serde_json::to_string(&report).expect("ScrubReport should serialize to JSON");
-        assert!(json.contains("roots_verified"), "JSON should contain roots_verified");
-        assert!(json.contains("corrupted_roots"), "JSON should contain corrupted_roots");
-        assert!(json.contains("saturated_blocks"), "JSON should contain saturated_blocks");
+        assert!(
+            json.contains("roots_verified"),
+            "JSON should contain roots_verified"
+        );
+        assert!(
+            json.contains("corrupted_roots"),
+            "JSON should contain corrupted_roots"
+        );
+        assert!(
+            json.contains("saturated_blocks"),
+            "JSON should contain saturated_blocks"
+        );
     }
 
     // ── scrub segment store json output ──────────────────────────────────────
@@ -354,7 +392,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_segment_store(&dir);
         let result = run_scrub(dir.path(), true);
-        assert!(result.is_ok(), "segment store --json scrub should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "segment store --json scrub should succeed: {:?}",
+            result
+        );
     }
 
     // ── empty segments directory (no committed state) ─────────────────────────
@@ -365,6 +407,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("segments")).unwrap();
         let result = run_scrub(dir.path(), false);
-        assert!(result.is_ok(), "empty segments dir should scrub clean: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "empty segments dir should scrub clean: {:?}",
+            result
+        );
     }
 }

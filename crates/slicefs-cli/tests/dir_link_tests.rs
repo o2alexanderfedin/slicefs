@@ -6,7 +6,7 @@
 //! Uses `DictMetadataStore` and `SliceFsFilesystem` simulate_* methods directly —
 //! no FUSE mount required.
 
-use blockset::{State, Tree, FileStorageAdd, file_storage_get};
+use blockset::{FileStorageAdd, State, Tree, file_storage_get};
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use slicefs_cli::filesystem::SliceFsFilesystem;
@@ -228,7 +228,10 @@ fn test_unlink_with_nlinks_1_deletes_inode_and_decrements_refcount() {
 
     // Refcount decremented to 0
     let rc_after = fs.meta().get_refcount(&digest);
-    assert_eq!(rc_after, 0, "refcount must reach 0 after unlink with nlinks==1");
+    assert_eq!(
+        rc_after, 0,
+        "refcount must reach 0 after unlink with nlinks==1"
+    );
 }
 
 #[test]
@@ -250,7 +253,10 @@ fn test_unlink_with_nlinks_2_keeps_inode() {
     // Entry gone, but inode still exists (nlinks==1 now)
     assert!(fs.meta().lookup(1, "shared.txt").is_err());
     let meta = fs.meta().get_inode(ino).unwrap();
-    assert_eq!(meta.nlinks, 1, "nlinks must be 1 after unlink of one of two links");
+    assert_eq!(
+        meta.nlinks, 1,
+        "nlinks must be 1 after unlink of one of two links"
+    );
 }
 
 #[test]
@@ -261,11 +267,7 @@ fn test_unlink_directory_returns_eisdir() {
 
     let result = fs.simulate_unlink(1, "adir");
     assert!(result.is_err(), "unlink on directory must fail");
-    assert_eq!(
-        result.unwrap_err(),
-        libc::EISDIR,
-        "error must be EISDIR"
-    );
+    assert_eq!(result.unwrap_err(), libc::EISDIR, "error must be EISDIR");
 }
 
 // ── Task 1: link (hard link) ──────────────────────────────────────────────────
@@ -289,7 +291,8 @@ fn test_link_increments_nlinks() {
     let ino = make_file(&fs, 1, "orig.txt");
     let nlinks_before = fs.meta().get_inode(ino).unwrap().nlinks;
 
-    fs.simulate_link(ino, 1, "link2.txt").expect("link should succeed");
+    fs.simulate_link(ino, 1, "link2.txt")
+        .expect("link should succeed");
 
     let nlinks_after = fs.meta().get_inode(ino).unwrap().nlinks;
     assert_eq!(
@@ -357,7 +360,10 @@ fn test_rename_within_same_directory() {
         .expect("rename should succeed");
 
     // Old name gone, new name present
-    assert!(fs.meta().lookup(1, "old_name.txt").is_err(), "old name must be gone");
+    assert!(
+        fs.meta().lookup(1, "old_name.txt").is_err(),
+        "old name must be gone"
+    );
     let new_ino = fs.meta().lookup(1, "new_name.txt").unwrap();
     assert_eq!(new_ino, ino, "new name must resolve to same inode");
 }
@@ -374,7 +380,10 @@ fn test_rename_across_directories() {
         .expect("cross-dir rename should succeed");
 
     // Old entry gone from root
-    assert!(fs.meta().lookup(1, "move_me.txt").is_err(), "old entry must be gone from source dir");
+    assert!(
+        fs.meta().lookup(1, "move_me.txt").is_err(),
+        "old entry must be gone from source dir"
+    );
     // New entry present in subdir
     let new_ino = fs.meta().lookup(dir_ino, "moved.txt").unwrap();
     assert_eq!(new_ino, ino, "new entry must resolve to same inode");
@@ -391,7 +400,10 @@ fn test_rename_overwrites_existing_target() {
         .expect("rename with overwrite should succeed");
 
     // src is gone
-    assert!(fs.meta().lookup(1, "src.txt").is_err(), "old source must be gone");
+    assert!(
+        fs.meta().lookup(1, "src.txt").is_err(),
+        "old source must be gone"
+    );
     // dst now points to src's inode
     let result_ino = fs.meta().lookup(1, "dst.txt").unwrap();
     assert_eq!(result_ino, src_ino, "target must now be source inode");
@@ -405,7 +417,10 @@ fn test_rename_noreplace_returns_eexist_if_target_exists() {
 
     // RENAME_NOREPLACE = 1 (from Linux kernel)
     let result = fs.simulate_rename(1, "alpha.txt", 1, "beta.txt", 1);
-    assert!(result.is_err(), "RENAME_NOREPLACE must fail if target exists");
+    assert!(
+        result.is_err(),
+        "RENAME_NOREPLACE must fail if target exists"
+    );
     assert_eq!(
         result.unwrap_err(),
         libc::EEXIST,
@@ -467,11 +482,12 @@ fn test_symlink_readlink_returns_target() {
         .simulate_symlink(1, "link_to_myfile", target, 0, 0)
         .expect("symlink should succeed");
 
-    let read_back = fs
-        .simulate_readlink(ino)
-        .expect("readlink should succeed");
+    let read_back = fs.simulate_readlink(ino).expect("readlink should succeed");
 
-    assert_eq!(read_back, target, "readlink must return the exact target path");
+    assert_eq!(
+        read_back, target,
+        "readlink must return the exact target path"
+    );
 }
 
 #[test]
@@ -500,7 +516,11 @@ fn test_symlink_stores_target_as_cas_content() {
 
     // Content bytes must match target string
     let content = read_content(&fs, ino);
-    assert_eq!(content, target.as_bytes(), "symlink content must be target bytes");
+    assert_eq!(
+        content,
+        target.as_bytes(),
+        "symlink content must be target bytes"
+    );
 }
 
 #[test]

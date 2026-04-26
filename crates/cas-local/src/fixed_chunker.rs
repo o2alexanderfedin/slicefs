@@ -1,6 +1,9 @@
 //! `FixedChunker`: implements `Chunker` with fixed-size blocks.
 
-use slicefs_traits::{chunk::{Chunk, Chunker}, error::CasError};
+use slicefs_traits::{
+    chunk::{Chunk, Chunker},
+    error::CasError,
+};
 
 /// Fixed-size block chunker.
 ///
@@ -146,13 +149,14 @@ mod tests {
 
         let mut expected_offset = 0usize;
         for c in &chunks {
-            assert_eq!(
-                c.offset, expected_offset,
-                "chunk offset must be contiguous"
-            );
+            assert_eq!(c.offset, expected_offset, "chunk offset must be contiguous");
             expected_offset += c.data.len();
         }
-        assert_eq!(expected_offset, data.len(), "offsets must cover all input bytes");
+        assert_eq!(
+            expected_offset,
+            data.len(),
+            "offsets must cover all input bytes"
+        );
     }
 
     #[test]
@@ -161,7 +165,10 @@ mod tests {
         let data: Vec<u8> = (0..=255u8).cycle().take(10_000).collect();
         let chunks = chunker.chunk(&data).unwrap();
         let reconstructed = concat_chunks(&chunks);
-        assert_eq!(reconstructed, data, "chunk round-trip must reproduce original input");
+        assert_eq!(
+            reconstructed, data,
+            "chunk round-trip must reproduce original input"
+        );
     }
 
     #[test]

@@ -9,10 +9,10 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 
 pub const BLOOM_MAGIC_START: [u8; 8] = *b"SLDXBL01";
-pub const BLOOM_MAGIC_END:   [u8; 8] = *b"BL01ENDX";
+pub const BLOOM_MAGIC_END: [u8; 8] = *b"BL01ENDX";
 pub const BLOOM_VERSION: u32 = 1;
-pub const HEADER_LEN:    usize = 64;
-pub const FOOTER_LEN:    usize = 16;
+pub const HEADER_LEN: usize = 64;
+pub const FOOTER_LEN: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct BloomSnapshotMeta {
@@ -59,7 +59,11 @@ pub fn write_atomic(
     footer[..8].copy_from_slice(&xxh3_hi.to_le_bytes());
     footer[8..16].copy_from_slice(&BLOOM_MAGIC_END);
 
-    let mut f = OpenOptions::new().create(true).truncate(true).write(true).open(&tmp)?;
+    let mut f = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&tmp)?;
     f.write_all(&header)?;
     f.write_all(payload)?;
     f.write_all(&footer)?;
@@ -81,7 +85,7 @@ pub fn load(root: &DedupRoot) -> Result<(BloomSnapshotMeta, Vec<u8>), DedupIndex
         return Err(DedupIndexError::BloomCorrupt("magic_start mismatch"));
     }
     let header_crc_stored = u32::from_le_bytes(header[60..64].try_into().unwrap());
-    let header_crc_calc   = crc32c::crc32c(&header[..60]);
+    let header_crc_calc = crc32c::crc32c(&header[..60]);
     if header_crc_stored != header_crc_calc {
         return Err(DedupIndexError::BloomCorrupt("header crc32c mismatch"));
     }
@@ -110,9 +114,9 @@ pub fn load(root: &DedupRoot) -> Result<(BloomSnapshotMeta, Vec<u8>), DedupIndex
     }
 
     let meta = BloomSnapshotMeta {
-        bloom_capacity:       u64::from_le_bytes(header[24..32].try_into().unwrap()),
-        bloom_fpr_bits:       f64::from_le_bytes(header[32..40].try_into().unwrap()),
-        entries_at_snapshot:  u64::from_le_bytes(header[40..48].try_into().unwrap()),
+        bloom_capacity: u64::from_le_bytes(header[24..32].try_into().unwrap()),
+        bloom_fpr_bits: f64::from_le_bytes(header[32..40].try_into().unwrap()),
+        entries_at_snapshot: u64::from_le_bytes(header[40..48].try_into().unwrap()),
         redb_hwm_at_snapshot: u64::from_le_bytes(header[48..56].try_into().unwrap()),
     };
     Ok((meta, payload))
@@ -175,7 +179,9 @@ mod tests {
         std::fs::write(r.bloom(), &bytes).unwrap();
         let err = load(&r).unwrap_err();
         match err {
-            DedupIndexError::BloomCorrupt(s) => assert!(s.contains("crc32c") || s.contains("magic")),
+            DedupIndexError::BloomCorrupt(s) => {
+                assert!(s.contains("crc32c") || s.contains("magic"))
+            }
             other => panic!("expected BloomCorrupt, got {other:?}"),
         }
     }

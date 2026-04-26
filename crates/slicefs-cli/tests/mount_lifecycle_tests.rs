@@ -84,7 +84,11 @@ fn test_load_store_valid_seeded_succeeds() {
 
     // Root inode must exist.
     let root = meta.get_inode(1).expect("root inode missing");
-    assert_eq!(root.mode & 0o170_000, 0o040_000, "inode 1 must be a directory");
+    assert_eq!(
+        root.mode & 0o170_000,
+        0o040_000,
+        "inode 1 must be a directory"
+    );
 
     // Seeded file must be accessible.
     let ino = meta.lookup(1, "hello.txt").expect("hello.txt not found");
@@ -133,11 +137,18 @@ fn test_load_store_dirty_mount_stale_lock_recovery() {
     std::fs::write(store_dir.path().join("mount.lock"), b"stale-pid").unwrap();
 
     let result = load_store(store_dir.path(), WalConfig::NoWal);
-    assert!(result.is_ok(), "dirty mount recovery should succeed, got: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "dirty mount recovery should succeed, got: {:?}",
+        result.err()
+    );
 
     let (meta, _io, _lock) = result.unwrap();
     let ino = meta.lookup(1, "hello.txt");
-    assert!(ino.is_ok(), "hello.txt should be accessible after dirty mount recovery");
+    assert!(
+        ino.is_ok(),
+        "hello.txt should be accessible after dirty mount recovery"
+    );
 }
 
 /// An empty segment file (0 bytes) should be skipped gracefully by
@@ -152,7 +163,11 @@ fn test_load_store_empty_segment_file_skipped() {
     std::fs::write(segs_dir.join("segment-000099.seg"), b"").unwrap();
 
     let result = load_store(store_dir.path(), WalConfig::NoWal);
-    assert!(result.is_ok(), "empty segment file should be skipped, got: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "empty segment file should be skipped, got: {:?}",
+        result.err()
+    );
 
     let (meta, _io, _lock) = result.unwrap();
     let ino = meta.lookup(1, "hello.txt");
@@ -170,7 +185,11 @@ fn test_load_store_truncated_segment_skipped() {
     std::fs::write(segs_dir.join("segment-000098.seg"), b"short").unwrap();
 
     let result = load_store(store_dir.path(), WalConfig::NoWal);
-    assert!(result.is_ok(), "truncated segment should be skipped, got: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "truncated segment should be skipped, got: {:?}",
+        result.err()
+    );
 
     let (meta, _io, _lock) = result.unwrap();
     let ino = meta.lookup(1, "hello.txt");
@@ -209,12 +228,18 @@ fn test_load_store_from_segments_skips_empty_files() {
     std::fs::create_dir_all(&segs_dir).unwrap();
 
     std::fs::write(segs_dir.join("segment-000001.seg"), b"").unwrap();
-    std::fs::write(segs_dir.join("segment-000002.seg"), &[0u8; 10]).unwrap();
+    std::fs::write(segs_dir.join("segment-000002.seg"), [0u8; 10]).unwrap();
 
     let result = load_store_from_segments(&segs_dir);
-    assert!(result.is_ok(), "should not error on empty/truncated segments");
+    assert!(
+        result.is_ok(),
+        "should not error on empty/truncated segments"
+    );
     let (root, _snapshots) = result.unwrap();
-    assert!(root.is_none(), "no valid root should be found from empty segments");
+    assert!(
+        root.is_none(),
+        "no valid root should be found from empty segments"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -280,10 +305,14 @@ fn test_mount_options_no_custom_options() {
     #[cfg(not(target_os = "macos"))]
     let config = build_mount_options(false, false, None);
 
-    let has_custom = config.mount_options.iter().any(|opt| {
-        matches!(opt, fuser::MountOption::CUSTOM(_))
-    });
-    assert!(!has_custom, "No CUSTOM mount options should be present (FUSE-T rejects them)");
+    let has_custom = config
+        .mount_options
+        .iter()
+        .any(|opt| matches!(opt, fuser::MountOption::CUSTOM(_)));
+    assert!(
+        !has_custom,
+        "No CUSTOM mount options should be present (FUSE-T rejects them)"
+    );
 }
 
 #[test]
@@ -293,11 +322,9 @@ fn test_mount_options_no_direct_io() {
     #[cfg(not(target_os = "macos"))]
     let config = build_mount_options(false, false, None);
 
-    let has_direct_io = config.mount_options.iter().any(|opt| {
-        match opt {
-            fuser::MountOption::CUSTOM(s) => s.contains("direct_io"),
-            _ => false,
-        }
+    let has_direct_io = config.mount_options.iter().any(|opt| match opt {
+        fuser::MountOption::CUSTOM(s) => s.contains("direct_io"),
+        _ => false,
     });
     assert!(!has_direct_io, "direct_io must NOT be present");
 }
@@ -310,7 +337,9 @@ fn test_mount_options_default_permissions_always_present() {
     let config = build_mount_options(false, false, None);
 
     assert!(
-        config.mount_options.contains(&fuser::MountOption::DefaultPermissions),
+        config
+            .mount_options
+            .contains(&fuser::MountOption::DefaultPermissions),
         "DefaultPermissions must always be present"
     );
 }
@@ -322,9 +351,10 @@ fn test_mount_options_fsname_slicefs_always_present() {
     #[cfg(not(target_os = "macos"))]
     let config = build_mount_options(false, false, None);
 
-    let has_fsname = config.mount_options.iter().any(|opt| {
-        matches!(opt, fuser::MountOption::FSName(s) if s == "slicefs")
-    });
+    let has_fsname = config
+        .mount_options
+        .iter()
+        .any(|opt| matches!(opt, fuser::MountOption::FSName(s) if s == "slicefs"));
     assert!(has_fsname, "FSName(\"slicefs\") must always be present");
 }
 
@@ -337,7 +367,11 @@ fn test_mount_options_both_noatime_and_allow_other() {
 
     assert!(config.mount_options.contains(&fuser::MountOption::NoAtime));
     assert!(matches!(config.acl, fuser::SessionACL::All));
-    assert!(config.mount_options.contains(&fuser::MountOption::DefaultPermissions));
+    assert!(
+        config
+            .mount_options
+            .contains(&fuser::MountOption::DefaultPermissions)
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -346,9 +380,7 @@ fn test_mount_options_both_noatime_and_allow_other() {
 
 #[cfg(target_os = "macos")]
 mod backend_tests {
-    use slicefs_cli::backend::{
-        FuseTBackend, parse_backend_flag, select_backend,
-    };
+    use slicefs_cli::backend::{FuseTBackend, parse_backend_flag, select_backend};
 
     #[test]
     fn test_auto_detect_returns_nfs_when_fskit_unavailable() {
@@ -380,7 +412,11 @@ mod backend_tests {
         let result = select_backend(None, false, (1, 0, 30), false);
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("too old"), "error should mention version too old, got: {}", msg);
+        assert!(
+            msg.contains("too old"),
+            "error should mention version too old, got: {}",
+            msg
+        );
     }
 
     #[test]
@@ -401,9 +437,10 @@ mod backend_tests {
     #[test]
     fn test_no_custom_mount_options_with_backend() {
         let config = super::build_mount_options(false, false, Some(&FuseTBackend::Smb));
-        let has_custom = config.mount_options.iter().any(|opt| {
-            matches!(opt, fuser::MountOption::CUSTOM(_))
-        });
+        let has_custom = config
+            .mount_options
+            .iter()
+            .any(|opt| matches!(opt, fuser::MountOption::CUSTOM(_)));
         assert!(!has_custom, "CUSTOM options must not be passed to FUSE-T");
     }
 }
@@ -435,16 +472,19 @@ fn test_parse_wal_config_periodic() {
 
 #[test]
 fn test_parse_wal_config_no_wal() {
-    assert!(matches!(
-        parse_wal_config(Some("no-wal")),
-        WalConfig::NoWal
-    ));
+    assert!(matches!(parse_wal_config(Some("no-wal")), WalConfig::NoWal));
 }
 
 #[test]
 fn test_parse_wal_config_unknown_falls_back_to_per_op() {
-    assert!(matches!(parse_wal_config(Some("unknown")), WalConfig::PerOp));
-    assert!(matches!(parse_wal_config(Some("FLUSH-ON-FSYNC")), WalConfig::PerOp));
+    assert!(matches!(
+        parse_wal_config(Some("unknown")),
+        WalConfig::PerOp
+    ));
+    assert!(matches!(
+        parse_wal_config(Some("FLUSH-ON-FSYNC")),
+        WalConfig::PerOp
+    ));
     assert!(matches!(parse_wal_config(Some("")), WalConfig::PerOp));
 }
 
@@ -497,7 +537,10 @@ fn test_load_store_with_multiple_valid_segments() {
 
     // Load again — this exercises next_segment_id with existing segments.
     let result = load_store(store_dir.path(), WalConfig::PerOp);
-    assert!(result.is_ok(), "loading store with existing segments should work");
+    assert!(
+        result.is_ok(),
+        "loading store with existing segments should work"
+    );
 
     let (meta2, _io2, _lock2) = result.unwrap();
     let ino2 = meta2.lookup(1, "first.txt");
@@ -544,7 +587,10 @@ fn test_load_store_with_flush_on_fsync_wal() {
     write_seeded_store_segments(&store_dir);
 
     let result = load_store(store_dir.path(), WalConfig::FlushOnFsync);
-    assert!(result.is_ok(), "loading with FlushOnFsync WAL should succeed");
+    assert!(
+        result.is_ok(),
+        "loading with FlushOnFsync WAL should succeed"
+    );
 }
 
 #[test]
@@ -601,13 +647,19 @@ fn test_load_store_creates_mount_lock() {
     write_seeded_store_segments(&store_dir);
 
     let lock_path = store_dir.path().join("mount.lock");
-    assert!(!lock_path.exists(), "mount.lock should not exist before load_store");
+    assert!(
+        !lock_path.exists(),
+        "mount.lock should not exist before load_store"
+    );
 
     let result = load_store(store_dir.path(), WalConfig::NoWal);
     assert!(result.is_ok());
     let (_meta, _io, _lock) = result.unwrap();
 
-    assert!(lock_path.exists(), "mount.lock should exist while MountLock is held");
+    assert!(
+        lock_path.exists(),
+        "mount.lock should exist while MountLock is held"
+    );
 }
 
 /// When MountLock is dropped, mount.lock should be removed.
@@ -625,5 +677,8 @@ fn test_mount_lock_dropped_on_scope_exit() {
         // _lock is dropped here.
     }
 
-    assert!(!lock_path.exists(), "mount.lock should be removed after MountLock is dropped");
+    assert!(
+        !lock_path.exists(),
+        "mount.lock should be removed after MountLock is dropped"
+    );
 }

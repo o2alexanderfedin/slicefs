@@ -35,8 +35,7 @@ pub enum MountState {
 /// - Key:  `&[u8; 28]` — the full content address (no truncation).
 /// - Val:  `()` — presence-only; the CAS is the source of truth for
 ///   payload bytes (S1).
-pub const DEDUP_TABLE: TableDefinition<&[u8; 28], ()> =
-    TableDefinition::new("dedup_index_v1");
+pub const DEDUP_TABLE: TableDefinition<&[u8; 28], ()> = TableDefinition::new("dedup_index_v1");
 
 /// Authoritative on-disk index, redb 4.1.
 ///
@@ -249,7 +248,11 @@ impl RedbDedupIndex {
     /// Returns `None` if the hex string is shorter than 4 characters
     /// (which should never happen for a 28-byte hash, but defensive).
     fn cas_path(&self, hash: &ChunkHash) -> Option<std::path::PathBuf> {
-        let hex: String = hash.as_bytes().iter().map(|b| format!("{:02x}", b)).collect();
+        let hex: String = hash
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
         if hex.len() < 4 {
             return None;
         }
@@ -281,23 +284,31 @@ impl DedupIndex for RedbDedupIndex {
         self.stats.bloom_hits_total.fetch_add(1, Ordering::Relaxed);
 
         let h = Self::hash28(hash)?;
-        let txn = self.db.begin_read().map_err(|e| {
-            CasError::Index(format!("redb begin_read: {e}"))
-        })?;
-        let t = txn.open_table(DEDUP_TABLE).map_err(|e| {
-            CasError::Index(format!("redb open_table: {e}"))
-        })?;
-        let hit = t.get(&h).map_err(|e| {
-            CasError::Index(format!("redb get: {e}"))
-        })?.is_some();
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| CasError::Index(format!("redb begin_read: {e}")))?;
+        let t = txn
+            .open_table(DEDUP_TABLE)
+            .map_err(|e| CasError::Index(format!("redb open_table: {e}")))?;
+        let hit = t
+            .get(&h)
+            .map_err(|e| CasError::Index(format!("redb get: {e}")))?
+            .is_some();
 
         if !hit {
-            self.stats.bloom_false_positives_total.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .bloom_false_positives_total
+                .fetch_add(1, Ordering::Relaxed);
             return Ok(DedupResult::Absent);
         }
 
-        if self.config.verify_on_present && let Some(p) = self.cas_path(hash) {
-            self.stats.verify_on_present_hits_total.fetch_add(1, Ordering::Relaxed);
+        if self.config.verify_on_present
+            && let Some(p) = self.cas_path(hash)
+        {
+            self.stats
+                .verify_on_present_hits_total
+                .fetch_add(1, Ordering::Relaxed);
             if !p.exists() {
                 return Ok(DedupResult::Absent);
             }
@@ -307,19 +318,24 @@ impl DedupIndex for RedbDedupIndex {
 
     fn remove(&self, hash: &ChunkHash) -> Result<(), CasError> {
         let h = Self::hash28(hash)?;
-        let mut txn = self.db.begin_write().map_err(|e| {
-            CasError::Index(format!("redb begin_write: {e}"))
-        })?;
+        let mut txn = self
+            .db
+            .begin_write()
+            .map_err(|e| CasError::Index(format!("redb begin_write: {e}")))?;
         let _ = txn.set_durability(match self.config.durability {
-            crate::config::DurabilityMode::Seed     => redb::Durability::None,
-            crate::config::DurabilityMode::Default  => redb::Durability::Immediate,
+            crate::config::DurabilityMode::Seed => redb::Durability::None,
+            crate::config::DurabilityMode::Default => redb::Durability::Immediate,
             crate::config::DurabilityMode::Paranoid => redb::Durability::Immediate,
         });
         {
-            let mut t = txn.open_table(DEDUP_TABLE).map_err(|e| CasError::Index(format!("open: {e}")))?;
-            t.remove(&h).map_err(|e| CasError::Index(format!("remove: {e}")))?;
+            let mut t = txn
+                .open_table(DEDUP_TABLE)
+                .map_err(|e| CasError::Index(format!("open: {e}")))?;
+            t.remove(&h)
+                .map_err(|e| CasError::Index(format!("remove: {e}")))?;
         }
-        txn.commit().map_err(|e| CasError::Index(format!("commit: {e}")))?;
+        txn.commit()
+            .map_err(|e| CasError::Index(format!("commit: {e}")))?;
         self.stats.removes_total.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -354,14 +370,12 @@ impl Drop for RedbDedupIndex {
                 .stats
                 .inserts_total
                 .load(std::sync::atomic::Ordering::Relaxed),
-            redb_hwm_at_snapshot: self
-                .high_water
-                .load(std::sync::atomic::Ordering::Acquire),
+            redb_hwm_at_snapshot: self.high_water.load(std::sync::atomic::Ordering::Acquire),
         };
         let _ = crate::bloom_snapshot::write_atomic(&self.root, &meta, &payload);
 
-        let _ = std::fs::File::open(self.root.redb())
-            .and_then(|f| crate::platform::durable_sync(&f));
+        let _ =
+            std::fs::File::open(self.root.redb()).and_then(|f| crate::platform::durable_sync(&f));
 
         let mut m = match crate::manifest::Manifest::read(&self.root) {
             Ok(m) => m,
@@ -509,10 +523,14 @@ mod insert_tests {
         let h = make_hash(9);
         idx.insert(&h).unwrap();
         idx.remove(&h).unwrap();
-        assert!(matches!(idx.lookup(&h).unwrap(), DedupResult::Absent),
-            "lookup must be Absent after remove (bloom hit + redb miss = false positive)");
-        assert!(idx.bloom_check(&h),
-            "bloom must NOT be updated on remove (I3 — drift is benign)");
+        assert!(
+            matches!(idx.lookup(&h).unwrap(), DedupResult::Absent),
+            "lookup must be Absent after remove (bloom hit + redb miss = false positive)"
+        );
+        assert!(
+            idx.bloom_check(&h),
+            "bloom must NOT be updated on remove (I3 — drift is benign)"
+        );
     }
 
     #[test]
@@ -520,14 +538,21 @@ mod insert_tests {
         let td = tempfile::tempdir().unwrap();
         let cas = td.path().join("cas");
         std::fs::create_dir_all(&cas).unwrap();
-        let cfg = DedupIndexConfig::builder(&cas).mode(crate::config::DurabilityMode::Default).build();
+        let cfg = DedupIndexConfig::builder(&cas)
+            .mode(crate::config::DurabilityMode::Default)
+            .build();
         let idx = RedbDedupIndex::create(cfg).unwrap();
-        for i in 0..50u8 { idx.insert(&make_hash(i)).unwrap(); }
+        for i in 0..50u8 {
+            idx.insert(&make_hash(i)).unwrap();
+        }
         idx.flush().unwrap();
 
         // After flush, every insert must be Present even on a fresh read txn.
         for i in 0..50u8 {
-            assert!(matches!(idx.lookup(&make_hash(i)).unwrap(), DedupResult::Present));
+            assert!(matches!(
+                idx.lookup(&make_hash(i)).unwrap(),
+                DedupResult::Present
+            ));
         }
     }
 
@@ -581,8 +606,10 @@ mod insert_tests {
             idx.flush().unwrap();
         } // Drop writes snapshot.
         let idx2 = RedbDedupIndex::open(cfg).unwrap();
-        assert!(idx2.bloom_check(&make_hash(33)),
-            "bloom must be loaded from snapshot or rebuilt from redb");
+        assert!(
+            idx2.bloom_check(&make_hash(33)),
+            "bloom must be loaded from snapshot or rebuilt from redb"
+        );
     }
 
     #[test]
@@ -604,7 +631,9 @@ mod insert_tests {
 
         let idx2 = RedbDedupIndex::open(cfg).unwrap();
         // Bloom rebuild from redb should set this hash.
-        assert!(idx2.bloom_check(&make_hash(44)),
-            "bloom rebuild from redb must include the inserted hash");
+        assert!(
+            idx2.bloom_check(&make_hash(44)),
+            "bloom rebuild from redb must include the inserted hash"
+        );
     }
 }

@@ -8,8 +8,8 @@ use std::io;
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::segment::SegmentWriter;
 use super::{WalEntry, WalError, WalStrategy, per_op::wal_entry_to_segment};
+use crate::segment::SegmentWriter;
 
 /// WAL that buffers mutations; flushes are triggered externally (timer) or at shutdown.
 pub struct PeriodicWal {

@@ -28,17 +28,20 @@ fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
 #[test]
 fn test_streaming_write_fsync_then_more_writes() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "file.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "file.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write "hello"
-    fs.test_write(fh, 0, b"hello").expect("write 1 should succeed");
+    fs.test_write(fh, 0, b"hello")
+        .expect("write 1 should succeed");
 
     // fsync mid-stream
     fs.test_fsync(ino, fh).expect("fsync should succeed");
 
     // Write " world" after fsync
-    fs.test_write(fh, 5, b" world").expect("write 2 should succeed");
+    fs.test_write(fh, 5, b" world")
+        .expect("write 2 should succeed");
 
     // Release
     fs.test_release(ino, fh).expect("release should succeed");
@@ -53,11 +56,13 @@ fn test_streaming_write_fsync_then_more_writes() {
 #[test]
 fn test_read_during_write_uncommitted() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "stream.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "stream.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write data without fsync
-    fs.test_write(fh, 0, b"streaming data").expect("write should succeed");
+    fs.test_write(fh, 0, b"streaming data")
+        .expect("write should succeed");
 
     // Read via test_read WITHOUT fsync -- should see uncommitted bytes
     let content = fs.test_read(ino, 0, 1024).expect("read should succeed");
@@ -72,11 +77,13 @@ fn test_read_during_write_uncommitted() {
 #[test]
 fn test_fsync_midstream_then_continue() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "chunks.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "chunks.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write chunk A
-    fs.test_write(fh, 0, b"AAAA").expect("write A should succeed");
+    fs.test_write(fh, 0, b"AAAA")
+        .expect("write A should succeed");
 
     // fsync -- commits chunk A
     fs.test_fsync(ino, fh).expect("fsync 1 should succeed");
@@ -86,7 +93,8 @@ fn test_fsync_midstream_then_continue() {
     assert_eq!(content1, b"AAAA");
 
     // Write chunk B
-    fs.test_write(fh, 4, b"BBBB").expect("write B should succeed");
+    fs.test_write(fh, 4, b"BBBB")
+        .expect("write B should succeed");
 
     // fsync again -- commits chunks A+B
     fs.test_fsync(ino, fh).expect("fsync 2 should succeed");
@@ -99,7 +107,9 @@ fn test_fsync_midstream_then_continue() {
     fs.test_release(ino, fh).expect("release should succeed");
 
     // Final read
-    let content3 = fs.test_read(ino, 0, 1024).expect("final read should succeed");
+    let content3 = fs
+        .test_read(ino, 0, 1024)
+        .expect("final read should succeed");
     assert_eq!(content3, b"AAAABBBB");
 }
 
@@ -108,15 +118,18 @@ fn test_fsync_midstream_then_continue() {
 #[test]
 fn test_fsync_refcount_no_leak() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "refcount.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "refcount.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write "v1" and fsync
-    fs.test_write(fh, 0, b"v1").expect("write v1 should succeed");
+    fs.test_write(fh, 0, b"v1")
+        .expect("write v1 should succeed");
     fs.test_fsync(ino, fh).expect("fsync 1 should succeed");
 
     // Write " v2" (appended) and fsync again
-    fs.test_write(fh, 2, b" v2").expect("write v2 should succeed");
+    fs.test_write(fh, 2, b" v2")
+        .expect("write v2 should succeed");
     fs.test_fsync(ino, fh).expect("fsync 2 should succeed");
 
     // Release
@@ -136,14 +149,18 @@ fn test_fsync_refcount_no_leak() {
 #[test]
 fn test_empty_file_release() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "empty.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "empty.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Release immediately (no writes)
     fs.test_release(ino, fh).expect("release should succeed");
 
     // Manifest should be empty
-    let manifest = fs.meta().get_manifest(ino).expect("get manifest should succeed");
+    let manifest = fs
+        .meta()
+        .get_manifest(ino)
+        .expect("get manifest should succeed");
     assert!(manifest.is_empty(), "empty file should have empty manifest");
 
     // Read returns empty bytes
@@ -156,7 +173,8 @@ fn test_empty_file_release() {
 #[test]
 fn test_sequential_large_write() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "large.bin", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "large.bin", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Generate 1 MB of deterministic data
@@ -170,7 +188,8 @@ fn test_sequential_large_write() {
             .map(|j| ((i * chunk_size + j) % 256) as u8)
             .collect();
         let offset = (i * chunk_size) as u64;
-        fs.test_write(fh, offset, &chunk).expect("write chunk should succeed");
+        fs.test_write(fh, offset, &chunk)
+            .expect("write chunk should succeed");
         expected.extend_from_slice(&chunk);
     }
 
@@ -178,7 +197,9 @@ fn test_sequential_large_write() {
     fs.test_release(ino, fh).expect("release should succeed");
 
     // Read back entire file
-    let content = fs.test_read(ino, 0, total_size as u32).expect("read should succeed");
+    let content = fs
+        .test_read(ino, 0, total_size as u32)
+        .expect("read should succeed");
     assert_eq!(content.len(), total_size, "content length should match");
     assert_eq!(content, expected, "content should match byte-for-byte");
 
@@ -192,17 +213,21 @@ fn test_sequential_large_write() {
 #[test]
 fn test_truncate_to_zero_on_open_handle() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "trunc0.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "trunc0.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write "hello world"
-    fs.test_write(fh, 0, b"hello world").expect("write should succeed");
+    fs.test_write(fh, 0, b"hello world")
+        .expect("write should succeed");
 
     // Truncate to 0
-    fs.test_setattr_size(ino, Some(fh), 0).expect("truncate to 0 should succeed");
+    fs.test_setattr_size(ino, Some(fh), 0)
+        .expect("truncate to 0 should succeed");
 
     // Write new content
-    fs.test_write(fh, 0, b"new content").expect("write after truncate should succeed");
+    fs.test_write(fh, 0, b"new content")
+        .expect("write after truncate should succeed");
 
     // Release
     fs.test_release(ino, fh).expect("release should succeed");
@@ -217,14 +242,17 @@ fn test_truncate_to_zero_on_open_handle() {
 #[test]
 fn test_truncate_midstream_nonzero() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "trunc5.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "trunc5.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write "hello world" (11 bytes)
-    fs.test_write(fh, 0, b"hello world").expect("write should succeed");
+    fs.test_write(fh, 0, b"hello world")
+        .expect("write should succeed");
 
     // Truncate to 5
-    fs.test_setattr_size(ino, Some(fh), 5).expect("truncate to 5 should succeed");
+    fs.test_setattr_size(ino, Some(fh), 5)
+        .expect("truncate to 5 should succeed");
 
     // Release
     fs.test_release(ino, fh).expect("release should succeed");
@@ -239,14 +267,16 @@ fn test_truncate_midstream_nonzero() {
 #[test]
 fn test_truncate_extend_beyond() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "extend.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "extend.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write "hi" (2 bytes)
     fs.test_write(fh, 0, b"hi").expect("write should succeed");
 
     // Truncate to 10 (extend with zeros)
-    fs.test_setattr_size(ino, Some(fh), 10).expect("truncate to 10 should succeed");
+    fs.test_setattr_size(ino, Some(fh), 10)
+        .expect("truncate to 10 should succeed");
 
     // Release
     fs.test_release(ino, fh).expect("release should succeed");
@@ -263,7 +293,8 @@ fn test_truncate_extend_beyond() {
 #[test]
 fn test_truncate_after_fsync_decrements_refcount() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "fsync_trunc.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "fsync_trunc.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write "data" and fsync (commits root)
@@ -271,10 +302,12 @@ fn test_truncate_after_fsync_decrements_refcount() {
     fs.test_fsync(ino, fh).expect("fsync should succeed");
 
     // Truncate to 0 (should decrement old committed root)
-    fs.test_setattr_size(ino, Some(fh), 0).expect("truncate to 0 should succeed");
+    fs.test_setattr_size(ino, Some(fh), 0)
+        .expect("truncate to 0 should succeed");
 
     // Write new data
-    fs.test_write(fh, 0, b"new data").expect("write after truncate should succeed");
+    fs.test_write(fh, 0, b"new data")
+        .expect("write after truncate should succeed");
 
     // Release
     fs.test_release(ino, fh).expect("release should succeed");
@@ -289,11 +322,13 @@ fn test_truncate_after_fsync_decrements_refcount() {
 #[test]
 fn test_cas_committed_guard_fsync_then_release() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "guard.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "guard.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write "committed data"
-    fs.test_write(fh, 0, b"committed data").expect("write should succeed");
+    fs.test_write(fh, 0, b"committed data")
+        .expect("write should succeed");
 
     // fsync commits the data
     fs.test_fsync(ino, fh).expect("fsync should succeed");
@@ -311,17 +346,20 @@ fn test_cas_committed_guard_fsync_then_release() {
 #[test]
 fn test_write_after_fsync_produces_correct_final() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "append.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "append.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write "part1"
-    fs.test_write(fh, 0, b"part1").expect("write 1 should succeed");
+    fs.test_write(fh, 0, b"part1")
+        .expect("write 1 should succeed");
 
     // fsync
     fs.test_fsync(ino, fh).expect("fsync should succeed");
 
     // Write "part2" (appended)
-    fs.test_write(fh, 5, b"part2").expect("write 2 should succeed");
+    fs.test_write(fh, 5, b"part2")
+        .expect("write 2 should succeed");
 
     // Release
     fs.test_release(ino, fh).expect("release should succeed");
@@ -338,14 +376,17 @@ fn test_write_after_fsync_produces_correct_final() {
 #[test]
 fn test_nonseq_fallback_on_gap() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "gap.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "gap.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write 5 bytes at offset 0 (sequential)
-    fs.test_write(fh, 0, b"AAAAA").expect("write 1 should succeed");
+    fs.test_write(fh, 0, b"AAAAA")
+        .expect("write 1 should succeed");
 
     // Write 5 bytes at offset 20 (gap triggers fallback)
-    fs.test_write(fh, 20, b"BBBBB").expect("write 2 should succeed");
+    fs.test_write(fh, 20, b"BBBBB")
+        .expect("write 2 should succeed");
 
     // Release
     fs.test_release(ino, fh).expect("release should succeed");
@@ -354,7 +395,10 @@ fn test_nonseq_fallback_on_gap() {
     let content = fs.test_read(ino, 0, 1024).expect("read should succeed");
     assert_eq!(content.len(), 25);
     assert_eq!(&content[0..5], b"AAAAA");
-    assert!(content[5..20].iter().all(|&b| b == 0), "gap must be zero-padded");
+    assert!(
+        content[5..20].iter().all(|&b| b == 0),
+        "gap must be zero-padded"
+    );
     assert_eq!(&content[20..25], b"BBBBB");
 }
 
@@ -363,16 +407,19 @@ fn test_nonseq_fallback_on_gap() {
 #[test]
 fn test_fallback_materializes_streaming_content() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "materialize.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "materialize.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write 100 bytes sequentially at offset 0
     let original: Vec<u8> = (0..100).map(|i| (i % 256) as u8).collect();
-    fs.test_write(fh, 0, &original).expect("write 1 should succeed");
+    fs.test_write(fh, 0, &original)
+        .expect("write 1 should succeed");
 
     // Write 10 bytes at offset 50 (triggers fallback, overlaps existing streaming content)
     let overwrite = b"XXXXXXXXXX";
-    fs.test_write(fh, 50, overwrite).expect("write 2 should succeed");
+    fs.test_write(fh, 50, overwrite)
+        .expect("write 2 should succeed");
 
     // Release
     fs.test_release(ino, fh).expect("release should succeed");
@@ -390,11 +437,13 @@ fn test_fallback_materializes_streaming_content() {
 #[test]
 fn test_pwrite_new_file_gap_zero_pads() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "pwrite_new.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "pwrite_new.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write 5 bytes at offset 50 on a brand new file (byte_count=0, triggers immediate fallback)
-    fs.test_write(fh, 50, b"hello").expect("write should succeed");
+    fs.test_write(fh, 50, b"hello")
+        .expect("write should succeed");
 
     // Release
     fs.test_release(ino, fh).expect("release should succeed");
@@ -402,7 +451,10 @@ fn test_pwrite_new_file_gap_zero_pads() {
     // Read back -- 55 bytes: 50 zeros + "hello"
     let content = fs.test_read(ino, 0, 1024).expect("read should succeed");
     assert_eq!(content.len(), 55);
-    assert!(content[0..50].iter().all(|&b| b == 0), "gap must be zero-padded");
+    assert!(
+        content[0..50].iter().all(|&b| b == 0),
+        "gap must be zero-padded"
+    );
     assert_eq!(&content[50..55], b"hello");
 }
 
@@ -411,20 +463,26 @@ fn test_pwrite_new_file_gap_zero_pads() {
 #[test]
 fn test_read_in_buffered_mode() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "buf_read.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "buf_read.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write 10 bytes at offset 0 (sequential)
-    fs.test_write(fh, 0, b"AAAAAAAAAA").expect("write 1 should succeed");
+    fs.test_write(fh, 0, b"AAAAAAAAAA")
+        .expect("write 1 should succeed");
 
     // Write 5 bytes at offset 20 (non-sequential, triggers fallback)
-    fs.test_write(fh, 20, b"BBBBB").expect("write 2 should succeed");
+    fs.test_write(fh, 20, b"BBBBB")
+        .expect("write 2 should succeed");
 
     // DO NOT release -- read back via test_read while still open (buffered mode)
     let content = fs.test_read(ino, 0, 1024).expect("read should succeed");
     assert_eq!(content.len(), 25);
     assert_eq!(&content[0..10], b"AAAAAAAAAA");
-    assert!(content[10..20].iter().all(|&b| b == 0), "gap must be zero-padded");
+    assert!(
+        content[10..20].iter().all(|&b| b == 0),
+        "gap must be zero-padded"
+    );
     assert_eq!(&content[20..25], b"BBBBB");
 
     // Clean up
@@ -436,20 +494,24 @@ fn test_read_in_buffered_mode() {
 #[test]
 fn test_fsync_in_buffered_mode() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "buf_fsync.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "buf_fsync.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write 10 bytes at offset 0 (sequential)
-    fs.test_write(fh, 0, b"AAAAAAAAAA").expect("write 1 should succeed");
+    fs.test_write(fh, 0, b"AAAAAAAAAA")
+        .expect("write 1 should succeed");
 
     // Write 5 bytes at offset 20 (triggers fallback)
-    fs.test_write(fh, 20, b"BBBBB").expect("write 2 should succeed");
+    fs.test_write(fh, 20, b"BBBBB")
+        .expect("write 2 should succeed");
 
     // fsync mid-stream in buffered mode
     fs.test_fsync(ino, fh).expect("fsync should succeed");
 
     // Write 5 more bytes at offset 30
-    fs.test_write(fh, 30, b"CCCCC").expect("write 3 should succeed");
+    fs.test_write(fh, 30, b"CCCCC")
+        .expect("write 3 should succeed");
 
     // Release
     fs.test_release(ino, fh).expect("release should succeed");
@@ -458,9 +520,15 @@ fn test_fsync_in_buffered_mode() {
     let content = fs.test_read(ino, 0, 1024).expect("read should succeed");
     assert_eq!(content.len(), 35);
     assert_eq!(&content[0..10], b"AAAAAAAAAA");
-    assert!(content[10..20].iter().all(|&b| b == 0), "gap must be zero-padded");
+    assert!(
+        content[10..20].iter().all(|&b| b == 0),
+        "gap must be zero-padded"
+    );
     assert_eq!(&content[20..25], b"BBBBB");
-    assert!(content[25..30].iter().all(|&b| b == 0), "gap must be zero-padded");
+    assert!(
+        content[25..30].iter().all(|&b| b == 0),
+        "gap must be zero-padded"
+    );
     assert_eq!(&content[30..35], b"CCCCC");
 }
 
@@ -469,17 +537,21 @@ fn test_fsync_in_buffered_mode() {
 #[test]
 fn test_truncate_in_buffered_mode() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "buf_trunc.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "buf_trunc.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write 10 bytes at offset 0 (sequential)
-    fs.test_write(fh, 0, b"AAAAAAAAAA").expect("write 1 should succeed");
+    fs.test_write(fh, 0, b"AAAAAAAAAA")
+        .expect("write 1 should succeed");
 
     // Write 5 bytes at offset 20 (triggers fallback)
-    fs.test_write(fh, 20, b"BBBBB").expect("write 2 should succeed");
+    fs.test_write(fh, 20, b"BBBBB")
+        .expect("write 2 should succeed");
 
     // Truncate to 15 -- removes the non-sequential part at offset 20
-    fs.test_setattr_size(ino, Some(fh), 15).expect("truncate should succeed");
+    fs.test_setattr_size(ino, Some(fh), 15)
+        .expect("truncate should succeed");
 
     // Release
     fs.test_release(ino, fh).expect("release should succeed");
@@ -488,7 +560,10 @@ fn test_truncate_in_buffered_mode() {
     let content = fs.test_read(ino, 0, 1024).expect("read should succeed");
     assert_eq!(content.len(), 15);
     assert_eq!(&content[0..10], b"AAAAAAAAAA");
-    assert!(content[10..15].iter().all(|&b| b == 0), "padded bytes must be zero");
+    assert!(
+        content[10..15].iter().all(|&b| b == 0),
+        "padded bytes must be zero"
+    );
 }
 
 // ── Test 19: out-of-order writes simulating writeback_cache (STRM-02i) ──
@@ -496,13 +571,17 @@ fn test_truncate_in_buffered_mode() {
 #[test]
 fn test_out_of_order_writes() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "ooo.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "ooo.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write chunks in reverse order simulating writeback_cache reordering
-    fs.test_write(fh, 30, b"CCCC").expect("write C should succeed"); // offset 30, triggers immediate fallback
-    fs.test_write(fh, 0, b"AAAA").expect("write A should succeed");
-    fs.test_write(fh, 15, b"BBBB").expect("write B should succeed");
+    fs.test_write(fh, 30, b"CCCC")
+        .expect("write C should succeed"); // offset 30, triggers immediate fallback
+    fs.test_write(fh, 0, b"AAAA")
+        .expect("write A should succeed");
+    fs.test_write(fh, 15, b"BBBB")
+        .expect("write B should succeed");
 
     // Release
     fs.test_release(ino, fh).expect("release should succeed");
@@ -511,9 +590,15 @@ fn test_out_of_order_writes() {
     let content = fs.test_read(ino, 0, 1024).expect("read should succeed");
     assert_eq!(content.len(), 34);
     assert_eq!(&content[0..4], b"AAAA");
-    assert!(content[4..15].iter().all(|&b| b == 0), "gap 4..15 must be zeros");
+    assert!(
+        content[4..15].iter().all(|&b| b == 0),
+        "gap 4..15 must be zeros"
+    );
     assert_eq!(&content[15..19], b"BBBB");
-    assert!(content[19..30].iter().all(|&b| b == 0), "gap 19..30 must be zeros");
+    assert!(
+        content[19..30].iter().all(|&b| b == 0),
+        "gap 19..30 must be zeros"
+    );
     assert_eq!(&content[30..34], b"CCCC");
 }
 
@@ -522,14 +607,17 @@ fn test_out_of_order_writes() {
 #[test]
 fn test_overlapping_writes() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "overlap.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "overlap.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write 10 bytes at offset 0
-    fs.test_write(fh, 0, b"AAAAAAAAAA").expect("write 1 should succeed");
+    fs.test_write(fh, 0, b"AAAAAAAAAA")
+        .expect("write 1 should succeed");
 
     // Write 5 bytes at offset 3 (triggers fallback, overlaps)
-    fs.test_write(fh, 3, b"BBBBB").expect("write 2 should succeed");
+    fs.test_write(fh, 3, b"BBBBB")
+        .expect("write 2 should succeed");
 
     // Release
     fs.test_release(ino, fh).expect("release should succeed");
@@ -547,7 +635,8 @@ fn test_overlapping_writes() {
 #[test]
 fn test_mixed_seq_then_nonseq() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "mixed.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "mixed.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write 4 sequential chunks of 10 bytes each
@@ -555,13 +644,18 @@ fn test_mixed_seq_then_nonseq() {
     let chunk_b: Vec<u8> = vec![b'B'; 10];
     let chunk_c: Vec<u8> = vec![b'C'; 10];
     let chunk_d: Vec<u8> = vec![b'D'; 10];
-    fs.test_write(fh, 0, &chunk_a).expect("write A should succeed");
-    fs.test_write(fh, 10, &chunk_b).expect("write B should succeed");
-    fs.test_write(fh, 20, &chunk_c).expect("write C should succeed");
-    fs.test_write(fh, 30, &chunk_d).expect("write D should succeed");
+    fs.test_write(fh, 0, &chunk_a)
+        .expect("write A should succeed");
+    fs.test_write(fh, 10, &chunk_b)
+        .expect("write B should succeed");
+    fs.test_write(fh, 20, &chunk_c)
+        .expect("write C should succeed");
+    fs.test_write(fh, 30, &chunk_d)
+        .expect("write D should succeed");
 
     // Non-sequential write at offset 15 (triggers fallback)
-    fs.test_write(fh, 15, b"XXXXX").expect("write X should succeed");
+    fs.test_write(fh, 15, b"XXXXX")
+        .expect("write X should succeed");
 
     // Release
     fs.test_release(ino, fh).expect("release should succeed");
@@ -584,14 +678,16 @@ fn test_mixed_seq_then_nonseq() {
 #[test]
 fn test_sequential_stays_streaming() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "seq_only.bin", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "seq_only.bin", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Write 5 sequential chunks of 100 bytes each
     let mut expected = Vec::with_capacity(500);
     for i in 0u8..5 {
         let chunk: Vec<u8> = vec![i + b'A'; 100];
-        fs.test_write(fh, (i as u64) * 100, &chunk).expect("write should succeed");
+        fs.test_write(fh, (i as u64) * 100, &chunk)
+            .expect("write should succeed");
         expected.extend_from_slice(&chunk);
     }
 

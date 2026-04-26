@@ -113,10 +113,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn make_store(verify_on_read: bool) -> MemBlockStore {
-        MemBlockStore::new(
-            BlockStoreConfig { verify_on_read },
-            Box::new(Blake3Hasher),
-        )
+        MemBlockStore::new(BlockStoreConfig { verify_on_read }, Box::new(Blake3Hasher))
     }
 
     fn make_store_arc(verify_on_read: bool) -> Arc<MemBlockStore> {

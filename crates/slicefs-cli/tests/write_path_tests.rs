@@ -40,7 +40,8 @@ fn read_content(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
 #[test]
 fn test_create_produces_inode_in_parent_dir() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "hello.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
+    let (ino, fh) = fs
+        .test_create(1, "hello.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
     // Inode must exist
@@ -59,7 +60,8 @@ fn test_create_produces_inode_in_parent_dir() {
 #[test]
 fn test_create_returns_valid_attr() {
     let (fs, _dir) = fresh_fs();
-    let (ino, _fh) = fs.test_create(1, "file.txt", S_IFREG | 0o644, 0o022, 500, 500)
+    let (ino, _fh) = fs
+        .test_create(1, "file.txt", S_IFREG | 0o644, 0o022, 500, 500)
         .expect("create should succeed");
     let meta = fs.meta().get_inode(ino).unwrap();
     let attr = inode_to_file_attr(&meta);
@@ -71,13 +73,18 @@ fn test_create_returns_valid_attr() {
 #[test]
 fn test_write_sequential_produces_correct_buffer() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "seq.txt", S_IFREG | 0o644, 0o022, 0, 0)
+    let (ino, fh) = fs
+        .test_create(1, "seq.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
 
     // write "hello" at offset 0, then " world" at offset 5
-    let n1 = fs.test_write(fh, 0, b"hello").expect("write should succeed");
+    let n1 = fs
+        .test_write(fh, 0, b"hello")
+        .expect("write should succeed");
     assert_eq!(n1, 5);
-    let n2 = fs.test_write(fh, 5, b" world").expect("write should succeed");
+    let n2 = fs
+        .test_write(fh, 5, b" world")
+        .expect("write should succeed");
     assert_eq!(n2, 6);
 
     fs.test_release(ino, fh).expect("release should succeed");
@@ -90,11 +97,13 @@ fn test_write_sequential_produces_correct_buffer() {
 #[test]
 fn test_write_with_gap_zero_pads() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "gap.txt", S_IFREG | 0o644, 0o022, 0, 0)
+    let (ino, fh) = fs
+        .test_create(1, "gap.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
 
     // write 5 bytes at offset 10 — positions 0-9 must be zero-padded
-    fs.test_write(fh, 10, b"hello").expect("write should succeed");
+    fs.test_write(fh, 10, b"hello")
+        .expect("write should succeed");
     fs.test_release(ino, fh).expect("release should succeed");
 
     let content = read_content(&fs, ino);
@@ -106,9 +115,11 @@ fn test_write_with_gap_zero_pads() {
 #[test]
 fn test_release_flushes_to_cas_content_readable() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "flush.txt", S_IFREG | 0o644, 0o022, 0, 0)
+    let (ino, fh) = fs
+        .test_create(1, "flush.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
-    fs.test_write(fh, 0, b"flush content").expect("write should succeed");
+    fs.test_write(fh, 0, b"flush content")
+        .expect("write should succeed");
     fs.test_release(ino, fh).expect("release should succeed");
 
     let content = read_content(&fs, ino);
@@ -118,9 +129,11 @@ fn test_release_flushes_to_cas_content_readable() {
 #[test]
 fn test_release_updates_inode_size_and_mtime() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "size.txt", S_IFREG | 0o644, 0o022, 0, 0)
+    let (ino, fh) = fs
+        .test_create(1, "size.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
-    fs.test_write(fh, 0, b"hello").expect("write should succeed");
+    fs.test_write(fh, 0, b"hello")
+        .expect("write should succeed");
     fs.test_release(ino, fh).expect("release should succeed");
 
     let meta = fs.meta().get_inode(ino).unwrap();
@@ -132,9 +145,11 @@ fn test_release_updates_inode_size_and_mtime() {
 #[test]
 fn test_release_increments_refcount() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "refcount.txt", S_IFREG | 0o644, 0o022, 0, 0)
+    let (ino, fh) = fs
+        .test_create(1, "refcount.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
-    fs.test_write(fh, 0, b"refcount data").expect("write should succeed");
+    fs.test_write(fh, 0, b"refcount data")
+        .expect("write should succeed");
     fs.test_release(ino, fh).expect("release should succeed");
 
     let manifest = fs.meta().get_manifest(ino).unwrap();
@@ -147,14 +162,18 @@ fn test_release_increments_refcount() {
 fn test_two_identical_files_share_content_digest() {
     let (fs, _dir) = fresh_fs();
 
-    let (ino1, fh1) = fs.test_create(1, "a.txt", S_IFREG | 0o644, 0o022, 0, 0)
+    let (ino1, fh1) = fs
+        .test_create(1, "a.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
-    fs.test_write(fh1, 0, b"same content").expect("write should succeed");
+    fs.test_write(fh1, 0, b"same content")
+        .expect("write should succeed");
     fs.test_release(ino1, fh1).expect("release should succeed");
 
-    let (ino2, fh2) = fs.test_create(1, "b.txt", S_IFREG | 0o644, 0o022, 0, 0)
+    let (ino2, fh2) = fs
+        .test_create(1, "b.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
-    fs.test_write(fh2, 0, b"same content").expect("write should succeed");
+    fs.test_write(fh2, 0, b"same content")
+        .expect("write should succeed");
     fs.test_release(ino2, fh2).expect("release should succeed");
 
     let m1 = fs.meta().get_manifest(ino1).unwrap();
@@ -162,13 +181,17 @@ fn test_two_identical_files_share_content_digest() {
     assert_eq!(m1, m2, "identical content must share the same Digest224");
 
     let rc = fs.meta().get_refcount(&m1[0]);
-    assert_eq!(rc, 2, "refcount must be 2 after two files with same content");
+    assert_eq!(
+        rc, 2,
+        "refcount must be 2 after two files with same content"
+    );
 }
 
 #[test]
 fn test_empty_file_create_release_has_empty_manifest() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "empty.txt", S_IFREG | 0o644, 0o022, 0, 0)
+    let (ino, fh) = fs
+        .test_create(1, "empty.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
     // No writes — just release
     fs.test_release(ino, fh).expect("release should succeed");
@@ -185,13 +208,16 @@ fn test_empty_file_create_release_has_empty_manifest() {
 #[test]
 fn test_setattr_truncate_smaller_on_closed_file() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "trunc.txt", S_IFREG | 0o644, 0o022, 0, 0)
+    let (ino, fh) = fs
+        .test_create(1, "trunc.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
-    fs.test_write(fh, 0, b"hello world").expect("write should succeed");
+    fs.test_write(fh, 0, b"hello world")
+        .expect("write should succeed");
     fs.test_release(ino, fh).expect("release should succeed");
 
     // Truncate to 5 bytes
-    fs.test_setattr_size(ino, None, 5).expect("setattr size should succeed");
+    fs.test_setattr_size(ino, None, 5)
+        .expect("setattr size should succeed");
 
     let content = read_content(&fs, ino);
     assert_eq!(content, b"hello");
@@ -203,13 +229,15 @@ fn test_setattr_truncate_smaller_on_closed_file() {
 #[test]
 fn test_setattr_truncate_larger_zero_extends_closed_file() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "extend.txt", S_IFREG | 0o644, 0o022, 0, 0)
+    let (ino, fh) = fs
+        .test_create(1, "extend.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
     fs.test_write(fh, 0, b"hi").expect("write should succeed");
     fs.test_release(ino, fh).expect("release should succeed");
 
     // Extend to 10 bytes
-    fs.test_setattr_size(ino, None, 10).expect("setattr size should succeed");
+    fs.test_setattr_size(ino, None, 10)
+        .expect("setattr size should succeed");
 
     let content = read_content(&fs, ino);
     assert_eq!(content.len(), 10);
@@ -220,12 +248,15 @@ fn test_setattr_truncate_larger_zero_extends_closed_file() {
 #[test]
 fn test_setattr_truncate_open_file_handle_truncates_buffer() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "open_trunc.txt", S_IFREG | 0o644, 0o022, 0, 0)
+    let (ino, fh) = fs
+        .test_create(1, "open_trunc.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
-    fs.test_write(fh, 0, b"hello world").expect("write should succeed");
+    fs.test_write(fh, 0, b"hello world")
+        .expect("write should succeed");
 
     // Truncate the in-flight buffer while file is open
-    fs.test_setattr_size(ino, Some(fh), 5).expect("setattr size on open file should succeed");
+    fs.test_setattr_size(ino, Some(fh), 5)
+        .expect("setattr size on open file should succeed");
 
     // Now release — content should be 5 bytes
     fs.test_release(ino, fh).expect("release should succeed");
@@ -237,11 +268,13 @@ fn test_setattr_truncate_open_file_handle_truncates_buffer() {
 #[test]
 fn test_setattr_mode_changes_permission_bits() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "perm.txt", S_IFREG | 0o644, 0o022, 0, 0)
+    let (ino, fh) = fs
+        .test_create(1, "perm.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
     fs.test_release(ino, fh).expect("release should succeed");
 
-    fs.test_setattr_mode(ino, 0o600).expect("setattr mode should succeed");
+    fs.test_setattr_mode(ino, 0o600)
+        .expect("setattr mode should succeed");
 
     let meta = fs.meta().get_inode(ino).unwrap();
     assert_eq!(meta.mode & 0o7777, 0o600);
@@ -252,7 +285,8 @@ fn test_setattr_mode_changes_permission_bits() {
 #[test]
 fn test_setattr_uid_gid_changes_ownership() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "owner.txt", S_IFREG | 0o644, 0o022, 0, 0)
+    let (ino, fh) = fs
+        .test_create(1, "owner.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
     fs.test_release(ino, fh).expect("release should succeed");
 
@@ -267,7 +301,8 @@ fn test_setattr_uid_gid_changes_ownership() {
 #[test]
 fn test_setattr_mtime_updates_timestamp() {
     let (fs, _dir) = fresh_fs();
-    let (ino, fh) = fs.test_create(1, "mtime.txt", S_IFREG | 0o644, 0o022, 0, 0)
+    let (ino, fh) = fs
+        .test_create(1, "mtime.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
     fs.test_release(ino, fh).expect("release should succeed");
 
@@ -298,12 +333,16 @@ fn test_mknod_regular_file_then_open_write_release() {
     let (fs, _dir) = fresh_fs();
 
     // Step 1: mknod creates the inode (like FUSE-T's NFS server would)
-    let ino = fs.test_mknod(1, "newfile.txt", S_IFREG | 0o644, 1000, 1000, 0o022)
+    let ino = fs
+        .test_mknod(1, "newfile.txt", S_IFREG | 0o644, 1000, 1000, 0o022)
         .expect("mknod for regular file should succeed");
     assert!(ino > 1, "new inode must be > 1");
 
     // Step 2: Verify the file exists in the parent directory
-    let child = fs.meta().lookup(1, "newfile.txt").expect("file should exist after mknod");
+    let child = fs
+        .meta()
+        .lookup(1, "newfile.txt")
+        .expect("file should exist after mknod");
     assert_eq!(child, ino);
 
     // Step 3: Verify inode metadata
@@ -316,7 +355,8 @@ fn test_mknod_regular_file_then_open_write_release() {
     // test_create already handled linking, so we use the open path directly.
     // In the real FUSE flow, open() is called after mknod() and it creates
     // the write handle via OpenFileState.
-    let (_, fh) = fs.test_create(1, "mknod_write_test.txt", 0o644, 0, 0, 0)
+    let (_, fh) = fs
+        .test_create(1, "mknod_write_test.txt", 0o644, 0, 0, 0)
         .expect("create for write handle");
 
     // Step 5: Write data
@@ -338,7 +378,8 @@ fn test_mknod_regular_file_then_open_write_release() {
 fn test_mknod_zero_type_bits_creates_regular_file() {
     let (fs, _dir) = fresh_fs();
     // Some callers pass mode=0o644 without S_IFREG type bits
-    let ino = fs.test_mknod(1, "nomode.txt", 0o644, 0, 0, 0)
+    let ino = fs
+        .test_mknod(1, "nomode.txt", 0o644, 0, 0, 0)
         .expect("mknod with no type bits should succeed as regular file");
     let inode = fs.meta().get_inode(ino).expect("inode should exist");
     // Should have S_IFREG set
@@ -362,7 +403,8 @@ fn test_setattr_size_zero_on_new_file_without_manifest() {
 
     // Simulate: echo "test" > /mount/newfile.txt with FUSE_ATOMIC_O_TRUNC NOT set.
     // FUSE-T calls create() then setattr(size=0) for new files with O_TRUNC.
-    let (ino, fh) = fs.test_create(1, "otrunc.txt", S_IFREG | 0o644, 0o022, 0, 0)
+    let (ino, fh) = fs
+        .test_create(1, "otrunc.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
 
     // At this point: inode exists, directory entry exists, open handle exists,
@@ -376,7 +418,8 @@ fn test_setattr_size_zero_on_new_file_without_manifest() {
     assert_eq!(meta.size, 0);
 
     // Normal write + release after the setattr must still work
-    fs.test_write(fh, 0, b"hello").expect("write should succeed");
+    fs.test_write(fh, 0, b"hello")
+        .expect("write should succeed");
     fs.test_release(ino, fh).expect("release should succeed");
 
     let content = read_content(&fs, ino);
@@ -396,22 +439,28 @@ fn test_flush_write_read_roundtrip() {
 
     // Simulate: echo "test" > /mount/newfile.txt
     // Step 1: create (NFS4 OPEN CREATE → FUSE create)
-    let (ino, fh) = fs.test_create(1, "newfile.txt", S_IFREG | 0o644, 0o022, 0, 0)
+    let (ino, fh) = fs
+        .test_create(1, "newfile.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create should succeed");
 
     // Step 2: write (NFS4 WRITE → FUSE write)
-    fs.test_write(fh, 0, b"test\n").expect("write should succeed");
+    fs.test_write(fh, 0, b"test\n")
+        .expect("write should succeed");
 
     // Step 3: flush (NFS4 CLOSE → FUSE flush)
     // flush_buffer_for_fsync is the same helper used by the flush() callback
-    fs.test_fsync(ino, fh).expect("flush (via test_fsync) must not return ENOSYS");
+    fs.test_fsync(ino, fh)
+        .expect("flush (via test_fsync) must not return ENOSYS");
 
     // Step 4: release (NFS4 final close → FUSE release)
     fs.test_release(ino, fh).expect("release should succeed");
 
     // Step 5: read back (cat /mount/newfile.txt → FUSE read)
     let content = read_content(&fs, ino);
-    assert_eq!(content, b"test\n", "written content must be readable after flush+release");
+    assert_eq!(
+        content, b"test\n",
+        "written content must be readable after flush+release"
+    );
 
     // Inode size must reflect the written data
     let meta = fs.meta().get_inode(ino).unwrap();

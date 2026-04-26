@@ -65,11 +65,7 @@ pub trait Compressor: Send + Sync {
     fn compress(&self, input: &[u8]) -> Result<(AlgorithmId, Vec<u8>), CompressorError>;
 
     /// Decompress `input` that was encoded with `algorithm`.
-    fn decompress(
-        &self,
-        algorithm: AlgorithmId,
-        input: &[u8],
-    ) -> Result<Vec<u8>, CompressorError>;
+    fn decompress(&self, algorithm: AlgorithmId, input: &[u8]) -> Result<Vec<u8>, CompressorError>;
 
     /// The primary algorithm this compressor uses (excluding Raw passthrough).
     fn algorithm_id(&self) -> AlgorithmId;

@@ -8,7 +8,11 @@ use std::process::Command;
 
 fn slicefs_bin() -> std::path::PathBuf {
     let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    dir.join("..").join("..").join("target").join("debug").join("slicefs")
+    dir.join("..")
+        .join("..")
+        .join("target")
+        .join("debug")
+        .join("slicefs")
 }
 
 /// Write a CAS block file at `cas/<hh>/<54-hex>` so reindex/recover have
@@ -95,7 +99,10 @@ fn dedup_recover_preserves_old_index_as_bak() {
         String::from_utf8_lossy(&out2.stdout),
         String::from_utf8_lossy(&out2.stderr)
     );
-    assert!(idx.exists(), "second recover must leave index.redb in place");
+    assert!(
+        idx.exists(),
+        "second recover must leave index.redb in place"
+    );
 
     let baks: Vec<_> = std::fs::read_dir(cas.join(".dedup-index"))
         .unwrap()

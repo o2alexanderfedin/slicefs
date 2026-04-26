@@ -20,11 +20,7 @@ impl Compressor for NoneCompressor {
         Ok((AlgorithmId::None, input.to_vec()))
     }
 
-    fn decompress(
-        &self,
-        algorithm: AlgorithmId,
-        input: &[u8],
-    ) -> Result<Vec<u8>, CompressorError> {
+    fn decompress(&self, algorithm: AlgorithmId, input: &[u8]) -> Result<Vec<u8>, CompressorError> {
         match algorithm {
             AlgorithmId::None | AlgorithmId::Raw => Ok(input.to_vec()),
             other => Err(CompressorError::Decompress(format!(

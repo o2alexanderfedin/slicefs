@@ -16,9 +16,9 @@
 //! An empty attribute set is represented by an empty byte sequence and is stored
 //! in the Dictionary as the canonical empty-content `Digest224`.
 
+use blockset::{Io, State, StorageAdd, Tree, file_storage_get};
 use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::MetaError;
-use blockset::{State, Tree, StorageAdd, Io, file_storage_get};
 
 // ─── serialization helpers ────────────────────────────────────────────────────
 
@@ -48,7 +48,9 @@ fn deserialize_xattrs(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, MetaError>
 
         // name bytes
         if i + name_len > bytes.len() {
-            return Err(MetaError::Corrupted("xattr: truncated at name bytes".into()));
+            return Err(MetaError::Corrupted(
+                "xattr: truncated at name bytes".into(),
+            ));
         }
         let name = String::from_utf8(bytes[i..i + name_len].to_vec())
             .map_err(|_| MetaError::Corrupted("xattr name not utf-8".into()))?;
@@ -63,7 +65,9 @@ fn deserialize_xattrs(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, MetaError>
 
         // value bytes
         if i + value_len > bytes.len() {
-            return Err(MetaError::Corrupted("xattr: truncated at value bytes".into()));
+            return Err(MetaError::Corrupted(
+                "xattr: truncated at value bytes".into(),
+            ));
         }
         let value = bytes[i..i + value_len].to_vec();
         i += value_len;
@@ -108,7 +112,10 @@ pub fn set_xattr_entry(xattrs: &mut Vec<(String, Vec<u8>)>, name: &str, value: &
 
 /// Look up the value for `name` in an xattr list.
 pub fn get_xattr_entry(xattrs: &[(String, Vec<u8>)], name: &str) -> Option<Vec<u8>> {
-    xattrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    xattrs
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.clone())
 }
 
 /// Return all attribute names in an xattr list.
@@ -164,7 +171,10 @@ mod tests {
         let xattrs = vec![
             ("user.a".to_string(), b"alpha".to_vec()),
             ("user.b".to_string(), b"beta".to_vec()),
-            ("security.selinux".to_string(), b"system_u:object_r:unlabeled_t:s0".to_vec()),
+            (
+                "security.selinux".to_string(),
+                b"system_u:object_r:unlabeled_t:s0".to_vec(),
+            ),
         ];
         let bytes = serialize_xattrs(&xattrs);
         let recovered = deserialize_xattrs(&bytes).unwrap();
@@ -204,7 +214,10 @@ mod tests {
     fn test_intern_load_empty() {
         let (_dir, mut io) = make_io();
         let xattrs: Vec<(String, Vec<u8>)> = vec![];
-        let key = { let mut fsa = FileStorageAdd::new(&mut io); intern_xattrs(&mut fsa, &xattrs) };
+        let key = {
+            let mut fsa = FileStorageAdd::new(&mut io);
+            intern_xattrs(&mut fsa, &xattrs)
+        };
         let recovered = load_xattrs(&mut io, &key).unwrap();
         assert!(recovered.is_empty());
     }
@@ -213,7 +226,10 @@ mod tests {
     fn test_intern_load_single_attr() {
         let (_dir, mut io) = make_io();
         let xattrs = vec![("user.test".to_string(), b"testvalue".to_vec())];
-        let key = { let mut fsa = FileStorageAdd::new(&mut io); intern_xattrs(&mut fsa, &xattrs) };
+        let key = {
+            let mut fsa = FileStorageAdd::new(&mut io);
+            intern_xattrs(&mut fsa, &xattrs)
+        };
         let recovered = load_xattrs(&mut io, &key).unwrap();
         assert_eq!(recovered, xattrs);
     }
@@ -224,7 +240,10 @@ mod tests {
         let (_dir, mut io) = make_io();
         let value: Vec<u8> = (0..=127u8).collect(); // 128 bytes
         let xattrs = vec![("user.big".to_string(), value)];
-        let key = { let mut fsa = FileStorageAdd::new(&mut io); intern_xattrs(&mut fsa, &xattrs) };
+        let key = {
+            let mut fsa = FileStorageAdd::new(&mut io);
+            intern_xattrs(&mut fsa, &xattrs)
+        };
         let recovered = load_xattrs(&mut io, &key).unwrap();
         assert_eq!(recovered, xattrs);
     }
@@ -237,7 +256,10 @@ mod tests {
             ("user.b".to_string(), b"val-b".to_vec()),
             ("user.c".to_string(), b"val-c".to_vec()),
         ];
-        let key = { let mut fsa = FileStorageAdd::new(&mut io); intern_xattrs(&mut fsa, &xattrs) };
+        let key = {
+            let mut fsa = FileStorageAdd::new(&mut io);
+            intern_xattrs(&mut fsa, &xattrs)
+        };
         let recovered = load_xattrs(&mut io, &key).unwrap();
         assert_eq!(recovered, xattrs);
     }

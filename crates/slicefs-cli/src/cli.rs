@@ -181,7 +181,9 @@ mod tests {
     fn test_mount_basic() {
         let cli = Cli::try_parse_from(["slicefs", "mount", "/mnt", "--store", "/data"]).unwrap();
         match cli.command {
-            Cmd::Mount { mountpoint, store, .. } => {
+            Cmd::Mount {
+                mountpoint, store, ..
+            } => {
                 assert_eq!(mountpoint, PathBuf::from("/mnt"));
                 assert_eq!(store, PathBuf::from("/data"));
             }
@@ -203,8 +205,7 @@ mod tests {
 
     #[test]
     fn test_unmount_with_store() {
-        let cli =
-            Cli::try_parse_from(["slicefs", "unmount", "/mnt", "--store", "/data"]).unwrap();
+        let cli = Cli::try_parse_from(["slicefs", "unmount", "/mnt", "--store", "/data"]).unwrap();
         match cli.command {
             Cmd::Unmount { mountpoint, store } => {
                 assert_eq!(mountpoint, PathBuf::from("/mnt"));
@@ -240,7 +241,13 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Cmd::Mount { mountpoint, store, noatime, cache_size, .. } => {
+            Cmd::Mount {
+                mountpoint,
+                store,
+                noatime,
+                cache_size,
+                ..
+            } => {
                 assert_eq!(mountpoint, PathBuf::from("/mnt"));
                 assert_eq!(store, PathBuf::from("/data"));
                 assert!(noatime);
@@ -256,7 +263,9 @@ mod tests {
     fn test_snapshot_create_no_name() {
         let cli = Cli::try_parse_from(["slicefs", "snapshot", "create", "/data"]).unwrap();
         match cli.command {
-            Cmd::Snapshot { action: SnapshotAction::Create { store, name } } => {
+            Cmd::Snapshot {
+                action: SnapshotAction::Create { store, name },
+            } => {
                 assert_eq!(store, PathBuf::from("/data"));
                 assert!(name.is_none());
             }
@@ -267,11 +276,18 @@ mod tests {
     #[test]
     fn test_snapshot_create_with_name() {
         let cli = Cli::try_parse_from([
-            "slicefs", "snapshot", "create", "/data", "--name", "release-1.0",
+            "slicefs",
+            "snapshot",
+            "create",
+            "/data",
+            "--name",
+            "release-1.0",
         ])
         .unwrap();
         match cli.command {
-            Cmd::Snapshot { action: SnapshotAction::Create { store, name } } => {
+            Cmd::Snapshot {
+                action: SnapshotAction::Create { store, name },
+            } => {
                 assert_eq!(store, PathBuf::from("/data"));
                 assert_eq!(name.as_deref(), Some("release-1.0"));
             }
@@ -283,7 +299,9 @@ mod tests {
     fn test_snapshot_list() {
         let cli = Cli::try_parse_from(["slicefs", "snapshot", "list", "/data"]).unwrap();
         match cli.command {
-            Cmd::Snapshot { action: SnapshotAction::List { store } } => {
+            Cmd::Snapshot {
+                action: SnapshotAction::List { store },
+            } => {
                 assert_eq!(store, PathBuf::from("/data"));
             }
             _ => panic!("expected Snapshot::List"),
@@ -292,10 +310,15 @@ mod tests {
 
     #[test]
     fn test_snapshot_switch_by_version() {
-        let cli =
-            Cli::try_parse_from(["slicefs", "snapshot", "switch", "/data", "3"]).unwrap();
+        let cli = Cli::try_parse_from(["slicefs", "snapshot", "switch", "/data", "3"]).unwrap();
         match cli.command {
-            Cmd::Snapshot { action: SnapshotAction::Switch { store, version_or_name } } => {
+            Cmd::Snapshot {
+                action:
+                    SnapshotAction::Switch {
+                        store,
+                        version_or_name,
+                    },
+            } => {
                 assert_eq!(store, PathBuf::from("/data"));
                 assert_eq!(version_or_name, "3");
             }
@@ -305,12 +328,16 @@ mod tests {
 
     #[test]
     fn test_snapshot_switch_by_name() {
-        let cli = Cli::try_parse_from([
-            "slicefs", "snapshot", "switch", "/data", "release-1.0",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["slicefs", "snapshot", "switch", "/data", "release-1.0"]).unwrap();
         match cli.command {
-            Cmd::Snapshot { action: SnapshotAction::Switch { store, version_or_name } } => {
+            Cmd::Snapshot {
+                action:
+                    SnapshotAction::Switch {
+                        store,
+                        version_or_name,
+                    },
+            } => {
                 assert_eq!(store, PathBuf::from("/data"));
                 assert_eq!(version_or_name, "release-1.0");
             }
@@ -321,11 +348,21 @@ mod tests {
     #[test]
     fn test_mount_with_snapshot_flag() {
         let cli = Cli::try_parse_from([
-            "slicefs", "mount", "/mnt", "--store", "/data", "--snapshot", "3",
+            "slicefs",
+            "mount",
+            "/mnt",
+            "--store",
+            "/data",
+            "--snapshot",
+            "3",
         ])
         .unwrap();
         match cli.command {
-            Cmd::Mount { snapshot, auto_snapshot, .. } => {
+            Cmd::Mount {
+                snapshot,
+                auto_snapshot,
+                ..
+            } => {
                 assert_eq!(snapshot.as_deref(), Some("3"));
                 assert!(!auto_snapshot);
             }
@@ -336,11 +373,20 @@ mod tests {
     #[test]
     fn test_mount_with_auto_snapshot_flag() {
         let cli = Cli::try_parse_from([
-            "slicefs", "mount", "/mnt", "--store", "/data", "--auto-snapshot",
+            "slicefs",
+            "mount",
+            "/mnt",
+            "--store",
+            "/data",
+            "--auto-snapshot",
         ])
         .unwrap();
         match cli.command {
-            Cmd::Mount { snapshot, auto_snapshot, .. } => {
+            Cmd::Mount {
+                snapshot,
+                auto_snapshot,
+                ..
+            } => {
                 assert!(snapshot.is_none());
                 assert!(auto_snapshot);
             }

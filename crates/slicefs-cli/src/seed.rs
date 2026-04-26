@@ -10,12 +10,12 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use blockset::{State, Tree, FileStorageAdd};
-use metadata::segment::{SegmentWriter, SegmentEntry};
+use blockset::{FileStorageAdd, State, Tree};
+use metadata::segment::{SegmentEntry, SegmentWriter};
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use slicefs_traits::digest::Digest224;
-use slicefs_traits::metadata::{InodeMeta, InodeId, MetadataStore};
+use slicefs_traits::metadata::{InodeId, InodeMeta, MetadataStore};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -190,7 +190,10 @@ mod tests {
         let vt0_dir = store_dir.path().join("vt0");
 
         assert!(segs_dir.is_dir(), "segments/ must exist after seed");
-        assert!(vt0_dir.is_dir(), "vt0/ must exist after seed (FileStorage batch files)");
+        assert!(
+            vt0_dir.is_dir(),
+            "vt0/ must exist after seed (FileStorage batch files)"
+        );
 
         // dictionary.bin must NOT exist
         assert!(
@@ -209,7 +212,10 @@ mod tests {
 
         let segs_dir = store_dir.path().join("segments");
         let seg_file = segs_dir.join("segment-000001.seg");
-        assert!(seg_file.exists(), "segment-000001.seg must exist after seed");
+        assert!(
+            seg_file.exists(),
+            "segment-000001.seg must exist after seed"
+        );
 
         // load_store_from_segments should find a root
         let (root_opt, _snapshots) = load_store_from_segments(&segs_dir).expect("load failed");
@@ -234,13 +240,16 @@ mod tests {
 
         // Reconstruct metadata store
         let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
-        let reloaded = DictMetadataStore::load_from_root(io.clone(), &root).expect("load_from_root failed");
+        let reloaded =
+            DictMetadataStore::load_from_root(io.clone(), &root).expect("load_from_root failed");
 
         // Find the file inode via lookup.
         let file_ino = reloaded.lookup(1, "hello.txt").expect("lookup failed");
 
         // Get the manifest (content digest).
-        let manifest = reloaded.get_manifest(file_ino).expect("get_manifest failed");
+        let manifest = reloaded
+            .get_manifest(file_ino)
+            .expect("get_manifest failed");
         assert_eq!(manifest.len(), 1, "expected exactly one block in manifest");
 
         // Retrieve content bytes from FileStorage.
@@ -248,7 +257,11 @@ mod tests {
             let mut io_guard = io.lock().unwrap();
             file_storage_get(&mut *io_guard, &manifest[0]).expect("file_storage_get failed")
         };
-        assert_eq!(read_back, content.as_slice(), "content mismatch after round-trip");
+        assert_eq!(
+            read_back,
+            content.as_slice(),
+            "content mismatch after round-trip"
+        );
     }
 
     /// Seed a directory with nested subdirectories — all dirs appear after load_from_root.
@@ -264,7 +277,11 @@ mod tests {
         //   top.txt
         std::fs::create_dir_all(source_dir.path().join("a").join("b")).unwrap();
         std::fs::write(source_dir.path().join("top.txt"), b"top level").unwrap();
-        std::fs::write(source_dir.path().join("a").join("b").join("deep.txt"), b"deep file").unwrap();
+        std::fs::write(
+            source_dir.path().join("a").join("b").join("deep.txt"),
+            b"deep file",
+        )
+        .unwrap();
 
         run_seed(store_dir.path(), source_dir.path()).expect("seed failed");
 
@@ -277,7 +294,10 @@ mod tests {
         let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
 
         // top.txt in root
-        assert!(reloaded.lookup(1, "top.txt").is_ok(), "top.txt not found in root");
+        assert!(
+            reloaded.lookup(1, "top.txt").is_ok(),
+            "top.txt not found in root"
+        );
 
         // dir "a" in root
         let a_ino = reloaded.lookup(1, "a").expect("dir a not found");
@@ -286,7 +306,10 @@ mod tests {
         let b_ino = reloaded.lookup(a_ino, "b").expect("dir b not found");
 
         // deep.txt in b
-        assert!(reloaded.lookup(b_ino, "deep.txt").is_ok(), "deep.txt not found in b");
+        assert!(
+            reloaded.lookup(b_ino, "deep.txt").is_ok(),
+            "deep.txt not found in b"
+        );
     }
 
     /// Seed preserves file metadata — size matches original file size in InodeMeta.
@@ -309,6 +332,10 @@ mod tests {
 
         let ino = reloaded.lookup(1, "sized.bin").unwrap();
         let meta = reloaded.get_inode(ino).unwrap();
-        assert_eq!(meta.size, 200, "file size mismatch: expected 200, got {}", meta.size);
+        assert_eq!(
+            meta.size, 200,
+            "file size mismatch: expected 200, got {}",
+            meta.size
+        );
     }
 }

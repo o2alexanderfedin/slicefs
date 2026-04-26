@@ -112,7 +112,11 @@ mod tests {
         let c = ZstdCompressor::new(3);
         let (algo, out) = c.compress(&compressible()).unwrap();
         assert_eq!(algo, AlgorithmId::Zstd);
-        assert!(out.len() < 1000, "compressed should be smaller: {}", out.len());
+        assert!(
+            out.len() < 1000,
+            "compressed should be smaller: {}",
+            out.len()
+        );
     }
 
     #[test]
@@ -172,7 +176,11 @@ mod tests {
         let c = Lz4Compressor::new();
         let (algo, out) = c.compress(&compressible()).unwrap();
         assert_eq!(algo, AlgorithmId::Lz4);
-        assert!(out.len() < 1000, "compressed should be smaller: {}", out.len());
+        assert!(
+            out.len() < 1000,
+            "compressed should be smaller: {}",
+            out.len()
+        );
     }
 
     #[test]

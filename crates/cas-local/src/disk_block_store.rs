@@ -11,10 +11,7 @@
 //! is `true`, the block bytes are re-hashed after reading and compared to the
 //! requested hash. Any discrepancy returns `CasError::IntegrityFailure`.
 
-use std::{
-    fs,
-    path::PathBuf,
-};
+use std::{fs, path::PathBuf};
 
 use slicefs_traits::{
     block_store::{BlockStore, BlockStoreConfig},
@@ -149,7 +146,9 @@ mod tests {
     fn store_with_verify(dir: &TempDir) -> LocalDiskStore {
         LocalDiskStore::new(
             dir.path().to_path_buf(),
-            BlockStoreConfig { verify_on_read: true },
+            BlockStoreConfig {
+                verify_on_read: true,
+            },
             Box::new(Blake3Hasher),
         )
         .expect("failed to create LocalDiskStore")
@@ -158,7 +157,9 @@ mod tests {
     fn store_no_verify(dir: &TempDir) -> LocalDiskStore {
         LocalDiskStore::new(
             dir.path().to_path_buf(),
-            BlockStoreConfig { verify_on_read: false },
+            BlockStoreConfig {
+                verify_on_read: false,
+            },
             Box::new(Blake3Hasher),
         )
         .expect("failed to create LocalDiskStore")
@@ -229,7 +230,9 @@ mod tests {
         let (hash, _) = valid_hash_and_data();
 
         // Should not return an error
-        store.delete(&hash).expect("delete of absent block should succeed");
+        store
+            .delete(&hash)
+            .expect("delete of absent block should succeed");
     }
 
     #[test]
@@ -240,7 +243,9 @@ mod tests {
 
         store.put(&hash, &data).unwrap();
         // Second put should succeed without error
-        store.put(&hash, &data).expect("second put must be idempotent");
+        store
+            .put(&hash, &data)
+            .expect("second put must be idempotent");
         let retrieved = store.get(&hash).unwrap();
         assert_eq!(retrieved, data);
     }
@@ -300,7 +305,9 @@ mod tests {
         fs::write(&path, corrupted).unwrap();
 
         // Without verify_on_read, the corrupted bytes are returned as-is.
-        let result = store_read.get(&hash).expect("get without verify should not error");
+        let result = store_read
+            .get(&hash)
+            .expect("get without verify should not error");
         assert_eq!(result, corrupted.to_vec());
     }
 
@@ -335,7 +342,10 @@ mod tests {
 
         let hex = hash.to_string();
         let shard_dir = dir.path().join(&hex[..2]);
-        assert!(!shard_dir.exists(), "shard directory should not exist before put");
+        assert!(
+            !shard_dir.exists(),
+            "shard directory should not exist before put"
+        );
 
         store.put(&hash, &data).unwrap();
         assert!(shard_dir.exists(), "shard directory should exist after put");
@@ -352,7 +362,9 @@ mod tests {
         // Instead, directly call hash_to_path and verify the path string.
         let store = LocalDiskStore::new(
             dir.path().to_path_buf(),
-            BlockStoreConfig { verify_on_read: false },
+            BlockStoreConfig {
+                verify_on_read: false,
+            },
             Box::new(Blake3Hasher),
         )
         .unwrap();

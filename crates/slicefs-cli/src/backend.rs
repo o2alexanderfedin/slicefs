@@ -101,17 +101,14 @@ fn parse_libfuse_t_filename(name: &str) -> Option<(u32, u32, u32)> {
 
 /// Returns `true` if the running macOS version is 26 or later.
 pub(crate) fn check_macos_version_26_or_later() -> bool {
-    let output = Command::new("sw_vers")
-        .arg("-productVersion")
-        .output()
-        .ok();
-    if let Some(out) = output {
-        if out.status.success() {
-            let version_str = String::from_utf8_lossy(&out.stdout);
-            let major_str = version_str.trim().split('.').next().unwrap_or("0");
-            if let Ok(major) = major_str.parse::<u32>() {
-                return major >= 26;
-            }
+    let output = Command::new("sw_vers").arg("-productVersion").output().ok();
+    if let Some(out) = output
+        && out.status.success()
+    {
+        let version_str = String::from_utf8_lossy(&out.stdout);
+        let major_str = version_str.trim().split('.').next().unwrap_or("0");
+        if let Ok(major) = major_str.parse::<u32>() {
+            return major >= 26;
         }
     }
     false
@@ -127,6 +124,7 @@ pub fn is_fskit_available() -> bool {
 // ── TTY detection ─────────────────────────────────────────────────────────────
 
 /// Returns `true` if stdin is an interactive terminal (TTY).
+#[allow(dead_code)] // public lib API; not yet wired into the binary
 pub fn is_interactive() -> bool {
     // SAFETY: isatty is a simple syscall with no memory-safety implications.
     unsafe { libc::isatty(libc::STDIN_FILENO) != 0 }
@@ -149,7 +147,7 @@ const MIN_VERSION: (u32, u32, u32) = (1, 0, 35);
 /// - `FSKit backend not available` — FSKit requested but unavailable
 pub fn select_backend(
     requested: Option<FuseTBackend>,
-    force: bool,
+    _force: bool,
     version: (u32, u32, u32),
     fskit_available: bool,
 ) -> Result<FuseTBackend, String> {
@@ -190,6 +188,7 @@ pub fn select_backend(
 // ── Fallback confirmation ─────────────────────────────────────────────────────
 
 /// Inner testable version of confirm_fallback that accepts an explicit `is_tty` flag.
+#[allow(dead_code)] // public lib API; not yet wired into the binary
 pub fn confirm_fallback_with_tty(
     fallback_backend: FuseTBackend,
     reason: &str,
@@ -223,6 +222,7 @@ pub fn confirm_fallback_with_tty(
 ///
 /// The `reader` parameter allows unit tests to inject mock stdin.
 /// Production callers should pass `&mut std::io::BufReader::new(std::io::stdin())`.
+#[allow(dead_code)] // public lib API; not yet wired into the binary
 pub fn confirm_fallback(
     fallback_backend: FuseTBackend,
     reason: &str,
@@ -242,8 +242,9 @@ pub fn select_backend_auto(
     requested: Option<FuseTBackend>,
     force: bool,
 ) -> Result<(FuseTBackend, (u32, u32, u32)), String> {
-    let version = detect_fuse_t_version()
-        .ok_or_else(|| "FUSE-T not found. Install from https://github.com/macos-fuse-t/fuse-t/releases".to_string())?;
+    let version = detect_fuse_t_version().ok_or_else(|| {
+        "FUSE-T not found. Install from https://github.com/macos-fuse-t/fuse-t/releases".to_string()
+    })?;
 
     let fskit_available = is_fskit_available();
 
@@ -421,12 +422,8 @@ mod tests {
     fn test_confirm_fallback_interactive_yes() {
         let input = b"y\n";
         let mut reader = Cursor::new(&input[..]);
-        let result = confirm_fallback_with_tty(
-            FuseTBackend::Smb,
-            "FSKit not available",
-            &mut reader,
-            true,
-        );
+        let result =
+            confirm_fallback_with_tty(FuseTBackend::Smb, "FSKit not available", &mut reader, true);
         assert_eq!(result, Ok(FuseTBackend::Smb));
     }
 
@@ -435,12 +432,8 @@ mod tests {
         // Empty input (pressing Enter) should accept (default Yes).
         let input = b"\n";
         let mut reader = Cursor::new(&input[..]);
-        let result = confirm_fallback_with_tty(
-            FuseTBackend::Smb,
-            "FSKit not available",
-            &mut reader,
-            true,
-        );
+        let result =
+            confirm_fallback_with_tty(FuseTBackend::Smb, "FSKit not available", &mut reader, true);
         assert_eq!(result, Ok(FuseTBackend::Smb));
     }
 
@@ -448,27 +441,23 @@ mod tests {
     fn test_confirm_fallback_interactive_no_lowercase() {
         let input = b"n\n";
         let mut reader = Cursor::new(&input[..]);
-        let result = confirm_fallback_with_tty(
-            FuseTBackend::Smb,
-            "FSKit not available",
-            &mut reader,
-            true,
-        );
+        let result =
+            confirm_fallback_with_tty(FuseTBackend::Smb, "FSKit not available", &mut reader, true);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("cancelled"), "expected 'cancelled' in: {}", err);
+        assert!(
+            err.contains("cancelled"),
+            "expected 'cancelled' in: {}",
+            err
+        );
     }
 
     #[test]
     fn test_confirm_fallback_interactive_no_uppercase() {
         let input = b"N\n";
         let mut reader = Cursor::new(&input[..]);
-        let result = confirm_fallback_with_tty(
-            FuseTBackend::Smb,
-            "FSKit not available",
-            &mut reader,
-            true,
-        );
+        let result =
+            confirm_fallback_with_tty(FuseTBackend::Smb, "FSKit not available", &mut reader, true);
         assert!(result.is_err());
     }
 
@@ -495,7 +484,10 @@ mod tests {
         create_dylib(&dir, "libfuse-t-1.0.40.dylib");
         create_dylib(&dir, "libfuse-t-1.0.54.dylib");
         let result = detect_fuse_t_version_from_path(dir.path().to_str().unwrap());
-        assert!(result.is_some(), "should find at least one version among multiple dylibs");
+        assert!(
+            result.is_some(),
+            "should find at least one version among multiple dylibs"
+        );
         let (major, minor, _patch) = result.unwrap();
         assert_eq!(major, 1);
         assert_eq!(minor, 0);
@@ -505,8 +497,8 @@ mod tests {
     fn test_detect_version_ignores_partial_match() {
         // File starts with "libfuse-t-" but has wrong suffix.
         let dir = TempDir::new().unwrap();
-        create_dylib(&dir, "libfuse-t-1.0.54.so");   // wrong suffix
-        create_dylib(&dir, "libfuse-t-1.0.54");       // no suffix at all
+        create_dylib(&dir, "libfuse-t-1.0.54.so"); // wrong suffix
+        create_dylib(&dir, "libfuse-t-1.0.54"); // no suffix at all
         let result = detect_fuse_t_version_from_path(dir.path().to_str().unwrap());
         assert_eq!(result, None, "wrong suffix should not match");
     }
@@ -523,22 +515,34 @@ mod tests {
 
     #[test]
     fn test_parse_backend_flag_uppercase_smb_is_invalid() {
-        assert!(parse_backend_flag("SMB").is_err(), "uppercase SMB should be invalid");
+        assert!(
+            parse_backend_flag("SMB").is_err(),
+            "uppercase SMB should be invalid"
+        );
     }
 
     #[test]
     fn test_parse_backend_flag_uppercase_nfs_is_invalid() {
-        assert!(parse_backend_flag("NFS").is_err(), "uppercase NFS should be invalid");
+        assert!(
+            parse_backend_flag("NFS").is_err(),
+            "uppercase NFS should be invalid"
+        );
     }
 
     #[test]
     fn test_parse_backend_flag_uppercase_fskit_is_invalid() {
-        assert!(parse_backend_flag("FSKIT").is_err(), "uppercase FSKIT should be invalid");
+        assert!(
+            parse_backend_flag("FSKIT").is_err(),
+            "uppercase FSKIT should be invalid"
+        );
     }
 
     #[test]
     fn test_parse_backend_flag_empty_string_is_invalid() {
-        assert!(parse_backend_flag("").is_err(), "empty string should be invalid");
+        assert!(
+            parse_backend_flag("").is_err(),
+            "empty string should be invalid"
+        );
     }
 
     #[test]
@@ -546,7 +550,8 @@ mod tests {
         let err = parse_backend_flag("unknown").unwrap_err();
         assert!(
             err.contains("smb") && err.contains("nfs") && err.contains("fskit"),
-            "error should mention valid values, got: {}", err
+            "error should mention valid values, got: {}",
+            err
         );
     }
 
@@ -581,7 +586,10 @@ mod tests {
     #[test]
     fn test_select_backend_smb_with_old_version_fails() {
         let result = select_backend(Some(FuseTBackend::Smb), false, (1, 0, 10), false);
-        assert!(result.is_err(), "SMB on old version should fail version gate");
+        assert!(
+            result.is_err(),
+            "SMB on old version should fail version gate"
+        );
     }
 
     // ── FuseTBackend Debug ────────────────────────────────────────────────────

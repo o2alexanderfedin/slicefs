@@ -5,15 +5,14 @@
 ///   - load_store_from_segments reconstructs DictMetadataStore correctly
 ///   - Lock file lifecycle (acquire creates, drop removes)
 ///   - Dirty mount detection (lock file present → DirtyMount error)
-
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
-use metadata::segment::{load_store_from_segments, SegmentEntry, SegmentReader};
+use metadata::mount_lock::{MountLockError, acquire_mount_lock};
+use metadata::segment::{SegmentEntry, SegmentReader, load_store_from_segments};
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
-use metadata::mount_lock::{acquire_mount_lock, MountLockError};
 use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 
 fn make_store() -> (TempDir, DictMetadataStore) {
@@ -52,8 +51,14 @@ fn test_wal_logs_root_update_on_commit() {
     let reader = SegmentReader::open(&seg_path).unwrap();
     let entries: Vec<_> = reader.collect();
 
-    let has_root_update = entries.iter().any(|e| matches!(e, SegmentEntry::RootUpdate { .. }));
-    assert!(has_root_update, "segment must contain a RootUpdate after commit(); entries: {}", entries.len());
+    let has_root_update = entries
+        .iter()
+        .any(|e| matches!(e, SegmentEntry::RootUpdate { .. }));
+    assert!(
+        has_root_update,
+        "segment must contain a RootUpdate after commit(); entries: {}",
+        entries.len()
+    );
 }
 
 // ── Test 2: load_store_from_segments reconstructs state ─────────────────────
@@ -82,7 +87,11 @@ fn test_load_store_from_segments_returns_root() {
     let segs_dir = store_dir.path().join("segments");
     let (loaded_root, _snapshots) = load_store_from_segments(&segs_dir).unwrap();
     assert!(loaded_root.is_some(), "should have a RootUpdate digest");
-    assert_eq!(loaded_root.unwrap(), root_digest, "loaded root must match committed root");
+    assert_eq!(
+        loaded_root.unwrap(),
+        root_digest,
+        "loaded root must match committed root"
+    );
 }
 
 // ── Test 3: Lock file lifecycle ───────────────────────────────────────────────
@@ -100,7 +109,10 @@ fn test_mount_lock_created_and_removed() {
         assert!(lock_path.exists(), "lock file must exist after acquire");
     } // _lock dropped here
 
-    assert!(!lock_path.exists(), "lock file must be removed after MountLock drop");
+    assert!(
+        !lock_path.exists(),
+        "lock file must be removed after MountLock drop"
+    );
 }
 
 // ── Test 4: Dirty mount detection ────────────────────────────────────────────

@@ -44,10 +44,7 @@ mod tests {
 
     #[test]
     fn io_passthrough_to_cas_io() {
-        let e = DedupIndexError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "missing",
-        ));
+        let e = DedupIndexError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"));
         match CasError::from(e) {
             CasError::Io(_) => {}
             other => panic!("expected CasError::Io, got {other:?}"),

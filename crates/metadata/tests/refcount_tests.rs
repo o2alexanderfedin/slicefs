@@ -2,16 +2,24 @@
 //!
 //! Tests increment/decrement/get_refcount methods and persistence across commit/load_from_root.
 
-use std::sync::{Arc, Mutex};
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::MetadataStore;
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 /// A simple non-zero Digest224 for testing.
 fn make_digest(seed: u32) -> Digest224 {
-    [seed, seed + 1, seed + 2, seed + 3, seed + 4, seed + 5, seed + 6]
+    [
+        seed,
+        seed + 1,
+        seed + 2,
+        seed + 3,
+        seed + 4,
+        seed + 5,
+        seed + 6,
+    ]
 }
 
 fn make_store() -> (TempDir, DictMetadataStore) {
@@ -46,7 +54,11 @@ fn test_decrement_refcount() {
     assert_eq!(store.get_refcount(&digest), 1, "after first decrement");
 
     store.decrement_refcount(&digest);
-    assert_eq!(store.get_refcount(&digest), 0, "after second decrement — entry removed");
+    assert_eq!(
+        store.get_refcount(&digest),
+        0,
+        "after second decrement — entry removed"
+    );
 }
 
 #[test]
@@ -83,7 +95,19 @@ fn test_refcounts_survive_commit_load_round_trip() {
     let io = Arc::clone(store.io());
     let store2 = DictMetadataStore::load_from_root(io, &root).unwrap();
 
-    assert_eq!(store2.get_refcount(&digest_a), 2, "digest_a refcount must survive reload");
-    assert_eq!(store2.get_refcount(&digest_b), 1, "digest_b refcount must survive reload");
-    assert_eq!(store2.get_refcount(&make_digest(999)), 0, "unknown digest returns 0");
+    assert_eq!(
+        store2.get_refcount(&digest_a),
+        2,
+        "digest_a refcount must survive reload"
+    );
+    assert_eq!(
+        store2.get_refcount(&digest_b),
+        1,
+        "digest_b refcount must survive reload"
+    );
+    assert_eq!(
+        store2.get_refcount(&make_digest(999)),
+        0,
+        "unknown digest returns 0"
+    );
 }

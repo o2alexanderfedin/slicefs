@@ -6,9 +6,9 @@
 
 use std::collections::BTreeMap;
 
+use blockset::{Io, State, StorageAdd, Tree, file_storage_get};
 use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::MetaError;
-use blockset::{State, Tree, StorageAdd, Io, file_storage_get};
 
 /// In-memory inode number → Digest224 key mapping.
 ///
@@ -102,7 +102,7 @@ pub fn serialize_inode_map(map: &InodeMap) -> Vec<u8> {
 /// Sets `next_ino` to `max(keys) + 1`, or 2 for an empty map.
 /// Returns `MetaError::Corrupted` if the byte length is not a multiple of 36.
 pub fn deserialize_inode_map(bytes: &[u8]) -> Result<InodeMap, MetaError> {
-    if bytes.len() % 36 != 0 {
+    if !bytes.len().is_multiple_of(36) {
         return Err(MetaError::Corrupted(format!(
             "inode map: expected multiple-of-36 bytes, got {}",
             bytes.len()
@@ -229,8 +229,8 @@ mod tests {
     #[test]
     fn test_intern_and_load_round_trip() {
         use crate::store_io::StoreIo;
-        use tempfile::TempDir;
         use blockset::FileStorageAdd;
+        use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
         let mut io = StoreIo::new(dir.path());

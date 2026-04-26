@@ -41,7 +41,7 @@ use crate::config::{DedupIndexConfig, DurabilityMode};
 use crate::error::DedupIndexError;
 use crate::redb_dedup_index::DEDUP_TABLE;
 use crate::stats::StatsCounters;
-use crossbeam_channel::{bounded, Sender};
+use crossbeam_channel::{Sender, bounded};
 use redb::{Database, Durability};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -164,11 +164,12 @@ impl BatchWriter {
                     } else {
                         // I5: bloom + HWM strictly AFTER commit, before
                         // we reply to the submitter.
-                        let refs: Vec<&[u8]> =
-                            batch.iter().map(|r| r.hash.as_slice()).collect();
+                        let refs: Vec<&[u8]> = batch.iter().map(|r| r.hash.as_slice()).collect();
                         bloom_for_thread.set_all(&refs);
                         hw.fetch_add(batch.len() as u64, Ordering::AcqRel);
-                        stats_for_thread.commits_total.fetch_add(1, Ordering::Relaxed);
+                        stats_for_thread
+                            .commits_total
+                            .fetch_add(1, Ordering::Relaxed);
                         stats_for_thread
                             .inserts_total
                             .fetch_add(batch.len() as u64, Ordering::Relaxed);
@@ -185,8 +186,7 @@ impl BatchWriter {
                         // `Arc<RwLock<BloomFilter>>` to a separate
                         // snapshotter thread instead of doing it in the
                         // batcher hot path.
-                        let total_after =
-                            stats_for_thread.inserts_total.load(Ordering::Relaxed);
+                        let total_after = stats_for_thread.inserts_total.load(Ordering::Relaxed);
                         let total_before = total_after - batch.len() as u64;
                         let n = bloom_cfg.snapshot_every as u64;
                         if n > 0 && n != u64::MAX {
@@ -201,9 +201,9 @@ impl BatchWriter {
                                     redb_hwm_at_snapshot: hw.load(Ordering::Acquire),
                                 };
                                 let root = crate::paths::DedupRoot::new(&dedup_root);
-                                if let Err(e) = crate::bloom_snapshot::write_atomic(
-                                    &root, &meta, &payload,
-                                ) {
+                                if let Err(e) =
+                                    crate::bloom_snapshot::write_atomic(&root, &meta, &payload)
+                                {
                                     tracing::warn!("bloom snapshot failed: {e}");
                                     stats_for_thread
                                         .bloom_snapshot_failures_total
@@ -295,13 +295,7 @@ mod tests {
         let bloom = AtomicBloomFilter::new(&cfg.bloom);
         let stats = Arc::new(StatsCounters::default());
         let hw = Arc::new(AtomicU64::new(0));
-        let bw = BatchWriter::spawn(
-            cfg,
-            Arc::clone(&idx.db),
-            bloom,
-            stats,
-            Arc::clone(&hw),
-        );
+        let bw = BatchWriter::spawn(cfg, Arc::clone(&idx.db), bloom, stats, Arc::clone(&hw));
 
         let mut h = [0u8; 28];
         h[0] = 0xAA;

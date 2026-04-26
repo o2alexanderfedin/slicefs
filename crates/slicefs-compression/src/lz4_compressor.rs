@@ -31,16 +31,10 @@ impl Compressor for Lz4Compressor {
         }
     }
 
-    fn decompress(
-        &self,
-        algorithm: AlgorithmId,
-        input: &[u8],
-    ) -> Result<Vec<u8>, CompressorError> {
+    fn decompress(&self, algorithm: AlgorithmId, input: &[u8]) -> Result<Vec<u8>, CompressorError> {
         match algorithm {
-            AlgorithmId::Lz4 => {
-                lz4_flex::block::decompress_size_prepended(input)
-                    .map_err(|e| CompressorError::Decompress(e.to_string()))
-            }
+            AlgorithmId::Lz4 => lz4_flex::block::decompress_size_prepended(input)
+                .map_err(|e| CompressorError::Decompress(e.to_string())),
             AlgorithmId::Raw | AlgorithmId::None => Ok(input.to_vec()),
             other => Err(CompressorError::Decompress(format!(
                 "Lz4Compressor cannot decompress {:?} data",

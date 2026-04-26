@@ -10,7 +10,6 @@
 ///
 /// Tests use test_* helpers to drive the filesystem without FUSE mounting,
 /// making them portable to macOS where a FUSE mount is unavailable.
-
 use metadata::gc::GarbageCollector;
 use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
@@ -21,6 +20,7 @@ use slicefs_traits::metadata::MetadataStore;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
+#[allow(dead_code)]
 const S_IFREG: u32 = 0o100_000;
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
@@ -40,12 +40,11 @@ fn make_fs_per_op(store_dir: &TempDir) -> SliceFsFilesystem {
 /// Returns `DictMetadataStore`. Panics if no committed root found.
 fn reload_store(store_dir: &TempDir) -> DictMetadataStore {
     let segs_dir = store_dir.path().join("segments");
-    let (root_opt, _snapshots) = load_store_from_segments(&segs_dir)
-        .expect("should load segments after crash");
+    let (root_opt, _snapshots) =
+        load_store_from_segments(&segs_dir).expect("should load segments after crash");
     let root = root_opt.expect("should have a committed root");
     let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
-    DictMetadataStore::load_from_root(io, &root)
-        .expect("should reconstruct store from root")
+    DictMetadataStore::load_from_root(io, &root).expect("should reconstruct store from root")
 }
 
 // ── SC1: Crash during write — filesystem is consistent on remount ─────────────
@@ -80,17 +79,17 @@ fn test_sc1_crash_during_write_filesystem_consistent() {
 
     // Remount from segments (WAL replay is implicit — re-loading is idempotent)
     let segs_dir = store_dir.path().join("segments");
-    let (root_opt, _snapshots) = load_store_from_segments(&segs_dir)
-        .expect("should load segments after crash");
+    let (root_opt, _snapshots) =
+        load_store_from_segments(&segs_dir).expect("should load segments after crash");
 
     // Should have a committed root (from the commit() after existing.txt)
     let root = root_opt.expect("committed root should be present");
     let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
-    let rebuilt = DictMetadataStore::load_from_root(io, &root)
-        .expect("should reconstruct store");
+    let rebuilt = DictMetadataStore::load_from_root(io, &root).expect("should reconstruct store");
 
     // The committed file must be present
-    let existing_ino = rebuilt.lookup(1, "existing.txt")
+    let existing_ino = rebuilt
+        .lookup(1, "existing.txt")
         .expect("existing.txt (committed before crash) must survive");
     assert!(existing_ino > 1, "existing.txt inode should be valid");
 
@@ -99,7 +98,8 @@ fn test_sc1_crash_during_write_filesystem_consistent() {
     let _ = rebuilt.lookup(1, "incomplete.txt");
 
     // Root inode (ino=1) must always be accessible
-    let root_inode = rebuilt.get_inode(1)
+    let root_inode = rebuilt
+        .get_inode(1)
         .expect("root inode must always be accessible after crash");
     let is_dir = root_inode.mode & 0o170_000 == 0o040_000;
     assert!(is_dir, "root inode must be a directory");
@@ -133,17 +133,21 @@ fn test_sc2_fsync_guarantees_durability() {
 
     // Reload from segments
     let segs_dir = store_dir.path().join("segments");
-    let (root_opt, _snapshots) = load_store_from_segments(&segs_dir)
-        .expect("should load segments after crash");
+    let (root_opt, _snapshots) =
+        load_store_from_segments(&segs_dir).expect("should load segments after crash");
 
-    assert!(root_opt.is_some(), "root should be present after fsync + crash");
+    assert!(
+        root_opt.is_some(),
+        "root should be present after fsync + crash"
+    );
 
     let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
     let rebuilt = DictMetadataStore::load_from_root(io, &committed_root)
         .expect("should reconstruct store from committed root");
 
     // durable.txt must be present
-    let ino = rebuilt.lookup(1, "durable.txt")
+    let ino = rebuilt
+        .lookup(1, "durable.txt")
         .expect("durable.txt should survive fsync + crash");
     assert!(ino > 1, "file inode should be valid");
 }
@@ -169,7 +173,8 @@ fn test_sc3_orphaned_blocks_reclaimed_by_gc() {
 
         // Create a file to be deleted (its blocks will become orphaned)
         let (ino_dead, fh_dead) = fs.test_create(1, "dead.txt", 0o644, 0, 0, 0).unwrap();
-        fs.test_write(fh_dead, 0, b"dead content that will be orphaned").unwrap();
+        fs.test_write(fh_dead, 0, b"dead content that will be orphaned")
+            .unwrap();
         fs.test_release(ino_dead, fh_dead).unwrap();
 
         // Commit both files into the store
@@ -187,36 +192,41 @@ fn test_sc3_orphaned_blocks_reclaimed_by_gc() {
 
     // Reload from segments to get the current state for GC
     let segs_dir = store_dir.path().join("segments");
-    let (root_opt, _snapshots) = load_store_from_segments(&segs_dir)
-        .expect("should load segments");
+    let (root_opt, _snapshots) = load_store_from_segments(&segs_dir).expect("should load segments");
     let root = root_opt.expect("root should exist");
 
     // Run GC with the current root as the only live root
     let gc = GarbageCollector::new(segs_dir.clone());
     let mut gc_io = StoreIo::new(store_dir.path());
-    let stats = gc.run_gc(&mut gc_io, &[root])
-        .expect("GC should succeed");
+    let stats = gc.run_gc(&mut gc_io, &[root]).expect("GC should succeed");
 
     // GC should have scanned entries and potentially removed orphaned ones
     assert!(stats.entries_scanned > 0, "GC should have scanned entries");
     // segments_compacted >= 1 means GC ran compaction
-    assert!(stats.segments_compacted >= 1, "at least one segment should have been compacted");
+    assert!(
+        stats.segments_compacted >= 1,
+        "at least one segment should have been compacted"
+    );
 
     // After GC, the store should still be loadable and live.txt accessible
-    let (root2_opt, _snapshots2) = load_store_from_segments(&segs_dir)
-        .expect("segments should be loadable after GC");
+    let (root2_opt, _snapshots2) =
+        load_store_from_segments(&segs_dir).expect("segments should be loadable after GC");
     let root2 = root2_opt.expect("root should still be present after GC");
     let io2 = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
-    let rebuilt = DictMetadataStore::load_from_root(io2, &root2)
-        .expect("should reconstruct store after GC");
+    let rebuilt =
+        DictMetadataStore::load_from_root(io2, &root2).expect("should reconstruct store after GC");
 
-    let live_ino = rebuilt.lookup(1, "live.txt")
+    let live_ino = rebuilt
+        .lookup(1, "live.txt")
         .expect("live.txt should survive GC");
     assert!(live_ino > 1, "live.txt inode should be valid");
 
     // dead.txt should not be findable from the live root
     let dead_result = rebuilt.lookup(1, "dead.txt");
-    assert!(dead_result.is_err(), "dead.txt should not be reachable from live root");
+    assert!(
+        dead_result.is_err(),
+        "dead.txt should not be reachable from live root"
+    );
 }
 
 // ── SC4: Multiple fsync cycles — all synced data survives crash ───────────────
@@ -248,11 +258,13 @@ fn test_sc4_multiple_fsync_cycles_all_survive() {
     // Reload from segments
     let rebuilt = reload_store(&store_dir);
 
-    let ino_a = rebuilt.lookup(1, "file_a.txt")
+    let ino_a = rebuilt
+        .lookup(1, "file_a.txt")
         .expect("file_a.txt should survive both fsync cycles");
     assert!(ino_a > 1, "file_a.txt inode should be valid");
 
-    let ino_b = rebuilt.lookup(1, "file_b.txt")
+    let ino_b = rebuilt
+        .lookup(1, "file_b.txt")
         .expect("file_b.txt should survive both fsync cycles");
     assert!(ino_b > 1, "file_b.txt should be valid");
 }
@@ -292,11 +304,13 @@ fn test_sc5_wal_replay_on_dirty_mount() {
         .expect("load_store should succeed on dirty mount (WAL replay)");
 
     // Both files must be accessible — WAL replay preserved state
-    let ino1 = meta.lookup(1, "file1.txt")
+    let ino1 = meta
+        .lookup(1, "file1.txt")
         .expect("file1.txt should be present after WAL replay");
     assert!(ino1 > 1, "file1.txt inode should be valid");
 
-    let ino2 = meta.lookup(1, "file2.txt")
+    let ino2 = meta
+        .lookup(1, "file2.txt")
         .expect("file2.txt should be present after WAL replay");
     assert!(ino2 > 1, "file2.txt inode should be valid");
 }
@@ -335,12 +349,15 @@ fn test_bonus_append_across_fsync_cycles() {
     let rebuilt = reload_store(&store_dir);
 
     // data.txt should be present and accessible
-    let ino = rebuilt.lookup(1, "data.txt")
+    let ino = rebuilt
+        .lookup(1, "data.txt")
         .expect("data.txt should survive multiple fsync cycles");
     assert!(ino > 1, "data.txt inode should be valid");
 
     // The last committed inode size should reflect the write (10 bytes: "part1part2")
-    let inode = rebuilt.get_inode(ino)
-        .expect("should get data.txt inode");
-    assert_eq!(inode.size, 10, "data.txt should be 10 bytes after two 5-byte writes");
+    let inode = rebuilt.get_inode(ino).expect("should get data.txt inode");
+    assert_eq!(
+        inode.size, 10,
+        "data.txt should be 10 bytes after two 5-byte writes"
+    );
 }

@@ -6,9 +6,9 @@
 //! `intern_inode` accepts any `blockset::StorageAdd` impl (e.g. `FileStorageAdd`).
 //! `load_inode` uses `file_storage_get` via `&mut impl Io` — works with any Io backend.
 
+use blockset::{Io, State, StorageAdd, Tree, file_storage_get};
+use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::{InodeMeta, MetaError};
-use slicefs_traits::digest::{Digest224};
-use blockset::{State, Tree, StorageAdd, Io, file_storage_get};
 
 /// Serialize `InodeMeta` to a fixed 56-byte little-endian buffer.
 ///
@@ -83,8 +83,8 @@ pub fn load_inode(io: &mut impl Io, key: &Digest224) -> Result<InodeMeta, MetaEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use slicefs_traits::metadata::InodeMeta;
     use proptest::prelude::*;
+    use slicefs_traits::metadata::InodeMeta;
 
     // Proptest strategy for arbitrary InodeMeta
     prop_compose! {
@@ -212,8 +212,8 @@ mod tests {
     #[test]
     fn test_intern_and_load_roundtrip() {
         use crate::store_io::StoreIo;
-        use tempfile::TempDir;
         use blockset::FileStorageAdd;
+        use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
         let mut io = StoreIo::new(dir.path());

@@ -338,9 +338,7 @@ fn t13_caller_cached_ok_across_crash_no_fp() {
         Ok(idx) => {
             let mut h = [0u8; 28];
             h[0] = 0xA1;
-            let r = idx
-                .lookup(&ChunkHash::from_bytes(h.to_vec()))
-                .unwrap();
+            let r = idx.lookup(&ChunkHash::from_bytes(h.to_vec())).unwrap();
 
             // The contract: ANY answer is acceptable EXCEPT Present-without-CAS.
             // CAS exists in this scenario, so Present is fine; Absent is the
@@ -348,11 +346,7 @@ fn t13_caller_cached_ok_across_crash_no_fp() {
             if matches!(r, DedupResult::Present) {
                 let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
                 let p = cas.join(&hex[..2]).join(&hex[2..]);
-                assert!(
-                    p.exists(),
-                    "I1 violated: Present without CAS at {:?}",
-                    p
-                );
+                assert!(p.exists(), "I1 violated: Present without CAS at {:?}", p);
             }
         }
         Err(_) => {
@@ -394,7 +388,9 @@ fn child_main_t10() -> ! {
 #[test]
 #[ignore = "stress test; run with --ignored or in nightly CI"]
 fn t10_100x_concurrent_kill9_no_fp() {
-    if env::var(CHILD_MARK_T10).is_ok() { child_main_t10(); }
+    if env::var(CHILD_MARK_T10).is_ok() {
+        child_main_t10();
+    }
 
     let td = tempfile::tempdir().unwrap();
     let cas = td.path().join("cas");
@@ -404,7 +400,8 @@ fn t10_100x_concurrent_kill9_no_fp() {
     let mut children = Vec::with_capacity(n_workers as usize);
     for w in 0..n_workers {
         let c = Command::new(env::current_exe().unwrap())
-            .arg("--exact").arg("t10_100x_concurrent_kill9_no_fp")
+            .arg("--exact")
+            .arg("t10_100x_concurrent_kill9_no_fp")
             .arg("--ignored")
             .arg("--nocapture")
             .env(CHILD_MARK_T10, "1")
@@ -412,18 +409,23 @@ fn t10_100x_concurrent_kill9_no_fp() {
             .env("WORKER_ID", w.to_string())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn().unwrap();
+            .spawn()
+            .unwrap();
         children.push(c);
     }
     // Random staggered kills 10–200 ms.
     let mut rng_state = 0x12345u64;
     for child in children.iter_mut() {
         let r = ((rng_state ^ (rng_state >> 11)) % 191) + 10;
-        rng_state = rng_state.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
+        rng_state = rng_state
+            .wrapping_mul(2862933555777941757)
+            .wrapping_add(3037000493);
         std::thread::sleep(Duration::from_millis(r));
         let _ = child.kill();
     }
-    for mut c in children { let _ = c.wait(); }
+    for mut c in children {
+        let _ = c.wait();
+    }
 
     use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
     use slicefs_traits::{ChunkHash, DedupIndex, DedupResult};

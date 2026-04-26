@@ -28,7 +28,10 @@ pub struct Manifest {
 
 impl Manifest {
     pub fn new(bloom_capacity: u64, bloom_fpr: f64, page_size: u32) -> Self {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
         Self {
             magic: MANIFEST_MAGIC.into(),
             schema_version: SCHEMA_VERSION,

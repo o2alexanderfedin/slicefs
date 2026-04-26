@@ -21,25 +21,26 @@
 //! The command blocks until the FUSE session ends (SIGTERM, Ctrl+C, or `slicefs unmount`).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use fuser::{mount2, Config, MountOption, SessionACL};
+use crate::filesystem::SliceFsFilesystem;
+use crate::util::ts;
+use fuser::{Config, MountOption, SessionACL, mount2};
 use metadata::gc::background::spawn_background_gc;
-use metadata::mount_lock::{acquire_mount_lock, MountLock, MountLockError};
+use metadata::mount_lock::{MountLock, MountLockError, acquire_mount_lock};
 use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
-use crate::filesystem::SliceFsFilesystem;
-use crate::util::ts;
 
 // ── Signal handling (macOS only) ──────────────────────────────────────────────
 
 /// Set by SIGTERM/SIGINT handler to coordinate watchdog shutdown.
 ///
 /// Signal-safe: only an atomic store is performed in the handler.
+#[allow(dead_code)] // retained for watchdog fallback path; see register_signal_handlers
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Register SIGTERM and SIGINT handlers that set SHUTDOWN_REQUESTED.
@@ -52,13 +53,18 @@ static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 ///
 /// `libc::signal` is unsafe. The handler only performs a single atomic store
 /// (signal-safe per POSIX).
+#[allow(dead_code)] // belt-and-suspenders fallback; fuser already handles signals
 #[cfg(target_os = "macos")]
 unsafe fn register_signal_handlers() {
     extern "C" fn handler(_sig: libc::c_int) {
         SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
     }
-    libc::signal(libc::SIGTERM, handler as libc::sighandler_t);
-    libc::signal(libc::SIGINT, handler as libc::sighandler_t);
+    // SAFETY: libc::signal sets a process-wide signal handler. The handler
+    // only performs a signal-safe atomic store (POSIX-compliant).
+    unsafe {
+        libc::signal(libc::SIGTERM, handler as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, handler as *const () as libc::sighandler_t);
+    }
 }
 
 // ── Watchdog thread ───────────────────────────────────────────────────────────
@@ -73,6 +79,7 @@ unsafe fn register_signal_handlers() {
 /// `shutdown` flag so it exits cleanly after `mount2()` returns.
 ///
 /// Pattern mirrors the existing background GC thread.
+#[allow(dead_code)] // fallback watchdog; live path uses fuser's session loop
 fn spawn_watchdog(
     mountpoint: PathBuf,
     interval: Duration,
@@ -109,7 +116,8 @@ fn spawn_watchdog(
             if !nfs_alive {
                 eprintln!(
                     "[{}][watchdog] go-nfsv4 process not found for {} — mount is dead",
-                    ts(), mountpoint.display()
+                    ts(),
+                    mountpoint.display()
                 );
                 break;
             }
@@ -120,6 +128,7 @@ fn spawn_watchdog(
 // ── fuse-t.ini fallback (macOS only) ─────────────────────────────────────────
 
 /// Path to the fuse-t.ini configuration file.
+#[allow(dead_code)] // used only by ini-fallback path retained for older fuse-t versions
 #[cfg(target_os = "macos")]
 const FUSE_T_INI_PATH: &str = "/Library/Application Support/fuse-t/cfg/fuse-t.ini";
 
@@ -127,6 +136,7 @@ const FUSE_T_INI_PATH: &str = "/Library/Application Support/fuse-t/cfg/fuse-t.in
 ///
 /// Created before injecting a temporary backend override; dropped after the
 /// mount attempt regardless of success or panic.
+#[allow(dead_code)]
 #[cfg(target_os = "macos")]
 struct FuseTIniGuard {
     path: PathBuf,
@@ -155,6 +165,7 @@ impl Drop for FuseTIniGuard {
 ///
 /// This is only called as a fallback when the primary CUSTOM mount-option
 /// approach fails. On FUSE-T 1.0.54+ it will never be triggered in practice.
+#[allow(dead_code)]
 #[cfg(target_os = "macos")]
 fn with_fuse_t_ini_backend<F, R>(backend: &str, f: F) -> Result<R, Box<dyn std::error::Error>>
 where
@@ -178,13 +189,17 @@ where
     std::fs::write(&ini_path, &modified)?;
 
     // Guard restores original on drop (even on panic).
-    let _guard = FuseTIniGuard { path: ini_path, original };
+    let _guard = FuseTIniGuard {
+        path: ini_path,
+        original,
+    };
 
     f()
 }
 
 /// Inject or replace `backend=<value>` under the `[Default]` section in an
 /// ini-format string.  Returns the modified string.
+#[allow(dead_code)]
 #[cfg(target_os = "macos")]
 fn inject_backend_into_ini(ini: &str, backend: &str) -> String {
     let new_entry = format!("backend={}", backend);
@@ -239,6 +254,9 @@ fn inject_backend_into_ini(ini: &str, backend: &str) -> String {
 
 // ── Store loading ─────────────────────────────────────────────────────────────
 
+/// Tuple returned by [`load_store`]: the in-memory store, shared `StoreIo`, and the mount lock.
+pub type LoadedStore = (DictMetadataStore, Arc<Mutex<StoreIo>>, MountLock);
+
 /// Load a seeded store from disk, returning `(DictMetadataStore, Arc<Mutex<StoreIo>>, MountLock)`.
 ///
 /// The returned `MountLock` must be kept alive for the duration of the mount;
@@ -255,18 +273,20 @@ fn inject_backend_into_ini(ini: &str, backend: &str) -> String {
 pub fn load_store(
     store_path: &Path,
     wal_config: WalConfig,
-) -> Result<(DictMetadataStore, Arc<Mutex<StoreIo>>, MountLock), Box<dyn std::error::Error>> {
+) -> Result<LoadedStore, Box<dyn std::error::Error>> {
     // Step 1: Reject legacy format — migration path removed.
     if store_path.join("dictionary.bin").exists() {
         return Err(format!(
             "legacy store format detected at {}. Re-seed required: slicefs seed <store> <source>",
             store_path.display()
-        ).into());
+        )
+        .into());
     } else if !store_path.join("segments").is_dir() {
         return Err(format!(
             "store not found at {}: no segments/ directory",
             store_path.display()
-        ).into());
+        )
+        .into());
     }
 
     // Step 2: Acquire mount lock.
@@ -291,7 +311,10 @@ pub fn load_store(
         .map_err(|e| format!("failed to load segments: {}", e))?;
 
     let root = last_root.ok_or_else(|| {
-        format!("no committed state found in segments at {}", segs_dir.display())
+        format!(
+            "no committed state found in segments at {}",
+            segs_dir.display()
+        )
     })?;
 
     // Step 4: Reconstruct metadata store using file-backed StoreIo.
@@ -373,7 +396,11 @@ pub fn build_mount_options(
     // fuser 0.17 uses SessionACL to control allow_other: SessionACL::All
     // passes `allow_other` to the kernel, SessionACL::Owner restricts access
     // to the mounting user only.
-    cfg.acl = if allow_other { SessionACL::All } else { SessionACL::Owner };
+    cfg.acl = if allow_other {
+        SessionACL::All
+    } else {
+        SessionACL::Owner
+    };
     cfg
 }
 
@@ -399,7 +426,9 @@ pub fn parse_wal_config(strategy: Option<&str>) -> WalConfig {
 /// Returns an error if the mountpoint is already in use, preventing stale process
 /// accumulation when `slicefs mount` is invoked multiple times on the same path.
 fn check_mountpoint_not_in_use(mountpoint: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let canonical = mountpoint.canonicalize().unwrap_or_else(|_| mountpoint.to_path_buf());
+    let canonical = mountpoint
+        .canonicalize()
+        .unwrap_or_else(|_| mountpoint.to_path_buf());
     let output = std::process::Command::new("mount")
         .output()
         .map_err(|e| format!("failed to run `mount`: {}", e))?;
@@ -453,8 +482,13 @@ pub fn run_mount(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Pre-flight: create mountpoint directory if it doesn't exist.
     if !mountpoint.exists() {
-        std::fs::create_dir_all(mountpoint)
-            .map_err(|e| format!("failed to create mountpoint {}: {}", mountpoint.display(), e))?;
+        std::fs::create_dir_all(mountpoint).map_err(|e| {
+            format!(
+                "failed to create mountpoint {}: {}",
+                mountpoint.display(),
+                e
+            )
+        })?;
     }
 
     // Pre-flight: reject if mountpoint is already in use.
@@ -468,7 +502,7 @@ pub fn run_mount(
     let (selected_backend, fuse_t_version) = {
         use crate::backend::{parse_backend_flag, select_backend_auto};
         let requested: Option<crate::backend::FuseTBackend> = backend
-            .map(|s| parse_backend_flag(s))
+            .map(parse_backend_flag)
             .transpose()
             .map_err(|e: String| -> Box<dyn std::error::Error> { e.into() })?;
         select_backend_auto(requested, force)
@@ -489,13 +523,18 @@ pub fn run_mount(
     // If mounting a snapshot: resolve it and load from snapshot root (read-only).
     #[cfg(target_os = "macos")]
     let (final_meta, final_io, config) = if let Some(snap_ref) = snapshot_ref {
-        let snap = meta.find_snapshot(snap_ref).ok_or_else(|| -> Box<dyn std::error::Error> {
-            format!("snapshot not found: {}", snap_ref).into()
-        })?;
+        let snap = meta
+            .find_snapshot(snap_ref)
+            .ok_or_else(|| -> Box<dyn std::error::Error> {
+                format!("snapshot not found: {}", snap_ref).into()
+            })?;
         println!("Mounting snapshot {} (read-only)", snap.version);
         let snap_io: Arc<Mutex<StoreIo>> = io.clone();
-        let snap_meta = DictMetadataStore::load_from_root(snap_io.clone(), &snap.root)
-            .map_err(|e| -> Box<dyn std::error::Error> { format!("failed to load snapshot root: {}", e).into() })?;
+        let snap_meta = DictMetadataStore::load_from_root(snap_io.clone(), &snap.root).map_err(
+            |e| -> Box<dyn std::error::Error> {
+                format!("failed to load snapshot root: {}", e).into()
+            },
+        )?;
         let mut cfg = build_mount_options(noatime, allow_other, None);
         cfg.mount_options.push(MountOption::RO);
         (snap_meta, snap_io, cfg)
@@ -506,13 +545,18 @@ pub fn run_mount(
 
     #[cfg(not(target_os = "macos"))]
     let (final_meta, final_io, config) = if let Some(snap_ref) = snapshot_ref {
-        let snap = meta.find_snapshot(snap_ref).ok_or_else(|| -> Box<dyn std::error::Error> {
-            format!("snapshot not found: {}", snap_ref).into()
-        })?;
+        let snap = meta
+            .find_snapshot(snap_ref)
+            .ok_or_else(|| -> Box<dyn std::error::Error> {
+                format!("snapshot not found: {}", snap_ref).into()
+            })?;
         println!("Mounting snapshot {} (read-only)", snap.version);
         let snap_io: Arc<Mutex<StoreIo>> = io.clone();
-        let snap_meta = DictMetadataStore::load_from_root(snap_io.clone(), &snap.root)
-            .map_err(|e| -> Box<dyn std::error::Error> { format!("failed to load snapshot root: {}", e).into() })?;
+        let snap_meta = DictMetadataStore::load_from_root(snap_io.clone(), &snap.root).map_err(
+            |e| -> Box<dyn std::error::Error> {
+                format!("failed to load snapshot root: {}", e).into()
+            },
+        )?;
         let mut cfg = build_mount_options(noatime, allow_other, None);
         cfg.mount_options.push(MountOption::RO);
         (snap_meta, snap_io, cfg)
@@ -521,11 +565,7 @@ pub fn run_mount(
         (meta, io, cfg)
     };
 
-    let mut fs = SliceFsFilesystem::new(
-        final_meta,
-        final_io,
-        Some(store_path.to_path_buf()),
-    );
+    let mut fs = SliceFsFilesystem::new(final_meta, final_io, Some(store_path.to_path_buf()));
     fs.set_auto_snapshot(auto_snapshot);
 
     // Spawn background GC thread.
@@ -547,7 +587,9 @@ pub fn run_mount(
 
     #[cfg(target_os = "macos")]
     {
-        let backend_name = selected_backend.as_mount_option().trim_start_matches("backend=");
+        let backend_name = selected_backend
+            .as_mount_option()
+            .trim_start_matches("backend=");
         println!(
             "SliceFS mounted at {} (backend: {}, fuse-t: {}.{}.{})",
             mountpoint.display(),
@@ -613,7 +655,8 @@ mod tests {
         let store_dir = tempfile::tempdir().unwrap();
         write_seeded_store_segments(&store_dir);
 
-        let (meta, _io, _lock) = load_store(store_dir.path(), WalConfig::NoWal).expect("load_store failed");
+        let (meta, _io, _lock) =
+            load_store(store_dir.path(), WalConfig::NoWal).expect("load_store failed");
 
         // Inode 1 must exist and be a directory (root)
         let root_meta = meta.get_inode(1).expect("root inode missing");
@@ -626,7 +669,8 @@ mod tests {
         let store_dir = tempfile::tempdir().unwrap();
         write_seeded_store_segments(&store_dir);
 
-        let (meta, _io, _lock) = load_store(store_dir.path(), WalConfig::NoWal).expect("load_store failed");
+        let (meta, _io, _lock) =
+            load_store(store_dir.path(), WalConfig::NoWal).expect("load_store failed");
 
         // hello.txt was seeded
         let ino = meta.lookup(1, "hello.txt").expect("hello.txt not found");
@@ -672,7 +716,9 @@ mod tests {
             .expect("load_store from segments failed");
 
         // hello.txt was seeded
-        let ino = meta.lookup(1, "hello.txt").expect("hello.txt not found in segment store");
+        let ino = meta
+            .lookup(1, "hello.txt")
+            .expect("hello.txt not found in segment store");
         assert!(ino > 1, "file inode should be > 1");
     }
 
@@ -700,7 +746,9 @@ mod tests {
             "NoAtime must be present when noatime=true"
         );
         assert!(
-            config.mount_options.contains(&MountOption::DefaultPermissions),
+            config
+                .mount_options
+                .contains(&MountOption::DefaultPermissions),
             "DefaultPermissions must always be present"
         );
     }
@@ -717,7 +765,9 @@ mod tests {
             "NoAtime must NOT be present when noatime=false"
         );
         assert!(
-            config.mount_options.contains(&MountOption::DefaultPermissions),
+            config
+                .mount_options
+                .contains(&MountOption::DefaultPermissions),
             "DefaultPermissions must always be present"
         );
     }
@@ -728,7 +778,9 @@ mod tests {
         // direct_io must NOT be present — it breaks FUSE-T's go-nfsv4 write path.
         let config = bmo(false, false);
         assert!(
-            !config.mount_options.contains(&MountOption::CUSTOM("direct_io".to_string())),
+            !config
+                .mount_options
+                .contains(&MountOption::CUSTOM("direct_io".to_string())),
             "CUSTOM(direct_io) must NOT be present — breaks FUSE-T write forwarding"
         );
     }
@@ -760,10 +812,14 @@ mod tests {
     fn test_build_mount_options_no_custom_options_on_macos() {
         use crate::backend::FuseTBackend;
         let config = build_mount_options(false, false, Some(&FuseTBackend::Smb));
-        let has_custom = config.mount_options.iter().any(|opt| {
-            matches!(opt, MountOption::CUSTOM(_))
-        });
-        assert!(!has_custom, "No CUSTOM options should be passed to FUSE-T 1.2.0");
+        let has_custom = config
+            .mount_options
+            .iter()
+            .any(|opt| matches!(opt, MountOption::CUSTOM(_)));
+        assert!(
+            !has_custom,
+            "No CUSTOM options should be passed to FUSE-T 1.2.0"
+        );
     }
 
     // ── WAL config ────────────────────────────────────────────────────────────
@@ -776,7 +832,10 @@ mod tests {
 
     #[test]
     fn test_parse_wal_config_flush_on_fsync() {
-        assert!(matches!(parse_wal_config(Some("flush-on-fsync")), WalConfig::FlushOnFsync));
+        assert!(matches!(
+            parse_wal_config(Some("flush-on-fsync")),
+            WalConfig::FlushOnFsync
+        ));
     }
 
     #[test]
@@ -786,7 +845,10 @@ mod tests {
 
     #[test]
     fn test_parse_wal_config_periodic() {
-        assert!(matches!(parse_wal_config(Some("periodic")), WalConfig::Periodic { .. }));
+        assert!(matches!(
+            parse_wal_config(Some("periodic")),
+            WalConfig::Periodic { .. }
+        ));
     }
 
     // ── inject_backend_into_ini ───────────────────────────────────────────────
@@ -796,9 +858,18 @@ mod tests {
     fn test_inject_backend_replaces_existing() {
         let ini = "[Default]\nbackend=nfs\nfoo=bar\n";
         let result = inject_backend_into_ini(ini, "smb");
-        assert!(result.contains("backend=smb"), "should replace backend=nfs with backend=smb");
-        assert!(!result.contains("backend=nfs"), "old backend line should be gone");
-        assert!(result.contains("foo=bar"), "unrelated keys should be preserved");
+        assert!(
+            result.contains("backend=smb"),
+            "should replace backend=nfs with backend=smb"
+        );
+        assert!(
+            !result.contains("backend=nfs"),
+            "old backend line should be gone"
+        );
+        assert!(
+            result.contains("foo=bar"),
+            "unrelated keys should be preserved"
+        );
     }
 
     #[test]
@@ -806,8 +877,14 @@ mod tests {
     fn test_inject_backend_adds_when_absent() {
         let ini = "[Default]\nfoo=bar\n";
         let result = inject_backend_into_ini(ini, "smb");
-        assert!(result.contains("backend=smb"), "should add backend=smb entry");
-        assert!(result.contains("foo=bar"), "unrelated keys should be preserved");
+        assert!(
+            result.contains("backend=smb"),
+            "should add backend=smb entry"
+        );
+        assert!(
+            result.contains("foo=bar"),
+            "unrelated keys should be preserved"
+        );
     }
 
     #[test]
@@ -815,8 +892,14 @@ mod tests {
     fn test_inject_backend_creates_section_when_missing() {
         let ini = "[Other]\nfoo=bar\n";
         let result = inject_backend_into_ini(ini, "fskit");
-        assert!(result.contains("backend=fskit"), "should add [Default] section with backend=fskit");
-        assert!(result.contains("[Default]"), "should add [Default] section header");
+        assert!(
+            result.contains("backend=fskit"),
+            "should add [Default] section with backend=fskit"
+        );
+        assert!(
+            result.contains("[Default]"),
+            "should add [Default] section header"
+        );
     }
 
     #[test]
@@ -901,7 +984,10 @@ mod tests {
         // The store should be loadable — hello.txt was seeded.
         let (meta, _io, _lock) = result.unwrap();
         let ino = meta.lookup(1, "hello.txt");
-        assert!(ino.is_ok(), "hello.txt should be accessible after dirty mount recovery");
+        assert!(
+            ino.is_ok(),
+            "hello.txt should be accessible after dirty mount recovery"
+        );
     }
 
     // ── SHUTDOWN_REQUESTED atomic ─────────────────────────────────────────────
@@ -926,7 +1012,10 @@ mod tests {
         let after_set = SHUTDOWN_REQUESTED.load(Ordering::SeqCst);
         // Restore original value.
         SHUTDOWN_REQUESTED.store(original, Ordering::SeqCst);
-        assert!(after_set, "SHUTDOWN_REQUESTED should read back as true after store(true)");
+        assert!(
+            after_set,
+            "SHUTDOWN_REQUESTED should read back as true after store(true)"
+        );
     }
 
     // ── spawn_watchdog shutdown ───────────────────────────────────────────────
@@ -956,8 +1045,14 @@ mod tests {
     #[test]
     fn test_parse_wal_config_unknown_defaults_to_per_op() {
         // Unknown strategy strings should fall through to PerOp default.
-        assert!(matches!(parse_wal_config(Some("invalid-strategy")), WalConfig::PerOp));
-        assert!(matches!(parse_wal_config(Some("FLUSH-ON-FSYNC")), WalConfig::PerOp));
+        assert!(matches!(
+            parse_wal_config(Some("invalid-strategy")),
+            WalConfig::PerOp
+        ));
+        assert!(matches!(
+            parse_wal_config(Some("FLUSH-ON-FSYNC")),
+            WalConfig::PerOp
+        ));
         assert!(matches!(parse_wal_config(Some("")), WalConfig::PerOp));
     }
 
@@ -969,7 +1064,10 @@ mod tests {
         let ini = "[Other]\nkey=val\n[Default]\nbackend=nfs\n[Third]\nanother=one\n";
         let result = inject_backend_into_ini(ini, "smb");
         assert!(result.contains("backend=smb"), "should inject backend=smb");
-        assert!(!result.contains("backend=nfs"), "should not keep old backend=nfs");
+        assert!(
+            !result.contains("backend=nfs"),
+            "should not keep old backend=nfs"
+        );
         assert!(result.contains("[Other]"), "should preserve other sections");
         assert!(result.contains("[Third]"), "should preserve third section");
     }
@@ -978,7 +1076,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn test_inject_backend_fskit_into_empty_ini() {
         let result = inject_backend_into_ini("", "fskit");
-        assert!(result.contains("backend=fskit"), "should add backend=fskit to empty ini");
+        assert!(
+            result.contains("backend=fskit"),
+            "should add backend=fskit to empty ini"
+        );
         assert!(result.contains("[Default]"), "should add [Default] section");
     }
 
@@ -987,8 +1088,14 @@ mod tests {
     fn test_inject_backend_nfs_backend() {
         let ini = "[Default]\nbackend=smb\n";
         let result = inject_backend_into_ini(ini, "nfs");
-        assert!(result.contains("backend=nfs"), "should replace with backend=nfs");
-        assert!(!result.contains("backend=smb"), "old backend=smb should be removed");
+        assert!(
+            result.contains("backend=nfs"),
+            "should replace with backend=nfs"
+        );
+        assert!(
+            !result.contains("backend=smb"),
+            "old backend=smb should be removed"
+        );
     }
 
     #[test]
@@ -997,8 +1104,14 @@ mod tests {
         // [Default] section exists but has no backend= key
         let ini = "[Default]\nother_key=other_val\n";
         let result = inject_backend_into_ini(ini, "fskit");
-        assert!(result.contains("backend=fskit"), "should inject backend=fskit");
-        assert!(result.contains("other_key=other_val"), "should preserve existing keys");
+        assert!(
+            result.contains("backend=fskit"),
+            "should inject backend=fskit"
+        );
+        assert!(
+            result.contains("other_key=other_val"),
+            "should preserve existing keys"
+        );
     }
 
     // ── build_mount_options additional combinations ───────────────────────────
@@ -1019,9 +1132,10 @@ mod tests {
         let config = build_mount_options(false, false, None);
         #[cfg(not(target_os = "macos"))]
         let config = build_mount_options(false, false, None);
-        let has_fsname = config.mount_options.iter().any(|opt| {
-            matches!(opt, MountOption::FSName(s) if s == "slicefs")
-        });
+        let has_fsname = config
+            .mount_options
+            .iter()
+            .any(|opt| matches!(opt, MountOption::FSName(s) if s == "slicefs"));
         assert!(has_fsname, "FSName(slicefs) must always be present");
     }
 
@@ -1031,9 +1145,13 @@ mod tests {
         // FUSE-T 1.2.0 rejects unknown CUSTOM options. noappledouble is handled
         // internally by go-nfsv4's --namedattr flag.
         let config = build_mount_options(false, false, None);
-        let has_custom = config.mount_options.iter().any(|opt| {
-            matches!(opt, MountOption::CUSTOM(_))
-        });
-        assert!(!has_custom, "No CUSTOM options on macOS — FUSE-T rejects them");
+        let has_custom = config
+            .mount_options
+            .iter()
+            .any(|opt| matches!(opt, MountOption::CUSTOM(_)));
+        assert!(
+            !has_custom,
+            "No CUSTOM options on macOS — FUSE-T rejects them"
+        );
     }
 }

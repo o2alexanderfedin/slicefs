@@ -68,7 +68,10 @@ impl MemDedupIndex {
     ///
     /// Format: `u64` count followed by `u32` length-prefixed bytes for each hash.
     pub fn save_to_writer(&self, writer: &mut impl Write) -> Result<(), CasError> {
-        let guard = self.present.read().map_err(|e| CasError::Index(e.to_string()))?;
+        let guard = self
+            .present
+            .read()
+            .map_err(|e| CasError::Index(e.to_string()))?;
         let count = guard.len() as u64;
         writer
             .write_all(&count.to_le_bytes())
@@ -76,9 +79,7 @@ impl MemDedupIndex {
         for hash in guard.iter() {
             let bytes = hash.as_bytes();
             let len = bytes.len() as u32;
-            writer
-                .write_all(&len.to_le_bytes())
-                .map_err(CasError::Io)?;
+            writer.write_all(&len.to_le_bytes()).map_err(CasError::Io)?;
             writer.write_all(bytes).map_err(CasError::Io)?;
         }
         Ok(())
@@ -138,7 +139,10 @@ impl MemDedupIndex {
             .map_err(CasError::Io)?;
 
         // Write count + entries
-        let guard = self.present.read().map_err(|e| CasError::Index(e.to_string()))?;
+        let guard = self
+            .present
+            .read()
+            .map_err(|e| CasError::Index(e.to_string()))?;
         let count = guard.len() as u64;
         writer
             .write_all(&count.to_le_bytes())
@@ -146,9 +150,7 @@ impl MemDedupIndex {
         for hash in guard.iter() {
             let bytes = hash.as_bytes();
             let len = bytes.len() as u32;
-            writer
-                .write_all(&len.to_le_bytes())
-                .map_err(CasError::Io)?;
+            writer.write_all(&len.to_le_bytes()).map_err(CasError::Io)?;
             writer.write_all(bytes).map_err(CasError::Io)?;
         }
         Ok(())
@@ -167,7 +169,10 @@ impl DedupIndex for MemDedupIndex {
         }
 
         // Slow path: authoritative check.
-        let guard = self.present.read().map_err(|e| CasError::Index(e.to_string()))?;
+        let guard = self
+            .present
+            .read()
+            .map_err(|e| CasError::Index(e.to_string()))?;
         if guard.contains(hash) {
             Ok(DedupResult::Present)
         } else {
@@ -181,14 +186,20 @@ impl DedupIndex for MemDedupIndex {
         self.bloom.insert(hash.as_bytes());
 
         // Then insert into authoritative set.
-        let mut guard = self.present.write().map_err(|e| CasError::Index(e.to_string()))?;
+        let mut guard = self
+            .present
+            .write()
+            .map_err(|e| CasError::Index(e.to_string()))?;
         guard.insert(hash.clone());
         Ok(())
     }
 
     fn remove(&self, hash: &ChunkHash) -> Result<(), CasError> {
         // Only remove from authoritative set — do NOT update bloom filter.
-        let mut guard = self.present.write().map_err(|e| CasError::Index(e.to_string()))?;
+        let mut guard = self
+            .present
+            .write()
+            .map_err(|e| CasError::Index(e.to_string()))?;
         guard.remove(hash);
         Ok(())
     }
@@ -198,8 +209,8 @@ impl DedupIndex for MemDedupIndex {
 mod tests {
     use super::*;
     use crate::blake3_hasher::Blake3Hasher;
-    use slicefs_traits::hash::ContentHasher;
     use proptest::prelude::*;
+    use slicefs_traits::hash::ContentHasher;
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -308,14 +319,22 @@ mod tests {
 
         // First time: not present.
         let first = idx.lookup(&hash).unwrap();
-        assert_ne!(first, DedupResult::Present, "hash should not be present yet");
+        assert_ne!(
+            first,
+            DedupResult::Present,
+            "hash should not be present yet"
+        );
 
         // Insert.
         idx.insert(&hash).unwrap();
 
         // Second time: detected as duplicate.
         let second = idx.lookup(&hash).unwrap();
-        assert_eq!(second, DedupResult::Present, "hash should be present after insert");
+        assert_eq!(
+            second,
+            DedupResult::Present,
+            "hash should be present after insert"
+        );
     }
 
     #[test]
@@ -430,9 +449,7 @@ mod tests {
     fn serialization_round_trip() {
         let idx = MemDedupIndex::new(1_000, 0.01);
 
-        let hashes: Vec<ChunkHash> = (0..50u32)
-            .map(|i| make_hash(&i.to_le_bytes()))
-            .collect();
+        let hashes: Vec<ChunkHash> = (0..50u32).map(|i| make_hash(&i.to_le_bytes())).collect();
         for h in &hashes {
             idx.insert(h).unwrap();
         }

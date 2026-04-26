@@ -72,7 +72,10 @@ mod tests {
         let h = Blake3Hasher;
         let hash_a = h.hash(b"input-a");
         let hash_b = h.hash(b"input-b");
-        assert_ne!(hash_a, hash_b, "different inputs must produce different hashes");
+        assert_ne!(
+            hash_a, hash_b,
+            "different inputs must produce different hashes"
+        );
     }
 
     #[test]

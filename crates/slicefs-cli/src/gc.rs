@@ -58,7 +58,8 @@ pub fn run_gc(store_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // Step 3: Run GC engine using file-backed Io (Dictionary-free).
     let mut io = StoreIo::new(store_path);
     let gc = GarbageCollector::new(segs_dir);
-    let stats = gc.run_gc(&mut io, &roots)
+    let stats = gc
+        .run_gc(&mut io, &roots)
         .map_err(|e| format!("GC failed: {}", e))?;
 
     // Step 4: Report statistics.

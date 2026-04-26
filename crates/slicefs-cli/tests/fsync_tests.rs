@@ -5,7 +5,6 @@
 ///   - fsync with no buffered writes is a no-op (returns Ok)
 ///   - fdatasync (datasync=true) is identical to fsync (same code path)
 ///   - fsync followed by simulated crash (drop without destroy) + reload from segments shows data present
-
 use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
@@ -15,6 +14,7 @@ use slicefs_traits::metadata::MetadataStore;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
+#[allow(dead_code)]
 const S_IFREG: u32 = 0o100_000;
 
 /// Create a SliceFsFilesystem backed by PerOpWal in the given store directory.
@@ -48,12 +48,19 @@ fn test_fsync_flushes_buffer_to_cas() {
     // File handle should still be open — verify by writing more data without error
     let data2 = b" more";
     let result = fs.test_write(fh, data.len() as u64, data2);
-    assert!(result.is_ok(), "fh should remain open after fsync, got: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "fh should remain open after fsync, got: {:?}",
+        result
+    );
 
     // The manifest should be set after fsync
     let manifest = fs.meta().get_manifest(ino);
     assert!(manifest.is_ok(), "manifest should be set after fsync");
-    assert!(!manifest.unwrap().is_empty(), "manifest should be non-empty for non-empty file");
+    assert!(
+        !manifest.unwrap().is_empty(),
+        "manifest should be non-empty for non-empty file"
+    );
 }
 
 // ── Test 2: fsync with no buffered writes is a no-op ────────────────────────
@@ -70,7 +77,11 @@ fn test_fsync_no_buffer_is_noop() {
 
     // fsync on a non-open fh should be a no-op (Ok)
     let result = fs.test_fsync(ino, 999);
-    assert!(result.is_ok(), "fsync on non-open fh should return Ok, got: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "fsync on non-open fh should return Ok, got: {:?}",
+        result
+    );
 }
 
 // ── Test 3: fdatasync is identical to fsync ─────────────────────────────────
@@ -92,7 +103,10 @@ fn test_fdatasync_identical_to_fsync() {
     // Write more data and flush again (fdatasync path)
     fs.test_write(fh, 4, b" more").unwrap();
     let r2 = fs.test_fsync(ino, fh);
-    assert!(r2.is_ok(), "second test_fsync (fdatasync path) should succeed");
+    assert!(
+        r2.is_ok(),
+        "second test_fsync (fdatasync path) should succeed"
+    );
 }
 
 // ── Test 4: crash after fsync — data survives reload ────────────────────────
@@ -122,17 +136,21 @@ fn test_fsync_crash_durability() {
 
     // Reload from segment files
     let segs_dir = store_dir.path().join("segments");
-    let (loaded_root, _snapshots) = load_store_from_segments(&segs_dir)
-        .expect("should be able to load segments after crash");
+    let (loaded_root, _snapshots) =
+        load_store_from_segments(&segs_dir).expect("should be able to load segments after crash");
 
-    assert!(loaded_root.is_some(), "a RootUpdate should have been written by fsync+commit");
+    assert!(
+        loaded_root.is_some(),
+        "a RootUpdate should have been written by fsync+commit"
+    );
 
     // Reconstruct the store from the committed root
     let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
     let rebuilt = DictMetadataStore::load_from_root(io, &root_digest)
         .expect("should be able to reconstruct store");
 
-    let found_ino = rebuilt.lookup(1, "durable.txt")
+    let found_ino = rebuilt
+        .lookup(1, "durable.txt")
         .expect("durable.txt should survive fsync + crash");
     assert!(found_ino > 1, "file inode should be > 1");
 }

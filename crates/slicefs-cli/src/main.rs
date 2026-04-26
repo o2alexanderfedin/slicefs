@@ -7,8 +7,8 @@ mod cli;
 mod dedup_recover;
 mod filesystem;
 mod fuse_callbacks;
-mod handlers;
 mod gc;
+mod handlers;
 mod mount;
 mod reindex;
 mod scrub;
@@ -27,7 +27,18 @@ fn main() {
     let json = cli.json;
 
     match cli.command {
-        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force } => {
+        Cmd::Mount {
+            mountpoint,
+            store,
+            noatime,
+            allow_other,
+            cache_size,
+            wal_strategy,
+            snapshot,
+            auto_snapshot,
+            backend,
+            force,
+        } => {
             if let Err(e) = mount::run_mount(
                 &store,
                 &mountpoint,

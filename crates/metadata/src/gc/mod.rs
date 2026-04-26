@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use blockset::Io;
 use slicefs_traits::digest::Digest224;
 
-use crate::segment::compaction::{compact_segment, SegmentError};
+use crate::segment::compaction::{SegmentError, compact_segment};
 
 /// Collect the live set of `Digest224` keys reachable from `roots`.
 ///
@@ -71,11 +71,7 @@ impl GarbageCollector {
     /// With FileStorage, `collect_live_set` is a no-op (returns empty set) so
     /// this is equivalent to `run_gc_roots_only`. FileStorage orphan file cleanup
     /// is deferred to a future phase.
-    pub fn run_gc(
-        &self,
-        io: &mut impl Io,
-        roots: &[Digest224],
-    ) -> Result<GcStats, GcError> {
+    pub fn run_gc(&self, io: &mut impl Io, roots: &[Digest224]) -> Result<GcStats, GcError> {
         let _live_set = collect_live_set(io, roots);
         self.run_gc_inner()
     }

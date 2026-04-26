@@ -22,7 +22,7 @@ use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
 use slicefs_cli::filesystem::SliceFsFilesystem;
 use slicefs_cli::seed::run_seed;
-use slicefs_traits::metadata::{InodeMeta, MetadataStore};
+use slicefs_traits::metadata::MetadataStore;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
@@ -115,8 +115,7 @@ fn test_seed_roundtrip_various_file_types() {
 
     // Load the store from segments
     let segs_dir = store_dir.path().join("segments");
-    let (root_opt, _snapshots) =
-        load_store_from_segments(&segs_dir).expect("should load segments");
+    let (root_opt, _snapshots) = load_store_from_segments(&segs_dir).expect("should load segments");
     let root = root_opt.expect("root should exist after seed");
 
     let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
@@ -154,7 +153,10 @@ fn test_seed_roundtrip_various_file_types() {
         let mut io_g = io.lock().unwrap();
         file_storage_get(&mut *io_g, &large_manifest[0]).unwrap()
     };
-    assert_eq!(large_readback, large_content, "large file must round-trip byte-for-byte");
+    assert_eq!(
+        large_readback, large_content,
+        "large file must round-trip byte-for-byte"
+    );
 
     // Verify binary file
     let bin_ino = store.lookup(1, "binary.bin").unwrap();
@@ -272,7 +274,8 @@ fn test_overwrite_with_longer_content() {
     let ino = create_file_with_content(&fs, 1, "grow.txt", b"short");
 
     let (fh, _) = fs.test_open(ino, libc::O_WRONLY | libc::O_TRUNC).unwrap();
-    fs.test_write(fh, 0, b"much longer replacement content").unwrap();
+    fs.test_write(fh, 0, b"much longer replacement content")
+        .unwrap();
     fs.test_release(ino, fh).unwrap();
 
     let content = fs.test_read(ino, 0, 1024).unwrap();
@@ -345,7 +348,10 @@ fn test_read_while_another_file_is_being_written() {
 
     // Read A while B is still open for writing
     let a_content = fs.test_read(ino_a, 0, 1024).unwrap();
-    assert_eq!(a_content, b"stable content", "reading A while writing B must work");
+    assert_eq!(
+        a_content, b"stable content",
+        "reading A while writing B must work"
+    );
 
     fs.test_release(ino_b, fh_b).unwrap();
 
@@ -398,7 +404,8 @@ fn test_chown_roundtrip() {
     let (fs, _dir) = fresh_fs();
     let ino = create_file_with_content(&fs, 1, "owned.txt", b"data");
 
-    fs.test_setattr_uid_gid(ino, Some(2000), Some(3000)).unwrap();
+    fs.test_setattr_uid_gid(ino, Some(2000), Some(3000))
+        .unwrap();
     let meta = fs.meta().get_inode(ino).unwrap();
     assert_eq!(meta.uid, 2000);
     assert_eq!(meta.gid, 3000);
@@ -421,7 +428,8 @@ fn test_mtime_roundtrip() {
     let (fs, _dir) = fresh_fs();
     let ino = create_file_with_content(&fs, 1, "timed.txt", b"data");
 
-    fs.test_setattr_mtime(ino, 1_700_000_000, 123_456_789).unwrap();
+    fs.test_setattr_mtime(ino, 1_700_000_000, 123_456_789)
+        .unwrap();
     let meta = fs.meta().get_inode(ino).unwrap();
     assert_eq!(meta.mtime_sec, 1_700_000_000);
     assert_eq!(meta.mtime_nsec, 123_456_789);
@@ -844,7 +852,9 @@ fn test_crash_recovery_committed_data_survives() {
         fs.meta().commit().unwrap();
 
         // Write an uncommitted file
-        let (_ino2, fh2) = fs.test_create(1, "uncommitted.txt", 0o644, 0, 0, 0).unwrap();
+        let (_ino2, fh2) = fs
+            .test_create(1, "uncommitted.txt", 0o644, 0, 0, 0)
+            .unwrap();
         fs.test_write(fh2, 0, b"lost data").unwrap();
         // DO NOT release or commit -- simulate crash
         drop(fs);
@@ -929,7 +939,10 @@ fn test_dedup_refcount_is_correct() {
     // Create a third copy
     let _ino3 = create_file_with_content(&fs, 1, "ref3.txt", content);
     let rc = fs.meta().get_refcount(&m1[0]);
-    assert_eq!(rc, 3, "refcount must be 3 for three files with same content");
+    assert_eq!(
+        rc, 3,
+        "refcount must be 3 for three files with same content"
+    );
 
     // Delete one file
     fs.simulate_unlink(1, "ref1.txt").unwrap();
@@ -1028,10 +1041,10 @@ fn test_edge_unicode_file_names() {
     let (fs, _dir) = fresh_fs();
 
     let unicode_names = [
-        "\u{00e9}t\u{00e9}.txt",     // ete.txt with accents
-        "\u{00fc}ber.txt",            // uber with umlaut
-        "\u{4f60}\u{597d}.txt",       // Chinese "hello"
-        "\u{1f600}.txt",              // emoji
+        "\u{00e9}t\u{00e9}.txt", // ete.txt with accents
+        "\u{00fc}ber.txt",       // uber with umlaut
+        "\u{4f60}\u{597d}.txt",  // Chinese "hello"
+        "\u{1f600}.txt",         // emoji
     ];
 
     for name in &unicode_names {
@@ -1158,7 +1171,10 @@ fn test_edge_write_read_large_file_128kb() {
 
     let readback = fs.test_read(ino, 0, size as u32).unwrap();
     assert_eq!(readback.len(), size);
-    assert_eq!(readback, content, "128 KB file must round-trip byte-for-byte");
+    assert_eq!(
+        readback, content,
+        "128 KB file must round-trip byte-for-byte"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1213,10 +1229,12 @@ fn test_full_workflow_project_directory() {
     // Create source files
     let main_ino = create_file_with_content(&fs, src, "main.rs", b"fn main() {}");
     let lib_ino = create_file_with_content(&fs, src, "lib.rs", b"pub mod utils;");
-    let _test_ino = create_file_with_content(&fs, tests, "test_main.rs", b"#[test] fn it_works() {}");
+    let _test_ino =
+        create_file_with_content(&fs, tests, "test_main.rs", b"#[test] fn it_works() {}");
 
     // Create root files
-    let _cargo_ino = create_file_with_content(&fs, 1, "Cargo.toml", b"[package]\nname = \"myproj\"");
+    let _cargo_ino =
+        create_file_with_content(&fs, 1, "Cargo.toml", b"[package]\nname = \"myproj\"");
     let _readme_ino = create_file_with_content(&fs, 1, "README.md", b"# My Project");
 
     // Verify root directory listing
@@ -1234,15 +1252,19 @@ fn test_full_workflow_project_directory() {
     assert!(src_names.contains(&"lib.rs"));
 
     // Modify main.rs
-    let (fh, _) = fs.test_open(main_ino, libc::O_WRONLY | libc::O_TRUNC).unwrap();
-    fs.test_write(fh, 0, b"fn main() { println!(\"hello\"); }").unwrap();
+    let (fh, _) = fs
+        .test_open(main_ino, libc::O_WRONLY | libc::O_TRUNC)
+        .unwrap();
+    fs.test_write(fh, 0, b"fn main() { println!(\"hello\"); }")
+        .unwrap();
     fs.test_release(main_ino, fh).unwrap();
 
     let content = fs.test_read(main_ino, 0, 1024).unwrap();
     assert_eq!(content, b"fn main() { println!(\"hello\"); }");
 
     // Rename lib.rs to utils.rs
-    fs.simulate_rename(src, "lib.rs", src, "utils.rs", 0).unwrap();
+    fs.simulate_rename(src, "lib.rs", src, "utils.rs", 0)
+        .unwrap();
     assert!(fs.meta().lookup(src, "lib.rs").is_err());
     let utils_ino = fs.meta().lookup(src, "utils.rs").unwrap();
     assert_eq!(utils_ino, lib_ino);
@@ -1349,11 +1371,7 @@ fn test_seed_then_mount_and_modify() {
     // Create source content
     std::fs::write(source_dir.path().join("readme.txt"), b"original readme").unwrap();
     std::fs::create_dir(source_dir.path().join("docs")).unwrap();
-    std::fs::write(
-        source_dir.path().join("docs/guide.txt"),
-        b"original guide",
-    )
-    .unwrap();
+    std::fs::write(source_dir.path().join("docs/guide.txt"), b"original guide").unwrap();
 
     // Seed
     run_seed(store_dir.path(), source_dir.path()).unwrap();

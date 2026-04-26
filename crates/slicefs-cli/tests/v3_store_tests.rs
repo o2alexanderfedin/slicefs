@@ -49,7 +49,10 @@ fn test_write_raw_no_compression() {
         .meta()
         .get_manifest(ino)
         .expect("manifest must exist after release");
-    assert!(!manifest.is_empty(), "manifest must be non-empty after writing content");
+    assert!(
+        !manifest.is_empty(),
+        "manifest must be non-empty after writing content"
+    );
 
     // Read bytes back via file_storage_get — bypasses the filesystem read path
     let stored = {
@@ -113,15 +116,19 @@ fn test_raw_content_dedup() {
     let (ino1, fh1) = fs
         .test_create(1, "dedup_a.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create file 1 should succeed");
-    fs.test_write(fh1, 0, content).expect("write to file 1 should succeed");
-    fs.test_release(ino1, fh1).expect("release file 1 should succeed");
+    fs.test_write(fh1, 0, content)
+        .expect("write to file 1 should succeed");
+    fs.test_release(ino1, fh1)
+        .expect("release file 1 should succeed");
 
     // File 2
     let (ino2, fh2) = fs
         .test_create(1, "dedup_b.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .expect("create file 2 should succeed");
-    fs.test_write(fh2, 0, content).expect("write to file 2 should succeed");
-    fs.test_release(ino2, fh2).expect("release file 2 should succeed");
+    fs.test_write(fh2, 0, content)
+        .expect("write to file 2 should succeed");
+    fs.test_release(ino2, fh2)
+        .expect("release file 2 should succeed");
 
     // Get manifests for both files
     let manifest1 = fs

@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use slicefs_dedup::{DedupIndexConfig, RedbDedupIndex};
 use slicefs_traits::{ChunkHash, DedupIndex};
 
@@ -22,7 +22,11 @@ fn steady_mixed(c: &mut Criterion) {
             let mut next_seed = 1_000_000u64;
             for i in 0..n {
                 if i % 5 == 4 {
-                    let target = if i % 10 == 4 { i % 10_000 } else { 1_500_000 + i };
+                    let target = if i % 10 == 4 {
+                        i % 10_000
+                    } else {
+                        1_500_000 + i
+                    };
                     let mut h = [0u8; 28];
                     h[..8].copy_from_slice(&target.to_le_bytes());
                     let r = idx.lookup(&ChunkHash::from_bytes(h.to_vec())).unwrap();

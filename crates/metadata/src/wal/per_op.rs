@@ -4,8 +4,8 @@ use std::io;
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::segment::{SegmentEntry, SegmentWriter};
 use super::{WalEntry, WalError, WalStrategy};
+use crate::segment::{SegmentEntry, SegmentWriter};
 
 /// WAL that calls `sync_all` after every mutation.
 ///
@@ -55,7 +55,12 @@ impl WalStrategy for PerOpWal {
 pub(crate) fn wal_entry_to_segment(entry: &WalEntry) -> SegmentEntry {
     match entry {
         WalEntry::RootUpdate { root } => SegmentEntry::RootUpdate { root: *root },
-        WalEntry::Snapshot { version, root, created_at, name } => SegmentEntry::SnapshotRecord {
+        WalEntry::Snapshot {
+            version,
+            root,
+            created_at,
+            name,
+        } => SegmentEntry::SnapshotRecord {
             version: *version,
             root: *root,
             created_at: *created_at,

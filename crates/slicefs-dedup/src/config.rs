@@ -87,7 +87,10 @@ pub struct DedupIndexConfigBuilder {
 
 impl DedupIndexConfigBuilder {
     pub fn new(cas_root: PathBuf) -> Self {
-        Self { cas_root, durability: DurabilityMode::Default }
+        Self {
+            cas_root,
+            durability: DurabilityMode::Default,
+        }
     }
 
     pub fn mode(mut self, mode: DurabilityMode) -> Self {
@@ -98,9 +101,9 @@ impl DedupIndexConfigBuilder {
     pub fn build(self) -> DedupIndexConfig {
         let dedup_root = self.cas_root.join(".dedup-index");
         let (coalesce, batch_default, batch_seed, verify_on_present) = match self.durability {
-            DurabilityMode::Seed     => (Duration::from_millis(20), 10_000, 100_000, false),
-            DurabilityMode::Default  => (Duration::from_millis(2),  10_000, 100_000, false),
-            DurabilityMode::Paranoid => (Duration::ZERO,            1,      1,       true),
+            DurabilityMode::Seed => (Duration::from_millis(20), 10_000, 100_000, false),
+            DurabilityMode::Default => (Duration::from_millis(2), 10_000, 100_000, false),
+            DurabilityMode::Paranoid => (Duration::ZERO, 1, 1, true),
         };
         DedupIndexConfig {
             cas_root: self.cas_root,
@@ -133,20 +136,27 @@ mod tests {
 
     #[test]
     fn paranoid_enables_verify_on_present() {
-        let c = DedupIndexConfig::builder("/x").mode(DurabilityMode::Paranoid).build();
+        let c = DedupIndexConfig::builder("/x")
+            .mode(DurabilityMode::Paranoid)
+            .build();
         assert!(c.verify_on_present);
         assert_eq!(c.batch_size_default, 1);
     }
 
     #[test]
     fn seed_uses_large_batches() {
-        let c = DedupIndexConfig::builder("/x").mode(DurabilityMode::Seed).build();
+        let c = DedupIndexConfig::builder("/x")
+            .mode(DurabilityMode::Seed)
+            .build();
         assert_eq!(c.batch_size_seed, 100_000);
     }
 
     #[test]
     fn dedup_root_is_under_cas() {
         let c = DedupIndexConfig::builder("/store/cas").build();
-        assert_eq!(c.dedup_root, std::path::Path::new("/store/cas/.dedup-index"));
+        assert_eq!(
+            c.dedup_root,
+            std::path::Path::new("/store/cas/.dedup-index")
+        );
     }
 }

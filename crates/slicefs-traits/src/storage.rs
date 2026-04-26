@@ -7,7 +7,7 @@
 //! `StorageGet` — any type implementing these traits is automatically a valid
 //! blockset Dictionary backend.
 
-use crate::digest::{Digest224, Digest256, Branches};
+use crate::digest::{Branches, Digest224, Digest256};
 
 /// Dictionary write interface: add tree nodes and finalize to a Digest224 key.
 ///

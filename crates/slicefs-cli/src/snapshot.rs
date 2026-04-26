@@ -27,7 +27,10 @@ pub fn run_snapshot(action: SnapshotAction) -> Result<(), Box<dyn std::error::Er
     match action {
         SnapshotAction::Create { store, name } => run_snapshot_create(&store, name),
         SnapshotAction::List { store } => run_snapshot_list(&store),
-        SnapshotAction::Switch { store, version_or_name } => run_snapshot_switch(&store, &version_or_name),
+        SnapshotAction::Switch {
+            store,
+            version_or_name,
+        } => run_snapshot_switch(&store, &version_or_name),
     }
 }
 
@@ -58,7 +61,10 @@ pub fn run_snapshot_create(
         .map_err(|e| format!("failed to load segments: {}", e))?;
 
     let root = root_opt.ok_or_else(|| {
-        format!("no committed state found in segments at {}", segs_dir.display())
+        format!(
+            "no committed state found in segments at {}",
+            segs_dir.display()
+        )
     })?;
 
     // Reconstruct DictMetadataStore from file-backed StoreIo.
@@ -112,7 +118,7 @@ pub fn run_snapshot_list(store_path: &Path) -> Result<(), Box<dyn std::error::Er
     }
 
     // Print table header.
-    println!("{:<8} {:<20} {:<22} {}", "Version", "Name", "Created", "Root");
+    println!("{:<8} {:<20} {:<22} Root", "Version", "Name", "Created");
     println!("{}", "-".repeat(80));
 
     for snap in &snapshots {
@@ -165,7 +171,10 @@ pub fn run_snapshot_switch(
         .map_err(|e| format!("failed to load segments: {}", e))?;
 
     let root = root_opt.ok_or_else(|| {
-        format!("no committed state found in segments at {}", segs_dir.display())
+        format!(
+            "no committed state found in segments at {}",
+            segs_dir.display()
+        )
     })?;
 
     // Reconstruct DictMetadataStore from file-backed StoreIo.
@@ -184,9 +193,9 @@ pub fn run_snapshot_switch(
     meta.set_wal(wal);
 
     // Find target snapshot.
-    let target = meta.find_snapshot(version_or_name).ok_or_else(|| {
-        format!("snapshot not found: {}", version_or_name)
-    })?;
+    let target = meta
+        .find_snapshot(version_or_name)
+        .ok_or_else(|| format!("snapshot not found: {}", version_or_name))?;
 
     // Auto-snapshot current state before switching.
     let auto_snap = meta
@@ -240,7 +249,10 @@ fn format_unix_timestamp(secs: u64) -> String {
     let days = s / 86400;
     // Compute year/month/day from day count (Gregorian calendar).
     let (year, month, day) = days_to_ymd(days);
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, hour, min, sec)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hour, min, sec
+    )
 }
 
 /// Convert a count of days since Unix epoch (1970-01-01) to (year, month, day).
@@ -299,7 +311,11 @@ mod tests {
         make_seeded_store(&store_dir);
 
         let result = run_snapshot_create(store_dir.path(), None);
-        assert!(result.is_ok(), "snapshot create should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "snapshot create should succeed: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -308,7 +324,11 @@ mod tests {
         make_seeded_store(&store_dir);
 
         let result = run_snapshot_create(store_dir.path(), Some("v1.0".to_string()));
-        assert!(result.is_ok(), "snapshot create with name should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "snapshot create with name should succeed: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -332,7 +352,11 @@ mod tests {
 
         // No snapshots yet — should print "No snapshots found."
         let result = run_snapshot_list(store_dir.path());
-        assert!(result.is_ok(), "snapshot list should succeed on empty: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "snapshot list should succeed on empty: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -354,7 +378,11 @@ mod tests {
         run_snapshot_create(store_dir.path(), Some("snap-1".to_string())).unwrap();
 
         let result = run_snapshot_switch(store_dir.path(), "1");
-        assert!(result.is_ok(), "snapshot switch by version should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "snapshot switch by version should succeed: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -364,7 +392,11 @@ mod tests {
         run_snapshot_create(store_dir.path(), Some("snap-1".to_string())).unwrap();
 
         let result = run_snapshot_switch(store_dir.path(), "snap-1");
-        assert!(result.is_ok(), "snapshot switch by name should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "snapshot switch by name should succeed: {:?}",
+            result
+        );
     }
 
     #[test]
