@@ -30,3 +30,5 @@ mod platform;
 
 mod manifest;
 pub use manifest::Manifest;
+
+mod bloom_snapshot;
