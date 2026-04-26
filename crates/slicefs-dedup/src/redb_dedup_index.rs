@@ -263,6 +263,16 @@ impl DedupIndex for RedbDedupIndex {
         self.stats.removes_total.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
+
+    fn flush(&self) -> Result<(), CasError> {
+        // BatchWriter has no explicit drain primitive; submit() blocks
+        // for reply already, so by the time the most-recent insert
+        // returned, all earlier inserts are committed. To force device
+        // durability, open the redb file and F_FULLFSYNC it.
+        let f = std::fs::File::open(self.root.redb()).map_err(CasError::Io)?;
+        crate::platform::durable_sync(&f).map_err(CasError::Io)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -417,6 +427,23 @@ mod insert_tests {
             "lookup must be Absent after remove (bloom hit + redb miss = false positive)");
         assert!(idx.bloom_check(&h),
             "bloom must NOT be updated on remove (I3 — drift is benign)");
+        shutdown_then_drop(idx);
+    }
+
+    #[test]
+    fn flush_drains_pending_inserts() {
+        let td = tempfile::tempdir().unwrap();
+        let cas = td.path().join("cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let cfg = DedupIndexConfig::builder(&cas).mode(crate::config::DurabilityMode::Default).build();
+        let idx = RedbDedupIndex::create(cfg).unwrap();
+        for i in 0..50u8 { idx.insert(&make_hash(i)).unwrap(); }
+        idx.flush().unwrap();
+
+        // After flush, every insert must be Present even on a fresh read txn.
+        for i in 0..50u8 {
+            assert!(matches!(idx.lookup(&make_hash(i)).unwrap(), DedupResult::Present));
+        }
         shutdown_then_drop(idx);
     }
 }
