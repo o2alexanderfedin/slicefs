@@ -22,3 +22,8 @@ pub use verify::VerifyReport;
 
 mod paths;
 pub use paths::DedupRoot;
+
+mod platform;
+// Consumed by manifest.rs (D3) and bloom_snapshot.rs (D4); see ARCHITECTURE §3 I10.
+#[allow(unused_imports)]
+pub(crate) use platform::{durable_sync, fsync_parent_dir};
