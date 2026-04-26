@@ -1,0 +1,54 @@
+[package]
+name = "slicefs-dedup"
+version = "0.1.0"
+edition = "2024"
+authors = ["Alexander Fedin <af@o2.services>", "Sergey Shandar"]
+license = "AGPL-3.0-or-later"
+description = "Persistent, redb-backed DedupIndex for SliceFS: bloom-fronted lookups, group-commit batcher, CAS-as-truth recovery"
+
+[features]
+default = []
+prometheus = ["metrics-exporter-prometheus"]
+
+[dependencies]
+slicefs-traits     = { path = "../slicefs-traits" }
+redb.workspace               = true
+fastbloom.workspace          = true
+xxhash-rust.workspace        = true
+crc32c.workspace             = true
+serde.workspace              = true
+serde_json.workspace         = true
+thiserror.workspace          = true
+tracing.workspace            = true
+metrics.workspace            = true
+parking_lot.workspace        = true
+crossbeam-channel.workspace  = true
+libc.workspace               = true
+
+metrics-exporter-prometheus = { version = "0.15", optional = true }
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+cas-local          = { path = "../cas-local" }
+criterion.workspace = true
+
+[[bench]]
+name = "seed_burst"
+harness = false
+
+[[bench]]
+name = "lookup"
+harness = false
+
+[[bench]]
+name = "steady_mixed"
+harness = false
+
+[[bench]]
+name = "commit_latency"
+harness = false
+
+[[bench]]
+name = "recovery_50m"
+harness = false
