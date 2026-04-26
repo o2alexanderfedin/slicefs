@@ -275,6 +275,34 @@ impl DedupIndex for RedbDedupIndex {
     }
 }
 
+impl Drop for RedbDedupIndex {
+    fn drop(&mut self) {
+        // Best-effort: shut batcher with timeout, then flush, then update manifest.
+        // See ARCHITECTURE §5.2 (Drop contract) and §9.1 (Healthy transition).
+        if let Some(bw) = self.batch_writer.take() {
+            bw.shutdown(std::time::Duration::from_secs(5));
+        }
+        let _ = std::fs::File::open(self.root.redb())
+            .and_then(|f| crate::platform::durable_sync(&f));
+
+        let mut m = match crate::manifest::Manifest::read(&self.root) {
+            Ok(m) => m,
+            Err(_) => crate::manifest::Manifest::new(
+                self.config.bloom.capacity as u64,
+                self.config.bloom.fpr,
+                self.config.page_size as u32,
+            ),
+        };
+        m.last_shutdown_was_clean = true;
+        m.last_clean_shutdown_unix_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+        m.entries_high_water_mark = self.high_water.load(std::sync::atomic::Ordering::Acquire);
+        let _ = m.write_atomic(&self.root);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,14 +314,7 @@ mod tests {
         let cas = td.path().join("cas");
         std::fs::create_dir_all(&cas).unwrap();
         let cfg = DedupIndexConfig::builder(&cas).build();
-        let mut idx = RedbDedupIndex::create(cfg.clone()).unwrap();
-        // Until Task I2 lands a Drop impl, the batcher thread holds an
-        // Arc<Database> clone that keeps redb's in-process registry busy
-        // until the thread exits. Explicitly shut it down here so the
-        // subsequent open() does not race against thread teardown.
-        if let Some(bw) = idx.batch_writer.take() {
-            bw.shutdown(std::time::Duration::from_secs(2));
-        }
+        let idx = RedbDedupIndex::create(cfg.clone()).unwrap();
         drop(idx);
         let _idx2 = RedbDedupIndex::open(cfg).unwrap();
     }
@@ -362,13 +383,6 @@ mod insert_tests {
         ChunkHash::from_bytes(v)
     }
 
-    fn shutdown_then_drop(mut idx: RedbDedupIndex) {
-        if let Some(bw) = idx.batch_writer.take() {
-            bw.shutdown(std::time::Duration::from_secs(2));
-        }
-        drop(idx);
-    }
-
     #[test]
     fn insert_then_bloom_check_true() {
         let td = tempfile::tempdir().unwrap();
@@ -380,8 +394,6 @@ mod insert_tests {
         let h = make_hash(1);
         idx.insert(&h).unwrap();
         assert!(idx.bloom_check(&h));
-
-        shutdown_then_drop(idx);
     }
 
     #[test]
@@ -394,8 +406,6 @@ mod insert_tests {
         let h = make_hash(0xFE);
         let r = idx.lookup(&h).unwrap();
         assert!(matches!(r, DedupResult::DefinitelyAbsent));
-
-        shutdown_then_drop(idx);
     }
 
     #[test]
@@ -409,8 +419,6 @@ mod insert_tests {
         idx.insert(&h).unwrap();
         let r = idx.lookup(&h).unwrap();
         assert!(matches!(r, DedupResult::Present));
-
-        shutdown_then_drop(idx);
     }
 
     #[test]
@@ -427,7 +435,6 @@ mod insert_tests {
             "lookup must be Absent after remove (bloom hit + redb miss = false positive)");
         assert!(idx.bloom_check(&h),
             "bloom must NOT be updated on remove (I3 — drift is benign)");
-        shutdown_then_drop(idx);
     }
 
     #[test]
@@ -444,6 +451,22 @@ mod insert_tests {
         for i in 0..50u8 {
             assert!(matches!(idx.lookup(&make_hash(i)).unwrap(), DedupResult::Present));
         }
-        shutdown_then_drop(idx);
+    }
+
+    #[test]
+    fn drop_writes_clean_shutdown_manifest() {
+        let td = tempfile::tempdir().unwrap();
+        let cas = td.path().join("cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let cfg = DedupIndexConfig::builder(&cas).build();
+        let dedup_root = cfg.dedup_root.clone();
+        {
+            let idx = RedbDedupIndex::create(cfg.clone()).unwrap();
+            idx.insert(&make_hash(1)).unwrap();
+            // Drop fires here when scope exits.
+        }
+        let m = crate::manifest::Manifest::read(&DedupRoot::new(&dedup_root)).unwrap();
+        assert!(m.last_shutdown_was_clean);
+        assert_eq!(m.entries_high_water_mark, 1);
     }
 }
