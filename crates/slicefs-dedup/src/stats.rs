@@ -1,5 +1,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Trait-level coarse stats: a small, stable shape returned by
+/// [`slicefs_traits::DedupIndex::stats`]'s default-impl. Applicable to all
+/// `DedupIndex` impls (`MemDedupIndex`, `RedbDedupIndex`, …). Task C1 moves
+/// this type into `slicefs-traits` and re-exports it from this crate.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct IndexStats {
     pub entries: u64,
@@ -27,6 +31,11 @@ impl StatsCounters {
     }
 }
 
+/// Rich, crate-internal stats snapshot produced by
+/// `RedbDedupIndex::stats_snapshot`. Includes redb-specific fields
+/// (`redb_free_bytes`, `hwm`) and queue-depth instrumentation that don't
+/// belong on the trait surface. Use [`IndexStats`] for the trait-level
+/// shape.
 #[derive(Debug, Default, Clone)]
 pub struct StatsSnapshot {
     pub inserts_total: u64,
