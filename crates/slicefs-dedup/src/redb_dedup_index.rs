@@ -3,15 +3,19 @@
 //! See ARCHITECTURE §7.2: single table `dedup_index_v1` with key
 //! `&[u8; 28]` (the 28-byte content address) and unit value.
 //!
-//! This module provides the skeleton — `create()` / `open()` and the
-//! [`DEDUP_TABLE`] definition. Insert / lookup / remove / flush land in
-//! later tasks (G1, G2, H1, H2, I1).
+//! G2 wires the [`BatchWriter`] into the struct and ships
+//! [`DedupIndex::insert`] (commit-then-bloom). [`DedupIndex::lookup`]
+//! and [`DedupIndex::remove`] are stubbed for tasks H1 and H2.
 
+use crate::atomic_bloom::AtomicBloomFilter;
+use crate::batch_writer::BatchWriter;
 use crate::config::DedupIndexConfig;
 use crate::error::DedupIndexError;
 use crate::paths::DedupRoot;
+use crate::stats::StatsCounters;
 use redb::{Database, TableDefinition};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MountState {
@@ -36,15 +40,25 @@ pub const DEDUP_TABLE: TableDefinition<&[u8; 28], ()> =
 /// Authoritative on-disk index, redb 4.1.
 ///
 /// Constructed via [`RedbDedupIndex::create`] (first-time bootstrap) or
-/// [`RedbDedupIndex::open`] (subsequent mounts). The bloom filter,
-/// batcher, manifest, and stats counters are bolted on by later tasks.
-// Fields are wired up by later tasks: BatchWriter (G1), lookup (H1),
-// flush() (I1), Drop (I2), bloom snapshot (J1), recovery (K1).
+/// [`RedbDedupIndex::open`] (subsequent mounts). Both paths spawn a
+/// [`BatchWriter`] that owns the single redb writer thread (G1/G2).
+///
+/// The manifest, bloom snapshot persistence, and Drop-time clean-shutdown
+/// hooks are bolted on by later tasks (I2, J1).
+//
+// Some fields (`config`, `root`, `high_water`, `stats`) are populated
+// here but not yet *read* until later tasks (I1 flush, I2 Drop, J1
+// snapshot). Keep `#[allow(dead_code)]` until those tasks land — the
+// alternative is per-field allows that we'd just have to remove anyway.
 #[allow(dead_code)]
 pub struct RedbDedupIndex {
     pub(crate) config: DedupIndexConfig,
     pub(crate) root: DedupRoot,
     pub(crate) db: Arc<Database>,
+    pub(crate) bloom: AtomicBloomFilter,
+    pub(crate) high_water: Arc<AtomicU64>,
+    pub(crate) stats: Arc<StatsCounters>,
+    pub(crate) batch_writer: Option<BatchWriter>,
 }
 
 impl RedbDedupIndex {
@@ -53,7 +67,7 @@ impl RedbDedupIndex {
     /// Creates the directory if missing, opens the redb database with the
     /// configured cache, and touches [`DEDUP_TABLE`] inside a write
     /// transaction so the table's metadata exists on disk before the
-    /// first real insert.
+    /// first real insert. Then spawns the [`BatchWriter`] thread.
     ///
     /// Note: `config.page_size` is recorded in [`DedupIndexConfig`] for
     /// the manifest, but redb 4.1 only exposes `set_page_size` under
@@ -62,28 +76,72 @@ impl RedbDedupIndex {
     pub fn create(config: DedupIndexConfig) -> Result<Self, DedupIndexError> {
         let root = DedupRoot::new(&config.dedup_root);
         std::fs::create_dir_all(root.base())?;
-        let db = Database::builder()
-            .set_cache_size(config.redb_cache_bytes)
-            .create(root.redb())?;
+        let db = Arc::new(
+            Database::builder()
+                .set_cache_size(config.redb_cache_bytes)
+                .create(root.redb())?,
+        );
         // Touch the table so its metadata exists.
         let txn = db.begin_write()?;
         {
             let _t = txn.open_table(DEDUP_TABLE)?;
         }
         txn.commit()?;
-        Ok(Self { config, root, db: Arc::new(db) })
+
+        let bloom = AtomicBloomFilter::new(&config.bloom);
+        let stats = Arc::new(StatsCounters::default());
+        let high_water = Arc::new(AtomicU64::new(0));
+        let bw = BatchWriter::spawn(
+            config.clone(),
+            Arc::clone(&db),
+            bloom.clone_handle(),
+            Arc::clone(&stats),
+            Arc::clone(&high_water),
+        );
+
+        Ok(Self {
+            config,
+            root,
+            db,
+            bloom,
+            high_water,
+            stats,
+            batch_writer: Some(bw),
+        })
     }
 
     /// Open an existing index at `config.dedup_root`.
     ///
     /// Does not touch the table — readers should open their own
-    /// read transactions.
+    /// read transactions. Spawns the [`BatchWriter`] thread.
     pub fn open(config: DedupIndexConfig) -> Result<Self, DedupIndexError> {
         let root = DedupRoot::new(&config.dedup_root);
-        let db = Database::builder()
-            .set_cache_size(config.redb_cache_bytes)
-            .open(root.redb())?;
-        Ok(Self { config, root, db: Arc::new(db) })
+        let db = Arc::new(
+            Database::builder()
+                .set_cache_size(config.redb_cache_bytes)
+                .open(root.redb())?,
+        );
+
+        let bloom = AtomicBloomFilter::new(&config.bloom);
+        let stats = Arc::new(StatsCounters::default());
+        let high_water = Arc::new(AtomicU64::new(0));
+        let bw = BatchWriter::spawn(
+            config.clone(),
+            Arc::clone(&db),
+            bloom.clone_handle(),
+            Arc::clone(&stats),
+            Arc::clone(&high_water),
+        );
+
+        Ok(Self {
+            config,
+            root,
+            db,
+            bloom,
+            high_water,
+            stats,
+            batch_writer: Some(bw),
+        })
     }
 
     /// Probe the manifest on open to determine mount state.
@@ -107,6 +165,50 @@ impl RedbDedupIndex {
     }
 }
 
+use slicefs_traits::{CasError, ChunkHash, DedupIndex, DedupResult};
+
+impl RedbDedupIndex {
+    /// Convert a [`ChunkHash`] into the fixed 28-byte redb key. Returns
+    /// [`CasError::Index`] if the hash is not exactly 28 bytes wide.
+    fn hash28(h: &ChunkHash) -> Result<[u8; 28], CasError> {
+        let bytes = h.as_bytes();
+        if bytes.len() != 28 {
+            return Err(CasError::Index(format!(
+                "ChunkHash must be 28 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        let mut out = [0u8; 28];
+        out.copy_from_slice(bytes);
+        Ok(out)
+    }
+}
+
+impl DedupIndex for RedbDedupIndex {
+    fn bloom_check(&self, hash: &ChunkHash) -> bool {
+        let bytes = hash.as_bytes();
+        self.bloom.contains(bytes)
+    }
+
+    fn insert(&self, hash: &ChunkHash) -> Result<(), CasError> {
+        let h = Self::hash28(hash)?;
+        let bw = self.batch_writer.as_ref().ok_or_else(|| {
+            CasError::Index("RedbDedupIndex was opened without a batch writer".into())
+        })?;
+        bw.submit(h).map_err(CasError::from)
+    }
+
+    fn lookup(&self, _hash: &ChunkHash) -> Result<DedupResult, CasError> {
+        // Filled in by Task H1.
+        unimplemented!("Task H1")
+    }
+
+    fn remove(&self, _hash: &ChunkHash) -> Result<(), CasError> {
+        // Filled in by Task H2.
+        unimplemented!("Task H2")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,7 +220,14 @@ mod tests {
         let cas = td.path().join("cas");
         std::fs::create_dir_all(&cas).unwrap();
         let cfg = DedupIndexConfig::builder(&cas).build();
-        let idx = RedbDedupIndex::create(cfg.clone()).unwrap();
+        let mut idx = RedbDedupIndex::create(cfg.clone()).unwrap();
+        // Until Task I2 lands a Drop impl, the batcher thread holds an
+        // Arc<Database> clone that keeps redb's in-process registry busy
+        // until the thread exits. Explicitly shut it down here so the
+        // subsequent open() does not race against thread teardown.
+        if let Some(bw) = idx.batch_writer.take() {
+            bw.shutdown(std::time::Duration::from_secs(2));
+        }
         drop(idx);
         let _idx2 = RedbDedupIndex::open(cfg).unwrap();
     }
@@ -173,5 +282,30 @@ mod probe_tests {
         m.last_shutdown_was_clean = true;
         m.write_atomic(&DedupRoot::new(&c.dedup_root)).unwrap();
         assert_eq!(RedbDedupIndex::probe(&c).unwrap(), MountState::Healthy);
+    }
+}
+
+#[cfg(test)]
+mod insert_tests {
+    use super::*;
+    use slicefs_traits::{ChunkHash, DedupIndex};
+
+    fn make_hash(seed: u8) -> ChunkHash {
+        let mut v = vec![0u8; 28];
+        v[0] = seed;
+        ChunkHash::from_bytes(v)
+    }
+
+    #[test]
+    fn insert_then_bloom_check_true() {
+        let td = tempfile::tempdir().unwrap();
+        let cas = td.path().join("cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let cfg = DedupIndexConfig::builder(&cas).build();
+        let idx = RedbDedupIndex::create(cfg).unwrap();
+
+        let h = make_hash(1);
+        idx.insert(&h).unwrap();
+        assert!(idx.bloom_check(&h));
     }
 }
