@@ -62,3 +62,24 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(20))]
+    #[test]
+    fn prop_open_close_open_preserves_set(seeds in proptest::collection::vec(any::<u8>(), 0..100)) {
+        let td = tempfile::tempdir().unwrap();
+        let cas = td.path().join("cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let cfg = DedupIndexConfig::builder(&cas).build();
+        {
+            let idx = RedbDedupIndex::create(cfg.clone()).unwrap();
+            for s in &seeds { idx.insert(&make_hash(*s)).unwrap(); }
+            idx.flush().unwrap();
+        }
+        let idx = RedbDedupIndex::open(cfg).unwrap();
+        for s in &seeds {
+            let r = idx.lookup(&make_hash(*s)).unwrap();
+            prop_assert!(matches!(r, DedupResult::Present));
+        }
+    }
+}
