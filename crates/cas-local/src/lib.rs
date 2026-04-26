@@ -17,3 +17,5 @@ pub mod disk_block_store;
 pub mod fixed_chunker;
 pub mod mem_block_store;
 pub mod mem_dedup_index;
+
+pub use mem_dedup_index::MemDedupIndex;
