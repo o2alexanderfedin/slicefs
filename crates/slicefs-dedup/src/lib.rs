@@ -33,5 +33,8 @@ pub use manifest::Manifest;
 
 mod bloom_snapshot;
 
+mod atomic_bloom;
+pub use atomic_bloom::AtomicBloomFilter;
+
 mod redb_dedup_index;
 pub use redb_dedup_index::{DEDUP_TABLE, MountState, RedbDedupIndex};
