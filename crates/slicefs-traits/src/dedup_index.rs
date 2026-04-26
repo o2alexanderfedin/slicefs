@@ -21,6 +21,44 @@ pub enum DedupResult {
     Absent,
 }
 
+/// Outcome of a [`DedupIndex::verify`] integrity scan.
+///
+/// Returned by the scrubber to summarize an on-disk integrity sweep:
+/// how many pages were inspected, how many anomalies were found,
+/// the bloom filter's current load factor, and how long the scan took.
+///
+/// `anomalies == 0` means the index is healthy; use [`VerifyReport::ok`]
+/// for a boolean check. The default-impl on [`DedupIndex::verify`] returns
+/// an empty report (zero pages, zero anomalies, ok), which is correct for
+/// in-memory impls that have nothing on disk to verify.
+#[derive(Debug, Default, Clone)]
+pub struct VerifyReport {
+    pub pages_scanned: u64,
+    pub anomalies: u64,
+    pub bloom_load_factor: f64,
+    pub elapsed_ms: u64,
+}
+
+impl VerifyReport {
+    /// Returns `true` when the verify scan found no anomalies.
+    pub fn ok(&self) -> bool {
+        self.anomalies == 0
+    }
+}
+
+/// Trait-level coarse stats: a small, stable shape returned by
+/// [`DedupIndex::stats`]'s default-impl. Applicable to all
+/// `DedupIndex` impls (`MemDedupIndex`, `RedbDedupIndex`, …).
+///
+/// Richer, impl-specific snapshots (e.g., `RedbDedupIndex::stats_snapshot`)
+/// expose engine-internal counters that don't belong on the trait surface.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IndexStats {
+    pub entries: u64,
+    pub bloom_load_factor: f64,
+    pub redb_free_bytes: u64,
+}
+
 /// On-disk dedup index with bounded memory usage (CAS-07).
 ///
 /// Separates the fast probabilistic bloom-filter pre-check from the authoritative
@@ -65,4 +103,31 @@ pub trait DedupIndex: Send + Sync {
     /// cause an unnecessary `lookup` call on the next check, which is acceptable.
     /// Called only by the garbage collection engine (Phase 5).
     fn remove(&self, hash: &ChunkHash) -> Result<(), CasError>;
+
+    /// Force pending writes / bloom snapshot to durable storage.
+    ///
+    /// In-memory impls have nothing to flush; the default no-op is correct.
+    /// Persistent impls must ensure all queued inserts are committed and any
+    /// bloom-filter snapshot is written to disk before returning `Ok(())`.
+    fn flush(&self) -> Result<(), CasError> {
+        Ok(())
+    }
+
+    /// On-disk integrity scan. Used by the scrubber.
+    ///
+    /// Returns a [`VerifyReport`] summarizing pages scanned, anomalies found,
+    /// and the bloom load factor. The default-impl returns an empty report,
+    /// which is correct for in-memory impls with nothing on disk to verify.
+    fn verify(&self) -> Result<VerifyReport, CasError> {
+        Ok(VerifyReport::default())
+    }
+
+    /// Coarse trait-level stats; richer snapshot on `RedbDedupIndex` directly.
+    ///
+    /// The default-impl returns a zeroed [`IndexStats`]. Persistent impls
+    /// should override to expose live entry counts, bloom load factor, and
+    /// free space.
+    fn stats(&self) -> IndexStats {
+        IndexStats::default()
+    }
 }

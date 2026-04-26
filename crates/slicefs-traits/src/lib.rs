@@ -22,6 +22,8 @@
 //! - [`Chunk`] — A single chunk produced by a [`Chunker`]
 //! - [`BlockStoreConfig`] — Configuration for a [`BlockStore`] (integrity verification)
 //! - [`DedupResult`] — Result of a [`DedupIndex`] lookup
+//! - [`IndexStats`] — Trait-level coarse stats from [`DedupIndex::stats`]
+//! - [`VerifyReport`] — Result of a [`DedupIndex::verify`] integrity scan
 //! - [`CasError`] — Typed error enum covering all CAS failure modes
 //! - [`MetaError`] — Typed error enum for metadata operations
 //! - [`InodeMeta`] — POSIX inode fields (plain data; serialization in `metadata` crate)
@@ -44,7 +46,7 @@ pub mod storage;
 pub use block_store::{BlockStore, BlockStoreConfig};
 pub use chunk::{Chunk, Chunker};
 pub use compressor::{AlgorithmId, Compressor, CompressorError};
-pub use dedup_index::{DedupIndex, DedupResult};
+pub use dedup_index::{DedupIndex, DedupResult, IndexStats, VerifyReport};
 pub use digest::*;
 pub use error::CasError;
 pub use hash::{ChunkHash, ContentHasher};
