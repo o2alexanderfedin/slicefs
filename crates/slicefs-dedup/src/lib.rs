@@ -11,3 +11,6 @@
 
 mod error;
 pub use error::DedupIndexError;
+
+mod config;
+pub use config::{BloomConfig, DedupIndexConfig, DedupIndexConfigBuilder, DurabilityMode};
