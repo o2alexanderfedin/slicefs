@@ -8,3 +8,6 @@
 //! No panic ever crosses the [`slicefs_traits::DedupIndex`] trait
 //! boundary. Engine panics are caught and surfaced as
 //! [`CasError::Index("engine-panic: …")`]. See ARCHITECTURE §5.3.
+
+mod error;
+pub use error::DedupIndexError;
