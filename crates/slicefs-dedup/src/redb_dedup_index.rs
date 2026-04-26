@@ -176,6 +176,35 @@ impl RedbDedupIndex {
         crate::recovery::rebuild_from_cas(config)
     }
 
+    /// Snapshot the live counters for operator surfaces (CLI `stats` block).
+    ///
+    /// Reads each [`StatsCounters`] atomic with `Relaxed` ordering — these
+    /// counters are advisory metrics, not synchronization. `redb_free_bytes`
+    /// is not exposed in MVP because redb 4.1's `DatabaseStats` lives on
+    /// `WriteTransaction` and we do not want a stats read to contend with
+    /// the [`BatchWriter`]; the field is reserved for v2 when redb gains a
+    /// read-side stats API. `bloom_load_factor` is similarly reserved —
+    /// fastbloom does not expose load-factor introspection.
+    pub fn stats_snapshot(&self) -> crate::stats::StatsSnapshot {
+        let s = &self.stats;
+        crate::stats::StatsSnapshot {
+            inserts_total: s.inserts_total.load(Ordering::Relaxed),
+            lookups_total: s.lookups_total.load(Ordering::Relaxed),
+            bloom_hits_total: s.bloom_hits_total.load(Ordering::Relaxed),
+            bloom_false_positives_total: s.bloom_false_positives_total.load(Ordering::Relaxed),
+            commits_total: s.commits_total.load(Ordering::Relaxed),
+            commit_failures_total: s.commit_failures_total.load(Ordering::Relaxed),
+            removes_total: s.removes_total.load(Ordering::Relaxed),
+            backpressure_rejects_total: s.backpressure_rejects_total.load(Ordering::Relaxed),
+            verify_on_present_hits_total: s.verify_on_present_hits_total.load(Ordering::Relaxed),
+            bloom_snapshot_failures_total: s.bloom_snapshot_failures_total.load(Ordering::Relaxed),
+            bloom_load_factor: 0.0,
+            redb_free_bytes: 0,
+            queue_depth: 0,
+            hwm: self.high_water.load(Ordering::Acquire),
+        }
+    }
+
     /// Probe the manifest on open to determine mount state.
     ///
     /// Returns the state of the index before recovery/rebuild decisions:

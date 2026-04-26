@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 slicefs-traits       = { path = "../slicefs-traits" }
+slicefs-dedup        = { path = "../slicefs-dedup" }
 metadata             = { path = "../metadata" }
 blockset             = { path = "../data-id/blockset" }
 

@@ -117,6 +117,33 @@ pub enum Cmd {
         /// Path to the SliceFS block store directory.
         store: PathBuf,
     },
+
+    /// Rebuild the dedup index from CAS contents (offline-only in MVP).
+    ///
+    /// The store must NOT be mounted. Walks `<store>/cas/<shard>/` and
+    /// bulk-loads every 28-byte content address into a fresh
+    /// `<store>/cas/.dedup-index/index.redb`, atomically replacing any
+    /// existing index. See ARCHITECTURE §9.2.
+    Reindex {
+        /// Path to the SliceFS store root.
+        #[arg(long)]
+        store: PathBuf,
+
+        /// Run offline (mount must be unmounted). Default true; required in MVP.
+        #[arg(long, default_value_t = true)]
+        offline: bool,
+    },
+
+    /// Non-destructive dedup index recovery.
+    ///
+    /// Backs up the existing `index.redb` to `index.redb.bak.<unix-secs>`,
+    /// then rebuilds from the CAS shards. On rebuild failure, the backup
+    /// is restored. Safe to run on any store.
+    DedupRecover {
+        /// Path to the SliceFS store root.
+        #[arg(long)]
+        store: PathBuf,
+    },
 }
 
 /// Snapshot subcommands.

@@ -178,9 +178,46 @@ pub fn run_stats(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
         println!("{}", output);
     } else {
         print_human_stats(&stats);
+        // O3: append [Index] block when a dedup index is present on disk.
+        // Failure to open the index is non-fatal — just emit a note on stderr.
+        print_index_block_if_present(store_path);
     }
 
     Ok(())
+}
+
+/// Print an `[Index]` block based on `<store>/cas/.dedup-index/`.
+///
+/// No-op when the dedup-index directory does not exist (older stores or
+/// stores that have never been mounted with the deduper enabled).
+fn print_index_block_if_present(store_path: &Path) {
+    let cas_root = store_path.join("cas");
+    let dedup_root = cas_root.join(".dedup-index");
+    if !dedup_root.exists() {
+        return;
+    }
+    let cfg = slicefs_dedup::DedupIndexConfig::builder(&cas_root).build();
+    match slicefs_dedup::RedbDedupIndex::open(cfg) {
+        Ok(idx) => {
+            let s = idx.stats_snapshot();
+            println!();
+            println!("[Index]");
+            println!("  inserts_total            : {}", s.inserts_total);
+            println!("  lookups_total            : {}", s.lookups_total);
+            println!("  bloom_hits_total         : {}", s.bloom_hits_total);
+            println!("  bloom_false_positives    : {}", s.bloom_false_positives_total);
+            println!("  commits_total            : {}", s.commits_total);
+            println!("  commit_failures_total    : {}", s.commit_failures_total);
+            println!("  removes_total            : {}", s.removes_total);
+            println!("  verify_on_present_hits   : {}", s.verify_on_present_hits_total);
+            println!("  bloom_snapshot_failures  : {}", s.bloom_snapshot_failures_total);
+            println!("  high_water_mark          : {}", s.hwm);
+            println!("  redb_free_bytes          : {}", s.redb_free_bytes);
+        }
+        Err(e) => {
+            eprintln!("(could not read [Index]: {e})");
+        }
+    }
 }
 
 /// Build per-snapshot statistics.

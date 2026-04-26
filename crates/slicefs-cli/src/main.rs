@@ -4,11 +4,13 @@
 
 mod backend;
 mod cli;
+mod dedup_recover;
 mod filesystem;
 mod fuse_callbacks;
 mod handlers;
 mod gc;
 mod mount;
+mod reindex;
 mod scrub;
 mod seed;
 mod snapshot;
@@ -102,6 +104,28 @@ fn main() {
                     eprintln!("{{\"error\": \"{e}\"}}");
                 } else {
                     eprintln!("slicefs scrub error: {e}");
+                }
+                std::process::exit(1);
+            }
+        }
+        Cmd::Reindex { store, offline } => {
+            if let Err(e) = reindex::run_reindex(&store, offline) {
+                if json {
+                    eprintln!("{{\"error\": \"{e}\"}}");
+                } else {
+                    eprintln!("slicefs reindex error: {e}");
+                }
+                // Online reindex (offline=false) is a usage error → exit 2.
+                let code = if !offline { 2 } else { 1 };
+                std::process::exit(code);
+            }
+        }
+        Cmd::DedupRecover { store } => {
+            if let Err(e) = dedup_recover::run_dedup_recover(&store) {
+                if json {
+                    eprintln!("{{\"error\": \"{e}\"}}");
+                } else {
+                    eprintln!("slicefs dedup-recover error: {e}");
                 }
                 std::process::exit(1);
             }
