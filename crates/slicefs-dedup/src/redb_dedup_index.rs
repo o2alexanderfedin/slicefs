@@ -13,9 +13,10 @@ use crate::config::DedupIndexConfig;
 use crate::error::DedupIndexError;
 use crate::paths::DedupRoot;
 use crate::stats::StatsCounters;
-use redb::{Database, TableDefinition};
+use redb::{Database, ReadableDatabase, TableDefinition};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MountState {
@@ -182,6 +183,18 @@ impl RedbDedupIndex {
         out.copy_from_slice(bytes);
         Ok(out)
     }
+
+    /// Convert a hash to its CAS path using 2-char shard / rest layout.
+    ///
+    /// Returns `None` if the hex string is shorter than 4 characters
+    /// (which should never happen for a 28-byte hash, but defensive).
+    fn cas_path(&self, hash: &ChunkHash) -> Option<std::path::PathBuf> {
+        let hex: String = hash.as_bytes().iter().map(|b| format!("{:02x}", b)).collect();
+        if hex.len() < 4 {
+            return None;
+        }
+        Some(self.config.cas_root.join(&hex[..2]).join(&hex[2..]))
+    }
 }
 
 impl DedupIndex for RedbDedupIndex {
@@ -198,9 +211,38 @@ impl DedupIndex for RedbDedupIndex {
         bw.submit(h).map_err(CasError::from)
     }
 
-    fn lookup(&self, _hash: &ChunkHash) -> Result<DedupResult, CasError> {
-        // Filled in by Task H1.
-        unimplemented!("Task H1")
+    fn lookup(&self, hash: &ChunkHash) -> Result<DedupResult, CasError> {
+        self.stats.lookups_total.fetch_add(1, Ordering::Relaxed);
+
+        let bytes = hash.as_bytes();
+        if !self.bloom.contains(bytes) {
+            return Ok(DedupResult::DefinitelyAbsent);
+        }
+        self.stats.bloom_hits_total.fetch_add(1, Ordering::Relaxed);
+
+        let h = Self::hash28(hash)?;
+        let txn = self.db.begin_read().map_err(|e| {
+            CasError::Index(format!("redb begin_read: {e}"))
+        })?;
+        let t = txn.open_table(DEDUP_TABLE).map_err(|e| {
+            CasError::Index(format!("redb open_table: {e}"))
+        })?;
+        let hit = t.get(&h).map_err(|e| {
+            CasError::Index(format!("redb get: {e}"))
+        })?.is_some();
+
+        if !hit {
+            self.stats.bloom_false_positives_total.fetch_add(1, Ordering::Relaxed);
+            return Ok(DedupResult::Absent);
+        }
+
+        if self.config.verify_on_present && let Some(p) = self.cas_path(hash) {
+            self.stats.verify_on_present_hits_total.fetch_add(1, Ordering::Relaxed);
+            if !p.exists() {
+                return Ok(DedupResult::Absent);
+            }
+        }
+        Ok(DedupResult::Present)
     }
 
     fn remove(&self, _hash: &ChunkHash) -> Result<(), CasError> {
@@ -288,12 +330,19 @@ mod probe_tests {
 #[cfg(test)]
 mod insert_tests {
     use super::*;
-    use slicefs_traits::{ChunkHash, DedupIndex};
+    use slicefs_traits::{ChunkHash, DedupIndex, DedupResult};
 
     fn make_hash(seed: u8) -> ChunkHash {
         let mut v = vec![0u8; 28];
         v[0] = seed;
         ChunkHash::from_bytes(v)
+    }
+
+    fn shutdown_then_drop(mut idx: RedbDedupIndex) {
+        if let Some(bw) = idx.batch_writer.take() {
+            bw.shutdown(std::time::Duration::from_secs(2));
+        }
+        drop(idx);
     }
 
     #[test]
@@ -307,5 +356,36 @@ mod insert_tests {
         let h = make_hash(1);
         idx.insert(&h).unwrap();
         assert!(idx.bloom_check(&h));
+
+        shutdown_then_drop(idx);
+    }
+
+    #[test]
+    fn definitely_absent_bypasses_redb() {
+        let td = tempfile::tempdir().unwrap();
+        let cas = td.path().join("cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let cfg = DedupIndexConfig::builder(&cas).build();
+        let idx = RedbDedupIndex::create(cfg).unwrap();
+        let h = make_hash(0xFE);
+        let r = idx.lookup(&h).unwrap();
+        assert!(matches!(r, DedupResult::DefinitelyAbsent));
+
+        shutdown_then_drop(idx);
+    }
+
+    #[test]
+    fn present_after_insert() {
+        let td = tempfile::tempdir().unwrap();
+        let cas = td.path().join("cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let cfg = DedupIndexConfig::builder(&cas).build();
+        let idx = RedbDedupIndex::create(cfg).unwrap();
+        let h = make_hash(7);
+        idx.insert(&h).unwrap();
+        let r = idx.lookup(&h).unwrap();
+        assert!(matches!(r, DedupResult::Present));
+
+        shutdown_then_drop(idx);
     }
 }
