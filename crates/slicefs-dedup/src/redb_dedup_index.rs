@@ -13,6 +13,16 @@ use crate::paths::DedupRoot;
 use redb::{Database, TableDefinition};
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountState {
+    /// Manifest present and clean. Bloom-xxh3 cross-check is added by Task J2.
+    Healthy,
+    /// Manifest absent / unclean / bloom xxh3 fail.
+    Suspect,
+    /// Redb file truncated, schema mismatch, or operator --force-rebuild.
+    Rebuilding,
+}
+
 /// The single authoritative table.
 ///
 /// - Name: `dedup_index_v1` (the `_v1` suffix gives us a forward path
@@ -75,6 +85,26 @@ impl RedbDedupIndex {
             .open(root.redb())?;
         Ok(Self { config, root, db: Arc::new(db) })
     }
+
+    /// Probe the manifest on open to determine mount state.
+    ///
+    /// Returns the state of the index before recovery/rebuild decisions:
+    /// - `Healthy`: manifest present and clean shutdown recorded
+    /// - `Suspect`: manifest absent, unclean shutdown, or corrupt
+    /// - `Rebuilding`: reachable from operator-driven recovery (K1) and
+    ///   corruption detection (later tasks)
+    pub fn probe(config: &DedupIndexConfig) -> Result<MountState, DedupIndexError> {
+        let root = DedupRoot::new(&config.dedup_root);
+        if !root.manifest().exists() {
+            return Ok(MountState::Suspect);
+        }
+        match crate::manifest::Manifest::read(&root) {
+            Ok(m) if m.last_shutdown_was_clean => Ok(MountState::Healthy),
+            Ok(_) => Ok(MountState::Suspect),
+            Err(DedupIndexError::ManifestCorrupt(_)) => Ok(MountState::Suspect),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -104,5 +134,44 @@ mod tests {
         let txn = idx.db.begin_read().unwrap();
         let t = txn.open_table(DEDUP_TABLE).unwrap();
         assert!(t.get(&[0u8; 28]).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use crate::manifest::Manifest;
+
+    fn cfg() -> (tempfile::TempDir, DedupIndexConfig) {
+        let td = tempfile::tempdir().unwrap();
+        let cas = td.path().join("cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let cfg = DedupIndexConfig::builder(&cas).build();
+        std::fs::create_dir_all(&cfg.dedup_root).unwrap();
+        (td, cfg)
+    }
+
+    #[test]
+    fn missing_manifest_is_suspect() {
+        let (_g, c) = cfg();
+        assert_eq!(RedbDedupIndex::probe(&c).unwrap(), MountState::Suspect);
+    }
+
+    #[test]
+    fn unclean_shutdown_is_suspect() {
+        let (_g, c) = cfg();
+        let mut m = Manifest::new(1, 0.01, 4096);
+        m.last_shutdown_was_clean = false;
+        m.write_atomic(&DedupRoot::new(&c.dedup_root)).unwrap();
+        assert_eq!(RedbDedupIndex::probe(&c).unwrap(), MountState::Suspect);
+    }
+
+    #[test]
+    fn clean_shutdown_is_healthy() {
+        let (_g, c) = cfg();
+        let mut m = Manifest::new(1, 0.01, 4096);
+        m.last_shutdown_was_clean = true;
+        m.write_atomic(&DedupRoot::new(&c.dedup_root)).unwrap();
+        assert_eq!(RedbDedupIndex::probe(&c).unwrap(), MountState::Healthy);
     }
 }
