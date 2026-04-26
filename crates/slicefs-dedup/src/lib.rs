@@ -19,3 +19,6 @@ mod stats;
 mod verify;
 pub use stats::{IndexStats, StatsCounters, StatsSnapshot};
 pub use verify::VerifyReport;
+
+mod paths;
+pub use paths::DedupRoot;
