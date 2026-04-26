@@ -13,7 +13,7 @@ use crate::config::DedupIndexConfig;
 use crate::error::DedupIndexError;
 use crate::paths::DedupRoot;
 use crate::stats::StatsCounters;
-use redb::{Database, ReadableDatabase, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -46,12 +46,6 @@ pub const DEDUP_TABLE: TableDefinition<&[u8; 28], ()> =
 ///
 /// The manifest, bloom snapshot persistence, and Drop-time clean-shutdown
 /// hooks are bolted on by later tasks (I2, J1).
-//
-// Some fields (`config`, `root`, `high_water`, `stats`) are populated
-// here but not yet *read* until later tasks (I1 flush, I2 Drop, J1
-// snapshot). Keep `#[allow(dead_code)]` until those tasks land — the
-// alternative is per-field allows that we'd just have to remove anyway.
-#[allow(dead_code)]
 pub struct RedbDedupIndex {
     pub(crate) config: DedupIndexConfig,
     pub(crate) root: DedupRoot,
@@ -113,8 +107,9 @@ impl RedbDedupIndex {
 
     /// Open an existing index at `config.dedup_root`.
     ///
-    /// Does not touch the table — readers should open their own
-    /// read transactions. Spawns the [`BatchWriter`] thread.
+    /// Attempts to load the bloom filter from a snapshot on disk. If the
+    /// snapshot is missing or corrupt, rebuilds the bloom by iterating
+    /// through the redb table. Spawns the [`BatchWriter`] thread.
     pub fn open(config: DedupIndexConfig) -> Result<Self, DedupIndexError> {
         let root = DedupRoot::new(&config.dedup_root);
         let db = Arc::new(
@@ -123,7 +118,26 @@ impl RedbDedupIndex {
                 .open(root.redb())?,
         );
 
-        let bloom = AtomicBloomFilter::new(&config.bloom);
+        let bloom = match crate::bloom_snapshot::load(&root) {
+            Ok((_meta, payload)) => {
+                // Cross-checking meta.redb_hwm_at_snapshot vs current redb HWM is a v2 lever.
+                // For MVP we trust the snapshot if it loads.
+                AtomicBloomFilter::from_serialized(&payload, &config.bloom)
+            }
+            Err(_) => {
+                // No snapshot or corrupt; rebuild from redb.
+                let bf = AtomicBloomFilter::new(&config.bloom);
+                let txn = db.begin_read().map_err(DedupIndexError::from)?;
+                let t = txn.open_table(DEDUP_TABLE).map_err(DedupIndexError::from)?;
+                let iter = t.iter().map_err(DedupIndexError::from)?;
+                for entry_res in iter {
+                    let (k, _) = entry_res.map_err(DedupIndexError::from)?;
+                    bf.set(&k.value()[..]);
+                }
+                bf
+            }
+        };
+
         let stats = Arc::new(StatsCounters::default());
         let high_water = Arc::new(AtomicU64::new(0));
         let bw = BatchWriter::spawn(
@@ -507,5 +521,44 @@ mod insert_tests {
             DedupRoot::new(&dedup_root).bloom().exists(),
             "bloom.snap must exist after threshold inserts + drop"
         );
+    }
+
+    #[test]
+    fn open_loads_bloom_from_snapshot() {
+        let td = tempfile::tempdir().unwrap();
+        let cas = td.path().join("cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let cfg = DedupIndexConfig::builder(&cas).build();
+        {
+            let idx = RedbDedupIndex::create(cfg.clone()).unwrap();
+            idx.insert(&make_hash(33)).unwrap();
+            idx.flush().unwrap();
+        } // Drop writes snapshot.
+        let idx2 = RedbDedupIndex::open(cfg).unwrap();
+        assert!(idx2.bloom_check(&make_hash(33)),
+            "bloom must be loaded from snapshot or rebuilt from redb");
+    }
+
+    #[test]
+    fn open_rebuilds_bloom_from_redb_when_snapshot_corrupt() {
+        let td = tempfile::tempdir().unwrap();
+        let cas = td.path().join("cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let cfg = DedupIndexConfig::builder(&cas).build();
+        {
+            let idx = RedbDedupIndex::create(cfg.clone()).unwrap();
+            idx.insert(&make_hash(44)).unwrap();
+            idx.flush().unwrap();
+        }
+        // Corrupt the snapshot.
+        let bloom_path = DedupRoot::new(&cfg.dedup_root).bloom();
+        let mut bytes = std::fs::read(&bloom_path).unwrap();
+        bytes[0] ^= 0xFF; // breaks magic
+        std::fs::write(&bloom_path, &bytes).unwrap();
+
+        let idx2 = RedbDedupIndex::open(cfg).unwrap();
+        // Bloom rebuild from redb should set this hash.
+        assert!(idx2.bloom_check(&make_hash(44)),
+            "bloom rebuild from redb must include the inserted hash");
     }
 }
