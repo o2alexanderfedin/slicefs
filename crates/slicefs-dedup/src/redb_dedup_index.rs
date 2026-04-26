@@ -159,6 +159,23 @@ impl RedbDedupIndex {
         })
     }
 
+    /// Rebuild the redb file by walking the CAS shard tree.
+    ///
+    /// Operator-facing recovery (ARCHITECTURE §9.2; I7 idempotent).
+    /// Bulk-loads every 28-byte content address discovered under
+    /// `cas_root/{00..ff}/` into a fresh `index.redb.tmp`, then
+    /// atomically renames over `index.redb` and fsyncs the parent
+    /// directory. Safe to re-run: any leftover `.tmp` from a crashed
+    /// previous attempt is removed first.
+    ///
+    /// Delegates to [`crate::recovery::rebuild_from_cas`] so the
+    /// procedure can be invoked without first constructing a
+    /// `RedbDedupIndex` (which would itself open the redb file we
+    /// are about to replace).
+    pub fn rebuild_from_cas(config: DedupIndexConfig) -> Result<(), DedupIndexError> {
+        crate::recovery::rebuild_from_cas(config)
+    }
+
     /// Probe the manifest on open to determine mount state.
     ///
     /// Returns the state of the index before recovery/rebuild decisions:

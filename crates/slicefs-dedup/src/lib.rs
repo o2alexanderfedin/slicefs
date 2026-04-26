@@ -42,3 +42,7 @@ pub use redb_dedup_index::{DEDUP_TABLE, MountState, RedbDedupIndex};
 // G1: BatchWriter is crate-internal infrastructure consumed only by
 // `RedbDedupIndex` (G2). No public re-export.
 mod batch_writer;
+
+// K1: operator-facing recovery — rebuild redb from the CAS shards.
+// Surface lives on RedbDedupIndex via `rebuild_from_cas`.
+mod recovery;
