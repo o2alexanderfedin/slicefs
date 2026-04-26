@@ -32,3 +32,7 @@ proptest.workspace = true
 tempfile.workspace = true
 cas-local          = { path = "../cas-local" }
 criterion.workspace = true
+
+[[bench]]
+name = "seed_burst"
+harness = false
