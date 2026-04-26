@@ -14,3 +14,8 @@ pub use error::DedupIndexError;
 
 mod config;
 pub use config::{BloomConfig, DedupIndexConfig, DedupIndexConfigBuilder, DurabilityMode};
+
+mod stats;
+mod verify;
+pub use stats::{IndexStats, StatsCounters, StatsSnapshot};
+pub use verify::VerifyReport;
