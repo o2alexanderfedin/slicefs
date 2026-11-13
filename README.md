@@ -4,17 +4,17 @@
 
 SliceFS splits files into variable-sized content-addressed blocks, stores each unique block once, and presents the result as a full POSIX filesystem. Dedup is transparent: it's a daily-driver filesystem, not a backup format.
 
-- **Content-addressable storage** with pluggable hashers (Blake3 default), chunkers, block stores, and dedup indexes.
+- **Content-addressable storage** built on the [`blockset`](https://github.com/o2alexanderfedin/data-id) engine: content-defined chunking (boundaries come from the data, so a byte inserted or removed only changes the chunks near it) and a SHA-224 Merkle tree. Hashers, chunkers, block stores, and dedup indexes are defined as traits for future backends.
 - **Full POSIX semantics** via [`fuser`](https://crates.io/crates/fuser) — FUSE-T on macOS, libfuse on Linux.
-- **Crash-safe**: WAL, GC, refcounts, and scrub.
+- **Crash-safe**: WAL, refcounts, scrub, and GC (segment compaction; orphan-block cleanup is not implemented yet).
 - **Snapshots**: point-in-time create / list / switch.
-- **Pluggable compression**: Zstd, LZ4, or None (see v2.0 notes below).
+- **No write-path compression** since v2.0: blocks are stored raw, so dedup works on the original bytes. The `slicefs-compression` crate (Zstd, LZ4, None) is kept for planned segment-level compression (v2.1).
 
 ## Status
 
-- **v1.0 shipped** — all POSIX semantics, mount/unmount/seed/gc/snapshot/stats/scrub, Linux + macOS CI with [pjdfstest](https://github.com/pjd/pjdfstest).
-- **v2.0 in progress** — streaming writes via incremental push API, removal of write-path compression to allow cross-compressor dedup, refcount-overflow fix, realistic `statfs`, O(1) snapshot lookup.
-- **1287 tests** passing workspace-wide.
+- **v1.0 shipped** — all POSIX semantics, mount/unmount/seed/gc/snapshot/stats/scrub. Linux CI runs `cargo test` and [pjdfstest](https://github.com/pjd/pjdfstest) (no macOS CI job yet).
+- **v2.0 complete** — streaming writes via the incremental push API, removal of write-path compression (dedup on raw content), refcount-overflow fix, realistic `statfs`, O(1) snapshot lookup.
+- **1287 tests** passing workspace-wide (last full run: 2026-04-03, end of Phase 12).
 
 Planning artifacts live in `.planning/` (PROJECT.md, ROADMAP.md, phase plans).
 
@@ -22,7 +22,7 @@ Planning artifacts live in `.planning/` (PROJECT.md, ROADMAP.md, phase plans).
 
 | Platform | Status | FUSE backend |
 |----------|--------|--------------|
-| macOS (Apple Silicon / Intel) | Supported | [FUSE-T](https://www.fuse-t.org/) |
+| macOS (Apple Silicon / Intel) | Supported | [FUSE-T](https://www.fuse-t.org/) (FSKit or SMB backend; NFS is blocked by default because of a macOS kernel deadlock) |
 | Linux | Supported | libfuse (`fuse`, `libfuse-dev`) |
 | Windows | Deferred (v2.x+) | — |
 
@@ -33,10 +33,10 @@ Windows is deferred because `winfsp-rs` is GPL-3; native Projected FS or Dokan a
 ```
 .
 ├── crates/
-│   ├── slicefs-traits/        # CAS trait contracts (ContentHasher, Chunker, BlockStore, DedupIndex)
-│   ├── cas-local/             # Local/test impls: Blake3 hasher, fixed chunker, disk + in-memory stores
-│   ├── slicefs-compression/   # Pluggable compressors: Zstd, LZ4, None
-│   ├── metadata/              # Inode / directory / xattr metadata layer
+│   ├── slicefs-traits/        # Trait contracts (metadata, ContentHasher, Chunker, BlockStore, DedupIndex) + Digest224
+│   ├── cas-local/             # Reference/test impls of the CAS traits (Blake3 hasher, fixed chunker, stores) — not used by the binary
+│   ├── slicefs-compression/   # Compressors (Zstd, LZ4, None) — not on the write path since v2.0
+│   ├── metadata/              # Inodes, directories, manifests, xattrs, WAL, segments, snapshots, GC
 │   ├── slicefs-cli/           # `slicefs` binary — mount, unmount, seed, gc, snapshot, stats, scrub
 │   └── data-id/               # [git submodule] blockset — upstream Merkle-CAS engine (Sergey Shandar)
 ├── benchmarks/
@@ -109,7 +109,7 @@ Linux users can also run the POSIX conformance suite (pjdfstest) — see `.githu
 
 ## Architecture (one paragraph)
 
-The CLI opens a `StoreIo` handle, which composes a `BlockStore` (default: on-disk), a `ContentHasher` (default: Blake3), a `Chunker` (default: fixed-size), a `DedupIndex`, and an optional `Compressor`. The FUSE layer (`fuser`) translates VFS operations into reads/writes against a metadata tree held in `redb`, whose leaves are content IDs. On write, chunks are hashed, looked up in the dedup index, compressed (v1.x — being removed in v2.0), and persisted if novel. On read, CIDs are fetched, decompressed, and returned. Snapshots are copy-on-write references to metadata roots.
+The `slicefs` binary is built from `slicefs-traits`, `metadata`, and the `blockset` engine (the `data-id` submodule). The FUSE layer (`fuser`) maps VFS operations onto `DictMetadataStore`, which keeps inodes, directories, file manifests, xattrs, and refcounts in memory and persists them through blockset file storage (`StoreIo` is the blockset I/O adapter rooted at the store directory). On write, file bytes are pushed into blockset (`State::push_all`), which splits them into content-defined chunks and builds a SHA-224 Merkle tree; identical chunks are stored once. A file manifest is an ordered list of 28-byte `Digest224` hashes. Each commit appends a `RootUpdate` to the WAL; WAL entries and snapshot records live in append-only segment files that GC compacts. On read, the digests are resolved through blockset and the raw bytes are returned. A snapshot is a named, immutable pointer to a committed root `Digest224`.
 
 For deep detail, see `.planning/PROJECT.md` and the per-phase artifacts under `.planning/phases/`.
 
