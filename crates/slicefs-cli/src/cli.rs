@@ -58,11 +58,11 @@ pub enum Cmd {
         /// Automatically create a snapshot on clean unmount.
         #[arg(long, default_value_t = false)]
         auto_snapshot: bool,
-        /// FUSE-T backend: nfs, smb, or fskit (default: auto-detect, prefers fskit > smb).
-        /// NFS is blocked by default due to macOS kernel bug; use --force to override.
+        /// FUSE-T backend: nfs, smb, or fskit (default: nfs; smb and fskit are opt-in).
+        /// NFS has a macOS kernel bug (FUSE-T #45) that can hang `cp` into the mount.
         #[arg(long, value_name = "BACKEND")]
         backend: Option<String>,
-        /// Force use of a blocked backend (e.g., --backend=nfs --force).
+        /// Accepted for compatibility; currently has no effect (no backend is blocked).
         #[arg(long, default_value_t = false)]
         force: bool,
     },

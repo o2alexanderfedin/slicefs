@@ -3,12 +3,14 @@
 //! Detects the installed FUSE-T version, determines which backend (SMB, FSKit, or NFS)
 //! to use, and handles CLI flag parsing.
 //!
-//! ## Backend priority (auto-detect)
+//! ## Backend selection
 //!
-//! FSKit > SMB > NFS
+//! Default: NFS. SMB and FSKit are opt-in via `--backend` (FSKit needs the system
+//! extension enabled; SMB needs Bonjour discovery, which fails on many machines).
 //!
-//! NFS is blocked by default due to a macOS kernel bug (FUSE-T Issue #45) that deadlocks
-//! on simultaneous read+write file descriptors. Pass `--backend=nfs --force` to override.
+//! NFS has a macOS kernel bug (FUSE-T Issue #45) that deadlocks on simultaneous
+//! read+write file descriptors, so `cp` into the mount can hang. `--force` is accepted
+//! but currently unused.
 
 use std::fs;
 use std::io::BufRead;
@@ -145,7 +147,6 @@ const MIN_VERSION: (u32, u32, u32) = (1, 0, 35);
 /// # Errors
 ///
 /// - `FUSE-T {version} is too old` — version < 1.0.35
-/// - `NFS backend is blocked` — NFS requested without `--force`
 /// - `FSKit backend not available` — FSKit requested but unavailable
 pub fn select_backend(
     requested: Option<FuseTBackend>,
