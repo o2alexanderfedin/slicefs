@@ -22,7 +22,7 @@ Planning artifacts live in `.planning/` (PROJECT.md, ROADMAP.md, phase plans).
 
 | Platform | Status | FUSE backend |
 |----------|--------|--------------|
-| macOS (Apple Silicon / Intel) | Supported | [FUSE-T](https://www.fuse-t.org/) (FSKit or SMB backend; NFS is blocked by default because of a macOS kernel deadlock) |
+| macOS (Apple Silicon / Intel) | Supported | [FUSE-T](https://www.fuse-t.org/) **1.0.54** (NFS backend by default; `cp` into the mount can hang — macOS kernel bug, FUSE-T #45) |
 | Linux | Supported | libfuse (`fuse`, `libfuse-dev`) |
 | Windows | Deferred (v2.x+) | — |
 
@@ -62,11 +62,15 @@ git submodule update --init --recursive
 
 ### Platform prerequisites
 
-**macOS** — install [FUSE-T](https://www.fuse-t.org/):
+**macOS** — install `pkg-config` and [FUSE-T](https://www.fuse-t.org/) **1.0.54**. FUSE-T 1.2.x is not compatible with `fuser` 0.17 (libfuse3 ABI change), so do not take the latest release:
 
 ```sh
-brew install macos-fuse-t/cask/fuse-t
+brew install pkg-config
+curl -LO https://github.com/macos-fuse-t/fuse-t/releases/download/1.0.54/fuse-t-macos-installer-1.0.54.pkg
+sudo installer -pkg fuse-t-macos-installer-1.0.54.pkg -target /
 ```
+
+The build finds FUSE-T through the bundled `.pkgconfig/fuse.pc` shim (set in `.cargo/config.toml`); no extra environment is needed.
 
 **Linux** — install libfuse:
 
@@ -79,22 +83,21 @@ sudo modprobe fuse
 
 ```sh
 # Create a store and seed it from an existing directory
-slicefs seed --store ./my-store --source-dir ~/Documents
+slicefs seed ./my-store ~/Documents
 
 # Mount the store
-mkdir /tmp/sfs
-slicefs mount --store ./my-store --mountpoint /tmp/sfs
+slicefs mount --store ./my-store /tmp/sfs   # creates /tmp/sfs if missing
 
 # Use it like any filesystem
 ls /tmp/sfs
 cp file.bin /tmp/sfs/
 
 # Inspect
-slicefs stats --store ./my-store
-slicefs snapshot list --store ./my-store
+slicefs stats ./my-store
+slicefs snapshot list ./my-store
 
 # Unmount
-slicefs unmount --mountpoint /tmp/sfs
+slicefs unmount /tmp/sfs
 ```
 
 Run `slicefs --help` (and `slicefs <subcommand> --help`) for the full CLI.
