@@ -5,6 +5,9 @@
 # `git flow hotfix finish` results). Direct work belongs on `develop` or a
 # `feature/*` branch.
 #
+# Only the first-parent line of `main` is checked. Commits that a release or
+# hotfix merge brings in from its second parent are allowed.
+#
 # Emergency override:  git push --no-verify
 #
 # Registered via:      git config core.hooksPath .githooks
@@ -32,7 +35,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         range="$remote_sha..$local_sha"
     fi
 
-    non_merge_commits=$(git rev-list --no-merges "$range" 2>/dev/null || true)
+    non_merge_commits=$(git rev-list --no-merges --first-parent "$range" 2>/dev/null || true)
     if [ -n "$non_merge_commits" ]; then
         cat >&2 <<EOF
 
@@ -45,7 +48,7 @@ Git-flow workflow on this repository:
 
 Offending commits:
 EOF
-        git log --oneline --no-merges "$range" | sed 's/^/  /' >&2
+        git log --oneline --no-merges --first-parent "$range" | sed 's/^/  /' >&2
         cat >&2 <<EOF
 
 Emergency override (use sparingly):  git push --no-verify
