@@ -166,8 +166,9 @@ impl Filesystem for SliceFsFilesystem {
 
     fn opendir(&self, _req: &Request, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         eprintln!("[{}][FUSE] opendir: ENTRY ino={}, flags={:#x}", ts(), _ino.0, _flags.0);
-        eprintln!("[{}][FUSE] opendir: EXIT ino={} -> ok, fh=0", ts(), _ino.0);
-        reply.opened(FileHandle(0), FopenFlags::empty());
+        let fh = self.alloc_dir_handle();
+        eprintln!("[{}][FUSE] opendir: EXIT ino={} -> ok, fh={}", ts(), _ino.0, fh);
+        reply.opened(FileHandle(fh), FopenFlags::empty());
     }
 
     fn release(

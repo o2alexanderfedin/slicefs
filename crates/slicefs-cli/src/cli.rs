@@ -59,7 +59,6 @@ pub enum Cmd {
         #[arg(long, default_value_t = false)]
         auto_snapshot: bool,
         /// FUSE-T backend: nfs, smb, or fskit (default: nfs; smb and fskit are opt-in).
-        /// NFS has a macOS kernel bug (FUSE-T #45) that can hang `cp` into the mount.
         #[arg(long, value_name = "BACKEND")]
         backend: Option<String>,
         /// Accepted for compatibility; currently has no effect (no backend is blocked).

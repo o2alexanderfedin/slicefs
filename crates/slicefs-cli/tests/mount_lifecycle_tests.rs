@@ -1,6 +1,6 @@
 //! Mount/unmount lifecycle E2E tests for SliceFS.
 //!
-//! Tests the pre-mount and post-mount logic WITHOUT calling mount2()
+//! Tests the pre-mount and post-mount logic WITHOUT calling mount()
 //! (which requires a live FUSE-T installation). Exercises:
 //!   - Mountpoint auto-creation
 //!   - Store loading edge cases (empty/truncated segments, legacy detection)
@@ -45,7 +45,7 @@ fn write_seeded_store_segments(store_dir: &TempDir) {
 // ════════════════════════════════════════════════════════════════════════════
 
 /// Verify that std::fs::create_dir_all works for nested non-existent paths
-/// (the same logic run_mount uses before calling mount2).
+/// (the same logic run_mount uses before calling mount).
 #[test]
 fn test_mountpoint_auto_creation_nested() {
     let dir = TempDir::new().unwrap();
@@ -399,12 +399,19 @@ mod backend_tests {
     }
 
     #[test]
-    fn test_no_custom_mount_options_with_backend() {
-        let config = super::build_mount_options(false, false, Some(&FuseTBackend::Smb));
-        let has_custom = config.mount_options.iter().any(|opt| {
-            matches!(opt, fuser::MountOption::CUSTOM(_))
-        });
-        assert!(!has_custom, "CUSTOM options must not be passed to FUSE-T");
+    fn test_backend_passed_as_custom_mount_option() {
+        for (backend, expected) in [
+            (FuseTBackend::Nfs, "backend=nfs"),
+            (FuseTBackend::Smb, "backend=smb"),
+            (FuseTBackend::Fskit, "backend=fskit"),
+        ] {
+            let config = super::build_mount_options(false, false, Some(&backend));
+            let customs: Vec<_> = config.mount_options.iter().filter_map(|opt| match opt {
+                fuser::MountOption::CUSTOM(s) => Some(s.clone()),
+                _ => None,
+            }).collect();
+            assert_eq!(customs, vec![expected.to_string()]);
+        }
     }
 }
 
