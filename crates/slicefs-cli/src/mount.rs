@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use fuser::{mount2, Config, MountOption, SessionACL};
+use fuser::{mount, Config, MountOption, SessionACL};
 use metadata::gc::background::spawn_background_gc;
 use metadata::mount_lock::{acquire_mount_lock, MountLock, MountLockError};
 use metadata::segment::load_store_from_segments;
@@ -70,7 +70,7 @@ unsafe fn register_signal_handlers() {
 /// `umount -f <mountpoint>` is invoked as a last resort.
 ///
 /// The watchdog also monitors the `SHUTDOWN_REQUESTED` static and the
-/// `shutdown` flag so it exits cleanly after `mount2()` returns.
+/// `shutdown` flag so it exits cleanly after `mount()` returns.
 ///
 /// Pattern mirrors the existing background GC thread.
 fn spawn_watchdog(
@@ -429,7 +429,7 @@ fn check_mountpoint_not_in_use(mountpoint: &Path) -> Result<(), Box<dyn std::err
 /// Run the `mount` subcommand.
 ///
 /// Loads the store, constructs the FUSE filesystem, and starts a blocking
-/// `fuser::mount2` session. Blocks until the session ends (SIGTERM, Ctrl+C,
+/// `fuser::mount` session. Blocks until the session ends (SIGTERM, Ctrl+C,
 /// or `slicefs unmount`).
 ///
 /// `_cache_size` is accepted but unused in Phase 3. Placeholder for Phase 4.
@@ -561,12 +561,12 @@ pub fn run_mount(
     #[cfg(not(target_os = "macos"))]
     println!("SliceFS mounted at {}", mountpoint.display());
 
-    // mount2 blocks until the FUSE session ends (SIGTERM, Ctrl+C, or unmount).
+    // mount blocks until the FUSE session ends (SIGTERM, Ctrl+C, or unmount).
     // fuser handles signal registration internally — do NOT override with
     // libc::signal as it replaces fuser's session-exit handler.
-    mount2(fs, mountpoint, &config)?;
+    mount(fs, mountpoint, &config)?;
 
-    // mount2 has returned — FUSE session ended, destroy() already called.
+    // mount has returned — FUSE session ended, destroy() already called.
     gc_shutdown.store(true, Ordering::SeqCst);
     gc_handle.shutdown();
 

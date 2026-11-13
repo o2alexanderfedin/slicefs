@@ -1,6 +1,6 @@
 //! Mount/unmount lifecycle E2E tests for SliceFS.
 //!
-//! Tests the pre-mount and post-mount logic WITHOUT calling mount2()
+//! Tests the pre-mount and post-mount logic WITHOUT calling mount()
 //! (which requires a live FUSE-T installation). Exercises:
 //!   - Mountpoint auto-creation
 //!   - Store loading edge cases (empty/truncated segments, legacy detection)
@@ -45,7 +45,7 @@ fn write_seeded_store_segments(store_dir: &TempDir) {
 // ════════════════════════════════════════════════════════════════════════════
 
 /// Verify that std::fs::create_dir_all works for nested non-existent paths
-/// (the same logic run_mount uses before calling mount2).
+/// (the same logic run_mount uses before calling mount).
 #[test]
 fn test_mountpoint_auto_creation_nested() {
     let dir = TempDir::new().unwrap();
