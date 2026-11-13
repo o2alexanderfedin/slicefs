@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Git-flow enforcement: block direct non-merge commits being pushed to `main`.
+#
+# Allowed on `main`: merge commits only (i.e. `git flow release finish` or
+# `git flow hotfix finish` results). Direct work belongs on `develop` or a
+# `feature/*` branch.
+#
+# Emergency override:  git push --no-verify
+#
+# Registered via:      git config core.hooksPath .githooks
+
+set -eu
+
+protected_branch="main"
+zero="0000000000000000000000000000000000000000"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    case "$remote_ref" in
+        "refs/heads/$protected_branch") ;;
+        *) continue ;;
+    esac
+
+    # Branch deletion — allow.
+    if [ "$local_sha" = "$zero" ]; then
+        continue
+    fi
+
+    # New branch — push entire history.
+    if [ "$remote_sha" = "$zero" ]; then
+        range="$local_sha"
+    else
+        range="$remote_sha..$local_sha"
+    fi
+
+    non_merge_commits=$(git rev-list --no-merges "$range" 2>/dev/null || true)
+    if [ -n "$non_merge_commits" ]; then
+        cat >&2 <<EOF
+
+ERROR: Refusing to push non-merge commits directly to '$protected_branch'.
+
+Git-flow workflow on this repository:
+  Feature work:  git flow feature start <name>      (merges to develop)
+  Releases:      git flow release start <version>   (merges to main + develop)
+  Hotfixes:      git flow hotfix start  <name>      (merges to main + develop)
+
+Offending commits:
+EOF
+        git log --oneline --no-merges "$range" | sed 's/^/  /' >&2
+        cat >&2 <<EOF
+
+Emergency override (use sparingly):  git push --no-verify
+EOF
+        exit 1
+    fi
+done
+
+exit 0
