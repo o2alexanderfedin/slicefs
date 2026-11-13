@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A general-purpose deduplicating filesystem built in Rust that uses content-addressable storage (CAS) with block-level deduplication to dramatically reduce storage consumption. It presents a full POSIX-compliant filesystem interface via FUSE (FUSE-T on macOS, libfuse on Linux, WinFSP on Windows) and is designed with pluggable abstractions at every layer to support future distributed and decentralized topologies.
+A general-purpose deduplicating filesystem built in Rust that uses content-addressable storage (CAS) with block-level deduplication to dramatically reduce storage consumption. It presents a full POSIX-compliant filesystem interface via FUSE (FUSE-T on macOS, libfuse on Linux; Windows deferred) and is designed with pluggable abstractions at every layer to support future distributed and decentralized topologies.
 
 ## Core Value
 
@@ -33,7 +33,7 @@ High-ratio data deduplication that works transparently as a real, daily-driver f
 - ✓ Block compression (Zstd/LZ4/None, pluggable) — v1.0
 - ✓ Point-in-time snapshots (create/list/switch) — v1.0
 - ✓ CLI completeness (mount/unmount/seed/gc/snapshot/stats/scrub/--json) — v1.0
-- ✓ CI pipeline (Linux + macOS, pjdfstest) — v1.0
+- ✓ CI pipeline (Linux: cargo test + pjdfstest; no macOS job) — v1.0
 
 ### Active
 
