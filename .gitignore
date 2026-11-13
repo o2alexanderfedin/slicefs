@@ -1,3 +1,13 @@
 /target/
 .slicefs-store/
 tarpaulin-report.json
+
+# MemPalace per-project files (issue #185)
+mempalace.yaml
+entities.json
+
+# graphify knowledge-graph output (regenerated locally)
+graphify-out/
+
+# Serena (LSP tool) local project state
+.serena/
