@@ -399,12 +399,19 @@ mod backend_tests {
     }
 
     #[test]
-    fn test_no_custom_mount_options_with_backend() {
-        let config = super::build_mount_options(false, false, Some(&FuseTBackend::Smb));
-        let has_custom = config.mount_options.iter().any(|opt| {
-            matches!(opt, fuser::MountOption::CUSTOM(_))
-        });
-        assert!(!has_custom, "CUSTOM options must not be passed to FUSE-T");
+    fn test_backend_passed_as_custom_mount_option() {
+        for (backend, expected) in [
+            (FuseTBackend::Nfs, "backend=nfs"),
+            (FuseTBackend::Smb, "backend=smb"),
+            (FuseTBackend::Fskit, "backend=fskit"),
+        ] {
+            let config = super::build_mount_options(false, false, Some(&backend));
+            let customs: Vec<_> = config.mount_options.iter().filter_map(|opt| match opt {
+                fuser::MountOption::CUSTOM(s) => Some(s.clone()),
+                _ => None,
+            }).collect();
+            assert_eq!(customs, vec![expected.to_string()]);
+        }
     }
 }
 

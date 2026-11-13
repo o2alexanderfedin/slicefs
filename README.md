@@ -22,7 +22,7 @@ Planning artifacts live in `.planning/` (PROJECT.md, ROADMAP.md, phase plans).
 
 | Platform | Status | FUSE backend |
 |----------|--------|--------------|
-| macOS (Apple Silicon / Intel) | Supported | [FUSE-T](https://www.fuse-t.org/) **1.0.54** (NFS backend by default; `cp` into the mount can hang — macOS kernel bug, FUSE-T #45) |
+| macOS (Apple Silicon / Intel) | Supported | [FUSE-T](https://www.fuse-t.org/) 1.2.x (NFS backend by default; `--backend smb` also works; FSKit untested) |
 | Linux | Supported | libfuse (`fuse`, `libfuse-dev`) |
 | Windows | Deferred (v2.x+) | — |
 
@@ -62,15 +62,16 @@ git submodule update --init --recursive
 
 ### Platform prerequisites
 
-**macOS** — install `pkg-config` and [FUSE-T](https://www.fuse-t.org/) **1.0.54**. FUSE-T 1.2.x is not compatible with `fuser` 0.17 (libfuse3 ABI change), so do not take the latest release:
+**macOS** — install `pkg-config` and [FUSE-T](https://www.fuse-t.org/) 1.2.x (tested with 1.2.9):
 
 ```sh
 brew install pkg-config
-curl -LO https://github.com/macos-fuse-t/fuse-t/releases/download/1.0.54/fuse-t-macos-installer-1.0.54.pkg
-sudo installer -pkg fuse-t-macos-installer-1.0.54.pkg -target /
+brew install macos-fuse-t/cask/fuse-t
 ```
 
 The build finds FUSE-T through the bundled `.pkgconfig/fuse.pc` shim (set in `.cargo/config.toml`); no extra environment is needed.
+
+SliceFS builds against a patched copy of `fuser` in `vendor/fuser` (see `vendor/fuser/PATCHES.md`). Stock `fuser` 0.17/0.18 cannot mount on FUSE-T 1.2.x, and with older FUSE-T, `cp` into the mount hangs.
 
 **Linux** — install libfuse:
 

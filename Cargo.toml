@@ -6,6 +6,7 @@ members = [
     "crates/slicefs-cli",
     "crates/slicefs-compression",
 ]
+exclude = ["vendor/fuser"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -31,3 +32,7 @@ anyhow     = "1"
 zstd       = "0.13"
 lz4_flex   = "0.11"
 serde_json = "1"
+
+# Patched fuser (INIT reply sizing fix for FUSE-T 1.2.x). See vendor/fuser/PATCHES.md.
+[patch.crates-io]
+fuser = { path = "vendor/fuser" }

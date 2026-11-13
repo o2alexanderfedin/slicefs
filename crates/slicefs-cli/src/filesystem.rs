@@ -235,6 +235,16 @@ fn dir_size(dir: &std::path::Path) -> u64 {
 // on macOS where a FUSE mount is not available.
 
 impl SliceFsFilesystem {
+    /// Allocate a unique, non-zero handle for an opened directory.
+    ///
+    /// Directory handles carry no state (readdir/releasedir ignore them), but
+    /// FUSE-T's SMB backend treats handle 0 as invalid: with `fh=0` from
+    /// opendir, `mkdir` on an SMB mount fails with EIO. Share the file-handle
+    /// counter so every handle is unique.
+    pub(crate) fn alloc_dir_handle(&self) -> u64 {
+        self.next_fh.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
     /// Create a regular file inode in `parent_ino` directory, returning `(ino, fh)`.
     /// Used by integration tests to bypass the FUSE request/reply layer.
     pub fn test_create(
