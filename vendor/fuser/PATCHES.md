@@ -51,4 +51,4 @@ exactly two, while the extended layout adds at least four zero padding bytes. Th
 
 ## Upstream
 
-Reported to fuser: see the issue linked in the SliceFS commit that added this directory.
+Reported upstream: https://github.com/cberner/fuser/issues/761 — drop this copy once fuser ships the fixes.
