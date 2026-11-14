@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::store::DictMetadataStore;
 use super::{GarbageCollector};
@@ -28,6 +28,7 @@ impl GcHandle {
     pub fn shutdown(mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
         if let Some(h) = self.handle.take() {
+            h.thread().unpark(); // wake the thread from its interval wait
             let _ = h.join();
         }
     }
@@ -38,6 +39,9 @@ impl Drop for GcHandle {
         // Signal the thread to stop on next iteration.
         // We intentionally do NOT join here — blocking in drop() can cause deadlocks.
         self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(h) = &self.handle {
+            h.thread().unpark();
+        }
     }
 }
 
@@ -64,9 +68,16 @@ pub fn spawn_background_gc(
         let gc = GarbageCollector::new(segments_dir.clone());
 
         loop {
-            std::thread::sleep(interval);
-
-            // Check shutdown flag first
+            // Wait for `interval`, but wake early on shutdown (GcHandle unparks us).
+            // park_timeout can wake spuriously, so loop until the deadline.
+            let deadline = Instant::now() + interval;
+            while !shutdown_flag.load(Ordering::SeqCst) {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                std::thread::park_timeout(deadline - now);
+            }
             if shutdown_flag.load(Ordering::SeqCst) {
                 break;
             }
