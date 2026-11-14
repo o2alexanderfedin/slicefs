@@ -8,9 +8,9 @@
 //! Default: NFS. SMB and FSKit are opt-in via `--backend` (FSKit needs the system
 //! extension enabled; SMB needs Bonjour discovery, which fails on many machines).
 //!
-//! NFS has a macOS kernel bug (FUSE-T Issue #45) that deadlocks on simultaneous
-//! read+write file descriptors, so `cp` into the mount can hang. `--force` is accepted
-//! but currently unused.
+//! The `cp` hang that was blamed on a macOS NFS kernel bug (FUSE-T Issue #45) was
+//! caused by fuser's I/O on FUSE-T's stream socket; it is fixed in `vendor/fuser`
+//! (see PATCHES.md). `--force` is accepted but currently unused.
 
 use std::fs;
 use std::io::BufRead;
@@ -26,7 +26,7 @@ pub enum FuseTBackend {
     Fskit,
     /// SMB backend — available since FUSE-T 1.0.35. Recommended default.
     Smb,
-    /// NFS backend — blocked by default due to macOS kernel bug (FUSE-T Issue #45).
+    /// NFS backend — the default.
     Nfs,
 }
 
@@ -175,8 +175,6 @@ pub fn select_backend(
             // - FSKit requires the system extension to be enabled in System Settings
             //   (can't detect reliably — fuse-t.app existing != extension enabled)
             // - SMB requires Bonjour service discovery which fails on many machines
-            // NFS has a known macOS kernel bug (Issue #45) for cp, but simple
-            // writes work. noappledouble/noapplexattr mount options mitigate.
             if fskit_available {
                 eprintln!(
                     "note: FSKit backend available. Use --backend=fskit for best performance \

@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use fuser::{mount2, Config, MountOption, SessionACL};
+use fuser::{mount, Config, MountOption, SessionACL};
 use metadata::gc::background::spawn_background_gc;
 use metadata::mount_lock::{acquire_mount_lock, MountLock, MountLockError};
 use metadata::segment::load_store_from_segments;
@@ -70,7 +70,7 @@ unsafe fn register_signal_handlers() {
 /// `umount -f <mountpoint>` is invoked as a last resort.
 ///
 /// The watchdog also monitors the `SHUTDOWN_REQUESTED` static and the
-/// `shutdown` flag so it exits cleanly after `mount2()` returns.
+/// `shutdown` flag so it exits cleanly after `mount()` returns.
 ///
 /// Pattern mirrors the existing background GC thread.
 fn spawn_watchdog(
@@ -361,12 +361,14 @@ pub fn build_mount_options(
     if noatime {
         mount_options.push(MountOption::NoAtime);
     }
-    // macOS FUSE-T specific options:
-    // NOTE: Do NOT pass CUSTOM mount options to FUSE-T 1.2.0 — unknown options
-    // cause "Invalid request" or silent session termination. noappledouble and
-    // noapplexattr are handled internally by FUSE-T's go-nfsv4 (--namedattr flag).
-    // Backend selection is also handled internally via fuse-t.ini or NFS default.
-    let _ = backend;
+    // macOS FUSE-T: pass the backend as `backend=<name>`; libfuse-t turns it into
+    // `go-nfsv4 --backend <name>`. (The earlier "Invalid request" on FUSE-T 1.2.x
+    // was not caused by this option but by fuser's INIT reply size — fixed in
+    // vendor/fuser, see PATCHES.md.)
+    #[cfg(target_os = "macos")]
+    if let Some(b) = backend {
+        mount_options.push(MountOption::CUSTOM(b.as_mount_option().to_string()));
+    }
 
     let mut cfg = Config::default();
     cfg.mount_options = mount_options;
@@ -429,7 +431,7 @@ fn check_mountpoint_not_in_use(mountpoint: &Path) -> Result<(), Box<dyn std::err
 /// Run the `mount` subcommand.
 ///
 /// Loads the store, constructs the FUSE filesystem, and starts a blocking
-/// `fuser::mount2` session. Blocks until the session ends (SIGTERM, Ctrl+C,
+/// `fuser::mount` session. Blocks until the session ends (SIGTERM, Ctrl+C,
 /// or `slicefs unmount`).
 ///
 /// `_cache_size` is accepted but unused in Phase 3. Placeholder for Phase 4.
@@ -561,12 +563,12 @@ pub fn run_mount(
     #[cfg(not(target_os = "macos"))]
     println!("SliceFS mounted at {}", mountpoint.display());
 
-    // mount2 blocks until the FUSE session ends (SIGTERM, Ctrl+C, or unmount).
+    // mount blocks until the FUSE session ends (SIGTERM, Ctrl+C, or unmount).
     // fuser handles signal registration internally — do NOT override with
     // libc::signal as it replaces fuser's session-exit handler.
-    mount2(fs, mountpoint, &config)?;
+    mount(fs, mountpoint, &config)?;
 
-    // mount2 has returned — FUSE session ended, destroy() already called.
+    // mount has returned — FUSE session ended, destroy() already called.
     gc_shutdown.store(true, Ordering::SeqCst);
     gc_handle.shutdown();
 
@@ -757,13 +759,16 @@ mod tests {
     /// is handled via fuse-t.ini or NFS default.
     #[test]
     #[cfg(target_os = "macos")]
-    fn test_build_mount_options_no_custom_options_on_macos() {
+    fn test_build_mount_options_passes_backend_on_macos() {
         use crate::backend::FuseTBackend;
         let config = build_mount_options(false, false, Some(&FuseTBackend::Smb));
-        let has_custom = config.mount_options.iter().any(|opt| {
-            matches!(opt, MountOption::CUSTOM(_))
-        });
-        assert!(!has_custom, "No CUSTOM options should be passed to FUSE-T 1.2.0");
+        let customs: Vec<_> = config.mount_options.iter().filter_map(|opt| match opt {
+            MountOption::CUSTOM(s) => Some(s.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(customs, vec!["backend=smb"], "backend must reach FUSE-T as backend=<name>");
+        let none = build_mount_options(false, false, None);
+        assert!(!none.mount_options.iter().any(|o| matches!(o, MountOption::CUSTOM(_))));
     }
 
     // ── WAL config ────────────────────────────────────────────────────────────

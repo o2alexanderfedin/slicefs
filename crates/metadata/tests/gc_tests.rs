@@ -234,6 +234,34 @@ mod background_gc_tests {
         handle.shutdown();
     }
 
+    /// shutdown() must return promptly even with the production 60 s interval.
+    /// Before the fix, the thread slept a full interval before checking the flag,
+    /// so `slicefs mount` lingered up to 60 s after unmount.
+    #[test]
+    fn test_background_gc_shutdown_does_not_wait_for_interval() {
+        use tempfile::TempDir;
+        let tmp_gc = TempDir::new().unwrap();
+        let (_tmp_store, store) = make_store();
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let handle = spawn_background_gc(
+            Arc::downgrade(&store),
+            tmp_gc.path().to_path_buf(),
+            Duration::from_secs(60),
+            usize::MAX,
+            Arc::clone(&shutdown),
+        );
+        std::thread::sleep(Duration::from_millis(50)); // let the thread start waiting
+
+        let start = std::time::Instant::now();
+        handle.shutdown();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "shutdown took {:?}; must not wait for the GC interval",
+            start.elapsed()
+        );
+    }
+
     /// Background GC thread runs at least one cycle when threshold=0 and interval is short.
     #[test]
     fn test_background_gc_runs_cycle() {
