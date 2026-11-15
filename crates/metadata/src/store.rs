@@ -890,7 +890,7 @@ impl MetadataStore for DictMetadataStore {
             intern_digest224_u64_map(&mut fsa, &rc)
         };
 
-        let mut root_bytes = Vec::with_capacity(184);
+        let mut root_bytes = Vec::with_capacity(200);
         // inode_map_digest: 28 bytes
         for word in &inode_map_digest {
             root_bytes.extend_from_slice(&word.to_le_bytes());
@@ -920,7 +920,11 @@ impl MetadataStore for DictMetadataStore {
             root_bytes.extend_from_slice(&word.to_le_bytes());
         }
 
-        assert_eq!(root_bytes.len(), 184, "root record must be 184 bytes");
+        // logical_bytes + inode_count (v3, 200 bytes): without them, loading
+        // had to read every inode object just to sum the sizes (O(files) reads).
+        root_bytes.extend_from_slice(&self.logical_bytes.load(Ordering::Relaxed).to_le_bytes());
+        root_bytes.extend_from_slice(&self.inode_count.load(Ordering::Relaxed).to_le_bytes());
+        assert_eq!(root_bytes.len(), 200, "root record must be 200 bytes");
         let root_digest = State::push_all(&mut fsa, &root_bytes);
         // Drop fsa first: this flushes all FileStorage blob files to disk via StoreIo
         drop(fsa);
@@ -1007,12 +1011,13 @@ impl DictMetadataStore {
         let bytes = file_storage_get(&mut *io_guard, root)
             .ok_or_else(|| MetaError::Corrupted("missing root node".into()))?;
 
-        // Accept both old (156-byte) and new (184-byte) formats.
-        let has_refcounts = match bytes.len() {
-            156 => false, // v1 format — no refcounts field
-            184 => true,  // v2 format — includes refcount_data_digest
+        // Accept the old (156-, 184-byte) formats and the current one (200 bytes).
+        let (has_refcounts, has_counters) = match bytes.len() {
+            156 => (false, false), // v1 format — no refcounts field
+            184 => (true, false),  // v2 format — includes refcount_data_digest
+            200 => (true, true),   // v3 format — adds logical_bytes and inode_count
             n => return Err(MetaError::Corrupted(format!(
-                "root record: expected 156 or 184 bytes, got {}",
+                "root record: expected 156, 184 or 200 bytes, got {}",
                 n
             ))),
         };
@@ -1070,13 +1075,16 @@ impl DictMetadataStore {
             )));
         }
 
-        // Recompute logical_bytes as the sum of all loaded inode sizes.
-        let initial_logical_bytes: u64 = inode_data.values().map(|digest| {
-            load_inode(&mut *io_guard, digest).map(|m| m.size).unwrap_or(0)
-        }).sum();
-
-        // Recompute inode_count from inode_data length.
-        let initial_inode_count = inode_data.len() as u64;
+        let (initial_logical_bytes, initial_inode_count) = if has_counters {
+            let at = |o: usize| u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap());
+            (at(184), at(192))
+        } else {
+            // Older record: sum the sizes of all inodes (reads every inode).
+            let logical: u64 = inode_data.values().map(|digest| {
+                load_inode(&mut *io_guard, digest).map(|m| m.size).unwrap_or(0)
+            }).sum();
+            (logical, inode_data.len() as u64)
+        };
 
         drop(io_guard);
 
