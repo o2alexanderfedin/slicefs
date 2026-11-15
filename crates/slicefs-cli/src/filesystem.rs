@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::util::ts;
@@ -119,6 +119,8 @@ pub struct SliceFsFilesystem {
     next_fh: AtomicU64,
     pub(crate) store_path: Option<PathBuf>,
     pub(crate) auto_snapshot: bool,
+    /// Shared by FUSE callbacks, exclusive for a timed commit (see `commit_gate()`).
+    commit_gate: Arc<RwLock<()>>,
 }
 
 impl SliceFsFilesystem {
@@ -145,12 +147,19 @@ impl SliceFsFilesystem {
             next_fh: AtomicU64::new(0),
             store_path,
             auto_snapshot: false,
+            commit_gate: Arc::new(RwLock::new(())),
         }
     }
 
     /// Enable auto-snapshot on clean unmount.
     pub fn set_auto_snapshot(&mut self, enabled: bool) {
         self.auto_snapshot = enabled;
+    }
+
+    /// Every FUSE callback holds this gate shared; the commit timer holds it
+    /// exclusively, so a timed commit never sees half of an operation.
+    pub fn commit_gate(&self) -> Arc<RwLock<()>> {
+        Arc::clone(&self.commit_gate)
     }
 
     /// Access the metadata store (used by the mount command after unmount).

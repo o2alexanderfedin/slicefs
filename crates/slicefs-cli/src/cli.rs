@@ -64,6 +64,10 @@ pub enum Cmd {
         /// Accepted for compatibility; currently has no effect (no backend is blocked).
         #[arg(long, default_value_t = false)]
         force: bool,
+        /// Commit metadata every SECS seconds while mounted, when something
+        /// changed (0 = only at unmount). A crash loses at most about this much.
+        #[arg(long, value_name = "SECS", default_value_t = crate::commit_timer::DEFAULT_COMMIT_INTERVAL_SECS)]
+        commit_interval: u64,
     },
 
     /// Unmount a SliceFS filesystem mounted at the given path.

@@ -4,6 +4,7 @@
 
 mod backend;
 mod cli;
+mod commit_timer;
 mod filesystem;
 mod fuse_callbacks;
 mod handlers;
@@ -25,7 +26,7 @@ fn main() {
     let json = cli.json;
 
     match cli.command {
-        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force } => {
+        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force, commit_interval } => {
             if let Err(e) = mount::run_mount(
                 &store,
                 &mountpoint,
@@ -37,6 +38,7 @@ fn main() {
                 auto_snapshot,
                 backend.as_deref(),
                 force,
+                commit_interval,
             ) {
                 if json {
                     eprintln!("{{\"error\": \"{e}\"}}");

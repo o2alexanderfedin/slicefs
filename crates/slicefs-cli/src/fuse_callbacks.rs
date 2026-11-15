@@ -33,6 +33,8 @@ use crate::handlers::{
 
 impl Filesystem for SliceFsFilesystem {
     fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> io::Result<()> {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] init: ENTRY — requesting capabilities: FUSE_ATOMIC_O_TRUNC, FUSE_BIG_WRITES", ts());
         // Advertise FUSE_ATOMIC_O_TRUNC so that FUSE-T passes O_TRUNC directly in
         // the create()/open() flags rather than sending a separate setattr(size=0)
@@ -48,6 +50,8 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn destroy(&mut self) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] destroy: ENTRY — auto_snapshot={}", ts(), self.auto_snapshot);
         let ok = self.test_destroy();
         eprintln!("[{}][FUSE] destroy: EXIT — commit_ok={}", ts(), ok);
@@ -56,6 +60,8 @@ impl Filesystem for SliceFsFilesystem {
     // ── Read operations ───────────────────────────────────────────────────────
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] getattr: ENTRY ino={}, fh={:?}", ts(), ino.0, _fh.map(|f| f.0));
         match handle_getattr(self, ino.0) {
             AttrResult::Ok(attr) => {
@@ -70,6 +76,8 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] lookup: ENTRY parent={}, name={:?}", ts(), parent.0, name);
         let name_str = name.to_str().unwrap_or("");
         match handle_lookup(self, parent.0, name_str) {
@@ -92,6 +100,8 @@ impl Filesystem for SliceFsFilesystem {
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] readdir: ENTRY ino={}, fh={}, offset={}", ts(), ino.0, _fh.0, offset);
         match handle_readdir(self, ino.0, offset) {
             ReaddirResult::Ok(entries) => {
@@ -126,6 +136,8 @@ impl Filesystem for SliceFsFilesystem {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] read: ENTRY ino={}, fh={}, offset={}, size={}, flags={:#x}", ts(), ino.0, _fh.0, offset, size, _flags.0);
         match handle_read(self, ino.0, offset, size) {
             DataResult::Ok(data) => {
@@ -140,6 +152,8 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         use fuser::OpenAccMode;
         let acc = flags.acc_mode();
         #[allow(unreachable_patterns)]
@@ -165,6 +179,8 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn opendir(&self, _req: &Request, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] opendir: ENTRY ino={}, flags={:#x}", ts(), _ino.0, _flags.0);
         let fh = self.alloc_dir_handle();
         eprintln!("[{}][FUSE] opendir: EXIT ino={} -> ok, fh={}", ts(), _ino.0, fh);
@@ -181,6 +197,8 @@ impl Filesystem for SliceFsFilesystem {
         flush: bool,
         reply: ReplyEmpty,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] release: ENTRY ino={}, fh={}, flush={}, flags={:#x}, lock_owner={:?}", ts(), ino.0, fh.0, flush, _flags.0, _lock_owner.map(|l| l.0));
         match handle_release(self, ino.0, fh.0) {
             EmptyResult::Ok => {
@@ -202,6 +220,8 @@ impl Filesystem for SliceFsFilesystem {
         _flags: OpenFlags,
         reply: ReplyEmpty,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] releasedir: ENTRY ino={}, fh={}, flags={:#x}", ts(), _ino.0, _fh.0, _flags.0);
         eprintln!("[{}][FUSE] releasedir: EXIT ino={} -> ok", ts(), _ino.0);
         reply.ok();
@@ -226,6 +246,8 @@ impl Filesystem for SliceFsFilesystem {
         _lock_owner: LockOwner,
         reply: ReplyEmpty,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] flush: ENTRY ino={}, fh={}, lock_owner={}", ts(), ino.0, fh.0, _lock_owner.0);
         match handle_flush(self, ino.0, fh.0) {
             EmptyResult::Ok => {
@@ -253,6 +275,8 @@ impl Filesystem for SliceFsFilesystem {
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] fsync: ENTRY ino={}, fh={}, datasync={}", ts(), ino.0, fh.0, _datasync);
         match handle_fsync(self, ino.0, fh.0) {
             EmptyResult::Ok => {
@@ -267,6 +291,8 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] statfs: ENTRY ino={}", ts(), _ino.0);
         match handle_statfs(self) {
             StatfsResult::Ok(blocks, bfree, bavail, files, ffree, bsize) => {
@@ -277,6 +303,8 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn access(&self, _req: &Request, _ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] access: ENTRY ino={}, mask={:#x}", ts(), _ino.0, _mask.bits());
         eprintln!("[{}][FUSE] access: EXIT ino={} -> ok", ts(), _ino.0);
         // Read-only filesystem — all reads are allowed
@@ -291,6 +319,8 @@ impl Filesystem for SliceFsFilesystem {
         size: u32,
         reply: ReplyXattr,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] getxattr: ENTRY ino={}, name={:?}, size={}", ts(), ino.0, name, size);
         let name_str = name.to_str().unwrap_or("");
         match handle_getxattr(self, ino.0, name_str, size) {
@@ -310,6 +340,8 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] listxattr: ENTRY ino={}, size={}", ts(), ino.0, size);
         match handle_listxattr(self, ino.0, size) {
             XattrResult::Size(sz) => {
@@ -337,6 +369,8 @@ impl Filesystem for SliceFsFilesystem {
         _position: u32,
         reply: ReplyEmpty,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] setxattr: ENTRY ino={}, name={:?}, value_len={}, flags={:#x}, position={}", ts(), ino.0, name, value.len(), _flags, _position);
         let name_str = name.to_str().unwrap_or("");
         match handle_setxattr(self, ino.0, name_str, value) {
@@ -352,6 +386,8 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn removexattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] removexattr: ENTRY ino={}, name={:?}", ts(), ino.0, name);
         let name_str = name.to_str().unwrap_or("");
         match handle_removexattr(self, ino.0, name_str) {
@@ -384,6 +420,8 @@ impl Filesystem for SliceFsFilesystem {
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] write: ENTRY ino={}, fh={}, offset={}, data_len={}, write_flags={:#x}, flags={:#x}, lock_owner={:?}", ts(), ino.0, fh.0, offset, data.len(), _write_flags.bits(), _flags.0, _lock_owner.map(|l| l.0));
         match handle_write(self, fh.0, offset, data) {
             WriteResult::Ok(n) => {
@@ -407,6 +445,8 @@ impl Filesystem for SliceFsFilesystem {
         flags: i32,
         reply: ReplyCreate,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] create: ENTRY parent={}, name={:?}, mode={:#o}, umask={:#o}, flags={:#x}, uid={}, gid={}", ts(), parent.0, name, mode, umask, flags, req.uid(), req.gid());
         let name_str = match name.to_str() {
             Some(s) => s,
@@ -436,6 +476,8 @@ impl Filesystem for SliceFsFilesystem {
         umask: u32,
         reply: ReplyEntry,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] mkdir: ENTRY parent={}, name={:?}, mode={:#o}, umask={:#o}, uid={}, gid={}", ts(), parent.0, name, mode, umask, req.uid(), req.gid());
         let name_str = match name.to_str() {
             Some(s) => s,
@@ -466,6 +508,8 @@ impl Filesystem for SliceFsFilesystem {
         rdev: u32,
         reply: ReplyEntry,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] mknod: ENTRY parent={}, name={:?}, mode={:#o}, umask={:#o}, rdev={}, uid={}, gid={}", ts(), parent.0, name, mode, umask, rdev, req.uid(), req.gid());
         let name_str = match name.to_str() {
             Some(s) => s,
@@ -491,6 +535,8 @@ impl Filesystem for SliceFsFilesystem {
         target: &std::path::Path,
         reply: ReplyEntry,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] symlink: ENTRY parent={}, link_name={:?}, target={:?}, uid={}, gid={}", ts(), parent.0, link_name, target, req.uid(), req.gid());
         let name_str = match link_name.to_str() {
             Some(s) => s,
@@ -519,6 +565,8 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] readlink: ENTRY ino={}", ts(), ino.0);
         match handle_readlink(self, ino.0) {
             DataResult::Ok(bytes) => {
@@ -540,6 +588,8 @@ impl Filesystem for SliceFsFilesystem {
         newname: &OsStr,
         reply: ReplyEntry,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] link: ENTRY ino={}, newparent={}, newname={:?}", ts(), ino.0, newparent.0, newname);
         let name_str = match newname.to_str() {
             Some(s) => s,
@@ -561,6 +611,8 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] unlink: ENTRY parent={}, name={:?}", ts(), parent.0, name);
         let name_str = match name.to_str() {
             Some(s) => s,
@@ -582,6 +634,8 @@ impl Filesystem for SliceFsFilesystem {
     }
 
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] rmdir: ENTRY parent={}, name={:?}", ts(), parent.0, name);
         let name_str = match name.to_str() {
             Some(s) => s,
@@ -612,6 +666,8 @@ impl Filesystem for SliceFsFilesystem {
         flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] rename: ENTRY parent={}, name={:?}, newparent={}, newname={:?}, flags={:#x}", ts(), parent.0, name, newparent.0, newname, flags.bits());
         let name_str = match name.to_str() {
             Some(s) => s,
@@ -657,6 +713,8 @@ impl Filesystem for SliceFsFilesystem {
         _flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] setattr: ENTRY ino={}, mode={:?}, uid={:?}, gid={:?}, size={:?}, mtime={:?}, fh={:?}", ts(), ino.0, mode.map(|m| format!("{:#o}", m)), uid, gid, size, mtime.as_ref().map(|t| match t { TimeOrNow::Now => "Now".to_string(), TimeOrNow::SpecificTime(st) => format!("{:?}", st) }), fh.map(|f| f.0));
         // Convert TimeOrNow to (sec, nsec) for the testable method
         let to_pair = |t: TimeOrNow| crate::filesystem::system_time_to_pair(match t {
@@ -700,6 +758,8 @@ impl Filesystem for SliceFsFilesystem {
         pid: u32,
         reply: ReplyLock,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         let type_str = match _typ { x if x == libc::F_RDLCK as i32 => "F_RDLCK", x if x == libc::F_WRLCK as i32 => "F_WRLCK", x if x == libc::F_UNLCK as i32 => "F_UNLCK", _ => "UNKNOWN" };
         eprintln!("[{}][FUSE] getlk: ENTRY ino={}, fh={}, lock_owner={}, start={}, end={}, type={}({}), pid={}", ts(), ino.0, _fh.0, _lock_owner.0, start, end, type_str, _typ, pid);
         match handle_getlk(start, end, pid) {
@@ -729,6 +789,8 @@ impl Filesystem for SliceFsFilesystem {
         _sleep: bool,
         reply: ReplyEmpty,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         let type_str = match _typ { x if x == libc::F_RDLCK as i32 => "F_RDLCK", x if x == libc::F_WRLCK as i32 => "F_WRLCK", x if x == libc::F_UNLCK as i32 => "F_UNLCK", _ => "UNKNOWN" };
         eprintln!("[{}][FUSE] setlk: ENTRY ino={}, fh={}, lock_owner={}, start={}, end={}, type={}({}), pid={}, sleep={}", ts(), ino.0, _fh.0, _lock_owner.0, _start, _end, type_str, _typ, _pid, _sleep);
         eprintln!("[{}][FUSE] setlk: EXIT ino={}, fh={} -> ok (no-op, single-threaded)", ts(), ino.0, _fh.0);
@@ -745,6 +807,8 @@ impl Filesystem for SliceFsFilesystem {
         _mode: i32,
         reply: ReplyEmpty,
     ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
         eprintln!("[{}][FUSE] fallocate: ENTRY ino={}, fh={}, offset={}, length={}, mode={:#x}", ts(), _ino.0, _fh.0, _offset, _length, _mode);
         // Return ENOSYS (not supported) instead of EROFS (read-only filesystem).
         // EROFS would incorrectly signal to the NFS client that the filesystem is
