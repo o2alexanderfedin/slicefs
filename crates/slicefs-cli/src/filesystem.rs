@@ -910,6 +910,14 @@ impl SliceFsFilesystem {
                         // (NFS sends a COMMIT per group of writes; skip the re-hash.)
                         return Ok(());
                     }
+                    if matches!(s.write_mode, WriteMode::Buffered { .. }) {
+                        // Hashing a Buffered file means hashing all of it again
+                        // (O(n) per fsync, #3). The manifest it would give is not
+                        // durable either: metadata reaches disk only at commit
+                        // (#18), and commit happens at unmount, after release or
+                        // destroy has written this handle's content. Skip it.
+                        return Ok(());
+                    }
                     s.cas_committed = true;
                     let snap = match &s.write_mode {
                         WriteMode::Streaming { state, next_expected_offset, .. } =>
@@ -1938,6 +1946,15 @@ impl SliceFsFilesystem {
     /// Destroy: commit, optionally snapshot, and shut down WAL.
     /// Returns true if commit succeeded.
     pub fn test_destroy(&self) -> bool {
+        // Write the content of handles that are still open (e.g. a forced
+        // unmount), so the commit below keeps it.
+        let open: Vec<(u64, u64)> = self.open_files.lock().unwrap()
+            .iter().map(|(&fh, st)| (fh, st.ino)).collect();
+        for (fh, ino) in open {
+            if let Err(e) = self.finalize_write(ino, fh) {
+                eprintln!("[{}][FUSE] destroy: could not write open handle fh={} ino={}: errno {}", ts(), fh, ino, e);
+            }
+        }
         // No handle survives unmount: unlinked-but-open inodes go away now.
         self.reclaim_all_orphans();
         if let Ok(_root) = self.meta.commit() {

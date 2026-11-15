@@ -136,3 +136,58 @@ fn test_fsync_crash_durability() {
         .expect("durable.txt should survive fsync + crash");
     assert!(found_ino > 1, "file inode should be > 1");
 }
+
+// ── #3: fsync on a Buffered handle must not re-hash the whole buffer ─────────
+
+fn buffered_file(fs: &SliceFsFilesystem, name: &str, mib: u64) -> (u64, u64) {
+    let (ino, fh) = fs.test_create(1, name, S_IFREG | 0o644, 0, 0, 0).unwrap();
+    let chunk = vec![0xA5u8; 1 << 20];
+    for i in 0..mib {
+        fs.test_write(fh, i << 20, &chunk).unwrap();
+    }
+    fs.test_write(fh, 0, b"rewrite").unwrap(); // backward write: Buffered mode
+    assert!(!fs.test_is_streaming(fh));
+    (ino, fh)
+}
+
+#[test]
+fn fsync_time_on_buffered_handle_does_not_grow_with_file_size() {
+    let store_dir = TempDir::new().unwrap();
+    let fs = make_fs(&store_dir, WalConfig::PerOp);
+    let time_fsyncs = |ino, fh| {
+        let t = std::time::Instant::now();
+        for i in 0..5u64 {
+            fs.test_write(fh, i * 7, b"x").unwrap();
+            fs.test_fsync(ino, fh).unwrap();
+        }
+        t.elapsed()
+    };
+    let (si, sf) = buffered_file(&fs, "small", 1);
+    let (bi, bf) = buffered_file(&fs, "big", 8);
+    let small = time_fsyncs(si, sf);
+    let big = time_fsyncs(bi, bf);
+    eprintln!("fsync x5: 1 MiB {small:?}, 8 MiB {big:?}");
+    assert!(big < small * 3 + std::time::Duration::from_millis(200),
+        "fsync cost grows with size: 1 MiB {small:?}, 8 MiB {big:?}");
+    fs.test_release(bi, bf).unwrap();
+    // "rewrite" at 0, then "x" at 0, 7, 14, 21, 28.
+    assert_eq!(fs.test_read(bi, 0, 8).unwrap(), b"xewritex");
+}
+
+#[test]
+fn destroy_keeps_data_of_a_handle_that_is_still_open() {
+    let store_dir = TempDir::new().unwrap();
+    let fs = make_fs(&store_dir, WalConfig::PerOp);
+    let (ino, fh) = buffered_file(&fs, "open-at-unmount", 1);
+    fs.test_write(fh, 100, b"after-fsync").unwrap();
+    fs.test_fsync(ino, fh).unwrap();
+    fs.test_write(fh, 200, b"unsynced").unwrap();
+    // No release: the handle is still open when the file system goes away.
+    assert!(fs.test_destroy());
+    let root = fs.meta().current_root().unwrap();
+    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let rebuilt = DictMetadataStore::load_from_root(io.clone(), &root).unwrap();
+    let fs2 = SliceFsFilesystem::new(rebuilt, io, None);
+    assert_eq!(fs2.test_read(ino, 100, 11).unwrap(), b"after-fsync");
+    assert_eq!(fs2.test_read(ino, 200, 8).unwrap(), b"unsynced");
+}

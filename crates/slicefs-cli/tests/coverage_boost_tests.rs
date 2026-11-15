@@ -1664,13 +1664,13 @@ fn test_repeated_fsync_without_writes_keeps_content() {
     fs.test_write(fh, 4, b"5678").unwrap();
     fs.test_write(fh, 0, b"1234").unwrap();
     fs.test_write(fh, 2, b"xx").unwrap(); // overlap -> Buffered
+    // fsync of a Buffered handle does not re-hash the file (#3); reads see
+    // the buffer, and release writes it, including writes after the fsync.
     fs.test_fsync(ino, fh).unwrap();
-    let root1 = fs.meta().get_manifest(ino).unwrap();
     fs.test_fsync(ino, fh).unwrap();
-    assert_eq!(fs.meta().get_manifest(ino).unwrap(), root1);
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"12xx5678");
     fs.test_write(fh, 8, b"9").unwrap();
     fs.test_fsync(ino, fh).unwrap();
-    assert_ne!(fs.meta().get_manifest(ino).unwrap(), root1, "a write after fsync must be flushed");
     fs.test_release(ino, fh).unwrap();
     assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"12xx56789");
 }
