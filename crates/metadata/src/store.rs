@@ -26,8 +26,7 @@ use crate::wal::{WalEntry, WalError, WalStrategy};
 
 use crate::inode::{intern_inode, load_inode};
 use crate::inode_map::{InodeMap, intern_inode_map, load_inode_map};
-use crate::directory::{create_dir_entries, add_dir_entry, remove_dir_entry,
-                       lookup_dir_entry, list_dir_entries};
+use crate::directory::{create_dir_entries, DirList};
 use crate::manifest::{intern_manifest, load_manifest};
 use crate::xattr::{intern_xattrs, load_xattrs, set_xattr_entry, get_xattr_entry,
                    list_xattr_names, remove_xattr_entry};
@@ -37,6 +36,49 @@ const S_IFMT: u32 = 0o0170_000;
 
 /// Longest directory entry name in bytes (statfs reports namelen 255).
 const NAME_MAX: usize = 255;
+
+/// When a cache holds more entries than this, its dirty entries are written
+/// and the clean ones dropped.
+#[cfg(not(test))]
+const DIR_CACHE_MAX: usize = 16_384;
+#[cfg(not(test))]
+const INODE_CACHE_MAX: usize = 262_144;
+// Small in unit tests, so the flush-and-evict path runs.
+#[cfg(test)]
+const DIR_CACHE_MAX: usize = 4;
+#[cfg(test)]
+const INODE_CACHE_MAX: usize = 16;
+/// Dirty cache entries are written once this many have built up, so the
+/// final commit (at unmount) stays small.
+#[cfg(not(test))]
+const DIRTY_FLUSH: usize = 1024;
+#[cfg(test)]
+const DIRTY_FLUSH: usize = 8;
+
+/// Cached decoded objects plus the set of those changed since the last flush.
+struct Live<T> {
+    map: HashMap<u64, T>,
+    dirty: std::collections::HashSet<u64>,
+}
+
+impl<T> Default for Live<T> {
+    fn default() -> Self {
+        Live { map: HashMap::new(), dirty: Default::default() }
+    }
+}
+
+impl<T> Live<T> {
+    fn remove(&mut self, ino: u64) {
+        self.map.remove(&ino);
+        self.dirty.remove(&ino);
+    }
+
+    /// Drop the entries that are already written.
+    fn evict_clean(&mut self) {
+        let dirty = &self.dirty;
+        self.map.retain(|ino, _| dirty.contains(ino));
+    }
+}
 
 fn check_name(name: &str) -> Result<(), MetaError> {
     if name.len() > NAME_MAX {
@@ -65,8 +107,18 @@ pub struct DictMetadataStore {
     inode_map: Mutex<InodeMap>,
     /// Maps inode number → current inode data `Digest224`.
     inode_data: Mutex<BTreeMap<u64, Digest224>>,
-    /// Maps directory inode number → current entry list `Digest224`.
+    /// Maps directory inode number → entry list `Digest224` as of the last flush.
+    /// A directory in `dir_live` can be newer than its digest here.
     dir_data: Mutex<BTreeMap<u64, Digest224>>,
+    /// Decoded entry lists of the directories in use, with a dirty flag.
+    /// Changes go here; `commit()` writes the dirty ones and updates `dir_data`.
+    /// Without this, each create re-wrote the whole entry list (O(n) per entry).
+    /// Lock order: `dir_live` before `io`.
+    dir_live: Mutex<Live<DirList>>,
+    /// Inodes in use, with a dirty flag. `inode_data` (and `inode_map`) hold the
+    /// digest as of the last flush; a dirty inode here is newer. `commit()`
+    /// writes the dirty ones. Lock order: `inode_map`, `inode_live`, `io`, `inode_data`.
+    inode_live: Mutex<Live<InodeMeta>>,
     /// Maps file inode number → current manifest `Digest224`.
     manifest_data: Mutex<BTreeMap<u64, Digest224>>,
     /// Maps inode number → xattr set `Digest224` (only for inodes with xattrs).
@@ -133,6 +185,8 @@ impl DictMetadataStore {
             inode_map: Mutex::new(inode_map),
             inode_data: Mutex::new(inode_data),
             dir_data: Mutex::new(dir_data),
+            dir_live: Mutex::new(Live::default()),
+            inode_live: Mutex::new(Live::default()),
             manifest_data: Mutex::new(BTreeMap::new()),
             xattr_data: Mutex::new(BTreeMap::new()),
             refcounts: Mutex::new(BTreeMap::new()),
@@ -281,14 +335,126 @@ impl DictMetadataStore {
     /// Used by the background GC thread to determine which root to use as the live-set anchor.
     /// Point directory `dir_ino`'s `..` entry at `parent_ino` (directory move).
     pub fn set_parent(&self, dir_ino: InodeId, parent_ino: InodeId) -> Result<(), MetaError> {
-        let dir_digest = self.dir_data.lock().unwrap().get(&dir_ino).copied()
-            .ok_or(MetaError::NotADirectory(dir_ino))?;
-        let new_digest = {
+        self.with_dir(dir_ino, |d| {
+            d.set_dotdot(parent_ino);
+            Ok(((), true))
+        })
+    }
+
+    /// Run `f` on the cached entry list of directory `ino` (read from the store
+    /// on first use). `f` returns `(result, changed)`; a changed list is marked
+    /// dirty and written by the next flush.
+    fn with_dir<R>(
+        &self,
+        ino: InodeId,
+        f: impl FnOnce(&mut DirList) -> Result<(R, bool), MetaError>,
+    ) -> Result<R, MetaError> {
+        let mut live = self.dir_live.lock().unwrap();
+        if !live.map.contains_key(&ino) {
+            let digest = self.dir_data.lock().unwrap().get(&ino).copied()
+                .ok_or(MetaError::NotADirectory(ino))?;
+            let list = {
+                let mut io_guard = self.io.lock().unwrap();
+                DirList::load(&mut *io_guard, &digest)?
+            };
+            live.map.insert(ino, list);
+        }
+        let (r, changed) = f(live.map.get_mut(&ino).expect("inserted above"))?;
+        if changed {
+            live.dirty.insert(ino);
+        }
+        let (flush, full) = (live.dirty.len() >= DIRTY_FLUSH, live.map.len() > DIR_CACHE_MAX);
+        drop(live);
+        if flush || full {
+            self.flush_dirs();
+        }
+        if full {
+            self.dir_live.lock().unwrap().evict_clean();
+        }
+        Ok(r)
+    }
+
+    /// Current metadata of `ino`: the cached copy, or read from the store.
+    fn load_meta(&self, ino: InodeId) -> Result<InodeMeta, MetaError> {
+        if let Some(m) = self.inode_live.lock().unwrap().map.get(&ino) {
+            return Ok(m.clone());
+        }
+        let digest = self.inode_data.lock().unwrap().get(&ino).copied()
+            .ok_or(MetaError::NotFound(ino))?;
+        let meta = {
             let mut io_guard = self.io.lock().unwrap();
-            crate::directory::set_dotdot(&mut *io_guard, &dir_digest, parent_ino)?
+            load_inode(&mut *io_guard, &digest)?
         };
-        self.dir_data.lock().unwrap().insert(dir_ino, new_digest);
-        Ok(())
+        let full = {
+            let mut live = self.inode_live.lock().unwrap();
+            // A concurrent update may have cached a newer copy meanwhile; keep it.
+            live.map.entry(ino).or_insert_with(|| meta.clone());
+            live.map.len() > INODE_CACHE_MAX
+        };
+        if full {
+            self.flush_inodes();
+            self.inode_live.lock().unwrap().evict_clean();
+        }
+        Ok(meta)
+    }
+
+    /// Cache `meta` as the new (dirty) state of its inode.
+    fn store_meta(&self, meta: &InodeMeta) {
+        let (flush, full) = {
+            let mut live = self.inode_live.lock().unwrap();
+            live.map.insert(meta.ino, meta.clone());
+            live.dirty.insert(meta.ino);
+            (live.dirty.len() >= DIRTY_FLUSH, live.map.len() > INODE_CACHE_MAX)
+        };
+        if flush || full {
+            self.flush_inodes();
+        }
+        if full {
+            self.inode_live.lock().unwrap().evict_clean();
+        }
+    }
+
+    /// Write every dirty cached inode; record its digest in `inode_data` and `inode_map`.
+    fn flush_inodes(&self) {
+        let mut inode_map = self.inode_map.lock().unwrap();
+        let mut live = self.inode_live.lock().unwrap();
+        if live.dirty.is_empty() {
+            return;
+        }
+        let mut io_guard = self.io.lock().unwrap();
+        let mut fsa = FileStorageAdd::new(&mut *io_guard);
+        let mut inode_data = self.inode_data.lock().unwrap();
+        let live = &mut *live;
+        for ino in live.dirty.drain() {
+            if let Some(meta) = live.map.get(&ino) {
+                let digest = intern_inode(&mut fsa, meta);
+                inode_data.insert(ino, digest);
+                inode_map.insert(ino, digest);
+            }
+        }
+    }
+
+    /// True if `ino` is a directory known to the store.
+    fn is_dir(&self, ino: InodeId) -> bool {
+        self.dir_live.lock().unwrap().map.contains_key(&ino)
+            || self.dir_data.lock().unwrap().contains_key(&ino)
+    }
+
+    /// Write every dirty cached directory and record its digest in `dir_data`.
+    fn flush_dirs(&self) {
+        let mut live = self.dir_live.lock().unwrap();
+        if live.dirty.is_empty() {
+            return;
+        }
+        let mut io_guard = self.io.lock().unwrap();
+        let mut fsa = FileStorageAdd::new(&mut *io_guard);
+        let mut dir_data = self.dir_data.lock().unwrap();
+        let live = &mut *live;
+        for ino in live.dirty.drain() {
+            if let Some(list) = live.map.get(&ino) {
+                dir_data.insert(ino, list.intern(&mut fsa));
+            }
+        }
     }
 
     pub fn current_root(&self) -> Option<Digest224> {
@@ -414,15 +580,9 @@ impl MetadataStore for DictMetadataStore {
         let ino = inode_map.allocate_ino();
         let mut full_meta = meta.clone();
         full_meta.ino = ino;
-
-        let digest = {
-            let mut io_guard = self.io.lock().unwrap();
-            let mut fsa = FileStorageAdd::new(&mut *io_guard);
-            intern_inode(&mut fsa, &full_meta)
-        };
-
-        inode_map.insert(ino, digest);
-        self.inode_data.lock().unwrap().insert(ino, digest);
+        drop(inode_map);
+        // The inode is written at the next flush; until then only the cache has it.
+        self.store_meta(&full_meta);
 
         // Track logical bytes: add this inode's size to running total.
         if full_meta.size > 0 {
@@ -436,34 +596,15 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn get_inode(&self, ino: InodeId) -> Result<InodeMeta, MetaError> {
-        let inode_data = self.inode_data.lock().unwrap();
-        let digest = inode_data.get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
-        drop(inode_data);
-
-        let mut io_guard = self.io.lock().unwrap();
-        load_inode(&mut *io_guard, &digest)
+        self.load_meta(ino)
     }
 
     fn update_inode(&self, meta: &InodeMeta) -> Result<(), MetaError> {
         let ino = meta.ino;
 
         // Capture old size before replacing the digest, so we can adjust logical_bytes.
-        let old_size = {
-            let inode_data = self.inode_data.lock().unwrap();
-            let old_digest = inode_data.get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
-            drop(inode_data);
-            let mut io_guard = self.io.lock().unwrap();
-            load_inode(&mut *io_guard, &old_digest).map(|m| m.size).unwrap_or(0)
-        };
-
-        let new_digest = {
-            let mut io_guard = self.io.lock().unwrap();
-            let mut fsa = FileStorageAdd::new(&mut *io_guard);
-            intern_inode(&mut fsa, meta)
-        };
-
-        self.inode_data.lock().unwrap().insert(ino, new_digest);
-        self.inode_map.lock().unwrap().insert(ino, new_digest);
+        let old_size = self.load_meta(ino)?.size;
+        self.store_meta(meta);
 
         // Adjust logical_bytes by the size delta (saturating arithmetic prevents underflow).
         let new_size = meta.size;
@@ -480,23 +621,16 @@ impl MetadataStore for DictMetadataStore {
 
     fn delete_inode(&self, ino: InodeId) -> Result<(), MetaError> {
         // Capture size before removing so we can decrement logical_bytes.
-        let size = {
-            let inode_data = self.inode_data.lock().unwrap();
-            if let Some(digest) = inode_data.get(&ino).copied() {
-                drop(inode_data);
-                let mut io_guard = self.io.lock().unwrap();
-                load_inode(&mut *io_guard, &digest).map(|m| m.size).unwrap_or(0)
-            } else {
-                return Err(MetaError::NotFound(ino));
-            }
-        };
+        let size = self.load_meta(ino)?.size;
 
+        self.inode_live.lock().unwrap().remove(ino);
         self.inode_data.lock().unwrap().remove(&ino);
         self.inode_map.lock().unwrap().remove(ino);
         // Drop every per-inode map entry: a leftover manifest/xattr/dir entry
         // would keep the deleted content reachable (never garbage-collected).
         self.manifest_data.lock().unwrap().remove(&ino);
         self.xattr_data.lock().unwrap().remove(&ino);
+        self.dir_live.lock().unwrap().remove(ino);
         self.dir_data.lock().unwrap().remove(&ino);
 
         // Decrement logical_bytes by the deleted inode's size.
@@ -526,7 +660,7 @@ impl MetadataStore for DictMetadataStore {
         if parent_meta.mode & S_IFMT != S_IFDIR {
             return Err(MetaError::NotADirectory(parent_ino));
         }
-        if !self.dir_data.lock().unwrap().contains_key(&parent_ino) {
+        if !self.is_dir(parent_ino) {
             return Err(MetaError::NotADirectory(parent_ino));
         }
 
@@ -540,35 +674,16 @@ impl MetadataStore for DictMetadataStore {
             dir_meta.mode |= S_IFDIR;
         }
 
-        // Read parent_dir_digest before acquiring io — avoids panic-under-lock
-        // if the entry is unexpectedly missing (TOCTOU with concurrent unlink).
-        let parent_dir_digest = match self.dir_data.lock().unwrap().get(&parent_ino).copied() {
-            Some(d) => d,
-            None => return Err(MetaError::NotADirectory(parent_ino)),
-        };
+        // Add the name to the parent first: if it already exists, nothing changed.
+        self.with_dir(parent_ino, |d| d.add(name, ino).map(|()| ((), true)))?;
 
-        let (dir_inode_digest, dir_entry_digest, new_parent_dir_digest) = {
-            let mut io_guard = self.io.lock().unwrap();
-
-            // Create new directory's inode, dir entries, and update parent — all via one FSA
-            let mut fsa = FileStorageAdd::new(&mut *io_guard);
-            let dir_inode_digest = intern_inode(&mut fsa, &dir_meta);
-            let dir_entry_digest = create_dir_entries(&mut fsa, ino, parent_ino);
-            drop(fsa);
-
-            // add_dir_entry needs &mut impl Io (reads then writes)
-            let new_parent_dir_digest = add_dir_entry(&mut *io_guard, &parent_dir_digest, name, ino)?;
-
-            (dir_inode_digest, dir_entry_digest, new_parent_dir_digest)
-        };
-
-        // Update maps
-        inode_map.insert(ino, dir_inode_digest);
         drop(inode_map);
-
-        self.inode_data.lock().unwrap().insert(ino, dir_inode_digest);
-        self.dir_data.lock().unwrap().insert(ino, dir_entry_digest);
-        self.dir_data.lock().unwrap().insert(parent_ino, new_parent_dir_digest);
+        self.store_meta(&dir_meta);
+        {
+            let mut live = self.dir_live.lock().unwrap();
+            live.map.insert(ino, DirList::new_dir(ino, parent_ino));
+            live.dirty.insert(ino);
+        }
 
         // Increment parent nlinks (for the .. backlink from new subdir)
         let mut parent_meta = self.get_inode(parent_ino)?;
@@ -582,52 +697,22 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn list_directory(&self, ino: InodeId) -> Result<Vec<DirEntry>, MetaError> {
-        let dir_data = self.dir_data.lock().unwrap();
-        let dir_digest = dir_data.get(&ino).copied().ok_or(MetaError::NotADirectory(ino))?;
-        drop(dir_data);
-
-        let mut io_guard = self.io.lock().unwrap();
-        list_dir_entries(&mut *io_guard, &dir_digest)
+        self.with_dir(ino, |d| Ok((d.list(), false)))
     }
 
     fn lookup(&self, parent_ino: InodeId, name: &str) -> Result<InodeId, MetaError> {
         check_name(name)?;
-        let dir_data = self.dir_data.lock().unwrap();
-        let dir_digest = dir_data.get(&parent_ino).copied().ok_or(MetaError::NotADirectory(parent_ino))?;
-        drop(dir_data);
-
-        let mut io_guard = self.io.lock().unwrap();
-        lookup_dir_entry(&mut *io_guard, &dir_digest, name)
+        self.with_dir(parent_ino, |d| Ok((d.lookup(name), false)))?
             .map_err(|_| MetaError::NotFound(0))
     }
 
     fn link(&self, parent_ino: InodeId, name: &str, ino: InodeId) -> Result<(), MetaError> {
         check_name(name)?;
-        let dir_data = self.dir_data.lock().unwrap();
-        let dir_digest = dir_data.get(&parent_ino).copied().ok_or(MetaError::NotADirectory(parent_ino))?;
-        drop(dir_data);
-
-        let new_dir_digest = {
-            let mut io_guard = self.io.lock().unwrap();
-            add_dir_entry(&mut *io_guard, &dir_digest, name, ino)?
-        };
-
-        self.dir_data.lock().unwrap().insert(parent_ino, new_dir_digest);
-        Ok(())
+        self.with_dir(parent_ino, |d| d.add(name, ino).map(|()| ((), true)))
     }
 
     fn unlink(&self, parent_ino: InodeId, name: &str) -> Result<(), MetaError> {
-        let dir_data = self.dir_data.lock().unwrap();
-        let dir_digest = dir_data.get(&parent_ino).copied().ok_or(MetaError::NotADirectory(parent_ino))?;
-        drop(dir_data);
-
-        let new_dir_digest = {
-            let mut io_guard = self.io.lock().unwrap();
-            remove_dir_entry(&mut *io_guard, &dir_digest, name)?
-        };
-
-        self.dir_data.lock().unwrap().insert(parent_ino, new_dir_digest);
-        Ok(())
+        self.with_dir(parent_ino, |d| d.remove(name).map(|()| ((), true)))
     }
 
     fn set_manifest(&self, ino: InodeId, blocks: &[Digest224]) -> Result<(), MetaError> {
@@ -747,6 +832,10 @@ impl MetadataStore for DictMetadataStore {
         //   [refcount_data_digest: 28 bytes (Digest224)] -- NEW in v2
         //
         // Backward compat: root records of exactly 156 bytes are old format (no refcounts).
+        // Write changed directories and inodes first, so the digest maps are current.
+        self.flush_dirs();
+        self.flush_inodes();
+
         let inode_map = self.inode_map.lock().unwrap();
         let mut io_guard = self.io.lock().unwrap();
         let mut fsa = FileStorageAdd::new(&mut *io_guard);
@@ -970,6 +1059,8 @@ impl DictMetadataStore {
             inode_map: Mutex::new(inode_map),
             inode_data: Mutex::new(inode_data),
             dir_data: Mutex::new(dir_data),
+            dir_live: Mutex::new(Live::default()),
+            inode_live: Mutex::new(Live::default()),
             manifest_data: Mutex::new(manifest_data),
             xattr_data: Mutex::new(xattr_data),
             refcounts: Mutex::new(refcounts),
@@ -1052,6 +1143,51 @@ fn parse_digest224(bytes: &[u8]) -> Digest224 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn cached_dirs_and_inodes_survive_eviction_commit_and_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let io = Arc::new(Mutex::new(StoreIo::new(tmp.path())));
+        let store = DictMetadataStore::new(io.clone());
+        let mut expect = Vec::new();
+        for d in 0..10u64 {
+            let dir = store
+                .create_directory(1, &format!("d{d}"), &InodeMeta::new_directory(0, 0, 0, 0o040_755))
+                .unwrap();
+            for f in 0..10u64 {
+                let ino = store.create_inode(&InodeMeta::new_file(0, 0, 0, 0o100_644)).unwrap();
+                store.link(dir, &format!("f{f}"), ino).unwrap();
+                let mut m = store.get_inode(ino).unwrap();
+                m.size = d * 100 + f;
+                store.update_inode(&m).unwrap();
+                expect.push((dir, format!("f{f}"), ino, m.size));
+            }
+            store.unlink(dir, "f0").unwrap();
+        }
+        // The caches stayed bounded, and every change is still visible.
+        assert!(store.inode_live.lock().unwrap().map.len() <= INODE_CACHE_MAX + 1);
+        assert!(store.dir_live.lock().unwrap().map.len() <= DIR_CACHE_MAX + 1);
+        // Dirty entries are written in batches, so the final commit stays small.
+        assert!(store.inode_live.lock().unwrap().dirty.len() < DIRTY_FLUSH);
+        assert!(store.dir_live.lock().unwrap().dirty.len() < DIRTY_FLUSH);
+        let check = |s: &DictMetadataStore| {
+            for (dir, name, ino, size) in &expect {
+                if name == "f0" {
+                    assert!(s.lookup(*dir, name).is_err());
+                    continue;
+                }
+                assert_eq!(s.lookup(*dir, name).unwrap(), *ino);
+                assert_eq!(s.get_inode(*ino).unwrap().size, *size);
+            }
+            assert_eq!(s.list_directory(1).unwrap().len(), 12); // . .. d0..d9
+        };
+        check(&store);
+        let root = store.commit().unwrap();
+        check(&store);
+        let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
+        check(&reloaded);
+        assert_eq!(reloaded.logical_bytes(), store.logical_bytes());
+    }
     use super::*;
     use slicefs_traits::metadata::{InodeMeta, MetadataStore};
     use tempfile::TempDir;

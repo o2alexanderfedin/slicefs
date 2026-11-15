@@ -400,17 +400,18 @@ mod backend_tests {
 
     #[test]
     fn test_backend_passed_as_custom_mount_option() {
+        // NFS also turns off FUSE-T's attribute cache (see build_mount_options).
         for (backend, expected) in [
-            (FuseTBackend::Nfs, "backend=nfs"),
-            (FuseTBackend::Smb, "backend=smb"),
-            (FuseTBackend::Fskit, "backend=fskit"),
+            (FuseTBackend::Nfs, &["backend=nfs", "noattrcache"][..]),
+            (FuseTBackend::Smb, &["backend=smb"][..]),
+            (FuseTBackend::Fskit, &["backend=fskit"][..]),
         ] {
             let config = super::build_mount_options(false, false, Some(&backend));
             let customs: Vec<_> = config.mount_options.iter().filter_map(|opt| match opt {
                 fuser::MountOption::CUSTOM(s) => Some(s.clone()),
                 _ => None,
             }).collect();
-            assert_eq!(customs, vec![expected.to_string()]);
+            assert_eq!(customs, expected);
         }
     }
 }
