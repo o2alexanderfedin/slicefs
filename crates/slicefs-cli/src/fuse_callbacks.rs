@@ -31,7 +31,18 @@ use crate::handlers::{
     OpenResult, ReaddirResult, StatfsResult, WriteResult, XattrResult,
 };
 
-impl Filesystem for SliceFsFilesystem {
+/// The file system as the FUSE session owns it. fuser takes the file system
+/// by value; this shares it, so the GC thread of the mount can reach it too.
+pub struct MountedFs(pub std::sync::Arc<SliceFsFilesystem>);
+
+impl std::ops::Deref for MountedFs {
+    type Target = SliceFsFilesystem;
+    fn deref(&self) -> &SliceFsFilesystem {
+        &self.0
+    }
+}
+
+impl Filesystem for MountedFs {
     fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> io::Result<()> {
         let gate = self.commit_gate();
         let _op = gate.read().unwrap_or_else(|e| e.into_inner());

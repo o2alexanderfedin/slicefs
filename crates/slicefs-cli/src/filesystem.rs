@@ -432,6 +432,69 @@ impl SliceFsFilesystem {
         fsa.end(&d256)
     }
 
+    /// Start an online GC (#25). Turns on object tracking in the store, then
+    /// takes the GC roots under the commit gate: a root for each open
+    /// streaming handle, and a commit that is made durable before the sweep
+    /// can delete anything. The gate is held only for that.
+    ///
+    /// A streaming handle holds subtrees that are on disk but that no commit
+    /// refers to yet; a clone of its state, ended, gives a root that covers
+    /// them. Pending (out-of-order) writes and Buffered handles are only in
+    /// RAM, so they need no root.
+    pub fn gc_start(&self) -> Result<metadata::gc::OnlineGc, String> {
+        if !Arc::ptr_eq(&self.io, self.meta.io()) {
+            return Err("file system and metadata do not share one StoreIo".into());
+        }
+        let gate = self.commit_gate.write().unwrap_or_else(|e| e.into_inner());
+        self.io.lock().unwrap().start_tracking();
+        let states: Vec<State> = self.open_files.lock().unwrap().values()
+            .filter_map(|s| match &s.write_mode {
+                WriteMode::Streaming { state, .. } => Some(state.clone()),
+                WriteMode::Buffered { .. } => None,
+            })
+            .collect();
+        let mut file_roots = Vec::with_capacity(states.len());
+        for state in states {
+            let mut io = self.io.lock().unwrap();
+            let mut fsa = FileStorageAdd::new(&mut *io);
+            let d256 = state.end(&mut fsa);
+            file_roots.push(fsa.end(&d256));
+        }
+        let committed = self.meta.commit().map_err(|e| e.to_string()).and_then(|root| {
+            self.meta.flush_wal().map_err(|e| e.to_string())?;
+            Ok(root)
+        });
+        drop(gate);
+        let root = match committed {
+            Ok(root) => root,
+            Err(e) => {
+                self.io.lock().unwrap().stop_tracking();
+                return Err(format!("GC start: commit failed: {e}"));
+            }
+        };
+        let mut meta_roots = vec![root];
+        for r in self.meta.snapshot_roots() {
+            if !meta_roots.contains(&r) {
+                meta_roots.push(r);
+            }
+        }
+        Ok(metadata::gc::OnlineGc::new(Arc::clone(&self.io), meta_roots, file_roots))
+    }
+
+    /// Run a full online GC: start, mark, sweep. `Ok(None)` if `stop` was set
+    /// before the GC completed (then nothing more is deleted).
+    pub fn gc_online(
+        &self,
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<metadata::gc::SweepStats>, String> {
+        let gc = self.gc_start()?;
+        let Some(live) = gc.mark(stop).map_err(|e| format!("GC mark failed, nothing deleted: {e}"))? else {
+            return Ok(None);
+        };
+        let stats = gc.sweep(&live, stop).map_err(|e| format!("GC sweep failed: {e}"))?;
+        Ok((!stop.load(Ordering::Relaxed)).then_some(stats))
+    }
+
     /// The open write handle of `ino` that holds the most data, if any.
     /// (FUSE-T may open a file O_RDWR only to read it; such an idle handle
     /// must not take a size change meant for the real writer.)

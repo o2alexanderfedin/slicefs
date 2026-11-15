@@ -460,6 +460,7 @@ pub fn run_mount(
     backend: Option<&str>,
     force: bool,
     commit_interval_secs: u64,
+    gc_interval_secs: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Pre-flight: create mountpoint directory if it doesn't exist.
     if !mountpoint.exists() {
@@ -537,6 +538,19 @@ pub fn run_mount(
         Some(store_path.to_path_buf()),
     );
     fs.set_auto_snapshot(auto_snapshot);
+    let fs = Arc::new(fs);
+
+    // GC of the stored objects while mounted (#25). Not on a snapshot mount:
+    // its metadata is the snapshot, not the current root.
+    let online_gc_shutdown = Arc::new(AtomicBool::new(false));
+    let online_gc_handle = snapshot_ref.is_none().then(|| {
+        crate::online_gc::spawn_online_gc(
+            Arc::downgrade(&fs),
+            store_path.to_path_buf(),
+            Duration::from_secs(gc_interval_secs),
+            Arc::clone(&online_gc_shutdown),
+        )
+    });
 
     // Spawn background GC thread.
     // The GC thread holds a Weak<DictMetadataStore> so it exits automatically when
@@ -585,7 +599,14 @@ pub fn run_mount(
     // mount blocks until the FUSE session ends (SIGTERM, Ctrl+C, or unmount).
     // fuser handles signal registration internally — do NOT override with
     // libc::signal as it replaces fuser's session-exit handler.
-    mount(fs, mountpoint, &config)?;
+    let mounted = mount(crate::fuse_callbacks::MountedFs(fs), mountpoint, &config);
+
+    // Stop the GC thread before mount.lock is released, also when mount failed.
+    online_gc_shutdown.store(true, Ordering::SeqCst);
+    if let Some(h) = online_gc_handle {
+        let _ = h.join();
+    }
+    mounted?;
 
     // mount has returned — FUSE session ended, destroy() already called.
     commit_shutdown.store(true, Ordering::SeqCst);
