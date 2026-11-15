@@ -223,6 +223,20 @@ pub fn remove_dir_entry(
     Ok(intern_entry_list(&mut fsa, &entries))
 }
 
+/// Point the `..` entry of a directory at `parent_ino` (used when a
+/// directory moves to a new parent). Returns the new entry list `Digest224`.
+pub fn set_dotdot(
+    io: &mut impl Io,
+    dir_digest: &Digest224,
+    parent_ino: u64,
+) -> Result<Digest224, MetaError> {
+    let mut entries = load_entry_list(io, dir_digest)?;
+    let mut fsa = FileStorageAdd::new(io);
+    let key = entry_key(&mut fsa, "..");
+    entries.insert(key, EntryRecord { key, ino: parent_ino, name: "..".to_string() });
+    Ok(intern_entry_list(&mut fsa, &entries))
+}
+
 /// Look up a single directory entry by name. O(log n) in the number of entries.
 ///
 /// Errors:

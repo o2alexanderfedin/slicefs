@@ -279,6 +279,18 @@ impl DictMetadataStore {
     /// Return the last committed root digest, or `None` if `commit()` has not been called yet.
     ///
     /// Used by the background GC thread to determine which root to use as the live-set anchor.
+    /// Point directory `dir_ino`'s `..` entry at `parent_ino` (directory move).
+    pub fn set_parent(&self, dir_ino: InodeId, parent_ino: InodeId) -> Result<(), MetaError> {
+        let dir_digest = self.dir_data.lock().unwrap().get(&dir_ino).copied()
+            .ok_or(MetaError::NotADirectory(dir_ino))?;
+        let new_digest = {
+            let mut io_guard = self.io.lock().unwrap();
+            crate::directory::set_dotdot(&mut *io_guard, &dir_digest, parent_ino)?
+        };
+        self.dir_data.lock().unwrap().insert(dir_ino, new_digest);
+        Ok(())
+    }
+
     pub fn current_root(&self) -> Option<Digest224> {
         *self.last_root.lock().unwrap()
     }
@@ -481,6 +493,11 @@ impl MetadataStore for DictMetadataStore {
 
         self.inode_data.lock().unwrap().remove(&ino);
         self.inode_map.lock().unwrap().remove(ino);
+        // Drop every per-inode map entry: a leftover manifest/xattr/dir entry
+        // would keep the deleted content reachable (never garbage-collected).
+        self.manifest_data.lock().unwrap().remove(&ino);
+        self.xattr_data.lock().unwrap().remove(&ino);
+        self.dir_data.lock().unwrap().remove(&ino);
 
         // Decrement logical_bytes by the deleted inode's size.
         if size > 0 {
@@ -1054,6 +1071,23 @@ mod tests {
         let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
         let store = DictMetadataStore::new(io);
         (dir, store)
+    }
+
+    #[test]
+    fn test_delete_inode_drops_manifest_xattrs_and_dir_entries() {
+        // Leftover per-inode map entries keep deleted content reachable for GC.
+        let (_d, store) = make_store();
+        let ino = store.create_inode(&new_file_meta()).unwrap();
+        store.set_manifest(ino, &[[9u32; 7]]).unwrap();
+        store.set_xattr(ino, "user.k", b"v").unwrap();
+        store.delete_inode(ino).unwrap();
+        assert!(store.get_manifest(ino).is_err());
+        assert!(store.get_xattr(ino, "user.k").is_err());
+
+        let d = store.create_directory(1, "d", &new_dir_meta()).unwrap();
+        store.unlink(1, "d").unwrap();
+        store.delete_inode(d).unwrap();
+        assert!(store.list_directory(d).is_err());
     }
 
     #[test]

@@ -720,13 +720,13 @@ fn test_rename_overwrite_directory_target() {
     // Create an empty directory target
     let _dst_ino = fs.simulate_mkdir(1, "dir_dst", S_IFDIR | 0o755, 0, 0, 0).unwrap();
 
-    // Normal rename overwriting the directory target — directories are left orphaned
+    // POSIX rename(2): a non-directory cannot replace a directory (EISDIR).
     let result = fs.simulate_rename(1, "file_src.txt", 1, "dir_dst", 0);
-    // This should succeed (dirs left orphaned per the impl comment)
-    assert!(result.is_ok(), "rename overwriting dir target must succeed");
+    assert_eq!(result, Err(libc::EISDIR));
 
-    let found = fs.meta().lookup(1, "dir_dst").unwrap();
-    assert_eq!(found, src_ino, "dir_dst must now point to the file source inode");
+    // Both names are unchanged.
+    assert_eq!(fs.meta().lookup(1, "file_src.txt").unwrap(), src_ino);
+    assert!(fs.meta().lookup(1, "dir_dst").is_ok());
 }
 
 // ── test_read edge cases ──────────────────────────────────────────────────────
@@ -1431,4 +1431,62 @@ fn test_destroy_reclaims_orphans() {
     fs.test_destroy();
     assert_eq!(fs.test_statfs_values().3, before - 1, "orphan inode must not survive unmount");
     let _ = ino;
+}
+
+// ── rename of directories ────────────────────────────────────────────────────
+
+#[test]
+fn test_rename_dir_onto_non_empty_dir_returns_enotempty() {
+    let (fs, _dir) = fresh_fs();
+    fs.simulate_mkdir(1, "a", 0o755, 0, 0, 0).unwrap();
+    let b = fs.simulate_mkdir(1, "b", 0o755, 0, 0, 0).unwrap();
+    fs.test_mknod(b, "keep", 0o644, 0, 0, 0).unwrap();
+    assert_eq!(fs.simulate_rename(1, "a", 1, "b", 0), Err(libc::ENOTEMPTY));
+    assert!(fs.test_lookup(1, "a").is_ok());
+    assert!(fs.test_lookup(b, "keep").is_ok());
+}
+
+#[test]
+fn test_rename_dir_onto_empty_dir_replaces_it() {
+    let (fs, _dir) = fresh_fs();
+    let a = fs.simulate_mkdir(1, "a", 0o755, 0, 0, 0).unwrap();
+    let b = fs.simulate_mkdir(1, "b", 0o755, 0, 0, 0).unwrap();
+    let root_links = fs.test_getattr(1).unwrap().nlinks;
+    fs.simulate_rename(1, "a", 1, "b", 0).unwrap();
+    assert_eq!(fs.test_lookup(1, "b").unwrap().0, a);
+    assert!(fs.test_getattr(b).is_err(), "replaced empty dir must be deleted");
+    assert_eq!(fs.test_getattr(1).unwrap().nlinks, root_links - 1);
+}
+
+#[test]
+fn test_move_dir_between_parents_updates_links_and_dotdot() {
+    let (fs, _dir) = fresh_fs();
+    let p1 = fs.simulate_mkdir(1, "p1", 0o755, 0, 0, 0).unwrap();
+    let p2 = fs.simulate_mkdir(1, "p2", 0o755, 0, 0, 0).unwrap();
+    let d = fs.simulate_mkdir(p1, "d", 0o755, 0, 0, 0).unwrap();
+    assert_eq!(fs.test_getattr(p1).unwrap().nlinks, 3);
+    fs.simulate_rename(p1, "d", p2, "d", 0).unwrap();
+    assert_eq!(fs.test_getattr(p1).unwrap().nlinks, 2);
+    assert_eq!(fs.test_getattr(p2).unwrap().nlinks, 3);
+    assert_eq!(fs.test_lookup(d, "..").unwrap().0, p2);
+}
+
+#[test]
+fn test_rename_file_onto_dir_and_dir_onto_file() {
+    let (fs, _dir) = fresh_fs();
+    fs.simulate_mkdir(1, "d", 0o755, 0, 0, 0).unwrap();
+    fs.test_mknod(1, "f", 0o644, 0, 0, 0).unwrap();
+    assert_eq!(fs.simulate_rename(1, "f", 1, "d", 0), Err(libc::EISDIR));
+    assert_eq!(fs.simulate_rename(1, "d", 1, "f", 0), Err(libc::ENOTDIR));
+}
+
+#[test]
+fn test_rename_between_hard_links_of_same_inode_is_noop() {
+    let (fs, _dir) = fresh_fs();
+    let ino = fs.test_mknod(1, "x", 0o644, 0, 0, 0).unwrap();
+    fs.simulate_link(ino, 1, "y").unwrap();
+    fs.simulate_rename(1, "x", 1, "y", 0).unwrap();
+    assert_eq!(fs.test_lookup(1, "x").unwrap().0, ino, "POSIX: same file -> nothing changes");
+    assert_eq!(fs.test_lookup(1, "y").unwrap().0, ino);
+    assert_eq!(fs.test_getattr(ino).unwrap().nlinks, 2);
 }

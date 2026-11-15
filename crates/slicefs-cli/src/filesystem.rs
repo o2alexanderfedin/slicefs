@@ -317,6 +317,13 @@ impl SliceFsFilesystem {
         Ok(())
     }
 
+    /// Add `delta` to the link count of `ino` (directory ".." bookkeeping).
+    fn adjust_nlinks(&self, ino: u64, delta: i32) -> Result<(), i32> {
+        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        inode.nlinks = (inode.nlinks as i64 + delta as i64).max(0) as u32;
+        self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))
+    }
+
     /// Reclaim all orphans (used at unmount: no handle survives it).
     fn reclaim_all_orphans(&self) {
         let orphans: Vec<u64> = self.orphans.lock().unwrap().drain().collect();
@@ -1219,33 +1226,56 @@ impl SliceFsFilesystem {
         let src_ino = self
             .meta
             .lookup(parent_ino, name)
-            .map_err(|_| libc::ENOENT)?;
+            .map_err(|e| meta_error_to_errno(&e))?;
+        let src_is_dir = self.meta.get_inode(src_ino).map_err(|e| meta_error_to_errno(&e))?
+            .mode & S_IFMT == S_IFDIR;
 
         // RENAME_NOREPLACE: fail if target already exists
-        let target_ino = self.meta.lookup(newparent_ino, newname).ok();
-        if flags & 1 != 0 {
-            if target_ino.is_some() {
-                return Err(libc::EEXIST);
-            }
+        let target_ino = match self.meta.lookup(newparent_ino, newname) {
+            Ok(ino) => Some(ino),
+            Err(MetaError::NameTooLong(n)) => return Err(meta_error_to_errno(&MetaError::NameTooLong(n))),
+            Err(_) => None,
+        };
+        if flags & 1 != 0 && target_ino.is_some() {
+            return Err(libc::EEXIST);
         }
 
-        // If target exists and we're doing a normal rename, remove the old target
         if let Some(dst_ino) = target_ino {
+            // POSIX: old and new name the same file -> do nothing.
+            if dst_ino == src_ino {
+                return Ok(());
+            }
             let dst_inode = self.meta.get_inode(dst_ino).map_err(|e| meta_error_to_errno(&e))?;
+            let dst_is_dir = dst_inode.mode & S_IFMT == S_IFDIR;
+            match (src_is_dir, dst_is_dir) {
+                (true, false) => return Err(libc::ENOTDIR),
+                (false, true) => return Err(libc::EISDIR),
+                _ => {}
+            }
+            if dst_is_dir {
+                let entries = self.meta.list_directory(dst_ino).map_err(|e| meta_error_to_errno(&e))?;
+                if entries.iter().any(|e| e.name != "." && e.name != "..") {
+                    return Err(libc::ENOTEMPTY);
+                }
+            }
             self.meta
                 .unlink(newparent_ino, newname)
                 .map_err(|e| meta_error_to_errno(&e))?;
-            // Manage nlinks for the displaced target
-            let new_nlinks = dst_inode.nlinks.saturating_sub(1);
-            if new_nlinks == 0 && dst_inode.mode & S_IFMT != S_IFDIR {
-                // Reclaim now, or keep as an orphan while handles are open.
-                self.drop_last_link(dst_inode.clone())?;
-            } else if new_nlinks > 0 {
-                let mut updated_dst = dst_inode.clone();
-                updated_dst.nlinks = new_nlinks;
-                let _ = self.meta.update_inode(&updated_dst);
+            if dst_is_dir {
+                // The replaced empty directory goes away with its ".." link.
+                self.meta.delete_inode(dst_ino).map_err(|e| meta_error_to_errno(&e))?;
+                self.adjust_nlinks(newparent_ino, -1)?;
+            } else {
+                let new_nlinks = dst_inode.nlinks.saturating_sub(1);
+                if new_nlinks == 0 {
+                    // Reclaim now, or keep as an orphan while handles are open.
+                    self.drop_last_link(dst_inode.clone())?;
+                } else {
+                    let mut updated_dst = dst_inode.clone();
+                    updated_dst.nlinks = new_nlinks;
+                    self.meta.update_inode(&updated_dst).map_err(|e| meta_error_to_errno(&e))?;
+                }
             }
-            // Directories are left orphaned (no directory hard links in our impl)
         }
 
         // Link source at new location and unlink from old location
@@ -1255,6 +1285,13 @@ impl SliceFsFilesystem {
         self.meta
             .unlink(parent_ino, name)
             .map_err(|e| meta_error_to_errno(&e))?;
+
+        // A directory moved to another parent: fix its ".." and both parents' nlink.
+        if src_is_dir && parent_ino != newparent_ino {
+            self.meta.set_parent(src_ino, newparent_ino).map_err(|e| meta_error_to_errno(&e))?;
+            self.adjust_nlinks(parent_ino, -1)?;
+            self.adjust_nlinks(newparent_ino, 1)?;
+        }
 
         // Update ctime on moved inode
         let mut src_inode = self.meta.get_inode(src_ino).map_err(|e| meta_error_to_errno(&e))?;
