@@ -119,6 +119,10 @@ pub struct DictMetadataStore {
     /// digest as of the last flush; a dirty inode here is newer. `commit()`
     /// writes the dirty ones. Lock order: `inode_map`, `inode_live`, `io`, `inode_data`.
     inode_live: Mutex<Live<InodeMeta>>,
+    /// Count of mutations so far, and its value at the last commit: the
+    /// commit timer commits only when they differ.
+    changes: AtomicU64,
+    committed_changes: AtomicU64,
     /// Maps file inode number → current manifest `Digest224`.
     manifest_data: Mutex<BTreeMap<u64, Digest224>>,
     /// Maps inode number → xattr set `Digest224` (only for inodes with xattrs).
@@ -187,6 +191,8 @@ impl DictMetadataStore {
             dir_data: Mutex::new(dir_data),
             dir_live: Mutex::new(Live::default()),
             inode_live: Mutex::new(Live::default()),
+            changes: AtomicU64::new(0),
+            committed_changes: AtomicU64::new(0),
             manifest_data: Mutex::new(BTreeMap::new()),
             xattr_data: Mutex::new(BTreeMap::new()),
             refcounts: Mutex::new(BTreeMap::new()),
@@ -221,6 +227,7 @@ impl DictMetadataStore {
     /// never be garbage-collected.  A tracing warning is emitted the first time
     /// a block reaches saturation.
     pub fn increment_refcount(&self, digest: &Digest224) {
+        self.changes.fetch_add(1, Ordering::Relaxed);
         let mut rc = self.refcounts.lock().unwrap();
         let val = rc.entry(*digest).or_insert(0);
         if *val == u64::MAX {
@@ -243,6 +250,7 @@ impl DictMetadataStore {
     /// If the current count is `u64::MAX` (saturated / immortal), this is a
     /// no-op — immortal blocks are never freed.
     pub fn decrement_refcount(&self, digest: &Digest224) {
+        self.changes.fetch_add(1, Ordering::Relaxed);
         let mut rc = self.refcounts.lock().unwrap();
         if let Some(count) = rc.get_mut(digest) {
             // Saturated blocks are immortal — decrement is a no-op.
@@ -335,6 +343,7 @@ impl DictMetadataStore {
     /// Used by the background GC thread to determine which root to use as the live-set anchor.
     /// Point directory `dir_ino`'s `..` entry at `parent_ino` (directory move).
     pub fn set_parent(&self, dir_ino: InodeId, parent_ino: InodeId) -> Result<(), MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
         self.with_dir(dir_ino, |d| {
             d.set_dotdot(parent_ino);
             Ok(((), true))
@@ -457,6 +466,11 @@ impl DictMetadataStore {
         }
     }
 
+    /// True if a mutation happened after the last `commit()`.
+    pub fn has_uncommitted_changes(&self) -> bool {
+        self.changes.load(Ordering::Relaxed) != self.committed_changes.load(Ordering::Relaxed)
+    }
+
     pub fn current_root(&self) -> Option<Digest224> {
         *self.last_root.lock().unwrap()
     }
@@ -576,6 +590,7 @@ impl DictMetadataStore {
 
 impl MetadataStore for DictMetadataStore {
     fn create_inode(&self, meta: &InodeMeta) -> Result<InodeId, MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
         let mut inode_map = self.inode_map.lock().unwrap();
         let ino = inode_map.allocate_ino();
         let mut full_meta = meta.clone();
@@ -600,6 +615,7 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn update_inode(&self, meta: &InodeMeta) -> Result<(), MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
         let ino = meta.ino;
 
         // Capture old size before replacing the digest, so we can adjust logical_bytes.
@@ -620,6 +636,7 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn delete_inode(&self, ino: InodeId) -> Result<(), MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
         // Capture size before removing so we can decrement logical_bytes.
         let size = self.load_meta(ino)?.size;
 
@@ -654,6 +671,7 @@ impl MetadataStore for DictMetadataStore {
         name: &str,
         meta: &InodeMeta,
     ) -> Result<InodeId, MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
         // Validate parent exists and is a directory
         check_name(name)?;
         let parent_meta = self.get_inode(parent_ino)?;
@@ -707,15 +725,18 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn link(&self, parent_ino: InodeId, name: &str, ino: InodeId) -> Result<(), MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
         check_name(name)?;
         self.with_dir(parent_ino, |d| d.add(name, ino).map(|()| ((), true)))
     }
 
     fn unlink(&self, parent_ino: InodeId, name: &str) -> Result<(), MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
         self.with_dir(parent_ino, |d| d.remove(name).map(|()| ((), true)))
     }
 
     fn set_manifest(&self, ino: InodeId, blocks: &[Digest224]) -> Result<(), MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
         let digest = {
             let mut io_guard = self.io.lock().unwrap();
             let mut fsa = FileStorageAdd::new(&mut *io_guard);
@@ -735,6 +756,7 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn set_xattr(&self, ino: InodeId, name: &str, value: &[u8]) -> Result<(), MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
         // Load existing xattrs for this inode (or empty vec if none yet)
         let mut xattrs = {
             let xattr_data = self.xattr_data.lock().unwrap();
@@ -790,6 +812,7 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn remove_xattr(&self, ino: InodeId, name: &str) -> Result<(), MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
         let xattr_data = self.xattr_data.lock().unwrap();
         let digest = match xattr_data.get(&ino).copied() {
             Some(d) => d,
@@ -832,6 +855,8 @@ impl MetadataStore for DictMetadataStore {
         //   [refcount_data_digest: 28 bytes (Digest224)] -- NEW in v2
         //
         // Backward compat: root records of exactly 156 bytes are old format (no refcounts).
+        // Changes made after this point are left for the next commit.
+        let changes = self.changes.load(Ordering::Relaxed);
         // Write changed directories and inodes first, so the digest maps are current.
         self.flush_dirs();
         self.flush_inodes();
@@ -865,7 +890,7 @@ impl MetadataStore for DictMetadataStore {
             intern_digest224_u64_map(&mut fsa, &rc)
         };
 
-        let mut root_bytes = Vec::with_capacity(184);
+        let mut root_bytes = Vec::with_capacity(200);
         // inode_map_digest: 28 bytes
         for word in &inode_map_digest {
             root_bytes.extend_from_slice(&word.to_le_bytes());
@@ -895,7 +920,11 @@ impl MetadataStore for DictMetadataStore {
             root_bytes.extend_from_slice(&word.to_le_bytes());
         }
 
-        assert_eq!(root_bytes.len(), 184, "root record must be 184 bytes");
+        // logical_bytes + inode_count (v3, 200 bytes): without them, loading
+        // had to read every inode object just to sum the sizes (O(files) reads).
+        root_bytes.extend_from_slice(&self.logical_bytes.load(Ordering::Relaxed).to_le_bytes());
+        root_bytes.extend_from_slice(&self.inode_count.load(Ordering::Relaxed).to_le_bytes());
+        assert_eq!(root_bytes.len(), 200, "root record must be 200 bytes");
         let root_digest = State::push_all(&mut fsa, &root_bytes);
         // Drop fsa first: this flushes all FileStorage blob files to disk via StoreIo
         drop(fsa);
@@ -909,6 +938,7 @@ impl MetadataStore for DictMetadataStore {
         // If we crash between flush and WAL write, the next mount will just re-commit.
         self.log_wal_entry(&WalEntry::RootUpdate { root: root_digest });
 
+        self.committed_changes.store(changes, Ordering::Relaxed);
         Ok(root_digest)
     }
 }
@@ -981,12 +1011,13 @@ impl DictMetadataStore {
         let bytes = file_storage_get(&mut *io_guard, root)
             .ok_or_else(|| MetaError::Corrupted("missing root node".into()))?;
 
-        // Accept both old (156-byte) and new (184-byte) formats.
-        let has_refcounts = match bytes.len() {
-            156 => false, // v1 format — no refcounts field
-            184 => true,  // v2 format — includes refcount_data_digest
+        // Accept the old (156-, 184-byte) formats and the current one (200 bytes).
+        let (has_refcounts, has_counters) = match bytes.len() {
+            156 => (false, false), // v1 format — no refcounts field
+            184 => (true, false),  // v2 format — includes refcount_data_digest
+            200 => (true, true),   // v3 format — adds logical_bytes and inode_count
             n => return Err(MetaError::Corrupted(format!(
-                "root record: expected 156 or 184 bytes, got {}",
+                "root record: expected 156, 184 or 200 bytes, got {}",
                 n
             ))),
         };
@@ -1044,13 +1075,16 @@ impl DictMetadataStore {
             )));
         }
 
-        // Recompute logical_bytes as the sum of all loaded inode sizes.
-        let initial_logical_bytes: u64 = inode_data.values().map(|digest| {
-            load_inode(&mut *io_guard, digest).map(|m| m.size).unwrap_or(0)
-        }).sum();
-
-        // Recompute inode_count from inode_data length.
-        let initial_inode_count = inode_data.len() as u64;
+        let (initial_logical_bytes, initial_inode_count) = if has_counters {
+            let at = |o: usize| u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap());
+            (at(184), at(192))
+        } else {
+            // Older record: sum the sizes of all inodes (reads every inode).
+            let logical: u64 = inode_data.values().map(|digest| {
+                load_inode(&mut *io_guard, digest).map(|m| m.size).unwrap_or(0)
+            }).sum();
+            (logical, inode_data.len() as u64)
+        };
 
         drop(io_guard);
 
@@ -1061,6 +1095,8 @@ impl DictMetadataStore {
             dir_data: Mutex::new(dir_data),
             dir_live: Mutex::new(Live::default()),
             inode_live: Mutex::new(Live::default()),
+            changes: AtomicU64::new(0),
+            committed_changes: AtomicU64::new(0),
             manifest_data: Mutex::new(manifest_data),
             xattr_data: Mutex::new(xattr_data),
             refcounts: Mutex::new(refcounts),

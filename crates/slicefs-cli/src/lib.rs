@@ -2,6 +2,7 @@
 
 pub mod backend;
 pub mod cli;
+pub mod commit_timer;
 pub mod filesystem;
 mod fuse_callbacks;
 pub(crate) mod handlers;

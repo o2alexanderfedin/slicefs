@@ -53,7 +53,7 @@ head -c 4000000 /dev/urandom > $R/committed.bin
 if mnt $R/s5 $R/m5; then   # session 1: write + clean unmount = committed state
   cp $R/committed.bin $R/m5/committed.bin; umnt $R/m5
 fi
-if mnt $R/s5 $R/m5; then   # session 2: kill -9 the daemon in the middle of a 64 MB write
+if mnt $R/s5 $R/m5 --commit-interval 1; then   # session 2: kill -9 the daemon in the middle of a 64 MB write
   head -c 1000000 /dev/urandom > $R/synced.bin   # written, fsynced and closed before the crash
   dd if=$R/synced.bin of=$R/m5/synced.bin bs=64k conv=fsync status=none
   ( head -c 64000000 /dev/urandom > $R/m5/partial.bin ) 2>/dev/null & W=$!
@@ -63,10 +63,9 @@ if mnt $R/s5 $R/m5; then   # session 2: kill -9 the daemon in the middle of a 64
   if mnt $R/s5 $R/m5; then ok "remount after crash"
     step committed-intact 30 cmp $R/committed.bin $R/m5/committed.bin
     step seeded-intact 10 diff $R/src/random.bin $R/m5/random.bin
-    # fsync must make data durable (POSIX). Known gap: metadata commits only at
-    # unmount/snapshot (GitHub issue #20), so this is reported, not counted.
-    if timeout 30 cmp -s $R/synced.bin $R/m5/synced.bin; then ok fsynced-file-survives-crash
-    else echo "  fsynced-file-survives-crash: KNOWN GAP ($( [ -e $R/m5/synced.bin ] && stat -c '%s bytes' $R/m5/synced.bin || echo absent); issue #20)"; fi
+    # The commit timer (--commit-interval 1, #18) committed synced.bin: it was
+    # closed ~3 s before the crash. fsync alone does not commit yet (#20).
+    step closed-file-survives-crash 30 cmp $R/synced.bin $R/m5/synced.bin
     step partial-consistent 60 bash -c "[ ! -e $R/m5/partial.bin ] || [ \$(stat -c %s $R/m5/partial.bin) -eq \$(cat $R/m5/partial.bin | wc -c) ]"
     echo "    partial.bin after crash: $( [ -e $R/m5/partial.bin ] && stat -c '%s bytes' $R/m5/partial.bin || echo absent)"
     step write-after-crash 10 bash -c "echo again > $R/m5/new.txt && [ \"\$(cat $R/m5/new.txt)\" = again ]"
