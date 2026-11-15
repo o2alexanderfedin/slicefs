@@ -11,8 +11,9 @@
 //! - Logical bytes (sum of all inode sizes before deduplication)
 //! - Unique content bytes (each distinct file content counted once)
 //! - Stored bytes (apparent size of vt0/ objects) and on-disk bytes (allocated blocks)
-//! - File dedup ratio (logical / unique content) — dedup savings
-//! - Format overhead (stored / unique content) — cost of the object format
+//! - File dedup ratio (logical / unique content) — whole-file duplicates only
+//! - Overall ratio (logical / stored) — all savings, including block-level
+//!   dedup inside and across files, minus the object-format cost
 //! - Content sharing (distinct file contents referenced by 1, 2, or 3+ files)
 //! - Snapshot count
 
@@ -110,10 +111,11 @@ pub struct StoreStats {
     pub physical_disk_bytes: u64,
     /// Allocated size of the whole store directory (st_blocks).
     pub host_disk_bytes: u64,
-    /// File-level dedup savings: logical / unique content.
-    pub dedup_ratio: f64,
-    /// Object format cost: stored (apparent) / unique content.
-    pub format_overhead: f64,
+    /// Whole-file dedup: logical / unique content.
+    pub file_dedup_ratio: f64,
+    /// Everything together: logical / CAS bytes (block-level dedup and the
+    /// object-format cost included; > 1.0 means the store is smaller).
+    pub overall_ratio: f64,
     pub snapshot_count: usize,
     /// How many files share each distinct content.
     pub refcount_distribution: RefcountDist,
@@ -199,8 +201,8 @@ pub fn run_stats(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
         (0u64, ContentStats::default())
     };
 
-    let dedup_ratio = ratio(logical_bytes, content.unique_content_bytes);
-    let format_overhead = ratio(physical_bytes, content.unique_content_bytes);
+    let file_dedup_ratio = ratio(logical_bytes, content.unique_content_bytes);
+    let overall_ratio = ratio(logical_bytes, physical_bytes);
 
     let snapshot_count = snapshots.len();
 
@@ -213,8 +215,8 @@ pub fn run_stats(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
         physical_bytes,
         physical_disk_bytes,
         host_disk_bytes,
-        dedup_ratio,
-        format_overhead,
+        file_dedup_ratio,
+        overall_ratio,
         snapshot_count,
         refcount_distribution: content.dist,
         snapshots: snap_stats,
@@ -256,8 +258,8 @@ fn print_human_stats(stats: &StoreStats) {
     println!("CAS bytes        : {} (vt0/ objects, apparent size)", format_bytes(stats.physical_bytes));
     println!("CAS on disk      : {} (vt0/ objects, allocated blocks)", format_bytes(stats.physical_disk_bytes));
     println!("Host disk used   : {} (whole store, allocated blocks)", format_bytes(stats.host_disk_bytes));
-    println!("Dedup ratio      : {:.2}x (logical / unique content)", stats.dedup_ratio);
-    println!("Format overhead  : {:.2}x (CAS bytes / unique content)", stats.format_overhead);
+    println!("File dedup ratio : {:.2}x (logical / unique content; whole-file duplicates)", stats.file_dedup_ratio);
+    println!("Overall ratio    : {:.2}x (logical / CAS bytes; block dedup and format cost included)", stats.overall_ratio);
     let d = &stats.refcount_distribution;
     println!("Content sharing  : {} unique, {} shared by 2, {} shared by 3+", d.unique, d.shared_2x, d.shared_3plus);
     println!("Snapshot count   : {}", stats.snapshot_count);
@@ -522,8 +524,8 @@ mod tests {
             logical_bytes: 1024,
             physical_bytes: 512,
             host_disk_bytes: 2048,
-            dedup_ratio: 2.0,
-            format_overhead: 1.5,
+            file_dedup_ratio: 2.0,
+            overall_ratio: 1.5,
             unique_content_bytes: 0,
             physical_disk_bytes: 0,
             snapshot_count: 3,
@@ -534,7 +536,7 @@ mod tests {
         let json = serde_json::to_string(&stats).expect("StoreStats should serialize to JSON");
         assert!(json.contains("logical_bytes"), "JSON should contain logical_bytes");
         assert!(json.contains("physical_bytes"), "JSON should contain physical_bytes");
-        assert!(json.contains("dedup_ratio"), "JSON should contain dedup_ratio");
+        assert!(json.contains("file_dedup_ratio"), "JSON should contain file_dedup_ratio");
         assert!(json.contains("snapshot_count"), "JSON should contain snapshot_count");
     }
 
