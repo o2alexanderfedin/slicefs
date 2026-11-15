@@ -5,7 +5,7 @@
 //!
 //! Write callbacks (create, write, release, setattr) are fully implemented in Phase 4.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,6 +36,10 @@ const S_IFBLK: u32 = 0o060_000;
 /// `truncate -s 1P f`) aborts the daemon on allocation failure.
 pub const MAX_FILE_SIZE: u64 = 1 << 40;
 
+/// Most bytes of out-of-order writes a streaming handle holds while it waits
+/// for a gap to close. Beyond it the handle switches to Buffered mode.
+pub const REORDER_WINDOW: usize = 64 << 20;
+
 /// Write mode for an open file handle.
 ///
 /// Streaming mode is the default for sequential writes (O(log N) memory).
@@ -45,6 +49,10 @@ enum WriteMode {
     Streaming {
         state: State,
         next_expected_offset: u64,
+        /// Writes that arrived ahead of `next_expected_offset` (NFS sends
+        /// WRITEs in parallel). Non-overlapping; drained into `state` when
+        /// the gap closes. Bounded by `REORDER_WINDOW` bytes.
+        pending: BTreeMap<u64, Vec<u8>>,
     },
     Buffered {
         buf: Vec<u8>,
@@ -151,6 +159,16 @@ impl SliceFsFilesystem {
     pub fn io(&self) -> &Arc<Mutex<StoreIo>> {
         &self.io
     }
+}
+
+/// pwrite semantics on a buffer: zero-fill any gap, then copy `data` at `offset`.
+fn pwrite_into(buf: &mut Vec<u8>, offset: u64, data: &[u8]) {
+    let start = offset as usize;
+    let end = start + data.len();
+    if end > buf.len() {
+        buf.resize(end, 0);
+    }
+    buf[start..end].copy_from_slice(data);
 }
 
 /// Convert a `SystemTime` to `(seconds, nanoseconds)` since the epoch.
@@ -339,6 +357,67 @@ impl SliceFsFilesystem {
         Ok(())
     }
 
+    /// True if the committed file has bytes (so a fresh stream would lose them).
+    fn has_content(&self, ino: u64) -> bool {
+        self.meta.get_inode(ino).map_or(false, |m| m.size > 0)
+            && self.meta.get_manifest(ino).map_or(false, |m| !m.is_empty())
+    }
+
+    /// Current content of a streaming handle: what it streamed so far, or the
+    /// committed file content if it has not streamed anything yet.
+    fn handle_content(&self, ino: u64, state: &State, streamed: u64) -> Vec<u8> {
+        if streamed > 0 {
+            let digest: Digest224 = {
+                let mut io = self.io.lock().unwrap();
+                let mut fsa = FileStorageAdd::new(&mut *io);
+                let d256 = state.clone().end(&mut fsa);
+                fsa.end(&d256)
+            };
+            let mut io = self.io.lock().unwrap();
+            file_storage_get(&mut *io, &digest).unwrap_or_default()
+        } else {
+            match self.meta.get_manifest(ino) {
+                Ok(m) if !m.is_empty() => {
+                    let mut io = self.io.lock().unwrap();
+                    file_storage_get(&mut *io, &m[0]).unwrap_or_default()
+                }
+                _ => Vec::new(),
+            }
+        }
+    }
+
+    /// If handle `fh` streams with out-of-order writes still pending, switch
+    /// it to Buffered mode so its content is complete (read, fsync, truncate,
+    /// release need the whole picture; gaps become zero bytes).
+    fn settle_pending(&self, fh: u64) {
+        let mut file_state = match self.open_files.lock().unwrap().remove(&fh) {
+            Some(s) => s,
+            None => return,
+        };
+        if let WriteMode::Streaming { state, next_expected_offset, pending } = &mut file_state.write_mode {
+            if !pending.is_empty() {
+                let mut buf = self.handle_content(file_state.ino, state, *next_expected_offset);
+                for (o, v) in std::mem::take(pending) {
+                    pwrite_into(&mut buf, o, &v);
+                }
+                let old_root = file_state.last_committed_root.take();
+                file_state.byte_count = file_state.byte_count.max(buf.len() as u64);
+                buf.resize(file_state.byte_count as usize, 0);
+                file_state.write_mode = WriteMode::Buffered { buf };
+                file_state.cas_committed = false;
+                if let Some(old) = old_root {
+                    self.meta.decrement_refcount(&old);
+                }
+            }
+        }
+        self.open_files.lock().unwrap().insert(fh, file_state);
+    }
+
+    /// Test hook: true if handle `fh` is still in Streaming mode.
+    pub fn test_is_streaming(&self, fh: u64) -> bool {
+        matches!(self.open_files.lock().unwrap().get(&fh).map(|s| &s.write_mode), Some(WriteMode::Streaming { .. }))
+    }
+
     /// Set access, modification and change times of a new inode to now.
     fn stamp_new(meta: &mut InodeMeta) {
         let (sec, nsec) = now_pair();
@@ -400,7 +479,7 @@ impl SliceFsFilesystem {
         let fh = self.open_handle(ino);
         self.open_files.lock().unwrap().insert(fh, OpenFileState {
             ino,
-            write_mode: WriteMode::Streaming { state: State::default(), next_expected_offset: 0 },
+            write_mode: WriteMode::Streaming { state: State::default(), next_expected_offset: 0, pending: BTreeMap::new() },
             byte_count: 0,
             cas_committed: false,
             last_committed_root: None,
@@ -433,69 +512,32 @@ impl SliceFsFilesystem {
         // open_files lock is released here.
 
         let result = match &mut file_state.write_mode {
-            WriteMode::Streaming { state, next_expected_offset } => {
-                if offset != *next_expected_offset {
-                    // Fallback from Streaming to Buffered mode
-                    let snapshot = state.clone();
-                    let byte_count = file_state.byte_count;
-                    let ino = file_state.ino;
-                    let old_root = file_state.last_committed_root.take();
+            WriteMode::Streaming { state, next_expected_offset, pending } => {
+                let end = offset + data.len() as u64;
+                // Streaming from scratch is only right when the file starts
+                // empty; otherwise unwritten parts must keep the old bytes.
+                let fresh = *next_expected_offset > 0 || !pending.is_empty() || !self.has_content(file_state.ino);
+                let overlaps_pending = pending.range(..end).next_back()
+                    .map_or(false, |(&o, v)| o + v.len() as u64 > offset);
+                let pending_bytes: usize = pending.values().map(Vec::len).sum();
 
-                    debug!(
-                        fh = fh, ino = ino,
-                        offset = offset, expected = byte_count,
-                        "fallback from Streaming to Buffered mode"
-                    );
-
-                    // Materialize current streaming content (or load from committed)
-                    let mut buf = if byte_count > 0 {
-                        let digest: Digest224 = {
-                            let mut io = self.io.lock().unwrap();
-                            let mut fsa = FileStorageAdd::new(&mut *io);
-                            let d256 = snapshot.end(&mut fsa);
-                            fsa.end(&d256)
-                        };
-                        let mut io = self.io.lock().unwrap();
-                        file_storage_get(&mut *io, &digest).unwrap_or_default()
-                    } else {
-                        // No streaming content yet -- load from committed manifest
-                        // (prevents existing file content loss per Research Pitfall 1)
-                        match self.meta.get_manifest(ino) {
-                            Ok(m) if !m.is_empty() => {
-                                let mut io = self.io.lock().unwrap();
-                                file_storage_get(&mut *io, &m[0]).unwrap_or_default()
-                            }
-                            _ => Vec::new(),
-                        }
-                    };
-
-                    // Apply pwrite semantics
-                    let end = offset as usize + data.len();
-                    if end > buf.len() {
-                        buf.resize(end, 0);
+                if fresh && offset == *next_expected_offset && !overlaps_pending {
+                    // In order: push, then drain pending writes that now line up.
+                    let mut chunks = vec![data.to_vec()];
+                    let mut next = end;
+                    while let Some((&o, _)) = pending.first_key_value() {
+                        if o != next { break; }
+                        let v = pending.remove(&o).unwrap();
+                        next += v.len() as u64;
+                        chunks.push(v);
                     }
-                    buf[offset as usize..end].copy_from_slice(data);
-
-                    // Swap to Buffered mode
-                    let buf_len = buf.len() as u64;
-                    file_state.write_mode = WriteMode::Buffered { buf };
-                    file_state.byte_count = buf_len;
-                    file_state.cas_committed = false;
-
-                    // Decrement old committed root
-                    if let Some(old) = old_root {
-                        self.meta.decrement_refcount(&old);
-                    }
-
-                    Ok(data.len() as u32)
-                } else {
-                    // Sequential write -- push bytes under io lock only (open_files not held)
                     let io_err = {
                         let mut io = self.io.lock().unwrap();
                         let mut fsa = FileStorageAdd::new(&mut *io);
-                        state.push_bytes(&mut fsa, data);
+                        for c in &chunks {
+                            state.push_bytes(&mut fsa, c);
+                        }
                         // Take error before fsa drops (drop may flush more nodes).
-                        // After drop, any additional errors are lost but the first is captured.
                         let err = fsa.take_io_error();
                         drop(fsa);
                         err
@@ -506,19 +548,42 @@ impl SliceFsFilesystem {
                         self.open_files.lock().unwrap().insert(fh, file_state);
                         return Err(libc::EIO);
                     }
-                    *next_expected_offset += data.len() as u64;
-                    file_state.byte_count += data.len() as u64;
+                    *next_expected_offset = next;
+                    file_state.byte_count = file_state.byte_count.max(next);
                     file_state.cas_committed = false;
+                    Ok(data.len() as u32)
+                } else if fresh && offset > *next_expected_offset && !overlaps_pending
+                    && pending_bytes + data.len() <= REORDER_WINDOW
+                {
+                    // Ahead of the stream: wait in the reorder window.
+                    pending.insert(offset, data.to_vec());
+                    file_state.byte_count = file_state.byte_count.max(end);
+                    file_state.cas_committed = false;
+                    Ok(data.len() as u32)
+                } else {
+                    // Random write: switch to Buffered mode.
+                    let ino = file_state.ino;
+                    debug!(fh = fh, ino = ino, offset = offset, expected = *next_expected_offset,
+                        "fallback from Streaming to Buffered mode");
+                    let mut buf = self.handle_content(ino, state, *next_expected_offset);
+                    // Older pending writes first, then this (newest) write.
+                    for (o, v) in std::mem::take(pending) {
+                        pwrite_into(&mut buf, o, &v);
+                    }
+                    pwrite_into(&mut buf, offset, data);
+                    let old_root = file_state.last_committed_root.take();
+                    file_state.byte_count = buf.len() as u64;
+                    file_state.write_mode = WriteMode::Buffered { buf };
+                    file_state.cas_committed = false;
+                    if let Some(old) = old_root {
+                        self.meta.decrement_refcount(&old);
+                    }
                     Ok(data.len() as u32)
                 }
             }
             WriteMode::Buffered { buf } => {
                 // Standard pwrite into buffer -- no io lock needed
-                let end = offset as usize + data.len();
-                if end > buf.len() {
-                    buf.resize(end, 0);
-                }
-                buf[offset as usize..end].copy_from_slice(data);
+                pwrite_into(buf, offset, data);
                 file_state.byte_count = buf.len() as u64;
                 file_state.cas_committed = false;
                 Ok(data.len() as u32)
@@ -547,6 +612,7 @@ impl SliceFsFilesystem {
 
     /// Commit the write state of `fh` (if any) to the inode's manifest.
     fn finalize_write(&self, ino: u64, fh: u64) -> Result<(), i32> {
+        self.settle_pending(fh);
         let (write_mode, byte_count, cas_committed, last_committed_root) = match self.open_files.lock().unwrap().remove(&fh) {
             Some(s) => (s.write_mode, s.byte_count, s.cas_committed, s.last_committed_root),
             None => return Ok(()), // Already closed
@@ -652,6 +718,12 @@ impl SliceFsFilesystem {
             Streaming(State),
         }
 
+        let pending_fh = self.open_files.lock().unwrap().iter()
+            .find(|(_, s)| s.ino == ino && matches!(&s.write_mode, WriteMode::Streaming { pending, .. } if !pending.is_empty()))
+            .map(|(&fh, _)| fh);
+        if let Some(fh) = pending_fh {
+            self.settle_pending(fh);
+        }
         let writer_snapshot: Option<WriterSnapshot> = {
             let open_files = self.open_files.lock().unwrap();
             match open_files.values().find(|s| s.ino == ino && s.byte_count > 0) {
@@ -712,6 +784,7 @@ impl SliceFsFilesystem {
     /// If `fh` is not in `open_files` (read-only handle or invalid), returns Ok
     /// without error — fsync is a no-op for read-only handles.
     fn flush_buffer_for_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
+        self.settle_pending(fh);
         // 1. Clone state/buf snapshot under open_files lock
         enum FsyncSnapshot {
             Streaming(State),
@@ -803,6 +876,9 @@ impl SliceFsFilesystem {
         if new_size > MAX_FILE_SIZE {
             return Err(libc::EFBIG);
         }
+        if let Some(fh) = fh {
+            self.settle_pending(fh);
+        }
         // Case A: open file handle — truncate in-flight write state
         if let Some(fh_val) = fh {
             let mut open_files = self.open_files.lock().unwrap();
@@ -826,11 +902,11 @@ impl SliceFsFilesystem {
                             drop(open_files);
                         }
                     }
-                    WriteMode::Streaming { state, .. } => {
+                    WriteMode::Streaming { state, next_expected_offset, .. } => {
                         if new_size == 0 {
                             // Fast path: reset to empty Streaming State
                             let old_root = s.last_committed_root.take();
-                            s.write_mode = WriteMode::Streaming { state: State::default(), next_expected_offset: 0 };
+                            s.write_mode = WriteMode::Streaming { state: State::default(), next_expected_offset: 0, pending: BTreeMap::new() };
                             s.byte_count = 0;
                             s.cas_committed = false;
                             drop(open_files);
@@ -839,25 +915,14 @@ impl SliceFsFilesystem {
                                 self.meta.decrement_refcount(&old);
                             }
                         } else {
-                            // Materialize current content from in-progress State
+                            // Materialize current content (the file's existing
+                            // content if this handle has not streamed yet).
                             let snapshot = state.clone();
-                            let current_byte_count = s.byte_count;
+                            let streamed = *next_expected_offset;
                             let old_root = s.last_committed_root.take();
                             drop(open_files); // Release before io lock
 
-                            // Materialize to bytes
-                            let mut content: Vec<u8> = if current_byte_count == 0 {
-                                Vec::new()
-                            } else {
-                                let digest = {
-                                    let mut io = self.io.lock().unwrap();
-                                    let mut fsa = FileStorageAdd::new(&mut *io);
-                                    let d256 = snapshot.end(&mut fsa);
-                                    fsa.end(&d256)
-                                };
-                                let mut io = self.io.lock().unwrap();
-                                file_storage_get(&mut *io, &digest).unwrap_or_default()
-                            };
+                            let mut content: Vec<u8> = self.handle_content(ino, &snapshot, streamed);
 
                             // Truncate or zero-extend
                             content.resize(new_size as usize, 0);
@@ -877,6 +942,7 @@ impl SliceFsFilesystem {
                                 s.write_mode = WriteMode::Streaming {
                                     state: new_state_and_count.0,
                                     next_expected_offset: new_state_and_count.1,
+                                    pending: BTreeMap::new(),
                                 };
                                 s.byte_count = new_state_and_count.1;
                                 s.cas_committed = false;
@@ -1500,7 +1566,7 @@ impl SliceFsFilesystem {
                 fh,
                 OpenFileState {
                     ino,
-                    write_mode: WriteMode::Streaming { state: State::default(), next_expected_offset: 0 },
+                    write_mode: WriteMode::Streaming { state: State::default(), next_expected_offset: 0, pending: BTreeMap::new() },
                     byte_count: 0,
                     cas_committed: false,
                     last_committed_root: None,

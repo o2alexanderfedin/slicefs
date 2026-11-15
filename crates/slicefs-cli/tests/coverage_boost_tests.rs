@@ -1574,3 +1574,85 @@ fn test_entry_changes_update_parent_times() {
     age(&fs, p); age(&fs, q); fs.simulate_rename(p, "n", q, "n", 0).unwrap();
     assert!(changed(&fs, p), "rename: old parent"); assert!(changed(&fs, q), "rename: new parent");
 }
+
+// ── overwrite / out-of-order writes ──────────────────────────────────────────
+
+#[test]
+fn test_overwrite_start_of_existing_file_keeps_tail() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"0123456789").unwrap();
+    fs.test_release(ino, fh).unwrap();
+    let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    fs.test_write(fh, 0, b"AB").unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"AB23456789");
+}
+
+fn pattern(n: usize) -> Vec<u8> {
+    (0..n as u32).map(|i| (i.wrapping_mul(2654435761) >> 11) as u8).collect()
+}
+
+#[test]
+fn test_shuffled_writes_inside_window_stay_streaming() {
+    let (fs, _dir) = fresh_fs();
+    let data = pattern(32 * 4096);
+    let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+    // NFS-style reordering: pairs swapped (1,0,3,2,...)
+    let chunks: Vec<_> = data.chunks(4096).enumerate().collect();
+    for pair in chunks.chunks(2) {
+        for (i, c) in pair.iter().rev() {
+            fs.test_write(fh, (*i * 4096) as u64, c).unwrap();
+        }
+    }
+    assert!(fs.test_is_streaming(fh), "reordered writes inside the window must not force Buffered mode");
+    assert_eq!(fs.test_getattr(ino).unwrap().size, data.len() as u64);
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, data.len() as u32).unwrap(), data);
+}
+
+#[test]
+fn test_read_and_release_with_pending_gap() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "g", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"aaaa").unwrap();
+    fs.test_write(fh, 8, b"cccc").unwrap(); // gap 4..8 stays a hole
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"aaaa\0\0\0\0cccc");
+    fs.test_write(fh, 4, b"bb").unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"aaaabb\0\0cccc");
+}
+
+#[test]
+fn test_overlap_with_pending_keeps_newest_bytes() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "o", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 4, b"OLDOLD").unwrap(); // pending [4,10)
+    fs.test_write(fh, 0, b"newnewne").unwrap(); // [0,8) overlaps pending, newer
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"newnewneLD");
+}
+
+#[test]
+fn test_fsync_with_pending_data_is_complete() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "s", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"12").unwrap();
+    fs.test_write(fh, 4, b"56").unwrap();
+    fs.test_write(fh, 2, b"34").unwrap();
+    fs.test_fsync(ino, fh).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"123456");
+}
+
+#[test]
+fn test_ftruncate_on_fresh_handle_keeps_existing_bytes() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "t", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"0123456789").unwrap();
+    fs.test_release(ino, fh).unwrap();
+    let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    fs.test_setattr_size(ino, Some(fh), 4).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"0123");
+}
