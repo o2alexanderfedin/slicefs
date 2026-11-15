@@ -33,6 +33,7 @@ use crate::xattr::{intern_xattrs, load_xattrs, set_xattr_entry, get_xattr_entry,
                    list_xattr_names, remove_xattr_entry};
 
 // S_IFDIR bit mask (POSIX directory type)
+const S_IFMT: u32 = 0o0170_000;
 const S_IFDIR: u32 = 0o0040_000;
 
 /// Concrete `MetadataStore` backed by file-based FileStorage (blockset Io).
@@ -494,7 +495,7 @@ impl MetadataStore for DictMetadataStore {
     ) -> Result<InodeId, MetaError> {
         // Validate parent exists and is a directory
         let parent_meta = self.get_inode(parent_ino)?;
-        if parent_meta.mode & S_IFDIR == 0 {
+        if parent_meta.mode & S_IFMT != S_IFDIR {
             return Err(MetaError::NotADirectory(parent_ino));
         }
         if !self.dir_data.lock().unwrap().contains_key(&parent_ino) {
@@ -507,7 +508,7 @@ impl MetadataStore for DictMetadataStore {
         let mut dir_meta = meta.clone();
         dir_meta.ino = ino;
         // Ensure mode has directory type bit
-        if dir_meta.mode & S_IFDIR == 0 {
+        if dir_meta.mode & S_IFMT != S_IFDIR {
             dir_meta.mode |= S_IFDIR;
         }
 

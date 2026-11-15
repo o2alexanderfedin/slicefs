@@ -847,12 +847,25 @@ fn test_statfs_after_creating_files_inode_count_increases() {
 // ── mknod type rejection ──────────────────────────────────────────────────────
 
 #[test]
-fn test_mknod_fifo_returns_enosys() {
+fn test_mknod_fifo_creates_named_pipe() {
+    // pjdfstest creates FIFOs with mkfifo(2); ENOSYS broke ~2,000 subtests.
     let (fs, _dir) = fresh_fs();
-    // S_IFIFO = 0o010_000
-    let result = fs.test_mknod(1, "fifo_file", 0o010_000 | 0o644, 0, 0, 0);
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), libc::ENOSYS, "FIFO must return ENOSYS");
+    // S_IFIFO = 0o010_000; umask 022 must apply to the permission bits.
+    let (ino, meta) = fs.test_mknod_full(1, "fifo_file", 0o010_000 | 0o666, 7, 8, 0o022).unwrap();
+    assert_eq!(meta.mode, 0o010_644);
+    assert_eq!((meta.uid, meta.gid, meta.size), (7, 8, 0));
+    let attr = slicefs_cli::filesystem::inode_to_file_attr(&meta);
+    assert_eq!(attr.kind, FileType::NamedPipe);
+    assert_eq!(fs.test_lookup(1, "fifo_file").unwrap().0, ino);
+}
+
+#[test]
+fn test_mknod_socket_creates_socket() {
+    let (fs, _dir) = fresh_fs();
+    // S_IFSOCK = 0o140_000 (bind(2) on a Unix socket path calls mknod).
+    let (_ino, meta) = fs.test_mknod_full(1, "sock", 0o140_000 | 0o755, 0, 0, 0).unwrap();
+    assert_eq!(meta.mode, 0o140_755);
+    assert_eq!(slicefs_cli::filesystem::inode_to_file_attr(&meta).kind, FileType::Socket);
 }
 
 #[test]
@@ -1292,4 +1305,39 @@ fn test_statfs_no_store_path_returns_zero_blocks() {
     assert_eq!(blocks, 0, "no store_path should give 0 blocks");
     assert_eq!(bfree, 0, "no store_path should give 0 bfree");
     assert_eq!(bavail, 0, "no store_path should give 0 bavail");
+}
+
+// ── sockets are not directories (S_IFSOCK contains the S_IFDIR bit) ──────────
+
+#[test]
+fn test_unlink_socket_succeeds() {
+    let (fs, _dir) = fresh_fs();
+    fs.test_mknod(1, "sock", 0o140_000 | 0o755, 0, 0, 0).unwrap();
+    assert_eq!(fs.simulate_unlink(1, "sock"), Ok(()));
+    assert!(fs.test_lookup(1, "sock").is_err());
+}
+
+#[test]
+fn test_rmdir_socket_returns_enotdir() {
+    let (fs, _dir) = fresh_fs();
+    fs.test_mknod(1, "sock", 0o140_000 | 0o755, 0, 0, 0).unwrap();
+    assert_eq!(fs.simulate_rmdir(1, "sock"), Err(libc::ENOTDIR));
+}
+
+#[test]
+fn test_create_inside_socket_returns_enotdir() {
+    let (fs, _dir) = fresh_fs();
+    let sock = fs.test_mknod(1, "sock", 0o140_000 | 0o755, 0, 0, 0).unwrap();
+    assert_eq!(fs.simulate_mkdir(sock, "d", 0o755, 0, 0, 0).map(|_| ()), Err(libc::ENOTDIR));
+}
+
+#[test]
+fn test_rename_over_socket_frees_it() {
+    let (fs, _dir) = fresh_fs();
+    fs.test_mknod(1, "sock", 0o140_000 | 0o755, 0, 0, 0).unwrap();
+    fs.test_mknod(1, "f", 0o644, 0, 0, 0).unwrap();
+    let before = fs.test_statfs_values().3;
+    fs.simulate_rename(1, "f", 1, "sock", 0).unwrap();
+    // The replaced socket inode must be deleted, not kept as a "directory".
+    assert_eq!(fs.test_statfs_values().3, before - 1);
 }

@@ -25,6 +25,8 @@ const S_IFMT: u32 = 0o170_000;
 const S_IFREG: u32 = 0o100_000;
 const S_IFDIR: u32 = 0o040_000;
 const S_IFLNK: u32 = 0o120_000;
+const S_IFIFO: u32 = 0o010_000;
+const S_IFSOCK: u32 = 0o140_000;
 
 /// Largest file size SliceFS accepts (1 TiB). Larger truncate/write requests
 /// fail with EFBIG. Out-of-order writes and truncates still hold the whole file
@@ -146,6 +148,8 @@ pub fn inode_to_file_attr(meta: &InodeMeta) -> FileAttr {
     let kind = match meta.mode & S_IFMT {
         S_IFDIR => FileType::Directory,
         S_IFLNK => FileType::Symlink,
+        S_IFIFO => FileType::NamedPipe,
+        S_IFSOCK => FileType::Socket,
         _ => FileType::RegularFile,
     };
 
@@ -877,11 +881,15 @@ impl SliceFsFilesystem {
     ///
     /// Non-regular file types (device nodes, FIFOs) return ENOSYS.
     pub fn test_mknod(&self, parent: u64, name: &str, mode: u32, uid: u32, gid: u32, umask: u32) -> Result<u64, i32> {
-        let file_type = mode & S_IFMT;
-        if file_type != S_IFREG && file_type != 0 {
-            return Err(libc::ENOSYS);
-        }
-        let file_mode = S_IFREG | (mode & !umask & 0o7777);
+        // Regular files, FIFOs and sockets need only the type bits in `mode`;
+        // the kernel implements FIFO/socket I/O. Device nodes would need rdev,
+        // which InodeMeta does not store, so they stay ENOSYS.
+        let file_type = match mode & S_IFMT {
+            0 | S_IFREG => S_IFREG,
+            t @ (S_IFIFO | S_IFSOCK) => t,
+            _ => return Err(libc::ENOSYS),
+        };
+        let file_mode = file_type | (mode & !umask & 0o7777);
         let file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
         let ino = self.meta.create_inode(&file_meta).map_err(|e| meta_error_to_errno(&e))?;
         if let Err(e) = self.meta.link(parent, name, ino) {
@@ -985,7 +993,7 @@ impl SliceFsFilesystem {
 
         // Verify it is a directory
         let inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-        if inode.mode & S_IFDIR == 0 {
+        if inode.mode & S_IFMT != S_IFDIR {
             return Err(libc::ENOTDIR);
         }
 
@@ -1037,7 +1045,7 @@ impl SliceFsFilesystem {
         let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
 
         // Must not be a directory
-        if inode.mode & S_IFDIR != 0 {
+        if inode.mode & S_IFMT == S_IFDIR {
             return Err(libc::EISDIR);
         }
 
@@ -1076,7 +1084,7 @@ impl SliceFsFilesystem {
         let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
 
         // Disallow hard links to directories
-        if inode.mode & S_IFDIR != 0 {
+        if inode.mode & S_IFMT == S_IFDIR {
             return Err(libc::EPERM);
         }
 
@@ -1138,7 +1146,7 @@ impl SliceFsFilesystem {
                 .map_err(|e| meta_error_to_errno(&e))?;
             // Manage nlinks for the displaced target
             let new_nlinks = dst_inode.nlinks.saturating_sub(1);
-            if new_nlinks == 0 && dst_inode.mode & S_IFDIR == 0 {
+            if new_nlinks == 0 && dst_inode.mode & S_IFMT != S_IFDIR {
                 // Decrement refcounts and delete inode for regular files
                 if let Ok(manifest) = self.meta.get_manifest(dst_ino) {
                     for digest in &manifest {
