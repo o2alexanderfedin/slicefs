@@ -1386,13 +1386,25 @@ impl SliceFsFilesystem {
 
     /// Get inode attributes. Returns `InodeMeta` on success.
     pub fn test_getattr(&self, ino: u64) -> Result<InodeMeta, MetaError> {
-        self.meta.get_inode(ino)
+        let mut meta = self.meta.get_inode(ino)?;
+        self.overlay_open_size(&mut meta);
+        Ok(meta)
+    }
+
+    /// Bytes written through an open handle stay in its write state until
+    /// release; report that size so fstat/stat during a write are correct.
+    fn overlay_open_size(&self, meta: &mut InodeMeta) {
+        let open_files = self.open_files.lock().unwrap();
+        if let Some(s) = open_files.values().find(|s| s.ino == meta.ino && s.byte_count > 0) {
+            meta.size = s.byte_count;
+        }
     }
 
     /// Lookup a name in a directory. Returns `(child_ino, InodeMeta)` on success.
     pub fn test_lookup(&self, parent: u64, name: &str) -> Result<(u64, InodeMeta), i32> {
         let child_ino = self.meta.lookup(parent, name).map_err(|e| meta_error_to_errno(&e))?;
-        let meta = self.meta.get_inode(child_ino).map_err(|e| meta_error_to_errno(&e))?;
+        let mut meta = self.meta.get_inode(child_ino).map_err(|e| meta_error_to_errno(&e))?;
+        self.overlay_open_size(&mut meta);
         Ok((child_ino, meta))
     }
 

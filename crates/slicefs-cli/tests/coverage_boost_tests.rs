@@ -1490,3 +1490,15 @@ fn test_rename_between_hard_links_of_same_inode_is_noop() {
     assert_eq!(fs.test_lookup(1, "y").unwrap().0, ino);
     assert_eq!(fs.test_getattr(ino).unwrap().nlinks, 2);
 }
+
+#[test]
+fn test_getattr_reports_size_of_open_write_handle() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "w", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"x").unwrap();
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 1, "fstat during a write must see the new size");
+    fs.test_write(fh, 5, b"yz").unwrap(); // out of order -> buffered
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 7);
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 7);
+}
