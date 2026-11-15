@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::util::ts;
 
-use blockset::{State, Tree, FileStorageAdd, file_storage_get, StorageAdd, Digest224};
+use blockset::{State, Tree, FileStorageAdd, FileStorageReader, file_storage_get, StorageAdd, Digest224};
 use tracing::debug;
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use metadata::store::DictMetadataStore;
@@ -97,6 +97,9 @@ pub struct SliceFsFilesystem {
     pub(crate) meta: Arc<DictMetadataStore>,
     pub(crate) io: Arc<Mutex<StoreIo>>,
     open_files: Mutex<HashMap<u64, OpenFileState>>,
+    /// Resumable content readers per inode (see `FileStorageReader`). A reader
+    /// whose root no longer matches the file content is replaced on use.
+    readers: Mutex<HashMap<u64, FileStorageReader>>,
     next_fh: AtomicU64,
     pub(crate) store_path: Option<PathBuf>,
     pub(crate) auto_snapshot: bool,
@@ -120,6 +123,7 @@ impl SliceFsFilesystem {
             meta: Arc::new(meta),
             io,
             open_files: Mutex::new(HashMap::new()),
+            readers: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(0),
             store_path,
             auto_snapshot: false,
@@ -523,45 +527,53 @@ impl SliceFsFilesystem {
         // In Streaming mode, clone State for materialization.
         enum WriterSnapshot {
             Streaming(State),
-            Buffered(Vec<u8>),
         }
 
         let writer_snapshot: Option<WriterSnapshot> = {
             let open_files = self.open_files.lock().unwrap();
-            open_files.values()
-                .find(|s| s.ino == ino && s.byte_count > 0)
-                .map(|s| match &s.write_mode {
-                    WriteMode::Streaming { state, .. } => WriterSnapshot::Streaming(state.clone()),
-                    WriteMode::Buffered { buf } => WriterSnapshot::Buffered(buf.clone()),
-                })
+            match open_files.values().find(|s| s.ino == ino && s.byte_count > 0) {
+                // Buffered: copy only the requested range, not the whole buffer.
+                Some(OpenFileState { write_mode: WriteMode::Buffered { buf }, .. }) => {
+                    let start = (offset as usize).min(buf.len());
+                    let end = start.saturating_add(size as usize).min(buf.len());
+                    return Ok(buf[start..end].to_vec());
+                }
+                Some(OpenFileState { write_mode: WriteMode::Streaming { state, .. }, .. }) => {
+                    Some(WriterSnapshot::Streaming(state.clone()))
+                }
+                None => None,
+            }
         };
         // open_files lock released
 
-        let raw_bytes: Vec<u8> = match writer_snapshot {
-            Some(WriterSnapshot::Buffered(buf)) => buf,
+        let root: Digest224 = match writer_snapshot {
             Some(WriterSnapshot::Streaming(snapshot)) => {
-                // Materialize uncommitted content via clone+end+file_storage_get
-                let digest: Digest224 = {
-                    let mut io = self.io.lock().unwrap();
-                    let mut fsa = FileStorageAdd::new(&mut *io);
-                    let d256 = snapshot.end(&mut fsa);
-                    fsa.end(&d256)
-                };
+                // Uncommitted content: finish a clone of the writer to get a root.
                 let mut io = self.io.lock().unwrap();
-                file_storage_get(&mut *io, &digest).ok_or(libc::EIO)?
+                let mut fsa = FileStorageAdd::new(&mut *io);
+                let d256 = snapshot.end(&mut fsa);
+                fsa.end(&d256)
             }
             None => {
                 // Fall back to committed manifest
                 let manifest = self.meta.get_manifest(ino).map_err(|_| libc::EIO)?;
                 if manifest.is_empty() { return Ok(vec![]); }
-                let mut io = self.io.lock().unwrap();
-                file_storage_get(&mut *io, &manifest[0]).ok_or(libc::EIO)?
+                manifest[0]
             }
         };
 
-        let start = (offset as usize).min(raw_bytes.len());
-        let end = (start + size as usize).min(raw_bytes.len());
-        Ok(raw_bytes[start..end].to_vec())
+        // Read only the requested range through a resumable per-inode reader,
+        // so a sequential read is O(n) overall instead of O(n^2).
+        let mut readers = self.readers.lock().unwrap();
+        if readers.len() > 256 && !readers.contains_key(&ino) {
+            readers.clear();
+        }
+        let reader = readers.entry(ino).or_insert_with(|| FileStorageReader::new(root));
+        if reader.root() != &root {
+            *reader = FileStorageReader::new(root);
+        }
+        let mut io = self.io.lock().unwrap();
+        reader.read_at(&mut *io, offset, size as usize).ok_or(libc::EIO)
     }
 
     /// Flush the streaming state for `fh` to CAS without closing the handle.
@@ -1970,6 +1982,41 @@ mod tests {
         // Read back
         let data = fs.test_read(ino, 0, 100).unwrap();
         assert_eq!(&data, b"hello");
+    }
+
+    #[test]
+    fn test_sequential_chunked_read_of_large_file() {
+        let (fs, _dir) = fresh_fs();
+        let data: Vec<u8> = (0..1_500_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let (ino, fh) = fs.test_create(1, "big", 0o644, 0, 0, 0).unwrap();
+        for (i, c) in data.chunks(65536).enumerate() {
+            fs.test_write(fh, (i * 65536) as u64, c).unwrap();
+        }
+        // Read while the write handle is open (streaming snapshot root).
+        assert_eq!(fs.test_read(ino, 1_000_000, 10).unwrap(), &data[1_000_000..1_000_010]);
+        fs.test_release(ino, fh).unwrap();
+        let mut out = Vec::new();
+        loop {
+            let chunk = fs.test_read(ino, out.len() as u64, 131072).unwrap();
+            if chunk.is_empty() { break; }
+            out.extend(chunk);
+        }
+        assert_eq!(out, data);
+        // Backwards seek after the sequential pass.
+        assert_eq!(fs.test_read(ino, 7, 5).unwrap(), &data[7..12]);
+    }
+
+    #[test]
+    fn test_read_sees_new_content_after_rewrite() {
+        let (fs, _dir) = fresh_fs();
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        fs.test_write(fh, 0, b"first version").unwrap();
+        fs.test_release(ino, fh).unwrap();
+        assert_eq!(fs.test_read(ino, 0, 5).unwrap(), b"first");
+        let fh = fs.test_open(ino, libc::O_WRONLY | libc::O_TRUNC).unwrap().0;
+        fs.test_write(fh, 0, b"second").unwrap();
+        fs.test_release(ino, fh).unwrap();
+        assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"second");
     }
 
     #[test]
