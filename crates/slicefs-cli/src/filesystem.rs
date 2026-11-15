@@ -14,7 +14,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::util::ts;
 
 use blockset::{State, Tree, FileStorageAdd, FileStorageReader, file_storage_get, StorageAdd, Digest224};
-use tracing::debug;
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
@@ -87,6 +86,10 @@ struct OpenFileState {
     /// The most recently committed Digest224 root. Used to decrement refcount
     /// when a new root is committed (fsync or release), preventing refcount leaks.
     last_committed_root: Option<Digest224>,
+    /// Size set by setattr while streaming (macOS cp extends the file before
+    /// writing it). Bytes between the stream end and this size are zeros;
+    /// they are added at fsync/release instead of materializing the file.
+    min_size: u64,
 }
 
 /// FUSE filesystem adapter backed by a [`DictMetadataStore`].
@@ -371,6 +374,28 @@ impl SliceFsFilesystem {
         self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)
     }
 
+    /// Finish a clone of a streaming state as a stored root, first appending
+    /// zeros from `streamed` up to `min_size` (an extension set by setattr).
+    fn end_padded(&self, state: &State, streamed: u64, min_size: u64) -> Digest224 {
+        let mut st = state.clone();
+        let mut io = self.io.lock().unwrap();
+        let mut fsa = FileStorageAdd::new(&mut *io);
+        let mut left = min_size.saturating_sub(streamed);
+        let zeros = vec![0u8; 1 << 16];
+        while left > 0 {
+            let n = left.min(zeros.len() as u64) as usize;
+            st.push_bytes(&mut fsa, &zeros[..n]);
+            left -= n as u64;
+        }
+        let d256 = st.end(&mut fsa);
+        fsa.end(&d256)
+    }
+
+    /// The open write handle of `ino`, if any.
+    fn write_handle_of(&self, ino: u64) -> Option<u64> {
+        self.open_files.lock().unwrap().iter().find(|(_, s)| s.ino == ino).map(|(&fh, _)| fh)
+    }
+
     /// True if the committed file has bytes (so a fresh stream would lose them).
     fn has_content(&self, ino: u64) -> bool {
         self.meta.get_inode(ino).map_or(false, |m| m.size > 0)
@@ -410,6 +435,8 @@ impl SliceFsFilesystem {
         };
         if let WriteMode::Streaming { state, next_expected_offset, pending } = &mut file_state.write_mode {
             if !pending.is_empty() {
+                eprintln!("[{}][FUSE] settle: fh={} ino={} switches to Buffered (expected={} pending_chunks={})",
+                    ts(), fh, file_state.ino, *next_expected_offset, pending.len());
                 let mut buf = self.handle_content(file_state.ino, state, *next_expected_offset);
                 for (o, v) in std::mem::take(pending) {
                     pwrite_into(&mut buf, o, &v);
@@ -497,6 +524,7 @@ impl SliceFsFilesystem {
             byte_count: 0,
             cas_committed: false,
             last_committed_root: None,
+            min_size: 0,
         });
         Ok((ino, fh))
     }
@@ -577,9 +605,12 @@ impl SliceFsFilesystem {
                 } else {
                     // Random write: switch to Buffered mode.
                     let ino = file_state.ino;
-                    debug!(fh = fh, ino = ino, offset = offset, expected = *next_expected_offset,
-                        "fallback from Streaming to Buffered mode");
+                    eprintln!("[{}][FUSE] write: fh={} ino={} switches to Buffered (offset={} len={} expected={} pending={} fresh={} overlap={})",
+                        ts(), fh, ino, offset, data.len(), *next_expected_offset, pending_bytes, fresh, overlaps_pending);
                     let mut buf = self.handle_content(ino, state, *next_expected_offset);
+                    if (buf.len() as u64) < file_state.min_size {
+                        buf.resize(file_state.min_size as usize, 0);
+                    }
                     // Older pending writes first, then this (newest) write.
                     for (o, v) in std::mem::take(pending) {
                         pwrite_into(&mut buf, o, &v);
@@ -627,8 +658,8 @@ impl SliceFsFilesystem {
     /// Commit the write state of `fh` (if any) to the inode's manifest.
     fn finalize_write(&self, ino: u64, fh: u64) -> Result<(), i32> {
         self.settle_pending(fh);
-        let (write_mode, byte_count, cas_committed, last_committed_root) = match self.open_files.lock().unwrap().remove(&fh) {
-            Some(s) => (s.write_mode, s.byte_count, s.cas_committed, s.last_committed_root),
+        let (write_mode, byte_count, cas_committed, last_committed_root, min_size) = match self.open_files.lock().unwrap().remove(&fh) {
+            Some(s) => (s.write_mode, s.byte_count, s.cas_committed, s.last_committed_root, s.min_size),
             None => return Ok(()), // Already closed
         };
 
@@ -651,11 +682,8 @@ impl SliceFsFilesystem {
 
         // Finalize to CAS based on write mode
         let new_digest: Digest224 = match write_mode {
-            WriteMode::Streaming { state, .. } => {
-                let mut io = self.io.lock().unwrap();
-                let mut fsa = FileStorageAdd::new(&mut *io);
-                let d256 = state.end(&mut fsa);
-                fsa.end(&d256)
+            WriteMode::Streaming { state, next_expected_offset, .. } => {
+                self.end_padded(&state, next_expected_offset, min_size)
             }
             WriteMode::Buffered { buf } => {
                 let mut io = self.io.lock().unwrap();
@@ -738,6 +766,7 @@ impl SliceFsFilesystem {
         if let Some(fh) = pending_fh {
             self.settle_pending(fh);
         }
+        let mut logical_size: Option<u64> = None;
         let writer_snapshot: Option<WriterSnapshot> = {
             let open_files = self.open_files.lock().unwrap();
             match open_files.values().find(|s| s.ino == ino && s.byte_count > 0) {
@@ -747,7 +776,8 @@ impl SliceFsFilesystem {
                     let end = start.saturating_add(size as usize).min(buf.len());
                     return Ok(buf[start..end].to_vec());
                 }
-                Some(OpenFileState { write_mode: WriteMode::Streaming { state, .. }, .. }) => {
+                Some(OpenFileState { write_mode: WriteMode::Streaming { state, .. }, byte_count, .. }) => {
+                    logical_size = Some(*byte_count);
                     Some(WriterSnapshot::Streaming(state.clone()))
                 }
                 None => None,
@@ -784,7 +814,15 @@ impl SliceFsFilesystem {
             *reader = FileStorageReader::new(root);
         }
         let mut io = self.io.lock().unwrap();
-        reader.read_at(&mut *io, offset, size as usize).ok_or(libc::EIO)
+        let mut out = reader.read_at(&mut *io, offset, size as usize).ok_or(libc::EIO)?;
+        // Past the streamed bytes but inside a setattr extension: zeros.
+        if let Some(logical) = logical_size {
+            let want = logical.saturating_sub(offset).min(size as u64) as usize;
+            if out.len() < want {
+                out.resize(want, 0);
+            }
+        }
+        Ok(out)
     }
 
     /// Flush the streaming state for `fh` to CAS without closing the handle.
@@ -803,7 +841,7 @@ impl SliceFsFilesystem {
         self.settle_pending(fh);
         // 1. Clone state/buf snapshot under open_files lock
         enum FsyncSnapshot {
-            Streaming(State),
+            Streaming(State, u64, u64),
             Buffered(Vec<u8>),
         }
 
@@ -822,7 +860,8 @@ impl SliceFsFilesystem {
                     }
                     s.cas_committed = true;
                     let snap = match &s.write_mode {
-                        WriteMode::Streaming { state, .. } => FsyncSnapshot::Streaming(state.clone()),
+                        WriteMode::Streaming { state, next_expected_offset, .. } =>
+                            FsyncSnapshot::Streaming(state.clone(), *next_expected_offset, s.min_size),
                         WriteMode::Buffered { buf } => FsyncSnapshot::Buffered(buf.clone()),
                     };
                     (snap, s.byte_count, s.last_committed_root)
@@ -834,11 +873,8 @@ impl SliceFsFilesystem {
 
         // 2. Materialize under io lock
         let new_digest: Digest224 = match snapshot {
-            FsyncSnapshot::Streaming(state_snapshot) => {
-                let mut io = self.io.lock().unwrap();
-                let mut fsa = FileStorageAdd::new(&mut *io);
-                let d256 = state_snapshot.end(&mut fsa);
-                fsa.end(&d256)
+            FsyncSnapshot::Streaming(state_snapshot, streamed, min_size) => {
+                self.end_padded(&state_snapshot, streamed, min_size)
             }
             FsyncSnapshot::Buffered(buf_clone) => {
                 let mut io = self.io.lock().unwrap();
@@ -897,8 +933,38 @@ impl SliceFsFilesystem {
         if new_size > MAX_FILE_SIZE {
             return Err(libc::EFBIG);
         }
-        if let Some(fh) = fh {
-            self.settle_pending(fh);
+        // A size change without a handle still belongs to an open write
+        // handle of the file (the NFS SETATTR from cp carries no handle).
+        let fh = fh.filter(|f| self.open_files.lock().unwrap().contains_key(f))
+            .or_else(|| self.write_handle_of(ino));
+        if let Some(fh_val) = fh {
+            // Extending a streaming handle: record the size, no materializing.
+            let extended = {
+                let mut open_files = self.open_files.lock().unwrap();
+                match open_files.get_mut(&fh_val) {
+                    Some(s) if matches!(s.write_mode, WriteMode::Streaming { .. })
+                        && new_size > 0 && new_size >= s.byte_count
+                        && (s.byte_count > 0 || !self.has_content(ino)) => {
+                        s.min_size = new_size;
+                        s.byte_count = new_size;
+                        s.cas_committed = false;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if extended {
+                let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
+                inode.size = new_size;
+                let (sec, nsec) = now_pair();
+                inode.mtime_sec = sec;
+                inode.mtime_nsec = nsec;
+                inode.ctime_sec = sec;
+                inode.ctime_nsec = nsec;
+                self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
+                return Ok(());
+            }
+            self.settle_pending(fh_val);
         }
         // Case A: open file handle — truncate in-flight write state
         if let Some(fh_val) = fh {
@@ -910,6 +976,7 @@ impl SliceFsFilesystem {
                             let old_root = s.last_committed_root.take();
                             *buf = Vec::new();
                             s.byte_count = 0;
+                            s.min_size = 0;
                             s.cas_committed = false;
                             drop(open_files);
 
@@ -920,6 +987,7 @@ impl SliceFsFilesystem {
                         } else {
                             buf.resize(new_size as usize, 0);
                             s.byte_count = buf.len() as u64;
+                            s.min_size = 0;
                             s.cas_committed = false;
                             drop(open_files);
                         }
@@ -930,6 +998,7 @@ impl SliceFsFilesystem {
                             let old_root = s.last_committed_root.take();
                             s.write_mode = WriteMode::Streaming { state: State::default(), next_expected_offset: 0, pending: BTreeMap::new() };
                             s.byte_count = 0;
+                            s.min_size = 0;
                             s.cas_committed = false;
                             drop(open_files);
 
@@ -968,6 +1037,7 @@ impl SliceFsFilesystem {
                                     pending: BTreeMap::new(),
                                 };
                                 s.byte_count = new_state_and_count.1;
+                                s.min_size = 0;
                                 s.cas_committed = false;
                                 s.last_committed_root = None;
                             }
@@ -995,8 +1065,8 @@ impl SliceFsFilesystem {
             }
         }
 
-        // Case B: closed file (or open file without FATTR_FH) — read from CAS, truncate/extend,
-        // re-push. NotFound from get_manifest means the inode exists but has no content yet
+        // Case B: no open write handle — stream the committed content into a new
+        // tree, truncated or zero-extended. NotFound from get_manifest means the inode exists but has no content yet
         // (brand-new file created by create() before any write/release). Treat as empty content.
         let old_manifest = match self.meta.get_manifest(ino) {
             Ok(m) => m,
@@ -1004,38 +1074,36 @@ impl SliceFsFilesystem {
             Err(_) => return Err(libc::EIO),
         };
 
-        // Read current content (raw bytes — v3 format, no compression)
-        let mut content: Vec<u8> = if old_manifest.is_empty() {
-            Vec::new()
-        } else {
-            let root_digest = old_manifest[0];
-            let raw_bytes: Vec<u8> = {
-                let mut io = self.io.lock().unwrap();
-                file_storage_get(&mut *io, &root_digest)
-                    .ok_or(libc::EIO)?
-            };
-            raw_bytes
-        };
-
         // Decrement old refcount
         if !old_manifest.is_empty() {
             self.meta.decrement_refcount(&old_manifest[0]);
         }
 
-        // Truncate or zero-extend
-        content.resize(new_size as usize, 0);
-
-        // Push new content (raw bytes directly — v3 format, no compression)
-        if content.is_empty() {
+        // Rebuild as a stream: the first new_size bytes of the old content
+        // (read in 1 MiB chunks), then zeros. Memory stays O(1 MiB), not O(file).
+        if new_size == 0 {
             self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
         } else {
-            let new_digest = {
-                let mut io = self.io.lock().unwrap();
-                let mut fsa = FileStorageAdd::new(&mut *io);
-                let digest = State::push_all(&mut fsa, &content);
-                drop(fsa);
-                digest
-            };
+            let mut st = State::default();
+            let mut written = 0u64;
+            if let Some(root) = old_manifest.first() {
+                let mut reader = FileStorageReader::new(*root);
+                while written < new_size {
+                    let want = (new_size - written).min(1 << 20) as usize;
+                    let chunk = {
+                        let mut io = self.io.lock().unwrap();
+                        reader.read_at(&mut *io, written, want).ok_or(libc::EIO)?
+                    };
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    let mut io = self.io.lock().unwrap();
+                    let mut fsa = FileStorageAdd::new(&mut *io);
+                    st.push_bytes(&mut fsa, &chunk);
+                    written += chunk.len() as u64;
+                }
+            }
+            let new_digest = self.end_padded(&st, written, new_size);
             self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
             self.meta.increment_refcount(&new_digest);
         }
@@ -1598,6 +1666,7 @@ impl SliceFsFilesystem {
                     byte_count: 0,
                     cas_committed: false,
                     last_committed_root: None,
+                    min_size: 0,
                 },
             );
 

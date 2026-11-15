@@ -1740,3 +1740,44 @@ fn test_setattr_size_and_mtime_together_keeps_explicit_mtime() {
     assert_eq!((m.size, m.mtime_sec, m.mtime_nsec), (3, 1_234_567_890, 5));
     assert_eq!(fs.test_getattr(ino).unwrap().mtime_sec, 1_234_567_890);
 }
+
+// ── setattr(size) while a write handle streams (macOS cp preallocates) ──────
+
+#[test]
+fn test_extend_without_fh_during_streaming_write_stays_streaming() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "pre", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"abcd").unwrap();
+    fs.test_setattr_size(ino, None, 10).unwrap(); // no fh, like the NFS SETATTR from cp
+    assert!(fs.test_is_streaming(fh), "extending must not materialize the file");
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 10);
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"abcd\0\0\0\0\0\0");
+    fs.test_write(fh, 4, b"XY").unwrap();
+    assert!(fs.test_is_streaming(fh));
+    fs.test_fsync(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"abcdXY\0\0\0\0");
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"abcdXY\0\0\0\0");
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 10);
+}
+
+#[test]
+fn test_write_past_extended_size_extends_further() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "pre2", 0o644, 0, 0, 0).unwrap();
+    fs.test_setattr_size(ino, Some(fh), 6).unwrap();
+    fs.test_write(fh, 0, b"0123456789").unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"0123456789");
+}
+
+#[test]
+fn test_closed_file_extend_and_shrink() {
+    let (fs, _dir) = fresh_fs();
+    let ino = existing_file(&fs, "c", b"hello");
+    fs.test_setattr_size(ino, None, 8).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"hello\0\0\0");
+    fs.test_setattr_size(ino, None, 2).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"he");
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 2);
+}

@@ -10,7 +10,7 @@
 
 use std::ffi::OsStr;
 use std::io;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileHandle, Filesystem, FopenFlags,
