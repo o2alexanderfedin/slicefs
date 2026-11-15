@@ -1307,11 +1307,7 @@ impl SliceFsFilesystem {
         let mut result = Vec::new();
         for entry in entries.iter().skip(offset as usize) {
             let kind = match self.meta.get_inode(entry.ino) {
-                Ok(m) => match m.mode & S_IFMT {
-                    S_IFDIR => FileType::Directory,
-                    S_IFLNK => FileType::Symlink,
-                    _ => FileType::RegularFile,
-                },
+                Ok(m) => inode_to_file_attr(&m).kind,
                 Err(_) => FileType::RegularFile,
             };
             result.push((entry.ino, kind, entry.name.clone()));

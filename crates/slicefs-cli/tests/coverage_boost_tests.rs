@@ -1359,3 +1359,18 @@ fn test_rename_over_socket_frees_it() {
     // The replaced socket inode must be deleted, not kept as a "directory".
     assert_eq!(fs.test_statfs_values().3, before - 1);
 }
+
+#[test]
+fn test_readdir_reports_special_file_types() {
+    let (fs, _dir) = fresh_fs();
+    fs.test_mknod(1, "fifo", 0o010_644, 0, 0, 0).unwrap();
+    fs.test_mknod(1, "sock", 0o140_644, 0, 0, 0).unwrap();
+    fs.test_mknod_rdev(1, "chr", 0o020_644, 5, 0, 0, 0).unwrap();
+    fs.test_mknod_rdev(1, "blk", 0o060_644, 6, 0, 0, 0).unwrap();
+    let kinds: std::collections::HashMap<String, FileType> = fs.test_readdir(1, 0).unwrap()
+        .into_iter().map(|(_, k, n)| (n, k)).collect();
+    assert_eq!(kinds["fifo"], FileType::NamedPipe);
+    assert_eq!(kinds["sock"], FileType::Socket);
+    assert_eq!(kinds["chr"], FileType::CharDevice);
+    assert_eq!(kinds["blk"], FileType::BlockDevice);
+}
