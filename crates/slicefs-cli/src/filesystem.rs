@@ -774,7 +774,9 @@ impl SliceFsFilesystem {
         // Read only the requested range through a resumable per-inode reader,
         // so a sequential read is O(n) overall instead of O(n^2).
         let mut readers = self.readers.lock().unwrap();
-        if readers.len() > 256 && !readers.contains_key(&ino) {
+        // Each reader keeps up to READ_WINDOW (4 MiB) of recent bytes: cap the
+        // cache at 32 inodes (at most 128 MiB).
+        if readers.len() >= 32 && !readers.contains_key(&ino) {
             readers.clear();
         }
         let reader = readers.entry(ino).or_insert_with(|| FileStorageReader::new(root));
