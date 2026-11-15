@@ -799,6 +799,11 @@ impl SliceFsFilesystem {
                         // Empty file -- nothing to flush
                         return Ok(());
                     }
+                    if s.cas_committed && s.last_committed_root.is_some() {
+                        // No write since the last fsync: the manifest is current.
+                        // (NFS sends a COMMIT per group of writes; skip the re-hash.)
+                        return Ok(());
+                    }
                     s.cas_committed = true;
                     let snap = match &s.write_mode {
                         WriteMode::Streaming { state, .. } => FsyncSnapshot::Streaming(state.clone()),

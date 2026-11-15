@@ -1656,3 +1656,21 @@ fn test_ftruncate_on_fresh_handle_keeps_existing_bytes() {
     fs.test_release(ino, fh).unwrap();
     assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"0123");
 }
+
+#[test]
+fn test_repeated_fsync_without_writes_keeps_content() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "r", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 4, b"5678").unwrap();
+    fs.test_write(fh, 0, b"1234").unwrap();
+    fs.test_write(fh, 2, b"xx").unwrap(); // overlap -> Buffered
+    fs.test_fsync(ino, fh).unwrap();
+    let root1 = fs.meta().get_manifest(ino).unwrap();
+    fs.test_fsync(ino, fh).unwrap();
+    assert_eq!(fs.meta().get_manifest(ino).unwrap(), root1);
+    fs.test_write(fh, 8, b"9").unwrap();
+    fs.test_fsync(ino, fh).unwrap();
+    assert_ne!(fs.meta().get_manifest(ino).unwrap(), root1, "a write after fsync must be flushed");
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"12xx56789");
+}
