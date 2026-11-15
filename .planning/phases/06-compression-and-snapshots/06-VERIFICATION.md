@@ -1,7 +1,7 @@
 ---
 phase: 06-compression-and-snapshots
 verified: 2026-03-29T21:00:00Z
-status: human_needed
+status: passed
 score: 5/5 success criteria verified
 re_verification:
   previous_status: gaps_found
@@ -128,3 +128,12 @@ All 5 requirements (COMP-01, COMP-02, SNAP-01, SNAP-02, SNAP-03) are satisfied. 
 
 _Verified: 2026-03-29T21:00:00Z_
 _Verifier: Claude (gsd-verifier)_
+
+## Re-verification (2026-11-14)
+
+Automated re-run by Claude on 2026-11-14 (not a human check), with the Docker Linux FUSE harness `scripts/docker-linux-test/` on branch `fix/pjdfstest-findings` (HEAD 0b01e76/0ec6d24).
+
+- **Human item 1 (compression ratio):** superseded. Phase 9 (v2.0) removed compression from the write path,
+  so the item no longer applies. Not counted as passed.
+- **Human item 2 (two snapshots, no double count):** `run.sh verify`, Phase 06 block: CAS bytes before, after
+  snapshot A and after snapshot B are equal (7117726 bytes each); `snapshot list` shows both: ok.

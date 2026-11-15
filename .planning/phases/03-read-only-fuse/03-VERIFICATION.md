@@ -1,7 +1,7 @@
 ---
 phase: 03-read-only-fuse
 verified: 2026-03-27T00:00:00Z
-status: human_needed
+status: passed
 score: 14/14 must-haves verified (automated)
 re_verification: false
 human_verification:
@@ -161,3 +161,15 @@ No gaps found. All automated must-haves are verified. The single outstanding ite
 
 _Verified: 2026-03-27_
 _Verifier: Claude (gsd-verifier)_
+
+## Re-verification (2026-11-14)
+
+Automated re-run by Claude on 2026-11-14 (not a human check), with the Docker Linux FUSE harness `scripts/docker-linux-test/` on branch `fix/pjdfstest-findings` (HEAD 0b01e76/0ec6d24).
+
+`run.sh verify`, Phase 03 block: a seeded tree (hello.txt, subdir/nested.txt, 64 KB random.bin) mounted
+read-only as a snapshot (`--snapshot base`):
+- ls, cat, stat (`regular file 14 640`) and `diff -r` against the source: ok
+- `touch` fails with "Read-only file system": ok
+- clean unmount, daemon exits: ok
+
+The mount is now read-write by default; the read-only path is a snapshot mount. The human item is covered.
