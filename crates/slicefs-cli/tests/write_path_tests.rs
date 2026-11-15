@@ -280,13 +280,10 @@ fn test_setattr_mtime_updates_timestamp() {
 }
 
 #[test]
-fn test_mknod_returns_enosys() {
+fn test_mknod_unknown_type_returns_einval() {
+    // 0o070_000 is not a valid file type.
     let (fs, _dir) = fresh_fs();
-    let result = fs.test_mknod(1, "fifo", 0o10644, 0, 0, 0);
-    assert!(result.is_err(), "mknod must return error");
-    // error code should be ENOSYS
-    let err = result.unwrap_err();
-    assert_eq!(err, libc::ENOSYS, "mknod must return ENOSYS");
+    assert_eq!(fs.test_mknod(1, "bad", 0o070_644, 0, 0, 0).unwrap_err(), libc::EINVAL);
 }
 
 /// Test that mknod creates a regular file that can then be opened and written to.

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7c97d02cb311aef76a4b01f3e7d4b1f309cb3943a4fa2a2895e5b6586108cb1d # shrinks to meta = InodeMeta { ino: 0, mode: 0, uid: 0, gid: 0, nlinks: 0, size: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, rdev: 1 }

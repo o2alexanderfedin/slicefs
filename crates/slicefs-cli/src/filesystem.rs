@@ -5,7 +5,7 @@
 //!
 //! Write callbacks (create, write, release, setattr) are fully implemented in Phase 4.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,8 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::util::ts;
 
-use blockset::{State, Tree, FileStorageAdd, file_storage_get, StorageAdd, Digest224};
-use tracing::debug;
+use blockset::{State, Tree, FileStorageAdd, FileStorageReader, file_storage_get, StorageAdd, Digest224};
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
@@ -25,6 +24,20 @@ const S_IFMT: u32 = 0o170_000;
 const S_IFREG: u32 = 0o100_000;
 const S_IFDIR: u32 = 0o040_000;
 const S_IFLNK: u32 = 0o120_000;
+const S_IFIFO: u32 = 0o010_000;
+const S_IFSOCK: u32 = 0o140_000;
+const S_IFCHR: u32 = 0o020_000;
+const S_IFBLK: u32 = 0o060_000;
+
+/// Largest file size SliceFS accepts (1 TiB). Larger truncate/write requests
+/// fail with EFBIG. Out-of-order writes and truncates still hold the whole file
+/// in memory, so without this cap a user-controlled size (for example
+/// `truncate -s 1P f`) aborts the daemon on allocation failure.
+pub const MAX_FILE_SIZE: u64 = 1 << 40;
+
+/// Most bytes of out-of-order writes a streaming handle holds while it waits
+/// for a gap to close. Beyond it the handle switches to Buffered mode.
+pub const REORDER_WINDOW: usize = 64 << 20;
 
 /// Write mode for an open file handle.
 ///
@@ -35,6 +48,10 @@ enum WriteMode {
     Streaming {
         state: State,
         next_expected_offset: u64,
+        /// Writes that arrived ahead of `next_expected_offset` (NFS sends
+        /// WRITEs in parallel). Non-overlapping; drained into `state` when
+        /// the gap closes. Bounded by `REORDER_WINDOW` bytes.
+        pending: BTreeMap<u64, Vec<u8>>,
     },
     Buffered {
         buf: Vec<u8>,
@@ -69,6 +86,10 @@ struct OpenFileState {
     /// The most recently committed Digest224 root. Used to decrement refcount
     /// when a new root is committed (fsync or release), preventing refcount leaks.
     last_committed_root: Option<Digest224>,
+    /// Size set by setattr while streaming (macOS cp extends the file before
+    /// writing it). Bytes between the stream end and this size are zeros;
+    /// they are added at fsync/release instead of materializing the file.
+    min_size: u64,
 }
 
 /// FUSE filesystem adapter backed by a [`DictMetadataStore`].
@@ -87,6 +108,14 @@ pub struct SliceFsFilesystem {
     pub(crate) meta: Arc<DictMetadataStore>,
     pub(crate) io: Arc<Mutex<StoreIo>>,
     open_files: Mutex<HashMap<u64, OpenFileState>>,
+    /// Resumable content readers per inode (see `FileStorageReader`). A reader
+    /// whose root no longer matches the file content is replaced on use.
+    readers: Mutex<HashMap<u64, FileStorageReader>>,
+    /// Every open handle (read-only too): fh -> ino. Used to keep an unlinked
+    /// inode alive until its last handle closes.
+    handles: Mutex<HashMap<u64, u64>>,
+    /// Inodes whose last link was removed while handles were still open.
+    orphans: Mutex<HashSet<u64>>,
     next_fh: AtomicU64,
     pub(crate) store_path: Option<PathBuf>,
     pub(crate) auto_snapshot: bool,
@@ -110,6 +139,9 @@ impl SliceFsFilesystem {
             meta: Arc::new(meta),
             io,
             open_files: Mutex::new(HashMap::new()),
+            readers: Mutex::new(HashMap::new()),
+            handles: Mutex::new(HashMap::new()),
+            orphans: Mutex::new(HashSet::new()),
             next_fh: AtomicU64::new(0),
             store_path,
             auto_snapshot: false,
@@ -132,37 +164,73 @@ impl SliceFsFilesystem {
     }
 }
 
+/// pwrite semantics on a buffer: zero-fill any gap, then copy `data` at `offset`.
+fn pwrite_into(buf: &mut Vec<u8>, offset: u64, data: &[u8]) {
+    let start = offset as usize;
+    let end = start + data.len();
+    if end > buf.len() {
+        buf.resize(end, 0);
+    }
+    buf[start..end].copy_from_slice(data);
+}
+
+/// Convert a `SystemTime` to `(seconds, nanoseconds)` since the epoch.
+/// Times before 1970 give negative seconds with a non-negative nanosecond part.
+pub fn system_time_to_pair(t: SystemTime) -> (i64, u32) {
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => (d.as_secs() as i64, d.subsec_nanos()),
+        Err(e) => {
+            let d = e.duration();
+            if d.subsec_nanos() == 0 {
+                (-(d.as_secs() as i64), 0)
+            } else {
+                (-(d.as_secs() as i64) - 1, 1_000_000_000 - d.subsec_nanos())
+            }
+        }
+    }
+}
+
+/// Inverse of [`system_time_to_pair`].
+pub fn pair_to_system_time(sec: i64, nsec: u32) -> SystemTime {
+    if sec >= 0 {
+        UNIX_EPOCH + Duration::new(sec as u64, nsec)
+    } else {
+        UNIX_EPOCH - Duration::new(sec.unsigned_abs(), 0) + Duration::new(0, nsec)
+    }
+}
+
+/// Current time as `(seconds, nanoseconds)`.
+fn now_pair() -> (i64, u32) {
+    system_time_to_pair(SystemTime::now())
+}
+
 /// Convert an [`InodeMeta`] to a fuser [`FileAttr`].
 ///
 /// Uses the `mode` field's type bits to determine `FileType`.
-/// `atime` is always `UNIX_EPOCH` (no-atime mode — deduplication workloads).
+/// `atime` is the stored access time (set by utimensat; reads do not update it).
 pub fn inode_to_file_attr(meta: &InodeMeta) -> FileAttr {
     let kind = match meta.mode & S_IFMT {
         S_IFDIR => FileType::Directory,
         S_IFLNK => FileType::Symlink,
+        S_IFIFO => FileType::NamedPipe,
+        S_IFSOCK => FileType::Socket,
+        S_IFCHR => FileType::CharDevice,
+        S_IFBLK => FileType::BlockDevice,
         _ => FileType::RegularFile,
     };
 
     let perm = (meta.mode & 0o7777) as u16;
     let blocks = (meta.size + 511) / 512;
 
-    let mtime = if meta.mtime_sec >= 0 {
-        UNIX_EPOCH + Duration::new(meta.mtime_sec as u64, meta.mtime_nsec)
-    } else {
-        UNIX_EPOCH - Duration::new((-meta.mtime_sec) as u64, 0)
-    };
-
-    let ctime = if meta.ctime_sec >= 0 {
-        UNIX_EPOCH + Duration::new(meta.ctime_sec as u64, meta.ctime_nsec)
-    } else {
-        UNIX_EPOCH - Duration::new((-meta.ctime_sec) as u64, 0)
-    };
+    let mtime = pair_to_system_time(meta.mtime_sec, meta.mtime_nsec);
+    let ctime = pair_to_system_time(meta.ctime_sec, meta.ctime_nsec);
+    let atime = pair_to_system_time(meta.atime_sec, meta.atime_nsec);
 
     FileAttr {
         ino: INodeNo(meta.ino),
         size: meta.size,
         blocks,
-        atime: UNIX_EPOCH,
+        atime,
         mtime,
         ctime,
         crtime: UNIX_EPOCH,
@@ -171,7 +239,7 @@ pub fn inode_to_file_attr(meta: &InodeMeta) -> FileAttr {
         nlink: meta.nlinks,
         uid: meta.uid,
         gid: meta.gid,
-        rdev: 0,
+        rdev: meta.rdev,
         blksize: 4096,
         flags: 0,
     }
@@ -186,6 +254,7 @@ pub fn meta_error_to_fuse_errno(e: &MetaError) -> Errno {
         MetaError::IsADirectory(_) => Errno::EISDIR,
         MetaError::NotEmpty(_) => Errno::ENOTEMPTY,
         MetaError::InvalidName(_) => Errno::EINVAL,
+        MetaError::NameTooLong(_) => Errno::ENAMETOOLONG,
         MetaError::Corrupted(_) => Errno::EIO,
         MetaError::Io(_) => Errno::EIO,
     }
@@ -201,6 +270,7 @@ pub fn meta_error_to_errno(e: &MetaError) -> i32 {
         MetaError::IsADirectory(_) => libc::EISDIR,
         MetaError::NotEmpty(_) => libc::ENOTEMPTY,
         MetaError::InvalidName(_) => libc::EINVAL,
+        MetaError::NameTooLong(_) => libc::ENAMETOOLONG,
         MetaError::Corrupted(_) => libc::EIO,
         MetaError::Io(_) => libc::EIO,
     }
@@ -245,8 +315,190 @@ impl SliceFsFilesystem {
         self.next_fh.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// Create a regular file inode in `parent_ino` directory, returning `(ino, fh)`.
+    /// Allocate a file handle and record it as open on `ino`.
+    fn open_handle(&self, ino: u64) -> u64 {
+        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
+        self.handles.lock().unwrap().insert(fh, ino);
+        fh
+    }
+
+    /// Forget handle `fh`. If it was the last handle of an orphaned inode,
+    /// reclaim the inode. A handle that is not open is ignored.
+    fn close_handle(&self, fh: u64) {
+        let ino = match self.handles.lock().unwrap().remove(&fh) {
+            Some(ino) => ino,
+            None => return,
+        };
+        let still_open = self.handles.lock().unwrap().values().any(|&i| i == ino);
+        if !still_open && self.orphans.lock().unwrap().remove(&ino) {
+            self.reclaim_inode(ino);
+        }
+    }
+
+    /// Delete a non-directory inode that has no links left and release its content.
+    fn reclaim_inode(&self, ino: u64) {
+        if let Ok(manifest) = self.meta.get_manifest(ino) {
+            for digest in &manifest {
+                self.meta.decrement_refcount(digest);
+            }
+        }
+        self.readers.lock().unwrap().remove(&ino);
+        let _ = self.meta.delete_inode(ino);
+    }
+
+    /// The last link of a non-directory inode was removed: reclaim it now, or
+    /// keep it as an orphan (nlink 0) while handles are still open.
+    fn drop_last_link(&self, mut inode: InodeMeta) -> Result<(), i32> {
+        let open = self.handles.lock().unwrap().values().any(|&i| i == inode.ino);
+        if open {
+            inode.nlinks = 0;
+            self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
+            self.orphans.lock().unwrap().insert(inode.ino);
+        } else {
+            self.reclaim_inode(inode.ino);
+        }
+        Ok(())
+    }
+
+    /// ftruncate(fd, 0) takes effect at once: empty the committed manifest and
+    /// release its root, unless that root is `released` (already released by
+    /// the handle). Later writes on the handle then start from an empty file.
+    fn clear_manifest(&self, ino: u64, released: Option<Digest224>) -> Result<(), i32> {
+        if let Ok(m) = self.meta.get_manifest(ino) {
+            if let Some(root) = m.first() {
+                if Some(*root) != released {
+                    self.meta.decrement_refcount(root);
+                }
+            }
+        }
+        self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)
+    }
+
+    /// Finish a clone of a streaming state as a stored root, first appending
+    /// zeros from `streamed` up to `min_size` (an extension set by setattr).
+    fn end_padded(&self, state: &State, streamed: u64, min_size: u64) -> Digest224 {
+        let mut st = state.clone();
+        let mut io = self.io.lock().unwrap();
+        let mut fsa = FileStorageAdd::new(&mut *io);
+        let mut left = min_size.saturating_sub(streamed);
+        let zeros = vec![0u8; 1 << 16];
+        while left > 0 {
+            let n = left.min(zeros.len() as u64) as usize;
+            st.push_bytes(&mut fsa, &zeros[..n]);
+            left -= n as u64;
+        }
+        let d256 = st.end(&mut fsa);
+        fsa.end(&d256)
+    }
+
+    /// The open write handle of `ino`, if any.
+    fn write_handle_of(&self, ino: u64) -> Option<u64> {
+        self.open_files.lock().unwrap().iter().find(|(_, s)| s.ino == ino).map(|(&fh, _)| fh)
+    }
+
+    /// True if the committed file has bytes (so a fresh stream would lose them).
+    fn has_content(&self, ino: u64) -> bool {
+        self.meta.get_inode(ino).map_or(false, |m| m.size > 0)
+            && self.meta.get_manifest(ino).map_or(false, |m| !m.is_empty())
+    }
+
+    /// Current content of a streaming handle: what it streamed so far, or the
+    /// committed file content if it has not streamed anything yet.
+    fn handle_content(&self, ino: u64, state: &State, streamed: u64) -> Vec<u8> {
+        if streamed > 0 {
+            let digest: Digest224 = {
+                let mut io = self.io.lock().unwrap();
+                let mut fsa = FileStorageAdd::new(&mut *io);
+                let d256 = state.clone().end(&mut fsa);
+                fsa.end(&d256)
+            };
+            let mut io = self.io.lock().unwrap();
+            file_storage_get(&mut *io, &digest).unwrap_or_default()
+        } else {
+            match self.meta.get_manifest(ino) {
+                Ok(m) if !m.is_empty() => {
+                    let mut io = self.io.lock().unwrap();
+                    file_storage_get(&mut *io, &m[0]).unwrap_or_default()
+                }
+                _ => Vec::new(),
+            }
+        }
+    }
+
+    /// If handle `fh` streams with out-of-order writes still pending, switch
+    /// it to Buffered mode so its content is complete (read, fsync, truncate,
+    /// release need the whole picture; gaps become zero bytes).
+    fn settle_pending(&self, fh: u64) {
+        let mut file_state = match self.open_files.lock().unwrap().remove(&fh) {
+            Some(s) => s,
+            None => return,
+        };
+        if let WriteMode::Streaming { state, next_expected_offset, pending } = &mut file_state.write_mode {
+            if !pending.is_empty() {
+                eprintln!("[{}][FUSE] settle: fh={} ino={} switches to Buffered (expected={} pending_chunks={})",
+                    ts(), fh, file_state.ino, *next_expected_offset, pending.len());
+                let mut buf = self.handle_content(file_state.ino, state, *next_expected_offset);
+                for (o, v) in std::mem::take(pending) {
+                    pwrite_into(&mut buf, o, &v);
+                }
+                let old_root = file_state.last_committed_root.take();
+                file_state.byte_count = file_state.byte_count.max(buf.len() as u64);
+                buf.resize(file_state.byte_count as usize, 0);
+                file_state.write_mode = WriteMode::Buffered { buf };
+                file_state.cas_committed = false;
+                if let Some(old) = old_root {
+                    self.meta.decrement_refcount(&old);
+                }
+            }
+        }
+        self.open_files.lock().unwrap().insert(fh, file_state);
+    }
+
+    /// Test hook: true if handle `fh` is still in Streaming mode.
+    pub fn test_is_streaming(&self, fh: u64) -> bool {
+        matches!(self.open_files.lock().unwrap().get(&fh).map(|s| &s.write_mode), Some(WriteMode::Streaming { .. }))
+    }
+
+    /// Set access, modification and change times of a new inode to now.
+    fn stamp_new(meta: &mut InodeMeta) {
+        let (sec, nsec) = now_pair();
+        meta.atime_sec = sec;
+        meta.atime_nsec = nsec;
+        meta.mtime_sec = sec;
+        meta.mtime_nsec = nsec;
+        meta.ctime_sec = sec;
+        meta.ctime_nsec = nsec;
+    }
+
+    /// A directory's entries changed: set its mtime and ctime to now.
+    fn touch_dir(&self, ino: u64) -> Result<(), i32> {
+        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        let (sec, nsec) = now_pair();
+        inode.mtime_sec = sec;
+        inode.mtime_nsec = nsec;
+        inode.ctime_sec = sec;
+        inode.ctime_nsec = nsec;
+        self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))
+    }
+
+    /// Add `delta` to the link count of `ino` (directory ".." bookkeeping).
+    fn adjust_nlinks(&self, ino: u64, delta: i32) -> Result<(), i32> {
+        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        inode.nlinks = (inode.nlinks as i64 + delta as i64).max(0) as u32;
+        self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))
+    }
+
+    /// Reclaim all orphans (used at unmount: no handle survives it).
+    fn reclaim_all_orphans(&self) {
+        let orphans: Vec<u64> = self.orphans.lock().unwrap().drain().collect();
+        for ino in orphans {
+            self.reclaim_inode(ino);
+        }
+    }
+
+
     /// Used by integration tests to bypass the FUSE request/reply layer.
+    /// Create a regular file inode in `parent_ino` directory, returning `(ino, fh)`.
     pub fn test_create(
         &self,
         parent_ino: u64,
@@ -257,19 +509,22 @@ impl SliceFsFilesystem {
         gid: u32,
     ) -> Result<(u64, u64), i32> {
         let file_mode = S_IFREG | (mode & !umask & 0o7777);
-        let file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
+        let mut file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
+        Self::stamp_new(&mut file_meta);
         let ino = self.meta.create_inode(&file_meta).map_err(|e| meta_error_to_errno(&e))?;
         if let Err(e) = self.meta.link(parent_ino, name, ino) {
             let _ = self.meta.delete_inode(ino);
             return Err(meta_error_to_errno(&e));
         }
-        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
+        self.touch_dir(parent_ino)?;
+        let fh = self.open_handle(ino);
         self.open_files.lock().unwrap().insert(fh, OpenFileState {
             ino,
-            write_mode: WriteMode::Streaming { state: State::default(), next_expected_offset: 0 },
+            write_mode: WriteMode::Streaming { state: State::default(), next_expected_offset: 0, pending: BTreeMap::new() },
             byte_count: 0,
             cas_committed: false,
             last_committed_root: None,
+            min_size: 0,
         });
         Ok((ino, fh))
     }
@@ -288,6 +543,9 @@ impl SliceFsFilesystem {
     /// Fallback transition: release open_files before io for materialization,
     /// re-acquire open_files to swap WriteMode. FUSE serializes per-fh writes.
     pub fn test_write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, i32> {
+        if offset.checked_add(data.len() as u64).map_or(true, |end| end > MAX_FILE_SIZE) {
+            return Err(libc::EFBIG);
+        }
         // Take the file state out of the map so we can release open_files before io.
         let mut file_state = match self.open_files.lock().unwrap().remove(&fh) {
             Some(s) => s,
@@ -296,69 +554,32 @@ impl SliceFsFilesystem {
         // open_files lock is released here.
 
         let result = match &mut file_state.write_mode {
-            WriteMode::Streaming { state, next_expected_offset } => {
-                if offset != *next_expected_offset {
-                    // Fallback from Streaming to Buffered mode
-                    let snapshot = state.clone();
-                    let byte_count = file_state.byte_count;
-                    let ino = file_state.ino;
-                    let old_root = file_state.last_committed_root.take();
+            WriteMode::Streaming { state, next_expected_offset, pending } => {
+                let end = offset + data.len() as u64;
+                // Streaming from scratch is only right when the file starts
+                // empty; otherwise unwritten parts must keep the old bytes.
+                let fresh = *next_expected_offset > 0 || !pending.is_empty() || !self.has_content(file_state.ino);
+                let overlaps_pending = pending.range(..end).next_back()
+                    .map_or(false, |(&o, v)| o + v.len() as u64 > offset);
+                let pending_bytes: usize = pending.values().map(Vec::len).sum();
 
-                    debug!(
-                        fh = fh, ino = ino,
-                        offset = offset, expected = byte_count,
-                        "fallback from Streaming to Buffered mode"
-                    );
-
-                    // Materialize current streaming content (or load from committed)
-                    let mut buf = if byte_count > 0 {
-                        let digest: Digest224 = {
-                            let mut io = self.io.lock().unwrap();
-                            let mut fsa = FileStorageAdd::new(&mut *io);
-                            let d256 = snapshot.end(&mut fsa);
-                            fsa.end(&d256)
-                        };
-                        let mut io = self.io.lock().unwrap();
-                        file_storage_get(&mut *io, &digest).unwrap_or_default()
-                    } else {
-                        // No streaming content yet -- load from committed manifest
-                        // (prevents existing file content loss per Research Pitfall 1)
-                        match self.meta.get_manifest(ino) {
-                            Ok(m) if !m.is_empty() => {
-                                let mut io = self.io.lock().unwrap();
-                                file_storage_get(&mut *io, &m[0]).unwrap_or_default()
-                            }
-                            _ => Vec::new(),
-                        }
-                    };
-
-                    // Apply pwrite semantics
-                    let end = offset as usize + data.len();
-                    if end > buf.len() {
-                        buf.resize(end, 0);
+                if fresh && offset == *next_expected_offset && !overlaps_pending {
+                    // In order: push, then drain pending writes that now line up.
+                    let mut chunks = vec![data.to_vec()];
+                    let mut next = end;
+                    while let Some((&o, _)) = pending.first_key_value() {
+                        if o != next { break; }
+                        let v = pending.remove(&o).unwrap();
+                        next += v.len() as u64;
+                        chunks.push(v);
                     }
-                    buf[offset as usize..end].copy_from_slice(data);
-
-                    // Swap to Buffered mode
-                    let buf_len = buf.len() as u64;
-                    file_state.write_mode = WriteMode::Buffered { buf };
-                    file_state.byte_count = buf_len;
-                    file_state.cas_committed = false;
-
-                    // Decrement old committed root
-                    if let Some(old) = old_root {
-                        self.meta.decrement_refcount(&old);
-                    }
-
-                    Ok(data.len() as u32)
-                } else {
-                    // Sequential write -- push bytes under io lock only (open_files not held)
                     let io_err = {
                         let mut io = self.io.lock().unwrap();
                         let mut fsa = FileStorageAdd::new(&mut *io);
-                        state.push_bytes(&mut fsa, data);
+                        for c in &chunks {
+                            state.push_bytes(&mut fsa, c);
+                        }
                         // Take error before fsa drops (drop may flush more nodes).
-                        // After drop, any additional errors are lost but the first is captured.
                         let err = fsa.take_io_error();
                         drop(fsa);
                         err
@@ -369,19 +590,45 @@ impl SliceFsFilesystem {
                         self.open_files.lock().unwrap().insert(fh, file_state);
                         return Err(libc::EIO);
                     }
-                    *next_expected_offset += data.len() as u64;
-                    file_state.byte_count += data.len() as u64;
+                    *next_expected_offset = next;
+                    file_state.byte_count = file_state.byte_count.max(next);
                     file_state.cas_committed = false;
+                    Ok(data.len() as u32)
+                } else if fresh && offset > *next_expected_offset && !overlaps_pending
+                    && pending_bytes + data.len() <= REORDER_WINDOW
+                {
+                    // Ahead of the stream: wait in the reorder window.
+                    pending.insert(offset, data.to_vec());
+                    file_state.byte_count = file_state.byte_count.max(end);
+                    file_state.cas_committed = false;
+                    Ok(data.len() as u32)
+                } else {
+                    // Random write: switch to Buffered mode.
+                    let ino = file_state.ino;
+                    eprintln!("[{}][FUSE] write: fh={} ino={} switches to Buffered (offset={} len={} expected={} pending={} fresh={} overlap={})",
+                        ts(), fh, ino, offset, data.len(), *next_expected_offset, pending_bytes, fresh, overlaps_pending);
+                    let mut buf = self.handle_content(ino, state, *next_expected_offset);
+                    if (buf.len() as u64) < file_state.min_size {
+                        buf.resize(file_state.min_size as usize, 0);
+                    }
+                    // Older pending writes first, then this (newest) write.
+                    for (o, v) in std::mem::take(pending) {
+                        pwrite_into(&mut buf, o, &v);
+                    }
+                    pwrite_into(&mut buf, offset, data);
+                    let old_root = file_state.last_committed_root.take();
+                    file_state.byte_count = buf.len() as u64;
+                    file_state.write_mode = WriteMode::Buffered { buf };
+                    file_state.cas_committed = false;
+                    if let Some(old) = old_root {
+                        self.meta.decrement_refcount(&old);
+                    }
                     Ok(data.len() as u32)
                 }
             }
             WriteMode::Buffered { buf } => {
                 // Standard pwrite into buffer -- no io lock needed
-                let end = offset as usize + data.len();
-                if end > buf.len() {
-                    buf.resize(end, 0);
-                }
-                buf[offset as usize..end].copy_from_slice(data);
+                pwrite_into(buf, offset, data);
                 file_state.byte_count = buf.len() as u64;
                 file_state.cas_committed = false;
                 Ok(data.len() as u32)
@@ -403,8 +650,16 @@ impl SliceFsFilesystem {
     /// Refcount lifecycle: decrements old committed root if different from new digest,
     /// increments new digest. Empty files (byte_count==0) set empty manifest without CAS push.
     pub fn test_release(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        let (write_mode, byte_count, cas_committed, last_committed_root) = match self.open_files.lock().unwrap().remove(&fh) {
-            Some(s) => (s.write_mode, s.byte_count, s.cas_committed, s.last_committed_root),
+        let result = self.finalize_write(ino, fh);
+        self.close_handle(fh);
+        result
+    }
+
+    /// Commit the write state of `fh` (if any) to the inode's manifest.
+    fn finalize_write(&self, ino: u64, fh: u64) -> Result<(), i32> {
+        self.settle_pending(fh);
+        let (write_mode, byte_count, cas_committed, last_committed_root, min_size) = match self.open_files.lock().unwrap().remove(&fh) {
+            Some(s) => (s.write_mode, s.byte_count, s.cas_committed, s.last_committed_root, s.min_size),
             None => return Ok(()), // Already closed
         };
 
@@ -427,11 +682,8 @@ impl SliceFsFilesystem {
 
         // Finalize to CAS based on write mode
         let new_digest: Digest224 = match write_mode {
-            WriteMode::Streaming { state, .. } => {
-                let mut io = self.io.lock().unwrap();
-                let mut fsa = FileStorageAdd::new(&mut *io);
-                let d256 = state.end(&mut fsa);
-                fsa.end(&d256)
+            WriteMode::Streaming { state, next_expected_offset, .. } => {
+                self.end_padded(&state, next_expected_offset, min_size)
             }
             WriteMode::Buffered { buf } => {
                 let mut io = self.io.lock().unwrap();
@@ -506,45 +758,71 @@ impl SliceFsFilesystem {
         // In Streaming mode, clone State for materialization.
         enum WriterSnapshot {
             Streaming(State),
-            Buffered(Vec<u8>),
         }
 
+        let pending_fh = self.open_files.lock().unwrap().iter()
+            .find(|(_, s)| s.ino == ino && matches!(&s.write_mode, WriteMode::Streaming { pending, .. } if !pending.is_empty()))
+            .map(|(&fh, _)| fh);
+        if let Some(fh) = pending_fh {
+            self.settle_pending(fh);
+        }
+        let mut logical_size: Option<u64> = None;
         let writer_snapshot: Option<WriterSnapshot> = {
             let open_files = self.open_files.lock().unwrap();
-            open_files.values()
-                .find(|s| s.ino == ino && s.byte_count > 0)
-                .map(|s| match &s.write_mode {
-                    WriteMode::Streaming { state, .. } => WriterSnapshot::Streaming(state.clone()),
-                    WriteMode::Buffered { buf } => WriterSnapshot::Buffered(buf.clone()),
-                })
+            match open_files.values().find(|s| s.ino == ino && s.byte_count > 0) {
+                // Buffered: copy only the requested range, not the whole buffer.
+                Some(OpenFileState { write_mode: WriteMode::Buffered { buf }, .. }) => {
+                    let start = (offset as usize).min(buf.len());
+                    let end = start.saturating_add(size as usize).min(buf.len());
+                    return Ok(buf[start..end].to_vec());
+                }
+                Some(OpenFileState { write_mode: WriteMode::Streaming { state, .. }, byte_count, .. }) => {
+                    logical_size = Some(*byte_count);
+                    Some(WriterSnapshot::Streaming(state.clone()))
+                }
+                None => None,
+            }
         };
         // open_files lock released
 
-        let raw_bytes: Vec<u8> = match writer_snapshot {
-            Some(WriterSnapshot::Buffered(buf)) => buf,
+        let root: Digest224 = match writer_snapshot {
             Some(WriterSnapshot::Streaming(snapshot)) => {
-                // Materialize uncommitted content via clone+end+file_storage_get
-                let digest: Digest224 = {
-                    let mut io = self.io.lock().unwrap();
-                    let mut fsa = FileStorageAdd::new(&mut *io);
-                    let d256 = snapshot.end(&mut fsa);
-                    fsa.end(&d256)
-                };
+                // Uncommitted content: finish a clone of the writer to get a root.
                 let mut io = self.io.lock().unwrap();
-                file_storage_get(&mut *io, &digest).ok_or(libc::EIO)?
+                let mut fsa = FileStorageAdd::new(&mut *io);
+                let d256 = snapshot.end(&mut fsa);
+                fsa.end(&d256)
             }
             None => {
                 // Fall back to committed manifest
                 let manifest = self.meta.get_manifest(ino).map_err(|_| libc::EIO)?;
                 if manifest.is_empty() { return Ok(vec![]); }
-                let mut io = self.io.lock().unwrap();
-                file_storage_get(&mut *io, &manifest[0]).ok_or(libc::EIO)?
+                manifest[0]
             }
         };
 
-        let start = (offset as usize).min(raw_bytes.len());
-        let end = (start + size as usize).min(raw_bytes.len());
-        Ok(raw_bytes[start..end].to_vec())
+        // Read only the requested range through a resumable per-inode reader,
+        // so a sequential read is O(n) overall instead of O(n^2).
+        let mut readers = self.readers.lock().unwrap();
+        // Each reader keeps up to READ_WINDOW (4 MiB) of recent bytes: cap the
+        // cache at 32 inodes (at most 128 MiB).
+        if readers.len() >= 32 && !readers.contains_key(&ino) {
+            readers.clear();
+        }
+        let reader = readers.entry(ino).or_insert_with(|| FileStorageReader::new(root));
+        if reader.root() != &root {
+            *reader = FileStorageReader::new(root);
+        }
+        let mut io = self.io.lock().unwrap();
+        let mut out = reader.read_at(&mut *io, offset, size as usize).ok_or(libc::EIO)?;
+        // Past the streamed bytes but inside a setattr extension: zeros.
+        if let Some(logical) = logical_size {
+            let want = logical.saturating_sub(offset).min(size as u64) as usize;
+            if out.len() < want {
+                out.resize(want, 0);
+            }
+        }
+        Ok(out)
     }
 
     /// Flush the streaming state for `fh` to CAS without closing the handle.
@@ -560,9 +838,10 @@ impl SliceFsFilesystem {
     /// If `fh` is not in `open_files` (read-only handle or invalid), returns Ok
     /// without error — fsync is a no-op for read-only handles.
     fn flush_buffer_for_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
+        self.settle_pending(fh);
         // 1. Clone state/buf snapshot under open_files lock
         enum FsyncSnapshot {
-            Streaming(State),
+            Streaming(State, u64, u64),
             Buffered(Vec<u8>),
         }
 
@@ -574,9 +853,15 @@ impl SliceFsFilesystem {
                         // Empty file -- nothing to flush
                         return Ok(());
                     }
+                    if s.cas_committed && s.last_committed_root.is_some() {
+                        // No write since the last fsync: the manifest is current.
+                        // (NFS sends a COMMIT per group of writes; skip the re-hash.)
+                        return Ok(());
+                    }
                     s.cas_committed = true;
                     let snap = match &s.write_mode {
-                        WriteMode::Streaming { state, .. } => FsyncSnapshot::Streaming(state.clone()),
+                        WriteMode::Streaming { state, next_expected_offset, .. } =>
+                            FsyncSnapshot::Streaming(state.clone(), *next_expected_offset, s.min_size),
                         WriteMode::Buffered { buf } => FsyncSnapshot::Buffered(buf.clone()),
                     };
                     (snap, s.byte_count, s.last_committed_root)
@@ -588,11 +873,8 @@ impl SliceFsFilesystem {
 
         // 2. Materialize under io lock
         let new_digest: Digest224 = match snapshot {
-            FsyncSnapshot::Streaming(state_snapshot) => {
-                let mut io = self.io.lock().unwrap();
-                let mut fsa = FileStorageAdd::new(&mut *io);
-                let d256 = state_snapshot.end(&mut fsa);
-                fsa.end(&d256)
+            FsyncSnapshot::Streaming(state_snapshot, streamed, min_size) => {
+                self.end_padded(&state_snapshot, streamed, min_size)
             }
             FsyncSnapshot::Buffered(buf_clone) => {
                 let mut io = self.io.lock().unwrap();
@@ -648,6 +930,42 @@ impl SliceFsFilesystem {
     /// - Streaming: materialize via clone+end, resize, repush into fresh State.
     /// - Buffered: simple buf.resize() (no CAS operations needed for non-zero truncate).
     pub fn test_setattr_size(&self, ino: u64, fh: Option<u64>, new_size: u64) -> Result<(), i32> {
+        if new_size > MAX_FILE_SIZE {
+            return Err(libc::EFBIG);
+        }
+        // A size change without a handle still belongs to an open write
+        // handle of the file (the NFS SETATTR from cp carries no handle).
+        let fh = fh.filter(|f| self.open_files.lock().unwrap().contains_key(f))
+            .or_else(|| self.write_handle_of(ino));
+        if let Some(fh_val) = fh {
+            // Extending a streaming handle: record the size, no materializing.
+            let extended = {
+                let mut open_files = self.open_files.lock().unwrap();
+                match open_files.get_mut(&fh_val) {
+                    Some(s) if matches!(s.write_mode, WriteMode::Streaming { .. })
+                        && new_size > 0 && new_size >= s.byte_count
+                        && (s.byte_count > 0 || !self.has_content(ino)) => {
+                        s.min_size = new_size;
+                        s.byte_count = new_size;
+                        s.cas_committed = false;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if extended {
+                let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
+                inode.size = new_size;
+                let (sec, nsec) = now_pair();
+                inode.mtime_sec = sec;
+                inode.mtime_nsec = nsec;
+                inode.ctime_sec = sec;
+                inode.ctime_nsec = nsec;
+                self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
+                return Ok(());
+            }
+            self.settle_pending(fh_val);
+        }
         // Case A: open file handle — truncate in-flight write state
         if let Some(fh_val) = fh {
             let mut open_files = self.open_files.lock().unwrap();
@@ -658,51 +976,45 @@ impl SliceFsFilesystem {
                             let old_root = s.last_committed_root.take();
                             *buf = Vec::new();
                             s.byte_count = 0;
+                            s.min_size = 0;
                             s.cas_committed = false;
                             drop(open_files);
 
                             if let Some(old) = old_root {
                                 self.meta.decrement_refcount(&old);
                             }
+                            self.clear_manifest(ino, old_root)?;
                         } else {
                             buf.resize(new_size as usize, 0);
                             s.byte_count = buf.len() as u64;
+                            s.min_size = 0;
                             s.cas_committed = false;
                             drop(open_files);
                         }
                     }
-                    WriteMode::Streaming { state, .. } => {
+                    WriteMode::Streaming { state, next_expected_offset, .. } => {
                         if new_size == 0 {
                             // Fast path: reset to empty Streaming State
                             let old_root = s.last_committed_root.take();
-                            s.write_mode = WriteMode::Streaming { state: State::default(), next_expected_offset: 0 };
+                            s.write_mode = WriteMode::Streaming { state: State::default(), next_expected_offset: 0, pending: BTreeMap::new() };
                             s.byte_count = 0;
+                            s.min_size = 0;
                             s.cas_committed = false;
                             drop(open_files);
 
                             if let Some(old) = old_root {
                                 self.meta.decrement_refcount(&old);
                             }
+                            self.clear_manifest(ino, old_root)?;
                         } else {
-                            // Materialize current content from in-progress State
+                            // Materialize current content (the file's existing
+                            // content if this handle has not streamed yet).
                             let snapshot = state.clone();
-                            let current_byte_count = s.byte_count;
+                            let streamed = *next_expected_offset;
                             let old_root = s.last_committed_root.take();
                             drop(open_files); // Release before io lock
 
-                            // Materialize to bytes
-                            let mut content: Vec<u8> = if current_byte_count == 0 {
-                                Vec::new()
-                            } else {
-                                let digest = {
-                                    let mut io = self.io.lock().unwrap();
-                                    let mut fsa = FileStorageAdd::new(&mut *io);
-                                    let d256 = snapshot.end(&mut fsa);
-                                    fsa.end(&d256)
-                                };
-                                let mut io = self.io.lock().unwrap();
-                                file_storage_get(&mut *io, &digest).unwrap_or_default()
-                            };
+                            let mut content: Vec<u8> = self.handle_content(ino, &snapshot, streamed);
 
                             // Truncate or zero-extend
                             content.resize(new_size as usize, 0);
@@ -722,8 +1034,10 @@ impl SliceFsFilesystem {
                                 s.write_mode = WriteMode::Streaming {
                                     state: new_state_and_count.0,
                                     next_expected_offset: new_state_and_count.1,
+                                    pending: BTreeMap::new(),
                                 };
                                 s.byte_count = new_state_and_count.1;
+                                s.min_size = 0;
                                 s.cas_committed = false;
                                 s.last_committed_root = None;
                             }
@@ -740,18 +1054,19 @@ impl SliceFsFilesystem {
                 // Update inode size immediately
                 let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
                 inode.size = new_size;
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or(Duration::ZERO);
-                inode.ctime_sec = now.as_secs() as i64;
-                inode.ctime_nsec = now.subsec_nanos();
+                // truncate changes the content: mtime and ctime both change.
+                let (sec, nsec) = now_pair();
+                inode.mtime_sec = sec;
+                inode.mtime_nsec = nsec;
+                inode.ctime_sec = sec;
+                inode.ctime_nsec = nsec;
                 self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
                 return Ok(());
             }
         }
 
-        // Case B: closed file (or open file without FATTR_FH) — read from CAS, truncate/extend,
-        // re-push. NotFound from get_manifest means the inode exists but has no content yet
+        // Case B: no open write handle — stream the committed content into a new
+        // tree, truncated or zero-extended. NotFound from get_manifest means the inode exists but has no content yet
         // (brand-new file created by create() before any write/release). Treat as empty content.
         let old_manifest = match self.meta.get_manifest(ino) {
             Ok(m) => m,
@@ -759,38 +1074,36 @@ impl SliceFsFilesystem {
             Err(_) => return Err(libc::EIO),
         };
 
-        // Read current content (raw bytes — v3 format, no compression)
-        let mut content: Vec<u8> = if old_manifest.is_empty() {
-            Vec::new()
-        } else {
-            let root_digest = old_manifest[0];
-            let raw_bytes: Vec<u8> = {
-                let mut io = self.io.lock().unwrap();
-                file_storage_get(&mut *io, &root_digest)
-                    .ok_or(libc::EIO)?
-            };
-            raw_bytes
-        };
-
         // Decrement old refcount
         if !old_manifest.is_empty() {
             self.meta.decrement_refcount(&old_manifest[0]);
         }
 
-        // Truncate or zero-extend
-        content.resize(new_size as usize, 0);
-
-        // Push new content (raw bytes directly — v3 format, no compression)
-        if content.is_empty() {
+        // Rebuild as a stream: the first new_size bytes of the old content
+        // (read in 1 MiB chunks), then zeros. Memory stays O(1 MiB), not O(file).
+        if new_size == 0 {
             self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
         } else {
-            let new_digest = {
-                let mut io = self.io.lock().unwrap();
-                let mut fsa = FileStorageAdd::new(&mut *io);
-                let digest = State::push_all(&mut fsa, &content);
-                drop(fsa);
-                digest
-            };
+            let mut st = State::default();
+            let mut written = 0u64;
+            if let Some(root) = old_manifest.first() {
+                let mut reader = FileStorageReader::new(*root);
+                while written < new_size {
+                    let want = (new_size - written).min(1 << 20) as usize;
+                    let chunk = {
+                        let mut io = self.io.lock().unwrap();
+                        reader.read_at(&mut *io, written, want).ok_or(libc::EIO)?
+                    };
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    let mut io = self.io.lock().unwrap();
+                    let mut fsa = FileStorageAdd::new(&mut *io);
+                    st.push_bytes(&mut fsa, &chunk);
+                    written += chunk.len() as u64;
+                }
+            }
+            let new_digest = self.end_padded(&st, written, new_size);
             self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
             self.meta.increment_refcount(&new_digest);
         }
@@ -798,11 +1111,12 @@ impl SliceFsFilesystem {
         // Update inode
         let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
         inode.size = new_size;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO);
-        inode.ctime_sec = now.as_secs() as i64;
-        inode.ctime_nsec = now.subsec_nanos();
+        // truncate changes the content: mtime and ctime both change.
+        let (sec, nsec) = now_pair();
+        inode.mtime_sec = sec;
+        inode.mtime_nsec = nsec;
+        inode.ctime_sec = sec;
+        inode.ctime_nsec = nsec;
         self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
         Ok(())
     }
@@ -865,18 +1179,35 @@ impl SliceFsFilesystem {
     ///
     /// Non-regular file types (device nodes, FIFOs) return ENOSYS.
     pub fn test_mknod(&self, parent: u64, name: &str, mode: u32, uid: u32, gid: u32, umask: u32) -> Result<u64, i32> {
-        let file_type = mode & S_IFMT;
-        if file_type != S_IFREG && file_type != 0 {
-            return Err(libc::ENOSYS);
+        self.test_mknod_rdev(parent, name, mode, 0, uid, gid, umask).map(|(ino, _)| ino)
+    }
+
+    /// mknod with a device number. Creates regular files, FIFOs, sockets and
+    /// character/block device nodes (the kernel implements their I/O; only
+    /// the type bits and `rdev` are stored). Returns `(ino, InodeMeta)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn test_mknod_rdev(
+        &self, parent: u64, name: &str, mode: u32, rdev: u32, uid: u32, gid: u32, umask: u32,
+    ) -> Result<(u64, InodeMeta), i32> {
+        let file_type = match mode & S_IFMT {
+            0 | S_IFREG => S_IFREG,
+            t @ (S_IFIFO | S_IFSOCK | S_IFCHR | S_IFBLK) => t,
+            _ => return Err(libc::EINVAL),
+        };
+        let file_mode = file_type | (mode & !umask & 0o7777);
+        let mut file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
+        Self::stamp_new(&mut file_meta);
+        if file_type == S_IFCHR || file_type == S_IFBLK {
+            file_meta.rdev = rdev;
         }
-        let file_mode = S_IFREG | (mode & !umask & 0o7777);
-        let file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
         let ino = self.meta.create_inode(&file_meta).map_err(|e| meta_error_to_errno(&e))?;
         if let Err(e) = self.meta.link(parent, name, ino) {
             let _ = self.meta.delete_inode(ino);
             return Err(meta_error_to_errno(&e));
         }
-        Ok(ino)
+        self.touch_dir(parent)?;
+        let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        Ok((ino, meta))
     }
 
     /// Return `(blocks, bfree, bavail, files, ffree, bsize)` — the same values
@@ -954,10 +1285,13 @@ impl SliceFsFilesystem {
         gid: u32,
     ) -> Result<u64, i32> {
         let dir_mode = S_IFDIR | (mode & !umask & 0o7777);
-        let dir_meta = InodeMeta::new_directory(0, uid, gid, dir_mode);
-        self.meta
+        let mut dir_meta = InodeMeta::new_directory(0, uid, gid, dir_mode);
+        Self::stamp_new(&mut dir_meta);
+        let ino = self.meta
             .create_directory(parent_ino, name, &dir_meta)
-            .map_err(|e| meta_error_to_errno(&e))
+            .map_err(|e| meta_error_to_errno(&e))?;
+        self.touch_dir(parent_ino)?;
+        Ok(ino)
     }
 
     /// Remove empty directory `name` from `parent_ino`.
@@ -973,7 +1307,7 @@ impl SliceFsFilesystem {
 
         // Verify it is a directory
         let inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-        if inode.mode & S_IFDIR == 0 {
+        if inode.mode & S_IFMT != S_IFDIR {
             return Err(libc::ENOTDIR);
         }
 
@@ -1003,6 +1337,7 @@ impl SliceFsFilesystem {
             parent_inode.nlinks -= 1;
             self.meta.update_inode(&parent_inode).map_err(|e| meta_error_to_errno(&e))?;
         }
+        self.touch_dir(parent_ino)?;
         Ok(())
     }
 
@@ -1025,7 +1360,7 @@ impl SliceFsFilesystem {
         let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
 
         // Must not be a directory
-        if inode.mode & S_IFDIR != 0 {
+        if inode.mode & S_IFMT == S_IFDIR {
             return Err(libc::EISDIR);
         }
 
@@ -1040,18 +1375,17 @@ impl SliceFsFilesystem {
         }
 
         if inode.nlinks == 0 {
-            // Decrement content refcounts
-            if let Ok(manifest) = self.meta.get_manifest(ino) {
-                for digest in &manifest {
-                    self.meta.decrement_refcount(digest);
-                }
-            }
-            // Delete inode
-            let _ = self.meta.delete_inode(ino);
+            // Reclaim now, or keep as an orphan while handles are open.
+            self.drop_last_link(inode)?;
         } else {
-            // Hard links still exist — just persist the decremented nlinks
+            // Hard links still exist — persist the decremented nlinks; the
+            // link count changed, so ctime changes too.
+            let (sec, nsec) = now_pair();
+            inode.ctime_sec = sec;
+            inode.ctime_nsec = nsec;
             self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
         }
+        self.touch_dir(parent_ino)?;
         Ok(())
     }
 
@@ -1064,7 +1398,7 @@ impl SliceFsFilesystem {
         let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
 
         // Disallow hard links to directories
-        if inode.mode & S_IFDIR != 0 {
+        if inode.mode & S_IFMT == S_IFDIR {
             return Err(libc::EPERM);
         }
 
@@ -1081,6 +1415,7 @@ impl SliceFsFilesystem {
         inode.ctime_sec = now.as_secs() as i64;
         inode.ctime_nsec = now.subsec_nanos();
         self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
+        self.touch_dir(newparent_ino)?;
 
         Ok(ino)
     }
@@ -1108,38 +1443,59 @@ impl SliceFsFilesystem {
         let src_ino = self
             .meta
             .lookup(parent_ino, name)
-            .map_err(|_| libc::ENOENT)?;
+            .map_err(|e| meta_error_to_errno(&e))?;
+        let src_is_dir = self.meta.get_inode(src_ino).map_err(|e| meta_error_to_errno(&e))?
+            .mode & S_IFMT == S_IFDIR;
 
         // RENAME_NOREPLACE: fail if target already exists
-        let target_ino = self.meta.lookup(newparent_ino, newname).ok();
-        if flags & 1 != 0 {
-            if target_ino.is_some() {
-                return Err(libc::EEXIST);
-            }
+        let target_ino = match self.meta.lookup(newparent_ino, newname) {
+            Ok(ino) => Some(ino),
+            Err(MetaError::NameTooLong(n)) => return Err(meta_error_to_errno(&MetaError::NameTooLong(n))),
+            Err(_) => None,
+        };
+        if flags & 1 != 0 && target_ino.is_some() {
+            return Err(libc::EEXIST);
         }
 
-        // If target exists and we're doing a normal rename, remove the old target
         if let Some(dst_ino) = target_ino {
+            // POSIX: old and new name the same file -> do nothing.
+            if dst_ino == src_ino {
+                return Ok(());
+            }
             let dst_inode = self.meta.get_inode(dst_ino).map_err(|e| meta_error_to_errno(&e))?;
+            let dst_is_dir = dst_inode.mode & S_IFMT == S_IFDIR;
+            match (src_is_dir, dst_is_dir) {
+                (true, false) => return Err(libc::ENOTDIR),
+                (false, true) => return Err(libc::EISDIR),
+                _ => {}
+            }
+            if dst_is_dir {
+                let entries = self.meta.list_directory(dst_ino).map_err(|e| meta_error_to_errno(&e))?;
+                if entries.iter().any(|e| e.name != "." && e.name != "..") {
+                    return Err(libc::ENOTEMPTY);
+                }
+            }
             self.meta
                 .unlink(newparent_ino, newname)
                 .map_err(|e| meta_error_to_errno(&e))?;
-            // Manage nlinks for the displaced target
-            let new_nlinks = dst_inode.nlinks.saturating_sub(1);
-            if new_nlinks == 0 && dst_inode.mode & S_IFDIR == 0 {
-                // Decrement refcounts and delete inode for regular files
-                if let Ok(manifest) = self.meta.get_manifest(dst_ino) {
-                    for digest in &manifest {
-                        self.meta.decrement_refcount(digest);
-                    }
+            if dst_is_dir {
+                // The replaced empty directory goes away with its ".." link.
+                self.meta.delete_inode(dst_ino).map_err(|e| meta_error_to_errno(&e))?;
+                self.adjust_nlinks(newparent_ino, -1)?;
+            } else {
+                let new_nlinks = dst_inode.nlinks.saturating_sub(1);
+                if new_nlinks == 0 {
+                    // Reclaim now, or keep as an orphan while handles are open.
+                    self.drop_last_link(dst_inode.clone())?;
+                } else {
+                    let mut updated_dst = dst_inode.clone();
+                    updated_dst.nlinks = new_nlinks;
+                    let (sec, nsec) = now_pair();
+                    updated_dst.ctime_sec = sec;
+                    updated_dst.ctime_nsec = nsec;
+                    self.meta.update_inode(&updated_dst).map_err(|e| meta_error_to_errno(&e))?;
                 }
-                let _ = self.meta.delete_inode(dst_ino);
-            } else if new_nlinks > 0 {
-                let mut updated_dst = dst_inode.clone();
-                updated_dst.nlinks = new_nlinks;
-                let _ = self.meta.update_inode(&updated_dst);
             }
-            // Directories are left orphaned (no directory hard links in our impl)
         }
 
         // Link source at new location and unlink from old location
@@ -1149,6 +1505,17 @@ impl SliceFsFilesystem {
         self.meta
             .unlink(parent_ino, name)
             .map_err(|e| meta_error_to_errno(&e))?;
+
+        // A directory moved to another parent: fix its ".." and both parents' nlink.
+        if src_is_dir && parent_ino != newparent_ino {
+            self.meta.set_parent(src_ino, newparent_ino).map_err(|e| meta_error_to_errno(&e))?;
+            self.adjust_nlinks(parent_ino, -1)?;
+            self.adjust_nlinks(newparent_ino, 1)?;
+        }
+        self.touch_dir(parent_ino)?;
+        if newparent_ino != parent_ino {
+            self.touch_dir(newparent_ino)?;
+        }
 
         // Update ctime on moved inode
         let mut src_inode = self.meta.get_inode(src_ino).map_err(|e| meta_error_to_errno(&e))?;
@@ -1175,7 +1542,7 @@ impl SliceFsFilesystem {
         gid: u32,
     ) -> Result<u64, i32> {
         let target_bytes = target.as_bytes();
-        let symlink_meta = InodeMeta {
+        let mut symlink_meta = InodeMeta {
             ino: 0,
             mode: S_IFLNK | 0o777,
             uid,
@@ -1186,7 +1553,9 @@ impl SliceFsFilesystem {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
+            rdev: 0, atime_sec: 0, atime_nsec: 0,
         };
+        Self::stamp_new(&mut symlink_meta);
 
         // Create inode
         let ino = self
@@ -1199,6 +1568,7 @@ impl SliceFsFilesystem {
             let _ = self.meta.delete_inode(ino);
             return Err(meta_error_to_errno(&e));
         }
+        self.touch_dir(parent_ino)?;
 
         // Store target as CAS content (raw bytes — v3 format, no compression)
         let content_digest = {
@@ -1242,13 +1612,25 @@ impl SliceFsFilesystem {
 
     /// Get inode attributes. Returns `InodeMeta` on success.
     pub fn test_getattr(&self, ino: u64) -> Result<InodeMeta, MetaError> {
-        self.meta.get_inode(ino)
+        let mut meta = self.meta.get_inode(ino)?;
+        self.overlay_open_size(&mut meta);
+        Ok(meta)
+    }
+
+    /// Bytes written through an open handle stay in its write state until
+    /// release; report that size so fstat/stat during a write are correct.
+    fn overlay_open_size(&self, meta: &mut InodeMeta) {
+        let open_files = self.open_files.lock().unwrap();
+        if let Some(s) = open_files.values().find(|s| s.ino == meta.ino && s.byte_count > 0) {
+            meta.size = s.byte_count;
+        }
     }
 
     /// Lookup a name in a directory. Returns `(child_ino, InodeMeta)` on success.
     pub fn test_lookup(&self, parent: u64, name: &str) -> Result<(u64, InodeMeta), i32> {
         let child_ino = self.meta.lookup(parent, name).map_err(|e| meta_error_to_errno(&e))?;
-        let meta = self.meta.get_inode(child_ino).map_err(|e| meta_error_to_errno(&e))?;
+        let mut meta = self.meta.get_inode(child_ino).map_err(|e| meta_error_to_errno(&e))?;
+        self.overlay_open_size(&mut meta);
         Ok((child_ino, meta))
     }
 
@@ -1259,11 +1641,7 @@ impl SliceFsFilesystem {
         let mut result = Vec::new();
         for entry in entries.iter().skip(offset as usize) {
             let kind = match self.meta.get_inode(entry.ino) {
-                Ok(m) => match m.mode & S_IFMT {
-                    S_IFDIR => FileType::Directory,
-                    S_IFLNK => FileType::Symlink,
-                    _ => FileType::RegularFile,
-                },
+                Ok(m) => inode_to_file_attr(&m).kind,
                 Err(_) => FileType::RegularFile,
             };
             result.push((entry.ino, kind, entry.name.clone()));
@@ -1277,17 +1655,18 @@ impl SliceFsFilesystem {
         let acc_mode = flags & libc::O_ACCMODE;
         let is_write = acc_mode == libc::O_WRONLY || acc_mode == libc::O_RDWR;
 
-        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
+        let fh = self.open_handle(ino);
 
         if is_write {
             self.open_files.lock().unwrap().insert(
                 fh,
                 OpenFileState {
                     ino,
-                    write_mode: WriteMode::Streaming { state: State::default(), next_expected_offset: 0 },
+                    write_mode: WriteMode::Streaming { state: State::default(), next_expected_offset: 0, pending: BTreeMap::new() },
                     byte_count: 0,
                     cas_committed: false,
                     last_committed_root: None,
+                    min_size: 0,
                 },
             );
 
@@ -1295,6 +1674,7 @@ impl SliceFsFilesystem {
             if flags & libc::O_TRUNC != 0 {
                 if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
                     self.open_files.lock().unwrap().remove(&fh);
+                    self.close_handle(fh);
                     return Err(e);
                 }
             }
@@ -1342,7 +1722,42 @@ impl SliceFsFilesystem {
         fh: Option<u64>,
         mtime: Option<(i64, u32)>,
     ) -> Result<InodeMeta, i32> {
+        self.test_setattr_full(ino, mode, uid, gid, size, fh, None, mtime)
+    }
+
+    /// Set only access and modification times (utimensat).
+    pub fn test_setattr_times(
+        &self,
+        ino: u64,
+        atime: Option<(i64, u32)>,
+        mtime: Option<(i64, u32)>,
+    ) -> Result<InodeMeta, i32> {
+        self.test_setattr_full(ino, None, None, None, None, None, atime, mtime)
+    }
+
+    /// setattr with every supported field.
+    #[allow(clippy::too_many_arguments)]
+    pub fn test_setattr_full(
+        &self,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        fh: Option<u64>,
+        atime: Option<(i64, u32)>,
+        mtime: Option<(i64, u32)>,
+    ) -> Result<InodeMeta, i32> {
+        // Size first: it rewrites the inode (size, mtime, ctime); the other
+        // fields of the same request are applied on top of the result.
+        if let Some(new_size) = size {
+            self.test_setattr_size(ino, fh, new_size)?;
+        }
         let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        if let Some((sec, nsec)) = atime {
+            inode.atime_sec = sec;
+            inode.atime_nsec = nsec;
+        }
 
         if let Some(m) = mode {
             inode.mode = (inode.mode & S_IFMT) | (m & 0o7777);
@@ -1356,13 +1771,6 @@ impl SliceFsFilesystem {
         if let Some((sec, nsec)) = mtime {
             inode.mtime_sec = sec;
             inode.mtime_nsec = nsec;
-        }
-        if let Some(new_size) = size {
-            if let Err(e) = self.test_setattr_size(ino, fh, new_size) {
-                return Err(e);
-            }
-            // Re-load inode after size change
-            inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
         }
 
         // Always update ctime
@@ -1398,6 +1806,7 @@ impl SliceFsFilesystem {
         if flags & libc::O_TRUNC != 0 {
             if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
                 self.open_files.lock().unwrap().remove(&fh);
+                self.close_handle(fh);
                 return Err(e);
             }
         }
@@ -1430,9 +1839,7 @@ impl SliceFsFilesystem {
         gid: u32,
         umask: u32,
     ) -> Result<(u64, InodeMeta), i32> {
-        let ino = self.test_mknod(parent, name, mode, uid, gid, umask)?;
-        let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-        Ok((ino, meta))
+        self.test_mknod_rdev(parent, name, mode, 0, uid, gid, umask)
     }
 
     /// Create a symlink and return `(ino, InodeMeta)`.
@@ -1470,7 +1877,8 @@ impl SliceFsFilesystem {
     /// Release with read-only handle check (matches FUSE release behavior).
     pub fn test_release_full(&self, ino: u64, fh: u64) -> Result<(), i32> {
         if !self.open_files.lock().unwrap().contains_key(&fh) {
-            return Ok(()); // read-only handle, no write state
+            self.close_handle(fh); // read-only handle, no write state
+            return Ok(());
         }
         self.test_release(ino, fh)
     }
@@ -1478,6 +1886,8 @@ impl SliceFsFilesystem {
     /// Destroy: commit, optionally snapshot, and shut down WAL.
     /// Returns true if commit succeeded.
     pub fn test_destroy(&self) -> bool {
+        // No handle survives unmount: unlinked-but-open inodes go away now.
+        self.reclaim_all_orphans();
         if let Ok(_root) = self.meta.commit() {
             if self.auto_snapshot {
                 let _ = self.meta.create_snapshot(Some("auto-unmount".to_string()));
@@ -1939,6 +2349,65 @@ mod tests {
     }
 
     #[test]
+    fn test_sequential_chunked_read_of_large_file() {
+        let (fs, _dir) = fresh_fs();
+        let data: Vec<u8> = (0..1_500_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let (ino, fh) = fs.test_create(1, "big", 0o644, 0, 0, 0).unwrap();
+        for (i, c) in data.chunks(65536).enumerate() {
+            fs.test_write(fh, (i * 65536) as u64, c).unwrap();
+        }
+        // Read while the write handle is open (streaming snapshot root).
+        assert_eq!(fs.test_read(ino, 1_000_000, 10).unwrap(), &data[1_000_000..1_000_010]);
+        fs.test_release(ino, fh).unwrap();
+        let mut out = Vec::new();
+        loop {
+            let chunk = fs.test_read(ino, out.len() as u64, 131072).unwrap();
+            if chunk.is_empty() { break; }
+            out.extend(chunk);
+        }
+        assert_eq!(out, data);
+        // Backwards seek after the sequential pass.
+        assert_eq!(fs.test_read(ino, 7, 5).unwrap(), &data[7..12]);
+    }
+
+    #[test]
+    fn test_read_sees_new_content_after_rewrite() {
+        let (fs, _dir) = fresh_fs();
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        fs.test_write(fh, 0, b"first version").unwrap();
+        fs.test_release(ino, fh).unwrap();
+        assert_eq!(fs.test_read(ino, 0, 5).unwrap(), b"first");
+        let fh = fs.test_open(ino, libc::O_WRONLY | libc::O_TRUNC).unwrap().0;
+        fs.test_write(fh, 0, b"second").unwrap();
+        fs.test_release(ino, fh).unwrap();
+        assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"second");
+    }
+
+    #[test]
+    fn test_setattr_size_beyond_max_returns_efbig() {
+        // pjdfstest truncate/12: a huge length must fail with EFBIG, not abort the daemon.
+        let (fs, _dir) = fresh_fs();
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        fs.test_write(fh, 0, b"hi").unwrap();
+        assert_eq!(fs.test_setattr_size(ino, Some(fh), 999_999_999_999_999), Err(libc::EFBIG));
+        fs.test_release(ino, fh).unwrap();
+        assert_eq!(fs.test_setattr_size(ino, None, 999_999_999_999_999), Err(libc::EFBIG));
+        assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"hi");
+    }
+
+    #[test]
+    fn test_write_beyond_max_returns_efbig() {
+        let (fs, _dir) = fresh_fs();
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        fs.test_write(fh, 0, b"hi").unwrap();
+        assert_eq!(fs.test_write(fh, 999_999_999_999_999, b"x"), Err(libc::EFBIG));
+        // The handle is still usable after the rejected write.
+        assert_eq!(fs.test_write(fh, 2, b"!"), Ok(1));
+        fs.test_release(ino, fh).unwrap();
+        assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"hi!");
+    }
+
+    #[test]
     fn test_setattr_size_extend_closed_file() {
         let (fs, _dir) = fresh_fs();
         let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
@@ -2065,11 +2534,11 @@ mod tests {
     }
 
     #[test]
-    fn test_mknod_non_regular_file_returns_enosys() {
+    fn test_mknod_char_device_succeeds() {
         let (fs, _dir) = fresh_fs();
         // S_IFCHR = 0o020_000
-        let err = fs.test_mknod(1, "chardev", 0o020_000 | 0o644, 0, 0, 0).unwrap_err();
-        assert_eq!(err, libc::ENOSYS);
+        let (_ino, meta) = fs.test_mknod_rdev(1, "chardev", 0o020_000 | 0o644, 7, 0, 0, 0).unwrap();
+        assert_eq!(meta.rdev, 7);
     }
 
     // ── test_write / test_read pipeline ──────────────────────────────────────
@@ -2405,6 +2874,7 @@ mod tests {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
+            rdev: 0, atime_sec: 0, atime_nsec: 0,
         };
         let attr = inode_to_file_attr(&meta);
         assert_eq!(attr.kind, FileType::Symlink);
@@ -2424,6 +2894,7 @@ mod tests {
             mtime_nsec: 0,
             ctime_sec: -50,
             ctime_nsec: 0,
+            rdev: 0, atime_sec: 0, atime_nsec: 0,
         };
         let attr = inode_to_file_attr(&meta);
         // Should not panic for negative timestamps
@@ -2444,6 +2915,7 @@ mod tests {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
+            rdev: 0, atime_sec: 0, atime_nsec: 0,
         };
         let attr = inode_to_file_attr(&meta);
         // blocks = (1024 + 511) / 512 = 2
@@ -2725,7 +3197,7 @@ mod tests {
             ino: 0,
             mode: S_IFLNK | 0o777,
             uid: 0, gid: 0, nlinks: 1, size: 0,
-            mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0,
+            mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, rdev: 0, atime_sec: 0, atime_nsec: 0,
         };
         let ino = fs.meta.create_inode(&sym_meta).unwrap();
         fs.meta.link(1, "emptylink", ino).unwrap();

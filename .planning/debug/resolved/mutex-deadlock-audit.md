@@ -1,8 +1,8 @@
 ---
-status: awaiting_human_verify
+status: resolved
 trigger: "mutex-deadlock-audit: 14 zombie mount processes, deadlock suspected in Mutex usage"
 created: 2026-03-30T00:00:00Z
-updated: 2026-03-30T00:01:00Z
+updated: 2026-11-14T00:00:00Z
 ---
 
 ## Current Focus
@@ -87,3 +87,20 @@ verification: cargo build succeeds, all 548 tests pass (0 failures)
 files_changed:
 - crates/metadata/src/store.rs (create_directory: moved dir_data lookup before io lock)
 - crates/slicefs-cli/src/filesystem.rs (test_write: remove-process-reinsert pattern to avoid nested locks)
+
+## Verification (2026-11-14, automated run by Claude, not a human check)
+
+Run on a live FUSE-T 1.2.9 mount with the `develop` build (after v2.1.0).
+The smoke test (read, echo-write, cp 3 MB twice, readback, mkdir+mv, chmod,
+truncate, xattr, rm, unmount) passed on all three backends: NFS, SMB, FSKit.
+No write hangs. The code fixes recorded above are present in the code. The
+remaining root cause of the FUSE-T hang was the fuser socket bug, fixed in
+v2.1.0 (vendored patched fuser 0.18).
+
+Limits of this check: the smoke test runs for about 10 seconds, so it does not
+exercise "mount becomes unresponsive over time". Two `slicefs mount` processes
+from a pre-fix FUSE-T run (started about 2026-11-13, before the fuser fix) are
+still stuck in state U on the dev Mac and need a reboot to clear. No new stuck
+process came from runs with the fixed build. The remaining lock-contention work
+(commit() holds the io lock while it serializes all maps) is tracked in GitHub
+issues #20 and #21.

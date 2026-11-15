@@ -1,7 +1,7 @@
 ---
 phase: 05-crash-safety-and-gc
 verified: 2026-03-27T00:00:00Z
-status: human_needed
+status: passed
 score: 12/12 must-haves verified
 re_verification: false
 human_verification:
@@ -122,3 +122,15 @@ The one outstanding item is a live FUSE kill -9 crash test on Linux. Per the ver
 
 _Verified: 2026-03-27_
 _Verifier: Claude (gsd-verifier)_
+
+## Re-verification (2026-11-14)
+
+Automated re-run by Claude on 2026-11-14 (not a human check), with the Docker Linux FUSE harness `scripts/docker-linux-test/` on branch `fix/pjdfstest-findings` (HEAD 0b01e76/0ec6d24).
+
+`run.sh verify`, Phase 05 block (Linux FUSE, `kill -9` of the daemon during a 64 MB write):
+- remount after the crash: ok; data committed by an earlier clean unmount: intact; seeded data: intact
+- the partially written file: absent (consistent); writes after the crash: ok; `slicefs scrub`: clean
+
+Known gap, recorded and not counted as passed: a file written and fsynced in the killed session is lost,
+because metadata commits only at unmount or snapshot (GitHub issues #18, #20). The human item as written
+("committed data intact, no corruption") passes. This covers a daemon kill, not power loss.
