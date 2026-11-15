@@ -19,3 +19,5 @@ $B unmount $R/m >/dev/null 2>&1
 grep -E "^Failed [0-9]+/[0-9]+ subtests|^Files=|^Result" $R/prove.txt
 echo "--- failing test files:"; grep -E "^/opt.*\(Wstat|Failed:? " $R/prove.txt | head -60
 awk '/Test Summary Report/,0' $R/prove.txt | grep -E "^/opt" | sed 's#/opt/pjdfstest/tests/##' | head -80
+# Exit status: 0 only if prove reported PASS for the main run.
+grep -q "^Result: PASS" $R/prove.txt
