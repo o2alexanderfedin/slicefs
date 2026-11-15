@@ -164,6 +164,38 @@ impl SliceFsFilesystem {
     }
 }
 
+/// Push zeros into the stream until it reaches offset `to` (64 KiB at a time).
+fn push_zeros(state: &mut State, fsa: &mut impl blockset::StorageAdd, next: &mut u64, to: u64) {
+    const ZEROS: [u8; 1 << 16] = [0u8; 1 << 16];
+    while *next < to {
+        let n = (to - *next).min(ZEROS.len() as u64) as usize;
+        state.push_bytes(fsa, &ZEROS[..n]);
+        *next += n as u64;
+    }
+}
+
+/// Push the pending writes that start before `upto` into the stream in offset
+/// order, with zeros in the gaps, then zeros up to `upto`. Memory stays O(1)
+/// in the gap size. Only for a fresh stream, where unwritten bytes read as zero.
+fn fill_stream(
+    state: &mut State,
+    fsa: &mut impl blockset::StorageAdd,
+    next: &mut u64,
+    pending: &mut BTreeMap<u64, Vec<u8>>,
+    upto: u64,
+) {
+    while let Some((&o, _)) = pending.first_key_value() {
+        if o >= upto {
+            break;
+        }
+        push_zeros(state, fsa, next, o);
+        let v = pending.remove(&o).expect("first key exists");
+        state.push_bytes(fsa, &v);
+        *next += v.len() as u64;
+    }
+    push_zeros(state, fsa, next, upto);
+}
+
 /// pwrite semantics on a buffer: zero-fill any gap, then copy `data` at `offset`.
 fn pwrite_into(buf: &mut Vec<u8>, offset: u64, data: &[u8]) {
     let start = offset as usize;
@@ -440,20 +472,18 @@ impl SliceFsFilesystem {
         };
         if let WriteMode::Streaming { state, next_expected_offset, pending } = &mut file_state.write_mode {
             if !pending.is_empty() {
-                eprintln!("[{}][FUSE] settle: fh={} ino={} switches to Buffered (expected={} pending_chunks={})",
-                    ts(), fh, file_state.ino, *next_expected_offset, pending.len());
-                let mut buf = self.handle_content(file_state.ino, state, *next_expected_offset);
-                for (o, v) in std::mem::take(pending) {
-                    pwrite_into(&mut buf, o, &v);
+                // Pending writes exist only on a fresh stream: the gaps are zeros.
+                // Stream them in order; no full-file buffer.
+                let upto = pending.iter().next_back().map(|(&o, v)| o + v.len() as u64).unwrap_or(0);
+                let mut io = self.io.lock().unwrap();
+                let mut fsa = FileStorageAdd::new(&mut *io);
+                fill_stream(state, &mut fsa, next_expected_offset, pending, upto);
+                if let Some(e) = fsa.take_io_error() {
+                    eprintln!("[{}][FUSE] settle: CAS I/O error: {}", ts(), e);
                 }
-                let old_root = file_state.last_committed_root.take();
-                file_state.byte_count = file_state.byte_count.max(buf.len() as u64);
-                buf.resize(file_state.byte_count as usize, 0);
-                file_state.write_mode = WriteMode::Buffered { buf };
+                drop(fsa);
+                file_state.byte_count = file_state.byte_count.max(*next_expected_offset);
                 file_state.cas_committed = false;
-                if let Some(old) = old_root {
-                    self.meta.decrement_refcount(&old);
-                }
             }
         }
         self.open_files.lock().unwrap().insert(fh, file_state);
@@ -566,7 +596,24 @@ impl SliceFsFilesystem {
                 let fresh = *next_expected_offset > 0 || !pending.is_empty() || !self.has_content(file_state.ino);
                 let overlaps_pending = pending.range(..end).next_back()
                     .map_or(false, |(&o, v)| o + v.len() as u64 > offset);
-                let pending_bytes: usize = pending.values().map(Vec::len).sum();
+                let mut pending_bytes: usize = pending.values().map(Vec::len).sum();
+
+                // A jump past the reorder window is a sparse write, not NFS
+                // reordering: stream the gap as zeros (O(1) memory) and go on.
+                if fresh && !overlaps_pending && offset > *next_expected_offset + REORDER_WINDOW as u64 {
+                    let io_err = {
+                        let mut io = self.io.lock().unwrap();
+                        let mut fsa = FileStorageAdd::new(&mut *io);
+                        fill_stream(state, &mut fsa, next_expected_offset, pending, offset);
+                        fsa.take_io_error()
+                    };
+                    if let Some(e) = io_err {
+                        eprintln!("[{}][FUSE] test_write: CAS I/O error while filling a gap: {}", ts(), e);
+                        self.open_files.lock().unwrap().insert(fh, file_state);
+                        return Err(libc::EIO);
+                    }
+                    pending_bytes = pending.values().map(Vec::len).sum();
+                }
 
                 if fresh && offset == *next_expected_offset && !overlaps_pending {
                     // In order: push, then drain pending writes that now line up.
