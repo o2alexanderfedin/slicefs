@@ -169,7 +169,15 @@ impl DictMetadataStore {
             let (uid, gid) = (unsafe { libc::getuid() }, unsafe { libc::getgid() });
             #[cfg(not(unix))]
             let (uid, gid) = (0u32, 0u32);
-            let root_meta = InodeMeta::new_directory(1, uid, gid, S_IFDIR | 0o755);
+            let mut root_meta = InodeMeta::new_directory(1, uid, gid, S_IFDIR | 0o755);
+            // A new file system starts now, not at the epoch (shown as 1969).
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            root_meta.mtime_sec = now.as_secs() as _;
+            root_meta.mtime_nsec = now.subsec_nanos() as _;
+            root_meta.ctime_sec = root_meta.mtime_sec;
+            root_meta.ctime_nsec = root_meta.mtime_nsec;
             let root_inode_digest = intern_inode(&mut fsa, &root_meta);
             let root_dir_digest = create_dir_entries(&mut fsa, 1, 1);
             (root_inode_digest, root_dir_digest)
@@ -1179,6 +1187,17 @@ fn parse_digest224(bytes: &[u8]) -> Digest224 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn new_store_root_dir_has_current_times() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let store = DictMetadataStore::new(Arc::new(Mutex::new(StoreIo::new(dir.path()))));
+        let root = store.get_inode(1).unwrap();
+        assert!(root.mtime_sec as i64 >= before, "root mtime {} (epoch 0 shows as 1969)", root.mtime_sec);
+        assert!(root.ctime_sec as i64 >= before, "root ctime {}", root.ctime_sec);
+    }
 
     #[test]
     fn cached_dirs_and_inodes_survive_eviction_commit_and_reload() {
