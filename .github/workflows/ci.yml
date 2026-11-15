@@ -17,11 +17,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          # crates/data-id is a private repository: the default GITHUB_TOKEN
-          # cannot read it. DATA_ID_TOKEN must be a token with read access to it.
-          token: ${{ secrets.DATA_ID_TOKEN || github.token }}
+
+      # crates/data-id is a private repository that GITHUB_TOKEN cannot read.
+      # DATA_ID_DEPLOY_KEY is a read-only deploy key of that repository.
+      - name: Fetch the data-id submodule
+        env:
+          DATA_ID_DEPLOY_KEY: ${{ secrets.DATA_ID_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DATA_ID_DEPLOY_KEY" > ~/.ssh/data_id && chmod 600 ~/.ssh/data_id
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/data_id -o IdentitiesOnly=yes" \
+            git -c url."git@github.com:".insteadOf="https://github.com/" \
+            submodule update --init --recursive
+          rm -f ~/.ssh/data_id
 
       # The harness runs in a container with /dev/fuse, so a hung mount dies
       # with the container (see scripts/docker-linux-test/run.sh).
@@ -36,12 +45,23 @@ jobs:
 
   macos:
     name: macOS (cargo test, FUSE-T build)
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          token: ${{ secrets.DATA_ID_TOKEN || github.token }}
+
+      # crates/data-id is a private repository that GITHUB_TOKEN cannot read.
+      # DATA_ID_DEPLOY_KEY is a read-only deploy key of that repository.
+      - name: Fetch the data-id submodule
+        env:
+          DATA_ID_DEPLOY_KEY: ${{ secrets.DATA_ID_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DATA_ID_DEPLOY_KEY" > ~/.ssh/data_id && chmod 600 ~/.ssh/data_id
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/data_id -o IdentitiesOnly=yes" \
+            git -c url."git@github.com:".insteadOf="https://github.com/" \
+            submodule update --init --recursive
+          rm -f ~/.ssh/data_id
 
       - name: Install pkg-config and FUSE-T
         run: |

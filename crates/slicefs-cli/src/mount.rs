@@ -459,6 +459,7 @@ pub fn run_mount(
     auto_snapshot: bool,
     backend: Option<&str>,
     force: bool,
+    commit_interval_secs: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Pre-flight: create mountpoint directory if it doesn't exist.
     if !mountpoint.exists() {
@@ -552,6 +553,17 @@ pub fn run_mount(
         Arc::clone(&gc_shutdown),
     );
 
+    // Commit metadata periodically, so a crash does not lose everything since mount (#18).
+    let commit_shutdown = Arc::new(AtomicBool::new(false));
+    let commit_handle = (commit_interval_secs > 0).then(|| {
+        crate::commit_timer::spawn_commit_timer(
+            Arc::downgrade(fs.meta()),
+            fs.commit_gate(),
+            Duration::from_secs(commit_interval_secs),
+            Arc::clone(&commit_shutdown),
+        )
+    });
+
     // ── Mount + startup log ────────────────────────────────────────────────────
 
     #[cfg(target_os = "macos")]
@@ -576,6 +588,10 @@ pub fn run_mount(
     mount(fs, mountpoint, &config)?;
 
     // mount has returned — FUSE session ended, destroy() already called.
+    commit_shutdown.store(true, Ordering::SeqCst);
+    if let Some(h) = commit_handle {
+        let _ = h.join();
+    }
     gc_shutdown.store(true, Ordering::SeqCst);
     gc_handle.shutdown();
 
