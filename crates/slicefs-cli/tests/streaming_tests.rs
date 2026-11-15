@@ -603,3 +603,42 @@ fn test_sequential_stays_streaming() {
     assert_eq!(content.len(), 500);
     assert_eq!(content, expected);
 }
+
+// ── Sparse writes (#23): a gap far past the end streams zeros, no RAM buffer ──
+
+#[test]
+fn sparse_write_far_past_end_stays_streaming() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "sparse", S_IFREG | 0o644, 0o022, 1000, 1000).unwrap();
+    fs.test_write(fh, 0, b"head").unwrap();
+    let far = 80u64 << 20; // beyond the 64 MiB reorder window
+    fs.test_write(fh, far, b"X").unwrap();
+    fs.test_fsync(ino, fh).unwrap();
+    assert!(fs.test_is_streaming(fh), "a gap must not switch the handle to Buffered mode");
+    fs.test_write(fh, far + 1, b"tail").unwrap();
+    assert!(fs.test_is_streaming(fh));
+    fs.test_release(ino, fh).unwrap();
+
+    assert_eq!(fs.meta().get_inode(ino).unwrap().size, far + 5);
+    assert_eq!(fs.test_read(ino, 0, 4).unwrap(), b"head");
+    assert_eq!(fs.test_read(ino, 40 << 20, 8).unwrap(), vec![0u8; 8]);
+    assert_eq!(fs.test_read(ino, far - 2, 7).unwrap(), b"\0\0Xtail");
+}
+
+#[test]
+fn pending_writes_with_gaps_settle_without_buffered_mode() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "gappy", S_IFREG | 0o644, 0o022, 1000, 1000).unwrap();
+    fs.test_write(fh, 0, b"aa").unwrap();
+    fs.test_write(fh, 1 << 20, b"bb").unwrap(); // inside the window, gap before it
+    fs.test_write(fh, 3 << 20, b"cc").unwrap();
+    fs.test_fsync(ino, fh).unwrap();
+    assert!(fs.test_is_streaming(fh), "fsync must not materialize a gappy stream");
+    fs.test_write(fh, (3 << 20) + 2, b"dd").unwrap();
+    fs.test_release(ino, fh).unwrap();
+
+    assert_eq!(fs.meta().get_inode(ino).unwrap().size, (3 << 20) + 4);
+    assert_eq!(fs.test_read(ino, 0, 3).unwrap(), b"aa\0");
+    assert_eq!(fs.test_read(ino, (1 << 20) - 1, 4).unwrap(), b"\0bb\0");
+    assert_eq!(fs.test_read(ino, (3 << 20) - 1, 5).unwrap(), b"\0ccdd");
+}
