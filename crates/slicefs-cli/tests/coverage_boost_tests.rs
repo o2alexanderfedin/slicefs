@@ -1703,3 +1703,40 @@ fn test_o_trunc_then_write_past_start_gives_hole() {
     assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"\0\0\0\0EFGH");
     assert_eq!(fs.test_getattr(ino).unwrap().size, 8);
 }
+
+#[test]
+fn test_rename_over_multiply_linked_target_updates_its_ctime() {
+    let (fs, _dir) = fresh_fs();
+    fs.test_mknod(1, "src", 0o644, 0, 0, 0).unwrap();
+    let dst = fs.test_mknod(1, "dst", 0o644, 0, 0, 0).unwrap();
+    fs.simulate_link(dst, 1, "dstlnk").unwrap();
+    age(&fs, dst);
+    fs.simulate_rename(1, "src", 1, "dst", 0).unwrap();
+    let m = fs.test_getattr(dst).unwrap();
+    assert_eq!(m.nlinks, 1);
+    assert!(m.ctime_sec > 0, "nlink changed, so ctime must change");
+}
+
+#[test]
+fn test_truncate_updates_mtime_and_ctime() {
+    let (fs, _dir) = fresh_fs();
+    let ino = existing_file(&fs, "m", b"test\n");
+    age(&fs, ino);
+    let (fh, _) = fs.test_open(ino, libc::O_WRONLY | libc::O_TRUNC).unwrap();
+    let m = fs.test_getattr(ino).unwrap();
+    assert!(m.mtime_sec > 0 && m.ctime_sec > 0, "O_TRUNC: {m:?}");
+    fs.test_release(ino, fh).unwrap();
+    age(&fs, ino);
+    fs.test_setattr_size(ino, None, 2).unwrap();
+    let m = fs.test_getattr(ino).unwrap();
+    assert!(m.mtime_sec > 0 && m.ctime_sec > 0, "truncate(path): {m:?}");
+}
+
+#[test]
+fn test_setattr_size_and_mtime_together_keeps_explicit_mtime() {
+    let (fs, _dir) = fresh_fs();
+    let ino = existing_file(&fs, "sm", b"0123456789");
+    let m = fs.test_setattr(ino, None, None, None, Some(3), None, Some((1_234_567_890, 5))).unwrap();
+    assert_eq!((m.size, m.mtime_sec, m.mtime_nsec), (3, 1_234_567_890, 5));
+    assert_eq!(fs.test_getattr(ino).unwrap().mtime_sec, 1_234_567_890);
+}

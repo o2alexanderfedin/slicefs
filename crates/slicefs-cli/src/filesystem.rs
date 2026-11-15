@@ -982,11 +982,12 @@ impl SliceFsFilesystem {
                 // Update inode size immediately
                 let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
                 inode.size = new_size;
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or(Duration::ZERO);
-                inode.ctime_sec = now.as_secs() as i64;
-                inode.ctime_nsec = now.subsec_nanos();
+                // truncate changes the content: mtime and ctime both change.
+                let (sec, nsec) = now_pair();
+                inode.mtime_sec = sec;
+                inode.mtime_nsec = nsec;
+                inode.ctime_sec = sec;
+                inode.ctime_nsec = nsec;
                 self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
                 return Ok(());
             }
@@ -1040,11 +1041,12 @@ impl SliceFsFilesystem {
         // Update inode
         let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
         inode.size = new_size;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO);
-        inode.ctime_sec = now.as_secs() as i64;
-        inode.ctime_nsec = now.subsec_nanos();
+        // truncate changes the content: mtime and ctime both change.
+        let (sec, nsec) = now_pair();
+        inode.mtime_sec = sec;
+        inode.mtime_nsec = nsec;
+        inode.ctime_sec = sec;
+        inode.ctime_nsec = nsec;
         self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
         Ok(())
     }
@@ -1418,6 +1420,9 @@ impl SliceFsFilesystem {
                 } else {
                     let mut updated_dst = dst_inode.clone();
                     updated_dst.nlinks = new_nlinks;
+                    let (sec, nsec) = now_pair();
+                    updated_dst.ctime_sec = sec;
+                    updated_dst.ctime_nsec = nsec;
                     self.meta.update_inode(&updated_dst).map_err(|e| meta_error_to_errno(&e))?;
                 }
             }
@@ -1672,6 +1677,11 @@ impl SliceFsFilesystem {
         atime: Option<(i64, u32)>,
         mtime: Option<(i64, u32)>,
     ) -> Result<InodeMeta, i32> {
+        // Size first: it rewrites the inode (size, mtime, ctime); the other
+        // fields of the same request are applied on top of the result.
+        if let Some(new_size) = size {
+            self.test_setattr_size(ino, fh, new_size)?;
+        }
         let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
         if let Some((sec, nsec)) = atime {
             inode.atime_sec = sec;
@@ -1690,13 +1700,6 @@ impl SliceFsFilesystem {
         if let Some((sec, nsec)) = mtime {
             inode.mtime_sec = sec;
             inode.mtime_nsec = nsec;
-        }
-        if let Some(new_size) = size {
-            if let Err(e) = self.test_setattr_size(ino, fh, new_size) {
-                return Err(e);
-            }
-            // Re-load inode after size change
-            inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
         }
 
         // Always update ctime
