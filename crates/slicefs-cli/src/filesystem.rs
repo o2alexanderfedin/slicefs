@@ -26,6 +26,12 @@ const S_IFREG: u32 = 0o100_000;
 const S_IFDIR: u32 = 0o040_000;
 const S_IFLNK: u32 = 0o120_000;
 
+/// Largest file size SliceFS accepts (1 TiB). Larger truncate/write requests
+/// fail with EFBIG. Out-of-order writes and truncates still hold the whole file
+/// in memory, so without this cap a user-controlled size (for example
+/// `truncate -s 1P f`) aborts the daemon on allocation failure.
+pub const MAX_FILE_SIZE: u64 = 1 << 40;
+
 /// Write mode for an open file handle.
 ///
 /// Streaming mode is the default for sequential writes (O(log N) memory).
@@ -288,6 +294,9 @@ impl SliceFsFilesystem {
     /// Fallback transition: release open_files before io for materialization,
     /// re-acquire open_files to swap WriteMode. FUSE serializes per-fh writes.
     pub fn test_write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, i32> {
+        if offset.checked_add(data.len() as u64).map_or(true, |end| end > MAX_FILE_SIZE) {
+            return Err(libc::EFBIG);
+        }
         // Take the file state out of the map so we can release open_files before io.
         let mut file_state = match self.open_files.lock().unwrap().remove(&fh) {
             Some(s) => s,
@@ -648,6 +657,9 @@ impl SliceFsFilesystem {
     /// - Streaming: materialize via clone+end, resize, repush into fresh State.
     /// - Buffered: simple buf.resize() (no CAS operations needed for non-zero truncate).
     pub fn test_setattr_size(&self, ino: u64, fh: Option<u64>, new_size: u64) -> Result<(), i32> {
+        if new_size > MAX_FILE_SIZE {
+            return Err(libc::EFBIG);
+        }
         // Case A: open file handle — truncate in-flight write state
         if let Some(fh_val) = fh {
             let mut open_files = self.open_files.lock().unwrap();
@@ -1936,6 +1948,30 @@ mod tests {
         // Read back
         let data = fs.test_read(ino, 0, 100).unwrap();
         assert_eq!(&data, b"hello");
+    }
+
+    #[test]
+    fn test_setattr_size_beyond_max_returns_efbig() {
+        // pjdfstest truncate/12: a huge length must fail with EFBIG, not abort the daemon.
+        let (fs, _dir) = fresh_fs();
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        fs.test_write(fh, 0, b"hi").unwrap();
+        assert_eq!(fs.test_setattr_size(ino, Some(fh), 999_999_999_999_999), Err(libc::EFBIG));
+        fs.test_release(ino, fh).unwrap();
+        assert_eq!(fs.test_setattr_size(ino, None, 999_999_999_999_999), Err(libc::EFBIG));
+        assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"hi");
+    }
+
+    #[test]
+    fn test_write_beyond_max_returns_efbig() {
+        let (fs, _dir) = fresh_fs();
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        fs.test_write(fh, 0, b"hi").unwrap();
+        assert_eq!(fs.test_write(fh, 999_999_999_999_999, b"x"), Err(libc::EFBIG));
+        // The handle is still usable after the rejected write.
+        assert_eq!(fs.test_write(fh, 2, b"!"), Ok(1));
+        fs.test_release(ino, fh).unwrap();
+        assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"hi!");
     }
 
     #[test]

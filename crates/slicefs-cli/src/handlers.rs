@@ -255,7 +255,7 @@ pub(crate) fn handle_write(
 ) -> WriteResult {
     match fs.test_write(fh, offset, data) {
         Ok(n) => WriteResult::Ok(n),
-        Err(_) => WriteResult::Error(libc::EBADF),
+        Err(e) => WriteResult::Error(e),
     }
 }
 
@@ -806,7 +806,15 @@ mod tests {
     fn test_handle_write_invalid_fh_returns_error() {
         let (fs, _dir) = fresh_fs();
         let result = handle_write(&fs, 9999, 0, b"data");
-        assert!(matches!(result, WriteResult::Error(_)));
+        assert!(matches!(result, WriteResult::Error(e) if e == libc::EBADF));
+    }
+
+    #[test]
+    fn test_handle_write_passes_efbig_through() {
+        let (fs, _dir) = fresh_fs();
+        let (_ino, fh) = fs.test_create(1, "big.txt", 0o644, 0, 0, 0).unwrap();
+        let result = handle_write(&fs, fh, 999_999_999_999_999, b"x");
+        assert!(matches!(result, WriteResult::Error(e) if e == libc::EFBIG));
     }
 
     // ── handle_create ─────────────────────────────────────────────────────────
