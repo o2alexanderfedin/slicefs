@@ -299,10 +299,11 @@ pub(crate) fn handle_mknod(
     name: &str,
     mode: u32,
     umask: u32,
+    rdev: u32,
     uid: u32,
     gid: u32,
 ) -> EntryResult {
-    match fs.test_mknod_full(parent, name, mode, uid, gid, umask) {
+    match fs.test_mknod_rdev(parent, name, mode, rdev, uid, gid, umask) {
         Ok((ino, meta)) => EntryResult::Ok(ino, inode_to_file_attr(&meta)),
         Err(errno) => EntryResult::Error(errno),
     }
@@ -869,7 +870,7 @@ mod tests {
     fn test_handle_mknod_regular_file_ok() {
         const S_IFREG: u32 = 0o100_000;
         let (fs, _dir) = fresh_fs();
-        match handle_mknod(&fs, 1, "node.txt", S_IFREG | 0o644, 0, 0, 0) {
+        match handle_mknod(&fs, 1, "node.txt", S_IFREG | 0o644, 0, 0, 0, 0) {
             EntryResult::Ok(ino, attr) => {
                 assert!(ino > 1);
                 assert_eq!(attr.kind, fuser::FileType::RegularFile);
@@ -882,8 +883,8 @@ mod tests {
     fn test_handle_mknod_duplicate_returns_error() {
         const S_IFREG: u32 = 0o100_000;
         let (fs, _dir) = fresh_fs();
-        handle_mknod(&fs, 1, "node2.txt", S_IFREG | 0o644, 0, 0, 0);
-        let result = handle_mknod(&fs, 1, "node2.txt", S_IFREG | 0o644, 0, 0, 0);
+        handle_mknod(&fs, 1, "node2.txt", S_IFREG | 0o644, 0, 0, 0, 0);
+        let result = handle_mknod(&fs, 1, "node2.txt", S_IFREG | 0o644, 0, 0, 0, 0);
         assert!(matches!(result, EntryResult::Error(_)));
     }
 

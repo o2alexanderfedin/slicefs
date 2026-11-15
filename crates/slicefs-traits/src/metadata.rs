@@ -81,6 +81,8 @@ pub struct InodeMeta {
     pub ctime_sec: i64,
     /// Last metadata change time — nanosecond fraction.
     pub ctime_nsec: u32,
+    /// Device number for character and block device nodes (`st_rdev`); 0 otherwise.
+    pub rdev: u32,
 }
 
 impl InodeMeta {
@@ -100,6 +102,7 @@ impl InodeMeta {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
+            rdev: 0,
         }
     }
 
@@ -118,6 +121,7 @@ impl InodeMeta {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
+            rdev: 0,
         }
     }
 }

@@ -280,11 +280,10 @@ fn test_setattr_mtime_updates_timestamp() {
 }
 
 #[test]
-fn test_mknod_char_device_returns_enosys() {
-    // Device nodes are not supported (no rdev in InodeMeta; FUSE mounts are nodev).
+fn test_mknod_unknown_type_returns_einval() {
+    // 0o070_000 is not a valid file type.
     let (fs, _dir) = fresh_fs();
-    let result = fs.test_mknod(1, "chr", 0o020_644, 0, 0, 0);
-    assert_eq!(result.unwrap_err(), libc::ENOSYS, "char device mknod must return ENOSYS");
+    assert_eq!(fs.test_mknod(1, "bad", 0o070_644, 0, 0, 0).unwrap_err(), libc::EINVAL);
 }
 
 /// Test that mknod creates a regular file that can then be opened and written to.

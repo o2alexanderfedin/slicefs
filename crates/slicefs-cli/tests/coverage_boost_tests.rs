@@ -94,6 +94,7 @@ fn test_inode_to_file_attr_symlink_kind() {
         mtime_nsec: 0,
         ctime_sec: 1000,
         ctime_nsec: 0,
+        rdev: 0,
     };
     let attr = inode_to_file_attr(&meta);
     use fuser::FileType;
@@ -114,6 +115,7 @@ fn test_inode_to_file_attr_unknown_type_is_regular() {
         mtime_nsec: 0,
         ctime_sec: 0,
         ctime_nsec: 0,
+        rdev: 0,
     };
     let attr = inode_to_file_attr(&meta);
     use fuser::FileType;
@@ -134,6 +136,7 @@ fn test_inode_to_file_attr_negative_mtime() {
         mtime_nsec: 0,
         ctime_sec: -50,
         ctime_nsec: 0,
+        rdev: 0,
     };
     let attr = inode_to_file_attr(&meta);
     // mtime should be UNIX_EPOCH - 100s
@@ -157,6 +160,7 @@ fn test_inode_to_file_attr_blocks_roundup() {
         mtime_nsec: 0,
         ctime_sec: 0,
         ctime_nsec: 0,
+        rdev: 0,
     };
     let attr = inode_to_file_attr(&meta);
     assert_eq!(attr.blocks, 1, "511 bytes should round up to 1 block");
@@ -176,6 +180,7 @@ fn test_inode_to_file_attr_blocks_exact() {
         mtime_nsec: 0,
         ctime_sec: 0,
         ctime_nsec: 0,
+        rdev: 0,
     };
     let attr = inode_to_file_attr(&meta);
     assert_eq!(attr.blocks, 1, "512 bytes = exactly 1 block");
@@ -623,6 +628,7 @@ fn test_readlink_empty_manifest_returns_empty_string() {
         mtime_nsec: 0,
         ctime_sec: 0,
         ctime_nsec: 0,
+        rdev: 0,
     };
     let ino = fs.meta().create_inode(&meta).unwrap();
     fs.meta().link(1, "empty_link", ino).unwrap();
@@ -869,12 +875,24 @@ fn test_mknod_socket_creates_socket() {
 }
 
 #[test]
-fn test_mknod_device_returns_enosys() {
+fn test_mknod_block_device_keeps_rdev() {
     let (fs, _dir) = fresh_fs();
-    // S_IFBLK = 0o060_000
-    let result = fs.test_mknod(1, "block_dev", 0o060_000 | 0o644, 0, 0, 0);
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), libc::ENOSYS, "block device must return ENOSYS");
+    // S_IFBLK = 0o060_000; rdev = makedev(1, 2) in the kernel's new encoding.
+    let (ino, meta) = fs.test_mknod_rdev(1, "block_dev", 0o060_000 | 0o644, 0x0102, 0, 0, 0).unwrap();
+    assert_eq!((meta.mode, meta.rdev), (0o060_644, 0x0102));
+    let attr = slicefs_cli::filesystem::inode_to_file_attr(&meta);
+    assert_eq!((attr.kind, attr.rdev), (FileType::BlockDevice, 0x0102));
+    // Survives a lookup (re-read from the store).
+    assert_eq!(fs.test_lookup(1, "block_dev").unwrap().1.rdev, 0x0102);
+    assert_eq!(fs.simulate_unlink(1, "block_dev"), Ok(()));
+    let _ = ino;
+}
+
+#[test]
+fn test_mknod_char_device_kind() {
+    let (fs, _dir) = fresh_fs();
+    let (_ino, meta) = fs.test_mknod_rdev(1, "chr", 0o020_000 | 0o600, 0x0503, 0, 0, 0).unwrap();
+    assert_eq!(slicefs_cli::filesystem::inode_to_file_attr(&meta).kind, FileType::CharDevice);
 }
 
 #[test]

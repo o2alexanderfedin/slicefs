@@ -463,15 +463,15 @@ impl Filesystem for SliceFsFilesystem {
         name: &OsStr,
         mode: u32,
         umask: u32,
-        _rdev: u32,
+        rdev: u32,
         reply: ReplyEntry,
     ) {
-        eprintln!("[{}][FUSE] mknod: ENTRY parent={}, name={:?}, mode={:#o}, umask={:#o}, rdev={}, uid={}, gid={}", ts(), parent.0, name, mode, umask, _rdev, req.uid(), req.gid());
+        eprintln!("[{}][FUSE] mknod: ENTRY parent={}, name={:?}, mode={:#o}, umask={:#o}, rdev={}, uid={}, gid={}", ts(), parent.0, name, mode, umask, rdev, req.uid(), req.gid());
         let name_str = match name.to_str() {
             Some(s) => s,
             None => return reply.error(Errno::EINVAL),
         };
-        match handle_mknod(self, parent.0, name_str, mode, umask, req.uid(), req.gid()) {
+        match handle_mknod(self, parent.0, name_str, mode, umask, rdev, req.uid(), req.gid()) {
             EntryResult::Ok(ino, attr) => {
                 eprintln!("[{}][FUSE] mknod: EXIT parent={}, name={:?} -> ok, ino={}, mode={:#o}", ts(), parent.0, name, ino, attr.perm);
                 reply.entry(&TTL, &attr, Generation(0));

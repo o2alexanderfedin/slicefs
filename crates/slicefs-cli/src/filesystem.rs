@@ -27,6 +27,8 @@ const S_IFDIR: u32 = 0o040_000;
 const S_IFLNK: u32 = 0o120_000;
 const S_IFIFO: u32 = 0o010_000;
 const S_IFSOCK: u32 = 0o140_000;
+const S_IFCHR: u32 = 0o020_000;
+const S_IFBLK: u32 = 0o060_000;
 
 /// Largest file size SliceFS accepts (1 TiB). Larger truncate/write requests
 /// fail with EFBIG. Out-of-order writes and truncates still hold the whole file
@@ -150,6 +152,8 @@ pub fn inode_to_file_attr(meta: &InodeMeta) -> FileAttr {
         S_IFLNK => FileType::Symlink,
         S_IFIFO => FileType::NamedPipe,
         S_IFSOCK => FileType::Socket,
+        S_IFCHR => FileType::CharDevice,
+        S_IFBLK => FileType::BlockDevice,
         _ => FileType::RegularFile,
     };
 
@@ -181,7 +185,7 @@ pub fn inode_to_file_attr(meta: &InodeMeta) -> FileAttr {
         nlink: meta.nlinks,
         uid: meta.uid,
         gid: meta.gid,
-        rdev: 0,
+        rdev: meta.rdev,
         blksize: 4096,
         flags: 0,
     }
@@ -881,22 +885,33 @@ impl SliceFsFilesystem {
     ///
     /// Non-regular file types (device nodes, FIFOs) return ENOSYS.
     pub fn test_mknod(&self, parent: u64, name: &str, mode: u32, uid: u32, gid: u32, umask: u32) -> Result<u64, i32> {
-        // Regular files, FIFOs and sockets need only the type bits in `mode`;
-        // the kernel implements FIFO/socket I/O. Device nodes would need rdev,
-        // which InodeMeta does not store, so they stay ENOSYS.
+        self.test_mknod_rdev(parent, name, mode, 0, uid, gid, umask).map(|(ino, _)| ino)
+    }
+
+    /// mknod with a device number. Creates regular files, FIFOs, sockets and
+    /// character/block device nodes (the kernel implements their I/O; only
+    /// the type bits and `rdev` are stored). Returns `(ino, InodeMeta)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn test_mknod_rdev(
+        &self, parent: u64, name: &str, mode: u32, rdev: u32, uid: u32, gid: u32, umask: u32,
+    ) -> Result<(u64, InodeMeta), i32> {
         let file_type = match mode & S_IFMT {
             0 | S_IFREG => S_IFREG,
-            t @ (S_IFIFO | S_IFSOCK) => t,
-            _ => return Err(libc::ENOSYS),
+            t @ (S_IFIFO | S_IFSOCK | S_IFCHR | S_IFBLK) => t,
+            _ => return Err(libc::EINVAL),
         };
         let file_mode = file_type | (mode & !umask & 0o7777);
-        let file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
+        let mut file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
+        if file_type == S_IFCHR || file_type == S_IFBLK {
+            file_meta.rdev = rdev;
+        }
         let ino = self.meta.create_inode(&file_meta).map_err(|e| meta_error_to_errno(&e))?;
         if let Err(e) = self.meta.link(parent, name, ino) {
             let _ = self.meta.delete_inode(ino);
             return Err(meta_error_to_errno(&e));
         }
-        Ok(ino)
+        let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        Ok((ino, meta))
     }
 
     /// Return `(blocks, bfree, bavail, files, ffree, bsize)` — the same values
@@ -1206,6 +1221,7 @@ impl SliceFsFilesystem {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
+            rdev: 0,
         };
 
         // Create inode
@@ -1450,9 +1466,7 @@ impl SliceFsFilesystem {
         gid: u32,
         umask: u32,
     ) -> Result<(u64, InodeMeta), i32> {
-        let ino = self.test_mknod(parent, name, mode, uid, gid, umask)?;
-        let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-        Ok((ino, meta))
+        self.test_mknod_rdev(parent, name, mode, 0, uid, gid, umask)
     }
 
     /// Create a symlink and return `(ino, InodeMeta)`.
@@ -2109,11 +2123,11 @@ mod tests {
     }
 
     #[test]
-    fn test_mknod_non_regular_file_returns_enosys() {
+    fn test_mknod_char_device_succeeds() {
         let (fs, _dir) = fresh_fs();
         // S_IFCHR = 0o020_000
-        let err = fs.test_mknod(1, "chardev", 0o020_000 | 0o644, 0, 0, 0).unwrap_err();
-        assert_eq!(err, libc::ENOSYS);
+        let (_ino, meta) = fs.test_mknod_rdev(1, "chardev", 0o020_000 | 0o644, 7, 0, 0, 0).unwrap();
+        assert_eq!(meta.rdev, 7);
     }
 
     // ── test_write / test_read pipeline ──────────────────────────────────────
@@ -2449,6 +2463,7 @@ mod tests {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
+            rdev: 0,
         };
         let attr = inode_to_file_attr(&meta);
         assert_eq!(attr.kind, FileType::Symlink);
@@ -2468,6 +2483,7 @@ mod tests {
             mtime_nsec: 0,
             ctime_sec: -50,
             ctime_nsec: 0,
+            rdev: 0,
         };
         let attr = inode_to_file_attr(&meta);
         // Should not panic for negative timestamps
@@ -2488,6 +2504,7 @@ mod tests {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
+            rdev: 0,
         };
         let attr = inode_to_file_attr(&meta);
         // blocks = (1024 + 511) / 512 = 2
@@ -2769,7 +2786,7 @@ mod tests {
             ino: 0,
             mode: S_IFLNK | 0o777,
             uid: 0, gid: 0, nlinks: 1, size: 0,
-            mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0,
+            mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, rdev: 0,
         };
         let ino = fs.meta.create_inode(&sym_meta).unwrap();
         fs.meta.link(1, "emptylink", ino).unwrap();
