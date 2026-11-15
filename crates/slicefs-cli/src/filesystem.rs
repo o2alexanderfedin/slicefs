@@ -391,9 +391,14 @@ impl SliceFsFilesystem {
         fsa.end(&d256)
     }
 
-    /// The open write handle of `ino`, if any.
+    /// The open write handle of `ino` that holds the most data, if any.
+    /// (FUSE-T may open a file O_RDWR only to read it; such an idle handle
+    /// must not take a size change meant for the real writer.)
     fn write_handle_of(&self, ino: u64) -> Option<u64> {
-        self.open_files.lock().unwrap().iter().find(|(_, s)| s.ino == ino).map(|(&fh, _)| fh)
+        self.open_files.lock().unwrap().iter()
+            .filter(|(_, s)| s.ino == ino)
+            .max_by_key(|(fh, s)| (s.byte_count, **fh))
+            .map(|(&fh, _)| fh)
     }
 
     /// True if the committed file has bytes (so a fresh stream would lose them).

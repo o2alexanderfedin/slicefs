@@ -1781,3 +1781,18 @@ fn test_closed_file_extend_and_shrink() {
     assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"he");
     assert_eq!(fs.test_getattr(ino).unwrap().size, 2);
 }
+
+#[test]
+fn test_extend_without_fh_goes_to_the_writing_handle() {
+    // FUSE-T may open a file O_RDWR only to read it: an idle handle must not
+    // receive the size change meant for the real writer.
+    let (fs, _dir) = fresh_fs();
+    let (ino, wfh) = fs.test_create(1, "two", 0o644, 0, 0, 0).unwrap();
+    let (idle, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    fs.test_write(wfh, 0, b"abcd").unwrap();
+    fs.test_setattr_size(ino, None, 10).unwrap();
+    fs.test_release(ino, idle).unwrap();
+    fs.test_release(ino, wfh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"abcd\0\0\0\0\0\0");
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 10);
+}
