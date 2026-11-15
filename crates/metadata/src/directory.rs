@@ -269,6 +269,88 @@ pub fn list_dir_entries(
         .collect())
 }
 
+// ─── in-memory directory (cached between commits) ───────────────────────────
+
+/// Hash a name to its entry key without writing anything to the store.
+///
+/// Gives the same `Digest224` as [`entry_key`]: an in-memory `Dictionary`
+/// runs the same tree hash, but the nodes are thrown away.
+pub fn name_key(name: &str) -> Digest224 {
+    let mut scratch = blockset::Dictionary::default();
+    State::push_all(&mut scratch, name.as_bytes())
+}
+
+/// A decoded directory entry list that the metadata store holds in memory.
+///
+/// Changes cost O(log n) and write nothing. [`DirList::intern`] writes the
+/// list in the same wire format as before, so its digest is the same as the
+/// digest of the old copy-on-every-change path.
+#[derive(Debug, Clone, Default)]
+pub struct DirList {
+    entries: BTreeMap<Digest224, EntryRecord>,
+}
+
+impl DirList {
+    /// A new directory with only `.` and `..`.
+    pub fn new_dir(self_ino: u64, parent_ino: u64) -> Self {
+        let mut d = DirList::default();
+        d.put(".", self_ino);
+        d.put("..", parent_ino);
+        d
+    }
+
+    /// Read a stored entry list.
+    pub fn load(io: &mut impl Io, digest: &Digest224) -> Result<Self, MetaError> {
+        Ok(DirList { entries: load_entry_list(io, digest)? })
+    }
+
+    /// Write the list to the store and return its digest.
+    pub fn intern(&self, storage: &mut impl StorageAdd) -> Digest224 {
+        intern_entry_list(storage, &self.entries)
+    }
+
+    fn put(&mut self, name: &str, ino: u64) {
+        let key = name_key(name);
+        self.entries.insert(key, EntryRecord { key, ino, name: name.to_string() });
+    }
+
+    /// Add `name -> ino`. Same errors as [`add_dir_entry`].
+    pub fn add(&mut self, name: &str, ino: u64) -> Result<(), MetaError> {
+        if name == "." || name == ".." {
+            return Err(MetaError::InvalidName(name.to_string()));
+        }
+        let key = name_key(name);
+        if self.entries.contains_key(&key) {
+            return Err(MetaError::AlreadyExists(ino));
+        }
+        self.entries.insert(key, EntryRecord { key, ino, name: name.to_string() });
+        Ok(())
+    }
+
+    /// Remove `name`. Same errors as [`remove_dir_entry`].
+    pub fn remove(&mut self, name: &str) -> Result<(), MetaError> {
+        if name == "." || name == ".." {
+            return Err(MetaError::InvalidName(name.to_string()));
+        }
+        self.entries.remove(&name_key(name)).map(|_| ()).ok_or(MetaError::NotFound(0))
+    }
+
+    /// Point `..` at `parent_ino`.
+    pub fn set_dotdot(&mut self, parent_ino: u64) {
+        self.put("..", parent_ino);
+    }
+
+    /// Find the inode of `name`.
+    pub fn lookup(&self, name: &str) -> Result<u64, MetaError> {
+        self.entries.get(&name_key(name)).map(|r| r.ino).ok_or(MetaError::NotFound(0))
+    }
+
+    /// All entries, in the same order as [`list_dir_entries`].
+    pub fn list(&self) -> Vec<DirEntry> {
+        self.entries.values().map(|r| DirEntry { name: r.name.clone(), ino: r.ino }).collect()
+    }
+}
+
 // ─── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -281,6 +363,29 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let io = StoreIo::new(dir.path());
         (dir, io)
+    }
+
+    #[test]
+    fn dir_list_interns_same_digest_as_per_change_path() {
+        let (_dir, mut io) = make_io();
+        let mut old = { let mut fsa = FileStorageAdd::new(&mut io); create_dir_entries(&mut fsa, 5, 1) };
+        let mut list = DirList::new_dir(5, 1);
+        for (i, n) in ["a", "b.hpp", "c", "dir"].iter().enumerate() {
+            old = add_dir_entry(&mut io, &old, n, 10 + i as u64).unwrap();
+            list.add(n, 10 + i as u64).unwrap();
+        }
+        old = remove_dir_entry(&mut io, &old, "c").unwrap();
+        list.remove("c").unwrap();
+        old = set_dotdot(&mut io, &old, 7).unwrap();
+        list.set_dotdot(7);
+        let new = { let mut fsa = FileStorageAdd::new(&mut io); list.intern(&mut fsa) };
+        assert_eq!(old, new);
+        assert_eq!(list.lookup("b.hpp").unwrap(), 11);
+        assert!(matches!(list.lookup("c"), Err(MetaError::NotFound(_))));
+        assert!(matches!(list.add("a", 99), Err(MetaError::AlreadyExists(_))));
+        assert_eq!(list_dir_entries(&mut io, &new).unwrap(), list.list());
+        let reloaded = DirList::load(&mut io, &new).unwrap();
+        assert_eq!(reloaded.list(), list.list());
     }
 
     #[test]
