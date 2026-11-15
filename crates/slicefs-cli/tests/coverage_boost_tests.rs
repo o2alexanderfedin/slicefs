@@ -94,6 +94,7 @@ fn test_inode_to_file_attr_symlink_kind() {
         mtime_nsec: 0,
         ctime_sec: 1000,
         ctime_nsec: 0,
+        rdev: 0, atime_sec: 0, atime_nsec: 0,
     };
     let attr = inode_to_file_attr(&meta);
     use fuser::FileType;
@@ -114,6 +115,7 @@ fn test_inode_to_file_attr_unknown_type_is_regular() {
         mtime_nsec: 0,
         ctime_sec: 0,
         ctime_nsec: 0,
+        rdev: 0, atime_sec: 0, atime_nsec: 0,
     };
     let attr = inode_to_file_attr(&meta);
     use fuser::FileType;
@@ -134,6 +136,7 @@ fn test_inode_to_file_attr_negative_mtime() {
         mtime_nsec: 0,
         ctime_sec: -50,
         ctime_nsec: 0,
+        rdev: 0, atime_sec: 0, atime_nsec: 0,
     };
     let attr = inode_to_file_attr(&meta);
     // mtime should be UNIX_EPOCH - 100s
@@ -157,6 +160,7 @@ fn test_inode_to_file_attr_blocks_roundup() {
         mtime_nsec: 0,
         ctime_sec: 0,
         ctime_nsec: 0,
+        rdev: 0, atime_sec: 0, atime_nsec: 0,
     };
     let attr = inode_to_file_attr(&meta);
     assert_eq!(attr.blocks, 1, "511 bytes should round up to 1 block");
@@ -176,6 +180,7 @@ fn test_inode_to_file_attr_blocks_exact() {
         mtime_nsec: 0,
         ctime_sec: 0,
         ctime_nsec: 0,
+        rdev: 0, atime_sec: 0, atime_nsec: 0,
     };
     let attr = inode_to_file_attr(&meta);
     assert_eq!(attr.blocks, 1, "512 bytes = exactly 1 block");
@@ -623,6 +628,7 @@ fn test_readlink_empty_manifest_returns_empty_string() {
         mtime_nsec: 0,
         ctime_sec: 0,
         ctime_nsec: 0,
+        rdev: 0, atime_sec: 0, atime_nsec: 0,
     };
     let ino = fs.meta().create_inode(&meta).unwrap();
     fs.meta().link(1, "empty_link", ino).unwrap();
@@ -714,13 +720,13 @@ fn test_rename_overwrite_directory_target() {
     // Create an empty directory target
     let _dst_ino = fs.simulate_mkdir(1, "dir_dst", S_IFDIR | 0o755, 0, 0, 0).unwrap();
 
-    // Normal rename overwriting the directory target — directories are left orphaned
+    // POSIX rename(2): a non-directory cannot replace a directory (EISDIR).
     let result = fs.simulate_rename(1, "file_src.txt", 1, "dir_dst", 0);
-    // This should succeed (dirs left orphaned per the impl comment)
-    assert!(result.is_ok(), "rename overwriting dir target must succeed");
+    assert_eq!(result, Err(libc::EISDIR));
 
-    let found = fs.meta().lookup(1, "dir_dst").unwrap();
-    assert_eq!(found, src_ino, "dir_dst must now point to the file source inode");
+    // Both names are unchanged.
+    assert_eq!(fs.meta().lookup(1, "file_src.txt").unwrap(), src_ino);
+    assert!(fs.meta().lookup(1, "dir_dst").is_ok());
 }
 
 // ── test_read edge cases ──────────────────────────────────────────────────────
@@ -847,21 +853,46 @@ fn test_statfs_after_creating_files_inode_count_increases() {
 // ── mknod type rejection ──────────────────────────────────────────────────────
 
 #[test]
-fn test_mknod_fifo_returns_enosys() {
+fn test_mknod_fifo_creates_named_pipe() {
+    // pjdfstest creates FIFOs with mkfifo(2); ENOSYS broke ~2,000 subtests.
     let (fs, _dir) = fresh_fs();
-    // S_IFIFO = 0o010_000
-    let result = fs.test_mknod(1, "fifo_file", 0o010_000 | 0o644, 0, 0, 0);
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), libc::ENOSYS, "FIFO must return ENOSYS");
+    // S_IFIFO = 0o010_000; umask 022 must apply to the permission bits.
+    let (ino, meta) = fs.test_mknod_full(1, "fifo_file", 0o010_000 | 0o666, 7, 8, 0o022).unwrap();
+    assert_eq!(meta.mode, 0o010_644);
+    assert_eq!((meta.uid, meta.gid, meta.size), (7, 8, 0));
+    let attr = slicefs_cli::filesystem::inode_to_file_attr(&meta);
+    assert_eq!(attr.kind, FileType::NamedPipe);
+    assert_eq!(fs.test_lookup(1, "fifo_file").unwrap().0, ino);
 }
 
 #[test]
-fn test_mknod_device_returns_enosys() {
+fn test_mknod_socket_creates_socket() {
     let (fs, _dir) = fresh_fs();
-    // S_IFBLK = 0o060_000
-    let result = fs.test_mknod(1, "block_dev", 0o060_000 | 0o644, 0, 0, 0);
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), libc::ENOSYS, "block device must return ENOSYS");
+    // S_IFSOCK = 0o140_000 (bind(2) on a Unix socket path calls mknod).
+    let (_ino, meta) = fs.test_mknod_full(1, "sock", 0o140_000 | 0o755, 0, 0, 0).unwrap();
+    assert_eq!(meta.mode, 0o140_755);
+    assert_eq!(slicefs_cli::filesystem::inode_to_file_attr(&meta).kind, FileType::Socket);
+}
+
+#[test]
+fn test_mknod_block_device_keeps_rdev() {
+    let (fs, _dir) = fresh_fs();
+    // S_IFBLK = 0o060_000; rdev = makedev(1, 2) in the kernel's new encoding.
+    let (ino, meta) = fs.test_mknod_rdev(1, "block_dev", 0o060_000 | 0o644, 0x0102, 0, 0, 0).unwrap();
+    assert_eq!((meta.mode, meta.rdev), (0o060_644, 0x0102));
+    let attr = slicefs_cli::filesystem::inode_to_file_attr(&meta);
+    assert_eq!((attr.kind, attr.rdev), (FileType::BlockDevice, 0x0102));
+    // Survives a lookup (re-read from the store).
+    assert_eq!(fs.test_lookup(1, "block_dev").unwrap().1.rdev, 0x0102);
+    assert_eq!(fs.simulate_unlink(1, "block_dev"), Ok(()));
+    let _ = ino;
+}
+
+#[test]
+fn test_mknod_char_device_kind() {
+    let (fs, _dir) = fresh_fs();
+    let (_ino, meta) = fs.test_mknod_rdev(1, "chr", 0o020_000 | 0o600, 0x0503, 0, 0, 0).unwrap();
+    assert_eq!(slicefs_cli::filesystem::inode_to_file_attr(&meta).kind, FileType::CharDevice);
 }
 
 #[test]
@@ -1292,4 +1323,476 @@ fn test_statfs_no_store_path_returns_zero_blocks() {
     assert_eq!(blocks, 0, "no store_path should give 0 blocks");
     assert_eq!(bfree, 0, "no store_path should give 0 bfree");
     assert_eq!(bavail, 0, "no store_path should give 0 bavail");
+}
+
+// ── sockets are not directories (S_IFSOCK contains the S_IFDIR bit) ──────────
+
+#[test]
+fn test_unlink_socket_succeeds() {
+    let (fs, _dir) = fresh_fs();
+    fs.test_mknod(1, "sock", 0o140_000 | 0o755, 0, 0, 0).unwrap();
+    assert_eq!(fs.simulate_unlink(1, "sock"), Ok(()));
+    assert!(fs.test_lookup(1, "sock").is_err());
+}
+
+#[test]
+fn test_rmdir_socket_returns_enotdir() {
+    let (fs, _dir) = fresh_fs();
+    fs.test_mknod(1, "sock", 0o140_000 | 0o755, 0, 0, 0).unwrap();
+    assert_eq!(fs.simulate_rmdir(1, "sock"), Err(libc::ENOTDIR));
+}
+
+#[test]
+fn test_create_inside_socket_returns_enotdir() {
+    let (fs, _dir) = fresh_fs();
+    let sock = fs.test_mknod(1, "sock", 0o140_000 | 0o755, 0, 0, 0).unwrap();
+    assert_eq!(fs.simulate_mkdir(sock, "d", 0o755, 0, 0, 0).map(|_| ()), Err(libc::ENOTDIR));
+}
+
+#[test]
+fn test_rename_over_socket_frees_it() {
+    let (fs, _dir) = fresh_fs();
+    fs.test_mknod(1, "sock", 0o140_000 | 0o755, 0, 0, 0).unwrap();
+    fs.test_mknod(1, "f", 0o644, 0, 0, 0).unwrap();
+    let before = fs.test_statfs_values().3;
+    fs.simulate_rename(1, "f", 1, "sock", 0).unwrap();
+    // The replaced socket inode must be deleted, not kept as a "directory".
+    assert_eq!(fs.test_statfs_values().3, before - 1);
+}
+
+#[test]
+fn test_readdir_reports_special_file_types() {
+    let (fs, _dir) = fresh_fs();
+    fs.test_mknod(1, "fifo", 0o010_644, 0, 0, 0).unwrap();
+    fs.test_mknod(1, "sock", 0o140_644, 0, 0, 0).unwrap();
+    fs.test_mknod_rdev(1, "chr", 0o020_644, 5, 0, 0, 0).unwrap();
+    fs.test_mknod_rdev(1, "blk", 0o060_644, 6, 0, 0, 0).unwrap();
+    let kinds: std::collections::HashMap<String, FileType> = fs.test_readdir(1, 0).unwrap()
+        .into_iter().map(|(_, k, n)| (n, k)).collect();
+    assert_eq!(kinds["fifo"], FileType::NamedPipe);
+    assert_eq!(kinds["sock"], FileType::Socket);
+    assert_eq!(kinds["chr"], FileType::CharDevice);
+    assert_eq!(kinds["blk"], FileType::BlockDevice);
+}
+
+// ── open-then-unlink: the inode lives until the last handle closes ──────────
+
+#[test]
+fn test_unlink_open_file_keeps_inode_until_release() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "tmp", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"abc").unwrap();
+    assert_eq!(fs.simulate_unlink(1, "tmp"), Ok(()));
+    assert!(fs.test_lookup(1, "tmp").is_err(), "name must be gone");
+    let attr = fs.test_getattr(ino).expect("fstat on an open, unlinked file must work");
+    assert_eq!(attr.nlinks, 0);
+    assert_eq!(fs.test_read(ino, 0, 10).unwrap(), b"abc");
+    fs.test_release(ino, fh).unwrap();
+    assert!(fs.test_getattr(ino).is_err(), "inode must be reclaimed at last close");
+}
+
+#[test]
+fn test_unlink_read_only_open_file_keeps_inode_until_release() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "ro", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"data").unwrap();
+    fs.test_release(ino, fh).unwrap();
+    let (rfh, _) = fs.test_open(ino, libc::O_RDONLY).unwrap();
+    let (rfh2, _) = fs.test_open(ino, libc::O_RDONLY).unwrap();
+    fs.simulate_unlink(1, "ro").unwrap();
+    assert_eq!(fs.test_read(ino, 0, 10).unwrap(), b"data");
+    fs.test_release_full(ino, rfh).unwrap();
+    fs.test_release_full(ino, rfh).unwrap(); // double close must not count twice
+    assert!(fs.test_getattr(ino).is_ok(), "second handle still open");
+    fs.test_release_full(ino, rfh2).unwrap();
+    assert!(fs.test_getattr(ino).is_err());
+}
+
+#[test]
+fn test_rename_over_open_file_keeps_target_until_release() {
+    let (fs, _dir) = fresh_fs();
+    let (dst, dfh) = fs.test_create(1, "dst", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(dfh, 0, b"old").unwrap();
+    let (src, sfh) = fs.test_create(1, "src", 0o644, 0, 0, 0).unwrap();
+    fs.test_release(src, sfh).unwrap();
+    fs.simulate_rename(1, "src", 1, "dst", 0).unwrap();
+    assert_eq!(fs.test_read(dst, 0, 10).unwrap(), b"old");
+    fs.test_release(dst, dfh).unwrap();
+    assert!(fs.test_getattr(dst).is_err());
+}
+
+#[test]
+fn test_destroy_reclaims_orphans() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "o", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"x").unwrap();
+    fs.simulate_unlink(1, "o").unwrap();
+    let before = fs.test_statfs_values().3;
+    fs.test_destroy();
+    assert_eq!(fs.test_statfs_values().3, before - 1, "orphan inode must not survive unmount");
+    let _ = ino;
+}
+
+// ── rename of directories ────────────────────────────────────────────────────
+
+#[test]
+fn test_rename_dir_onto_non_empty_dir_returns_enotempty() {
+    let (fs, _dir) = fresh_fs();
+    fs.simulate_mkdir(1, "a", 0o755, 0, 0, 0).unwrap();
+    let b = fs.simulate_mkdir(1, "b", 0o755, 0, 0, 0).unwrap();
+    fs.test_mknod(b, "keep", 0o644, 0, 0, 0).unwrap();
+    assert_eq!(fs.simulate_rename(1, "a", 1, "b", 0), Err(libc::ENOTEMPTY));
+    assert!(fs.test_lookup(1, "a").is_ok());
+    assert!(fs.test_lookup(b, "keep").is_ok());
+}
+
+#[test]
+fn test_rename_dir_onto_empty_dir_replaces_it() {
+    let (fs, _dir) = fresh_fs();
+    let a = fs.simulate_mkdir(1, "a", 0o755, 0, 0, 0).unwrap();
+    let b = fs.simulate_mkdir(1, "b", 0o755, 0, 0, 0).unwrap();
+    let root_links = fs.test_getattr(1).unwrap().nlinks;
+    fs.simulate_rename(1, "a", 1, "b", 0).unwrap();
+    assert_eq!(fs.test_lookup(1, "b").unwrap().0, a);
+    assert!(fs.test_getattr(b).is_err(), "replaced empty dir must be deleted");
+    assert_eq!(fs.test_getattr(1).unwrap().nlinks, root_links - 1);
+}
+
+#[test]
+fn test_move_dir_between_parents_updates_links_and_dotdot() {
+    let (fs, _dir) = fresh_fs();
+    let p1 = fs.simulate_mkdir(1, "p1", 0o755, 0, 0, 0).unwrap();
+    let p2 = fs.simulate_mkdir(1, "p2", 0o755, 0, 0, 0).unwrap();
+    let d = fs.simulate_mkdir(p1, "d", 0o755, 0, 0, 0).unwrap();
+    assert_eq!(fs.test_getattr(p1).unwrap().nlinks, 3);
+    fs.simulate_rename(p1, "d", p2, "d", 0).unwrap();
+    assert_eq!(fs.test_getattr(p1).unwrap().nlinks, 2);
+    assert_eq!(fs.test_getattr(p2).unwrap().nlinks, 3);
+    assert_eq!(fs.test_lookup(d, "..").unwrap().0, p2);
+}
+
+#[test]
+fn test_rename_file_onto_dir_and_dir_onto_file() {
+    let (fs, _dir) = fresh_fs();
+    fs.simulate_mkdir(1, "d", 0o755, 0, 0, 0).unwrap();
+    fs.test_mknod(1, "f", 0o644, 0, 0, 0).unwrap();
+    assert_eq!(fs.simulate_rename(1, "f", 1, "d", 0), Err(libc::EISDIR));
+    assert_eq!(fs.simulate_rename(1, "d", 1, "f", 0), Err(libc::ENOTDIR));
+}
+
+#[test]
+fn test_rename_between_hard_links_of_same_inode_is_noop() {
+    let (fs, _dir) = fresh_fs();
+    let ino = fs.test_mknod(1, "x", 0o644, 0, 0, 0).unwrap();
+    fs.simulate_link(ino, 1, "y").unwrap();
+    fs.simulate_rename(1, "x", 1, "y", 0).unwrap();
+    assert_eq!(fs.test_lookup(1, "x").unwrap().0, ino, "POSIX: same file -> nothing changes");
+    assert_eq!(fs.test_lookup(1, "y").unwrap().0, ino);
+    assert_eq!(fs.test_getattr(ino).unwrap().nlinks, 2);
+}
+
+#[test]
+fn test_getattr_reports_size_of_open_write_handle() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "w", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"x").unwrap();
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 1, "fstat during a write must see the new size");
+    fs.test_write(fh, 5, b"yz").unwrap(); // out of order -> buffered
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 7);
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 7);
+}
+
+// ── atime / timestamps ───────────────────────────────────────────────────────
+
+#[test]
+fn test_setattr_times_stores_atime_and_mtime() {
+    let (fs, _dir) = fresh_fs();
+    let ino = fs.test_mknod(1, "t", 0o644, 0, 0, 0).unwrap();
+    let m = fs.test_setattr_times(ino, Some((1_900_000_000, 7)), Some((1_950_000_000, 9))).unwrap();
+    assert_eq!((m.atime_sec, m.atime_nsec, m.mtime_sec, m.mtime_nsec), (1_900_000_000, 7, 1_950_000_000, 9));
+    let attr = slicefs_cli::filesystem::inode_to_file_attr(&fs.test_getattr(ino).unwrap());
+    assert_eq!(attr.atime, UNIX_EPOCH + Duration::new(1_900_000_000, 7));
+    assert_eq!(attr.mtime, UNIX_EPOCH + Duration::new(1_950_000_000, 9));
+}
+
+#[test]
+fn test_time_conversion_handles_pre_epoch() {
+    use slicefs_cli::filesystem::{system_time_to_pair, pair_to_system_time};
+    let t = UNIX_EPOCH - Duration::new(10, 250_000_000);
+    let (s, ns) = system_time_to_pair(t);
+    assert_eq!((s, ns), (-11, 750_000_000));
+    assert_eq!(pair_to_system_time(s, ns), t);
+    assert_eq!(system_time_to_pair(UNIX_EPOCH + Duration::new(5, 1)), (5, 1));
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+/// Set a directory's mtime/ctime to the epoch so a later change is visible.
+fn age(fs: &SliceFsFilesystem, ino: u64) {
+    let mut m = fs.test_getattr(ino).unwrap();
+    m.mtime_sec = 0; m.ctime_sec = 0;
+    fs.meta().update_inode(&m).unwrap();
+}
+
+#[test]
+fn test_new_inodes_get_current_times() {
+    let (fs, _dir) = fresh_fs();
+    let t0 = now_secs();
+    let (f, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+    fs.test_release(f, fh).unwrap();
+    let n = fs.test_mknod(1, "n", 0o010_644, 0, 0, 0).unwrap();
+    let d = fs.simulate_mkdir(1, "d", 0o755, 0, 0, 0).unwrap();
+    let l = fs.simulate_symlink(1, "l", "f", 0, 0).unwrap();
+    for ino in [f, n, d, l] {
+        let m = fs.test_getattr(ino).unwrap();
+        assert!(m.mtime_sec >= t0 && m.ctime_sec >= t0 && m.atime_sec >= t0, "ino {ino}: {m:?}");
+    }
+}
+
+#[test]
+fn test_entry_changes_update_parent_times() {
+    let (fs, _dir) = fresh_fs();
+    let p = fs.simulate_mkdir(1, "p", 0o755, 0, 0, 0).unwrap();
+    let q = fs.simulate_mkdir(1, "q", 0o755, 0, 0, 0).unwrap();
+    let changed = |fs: &SliceFsFilesystem, ino: u64| {
+        let m = fs.test_getattr(ino).unwrap();
+        m.mtime_sec > 0 && m.ctime_sec > 0
+    };
+    age(&fs, p); let (f, fh) = fs.test_create(p, "f", 0o644, 0, 0, 0).unwrap(); fs.test_release(f, fh).unwrap();
+    assert!(changed(&fs, p), "create");
+    age(&fs, p); fs.test_mknod(p, "n", 0o644, 0, 0, 0).unwrap(); assert!(changed(&fs, p), "mknod");
+    age(&fs, p); fs.simulate_mkdir(p, "sub", 0o755, 0, 0, 0).unwrap(); assert!(changed(&fs, p), "mkdir");
+    age(&fs, p); fs.simulate_symlink(p, "s", "f", 0, 0).unwrap(); assert!(changed(&fs, p), "symlink");
+    age(&fs, p); age(&fs, f); fs.simulate_link(f, p, "f2").unwrap();
+    assert!(changed(&fs, p), "link: parent"); assert!(fs.test_getattr(f).unwrap().ctime_sec > 0, "link: file ctime");
+    age(&fs, p); age(&fs, f); fs.simulate_unlink(p, "f2").unwrap();
+    assert!(changed(&fs, p), "unlink: parent"); assert!(fs.test_getattr(f).unwrap().ctime_sec > 0, "unlink: file ctime");
+    age(&fs, p); fs.simulate_rmdir(p, "sub").unwrap(); assert!(changed(&fs, p), "rmdir");
+    age(&fs, p); age(&fs, q); fs.simulate_rename(p, "n", q, "n", 0).unwrap();
+    assert!(changed(&fs, p), "rename: old parent"); assert!(changed(&fs, q), "rename: new parent");
+}
+
+// ── overwrite / out-of-order writes ──────────────────────────────────────────
+
+#[test]
+fn test_overwrite_start_of_existing_file_keeps_tail() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"0123456789").unwrap();
+    fs.test_release(ino, fh).unwrap();
+    let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    fs.test_write(fh, 0, b"AB").unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"AB23456789");
+}
+
+fn pattern(n: usize) -> Vec<u8> {
+    (0..n as u32).map(|i| (i.wrapping_mul(2654435761) >> 11) as u8).collect()
+}
+
+#[test]
+fn test_shuffled_writes_inside_window_stay_streaming() {
+    let (fs, _dir) = fresh_fs();
+    let data = pattern(32 * 4096);
+    let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+    // NFS-style reordering: pairs swapped (1,0,3,2,...)
+    let chunks: Vec<_> = data.chunks(4096).enumerate().collect();
+    for pair in chunks.chunks(2) {
+        for (i, c) in pair.iter().rev() {
+            fs.test_write(fh, (*i * 4096) as u64, c).unwrap();
+        }
+    }
+    assert!(fs.test_is_streaming(fh), "reordered writes inside the window must not force Buffered mode");
+    assert_eq!(fs.test_getattr(ino).unwrap().size, data.len() as u64);
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, data.len() as u32).unwrap(), data);
+}
+
+#[test]
+fn test_read_and_release_with_pending_gap() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "g", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"aaaa").unwrap();
+    fs.test_write(fh, 8, b"cccc").unwrap(); // gap 4..8 stays a hole
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"aaaa\0\0\0\0cccc");
+    fs.test_write(fh, 4, b"bb").unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"aaaabb\0\0cccc");
+}
+
+#[test]
+fn test_overlap_with_pending_keeps_newest_bytes() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "o", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 4, b"OLDOLD").unwrap(); // pending [4,10)
+    fs.test_write(fh, 0, b"newnewne").unwrap(); // [0,8) overlaps pending, newer
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"newnewneLD");
+}
+
+#[test]
+fn test_fsync_with_pending_data_is_complete() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "s", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"12").unwrap();
+    fs.test_write(fh, 4, b"56").unwrap();
+    fs.test_write(fh, 2, b"34").unwrap();
+    fs.test_fsync(ino, fh).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"123456");
+}
+
+#[test]
+fn test_ftruncate_on_fresh_handle_keeps_existing_bytes() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "t", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"0123456789").unwrap();
+    fs.test_release(ino, fh).unwrap();
+    let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    fs.test_setattr_size(ino, Some(fh), 4).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"0123");
+}
+
+#[test]
+fn test_repeated_fsync_without_writes_keeps_content() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "r", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 4, b"5678").unwrap();
+    fs.test_write(fh, 0, b"1234").unwrap();
+    fs.test_write(fh, 2, b"xx").unwrap(); // overlap -> Buffered
+    // fsync of a Buffered handle does not re-hash the file (#3); reads see
+    // the buffer, and release writes it, including writes after the fsync.
+    fs.test_fsync(ino, fh).unwrap();
+    fs.test_fsync(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"12xx5678");
+    fs.test_write(fh, 8, b"9").unwrap();
+    fs.test_fsync(ino, fh).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"12xx56789");
+}
+
+fn existing_file(fs: &SliceFsFilesystem, name: &str, content: &[u8]) -> u64 {
+    let (ino, fh) = fs.test_create(1, name, 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, content).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    ino
+}
+
+#[test]
+fn test_truncate_to_zero_then_extend_gives_zeros() {
+    let (fs, _dir) = fresh_fs();
+    let ino = existing_file(&fs, "z", b"0123456789");
+    let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    fs.test_setattr_size(ino, Some(fh), 0).unwrap();
+    fs.test_setattr_size(ino, Some(fh), 4).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"\0\0\0\0");
+}
+
+#[test]
+fn test_o_trunc_then_write_past_start_gives_hole() {
+    let (fs, _dir) = fresh_fs();
+    let ino = existing_file(&fs, "h", b"0123456789");
+    let (fh, _) = fs.test_open(ino, libc::O_WRONLY | libc::O_TRUNC).unwrap();
+    fs.test_write(fh, 4, b"EFGH").unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"\0\0\0\0EFGH");
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 8);
+}
+
+#[test]
+fn test_rename_over_multiply_linked_target_updates_its_ctime() {
+    let (fs, _dir) = fresh_fs();
+    fs.test_mknod(1, "src", 0o644, 0, 0, 0).unwrap();
+    let dst = fs.test_mknod(1, "dst", 0o644, 0, 0, 0).unwrap();
+    fs.simulate_link(dst, 1, "dstlnk").unwrap();
+    age(&fs, dst);
+    fs.simulate_rename(1, "src", 1, "dst", 0).unwrap();
+    let m = fs.test_getattr(dst).unwrap();
+    assert_eq!(m.nlinks, 1);
+    assert!(m.ctime_sec > 0, "nlink changed, so ctime must change");
+}
+
+#[test]
+fn test_truncate_updates_mtime_and_ctime() {
+    let (fs, _dir) = fresh_fs();
+    let ino = existing_file(&fs, "m", b"test\n");
+    age(&fs, ino);
+    let (fh, _) = fs.test_open(ino, libc::O_WRONLY | libc::O_TRUNC).unwrap();
+    let m = fs.test_getattr(ino).unwrap();
+    assert!(m.mtime_sec > 0 && m.ctime_sec > 0, "O_TRUNC: {m:?}");
+    fs.test_release(ino, fh).unwrap();
+    age(&fs, ino);
+    fs.test_setattr_size(ino, None, 2).unwrap();
+    let m = fs.test_getattr(ino).unwrap();
+    assert!(m.mtime_sec > 0 && m.ctime_sec > 0, "truncate(path): {m:?}");
+}
+
+#[test]
+fn test_setattr_size_and_mtime_together_keeps_explicit_mtime() {
+    let (fs, _dir) = fresh_fs();
+    let ino = existing_file(&fs, "sm", b"0123456789");
+    let m = fs.test_setattr(ino, None, None, None, Some(3), None, Some((1_234_567_890, 5))).unwrap();
+    assert_eq!((m.size, m.mtime_sec, m.mtime_nsec), (3, 1_234_567_890, 5));
+    assert_eq!(fs.test_getattr(ino).unwrap().mtime_sec, 1_234_567_890);
+}
+
+// ── setattr(size) while a write handle streams (macOS cp preallocates) ──────
+
+#[test]
+fn test_extend_without_fh_during_streaming_write_stays_streaming() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "pre", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"abcd").unwrap();
+    fs.test_setattr_size(ino, None, 10).unwrap(); // no fh, like the NFS SETATTR from cp
+    assert!(fs.test_is_streaming(fh), "extending must not materialize the file");
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 10);
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"abcd\0\0\0\0\0\0");
+    fs.test_write(fh, 4, b"XY").unwrap();
+    assert!(fs.test_is_streaming(fh));
+    fs.test_fsync(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"abcdXY\0\0\0\0");
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"abcdXY\0\0\0\0");
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 10);
+}
+
+#[test]
+fn test_write_past_extended_size_extends_further() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "pre2", 0o644, 0, 0, 0).unwrap();
+    fs.test_setattr_size(ino, Some(fh), 6).unwrap();
+    fs.test_write(fh, 0, b"0123456789").unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"0123456789");
+}
+
+#[test]
+fn test_closed_file_extend_and_shrink() {
+    let (fs, _dir) = fresh_fs();
+    let ino = existing_file(&fs, "c", b"hello");
+    fs.test_setattr_size(ino, None, 8).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"hello\0\0\0");
+    fs.test_setattr_size(ino, None, 2).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"he");
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 2);
+}
+
+#[test]
+fn test_extend_without_fh_goes_to_the_writing_handle() {
+    // FUSE-T may open a file O_RDWR only to read it: an idle handle must not
+    // receive the size change meant for the real writer.
+    let (fs, _dir) = fresh_fs();
+    let (ino, wfh) = fs.test_create(1, "two", 0o644, 0, 0, 0).unwrap();
+    let (idle, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    fs.test_write(wfh, 0, b"abcd").unwrap();
+    fs.test_setattr_size(ino, None, 10).unwrap();
+    fs.test_release(ino, idle).unwrap();
+    fs.test_release(ino, wfh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"abcd\0\0\0\0\0\0");
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 10);
 }

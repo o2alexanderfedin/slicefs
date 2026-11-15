@@ -1,8 +1,8 @@
 ---
-status: awaiting_human_verify
+status: resolved
 trigger: "fuse-t-write-hang: FUSE-T writes hang indefinitely on macOS even with direct_io mount option"
 created: 2026-03-29T00:00:00Z
-updated: 2026-03-29T15:00:00Z
+updated: 2026-11-14T00:00:00Z
 ---
 
 ## Current Focus
@@ -157,3 +157,12 @@ verification: |
   - Awaiting human verification: mount and run echo 'works' > /mount/echo_test.txt
 files_changed:
   - crates/slicefs-cli/src/filesystem.rs
+
+## Verification (2026-11-14, automated run by Claude, not a human check)
+
+Run on a live FUSE-T 1.2.9 mount with the `develop` build (after v2.1.0).
+The smoke test (read, echo-write, cp 3 MB twice, readback, mkdir+mv, chmod,
+truncate, xattr, rm, unmount) passed on all three backends: NFS, SMB, FSKit.
+No write hangs. The code fixes recorded above are present in the code. The
+remaining root cause of the FUSE-T hang was the fuser socket bug, fixed in
+v2.1.0 (vendored patched fuser 0.18).

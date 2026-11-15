@@ -255,7 +255,7 @@ pub(crate) fn handle_write(
 ) -> WriteResult {
     match fs.test_write(fh, offset, data) {
         Ok(n) => WriteResult::Ok(n),
-        Err(_) => WriteResult::Error(libc::EBADF),
+        Err(e) => WriteResult::Error(e),
     }
 }
 
@@ -299,10 +299,11 @@ pub(crate) fn handle_mknod(
     name: &str,
     mode: u32,
     umask: u32,
+    rdev: u32,
     uid: u32,
     gid: u32,
 ) -> EntryResult {
-    match fs.test_mknod_full(parent, name, mode, uid, gid, umask) {
+    match fs.test_mknod_rdev(parent, name, mode, rdev, uid, gid, umask) {
         Ok((ino, meta)) => EntryResult::Ok(ino, inode_to_file_attr(&meta)),
         Err(errno) => EntryResult::Error(errno),
     }
@@ -394,9 +395,10 @@ pub(crate) fn handle_setattr(
     gid: Option<u32>,
     size: Option<u64>,
     fh: Option<u64>,
+    atime: Option<(i64, u32)>,
     mtime: Option<(i64, u32)>,
 ) -> AttrResult {
-    match fs.test_setattr(ino, mode, uid, gid, size, fh, mtime) {
+    match fs.test_setattr_full(ino, mode, uid, gid, size, fh, atime, mtime) {
         Ok(inode) => AttrResult::Ok(inode_to_file_attr(&inode)),
         Err(errno) => AttrResult::Error(errno),
     }
@@ -806,7 +808,15 @@ mod tests {
     fn test_handle_write_invalid_fh_returns_error() {
         let (fs, _dir) = fresh_fs();
         let result = handle_write(&fs, 9999, 0, b"data");
-        assert!(matches!(result, WriteResult::Error(_)));
+        assert!(matches!(result, WriteResult::Error(e) if e == libc::EBADF));
+    }
+
+    #[test]
+    fn test_handle_write_passes_efbig_through() {
+        let (fs, _dir) = fresh_fs();
+        let (_ino, fh) = fs.test_create(1, "big.txt", 0o644, 0, 0, 0).unwrap();
+        let result = handle_write(&fs, fh, 999_999_999_999_999, b"x");
+        assert!(matches!(result, WriteResult::Error(e) if e == libc::EFBIG));
     }
 
     // ── handle_create ─────────────────────────────────────────────────────────
@@ -861,7 +871,7 @@ mod tests {
     fn test_handle_mknod_regular_file_ok() {
         const S_IFREG: u32 = 0o100_000;
         let (fs, _dir) = fresh_fs();
-        match handle_mknod(&fs, 1, "node.txt", S_IFREG | 0o644, 0, 0, 0) {
+        match handle_mknod(&fs, 1, "node.txt", S_IFREG | 0o644, 0, 0, 0, 0) {
             EntryResult::Ok(ino, attr) => {
                 assert!(ino > 1);
                 assert_eq!(attr.kind, fuser::FileType::RegularFile);
@@ -874,8 +884,8 @@ mod tests {
     fn test_handle_mknod_duplicate_returns_error() {
         const S_IFREG: u32 = 0o100_000;
         let (fs, _dir) = fresh_fs();
-        handle_mknod(&fs, 1, "node2.txt", S_IFREG | 0o644, 0, 0, 0);
-        let result = handle_mknod(&fs, 1, "node2.txt", S_IFREG | 0o644, 0, 0, 0);
+        handle_mknod(&fs, 1, "node2.txt", S_IFREG | 0o644, 0, 0, 0, 0);
+        let result = handle_mknod(&fs, 1, "node2.txt", S_IFREG | 0o644, 0, 0, 0, 0);
         assert!(matches!(result, EntryResult::Error(_)));
     }
 
@@ -1034,7 +1044,7 @@ mod tests {
         let (fs, _dir) = fresh_fs();
         let (ino, fh) = fs.test_create(1, "sa.txt", 0o644, 0, 0, 0).unwrap();
         fs.test_release_full(ino, fh).unwrap();
-        match handle_setattr(&fs, ino, Some(0o600), None, None, None, None, None) {
+        match handle_setattr(&fs, ino, Some(0o600), None, None, None, None, None, None) {
             AttrResult::Ok(attr) => assert_eq!(attr.perm, 0o600),
             AttrResult::Error(e) => panic!("expected Ok, got error {}", e),
         }
@@ -1043,7 +1053,7 @@ mod tests {
     #[test]
     fn test_handle_setattr_nonexistent_returns_error() {
         let (fs, _dir) = fresh_fs();
-        let result = handle_setattr(&fs, 9999, Some(0o644), None, None, None, None, None);
+        let result = handle_setattr(&fs, 9999, Some(0o644), None, None, None, None, None, None);
         assert!(matches!(result, AttrResult::Error(_)));
     }
 
@@ -1052,7 +1062,7 @@ mod tests {
         let (fs, _dir) = fresh_fs();
         let (ino, fh) = fs.test_create(1, "ug.txt", 0o644, 0, 0, 0).unwrap();
         fs.test_release_full(ino, fh).unwrap();
-        match handle_setattr(&fs, ino, None, Some(42), Some(99), None, None, None) {
+        match handle_setattr(&fs, ino, None, Some(42), Some(99), None, None, None, None) {
             AttrResult::Ok(attr) => {
                 assert_eq!(attr.uid, 42);
                 assert_eq!(attr.gid, 99);
