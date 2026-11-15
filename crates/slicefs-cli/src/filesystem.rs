@@ -5,7 +5,7 @@
 //!
 //! Write callbacks (create, write, release, setattr) are fully implemented in Phase 4.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -100,6 +100,11 @@ pub struct SliceFsFilesystem {
     /// Resumable content readers per inode (see `FileStorageReader`). A reader
     /// whose root no longer matches the file content is replaced on use.
     readers: Mutex<HashMap<u64, FileStorageReader>>,
+    /// Every open handle (read-only too): fh -> ino. Used to keep an unlinked
+    /// inode alive until its last handle closes.
+    handles: Mutex<HashMap<u64, u64>>,
+    /// Inodes whose last link was removed while handles were still open.
+    orphans: Mutex<HashSet<u64>>,
     next_fh: AtomicU64,
     pub(crate) store_path: Option<PathBuf>,
     pub(crate) auto_snapshot: bool,
@@ -124,6 +129,8 @@ impl SliceFsFilesystem {
             io,
             open_files: Mutex::new(HashMap::new()),
             readers: Mutex::new(HashMap::new()),
+            handles: Mutex::new(HashMap::new()),
+            orphans: Mutex::new(HashSet::new()),
             next_fh: AtomicU64::new(0),
             store_path,
             auto_snapshot: false,
@@ -265,8 +272,62 @@ impl SliceFsFilesystem {
         self.next_fh.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// Create a regular file inode in `parent_ino` directory, returning `(ino, fh)`.
+    /// Allocate a file handle and record it as open on `ino`.
+    fn open_handle(&self, ino: u64) -> u64 {
+        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
+        self.handles.lock().unwrap().insert(fh, ino);
+        fh
+    }
+
+    /// Forget handle `fh`. If it was the last handle of an orphaned inode,
+    /// reclaim the inode. A handle that is not open is ignored.
+    fn close_handle(&self, fh: u64) {
+        let ino = match self.handles.lock().unwrap().remove(&fh) {
+            Some(ino) => ino,
+            None => return,
+        };
+        let still_open = self.handles.lock().unwrap().values().any(|&i| i == ino);
+        if !still_open && self.orphans.lock().unwrap().remove(&ino) {
+            self.reclaim_inode(ino);
+        }
+    }
+
+    /// Delete a non-directory inode that has no links left and release its content.
+    fn reclaim_inode(&self, ino: u64) {
+        if let Ok(manifest) = self.meta.get_manifest(ino) {
+            for digest in &manifest {
+                self.meta.decrement_refcount(digest);
+            }
+        }
+        self.readers.lock().unwrap().remove(&ino);
+        let _ = self.meta.delete_inode(ino);
+    }
+
+    /// The last link of a non-directory inode was removed: reclaim it now, or
+    /// keep it as an orphan (nlink 0) while handles are still open.
+    fn drop_last_link(&self, mut inode: InodeMeta) -> Result<(), i32> {
+        let open = self.handles.lock().unwrap().values().any(|&i| i == inode.ino);
+        if open {
+            inode.nlinks = 0;
+            self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
+            self.orphans.lock().unwrap().insert(inode.ino);
+        } else {
+            self.reclaim_inode(inode.ino);
+        }
+        Ok(())
+    }
+
+    /// Reclaim all orphans (used at unmount: no handle survives it).
+    fn reclaim_all_orphans(&self) {
+        let orphans: Vec<u64> = self.orphans.lock().unwrap().drain().collect();
+        for ino in orphans {
+            self.reclaim_inode(ino);
+        }
+    }
+
+
     /// Used by integration tests to bypass the FUSE request/reply layer.
+    /// Create a regular file inode in `parent_ino` directory, returning `(ino, fh)`.
     pub fn test_create(
         &self,
         parent_ino: u64,
@@ -283,7 +344,7 @@ impl SliceFsFilesystem {
             let _ = self.meta.delete_inode(ino);
             return Err(meta_error_to_errno(&e));
         }
-        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
+        let fh = self.open_handle(ino);
         self.open_files.lock().unwrap().insert(fh, OpenFileState {
             ino,
             write_mode: WriteMode::Streaming { state: State::default(), next_expected_offset: 0 },
@@ -426,6 +487,13 @@ impl SliceFsFilesystem {
     /// Refcount lifecycle: decrements old committed root if different from new digest,
     /// increments new digest. Empty files (byte_count==0) set empty manifest without CAS push.
     pub fn test_release(&self, ino: u64, fh: u64) -> Result<(), i32> {
+        let result = self.finalize_write(ino, fh);
+        self.close_handle(fh);
+        result
+    }
+
+    /// Commit the write state of `fh` (if any) to the inode's manifest.
+    fn finalize_write(&self, ino: u64, fh: u64) -> Result<(), i32> {
         let (write_mode, byte_count, cas_committed, last_committed_root) = match self.open_files.lock().unwrap().remove(&fh) {
             Some(s) => (s.write_mode, s.byte_count, s.cas_committed, s.last_committed_root),
             None => return Ok(()), // Already closed
@@ -1089,14 +1157,8 @@ impl SliceFsFilesystem {
         }
 
         if inode.nlinks == 0 {
-            // Decrement content refcounts
-            if let Ok(manifest) = self.meta.get_manifest(ino) {
-                for digest in &manifest {
-                    self.meta.decrement_refcount(digest);
-                }
-            }
-            // Delete inode
-            let _ = self.meta.delete_inode(ino);
+            // Reclaim now, or keep as an orphan while handles are open.
+            self.drop_last_link(inode)?;
         } else {
             // Hard links still exist — just persist the decremented nlinks
             self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
@@ -1176,13 +1238,8 @@ impl SliceFsFilesystem {
             // Manage nlinks for the displaced target
             let new_nlinks = dst_inode.nlinks.saturating_sub(1);
             if new_nlinks == 0 && dst_inode.mode & S_IFMT != S_IFDIR {
-                // Decrement refcounts and delete inode for regular files
-                if let Ok(manifest) = self.meta.get_manifest(dst_ino) {
-                    for digest in &manifest {
-                        self.meta.decrement_refcount(digest);
-                    }
-                }
-                let _ = self.meta.delete_inode(dst_ino);
+                // Reclaim now, or keep as an orphan while handles are open.
+                self.drop_last_link(dst_inode.clone())?;
             } else if new_nlinks > 0 {
                 let mut updated_dst = dst_inode.clone();
                 updated_dst.nlinks = new_nlinks;
@@ -1323,7 +1380,7 @@ impl SliceFsFilesystem {
         let acc_mode = flags & libc::O_ACCMODE;
         let is_write = acc_mode == libc::O_WRONLY || acc_mode == libc::O_RDWR;
 
-        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
+        let fh = self.open_handle(ino);
 
         if is_write {
             self.open_files.lock().unwrap().insert(
@@ -1341,6 +1398,7 @@ impl SliceFsFilesystem {
             if flags & libc::O_TRUNC != 0 {
                 if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
                     self.open_files.lock().unwrap().remove(&fh);
+                    self.close_handle(fh);
                     return Err(e);
                 }
             }
@@ -1444,6 +1502,7 @@ impl SliceFsFilesystem {
         if flags & libc::O_TRUNC != 0 {
             if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
                 self.open_files.lock().unwrap().remove(&fh);
+                self.close_handle(fh);
                 return Err(e);
             }
         }
@@ -1514,7 +1573,8 @@ impl SliceFsFilesystem {
     /// Release with read-only handle check (matches FUSE release behavior).
     pub fn test_release_full(&self, ino: u64, fh: u64) -> Result<(), i32> {
         if !self.open_files.lock().unwrap().contains_key(&fh) {
-            return Ok(()); // read-only handle, no write state
+            self.close_handle(fh); // read-only handle, no write state
+            return Ok(());
         }
         self.test_release(ino, fh)
     }
@@ -1522,6 +1582,8 @@ impl SliceFsFilesystem {
     /// Destroy: commit, optionally snapshot, and shut down WAL.
     /// Returns true if commit succeeded.
     pub fn test_destroy(&self) -> bool {
+        // No handle survives unmount: unlinked-but-open inodes go away now.
+        self.reclaim_all_orphans();
         if let Ok(_root) = self.meta.commit() {
             if self.auto_snapshot {
                 let _ = self.meta.create_snapshot(Some("auto-unmount".to_string()));

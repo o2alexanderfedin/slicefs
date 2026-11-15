@@ -1374,3 +1374,61 @@ fn test_readdir_reports_special_file_types() {
     assert_eq!(kinds["chr"], FileType::CharDevice);
     assert_eq!(kinds["blk"], FileType::BlockDevice);
 }
+
+// ── open-then-unlink: the inode lives until the last handle closes ──────────
+
+#[test]
+fn test_unlink_open_file_keeps_inode_until_release() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "tmp", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"abc").unwrap();
+    assert_eq!(fs.simulate_unlink(1, "tmp"), Ok(()));
+    assert!(fs.test_lookup(1, "tmp").is_err(), "name must be gone");
+    let attr = fs.test_getattr(ino).expect("fstat on an open, unlinked file must work");
+    assert_eq!(attr.nlinks, 0);
+    assert_eq!(fs.test_read(ino, 0, 10).unwrap(), b"abc");
+    fs.test_release(ino, fh).unwrap();
+    assert!(fs.test_getattr(ino).is_err(), "inode must be reclaimed at last close");
+}
+
+#[test]
+fn test_unlink_read_only_open_file_keeps_inode_until_release() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "ro", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"data").unwrap();
+    fs.test_release(ino, fh).unwrap();
+    let (rfh, _) = fs.test_open(ino, libc::O_RDONLY).unwrap();
+    let (rfh2, _) = fs.test_open(ino, libc::O_RDONLY).unwrap();
+    fs.simulate_unlink(1, "ro").unwrap();
+    assert_eq!(fs.test_read(ino, 0, 10).unwrap(), b"data");
+    fs.test_release_full(ino, rfh).unwrap();
+    fs.test_release_full(ino, rfh).unwrap(); // double close must not count twice
+    assert!(fs.test_getattr(ino).is_ok(), "second handle still open");
+    fs.test_release_full(ino, rfh2).unwrap();
+    assert!(fs.test_getattr(ino).is_err());
+}
+
+#[test]
+fn test_rename_over_open_file_keeps_target_until_release() {
+    let (fs, _dir) = fresh_fs();
+    let (dst, dfh) = fs.test_create(1, "dst", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(dfh, 0, b"old").unwrap();
+    let (src, sfh) = fs.test_create(1, "src", 0o644, 0, 0, 0).unwrap();
+    fs.test_release(src, sfh).unwrap();
+    fs.simulate_rename(1, "src", 1, "dst", 0).unwrap();
+    assert_eq!(fs.test_read(dst, 0, 10).unwrap(), b"old");
+    fs.test_release(dst, dfh).unwrap();
+    assert!(fs.test_getattr(dst).is_err());
+}
+
+#[test]
+fn test_destroy_reclaims_orphans() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "o", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"x").unwrap();
+    fs.simulate_unlink(1, "o").unwrap();
+    let before = fs.test_statfs_values().3;
+    fs.test_destroy();
+    assert_eq!(fs.test_statfs_values().3, before - 1, "orphan inode must not survive unmount");
+    let _ = ino;
+}
