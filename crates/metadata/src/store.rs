@@ -34,6 +34,16 @@ use crate::xattr::{intern_xattrs, load_xattrs, set_xattr_entry, get_xattr_entry,
 
 // S_IFDIR bit mask (POSIX directory type)
 const S_IFMT: u32 = 0o0170_000;
+
+/// Longest directory entry name in bytes (statfs reports namelen 255).
+const NAME_MAX: usize = 255;
+
+fn check_name(name: &str) -> Result<(), MetaError> {
+    if name.len() > NAME_MAX {
+        return Err(MetaError::NameTooLong(name.len()));
+    }
+    Ok(())
+}
 const S_IFDIR: u32 = 0o0040_000;
 
 /// Concrete `MetadataStore` backed by file-based FileStorage (blockset Io).
@@ -494,6 +504,7 @@ impl MetadataStore for DictMetadataStore {
         meta: &InodeMeta,
     ) -> Result<InodeId, MetaError> {
         // Validate parent exists and is a directory
+        check_name(name)?;
         let parent_meta = self.get_inode(parent_ino)?;
         if parent_meta.mode & S_IFMT != S_IFDIR {
             return Err(MetaError::NotADirectory(parent_ino));
@@ -563,6 +574,7 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn lookup(&self, parent_ino: InodeId, name: &str) -> Result<InodeId, MetaError> {
+        check_name(name)?;
         let dir_data = self.dir_data.lock().unwrap();
         let dir_digest = dir_data.get(&parent_ino).copied().ok_or(MetaError::NotADirectory(parent_ino))?;
         drop(dir_data);
@@ -573,6 +585,7 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn link(&self, parent_ino: InodeId, name: &str, ino: InodeId) -> Result<(), MetaError> {
+        check_name(name)?;
         let dir_data = self.dir_data.lock().unwrap();
         let dir_digest = dir_data.get(&parent_ino).copied().ok_or(MetaError::NotADirectory(parent_ino))?;
         drop(dir_data);
@@ -1041,6 +1054,19 @@ mod tests {
         let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
         let store = DictMetadataStore::new(io);
         (dir, store)
+    }
+
+    #[test]
+    fn test_names_longer_than_name_max_are_rejected() {
+        let (_d, store) = make_store();
+        let ok = "a".repeat(255);
+        let long = "a".repeat(256);
+        let ino = store.create_inode(&new_file_meta()).unwrap();
+        assert!(matches!(store.link(1, &long, ino), Err(MetaError::NameTooLong(256))));
+        assert!(matches!(store.lookup(1, &long), Err(MetaError::NameTooLong(256))));
+        assert!(matches!(store.create_directory(1, &long, &new_dir_meta()), Err(MetaError::NameTooLong(256))));
+        store.link(1, &ok, ino).unwrap();
+        assert_eq!(store.lookup(1, &ok).unwrap(), ino);
     }
 
     #[test]

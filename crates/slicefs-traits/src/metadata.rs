@@ -33,9 +33,13 @@ pub enum MetaError {
     #[error("directory not empty: {0}")]
     NotEmpty(InodeId),
 
-    /// A directory entry name is invalid (e.g., contains NUL, too long).
+    /// A directory entry name is invalid (e.g., contains NUL).
     #[error("invalid name: {0}")]
     InvalidName(String),
+
+    /// A directory entry name is longer than NAME_MAX (255 bytes).
+    #[error("name too long: {0} bytes")]
+    NameTooLong(usize),
 
     /// On-disk data is corrupted or cannot be deserialized.
     #[error("corrupted data: {0}")]

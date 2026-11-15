@@ -204,6 +204,7 @@ pub fn meta_error_to_fuse_errno(e: &MetaError) -> Errno {
         MetaError::IsADirectory(_) => Errno::EISDIR,
         MetaError::NotEmpty(_) => Errno::ENOTEMPTY,
         MetaError::InvalidName(_) => Errno::EINVAL,
+        MetaError::NameTooLong(_) => Errno::ENAMETOOLONG,
         MetaError::Corrupted(_) => Errno::EIO,
         MetaError::Io(_) => Errno::EIO,
     }
@@ -219,6 +220,7 @@ pub fn meta_error_to_errno(e: &MetaError) -> i32 {
         MetaError::IsADirectory(_) => libc::EISDIR,
         MetaError::NotEmpty(_) => libc::ENOTEMPTY,
         MetaError::InvalidName(_) => libc::EINVAL,
+        MetaError::NameTooLong(_) => libc::ENAMETOOLONG,
         MetaError::Corrupted(_) => libc::EIO,
         MetaError::Io(_) => libc::EIO,
     }
