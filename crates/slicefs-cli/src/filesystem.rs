@@ -357,6 +357,20 @@ impl SliceFsFilesystem {
         Ok(())
     }
 
+    /// ftruncate(fd, 0) takes effect at once: empty the committed manifest and
+    /// release its root, unless that root is `released` (already released by
+    /// the handle). Later writes on the handle then start from an empty file.
+    fn clear_manifest(&self, ino: u64, released: Option<Digest224>) -> Result<(), i32> {
+        if let Ok(m) = self.meta.get_manifest(ino) {
+            if let Some(root) = m.first() {
+                if Some(*root) != released {
+                    self.meta.decrement_refcount(root);
+                }
+            }
+        }
+        self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)
+    }
+
     /// True if the committed file has bytes (so a fresh stream would lose them).
     fn has_content(&self, ino: u64) -> bool {
         self.meta.get_inode(ino).map_or(false, |m| m.size > 0)
@@ -900,6 +914,7 @@ impl SliceFsFilesystem {
                             if let Some(old) = old_root {
                                 self.meta.decrement_refcount(&old);
                             }
+                            self.clear_manifest(ino, old_root)?;
                         } else {
                             buf.resize(new_size as usize, 0);
                             s.byte_count = buf.len() as u64;
@@ -919,6 +934,7 @@ impl SliceFsFilesystem {
                             if let Some(old) = old_root {
                                 self.meta.decrement_refcount(&old);
                             }
+                            self.clear_manifest(ino, old_root)?;
                         } else {
                             // Materialize current content (the file's existing
                             // content if this handle has not streamed yet).

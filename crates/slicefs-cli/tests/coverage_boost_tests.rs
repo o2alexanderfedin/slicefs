@@ -1674,3 +1674,32 @@ fn test_repeated_fsync_without_writes_keeps_content() {
     fs.test_release(ino, fh).unwrap();
     assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"12xx56789");
 }
+
+fn existing_file(fs: &SliceFsFilesystem, name: &str, content: &[u8]) -> u64 {
+    let (ino, fh) = fs.test_create(1, name, 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, content).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    ino
+}
+
+#[test]
+fn test_truncate_to_zero_then_extend_gives_zeros() {
+    let (fs, _dir) = fresh_fs();
+    let ino = existing_file(&fs, "z", b"0123456789");
+    let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    fs.test_setattr_size(ino, Some(fh), 0).unwrap();
+    fs.test_setattr_size(ino, Some(fh), 4).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"\0\0\0\0");
+}
+
+#[test]
+fn test_o_trunc_then_write_past_start_gives_hole() {
+    let (fs, _dir) = fresh_fs();
+    let ino = existing_file(&fs, "h", b"0123456789");
+    let (fh, _) = fs.test_open(ino, libc::O_WRONLY | libc::O_TRUNC).unwrap();
+    fs.test_write(fh, 4, b"EFGH").unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"\0\0\0\0EFGH");
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 8);
+}
