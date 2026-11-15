@@ -155,15 +155,15 @@ _Verifier: Claude (gsd-verifier)_
 
 ## Re-verification (2026-11-14)
 
-Automated re-run by Claude on 2026-11-14 (not a human check), with the Docker Linux FUSE harness `scripts/docker-linux-test/` on branch `fix/pjdfstest-findings` (HEAD 0b01e76/0ec6d24).
+Automated re-run by Claude on 2026-11-14 (not a human check), with the Docker Linux FUSE harness `scripts/docker-linux-test/` on branch `fix/pjdfstest-findings` (HEAD 0b01e76/0ec6d24; final pjdfstest run at 978f9ec).
 
 - **Gap (test build):** closed. `cargo test -p slicefs-cli` compiles and passes on macOS (FUSE-T supplies the
   headers); the whole workspace passes (1361 tests in Docker, 1340 on macOS).
 - **Human item 1 (write session):** `run.sh verify`, Phase 04 block: echo/cat, mv, symlink + readlink, hard link,
   mkdir/rmdir, unmount, remount and re-check: all ok.
-- **Human item 2 (pjdfstest > 95%, POSIX-14):** 8758 of 8792 subtests pass (99.61%). Of the 34 failures,
-  28 are pjdfstest `# TODO` (expected-to-fail) items; the other 6 (rename/23 ctime, open/00 O_TRUNC mtime) were
-  fixed after the run in 0ec6d24. pjdfstest found and the branch fixed: daemon abort on huge truncate, missing
-  FIFO/socket/device nodes, S_IFSOCK treated as a directory, NAME_MAX, open-then-unlink, directory rename
-  semantics, atime/creation/parent timestamps, getattr size during writes.
-- `open/25.t` (1-byte write at 2 GiB) still builds the file in RAM and is slow (issues #1-#3 area).
+- **Human item 2 (pjdfstest > 95%, POSIX-14):** final run at 978f9ec: prove reports **Result: PASS**,
+  8764 of 8792 subtests pass; the 28 failures are all pjdfstest `# TODO` (expected-to-fail) items.
+  pjdfstest found, and the branch fixed: daemon abort on huge truncate, missing FIFO/socket/device nodes,
+  S_IFSOCK treated as a directory, NAME_MAX, open-then-unlink, directory rename semantics, atime/creation/
+  parent timestamps, truncate mtime, getattr size during writes.
+- `open/25.t` (1-byte write at 2 GiB) passes but still builds the gap in RAM and takes minutes (GitHub #23).
