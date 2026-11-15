@@ -12,86 +12,19 @@ use metadata::gc::{collect_live_set, GarbageCollector};
 use metadata::segment::compaction::compact_segment;
 use metadata::segment::{SegmentEntry, SegmentReader, SegmentWriter};
 
-// ─── Task 1 tests: collect_live_set ─────────────────────────────────────────
-//
-// collect_live_set is currently a deferred stub (FileStorage orphan GC is not
-// yet implemented). It returns an empty HashSet regardless of inputs.
-// These tests verify the stub contract.
+// ─── collect_live_set ───────────────────────────────────────────────────────
+// The full mark-and-sweep is tested end to end in slicefs-cli/tests/gc_sweep_tests.rs.
 
-/// collect_live_set is a no-op stub — always returns empty HashSet.
+/// A root that is not in the store gives an error, not an empty or partial
+/// live set: a sweep after a partial mark would delete live objects.
 #[test]
-fn test_collect_live_set_single_root_single_entry() {
+fn collect_live_set_fails_on_a_missing_root() {
     use metadata::store_io::StoreIo;
     use tempfile::TempDir;
     let dir = TempDir::new().unwrap();
     let mut io = StoreIo::new(dir.path());
-    let root: Digest224 = [1, 2, 3, 4, 5, 6, 7];
-
-    let live = collect_live_set(&mut io, &[root]);
-    // Stub returns empty — no assertions about contents needed.
-    let _ = live; // exercise the API
-}
-
-/// collect_live_set stub: empty root slice also returns empty set.
-#[test]
-fn test_collect_live_set_includes_all_descendants() {
-    use metadata::store_io::StoreIo;
-    use tempfile::TempDir;
-    let dir = TempDir::new().unwrap();
-    let mut io = StoreIo::new(dir.path());
-    let root: Digest224 = [2, 3, 4, 5, 6, 7, 8];
-
-    let live = collect_live_set(&mut io, &[root]);
-    // Stub always returns empty — just verify it doesn't panic.
-    assert!(live.len() >= 0);
-}
-
-/// collect_live_set stub: multiple roots — still returns empty.
-#[test]
-fn test_collect_live_set_two_roots_union() {
-    use metadata::store_io::StoreIo;
-    use tempfile::TempDir;
-    let dir = TempDir::new().unwrap();
-    let mut io = StoreIo::new(dir.path());
-    let root1: Digest224 = [1, 0, 0, 0, 0, 0, 0];
-    let root2: Digest224 = [2, 0, 0, 0, 0, 0, 0];
-
-    let live_both = collect_live_set(&mut io, &[root1, root2]);
-    // Stub returns empty — verify no panic.
-    let _ = live_both;
-}
-
-/// collect_live_set stub: snapshot root — returns empty (deferred).
-#[test]
-fn test_gc_03_snapshot_root_entry_survives() {
-    use metadata::store_io::StoreIo;
-    use tempfile::TempDir;
-    let dir = TempDir::new().unwrap();
-    let mut io = StoreIo::new(dir.path());
-    let snapshot_root: Digest224 = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11];
-    let current_root: Digest224 = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77];
-
-    // Stub: live set is empty, but the call must not panic.
-    let live = collect_live_set(&mut io, &[current_root, snapshot_root]);
-    let _ = live;
-}
-
-/// collect_live_set stub: does not panic on orphan keys (no-op anyway).
-#[test]
-fn test_unreachable_entry_not_in_live_set() {
-    use metadata::store_io::StoreIo;
-    use tempfile::TempDir;
-    let dir = TempDir::new().unwrap();
-    let mut io = StoreIo::new(dir.path());
-    let root: Digest224 = [5, 6, 7, 8, 9, 10, 11];
-    let orphan_key: Digest224 = [0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
-
-    let live = collect_live_set(&mut io, &[root]);
-    // Stub returns empty — orphan_key is definitely not in it.
-    assert!(
-        !live.contains(&orphan_key),
-        "stub live set must not contain orphan key"
-    );
+    assert!(collect_live_set(&mut io, &[[1, 2, 3, 4, 5, 6, 7]]).is_err());
+    assert!(collect_live_set(&mut io, &[]).unwrap().is_empty());
 }
 
 // ─── Task 1 tests: compact_segment ──────────────────────────────────────────

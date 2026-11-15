@@ -1,29 +1,79 @@
 //! Mark-and-sweep GC engine for SliceFS metadata.
 //!
 //! This module provides:
-//! - `collect_live_set`: simplified stub — FileStorage orphan file cleanup deferred
-//! - `GarbageCollector`: orchestrates live-set collection + segment compaction
+//! - `collect_live_set` + `sweep`: mark-and-sweep of the stored objects (offline)
+//! - `GarbageCollector`: compacts the metadata segment files
 
 pub mod background;
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use blockset::Io;
+use blockset::{file_storage_mark, Io};
 use slicefs_traits::digest::Digest224;
+use slicefs_traits::metadata::MetaError;
+
+use crate::store::referenced_roots;
 
 use crate::segment::compaction::{compact_segment, SegmentError};
 
-/// Collect the live set of `Digest224` keys reachable from `roots`.
+/// Store path (`vt0/...`) of every object reachable from `roots` (committed
+/// roots: the current one and each snapshot). This is the GC mark phase.
 ///
-/// With FileStorage, batch files are named by their root `Digest224`.
-/// Segment compaction no longer needs a live set (no DictEntry to filter).
-/// FileStorage orphan file cleanup is deferred to a future phase.
+/// Fails if a reachable object is missing: then the caller must not sweep,
+/// because the live set is not complete.
+pub fn collect_live_set(io: &mut impl Io, roots: &[Digest224]) -> Result<HashSet<String>, MetaError> {
+    let mut live = HashSet::new();
+    for root in roots {
+        for object in referenced_roots(io, root)? {
+            if !file_storage_mark(io, &object, &mut live) {
+                return Err(MetaError::Corrupted(format!("missing object under root {:?}", object)));
+            }
+        }
+    }
+    Ok(live)
+}
+
+/// Result of a sweep.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SweepStats {
+    pub objects_kept: usize,
+    pub objects_removed: usize,
+    pub bytes_removed: u64,
+}
+
+/// Delete each object in `<store>/vt0/` that is not in `live`. This is the GC
+/// sweep phase. Only offline: a mounted store writes objects that no committed
+/// root refers to yet.
 ///
-/// Returns an empty `HashSet` — all live-set logic is no-op until the
-/// FileStorage orphan GC phase is implemented.
-pub fn collect_live_set(_io: &mut impl Io, _roots: &[Digest224]) -> HashSet<Digest224> {
-    HashSet::new()
+/// Only names in the object format are touched (a 45-character base32 name,
+/// with a `.` prefix for internal nodes); other files stay.
+pub fn sweep(store: &Path, live: &HashSet<String>) -> std::io::Result<SweepStats> {
+    let mut stats = SweepStats::default();
+    let dir = store.join("vt0");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(stats),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let b32 = name.strip_prefix('.').unwrap_or(name);
+        if b32.len() != 45 || !b32.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            continue;
+        }
+        if live.contains(&format!("vt0/{name}")) {
+            stats.objects_kept += 1;
+            continue;
+        }
+        let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        std::fs::remove_file(entry.path())?;
+        stats.objects_removed += 1;
+        stats.bytes_removed += len;
+    }
+    Ok(stats)
 }
 
 /// Statistics returned by a GC run.
@@ -62,21 +112,14 @@ impl GarbageCollector {
         self.run_gc_inner()
     }
 
-    /// Collect the live set from `io` + `roots`, then compact all `.seg` files in
-    /// `segments_dir`.
-    ///
-    /// Segment files are compacted in place: each segment is replaced by a compacted
-    /// version that retains only the entries present in the live set.
-    ///
-    /// With FileStorage, `collect_live_set` is a no-op (returns empty set) so
-    /// this is equivalent to `run_gc_roots_only`. FileStorage orphan file cleanup
-    /// is deferred to a future phase.
+    /// Compact all `.seg` files in `segments_dir`. Same as `run_gc_roots_only`;
+    /// the stored objects are swept by [`collect_live_set`] and [`sweep`].
     pub fn run_gc(
         &self,
         io: &mut impl Io,
         roots: &[Digest224],
     ) -> Result<GcStats, GcError> {
-        let _live_set = collect_live_set(io, roots);
+        let _ = (io, roots);
         self.run_gc_inner()
     }
 

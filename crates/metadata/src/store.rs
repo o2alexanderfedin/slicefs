@@ -943,6 +943,38 @@ impl MetadataStore for DictMetadataStore {
     }
 }
 
+/// Roots of every stored object that the metadata at `root` reads back: the
+/// root record, its maps, each inode, directory list and xattr set, each file
+/// manifest, and each file root in the manifests. The GC mark phase (#25)
+/// walks the object tree of each of them.
+pub fn referenced_roots(
+    io: &mut impl blockset::Io,
+    root: &Digest224,
+) -> Result<Vec<Digest224>, MetaError> {
+    let bytes = file_storage_get(io, root)
+        .ok_or_else(|| MetaError::Corrupted(format!("missing root node {:?}", root)))?;
+    if !matches!(bytes.len(), 156 | 184 | 200) {
+        return Err(MetaError::Corrupted(format!(
+            "root record: expected 156, 184 or 200 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    let at = |o: usize| parse_digest224(&bytes[o..o + 28]);
+    let (inodes, dirs, manifests, xattrs) = (at(44), at(72), at(100), at(128));
+    let mut out = vec![*root, at(0), inodes, dirs, manifests, xattrs];
+    if bytes.len() >= 184 {
+        out.push(at(156)); // refcounts
+    }
+    for map in [inodes, dirs, xattrs] {
+        out.extend(load_u64_digest_map(io, &map)?.into_values());
+    }
+    for manifest in load_u64_digest_map(io, &manifests)?.into_values() {
+        out.push(manifest);
+        out.extend(load_manifest(io, &manifest)?);
+    }
+    Ok(out)
+}
+
 // ─── helpers for BTreeMap<u64, Digest224> serialization ─────────────────────
 
 /// Serialize and store a `BTreeMap<u64, Digest224>` via a StorageAdd backend.

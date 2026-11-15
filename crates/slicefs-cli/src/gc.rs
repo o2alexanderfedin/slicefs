@@ -9,8 +9,9 @@
 //! The command:
 //! 1. Refuses to run if the store is currently mounted (`mount.lock` present).
 //! 2. Loads the segment files to reconstruct the dictionary and last committed root.
-//! 3. Runs the GC engine to compact segment files, removing unreachable entries.
-//! 4. Prints statistics: entries scanned, entries removed, segments compacted.
+//! 3. Marks every stored object reachable from the current root and the
+//!    snapshot roots, and deletes the other objects in `vt0/` (#25).
+//! 4. Compacts the segment files and prints statistics.
 //!
 //! This command is safe to run when the filesystem is **not** mounted.
 //! For in-process GC during active mounts, use the background GC thread
@@ -18,7 +19,7 @@
 
 use std::path::Path;
 
-use metadata::gc::GarbageCollector;
+use metadata::gc::{collect_live_set, sweep, GarbageCollector};
 use metadata::segment::load_store_from_segments;
 use metadata::store_io::StoreIo;
 
@@ -55,8 +56,18 @@ pub fn run_gc(store_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         roots.push(snap.root);
     }
 
-    // Step 3: Run GC engine using file-backed Io (Dictionary-free).
+    // Step 3: Mark and sweep the stored objects. A failed mark (missing
+    // object, bad record) stops here, before anything is deleted.
     let mut io = StoreIo::new(store_path);
+    let live = collect_live_set(&mut io, &roots)
+        .map_err(|e| format!("GC mark failed, nothing deleted: {}", e))?;
+    let swept = sweep(store_path, &live)
+        .map_err(|e| format!("GC sweep failed: {}", e))?;
+    println!(
+        "GC objects: kept {}, removed {} ({} bytes)",
+        swept.objects_kept, swept.objects_removed, swept.bytes_removed
+    );
+
     let gc = GarbageCollector::new(segs_dir);
     let stats = gc.run_gc(&mut io, &roots)
         .map_err(|e| format!("GC failed: {}", e))?;
