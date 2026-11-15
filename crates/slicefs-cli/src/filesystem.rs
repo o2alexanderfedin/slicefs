@@ -153,10 +153,40 @@ impl SliceFsFilesystem {
     }
 }
 
+/// Convert a `SystemTime` to `(seconds, nanoseconds)` since the epoch.
+/// Times before 1970 give negative seconds with a non-negative nanosecond part.
+pub fn system_time_to_pair(t: SystemTime) -> (i64, u32) {
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => (d.as_secs() as i64, d.subsec_nanos()),
+        Err(e) => {
+            let d = e.duration();
+            if d.subsec_nanos() == 0 {
+                (-(d.as_secs() as i64), 0)
+            } else {
+                (-(d.as_secs() as i64) - 1, 1_000_000_000 - d.subsec_nanos())
+            }
+        }
+    }
+}
+
+/// Inverse of [`system_time_to_pair`].
+pub fn pair_to_system_time(sec: i64, nsec: u32) -> SystemTime {
+    if sec >= 0 {
+        UNIX_EPOCH + Duration::new(sec as u64, nsec)
+    } else {
+        UNIX_EPOCH - Duration::new(sec.unsigned_abs(), 0) + Duration::new(0, nsec)
+    }
+}
+
+/// Current time as `(seconds, nanoseconds)`.
+fn now_pair() -> (i64, u32) {
+    system_time_to_pair(SystemTime::now())
+}
+
 /// Convert an [`InodeMeta`] to a fuser [`FileAttr`].
 ///
 /// Uses the `mode` field's type bits to determine `FileType`.
-/// `atime` is always `UNIX_EPOCH` (no-atime mode — deduplication workloads).
+/// `atime` is the stored access time (set by utimensat; reads do not update it).
 pub fn inode_to_file_attr(meta: &InodeMeta) -> FileAttr {
     let kind = match meta.mode & S_IFMT {
         S_IFDIR => FileType::Directory,
@@ -171,23 +201,15 @@ pub fn inode_to_file_attr(meta: &InodeMeta) -> FileAttr {
     let perm = (meta.mode & 0o7777) as u16;
     let blocks = (meta.size + 511) / 512;
 
-    let mtime = if meta.mtime_sec >= 0 {
-        UNIX_EPOCH + Duration::new(meta.mtime_sec as u64, meta.mtime_nsec)
-    } else {
-        UNIX_EPOCH - Duration::new((-meta.mtime_sec) as u64, 0)
-    };
-
-    let ctime = if meta.ctime_sec >= 0 {
-        UNIX_EPOCH + Duration::new(meta.ctime_sec as u64, meta.ctime_nsec)
-    } else {
-        UNIX_EPOCH - Duration::new((-meta.ctime_sec) as u64, 0)
-    };
+    let mtime = pair_to_system_time(meta.mtime_sec, meta.mtime_nsec);
+    let ctime = pair_to_system_time(meta.ctime_sec, meta.ctime_nsec);
+    let atime = pair_to_system_time(meta.atime_sec, meta.atime_nsec);
 
     FileAttr {
         ino: INodeNo(meta.ino),
         size: meta.size,
         blocks,
-        atime: UNIX_EPOCH,
+        atime,
         mtime,
         ctime,
         crtime: UNIX_EPOCH,
@@ -317,6 +339,28 @@ impl SliceFsFilesystem {
         Ok(())
     }
 
+    /// Set access, modification and change times of a new inode to now.
+    fn stamp_new(meta: &mut InodeMeta) {
+        let (sec, nsec) = now_pair();
+        meta.atime_sec = sec;
+        meta.atime_nsec = nsec;
+        meta.mtime_sec = sec;
+        meta.mtime_nsec = nsec;
+        meta.ctime_sec = sec;
+        meta.ctime_nsec = nsec;
+    }
+
+    /// A directory's entries changed: set its mtime and ctime to now.
+    fn touch_dir(&self, ino: u64) -> Result<(), i32> {
+        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        let (sec, nsec) = now_pair();
+        inode.mtime_sec = sec;
+        inode.mtime_nsec = nsec;
+        inode.ctime_sec = sec;
+        inode.ctime_nsec = nsec;
+        self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))
+    }
+
     /// Add `delta` to the link count of `ino` (directory ".." bookkeeping).
     fn adjust_nlinks(&self, ino: u64, delta: i32) -> Result<(), i32> {
         let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
@@ -345,12 +389,14 @@ impl SliceFsFilesystem {
         gid: u32,
     ) -> Result<(u64, u64), i32> {
         let file_mode = S_IFREG | (mode & !umask & 0o7777);
-        let file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
+        let mut file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
+        Self::stamp_new(&mut file_meta);
         let ino = self.meta.create_inode(&file_meta).map_err(|e| meta_error_to_errno(&e))?;
         if let Err(e) = self.meta.link(parent_ino, name, ino) {
             let _ = self.meta.delete_inode(ino);
             return Err(meta_error_to_errno(&e));
         }
+        self.touch_dir(parent_ino)?;
         let fh = self.open_handle(ino);
         self.open_files.lock().unwrap().insert(fh, OpenFileState {
             ino,
@@ -991,6 +1037,7 @@ impl SliceFsFilesystem {
         };
         let file_mode = file_type | (mode & !umask & 0o7777);
         let mut file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
+        Self::stamp_new(&mut file_meta);
         if file_type == S_IFCHR || file_type == S_IFBLK {
             file_meta.rdev = rdev;
         }
@@ -999,6 +1046,7 @@ impl SliceFsFilesystem {
             let _ = self.meta.delete_inode(ino);
             return Err(meta_error_to_errno(&e));
         }
+        self.touch_dir(parent)?;
         let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
         Ok((ino, meta))
     }
@@ -1078,10 +1126,13 @@ impl SliceFsFilesystem {
         gid: u32,
     ) -> Result<u64, i32> {
         let dir_mode = S_IFDIR | (mode & !umask & 0o7777);
-        let dir_meta = InodeMeta::new_directory(0, uid, gid, dir_mode);
-        self.meta
+        let mut dir_meta = InodeMeta::new_directory(0, uid, gid, dir_mode);
+        Self::stamp_new(&mut dir_meta);
+        let ino = self.meta
             .create_directory(parent_ino, name, &dir_meta)
-            .map_err(|e| meta_error_to_errno(&e))
+            .map_err(|e| meta_error_to_errno(&e))?;
+        self.touch_dir(parent_ino)?;
+        Ok(ino)
     }
 
     /// Remove empty directory `name` from `parent_ino`.
@@ -1127,6 +1178,7 @@ impl SliceFsFilesystem {
             parent_inode.nlinks -= 1;
             self.meta.update_inode(&parent_inode).map_err(|e| meta_error_to_errno(&e))?;
         }
+        self.touch_dir(parent_ino)?;
         Ok(())
     }
 
@@ -1167,9 +1219,14 @@ impl SliceFsFilesystem {
             // Reclaim now, or keep as an orphan while handles are open.
             self.drop_last_link(inode)?;
         } else {
-            // Hard links still exist — just persist the decremented nlinks
+            // Hard links still exist — persist the decremented nlinks; the
+            // link count changed, so ctime changes too.
+            let (sec, nsec) = now_pair();
+            inode.ctime_sec = sec;
+            inode.ctime_nsec = nsec;
             self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
         }
+        self.touch_dir(parent_ino)?;
         Ok(())
     }
 
@@ -1199,6 +1256,7 @@ impl SliceFsFilesystem {
         inode.ctime_sec = now.as_secs() as i64;
         inode.ctime_nsec = now.subsec_nanos();
         self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
+        self.touch_dir(newparent_ino)?;
 
         Ok(ino)
     }
@@ -1292,6 +1350,10 @@ impl SliceFsFilesystem {
             self.adjust_nlinks(parent_ino, -1)?;
             self.adjust_nlinks(newparent_ino, 1)?;
         }
+        self.touch_dir(parent_ino)?;
+        if newparent_ino != parent_ino {
+            self.touch_dir(newparent_ino)?;
+        }
 
         // Update ctime on moved inode
         let mut src_inode = self.meta.get_inode(src_ino).map_err(|e| meta_error_to_errno(&e))?;
@@ -1318,7 +1380,7 @@ impl SliceFsFilesystem {
         gid: u32,
     ) -> Result<u64, i32> {
         let target_bytes = target.as_bytes();
-        let symlink_meta = InodeMeta {
+        let mut symlink_meta = InodeMeta {
             ino: 0,
             mode: S_IFLNK | 0o777,
             uid,
@@ -1329,8 +1391,9 @@ impl SliceFsFilesystem {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
-            rdev: 0,
+            rdev: 0, atime_sec: 0, atime_nsec: 0,
         };
+        Self::stamp_new(&mut symlink_meta);
 
         // Create inode
         let ino = self
@@ -1343,6 +1406,7 @@ impl SliceFsFilesystem {
             let _ = self.meta.delete_inode(ino);
             return Err(meta_error_to_errno(&e));
         }
+        self.touch_dir(parent_ino)?;
 
         // Store target as CAS content (raw bytes — v3 format, no compression)
         let content_digest = {
@@ -1495,7 +1559,37 @@ impl SliceFsFilesystem {
         fh: Option<u64>,
         mtime: Option<(i64, u32)>,
     ) -> Result<InodeMeta, i32> {
+        self.test_setattr_full(ino, mode, uid, gid, size, fh, None, mtime)
+    }
+
+    /// Set only access and modification times (utimensat).
+    pub fn test_setattr_times(
+        &self,
+        ino: u64,
+        atime: Option<(i64, u32)>,
+        mtime: Option<(i64, u32)>,
+    ) -> Result<InodeMeta, i32> {
+        self.test_setattr_full(ino, None, None, None, None, None, atime, mtime)
+    }
+
+    /// setattr with every supported field.
+    #[allow(clippy::too_many_arguments)]
+    pub fn test_setattr_full(
+        &self,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        fh: Option<u64>,
+        atime: Option<(i64, u32)>,
+        mtime: Option<(i64, u32)>,
+    ) -> Result<InodeMeta, i32> {
         let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        if let Some((sec, nsec)) = atime {
+            inode.atime_sec = sec;
+            inode.atime_nsec = nsec;
+        }
 
         if let Some(m) = mode {
             inode.mode = (inode.mode & S_IFMT) | (m & 0o7777);
@@ -2619,7 +2713,7 @@ mod tests {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
-            rdev: 0,
+            rdev: 0, atime_sec: 0, atime_nsec: 0,
         };
         let attr = inode_to_file_attr(&meta);
         assert_eq!(attr.kind, FileType::Symlink);
@@ -2639,7 +2733,7 @@ mod tests {
             mtime_nsec: 0,
             ctime_sec: -50,
             ctime_nsec: 0,
-            rdev: 0,
+            rdev: 0, atime_sec: 0, atime_nsec: 0,
         };
         let attr = inode_to_file_attr(&meta);
         // Should not panic for negative timestamps
@@ -2660,7 +2754,7 @@ mod tests {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
-            rdev: 0,
+            rdev: 0, atime_sec: 0, atime_nsec: 0,
         };
         let attr = inode_to_file_attr(&meta);
         // blocks = (1024 + 511) / 512 = 2
@@ -2942,7 +3036,7 @@ mod tests {
             ino: 0,
             mode: S_IFLNK | 0o777,
             uid: 0, gid: 0, nlinks: 1, size: 0,
-            mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, rdev: 0,
+            mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, rdev: 0, atime_sec: 0, atime_nsec: 0,
         };
         let ino = fs.meta.create_inode(&sym_meta).unwrap();
         fs.meta.link(1, "emptylink", ino).unwrap();

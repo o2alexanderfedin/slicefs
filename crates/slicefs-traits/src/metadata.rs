@@ -87,6 +87,10 @@ pub struct InodeMeta {
     pub ctime_nsec: u32,
     /// Device number for character and block device nodes (`st_rdev`); 0 otherwise.
     pub rdev: u32,
+    /// Last access time — seconds since Unix epoch (set by utimensat; reads do not update it).
+    pub atime_sec: i64,
+    /// Last access time — nanosecond fraction.
+    pub atime_nsec: u32,
 }
 
 impl InodeMeta {
@@ -106,7 +110,7 @@ impl InodeMeta {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
-            rdev: 0,
+            rdev: 0, atime_sec: 0, atime_nsec: 0,
         }
     }
 
@@ -125,7 +129,7 @@ impl InodeMeta {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
-            rdev: 0,
+            rdev: 0, atime_sec: 0, atime_nsec: 0,
         }
     }
 }

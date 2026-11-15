@@ -94,7 +94,7 @@ fn test_inode_to_file_attr_symlink_kind() {
         mtime_nsec: 0,
         ctime_sec: 1000,
         ctime_nsec: 0,
-        rdev: 0,
+        rdev: 0, atime_sec: 0, atime_nsec: 0,
     };
     let attr = inode_to_file_attr(&meta);
     use fuser::FileType;
@@ -115,7 +115,7 @@ fn test_inode_to_file_attr_unknown_type_is_regular() {
         mtime_nsec: 0,
         ctime_sec: 0,
         ctime_nsec: 0,
-        rdev: 0,
+        rdev: 0, atime_sec: 0, atime_nsec: 0,
     };
     let attr = inode_to_file_attr(&meta);
     use fuser::FileType;
@@ -136,7 +136,7 @@ fn test_inode_to_file_attr_negative_mtime() {
         mtime_nsec: 0,
         ctime_sec: -50,
         ctime_nsec: 0,
-        rdev: 0,
+        rdev: 0, atime_sec: 0, atime_nsec: 0,
     };
     let attr = inode_to_file_attr(&meta);
     // mtime should be UNIX_EPOCH - 100s
@@ -160,7 +160,7 @@ fn test_inode_to_file_attr_blocks_roundup() {
         mtime_nsec: 0,
         ctime_sec: 0,
         ctime_nsec: 0,
-        rdev: 0,
+        rdev: 0, atime_sec: 0, atime_nsec: 0,
     };
     let attr = inode_to_file_attr(&meta);
     assert_eq!(attr.blocks, 1, "511 bytes should round up to 1 block");
@@ -180,7 +180,7 @@ fn test_inode_to_file_attr_blocks_exact() {
         mtime_nsec: 0,
         ctime_sec: 0,
         ctime_nsec: 0,
-        rdev: 0,
+        rdev: 0, atime_sec: 0, atime_nsec: 0,
     };
     let attr = inode_to_file_attr(&meta);
     assert_eq!(attr.blocks, 1, "512 bytes = exactly 1 block");
@@ -628,7 +628,7 @@ fn test_readlink_empty_manifest_returns_empty_string() {
         mtime_nsec: 0,
         ctime_sec: 0,
         ctime_nsec: 0,
-        rdev: 0,
+        rdev: 0, atime_sec: 0, atime_nsec: 0,
     };
     let ino = fs.meta().create_inode(&meta).unwrap();
     fs.meta().link(1, "empty_link", ino).unwrap();
@@ -1501,4 +1501,76 @@ fn test_getattr_reports_size_of_open_write_handle() {
     assert_eq!(fs.test_getattr(ino).unwrap().size, 7);
     fs.test_release(ino, fh).unwrap();
     assert_eq!(fs.test_getattr(ino).unwrap().size, 7);
+}
+
+// ── atime / timestamps ───────────────────────────────────────────────────────
+
+#[test]
+fn test_setattr_times_stores_atime_and_mtime() {
+    let (fs, _dir) = fresh_fs();
+    let ino = fs.test_mknod(1, "t", 0o644, 0, 0, 0).unwrap();
+    let m = fs.test_setattr_times(ino, Some((1_900_000_000, 7)), Some((1_950_000_000, 9))).unwrap();
+    assert_eq!((m.atime_sec, m.atime_nsec, m.mtime_sec, m.mtime_nsec), (1_900_000_000, 7, 1_950_000_000, 9));
+    let attr = slicefs_cli::filesystem::inode_to_file_attr(&fs.test_getattr(ino).unwrap());
+    assert_eq!(attr.atime, UNIX_EPOCH + Duration::new(1_900_000_000, 7));
+    assert_eq!(attr.mtime, UNIX_EPOCH + Duration::new(1_950_000_000, 9));
+}
+
+#[test]
+fn test_time_conversion_handles_pre_epoch() {
+    use slicefs_cli::filesystem::{system_time_to_pair, pair_to_system_time};
+    let t = UNIX_EPOCH - Duration::new(10, 250_000_000);
+    let (s, ns) = system_time_to_pair(t);
+    assert_eq!((s, ns), (-11, 750_000_000));
+    assert_eq!(pair_to_system_time(s, ns), t);
+    assert_eq!(system_time_to_pair(UNIX_EPOCH + Duration::new(5, 1)), (5, 1));
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+/// Set a directory's mtime/ctime to the epoch so a later change is visible.
+fn age(fs: &SliceFsFilesystem, ino: u64) {
+    let mut m = fs.test_getattr(ino).unwrap();
+    m.mtime_sec = 0; m.ctime_sec = 0;
+    fs.meta().update_inode(&m).unwrap();
+}
+
+#[test]
+fn test_new_inodes_get_current_times() {
+    let (fs, _dir) = fresh_fs();
+    let t0 = now_secs();
+    let (f, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+    fs.test_release(f, fh).unwrap();
+    let n = fs.test_mknod(1, "n", 0o010_644, 0, 0, 0).unwrap();
+    let d = fs.simulate_mkdir(1, "d", 0o755, 0, 0, 0).unwrap();
+    let l = fs.simulate_symlink(1, "l", "f", 0, 0).unwrap();
+    for ino in [f, n, d, l] {
+        let m = fs.test_getattr(ino).unwrap();
+        assert!(m.mtime_sec >= t0 && m.ctime_sec >= t0 && m.atime_sec >= t0, "ino {ino}: {m:?}");
+    }
+}
+
+#[test]
+fn test_entry_changes_update_parent_times() {
+    let (fs, _dir) = fresh_fs();
+    let p = fs.simulate_mkdir(1, "p", 0o755, 0, 0, 0).unwrap();
+    let q = fs.simulate_mkdir(1, "q", 0o755, 0, 0, 0).unwrap();
+    let changed = |fs: &SliceFsFilesystem, ino: u64| {
+        let m = fs.test_getattr(ino).unwrap();
+        m.mtime_sec > 0 && m.ctime_sec > 0
+    };
+    age(&fs, p); let (f, fh) = fs.test_create(p, "f", 0o644, 0, 0, 0).unwrap(); fs.test_release(f, fh).unwrap();
+    assert!(changed(&fs, p), "create");
+    age(&fs, p); fs.test_mknod(p, "n", 0o644, 0, 0, 0).unwrap(); assert!(changed(&fs, p), "mknod");
+    age(&fs, p); fs.simulate_mkdir(p, "sub", 0o755, 0, 0, 0).unwrap(); assert!(changed(&fs, p), "mkdir");
+    age(&fs, p); fs.simulate_symlink(p, "s", "f", 0, 0).unwrap(); assert!(changed(&fs, p), "symlink");
+    age(&fs, p); age(&fs, f); fs.simulate_link(f, p, "f2").unwrap();
+    assert!(changed(&fs, p), "link: parent"); assert!(fs.test_getattr(f).unwrap().ctime_sec > 0, "link: file ctime");
+    age(&fs, p); age(&fs, f); fs.simulate_unlink(p, "f2").unwrap();
+    assert!(changed(&fs, p), "unlink: parent"); assert!(fs.test_getattr(f).unwrap().ctime_sec > 0, "unlink: file ctime");
+    age(&fs, p); fs.simulate_rmdir(p, "sub").unwrap(); assert!(changed(&fs, p), "rmdir");
+    age(&fs, p); age(&fs, q); fs.simulate_rename(p, "n", q, "n", 0).unwrap();
+    assert!(changed(&fs, p), "rename: old parent"); assert!(changed(&fs, q), "rename: new parent");
 }

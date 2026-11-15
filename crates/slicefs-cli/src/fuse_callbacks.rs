@@ -647,7 +647,7 @@ impl Filesystem for SliceFsFilesystem {
         uid: Option<u32>,
         gid: Option<u32>,
         size: Option<u64>,
-        _atime: Option<TimeOrNow>,
+        atime: Option<TimeOrNow>,
         mtime: Option<TimeOrNow>,
         _ctime: Option<SystemTime>,
         fh: Option<FileHandle>,
@@ -659,16 +659,14 @@ impl Filesystem for SliceFsFilesystem {
     ) {
         eprintln!("[{}][FUSE] setattr: ENTRY ino={}, mode={:?}, uid={:?}, gid={:?}, size={:?}, mtime={:?}, fh={:?}", ts(), ino.0, mode.map(|m| format!("{:#o}", m)), uid, gid, size, mtime.as_ref().map(|t| match t { TimeOrNow::Now => "Now".to_string(), TimeOrNow::SpecificTime(st) => format!("{:?}", st) }), fh.map(|f| f.0));
         // Convert TimeOrNow to (sec, nsec) for the testable method
-        let mtime_pair = mtime.map(|mt| {
-            let t = match mt {
-                TimeOrNow::SpecificTime(st) => st,
-                TimeOrNow::Now => SystemTime::now(),
-            };
-            let dur = t.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
-            (dur.as_secs() as i64, dur.subsec_nanos())
+        let to_pair = |t: TimeOrNow| crate::filesystem::system_time_to_pair(match t {
+            TimeOrNow::SpecificTime(st) => st,
+            TimeOrNow::Now => SystemTime::now(),
         });
+        let atime_pair = atime.map(to_pair);
+        let mtime_pair = mtime.map(to_pair);
         let fh_val = fh.map(|f| f.0);
-        match handle_setattr(self, ino.0, mode, uid, gid, size, fh_val, mtime_pair) {
+        match handle_setattr(self, ino.0, mode, uid, gid, size, fh_val, atime_pair, mtime_pair) {
             AttrResult::Ok(attr) => {
                 eprintln!("[{}][FUSE] setattr: EXIT ino={} -> ok, size={}, mode={:#o}, uid={}, gid={}", ts(), ino.0, attr.size, attr.perm, attr.uid, attr.gid);
                 reply.attr(&TTL, &attr);

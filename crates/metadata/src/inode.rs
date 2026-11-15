@@ -1,6 +1,6 @@
 //! InodeMeta binary serialization for SliceFS.
 //!
-//! Provides 56/60-byte little-endian pack/unpack of `InodeMeta`, plus
+//! Provides 56/72-byte little-endian pack/unpack of `InodeMeta`, plus
 //! Io-backed `intern_inode` and `load_inode` for CAS storage.
 //!
 //! `intern_inode` accepts any `blockset::StorageAdd` impl (e.g. `FileStorageAdd`).
@@ -23,10 +23,13 @@ use blockset::{State, Tree, StorageAdd, Io, file_storage_get};
 ///   [40..44] mtime_nsec u32  (4 bytes)
 ///   [44..52] ctime_sec  i64  (8 bytes)
 ///   [52..56] ctime_nsec u32  (4 bytes)
-///   [56..60] rdev       u32  (4 bytes) — only present when rdev != 0
+///   Extension (bytes 56..72), present only if rdev or atime is non-zero:
+///   [56..60] rdev       u32  (4 bytes)
+///   [60..68] atime_sec  i64  (8 bytes)
+///   [68..72] atime_nsec u32  (4 bytes)
 ///
-/// The rdev field is written only for device nodes, so every inode with
-/// rdev == 0 keeps the original 56-byte encoding (and its CAS digest).
+/// Inodes without rdev/atime keep the original 56-byte encoding (and their
+/// CAS digests), so stores written before the extension load unchanged.
 pub fn serialize_inode(meta: &InodeMeta) -> Vec<u8> {
     let mut buf = Vec::with_capacity(60);
     buf.extend_from_slice(&meta.ino.to_le_bytes());
@@ -39,19 +42,21 @@ pub fn serialize_inode(meta: &InodeMeta) -> Vec<u8> {
     buf.extend_from_slice(&meta.mtime_nsec.to_le_bytes());
     buf.extend_from_slice(&meta.ctime_sec.to_le_bytes());
     buf.extend_from_slice(&meta.ctime_nsec.to_le_bytes());
-    if meta.rdev != 0 {
+    if meta.rdev != 0 || meta.atime_sec != 0 || meta.atime_nsec != 0 {
         buf.extend_from_slice(&meta.rdev.to_le_bytes());
+        buf.extend_from_slice(&meta.atime_sec.to_le_bytes());
+        buf.extend_from_slice(&meta.atime_nsec.to_le_bytes());
     }
     buf
 }
 
-/// Deserialize `InodeMeta` from a 56-byte (rdev = 0) or 60-byte buffer.
+/// Deserialize `InodeMeta` from a 56-byte (base) or 72-byte (extended) buffer.
 ///
 /// Returns `MetaError::Corrupted` for any other length.
 pub fn deserialize_inode(buf: &[u8]) -> Result<InodeMeta, MetaError> {
-    if buf.len() != 56 && buf.len() != 60 {
+    if buf.len() != 56 && buf.len() != 72 {
         return Err(MetaError::Corrupted(format!(
-            "expected 56 or 60 bytes, got {}",
+            "expected 56 or 72 bytes, got {}",
             buf.len()
         )));
     }
@@ -66,7 +71,9 @@ pub fn deserialize_inode(buf: &[u8]) -> Result<InodeMeta, MetaError> {
         mtime_nsec: u32::from_le_bytes(buf[40..44].try_into().unwrap()),
         ctime_sec: i64::from_le_bytes(buf[44..52].try_into().unwrap()),
         ctime_nsec: u32::from_le_bytes(buf[52..56].try_into().unwrap()),
-        rdev: if buf.len() == 60 { u32::from_le_bytes(buf[56..60].try_into().unwrap()) } else { 0 },
+        rdev: if buf.len() == 72 { u32::from_le_bytes(buf[56..60].try_into().unwrap()) } else { 0 },
+        atime_sec: if buf.len() == 72 { i64::from_le_bytes(buf[60..68].try_into().unwrap()) } else { 0 },
+        atime_nsec: if buf.len() == 72 { u32::from_le_bytes(buf[68..72].try_into().unwrap()) } else { 0 },
     })
 }
 
@@ -107,8 +114,10 @@ mod tests {
             ctime_sec in any::<i64>(),
             ctime_nsec in any::<u32>(),
             rdev in any::<u32>(),
+            atime_sec in any::<i64>(),
+            atime_nsec in any::<u32>(),
         ) -> InodeMeta {
-            InodeMeta { ino, mode, uid, gid, nlinks, size, mtime_sec, mtime_nsec, ctime_sec, ctime_nsec, rdev }
+            InodeMeta { ino, mode, uid, gid, nlinks, size, mtime_sec, mtime_nsec, ctime_sec, ctime_nsec, rdev, atime_sec, atime_nsec }
         }
     }
 
@@ -116,7 +125,8 @@ mod tests {
         #[test]
         fn prop_round_trip(meta in arb_inode_meta()) {
             let bytes = serialize_inode(&meta);
-            prop_assert_eq!(bytes.len(), if meta.rdev == 0 { 56 } else { 60 });
+            let extended = meta.rdev != 0 || meta.atime_sec != 0 || meta.atime_nsec != 0;
+            prop_assert_eq!(bytes.len(), if extended { 72 } else { 56 });
             let recovered = deserialize_inode(&bytes).expect("deserialize failed");
             prop_assert_eq!(meta, recovered);
         }
@@ -134,7 +144,7 @@ mod tests {
             mtime_nsec: 123456789,
             ctime_sec: 1711497601,
             ctime_nsec: 987654321,
-            rdev: 0,
+            rdev: 0, atime_sec: 0, atime_nsec: 0,
         }
     }
 
@@ -166,7 +176,7 @@ mod tests {
             mtime_nsec: u32::MAX,
             ctime_sec: i64::MAX,
             ctime_nsec: u32::MAX,
-            rdev: 0,
+            rdev: 0, atime_sec: 0, atime_nsec: 0,
         };
         let bytes = serialize_inode(&meta);
         assert_eq!(bytes.len(), 56);
@@ -187,7 +197,7 @@ mod tests {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
-            rdev: 0,
+            rdev: 0, atime_sec: 0, atime_nsec: 0,
         };
         let bytes = serialize_inode(&meta);
         let recovered = deserialize_inode(&bytes).expect("deserialize failed");
@@ -203,11 +213,11 @@ mod tests {
     }
 
     #[test]
-    fn test_device_rdev_round_trip_60_bytes() {
-        let meta = InodeMeta { mode: 0o020_644, rdev: 0x0102, ..sample_meta() };
+    fn test_extension_round_trip_72_bytes() {
+        let meta = InodeMeta { mode: 0o020_644, rdev: 0x0102, atime_sec: -5, atime_nsec: 7, ..sample_meta() };
         let bytes = serialize_inode(&meta);
-        assert_eq!(bytes.len(), 60);
-        assert_eq!(&bytes[..56], &serialize_inode(&InodeMeta { rdev: 0, ..meta.clone() })[..]);
+        assert_eq!(bytes.len(), 72);
+        assert_eq!(&bytes[..56], &serialize_inode(&InodeMeta { rdev: 0, atime_sec: 0, atime_nsec: 0, ..meta.clone() })[..]);
         assert_eq!(deserialize_inode(&bytes).unwrap(), meta);
     }
 
@@ -219,8 +229,9 @@ mod tests {
         let long = [0u8; 57];
         assert!(deserialize_inode(&long).is_err());
 
-        let longer = [0u8; 61];
-        assert!(deserialize_inode(&longer).is_err());
+        for bad in [60usize, 61, 71, 73] {
+            assert!(deserialize_inode(&vec![0u8; bad]).is_err(), "len {bad}");
+        }
 
         let empty: &[u8] = &[];
         assert!(deserialize_inode(empty).is_err());

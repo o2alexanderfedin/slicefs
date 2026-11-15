@@ -395,9 +395,10 @@ pub(crate) fn handle_setattr(
     gid: Option<u32>,
     size: Option<u64>,
     fh: Option<u64>,
+    atime: Option<(i64, u32)>,
     mtime: Option<(i64, u32)>,
 ) -> AttrResult {
-    match fs.test_setattr(ino, mode, uid, gid, size, fh, mtime) {
+    match fs.test_setattr_full(ino, mode, uid, gid, size, fh, atime, mtime) {
         Ok(inode) => AttrResult::Ok(inode_to_file_attr(&inode)),
         Err(errno) => AttrResult::Error(errno),
     }
@@ -1043,7 +1044,7 @@ mod tests {
         let (fs, _dir) = fresh_fs();
         let (ino, fh) = fs.test_create(1, "sa.txt", 0o644, 0, 0, 0).unwrap();
         fs.test_release_full(ino, fh).unwrap();
-        match handle_setattr(&fs, ino, Some(0o600), None, None, None, None, None) {
+        match handle_setattr(&fs, ino, Some(0o600), None, None, None, None, None, None) {
             AttrResult::Ok(attr) => assert_eq!(attr.perm, 0o600),
             AttrResult::Error(e) => panic!("expected Ok, got error {}", e),
         }
@@ -1052,7 +1053,7 @@ mod tests {
     #[test]
     fn test_handle_setattr_nonexistent_returns_error() {
         let (fs, _dir) = fresh_fs();
-        let result = handle_setattr(&fs, 9999, Some(0o644), None, None, None, None, None);
+        let result = handle_setattr(&fs, 9999, Some(0o644), None, None, None, None, None, None);
         assert!(matches!(result, AttrResult::Error(_)));
     }
 
@@ -1061,7 +1062,7 @@ mod tests {
         let (fs, _dir) = fresh_fs();
         let (ino, fh) = fs.test_create(1, "ug.txt", 0o644, 0, 0, 0).unwrap();
         fs.test_release_full(ino, fh).unwrap();
-        match handle_setattr(&fs, ino, None, Some(42), Some(99), None, None, None) {
+        match handle_setattr(&fs, ino, None, Some(42), Some(99), None, None, None, None) {
             AttrResult::Ok(attr) => {
                 assert_eq!(attr.uid, 42);
                 assert_eq!(attr.gid, 99);
