@@ -841,6 +841,7 @@ mod tests {
     }
 
     /// The backend goes to FUSE-T as one custom option, and nothing else.
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_build_mount_options_backend_only_custom_option() {
         use crate::backend::FuseTBackend;
