@@ -1,0 +1,16 @@
+[package]
+name = "chunk-store"
+version = "0.1.0"
+edition = "2021"
+description = "Content-addressed chunk store: FastCDC + BLAKE3 objects in append-only pack files"
+
+[dependencies]
+blake3.workspace = true
+fastcdc.workspace = true
+zstd.workspace = true
+crc32c = "0.6"
+thiserror.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
