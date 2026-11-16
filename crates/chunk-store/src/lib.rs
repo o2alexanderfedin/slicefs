@@ -9,7 +9,7 @@
 //! pack without a valid index is scanned; the scan stops at the first record
 //! with a bad CRC or a short read, and the pack is cut there.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::ops::Range;
@@ -17,16 +17,24 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+pub mod file;
+
 // ── Object IDs and chunking ───────────────────────────────────────────────────
 
-/// BLAKE3-256 of the uncompressed bytes of an object.
+/// BLAKE3 of the uncompressed bytes of an object, 224 bits (28 bytes): the
+/// size of the `Digest224` that the metadata uses for content keys.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ObjectId(pub [u8; 32]);
+pub struct ObjectId(pub [u8; ID_LEN]);
+
+/// Length of an object ID in bytes.
+pub const ID_LEN: usize = 28;
 
 impl ObjectId {
     /// The ID of `data`.
     pub fn of(data: &[u8]) -> Self {
-        ObjectId(*blake3::hash(data).as_bytes())
+        let mut id = [0u8; ID_LEN];
+        blake3::Hasher::new().update(data).finalize_xof().fill(&mut id);
+        ObjectId(id)
     }
 
     /// Lowercase hex.
@@ -91,6 +99,10 @@ pub enum Error {
     Io(#[from] io::Error),
     #[error("object too large for one record: {0} bytes")]
     TooLarge(usize),
+    #[error("object not in the store: {0:?}")]
+    Missing(ObjectId),
+    #[error("damaged data: {0}")]
+    Corrupt(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -102,11 +114,11 @@ const IDX_MAGIC: &[u8; 4] = b"SFIX";
 const FORMAT_VERSION: u16 = 1;
 /// magic(4) + version(2) + pack number(8)
 const PACK_HEADER: usize = 14;
-/// id(32) + flags(1) + raw length(4) + stored length(4)
-const REC_HEADER: usize = 41;
+/// id(28) + flags(1) + raw length(4) + stored length(4)
+const REC_HEADER: usize = ID_LEN + 9;
 const REC_CRC: usize = 4;
-/// id(32) + offset(8) + stored(4) + raw(4) + flags(1)
-const IDX_ENTRY: usize = 49;
+/// id(28) + offset(8) + stored(4) + raw(4) + flags(1)
+const IDX_ENTRY: usize = ID_LEN + 17;
 const FLAG_ZSTD: u8 = 1;
 /// Objects smaller than this are not compressed.
 const MIN_COMPRESS: usize = 64;
@@ -142,10 +154,10 @@ fn decode_record(buf: &[u8]) -> Option<(ObjectId, u8, u32, u32, usize)> {
     if buf.len() < REC_HEADER + REC_CRC {
         return None;
     }
-    let id = ObjectId(buf[..32].try_into().unwrap());
-    let flags = buf[32];
-    let raw = u32::from_le_bytes(buf[33..37].try_into().unwrap());
-    let stored = u32::from_le_bytes(buf[37..41].try_into().unwrap());
+    let id = ObjectId(buf[..ID_LEN].try_into().unwrap());
+    let flags = buf[ID_LEN];
+    let raw = u32::from_le_bytes(buf[ID_LEN + 1..ID_LEN + 5].try_into().unwrap());
+    let stored = u32::from_le_bytes(buf[ID_LEN + 5..ID_LEN + 9].try_into().unwrap());
     let total = REC_HEADER + stored as usize + REC_CRC;
     if buf.len() < total {
         return None;
@@ -206,11 +218,12 @@ fn decode_index(b: &[u8], num: u64) -> Option<Vec<(ObjectId, Loc)>> {
         body[14..]
             .chunks_exact(IDX_ENTRY)
             .map(|e| {
-                let id = ObjectId(e[..32].try_into().unwrap());
-                let offset = u64::from_le_bytes(e[32..40].try_into().unwrap());
-                let stored = u32::from_le_bytes(e[40..44].try_into().unwrap());
-                let raw = u32::from_le_bytes(e[44..48].try_into().unwrap());
-                (id, Loc { pack: num, offset, stored, raw, flags: e[48] })
+                let id = ObjectId(e[..ID_LEN].try_into().unwrap());
+                let o = ID_LEN;
+                let offset = u64::from_le_bytes(e[o..o + 8].try_into().unwrap());
+                let stored = u32::from_le_bytes(e[o + 8..o + 12].try_into().unwrap());
+                let raw = u32::from_le_bytes(e[o + 12..o + 16].try_into().unwrap());
+                (id, Loc { pack: num, offset, stored, raw, flags: e[o + 16] })
             })
             .collect(),
     )
@@ -263,6 +276,20 @@ struct Inner {
     stats: Stats,
     /// A pack file was created since the last directory sync.
     dir_dirty: bool,
+    /// While a GC runs: every object put or read since `gc_begin`. GC keeps
+    /// them even if its mark did not find them.
+    touched: Option<HashSet<ObjectId>>,
+}
+
+/// Outcome of a GC.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GcStats {
+    pub kept_objects: u64,
+    pub removed_objects: u64,
+    /// Stored bytes of the removed objects.
+    pub removed_bytes: u64,
+    pub packs_deleted: u64,
+    pub packs_compacted: u64,
 }
 
 /// A content-addressed object store in pack files.
@@ -296,6 +323,7 @@ impl ChunkStore {
             next_pack: nums.last().map_or(1, |n| n + 1),
             stats: Stats::default(),
             dir_dirty: false,
+            touched: None,
         };
         let last = nums.last().copied();
         for num in nums {
@@ -342,8 +370,12 @@ impl ChunkStore {
     /// written again.
     pub fn put(&self, data: &[u8]) -> Result<ObjectId> {
         let id = ObjectId::of(data);
-        if self.contains(&id) {
-            return Ok(id);
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.index.contains_key(&id) {
+                inner.touch(id);
+                return Ok(id);
+            }
         }
         if data.len() > u32::MAX as usize - REC_HEADER {
             return Err(Error::TooLarge(data.len()));
@@ -360,9 +392,18 @@ impl ChunkStore {
         let rec = encode_record(&id, flags, data.len() as u32, payload);
 
         let mut inner = self.inner.lock().unwrap();
+        inner.touch(id);
         if inner.index.contains_key(&id) {
             return Ok(id);
         }
+        let loc = self.append(&mut inner, &id, &rec, payload.len() as u32, data.len() as u32, flags)?;
+        inner.add(id, loc);
+        Ok(id)
+    }
+
+    /// Append an encoded record to the active pack (made if there is none),
+    /// and seal the pack when it is full. Returns where the record is.
+    fn append(&self, inner: &mut Inner, id: &ObjectId, rec: &[u8], stored: u32, raw: u32, flags: u8) -> Result<Loc> {
         if inner.active.is_none() {
             let num = inner.next_pack;
             inner.next_pack += 1;
@@ -374,17 +415,114 @@ impl ChunkStore {
             inner.dir_dirty = true;
         }
         let a = inner.active.as_mut().unwrap();
-        a.file.write_all_at(&rec, a.len)?;
-        let loc = Loc { pack: a.num, offset: a.len, stored: payload.len() as u32, raw: data.len() as u32, flags };
+        a.file.write_all_at(rec, a.len)?;
+        let loc = Loc { pack: a.num, offset: a.len, stored, raw, flags };
         a.len += rec.len() as u64;
-        a.entries.push((id, loc));
+        a.entries.push((*id, loc));
         a.dirty = true;
-        let full = a.len >= self.opts.pack_limit;
-        inner.add(id, loc);
-        if full {
+        if a.len >= self.opts.pack_limit {
+            self.seal(inner)?;
+        }
+        Ok(loc)
+    }
+
+    /// Start a GC: seal the active pack, so every object so far is in a
+    /// sealed pack, and record from now on each object that is put or read.
+    /// Returns the last pack number that the GC may change.
+    pub fn gc_begin(&self) -> Result<u64> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
             self.seal(&mut inner)?;
         }
-        Ok(id)
+        inner.touched = Some(HashSet::new());
+        Ok(inner.next_pack - 1)
+    }
+
+    /// End a GC: remove every object of the packs up to `boundary` that is
+    /// not in `live` and was not put or read since `gc_begin`. A pack with no
+    /// live object is deleted; a pack with less than half of its bytes live,
+    /// or a small pack, is compacted (its live records are copied to the
+    /// active pack, which is synced before the old pack is deleted).
+    pub fn gc_finish(&self, live: &HashSet<ObjectId>, boundary: u64) -> Result<GcStats> {
+        let mut inner = self.inner.lock().unwrap();
+        let touched = inner.touched.take().unwrap_or_default();
+        let keep = |id: &ObjectId| live.contains(id) || touched.contains(id);
+        let active = inner.active.as_ref().map(|a| a.num);
+        let mut by_pack: HashMap<u64, Vec<(ObjectId, Loc)>> = HashMap::new();
+        for (id, l) in &inner.index {
+            if l.pack <= boundary && Some(l.pack) != active {
+                by_pack.entry(l.pack).or_default().push((*id, *l));
+            }
+        }
+        let mut st = GcStats::default();
+        let mut doomed = Vec::new();
+        let mut nums: Vec<u64> = by_pack.keys().copied().collect();
+        nums.sort_unstable();
+        for num in nums {
+            let entries = &by_pack[&num];
+            let rec_len = |l: &Loc| (REC_HEADER + l.stored as usize + REC_CRC) as u64;
+            let total: u64 = entries.iter().map(|(_, l)| rec_len(l)).sum();
+            let live_bytes: u64 = entries.iter().filter(|(id, _)| keep(id)).map(|(_, l)| rec_len(l)).sum();
+            let small = total < self.opts.pack_limit / 8;
+            if live_bytes == total && !small {
+                st.kept_objects += entries.len() as u64;
+                continue;
+            }
+            if live_bytes > 0 && live_bytes * 2 >= total && !small {
+                st.kept_objects += entries.len() as u64;
+                continue;
+            }
+            // Delete, or compact: copy the live records first.
+            let file = inner.reader(&self.packs, num)?;
+            for (id, l) in entries {
+                if keep(id) {
+                    let mut rec = vec![0u8; rec_len(l) as usize];
+                    file.read_exact_at(&mut rec, l.offset)?;
+                    let nl = self.append(&mut inner, id, &rec, l.stored, l.raw, l.flags)?;
+                    inner.index.insert(*id, nl);
+                    st.kept_objects += 1;
+                } else {
+                    inner.index.remove(id);
+                    inner.stats.objects -= 1;
+                    inner.stats.raw_bytes -= l.raw as u64;
+                    inner.stats.stored_bytes -= l.stored as u64;
+                    st.removed_objects += 1;
+                    st.removed_bytes += l.stored as u64;
+                }
+            }
+            if live_bytes > 0 {
+                st.packs_compacted += 1;
+            } else {
+                st.packs_deleted += 1;
+            }
+            doomed.push(num);
+        }
+        // Packs that the index no longer uses at all (older copies).
+        for num in 1..=boundary {
+            if Some(num) != active && !by_pack.contains_key(&num) && self.packs.join(pack_name(num, "pack")).exists() {
+                doomed.push(num);
+            }
+        }
+        if doomed.is_empty() {
+            return Ok(st);
+        }
+        // The copies must be durable before the originals go.
+        if let Some(a) = inner.active.as_mut() {
+            if a.dirty {
+                full_sync(&a.file)?;
+                a.dirty = false;
+            }
+        }
+        sync_dir(&self.packs)?;
+        for num in doomed {
+            let _ = fs::remove_file(self.packs.join(pack_name(num, "idx")));
+            fs::remove_file(self.packs.join(pack_name(num, "pack")))?;
+            inner.readers.remove(&num);
+            inner.stats.packs -= 1;
+        }
+        sync_dir(&self.packs)?;
+        inner.dir_dirty = false;
+        Ok(st)
     }
 
     /// The bytes of `id`, or `None` if the store does not have the object or
@@ -393,6 +531,7 @@ impl ChunkStore {
         let (loc, file) = {
             let mut inner = self.inner.lock().unwrap();
             let loc = *inner.index.get(id)?;
+            inner.touch(*id);
             let file = inner.reader(&self.packs, loc.pack).ok()?;
             (loc, file)
         };
@@ -474,6 +613,12 @@ fn pack_header(num: u64) -> Vec<u8> {
 }
 
 impl Inner {
+    fn touch(&mut self, id: ObjectId) {
+        if let Some(t) = self.touched.as_mut() {
+            t.insert(id);
+        }
+    }
+
     fn add(&mut self, id: ObjectId, l: Loc) {
         if self.index.insert(id, l).is_none() {
             self.stats.objects += 1;

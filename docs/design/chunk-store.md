@@ -23,8 +23,10 @@ Measured on the macOS CI round trip (Boost 1.85, 77,655 files, FSKit):
 ## Goals
 
 - Chunking: FastCDC v2020, average 8 KiB (min 2 KiB, max 32 KiB).
-- Object ID: BLAKE3-256 of the uncompressed bytes. Dedup does not depend on
-  compression.
+- Object ID: BLAKE3 of the uncompressed bytes, 224 bits (28 bytes, the size
+  of the `Digest224` that the metadata already uses, so the metadata types
+  do not change; collision strength 112 bits, the same as the SHA-224 used
+  now). Dedup does not depend on compression.
 - Objects go into append-only pack files: one `fsync` for each pack and
   commit, not one for each object.
 - Compression: zstd, per object, only when it makes the object smaller.
@@ -43,13 +45,13 @@ them.
 | chunk | file data, one FastCDC chunk | file writes |
 | node | serialized metadata: manifest, directory, inode map, xattr, inode | commit |
 
-Both kinds are content-addressed by BLAKE3-256 (32 bytes, type `ObjectId`).
+Both kinds are content-addressed by BLAKE3-224 (28 bytes, type `ObjectId`).
 A chunk and a node with the same bytes are the same object; the kind is not
 part of the ID.
 
 ### File manifest
 
-A file is an ordered list of `(ObjectId, length u32)` entries (36 bytes
+A file is an ordered list of `(ObjectId, length u64)` entries (36 bytes
 each). The file offset of an entry is the sum of the lengths before it.
 
 - Up to 1,024 entries: the list is one manifest node.
@@ -61,8 +63,8 @@ each). The file offset of an entry is the sum of the lengths before it.
 
 The other metadata (directories, inode map, xattrs) keeps its current
 logical layout. Only the storage of its nodes moves from `State::push_all`
-into node objects. Roots and snapshots become `ObjectId` (32 bytes) in the
-`RootUpdate` and `Snapshot` records.
+into node objects. Roots and snapshots stay 28 bytes in the `RootUpdate` and
+`Snapshot` records.
 
 ## Pack files
 
@@ -81,7 +83,7 @@ Record:
 
 | Field | Size |
 |---|---|
-| ObjectId | 32 |
+| ObjectId | 28 |
 | flags (bit 0: zstd) | u8 |
 | raw length | u32 LE |
 | stored length | u32 LE |
@@ -99,7 +101,7 @@ Record:
 ### Index in memory
 
 A map `ObjectId → (pack, offset, stored length, raw length, flags)`: about
-56 bytes per object, so 56 MB for one million objects. At open, it is filled
+52 bytes per object, so 52 MB for one million objects. At open, it is filled
 from the `.idx` files of the sealed packs and from a scan of the active
 pack. A later change can use a memory-mapped sorted index if stores get very
 large.
@@ -146,16 +148,22 @@ At open:
 Mark: the same as today, from the current root and each snapshot, through
 the metadata nodes and the manifests, into a set of live `ObjectId`s.
 
-Sweep, for each sealed pack:
+`gc_begin` seals the active pack, so every object so far is in a sealed
+pack. Sweep (`gc_finish`), for each sealed pack up to that point:
 
 - No live objects: delete the pack and its index.
-- Less than half of its bytes live: copy the live records into the active
-  pack, sync it, then publish the new index entries, then delete the old
-  pack.
+- Less than half of its bytes live, or smaller than 1/8 of the pack limit:
+  copy the live records (as they are, no re-compression) into the active
+  pack, sync it, update the index, then delete the old pack.
 - Otherwise: keep it.
 
-Online GC: an object written after the mark started is live (the same rule
-as today, for objects written during the mark). A pack that a reader has
+The small-pack rule merges the packs that each `gc_begin` seals; it rewrites
+at most 1/8 of the pack limit per GC.
+
+Online GC: from `gc_begin` to `gc_finish`, the store records every object
+that is put or read, and keeps them even if the mark did not find them. (A
+put of bytes that are already stored returns at once; without this record,
+the sweep could delete an object that a new file uses.) A pack that a reader has
 open stays readable after its file is deleted (POSIX), so readers need no
 lock against the GC; they only need the index entry to change atomically.
 
