@@ -123,3 +123,30 @@ the store write of data that is overwritten before a commit.
    active segment to its last synced length, then replay); a log-size commit
    trigger (also with `--commit-interval 0`); measure the cost of fsyncing
    each object before pack files exist.
+
+## Implementation plan (part 1)
+
+Done on `feat/write-log`:
+- Segment frame v2: seq + CRC32C per record; the reader stops at a torn tail.
+- `WalEntry::Op` / `SegmentEntry::Op` (opaque bytes, type 0x10);
+  `load_store_with_log` returns the op records after the last RootUpdate;
+  `DictMetadataStore::log_op`; PerOp syncs only non-Op records;
+  `compact_segment` keeps Op records.
+
+Next:
+1. `slicefs-cli/src/oplog.rs`: `Op` enum (create, mkdir, mknod, symlink,
+   link, unlink, rmdir, rename, setattr, setxattr, removexattr, write,
+   truncate), binary encoding, a time per record. A thread-local clock freeze
+   in `now_pair()` for the duration of each logged request (all times of one
+   request are equal and replayable). Log in `handlers.rs` after success; no
+   logging while replaying.
+2. Replay at mount: one replay handle per inode; a write to a reclaimed inode
+   is skipped; at the end release all replay handles and commit.
+3. The cut: before every commit (timer, GC start, unmount) flush each open
+   handle into its manifest (settle pending, Streaming: ended clone,
+   Buffered: hash). The commit timer then needs `Weak<SliceFsFilesystem>`.
+4. Rotation at commit: RootUpdate + all snapshot records into a new segment,
+   sync, delete older segments (the log is one segment: root, snapshots,
+   ops). Then `compact_segment` never sees dead op records.
+5. Tests: differential (live state against replayed state), kill -9 with
+   `--commit-interval 0` in the Linux harness, sync order, torn tail.
