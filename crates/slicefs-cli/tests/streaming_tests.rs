@@ -642,3 +642,42 @@ fn pending_writes_with_gaps_settle_without_buffered_mode() {
     assert_eq!(fs.test_read(ino, (1 << 20) - 1, 4).unwrap(), b"\0bb\0");
     assert_eq!(fs.test_read(ino, (3 << 20) - 1, 5).unwrap(), b"\0ccdd");
 }
+
+/// SMB reads one file with two streams about 20 MB apart. Each stream must
+/// keep its own reader: with one reader per inode, every switch restarted
+/// from the root (786 MB tar over SMB: 0.6 MB/s).
+#[test]
+fn two_interleaved_read_streams_do_not_restart_each_other() {
+    let (fs, _dir) = fresh_fs();
+    let n = 24usize << 20;
+    let data: Vec<u8> = (0..n).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+    let (ino, fh) = fs.test_create(1, "two.bin", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, &data).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    let step = 256 << 10;
+    let (a0, b0, len) = (0usize, 16usize << 20, 8usize << 20);
+    // Interleaved: a, b, a, b, ... (two streams, as SMB read-ahead does).
+    let t = std::time::Instant::now();
+    for k in (0..len).step_by(step) {
+        assert_eq!(fs.test_read(ino, (a0 + k) as u64, step as u32).unwrap(), &data[a0 + k..a0 + k + step]);
+        assert_eq!(fs.test_read(ino, (b0 + k) as u64, step as u32).unwrap(), &data[b0 + k..b0 + k + step]);
+    }
+    let interleaved = t.elapsed();
+    // The same bytes, one stream after the other.
+    let (fs, _dir2) = { let (f, d) = fresh_fs(); (f, d) };
+    let (ino, fh) = fs.test_create(1, "two.bin", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, &data).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    let t = std::time::Instant::now();
+    for base in [a0, b0] {
+        for k in (0..len).step_by(step) {
+            fs.test_read(ino, (base + k) as u64, step as u32).unwrap();
+        }
+    }
+    let sequential = t.elapsed();
+    // One reader per inode restarts from the root on every switch.
+    assert!(
+        interleaved < sequential * 3 + std::time::Duration::from_millis(200),
+        "interleaved {interleaved:?} vs one stream after the other {sequential:?}"
+    );
+}
