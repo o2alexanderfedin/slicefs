@@ -15,5 +15,5 @@ Local run:
 ```sh
 cargo build --release -p slicefs-cli
 scripts/macos-mount-test/fetch-boost.sh ~/boost 1_85_0
-SLICEFS=target/release/slicefs BOOST_DIR=~/boost scripts/macos-mount-test/boost-test.sh nfs 1_85_0
+SLICEFS=target/release/slicefs BOOST_DIR=~/boost scripts/macos-mount-test/boost-test.sh smb 1_85_0
 ```

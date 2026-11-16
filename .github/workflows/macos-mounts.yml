@@ -1,7 +1,7 @@
 name: macOS mounts
 
 # Real FUSE-T mounts on a fresh macOS VM: the Boost round trip through SliceFS
-# on NFS (must pass) and on FSKit (reported, may fail), plus an FSKit repro
+# on SMB (must pass) and on FSKit (reported, may fail), plus an FSKit repro
 # with the fuser `simple` example (no SliceFS code).
 # Long (about 20 to 60 min per job), so not on every pull request.
 on:
@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend: [nfs, fskit]
+        backend: [smb, fskit]
     continue-on-error: ${{ matrix.backend == 'fskit' }}
     steps:
       - uses: actions/checkout@v4

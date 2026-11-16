@@ -2,7 +2,7 @@
 # Boost round trip through a SliceFS mount on macOS (FUSE-T): copy to the mount,
 # copy back, compare; remount and compare again; delete all; GC on the mounted store.
 #
-# usage: boost-test.sh <backend: nfs|smb|fskit> <versions...>   e.g. boost-test.sh nfs 1_85_0
+# usage: boost-test.sh <backend: smb|fskit> <versions...>   e.g. boost-test.sh smb 1_85_0
 # env:   SLICEFS    slicefs binary (default: target/release/slicefs)
 #        BOOST_DIR  dir with boost_<v>.tar and x/boost_<v>/ (see fetch-boost.sh)
 #        WORK       work dir (default: a new temp dir)

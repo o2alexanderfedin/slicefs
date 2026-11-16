@@ -3,7 +3,7 @@
 # then `cp -R` of a large tree. Reports the time of the first
 # "Connection reset" error, if any.
 #
-# usage: fskit-repro.sh <simple binary> <source tree> <backend: fskit|nfs>
+# usage: fskit-repro.sh <simple binary> <source tree> <backend: fskit|smb>
 # env:   WORK (default: a new temp dir)
 X=$1; SRC=$2; BK=${3:-fskit}; R=${WORK:-$(mktemp -d)}/repro-$BK
 rm -rf $R; mkdir -p $R/data $R/mnt
