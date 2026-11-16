@@ -68,7 +68,9 @@ pub enum Cmd {
         /// changed (0 = only at unmount). A crash loses at most about this much.
         #[arg(long, value_name = "SECS", default_value_t = crate::commit_timer::DEFAULT_COMMIT_INTERVAL_SECS)]
         commit_interval: u64,
-        /// Run a GC of the stored objects every SECS seconds while mounted
+        /// GC the stored objects while mounted: at most every SECS seconds,
+        /// only when something was committed since the last GC, and with a
+        /// gap of at least 10 times the last GC's duration
         /// (0 = only when `slicefs gc` asks for one).
         #[arg(long, value_name = "SECS", default_value_t = crate::online_gc::DEFAULT_GC_INTERVAL_SECS)]
         gc_interval: u64,

@@ -52,11 +52,6 @@ impl StoreIo {
         self.touched.as_ref().is_some_and(|t| t.contains(name))
     }
 
-    /// Read without recording the name (the GC mark reads only live objects).
-    pub fn read_untracked(&self, filename: &str) -> io::Result<Vec<u8>> {
-        fs::read(self.full_path(filename))
-    }
-
     /// Full path for a blockset-relative filename.
     fn full_path(&self, filename: &str) -> PathBuf {
         self.root.join(filename)

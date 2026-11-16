@@ -151,3 +151,28 @@ fn a_stop_request_ends_the_gc_without_more_deletes() {
     assert!(fs.gc_online(&no_stop()).unwrap().unwrap().objects_removed > 50);
     check_after_remount(fs, dir.path(), &[("keep.bin", &keep)]);
 }
+
+#[test]
+fn a_parallel_mark_finds_the_same_live_set_as_one_thread() {
+    let dir = TempDir::new().unwrap();
+    let fs = make_fs(dir.path());
+    for i in 0..12 {
+        write_file(&fs, &format!("f{i}"), &data(100 + i, 150_000));
+    }
+    // Shared content: the same bytes under two names.
+    write_file(&fs, "dup", &data(100, 150_000));
+    make_garbage(&fs, "junk.bin", &data(99, 300_000));
+
+    let one = fs.gc_start().unwrap().with_threads(1);
+    let live_one = one.mark(&no_stop()).unwrap().unwrap();
+    drop(one);
+    let many = fs.gc_start().unwrap().with_threads(8);
+    let live_many = many.mark(&no_stop()).unwrap().unwrap();
+    assert_eq!(live_one, live_many);
+    let stats = many.sweep(&live_many, &no_stop()).unwrap();
+    assert!(stats.objects_removed > 50, "{stats:?}");
+    drop(many);
+    let files: Vec<(String, Vec<u8>)> = (0..12).map(|i| (format!("f{i}"), data(100 + i, 150_000))).collect();
+    let refs: Vec<(&str, &[u8])> = files.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
+    check_after_remount(fs, dir.path(), &refs);
+}

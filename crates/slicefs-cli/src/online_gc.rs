@@ -1,8 +1,14 @@
 //! GC of the stored objects while the store is mounted (#25).
 //!
 //! The mount runs a GC thread. It runs a GC:
-//! - every `--gc-interval` seconds (0 = only on request), and
+//! - automatically, when something was committed since the last GC, and at
+//!   least `--gc-interval` seconds (0 = never automatically) and at least
+//!   `GC_DUTY` times the duration of the last GC after it; and
 //! - when `slicefs gc <store>` asks for one.
+//!
+//! The duty rule keeps GC at about 1/`GC_DUTY` of the time on any store size:
+//! a small store gets a GC each minute, a store with a million objects less
+//! often.
 //!
 //! A request is a file in the store directory:
 //! 1. `slicefs gc` writes `gc.request`.
@@ -20,8 +26,11 @@ use std::time::{Duration, Instant};
 
 use crate::filesystem::SliceFsFilesystem;
 
-/// Default seconds between two automatic GC runs on a mounted store.
-pub const DEFAULT_GC_INTERVAL_SECS: u64 = 3600;
+/// Default minimum seconds between two automatic GC runs on a mounted store.
+pub const DEFAULT_GC_INTERVAL_SECS: u64 = 60;
+
+/// The gap after a GC is at least this many times its duration.
+const GC_DUTY: u32 = 10;
 
 pub const REQUEST_FILE: &str = "gc.request";
 pub const RUNNING_FILE: &str = "gc.running";
@@ -59,18 +68,29 @@ pub fn spawn_online_gc(
         .name("slicefs-gc".into())
         .spawn(move || {
             let mut last = Instant::now();
+            let mut last_took = Duration::ZERO;
+            let mut last_root = None;
             loop {
                 std::thread::sleep(POLL);
                 if shutdown.load(Ordering::SeqCst) {
                     break;
                 }
                 let requested = std::fs::rename(store.join(REQUEST_FILE), store.join(RUNNING_FILE)).is_ok();
-                let due = !interval.is_zero() && last.elapsed() >= interval;
+                let gap = interval.max(last_took * GC_DUTY);
+                let due = !interval.is_zero() && last.elapsed() >= gap;
                 if !requested && !due {
                     continue;
                 }
                 let Some(fs) = fs.upgrade() else { break };
+                // Nothing committed since the last GC: nothing new can be garbage.
+                if !requested && last_root.is_some() && fs.meta().current_root() == last_root {
+                    last = Instant::now();
+                    continue;
+                }
+                let t = Instant::now();
                 let outcome = run_once(&fs, &shutdown);
+                last_took = t.elapsed();
+                last_root = fs.meta().current_root();
                 drop(fs);
                 last = Instant::now();
                 eprintln!("[slicefs-gc] {outcome}");

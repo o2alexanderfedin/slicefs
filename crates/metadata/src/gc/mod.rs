@@ -109,17 +109,29 @@ pub fn sweep(store: &Path, live: &HashSet<String>) -> std::io::Result<SweepStats
 }
 
 /// Objects deleted per hold of the `io` lock in an online sweep. Small, so
-/// file system requests wait only a short time.
-const SWEEP_BATCH: usize = 256;
+/// file system requests wait only a short time; the deletes of one batch run
+/// on several threads.
+const SWEEP_BATCH: usize = 512;
 
-/// `Io` for the online mark: each read takes the `io` lock alone and does not
-/// record the name, so file system requests run between the reads.
-struct UntrackedIo<'a>(&'a Mutex<StoreIo>);
+/// Threads for the online mark and sweep.
+fn gc_threads() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8)
+}
 
-impl Io for UntrackedIo<'_> {
+/// `Io` for the online mark: plain file reads, without the `io` lock and
+/// without the touched record.
+///
+/// Safe without the lock: the mark reads only objects that are reachable from
+/// the roots, and each of them was written in full before the GC start
+/// commit returned. Content-addressed objects are not written again (blockset
+/// compares an existing object first and skips an equal write), so no write
+/// can change a file under the reader. Only the GC deletes objects.
+struct PathIo(PathBuf);
+
+impl Io for PathIo {
     type Args = std::vec::IntoIter<String>;
     fn read(&mut self, name: &str) -> std::io::Result<Vec<u8>> {
-        self.0.lock().unwrap().read_untracked(name)
+        std::fs::read(self.0.join(name))
     }
     fn write(&mut self, _name: &str, _data: &[u8]) -> std::io::Result<()> {
         Err(std::io::Error::other("the GC mark does not write"))
@@ -128,6 +140,64 @@ impl Io for UntrackedIo<'_> {
         Vec::new().into_iter()
     }
     fn print(&mut self, _text: &str) {}
+}
+
+/// Mark on `threads` threads. Each thread marks a share of the roots into its
+/// own set (a subtree shared between shares is read once per thread); the
+/// sets are merged at the end. `Ok(None)` if `stop` was set first.
+fn mark_parallel(
+    store: &Path,
+    meta_roots: &[Digest224],
+    file_roots: &[Digest224],
+    threads: usize,
+    stop: &AtomicBool,
+) -> Result<Option<HashSet<String>>, MetaError> {
+    let mut io = PathIo(store.to_path_buf());
+    let mut objects = Vec::new();
+    for root in meta_roots {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        objects.extend(referenced_roots(&mut io, root)?);
+    }
+    objects.extend_from_slice(file_roots);
+    let threads = threads.clamp(1, objects.len().max(1));
+    let results: Vec<Result<Option<HashSet<String>>, MetaError>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|t| {
+                let objects = &objects;
+                scope.spawn(move || {
+                    let mut io = PathIo(store.to_path_buf());
+                    let mut live = HashSet::new();
+                    for object in objects.iter().skip(t).step_by(threads) {
+                        if stop.load(Ordering::Relaxed) {
+                            return Ok(None);
+                        }
+                        if !file_storage_mark(&mut io, object, &mut live) {
+                            return Err(MetaError::Corrupted(format!("missing object under root {:?}", object)));
+                        }
+                    }
+                    Ok(Some(live))
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("GC mark thread panicked")).collect()
+    });
+    let mut sets = Vec::with_capacity(results.len());
+    for r in results {
+        match r? {
+            Some(set) => sets.push(set),
+            None => return Ok(None),
+        }
+    }
+    // Merge into the biggest set (fewest inserts).
+    sets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    let mut sets = sets.into_iter();
+    let mut live = sets.next().unwrap_or_default();
+    for s in sets {
+        live.extend(s);
+    }
+    Ok(Some(live))
 }
 
 /// A GC run on a mounted store.
@@ -149,20 +219,25 @@ pub struct OnlineGc {
     io: Arc<Mutex<StoreIo>>,
     meta_roots: Vec<Digest224>,
     file_roots: Vec<Digest224>,
+    threads: usize,
 }
 
 impl OnlineGc {
     /// `io` must track already (see the type docs).
     pub fn new(io: Arc<Mutex<StoreIo>>, meta_roots: Vec<Digest224>, file_roots: Vec<Digest224>) -> Self {
-        OnlineGc { io, meta_roots, file_roots }
+        OnlineGc { io, meta_roots, file_roots, threads: gc_threads() }
+    }
+
+    /// Use `threads` threads for the mark and the sweep (at least 1).
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads.max(1);
+        self
     }
 
     /// The mark phase. `Ok(None)` if `stop` was set first.
     pub fn mark(&self, stop: &AtomicBool) -> Result<Option<HashSet<String>>, MetaError> {
-        let mut live = HashSet::new();
-        let mut io = UntrackedIo(&self.io);
-        let done = mark_into(&mut io, &self.meta_roots, &self.file_roots, &mut live, stop)?;
-        Ok(done.then_some(live))
+        let store = self.io.lock().unwrap().root().to_path_buf();
+        mark_parallel(&store, &self.meta_roots, &self.file_roots, self.threads, stop)
     }
 
     /// The sweep phase. Stops early (with partial stats) if `stop` is set.
@@ -181,21 +256,43 @@ impl OnlineGc {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
+            // Hold the io lock across the check and the deletes of this batch.
             let io = self.io.lock().unwrap();
-            for (name, path) in batch {
-                if io.is_touched(name) {
-                    stats.objects_kept += 1;
-                    continue;
-                }
-                let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                match std::fs::remove_file(path) {
-                    Ok(()) => {
-                        stats.objects_removed += 1;
-                        stats.bytes_removed += len;
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e),
-                }
+            let doomed: Vec<&PathBuf> = batch
+                .iter()
+                .filter(|(name, _)| !io.is_touched(name))
+                .map(|(_, path)| path)
+                .collect();
+            stats.objects_kept += batch.len() - doomed.len();
+            let threads = self.threads.min(doomed.len()).max(1);
+            let per_thread: Vec<std::io::Result<(usize, u64)>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let doomed = &doomed;
+                        scope.spawn(move || {
+                            let (mut n, mut bytes) = (0usize, 0u64);
+                            for path in doomed.iter().skip(t).step_by(threads) {
+                                let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                                match std::fs::remove_file(path) {
+                                    Ok(()) => {
+                                        n += 1;
+                                        bytes += len;
+                                    }
+                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            Ok((n, bytes))
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().expect("GC sweep thread panicked")).collect()
+            });
+            drop(io);
+            for r in per_thread {
+                let (n, bytes) = r?;
+                stats.objects_removed += n;
+                stats.bytes_removed += bytes;
             }
         }
         Ok(stats)
