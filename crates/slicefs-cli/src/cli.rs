@@ -58,7 +58,7 @@ pub enum Cmd {
         /// Automatically create a snapshot on clean unmount.
         #[arg(long, default_value_t = false)]
         auto_snapshot: bool,
-        /// FUSE-T backend: nfs, smb, or fskit (default: nfs; smb and fskit are opt-in).
+        /// FUSE-T backend: smb or fskit (default: smb; fskit is opt-in).
         #[arg(long, value_name = "BACKEND")]
         backend: Option<String>,
         /// Accepted for compatibility; currently has no effect (no backend is blocked).
@@ -68,6 +68,12 @@ pub enum Cmd {
         /// changed (0 = only at unmount). A crash loses at most about this much.
         #[arg(long, value_name = "SECS", default_value_t = crate::commit_timer::DEFAULT_COMMIT_INTERVAL_SECS)]
         commit_interval: u64,
+        /// GC the stored objects while mounted: at most every SECS seconds,
+        /// only when something was committed since the last GC, and with a
+        /// gap of at least 10 times the last GC's duration
+        /// (0 = only when `slicefs gc` asks for one).
+        #[arg(long, value_name = "SECS", default_value_t = crate::online_gc::DEFAULT_GC_INTERVAL_SECS)]
+        gc_interval: u64,
     },
 
     /// Unmount a SliceFS filesystem mounted at the given path.
