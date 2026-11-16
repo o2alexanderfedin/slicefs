@@ -5,6 +5,7 @@ members = [
     "crates/metadata",
     "crates/slicefs-cli",
     "crates/slicefs-compression",
+    "benchmarks/chunk-bench",
 ]
 exclude = ["vendor/fuser"]
 resolver = "2"
