@@ -76,3 +76,20 @@ fn each_commit_rotates_the_log_to_one_segment_and_keeps_snapshots() {
         assert_eq!(snaps[0].name.as_deref(), Some("s"));
     }
 }
+
+#[test]
+fn a_commit_makes_its_objects_durable_before_the_root() {
+    use slicefs_traits::metadata::InodeMeta;
+    let dir = TempDir::new().unwrap();
+    let meta = store(&dir, WalConfig::PerOp);
+    let io = meta.io().clone();
+    meta.commit().unwrap();
+    let before = io.lock().unwrap().sync_count();
+    let f = InodeMeta::new_file(0, 0, 0, 0o100_644);
+    let ino = meta.create_inode(&f).unwrap();
+    meta.link(1, "f", ino).unwrap();
+    meta.commit().unwrap();
+    let io = io.lock().unwrap();
+    assert_eq!(io.unsynced_count(), 0, "every object written by the commit is synced");
+    assert!(io.sync_count() > before, "the commit synced its objects");
+}
