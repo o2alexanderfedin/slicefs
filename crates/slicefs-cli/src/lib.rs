@@ -7,6 +7,7 @@ pub mod filesystem;
 mod fuse_callbacks;
 pub(crate) mod handlers;
 pub mod gc;
+pub mod online_gc;
 pub mod mount;
 pub mod snapshot;
 pub mod seed;

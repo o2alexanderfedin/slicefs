@@ -9,6 +9,7 @@ mod filesystem;
 mod fuse_callbacks;
 mod handlers;
 mod gc;
+mod online_gc;
 mod mount;
 mod scrub;
 mod seed;
@@ -26,7 +27,7 @@ fn main() {
     let json = cli.json;
 
     match cli.command {
-        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force, commit_interval } => {
+        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force, commit_interval, gc_interval } => {
             if let Err(e) = mount::run_mount(
                 &store,
                 &mountpoint,
@@ -39,6 +40,7 @@ fn main() {
                 backend.as_deref(),
                 force,
                 commit_interval,
+                gc_interval,
             ) {
                 if json {
                     eprintln!("{{\"error\": \"{e}\"}}");
