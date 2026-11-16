@@ -618,7 +618,20 @@ pub fn run_mount(
     // mount blocks until the FUSE session ends (SIGTERM, Ctrl+C, or unmount).
     // fuser handles signal registration internally — do NOT override with
     // libc::signal as it replaces fuser's session-exit handler.
+    // FUSE-T's SMB server does not exit at unmount, so the session would
+    // never end (no destroy, no final commit): end it when the mount is gone.
+    #[cfg(target_os = "macos")]
+    let unmount_watch_shutdown = Arc::new(AtomicBool::new(false));
+    #[cfg(target_os = "macos")]
+    let unmount_watch = crate::fuset_watch::spawn_unmount_watcher(mountpoint, Arc::clone(&unmount_watch_shutdown));
+
     let mounted = mount(crate::fuse_callbacks::MountedFs(fs), mountpoint, &config);
+
+    #[cfg(target_os = "macos")]
+    {
+        unmount_watch_shutdown.store(true, Ordering::SeqCst);
+        let _ = unmount_watch.join();
+    }
 
     // Stop the GC thread before mount.lock is released, also when mount failed.
     online_gc_shutdown.store(true, Ordering::SeqCst);

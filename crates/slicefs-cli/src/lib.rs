@@ -10,6 +10,8 @@ pub mod handlers;
 pub mod oplog;
 pub mod gc;
 pub mod online_gc;
+#[cfg(target_os = "macos")]
+pub mod fuset_watch;
 pub mod mount;
 pub mod snapshot;
 pub mod seed;
