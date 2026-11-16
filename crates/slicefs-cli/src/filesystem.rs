@@ -1009,21 +1009,52 @@ impl SliceFsFilesystem {
     /// that the root holds every request logged before the commit. The caller
     /// holds the commit gate exclusively (no request is in flight).
     pub fn commit_cut(&self) -> Result<Digest224, MetaError> {
+        use crate::oplog::{Op, Record};
         let handles: Vec<(u64, u64)> = self.open_files.lock().unwrap()
             .iter().map(|(&fh, s)| (s.ino, fh)).collect();
-        for (ino, fh) in handles {
-            if let Err(e) = self.flush_handle(ino, fh, true) {
+        // Streamed prefixes go into the manifests (cheap: an ended clone).
+        for &(ino, fh) in &handles {
+            if let Err(e) = self.flush_handle(ino, fh, false) {
                 return Err(MetaError::Corrupted(format!("cut: flush of open file {ino} failed: errno {e}")));
             }
         }
-        self.meta.commit()
+        // Bytes that are only in RAM (pending out-of-order writes, Buffered
+        // buffers) are not hashed under the gate: they are logged again after
+        // the cut, so replay puts them on top of the root.
+        let mut relog: Vec<Op> = Vec::new();
+        {
+            let open_files = self.open_files.lock().unwrap();
+            for &(_, fh) in &handles {
+                let Some(s) = open_files.get(&fh) else { continue };
+                match &s.write_mode {
+                    WriteMode::Streaming { pending, .. } => {
+                        for (&off, data) in pending {
+                            relog.push(Op::Write { ino: s.ino, offset: off, data: data.clone() });
+                        }
+                    }
+                    WriteMode::Buffered { buf } => {
+                        relog.push(Op::Truncate { ino: s.ino });
+                        relog.push(Op::Write { ino: s.ino, offset: 0, data: buf.clone() });
+                    }
+                }
+            }
+        }
+        let root = self.meta.commit()?;
+        let time = now_pair();
+        for op in relog {
+            self.log_record(Record { time, op });
+        }
+        Ok(root)
     }
 
     /// Write the content of handle `fh` into the manifest of `ino`. Buffered
     /// handles are hashed in full only when `include_buffered` (a commit cut,
     /// not each fsync: #3).
     fn flush_handle(&self, ino: u64, fh: u64, include_buffered: bool) -> Result<(), i32> {
-        self.settle_pending(fh);
+        // Pending (out-of-order) bytes stay pending: settling them here would
+        // stream zeros for the gaps, and the late writes that fill the gaps
+        // would then force the handle into Buffered mode. The write log keeps
+        // pending bytes durable (#20), so the manifest takes the streamed prefix.
         // 1. Clone state/buf snapshot under open_files lock
         enum FsyncSnapshot {
             Streaming(State, u64, u64),

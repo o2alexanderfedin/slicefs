@@ -218,3 +218,26 @@ fn a_commit_with_open_files_is_a_clean_cut() {
     let bi = fs.meta().lookup(1, "rewrite.bin").unwrap();
     assert_eq!(fs.test_read(bi, 0, b.len() as u32 + 1).unwrap(), b);
 }
+
+#[test]
+fn a_commit_keeps_out_of_order_bytes_pending_and_the_handle_streaming() {
+    let dir = TempDir::new().unwrap();
+    let want = data(9, 3 << 20);
+    let (a, b, c) = (&want[..1 << 20], &want[1 << 20..2 << 20], &want[2 << 20..]);
+    {
+        let fs = new_fs(dir.path());
+        let (ino, fh) = create(&fs, 1, "ooo.bin");
+        write(&fs, fh, 0, a);
+        write(&fs, fh, 2 << 20, c); // ahead of the stream: pending (SMB/NFS parallel writes)
+        let _gate = fs.commit_gate();
+        fs.commit_cut().unwrap();
+        write(&fs, fh, 1 << 20, b); // the late write fills the gap
+        assert!(fs.test_is_streaming(fh), "the cut must not push the handle into Buffered mode");
+        assert_eq!(fs.test_read(ino, 0, want.len() as u32 + 1).unwrap(), want);
+        fsync(&fs, ino, fh);
+        std::mem::forget(fs);
+    }
+    let fs = reload_and_replay(dir.path());
+    let ino = fs.meta().lookup(1, "ooo.bin").unwrap();
+    assert_eq!(fs.test_read(ino, 0, want.len() as u32 + 1).unwrap(), want);
+}
