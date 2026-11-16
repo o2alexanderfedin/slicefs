@@ -21,7 +21,7 @@ use crate::filesystem::{inode_to_file_attr, SliceFsFilesystem};
 
 /// Result for `getattr` / `setattr` — returns a `FileAttr` on success.
 #[derive(Debug)]
-pub(crate) enum AttrResult {
+pub enum AttrResult {
     Ok(FileAttr),
     Error(i32),
 }
@@ -29,28 +29,28 @@ pub(crate) enum AttrResult {
 /// Result for `lookup`, `mkdir`, `mknod`, `symlink`, `link` — returns a `FileAttr`
 /// (the entry attributes) together with the inode number on success.
 #[derive(Debug)]
-pub(crate) enum EntryResult {
+pub enum EntryResult {
     Ok(u64, FileAttr),
     Error(i32),
 }
 
 /// Result for `readdir` — on success, a list of `(ino, FileType, name)` tuples.
 #[derive(Debug)]
-pub(crate) enum ReaddirResult {
+pub enum ReaddirResult {
     Ok(Vec<(u64, fuser::FileType, String)>),
     Error(i32),
 }
 
 /// Result for `read` / `readlink` — returns raw bytes on success.
 #[derive(Debug)]
-pub(crate) enum DataResult {
+pub enum DataResult {
     Ok(Vec<u8>),
     Error(i32),
 }
 
 /// Result for `open` — returns `(fh, is_writable)` on success.
 #[derive(Debug)]
-pub(crate) enum OpenResult {
+pub enum OpenResult {
     Ok(u64, bool),
     Error(i32),
 }
@@ -58,34 +58,34 @@ pub(crate) enum OpenResult {
 /// Result for callbacks that only succeed or fail with an errno (`release`, `flush`,
 /// `fsync`, `setxattr`, `removexattr`, `unlink`, `rmdir`, `rename`, `write`).
 #[derive(Debug)]
-pub(crate) enum EmptyResult {
+pub enum EmptyResult {
     Ok,
     Error(i32),
 }
 
 /// Result for `write` — returns the number of bytes written on success.
 #[derive(Debug)]
-pub(crate) enum WriteResult {
+pub enum WriteResult {
     Ok(u32),
     Error(i32),
 }
 
 /// Result for `create` — returns `(ino, fh, FileAttr)` on success.
 #[derive(Debug)]
-pub(crate) enum CreateResult {
+pub enum CreateResult {
     Ok(u64, u64, FileAttr),
     Error(i32),
 }
 
 /// Result for `statfs` — returns `(blocks, bfree, bavail, files, ffree, bsize)`.
 #[derive(Debug)]
-pub(crate) enum StatfsResult {
+pub enum StatfsResult {
     Ok(u64, u64, u64, u64, u64, u32),
 }
 
 /// Result for `getxattr` / `listxattr`.
 #[derive(Debug)]
-pub(crate) enum XattrResult {
+pub enum XattrResult {
     /// Caller asked for the size only (size == 0 in the FUSE request).
     Size(u32),
     /// Caller asked for the data.
@@ -95,15 +95,40 @@ pub(crate) enum XattrResult {
 
 /// Result for `getlk`.
 #[derive(Debug)]
-pub(crate) enum LockResult {
+pub enum LockResult {
     /// Returns `(start, end, typ, pid)` describing the lock.
     Ok(u64, u64, i32, u32),
 }
 
 // ── Handler functions ─────────────────────────────────────────────────────────
 
+/// One logged request (#20): freezes the clock while the request runs (all
+/// its times are equal and replayable), and `log` appends its record after
+/// it succeeded. During replay the clock is frozen already and nothing is
+/// logged.
+struct Logged {
+    _clock: Option<crate::oplog::Clock>,
+    time: (i64, u32),
+}
+
+fn logged() -> Logged {
+    match crate::oplog::frozen_now() {
+        Some(time) => Logged { _clock: None, time },
+        None => {
+            let time = crate::filesystem::system_now();
+            Logged { _clock: Some(crate::oplog::Clock::freeze_at(time)), time }
+        }
+    }
+}
+
+impl Logged {
+    fn log(&self, fs: &SliceFsFilesystem, op: crate::oplog::Op) {
+        fs.log_record(crate::oplog::Record { time: self.time, op });
+    }
+}
+
 /// Handle `getattr`: look up inode `ino` and return its attributes.
-pub(crate) fn handle_getattr(fs: &SliceFsFilesystem, ino: u64) -> AttrResult {
+pub fn handle_getattr(fs: &SliceFsFilesystem, ino: u64) -> AttrResult {
     match fs.test_getattr(ino) {
         Ok(meta) => AttrResult::Ok(inode_to_file_attr(&meta)),
         Err(e) => AttrResult::Error(crate::filesystem::meta_error_to_errno(&e)),
@@ -111,7 +136,7 @@ pub(crate) fn handle_getattr(fs: &SliceFsFilesystem, ino: u64) -> AttrResult {
 }
 
 /// Handle `lookup`: find `name` in directory `parent` and return its attributes.
-pub(crate) fn handle_lookup(fs: &SliceFsFilesystem, parent: u64, name: &str) -> EntryResult {
+pub fn handle_lookup(fs: &SliceFsFilesystem, parent: u64, name: &str) -> EntryResult {
     match fs.test_lookup(parent, name) {
         Ok((child_ino, meta)) => EntryResult::Ok(child_ino, inode_to_file_attr(&meta)),
         Err(errno) => EntryResult::Error(errno),
@@ -119,7 +144,7 @@ pub(crate) fn handle_lookup(fs: &SliceFsFilesystem, parent: u64, name: &str) -> 
 }
 
 /// Handle `readdir`: list entries in directory `ino` starting at `offset`.
-pub(crate) fn handle_readdir(
+pub fn handle_readdir(
     fs: &SliceFsFilesystem,
     ino: u64,
     offset: u64,
@@ -131,7 +156,7 @@ pub(crate) fn handle_readdir(
 }
 
 /// Handle `read`: read `size` bytes from `ino` starting at `offset`.
-pub(crate) fn handle_read(
+pub fn handle_read(
     fs: &SliceFsFilesystem,
     ino: u64,
     offset: u64,
@@ -144,46 +169,71 @@ pub(crate) fn handle_read(
 }
 
 /// Handle `open`: open inode `ino` with `flags`.
-pub(crate) fn handle_open(fs: &SliceFsFilesystem, ino: u64, flags: i32) -> OpenResult {
+pub fn handle_open(fs: &SliceFsFilesystem, ino: u64, flags: i32) -> OpenResult {
+    let l = logged();
     match fs.test_open(ino, flags) {
-        Ok((fh, is_write)) => OpenResult::Ok(fh, is_write),
+        Ok((fh, is_write)) => {
+            if is_write && flags & libc::O_TRUNC != 0 {
+                l.log(fs, crate::oplog::Op::Truncate { ino });
+            }
+            OpenResult::Ok(fh, is_write)
+        }
         Err(errno) => OpenResult::Error(errno),
     }
 }
 
 /// Handle `release`: finalize write state for `fh` of inode `ino`.
-pub(crate) fn handle_release(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> EmptyResult {
+pub fn handle_release(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> EmptyResult {
+    let l = logged();
+    let is_write = fs.ino_of_fh(fh).is_some();
     match fs.test_release_full(ino, fh) {
-        Ok(()) => EmptyResult::Ok,
+        Ok(()) => {
+            if is_write {
+                l.log(fs, crate::oplog::Op::Release { ino });
+            }
+            EmptyResult::Ok
+        }
         Err(_) => EmptyResult::Error(libc::EIO),
     }
 }
 
 /// Handle `flush`: flush write buffer for `fh` without closing the handle.
-pub(crate) fn handle_flush(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> EmptyResult {
+pub fn handle_flush(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> EmptyResult {
+    let l = logged();
+    let is_write = fs.ino_of_fh(fh).is_some();
     match fs.test_flush(ino, fh) {
-        Ok(()) => EmptyResult::Ok,
+        Ok(()) => {
+            if is_write {
+                l.log(fs, crate::oplog::Op::Flush { ino });
+            }
+            EmptyResult::Ok
+        }
         Err(_) => EmptyResult::Error(libc::EIO),
     }
 }
 
 /// Handle `fsync`: flush and sync write buffer for `fh`.
-pub(crate) fn handle_fsync(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> EmptyResult {
-    match fs.test_fsync(ino, fh) {
+pub fn handle_fsync(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> EmptyResult {
+    // Write the manifest (logged as a flush), then make the log durable: the
+    // sync covers this file's records and the flush record itself (#20).
+    if let EmptyResult::Error(e) = handle_flush(fs, ino, fh) {
+        return EmptyResult::Error(e);
+    }
+    match fs.meta().flush_wal() {
         Ok(()) => EmptyResult::Ok,
         Err(_) => EmptyResult::Error(libc::EIO),
     }
 }
 
 /// Handle `statfs`: compute filesystem statistics.
-pub(crate) fn handle_statfs(fs: &SliceFsFilesystem) -> StatfsResult {
+pub fn handle_statfs(fs: &SliceFsFilesystem) -> StatfsResult {
     let (blocks, bfree, bavail, files, ffree, bsize) = fs.compute_statfs();
     StatfsResult::Ok(blocks, bfree, bavail, files, ffree, bsize)
 }
 
 /// Handle `getxattr`: retrieve extended attribute `name` for inode `ino`.
 /// When `size == 0` the caller asks for the attribute size only.
-pub(crate) fn handle_getxattr(
+pub fn handle_getxattr(
     fs: &SliceFsFilesystem,
     ino: u64,
     name: &str,
@@ -203,7 +253,7 @@ pub(crate) fn handle_getxattr(
 
 /// Handle `listxattr`: list all extended attribute names for inode `ino`.
 /// When `size == 0` the caller asks for the total buffer size only.
-pub(crate) fn handle_listxattr(
+pub fn handle_listxattr(
     fs: &SliceFsFilesystem,
     ino: u64,
     size: u32,
@@ -221,46 +271,60 @@ pub(crate) fn handle_listxattr(
 }
 
 /// Handle `setxattr`: set extended attribute `name` to `value` on inode `ino`.
-pub(crate) fn handle_setxattr(
+pub fn handle_setxattr(
     fs: &SliceFsFilesystem,
     ino: u64,
     name: &str,
     value: &[u8],
 ) -> EmptyResult {
+    let l = logged();
     match fs.test_setxattr(ino, name, value) {
-        Ok(()) => EmptyResult::Ok,
+        Ok(()) => {
+            l.log(fs, crate::oplog::Op::Setxattr { ino, name: name.to_string(), value: value.to_vec() });
+            EmptyResult::Ok
+        }
         Err(errno) => EmptyResult::Error(errno),
     }
 }
 
 /// Handle `removexattr`: remove extended attribute `name` from inode `ino`.
-pub(crate) fn handle_removexattr(
+pub fn handle_removexattr(
     fs: &SliceFsFilesystem,
     ino: u64,
     name: &str,
 ) -> EmptyResult {
+    let l = logged();
     match fs.test_removexattr(ino, name) {
-        Ok(()) => EmptyResult::Ok,
+        Ok(()) => {
+            l.log(fs, crate::oplog::Op::Removexattr { ino, name: name.to_string() });
+            EmptyResult::Ok
+        }
         Err(e) if e == libc::ENOENT => EmptyResult::Error(libc::ENODATA),
         Err(errno) => EmptyResult::Error(errno),
     }
 }
 
 /// Handle `write`: write `data` at `offset` into open handle `fh`.
-pub(crate) fn handle_write(
+pub fn handle_write(
     fs: &SliceFsFilesystem,
     fh: u64,
     offset: u64,
     data: &[u8],
 ) -> WriteResult {
+    let l = logged();
     match fs.test_write(fh, offset, data) {
-        Ok(n) => WriteResult::Ok(n),
+        Ok(n) => {
+            if let Some(ino) = fs.ino_of_fh(fh) {
+                l.log(fs, crate::oplog::Op::Write { ino, offset, data: data[..n as usize].to_vec() });
+            }
+            WriteResult::Ok(n)
+        }
         Err(e) => WriteResult::Error(e),
     }
 }
 
 /// Handle `create`: create a new file named `name` in `parent` and open it.
-pub(crate) fn handle_create(
+pub fn handle_create(
     fs: &SliceFsFilesystem,
     parent: u64,
     name: &str,
@@ -270,14 +334,18 @@ pub(crate) fn handle_create(
     gid: u32,
     flags: i32,
 ) -> CreateResult {
+    let l = logged();
     match fs.test_create_full(parent, name, mode, umask, uid, gid, flags) {
-        Ok((ino, fh, meta)) => CreateResult::Ok(ino, fh, inode_to_file_attr(&meta)),
+        Ok((ino, fh, meta)) => {
+            l.log(fs, crate::oplog::Op::Create { parent, name: name.to_string(), mode, umask, uid, gid, flags, ino });
+            CreateResult::Ok(ino, fh, inode_to_file_attr(&meta))
+        }
         Err(errno) => CreateResult::Error(errno),
     }
 }
 
 /// Handle `mkdir`: create a new directory named `name` in `parent`.
-pub(crate) fn handle_mkdir(
+pub fn handle_mkdir(
     fs: &SliceFsFilesystem,
     parent: u64,
     name: &str,
@@ -286,14 +354,18 @@ pub(crate) fn handle_mkdir(
     uid: u32,
     gid: u32,
 ) -> EntryResult {
+    let l = logged();
     match fs.test_mkdir_full(parent, name, mode, umask, uid, gid) {
-        Ok((ino, meta)) => EntryResult::Ok(ino, inode_to_file_attr(&meta)),
+        Ok((ino, meta)) => {
+            l.log(fs, crate::oplog::Op::Mkdir { parent, name: name.to_string(), mode, umask, uid, gid, ino });
+            EntryResult::Ok(ino, inode_to_file_attr(&meta))
+        }
         Err(errno) => EntryResult::Error(errno),
     }
 }
 
 /// Handle `mknod`: create a new node (regular file) named `name` in `parent`.
-pub(crate) fn handle_mknod(
+pub fn handle_mknod(
     fs: &SliceFsFilesystem,
     parent: u64,
     name: &str,
@@ -303,14 +375,18 @@ pub(crate) fn handle_mknod(
     uid: u32,
     gid: u32,
 ) -> EntryResult {
+    let l = logged();
     match fs.test_mknod_rdev(parent, name, mode, rdev, uid, gid, umask) {
-        Ok((ino, meta)) => EntryResult::Ok(ino, inode_to_file_attr(&meta)),
+        Ok((ino, meta)) => {
+            l.log(fs, crate::oplog::Op::Mknod { parent, name: name.to_string(), mode, umask, rdev, uid, gid, ino });
+            EntryResult::Ok(ino, inode_to_file_attr(&meta))
+        }
         Err(errno) => EntryResult::Error(errno),
     }
 }
 
 /// Handle `symlink`: create a symbolic link named `link_name` in `parent` pointing to `target`.
-pub(crate) fn handle_symlink(
+pub fn handle_symlink(
     fs: &SliceFsFilesystem,
     parent: u64,
     link_name: &str,
@@ -318,14 +394,18 @@ pub(crate) fn handle_symlink(
     uid: u32,
     gid: u32,
 ) -> EntryResult {
+    let l = logged();
     match fs.test_symlink_full(parent, link_name, target, uid, gid) {
-        Ok((ino, meta)) => EntryResult::Ok(ino, inode_to_file_attr(&meta)),
+        Ok((ino, meta)) => {
+            l.log(fs, crate::oplog::Op::Symlink { parent, name: link_name.to_string(), target: target.to_string(), uid, gid, ino });
+            EntryResult::Ok(ino, inode_to_file_attr(&meta))
+        }
         Err(errno) => EntryResult::Error(errno),
     }
 }
 
 /// Handle `readlink`: read the target of symbolic link inode `ino`.
-pub(crate) fn handle_readlink(fs: &SliceFsFilesystem, ino: u64) -> DataResult {
+pub fn handle_readlink(fs: &SliceFsFilesystem, ino: u64) -> DataResult {
     match fs.simulate_readlink(ino) {
         Ok(target) => DataResult::Ok(target.into_bytes()),
         Err(errno) => DataResult::Error(errno),
@@ -333,44 +413,56 @@ pub(crate) fn handle_readlink(fs: &SliceFsFilesystem, ino: u64) -> DataResult {
 }
 
 /// Handle `link`: create a hard link named `newname` in `newparent` pointing to `ino`.
-pub(crate) fn handle_link(
+pub fn handle_link(
     fs: &SliceFsFilesystem,
     ino: u64,
     newparent: u64,
     newname: &str,
 ) -> EntryResult {
+    let l = logged();
     match fs.test_link_full(ino, newparent, newname) {
-        Ok((new_ino, meta)) => EntryResult::Ok(new_ino, inode_to_file_attr(&meta)),
+        Ok((new_ino, meta)) => {
+            l.log(fs, crate::oplog::Op::Link { ino, newparent, newname: newname.to_string() });
+            EntryResult::Ok(new_ino, inode_to_file_attr(&meta))
+        }
         Err(errno) => EntryResult::Error(errno),
     }
 }
 
 /// Handle `unlink`: remove the directory entry `name` from `parent`.
-pub(crate) fn handle_unlink(
+pub fn handle_unlink(
     fs: &SliceFsFilesystem,
     parent: u64,
     name: &str,
 ) -> EmptyResult {
+    let l = logged();
     match fs.simulate_unlink(parent, name) {
-        Ok(()) => EmptyResult::Ok,
+        Ok(()) => {
+            l.log(fs, crate::oplog::Op::Unlink { parent, name: name.to_string() });
+            EmptyResult::Ok
+        }
         Err(errno) => EmptyResult::Error(errno),
     }
 }
 
 /// Handle `rmdir`: remove the empty directory `name` from `parent`.
-pub(crate) fn handle_rmdir(
+pub fn handle_rmdir(
     fs: &SliceFsFilesystem,
     parent: u64,
     name: &str,
 ) -> EmptyResult {
+    let l = logged();
     match fs.simulate_rmdir(parent, name) {
-        Ok(()) => EmptyResult::Ok,
+        Ok(()) => {
+            l.log(fs, crate::oplog::Op::Rmdir { parent, name: name.to_string() });
+            EmptyResult::Ok
+        }
         Err(errno) => EmptyResult::Error(errno),
     }
 }
 
 /// Handle `rename`: rename `name` in `parent` to `newname` in `newparent`.
-pub(crate) fn handle_rename(
+pub fn handle_rename(
     fs: &SliceFsFilesystem,
     parent: u64,
     name: &str,
@@ -378,8 +470,12 @@ pub(crate) fn handle_rename(
     newname: &str,
     flags: u32,
 ) -> EmptyResult {
+    let l = logged();
     match fs.simulate_rename(parent, name, newparent, newname, flags) {
-        Ok(()) => EmptyResult::Ok,
+        Ok(()) => {
+            l.log(fs, crate::oplog::Op::Rename { parent, name: name.to_string(), newparent, newname: newname.to_string(), flags });
+            EmptyResult::Ok
+        }
         Err(errno) => EmptyResult::Error(errno),
     }
 }
@@ -387,7 +483,7 @@ pub(crate) fn handle_rename(
 /// Handle `setattr`: update inode attributes for `ino`.
 ///
 /// `mtime` is `Some((sec, nsec))` if mtime should be updated.
-pub(crate) fn handle_setattr(
+pub fn handle_setattr(
     fs: &SliceFsFilesystem,
     ino: u64,
     mode: Option<u32>,
@@ -398,14 +494,18 @@ pub(crate) fn handle_setattr(
     atime: Option<(i64, u32)>,
     mtime: Option<(i64, u32)>,
 ) -> AttrResult {
+    let l = logged();
     match fs.test_setattr_full(ino, mode, uid, gid, size, fh, atime, mtime) {
-        Ok(inode) => AttrResult::Ok(inode_to_file_attr(&inode)),
+        Ok(inode) => {
+            l.log(fs, crate::oplog::Op::Setattr { ino, mode, uid, gid, size, atime, mtime });
+            AttrResult::Ok(inode_to_file_attr(&inode))
+        }
         Err(errno) => AttrResult::Error(errno),
     }
 }
 
 /// Handle `getlk`: always report no conflicting lock (F_UNLCK).
-pub(crate) fn handle_getlk(
+pub fn handle_getlk(
     start: u64,
     end: u64,
     pid: u32,
