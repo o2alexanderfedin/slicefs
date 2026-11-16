@@ -592,18 +592,16 @@ pub fn run_mount(
 
     // ── Mount + startup log ────────────────────────────────────────────────────
 
+    // macOS: the unmount watcher prints this when the mount really appears.
     #[cfg(target_os = "macos")]
-    {
-        let backend_name = selected_backend.as_mount_option().trim_start_matches("backend=");
-        println!(
-            "SliceFS mounted at {} (backend: {}, fuse-t: {}.{}.{})",
-            mountpoint.display(),
-            backend_name,
-            fuse_t_version.0,
-            fuse_t_version.1,
-            fuse_t_version.2,
-        );
-    }
+    let mounted_msg = format!(
+        "SliceFS mounted at {} (backend: {}, fuse-t: {}.{}.{})",
+        mountpoint.display(),
+        selected_backend.as_mount_option().trim_start_matches("backend="),
+        fuse_t_version.0,
+        fuse_t_version.1,
+        fuse_t_version.2,
+    );
 
     #[cfg(not(target_os = "macos"))]
     println!("SliceFS mounted at {}", mountpoint.display());
@@ -616,14 +614,23 @@ pub fn run_mount(
     #[cfg(target_os = "macos")]
     let unmount_watch_shutdown = Arc::new(AtomicBool::new(false));
     #[cfg(target_os = "macos")]
-    let unmount_watch = crate::fuset_watch::spawn_unmount_watcher(mountpoint, Arc::clone(&unmount_watch_shutdown));
+    let unmount_watch =
+        crate::fuset_watch::spawn_unmount_watcher(mountpoint, mounted_msg, Arc::clone(&unmount_watch_shutdown));
 
-    let mounted = mount(crate::fuse_callbacks::MountedFs(fs), mountpoint, &config);
+    #[allow(unused_mut)]
+    let mut mounted = mount(crate::fuse_callbacks::MountedFs(fs), mountpoint, &config);
 
     #[cfg(target_os = "macos")]
     {
         unmount_watch_shutdown.store(true, Ordering::SeqCst);
-        let _ = unmount_watch.join();
+        let seen = unmount_watch.join().unwrap_or(true);
+        if mounted.is_ok() && !seen {
+            mounted = Err(std::io::Error::other(format!(
+                "the FUSE-T session ended, but no volume was mounted at {} (backend: {})",
+                mountpoint.display(),
+                selected_backend.as_mount_option().trim_start_matches("backend="),
+            )));
+        }
     }
 
     // Stop the GC thread before mount.lock is released, also when mount failed.
