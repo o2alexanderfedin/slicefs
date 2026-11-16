@@ -16,8 +16,7 @@ use std::sync::{Arc, RwLock, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use metadata::store::DictMetadataStore;
-use slicefs_traits::metadata::MetadataStore;
+use crate::filesystem::SliceFsFilesystem;
 
 use crate::util::ts;
 
@@ -26,7 +25,7 @@ pub const DEFAULT_COMMIT_INTERVAL_SECS: u64 = 30;
 
 /// Start the timer thread. It stops when `shutdown` is set or the store is dropped.
 pub fn spawn_commit_timer(
-    meta: Weak<DictMetadataStore>,
+    fs: Weak<SliceFsFilesystem>,
     gate: Arc<RwLock<()>>,
     interval: Duration,
     shutdown: Arc<AtomicBool>,
@@ -41,16 +40,17 @@ pub fn spawn_commit_timer(
                 }
                 std::thread::sleep(Duration::from_millis(100).min(interval));
             }
-            let Some(meta) = meta.upgrade() else { return };
+            let Some(fs) = fs.upgrade() else { return };
             if shutdown.load(Ordering::SeqCst) {
                 return;
             }
-            if !meta.has_uncommitted_changes() {
+            if !fs.meta().has_uncommitted_changes() {
                 continue;
             }
             let _all = gate.write().unwrap_or_else(|e| e.into_inner());
             let t = Instant::now();
-            match meta.commit() {
+            // A clean cut: open files' content goes into the root (#20).
+            match fs.commit_cut() {
                 Ok(_) => eprintln!("[{}][commit-timer] committed in {} ms", ts(), t.elapsed().as_millis()),
                 Err(e) => eprintln!("[{}][commit-timer] commit failed: {}", ts(), e),
             }
@@ -62,6 +62,8 @@ pub fn spawn_commit_timer(
 mod tests {
     use super::*;
     use crate::filesystem::SliceFsFilesystem;
+    use metadata::store::DictMetadataStore;
+    use slicefs_traits::metadata::MetadataStore;
     use metadata::store_io::StoreIo;
     use std::sync::Mutex;
 
@@ -80,9 +82,9 @@ mod tests {
     fn timer_commits_changes_and_waits_for_the_gate() {
         let dir = tempfile::tempdir().unwrap();
         let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
-        let fs = SliceFsFilesystem::new(DictMetadataStore::new(io.clone()), io.clone(), None);
+        let fs = Arc::new(SliceFsFilesystem::new(DictMetadataStore::new(io.clone()), io.clone(), None));
         let stop = Arc::new(AtomicBool::new(false));
-        let h = spawn_commit_timer(Arc::downgrade(fs.meta()), fs.commit_gate(), Duration::from_millis(200), stop.clone());
+        let h = spawn_commit_timer(Arc::downgrade(&fs), fs.commit_gate(), Duration::from_millis(200), stop.clone());
 
         let (ino, fh) = fs.test_create(1, "f", 0o100_644, 0o022, 0, 0).unwrap();
         // An operation in progress holds the gate: no commit may happen meanwhile.

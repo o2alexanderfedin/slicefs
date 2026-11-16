@@ -8,10 +8,14 @@ use super::{SegmentEntry, SegmentHeader, RecordType};
 
 /// Writes records to a segment file in append-only fashion.
 ///
-/// Each record is framed as: record_type(u8) + payload_len(u32 LE) + payload bytes.
-/// The file starts with a 16-byte `SegmentHeader`.
+/// Each record is framed as: record_type(u8) + payload_len(u32 LE) +
+/// seq(u64 LE) + payload + crc32c(u32 LE) over all the bytes before it.
+/// `seq` counts the records of this segment from 0. The file starts with a
+/// 16-byte `SegmentHeader`.
 pub struct SegmentWriter {
     inner: BufWriter<File>,
+    /// Sequence number of the next record.
+    seq: u64,
     /// True when bytes were written since the last successful `sync`.
     unsynced: bool,
     /// Number of `sync_all` calls made (for tests).
@@ -29,6 +33,7 @@ impl SegmentWriter {
             .open(path)?;
         let mut writer = SegmentWriter {
             inner: BufWriter::new(file),
+            seq: 0,
             unsynced: true,
             disk_syncs: 0,
         };
@@ -37,17 +42,15 @@ impl SegmentWriter {
         Ok(writer)
     }
 
-    /// Write a single entry. Frames as type(u8) + payload_len(u32 LE) + payload.
-    pub fn write_entry(&mut self, entry: &SegmentEntry) -> io::Result<()> {
+    /// Write a single entry (see the frame in the type docs). Returns its
+    /// sequence number.
+    pub fn write_entry(&mut self, entry: &SegmentEntry) -> io::Result<u64> {
         let payload = entry.payload_bytes();
-        let record_type = entry.record_type() as u8;
-        let payload_len = payload.len() as u32;
-
-        self.inner.write_all(&[record_type])?;
-        self.inner.write_all(&payload_len.to_le_bytes())?;
+        let frame = super::frame_record(entry.record_type() as u8, self.seq, &payload);
         self.unsynced = true;
-        self.inner.write_all(&payload)?;
-        Ok(())
+        self.inner.write_all(&frame)?;
+        self.seq += 1;
+        Ok(self.seq - 1)
     }
 
     /// Flush buffered data and call `sync_all` on the underlying file.

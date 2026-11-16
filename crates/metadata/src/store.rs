@@ -338,6 +338,27 @@ impl DictMetadataStore {
     ///
     /// IMPORTANT: Do NOT hold any other Mutex when calling this — WAL I/O
     /// may block and holding dict/inode_map locks would cause deadlocks.
+    /// Continue the WAL in a new segment that starts with `root` and every
+    /// snapshot record, and delete the older segments (#20). A failure leaves
+    /// the current segment in use, which is still correct (only larger).
+    fn rotate_wal(&self, root: Digest224) {
+        if let Some(ref w) = *self.wal.lock().unwrap() {
+            let mut seed = vec![WalEntry::RootUpdate { root }];
+            for s in self.list_snapshots() {
+                seed.push(WalEntry::Snapshot { version: s.version, root: s.root, created_at: s.created_at, name: s.name });
+            }
+            if let Err(e) = w.rotate(&seed) {
+                eprintln!("WAL rotation failed (the log keeps growing in the current segment): {e}");
+            }
+        }
+    }
+
+    /// Append a file system request to the write log (#20). Durable after the
+    /// next `flush_wal` (fsync) or commit; a commit makes it part of a root.
+    pub fn log_op(&self, bytes: Vec<u8>) {
+        self.log_wal_entry(&WalEntry::Op { bytes });
+    }
+
     fn log_wal_entry(&self, entry: &WalEntry) {
         if let Some(ref w) = *self.wal.lock().unwrap() {
             // Ignore WAL errors during mutation logging — the in-memory state
@@ -592,6 +613,7 @@ impl DictMetadataStore {
     pub fn commit_root(&self, root: Digest224) -> Result<(), MetaError> {
         *self.last_root.lock().unwrap() = Some(root);
         self.log_wal_entry(&WalEntry::RootUpdate { root });
+        self.rotate_wal(root);
         Ok(())
     }
 }
@@ -945,6 +967,7 @@ impl MetadataStore for DictMetadataStore {
         // Log RootUpdate to WAL AFTER all nodes are flushed to disk (crash-safe ordering).
         // If we crash between flush and WAL write, the next mount will just re-commit.
         self.log_wal_entry(&WalEntry::RootUpdate { root: root_digest });
+        self.rotate_wal(root_digest);
 
         self.committed_changes.store(changes, Ordering::Relaxed);
         Ok(root_digest)
