@@ -169,10 +169,17 @@ impl Io for StoreIo {
         let Some(parent) = path.parent() else {
             return fs::write(path, data);
         };
-        fs::create_dir_all(parent)?;
         self.tmp_seq += 1;
         let tmp = parent.join(format!(".tmp-{}-{}", std::process::id(), self.tmp_seq));
-        fs::write(&tmp, data)?;
+        // Create the directory only when it is missing: a create_dir_all per
+        // object costs a stat/mkdir per object write (#4).
+        match fs::write(&tmp, data) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(parent)?;
+                fs::write(&tmp, data)?;
+            }
+            r => r?,
+        }
         fs::rename(&tmp, &path).inspect_err(|_| {
             let _ = fs::remove_file(&tmp);
         })?;
@@ -215,6 +222,18 @@ mod tests {
         io.write("a/b/c/blob", b"data").unwrap();
         let read_back = io.read("a/b/c/blob").unwrap();
         assert_eq!(read_back, b"data");
+    }
+
+    /// The directory is created again if it was removed after a write (the
+    /// write does not depend on a remembered "exists" state).
+    #[test]
+    fn test_store_io_recreates_a_removed_dir() {
+        let dir = TempDir::new().unwrap();
+        let mut io = StoreIo::new(dir.path());
+        io.write("vt0/a", b"1").unwrap();
+        fs::remove_dir_all(dir.path().join("vt0")).unwrap();
+        io.write("vt0/b", b"2").unwrap();
+        assert_eq!(io.read("vt0/b").unwrap(), b"2");
     }
 
     #[test]
