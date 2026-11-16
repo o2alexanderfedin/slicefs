@@ -8,6 +8,8 @@ mod fuse_callbacks;
 pub(crate) mod handlers;
 pub mod gc;
 pub mod online_gc;
+#[cfg(target_os = "macos")]
+pub mod fuset_watch;
 pub mod mount;
 pub mod snapshot;
 pub mod seed;

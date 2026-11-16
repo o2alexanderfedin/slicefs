@@ -10,6 +10,8 @@ mod fuse_callbacks;
 mod handlers;
 mod gc;
 mod online_gc;
+#[cfg(target_os = "macos")]
+mod fuset_watch;
 mod mount;
 mod scrub;
 mod seed;
