@@ -17,6 +17,11 @@
 //!    `gc.running`.
 //! 3. `slicefs gc` waits for `gc.result`. If no mount takes the request in
 //!    time, it stops with an error (for example, the daemon is dead).
+//!
+//! The thread takes a request only between two GC runs, and an automatic GC
+//! of a large store can take minutes. While a GC runs, the thread refreshes
+//! the heartbeat file `gc.active`; `slicefs gc` keeps waiting for the pickup
+//! while the heartbeat is fresh. (A heartbeat left by a dead daemon gets old.)
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,12 +40,47 @@ const GC_DUTY: u32 = 10;
 pub const REQUEST_FILE: &str = "gc.request";
 pub const RUNNING_FILE: &str = "gc.running";
 pub const RESULT_FILE: &str = "gc.result";
+pub const ACTIVE_FILE: &str = "gc.active";
+
+/// How often a running GC refreshes `gc.active`.
+const HEARTBEAT: Duration = Duration::from_secs(1);
 
 /// How often the GC thread looks for a request (and for shutdown).
 const POLL: Duration = Duration::from_millis(500);
 
 /// How long `request_gc` waits for a mount to take the request.
 const PICKUP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run `f` while refreshing the heartbeat file `active` (see the module docs).
+fn with_heartbeat<T>(active: &Path, f: impl FnOnce() -> T) -> T {
+    let done = AtomicBool::new(false);
+    let out = std::thread::scope(|s| {
+        s.spawn(|| {
+            while !done.load(Ordering::SeqCst) {
+                let _ = std::fs::write(active, b"");
+                let t = Instant::now();
+                while t.elapsed() < HEARTBEAT && !done.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        });
+        let out = f();
+        done.store(true, Ordering::SeqCst);
+        out
+    });
+    // The heartbeat thread has ended here (end of the scope).
+    let _ = std::fs::remove_file(active);
+    out
+}
+
+/// True if `active` was refreshed within the pickup timeout.
+fn heartbeat_is_fresh(active: &Path) -> bool {
+    std::fs::metadata(active)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < PICKUP_TIMEOUT)
+}
 
 /// Run one GC on `fs` and give a one-line outcome for `gc.result`.
 fn run_once(fs: &SliceFsFilesystem, stop: &AtomicBool) -> String {
@@ -78,6 +118,9 @@ pub fn spawn_online_gc(
             let mut last = Instant::now();
             let mut last_took = Duration::ZERO;
             let mut last_root = None;
+            // Files left by a daemon that died during a GC.
+            let _ = std::fs::remove_file(store.join(ACTIVE_FILE));
+            let _ = std::fs::remove_file(store.join(RUNNING_FILE));
             loop {
                 std::thread::sleep(POLL);
                 if shutdown.load(Ordering::SeqCst) {
@@ -102,7 +145,7 @@ pub fn spawn_online_gc(
                     continue;
                 }
                 let t = Instant::now();
-                let outcome = run_once(&fs, &shutdown);
+                let outcome = with_heartbeat(&store.join(ACTIVE_FILE), || run_once(&fs, &shutdown));
                 last_took = t.elapsed();
                 last_root = fs.meta().current_root();
                 drop(fs);
@@ -123,8 +166,11 @@ pub fn request_gc(store: &Path) -> Result<String, String> {
     let (request, running, result) = (store.join(REQUEST_FILE), store.join(RUNNING_FILE), store.join(RESULT_FILE));
     let _ = std::fs::remove_file(&result);
     std::fs::write(&request, b"").map_err(|e| format!("cannot write {}: {e}", request.display()))?;
-    let t = Instant::now();
+    let mut t = Instant::now();
     while request.exists() {
+        if heartbeat_is_fresh(&store.join(ACTIVE_FILE)) {
+            t = Instant::now(); // a GC runs now; the request comes next
+        }
         if t.elapsed() > PICKUP_TIMEOUT {
             let _ = std::fs::remove_file(&request);
             return Err(format!(
@@ -158,5 +204,42 @@ mod tests {
         let err = request_gc(dir.path()).unwrap_err();
         assert!(err.contains("no running mount"), "{err}");
         assert!(!dir.path().join(REQUEST_FILE).exists());
+    }
+
+    #[test]
+    fn a_request_waits_while_a_gc_runs_and_is_taken_after_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = dir.path().to_path_buf();
+        // A "daemon": one long GC (longer than the pickup timeout) with the
+        // heartbeat, then it takes the request.
+        let d = store.clone();
+        let daemon = std::thread::spawn(move || {
+            with_heartbeat(&d.join(ACTIVE_FILE), || std::thread::sleep(PICKUP_TIMEOUT + Duration::from_secs(3)));
+            while std::fs::rename(d.join(REQUEST_FILE), d.join(RUNNING_FILE)).is_err() {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            std::fs::write(d.join(RESULT_FILE), "ok: test\n").unwrap();
+            std::fs::remove_file(d.join(RUNNING_FILE)).unwrap();
+        });
+        std::fs::write(store.join("mount.lock"), b"").unwrap();
+        while !store.join(ACTIVE_FILE).exists() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(request_gc(&store).unwrap(), "ok: test");
+        daemon.join().unwrap();
+        assert!(!store.join(ACTIVE_FILE).exists(), "the heartbeat file is removed after the GC");
+    }
+
+    #[test]
+    fn an_old_heartbeat_does_not_keep_the_request_waiting() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let active = dir.path().join(ACTIVE_FILE);
+        std::fs::write(&active, b"").unwrap();
+        let old = std::time::SystemTime::now() - PICKUP_TIMEOUT - Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&active).unwrap().set_modified(old).unwrap();
+        assert!(!heartbeat_is_fresh(&active));
+        let t = Instant::now();
+        assert!(request_gc(dir.path()).is_err());
+        assert!(t.elapsed() < PICKUP_TIMEOUT + Duration::from_secs(3));
     }
 }
