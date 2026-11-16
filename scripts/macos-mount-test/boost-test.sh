@@ -1,0 +1,94 @@
+#!/bin/bash
+# Boost round trip through a SliceFS mount on macOS (FUSE-T): copy to the mount,
+# copy back, compare; remount and compare again; delete all; GC on the mounted store.
+#
+# usage: boost-test.sh <backend: nfs|smb|fskit> <versions...>   e.g. boost-test.sh nfs 1_85_0
+# env:   SLICEFS    slicefs binary (default: target/release/slicefs)
+#        BOOST_DIR  dir with boost_<v>.tar and x/boost_<v>/ (see fetch-boost.sh)
+#        WORK       work dir (default: a new temp dir)
+#        STEP_TIMEOUT (s, default 3600), SKIP_TAR=1, SKIP_TREE=1
+BK=$1; shift; VERS=("$@")
+B=${SLICEFS:-target/release/slicefs}; DL=${BOOST_DIR:?set BOOST_DIR}
+R=${WORK:-$(mktemp -d)}/bt-$BK; rm -rf $R
+T=${STEP_TIMEOUT:-3600}
+mkdir -p $R/seed $R/mnt $R/out; echo s > $R/seed/s.txt; echo "version,step,mb,files,secs" > $R/perf.csv
+$B seed $R/store $R/seed >/dev/null 2>&1
+echo "run dir: $R"
+FAILS=0
+
+mount_fs() {
+  $B mount --store $R/store --backend $BK $R/mnt </dev/null >>$R/mount.log 2>>$R/mount.err &
+  MP=$!
+  for i in $(seq 1 60); do mount | grep -q " $R/mnt " && return 0; sleep 1; done
+  echo "MOUNT FAILED"; tail -5 $R/mount.log $R/mount.err; exit 1
+}
+unmount_fs() {
+  step unmount 60 $B unmount $R/mnt
+  for i in $(seq 1 40); do kill -0 $MP 2>/dev/null || break; sleep 0.5; done
+  if kill -0 $MP 2>/dev/null; then echo "  daemon-exit: FAIL"; FAILS=$((FAILS+1)); kill -9 $MP; else echo "  daemon-exit: ok"; fi
+}
+# step <name> <timeout> <cmd...>: run with watchdog, print status + duration
+step() {
+  local n=$1 t=$2; shift 2; local s=$(date +%s)
+  ( "$@" ) >$R/step.out 2>&1 & local p=$!
+  while kill -0 $p 2>/dev/null; do
+    if [ $(( $(date +%s) - s )) -ge $t ]; then kill -9 $p 2>/dev/null; echo "  $n: HANG (>${t}s)"; FAILS=$((FAILS+1)); return 1; fi
+    sleep 1
+  done
+  wait $p; local rc=$? d=$(( $(date +%s) - s )); LAST_D=$d
+  if [ $rc -eq 0 ]; then echo "  $n: ok (${d}s)"; else echo "  $n: FAIL rc=$rc (${d}s)"; head -5 $R/step.out | sed 's/^/      /'; FAILS=$((FAILS+1)); fi
+  return $rc
+}
+rate() { python3 -c "import sys; mb,f,d=float(sys.argv[1]),int(sys.argv[2]),max(int(sys.argv[3]),1); print(f'      -> {mb/d:.1f} MB/s' + (f', {f/d:.0f} files/s' if f>1 else ''))" $1 $2 $LAST_D; echo "$CUR,$3,$1,$2,$LAST_D" >> $R/perf.csv; }
+stats() { echo "  stats: $($B stats $R/store 2>/dev/null | awk -F': ' '/Logical|CAS bytes/{printf "%s=%s  ", $1, $2}' | tr -s ' ')"; }
+objects() { find $R/store/vt0 -type f 2>/dev/null | wc -l | tr -d ' '; }
+mb() { du -sm "$1" | cut -f1; }
+
+mount_fs
+mount | grep " $R/mnt " | sed 's/^/  /'
+for v in "${VERS[@]}"; do
+  echo "== boost_$v"
+  if [ -z "$SKIP_TAR" ]; then
+    tarf=$DL/boost_$v.tar
+    echo "  tar: $(mb $tarf) MB"
+    CUR=$v; TMB=$(mb $tarf)
+    step tar-to $T cp $tarf $R/mnt/ && rate $TMB 1 tar-to
+    stats
+    step tar-from $T cp $R/mnt/boost_$v.tar $R/out/ && rate $TMB 1 tar-from
+    step tar-cmp $T cmp $tarf $R/out/boost_$v.tar
+    rm -f $R/out/boost_$v.tar
+  fi
+  if [ -z "$SKIP_TREE" ]; then
+    src=$DL/x/boost_$v
+    CUR=$v; XMB=$(mb $src); XN=$(find $src -type f | wc -l | tr -d ' ')
+    echo "  tree: $XMB MB, $XN files"
+    mkdir -p $R/mnt/trees 2>/dev/null
+    step tree-to $T cp -Rp $src $R/mnt/trees/ && rate $XMB $XN tree-to
+    stats
+    step tree-from $T cp -Rp $R/mnt/trees/boost_$v $R/out/ && rate $XMB $XN tree-from
+    step tree-diff $T diff -r --no-dereference $src $R/out/boost_$v
+    step tree-modes $T bash -c "diff <(cd $src && find . -exec stat -f '%Sp %z %N' {} + | sort) <(cd $R/out/boost_$v && find . -exec stat -f '%Sp %z %N' {} + | sort)"
+    rm -rf $R/out/boost_$v
+  fi
+done
+unmount_fs
+
+echo "== remount + re-verify"
+mount_fs
+for v in "${VERS[@]}"; do
+  [ -z "$SKIP_TAR" ] && step "tar-cmp-after-remount $v" $T cmp $DL/boost_$v.tar $R/mnt/boost_$v.tar
+  [ -z "$SKIP_TREE" ] && step "tree-diff-after-remount $v" $T diff -r --no-dereference $DL/x/boost_$v $R/mnt/trees/boost_$v
+done
+stats
+step "rm-all" $T rm -rf $R/mnt/trees $R/mnt/boost_*.tar
+# FSKit volumes get a .fseventsd directory from macOS.
+step "empty-after-rm" 30 bash -c "[ \$(ls -A $R/mnt | grep -v -e '^s.txt\$' -e '^.fseventsd\$' | wc -l) -eq 0 ]"
+before=$(objects)
+step "gc-mounted" $T $B gc $R/store && sed 's/^/      /' $R/step.out
+after=$(objects); echo "  objects: $before -> $after"
+[ "$after" -lt $(( before / 10 + 100 )) ] || { echo "  gc-freed: FAIL"; FAILS=$((FAILS+1)); }
+unmount_fs
+step "gc-offline-check" $T $B gc $R/store && head -1 $R/step.out | sed 's/^/      /'
+echo "csv: $R/perf.csv"
+echo "RESULT $BK: $FAILS failure(s)"
+[ $FAILS -eq 0 ]
