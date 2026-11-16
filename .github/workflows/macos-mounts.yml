@@ -3,7 +3,7 @@ name: macOS mounts
 # Real FUSE-T mounts on a fresh macOS VM: the Boost round trip through SliceFS
 # on SMB (the default backend) and on FSKit. The FSKit job first enables the
 # FUSE-T FSKit module without the System Settings GUI (enable-fskit.sh).
-# Long (about 1 to 2 hours per job), so not on every pull request.
+# Long (about 3 to 4 hours per job), so not on every pull request.
 on:
   workflow_dispatch:
   push:
@@ -13,7 +13,7 @@ jobs:
   mounts:
     name: macOS ${{ matrix.backend }} (Boost round trip)
     runs-on: macos-26
-    timeout-minutes: 150
+    timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
@@ -63,6 +63,8 @@ jobs:
           SLICEFS: target/release/slicefs
           BOOST_DIR: ~/boost
           WORK: ${{ runner.temp }}/work
+          # On macOS 26.7 a tree diff on SMB takes about 1 hour (see the README).
+          STEP_TIMEOUT: 5400
         run: |
           export BOOST_DIR=$HOME/boost
           scripts/macos-mount-test/boost-test.sh ${{ matrix.backend }} 1_85_0
