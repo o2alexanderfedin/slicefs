@@ -9,7 +9,16 @@
 # so that they read it again. Exit 0 if the module is registered and listed.
 ID=org.fuset.fskit-srv.module
 SET="$HOME/Library/Group Containers/group.com.apple.fskit.settings"
+APP=/Applications/fuse-t.app
+APPEX=$APP/Contents/Extensions/FskitSrvModule.appex
+LSREG=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 echo "macOS $(sw_vers -productVersion)"
+# Right after the install, the extension may not be registered yet: register
+# it now and wait for it.
+[ -d "$APPEX" ] || { echo "  no $APPEX"; exit 1; }
+$LSREG -f -R "$APP" 2>&1 | sed 's/^/  lsregister: /'
+pluginkit -a "$APPEX" 2>&1 | sed 's/^/  add: /'
+for i in $(seq 1 30); do pluginkit -m -i $ID 2>/dev/null | grep -q $ID && break; sleep 2; done
 pluginkit -m -v -i $ID 2>&1 | sed 's/^/  pluginkit: /'
 pluginkit -e use -i $ID 2>&1 | sed 's/^/  enable: /'
 
