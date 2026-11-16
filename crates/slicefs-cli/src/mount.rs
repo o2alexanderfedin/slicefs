@@ -94,7 +94,7 @@ fn spawn_watchdog(
             }
 
             // NOTE: Do NOT use std::fs::metadata() for health checks — it will hang
-            // on a dead FUSE-T mount point (both NFS and SMB backends), blocking the
+            // on a dead FUSE-T mount point, blocking the
             // watchdog thread and preventing clean shutdown. Instead, check if the
             // go-nfsv4 child process is still alive.
             let nfs_alive = std::process::Command::new("pgrep")
@@ -438,8 +438,8 @@ fn check_mountpoint_not_in_use(mountpoint: &Path) -> Result<(), Box<dyn std::err
 /// `allow_other` passes the `allow_other` FUSE mount option (multi-user access).
 /// `snapshot_ref` mounts a specific snapshot read-only (by version number or name).
 /// `auto_snapshot` enables auto-snapshot on clean unmount (--auto-snapshot flag).
-/// `backend` selects the FUSE-T backend (macOS only): "smb", "fskit", or "nfs".
-/// `force` allows NFS backend to be used despite the macOS kernel bug.
+/// `backend` is the FUSE-T backend (macOS only): "fskit", the default and only one.
+/// `force` is accepted but currently unused.
 #[allow(clippy::too_many_arguments)]
 pub fn run_mount(
     store_path: &Path,
@@ -609,8 +609,9 @@ pub fn run_mount(
     // mount blocks until the FUSE session ends (SIGTERM, Ctrl+C, or unmount).
     // fuser handles signal registration internally — do NOT override with
     // libc::signal as it replaces fuser's session-exit handler.
-    // FUSE-T's SMB server does not exit at unmount, so the session would
-    // never end (no destroy, no final commit): end it when the mount is gone.
+    // The FUSE-T server may not exit at unmount (its SMB server did not), so
+    // the session would never end (no destroy, no final commit): end it when
+    // the mount is gone.
     #[cfg(target_os = "macos")]
     let unmount_watch_shutdown = Arc::new(AtomicBool::new(false));
     #[cfg(target_os = "macos")]
@@ -626,9 +627,11 @@ pub fn run_mount(
         let seen = unmount_watch.join().unwrap_or(true);
         if mounted.is_ok() && !seen {
             mounted = Err(std::io::Error::other(format!(
-                "the FUSE-T session ended, but no volume was mounted at {} (backend: {})",
+                "the FUSE-T session ended, but no volume was mounted at {} (backend: {}). \
+                 If the FUSE-T extension is not enabled: {}",
                 mountpoint.display(),
                 selected_backend.as_mount_option().trim_start_matches("backend="),
+                crate::backend::ENABLE_FSKIT_HINT,
             )));
         }
     }
@@ -829,20 +832,17 @@ mod tests {
         );
     }
 
-    /// Verify CUSTOM("backend=smb") is injected when backend=Some(Smb).
-    /// CUSTOM mount options are NOT passed to FUSE-T 1.2.0 — they cause
-    /// "Invalid request" or silent session termination. Backend selection
-    /// is handled via fuse-t.ini or NFS default.
+    /// Verify CUSTOM("backend=fskit") is injected when backend=Some(Fskit).
     #[test]
     #[cfg(target_os = "macos")]
     fn test_build_mount_options_passes_backend_on_macos() {
         use crate::backend::FuseTBackend;
-        let config = build_mount_options(false, false, Some(&FuseTBackend::Smb));
+        let config = build_mount_options(false, false, Some(&FuseTBackend::Fskit));
         let customs: Vec<_> = config.mount_options.iter().filter_map(|opt| match opt {
             MountOption::CUSTOM(s) => Some(s.as_str()),
             _ => None,
         }).collect();
-        assert_eq!(customs, vec!["backend=smb"], "backend must reach FUSE-T as backend=<name>");
+        assert_eq!(customs, vec!["backend=fskit"], "backend must reach FUSE-T as backend=<name>");
         let none = build_mount_options(false, false, None);
         assert!(!none.mount_options.iter().any(|o| matches!(o, MountOption::CUSTOM(_))));
     }
@@ -858,7 +858,6 @@ mod tests {
                 _ => None,
             }).collect()
         };
-        assert_eq!(customs(&FuseTBackend::Smb), vec!["backend=smb"]);
         assert_eq!(customs(&FuseTBackend::Fskit), vec!["backend=fskit"]);
     }
 

@@ -351,20 +351,20 @@ mod backend_tests {
     };
 
     #[test]
-    fn test_auto_detect_returns_smb_when_fskit_unavailable() {
-        let result = select_backend(None, false, (1, 0, 54), false);
-        assert_eq!(result, Ok(FuseTBackend::Smb));
+    fn test_default_backend_is_fskit() {
+        let result = select_backend(None, false, (1, 2, 9), true);
+        assert_eq!(result, Ok(FuseTBackend::Fskit));
     }
 
     #[test]
-    fn test_explicit_smb_works() {
-        let result = select_backend(Some(FuseTBackend::Smb), false, (1, 0, 54), false);
-        assert_eq!(result, Ok(FuseTBackend::Smb));
+    fn test_no_fskit_is_an_error_not_a_fallback() {
+        let err = select_backend(None, false, (1, 2, 9), false).unwrap_err();
+        assert!(err.contains("FSKit backend not available"), "{err}");
     }
 
     #[test]
     fn test_explicit_fskit_unavailable_error() {
-        let result = select_backend(Some(FuseTBackend::Fskit), false, (1, 0, 54), false);
+        let result = select_backend(Some(FuseTBackend::Fskit), false, (1, 2, 9), false);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("FSKit backend not available"));
     }
@@ -379,7 +379,6 @@ mod backend_tests {
 
     #[test]
     fn test_parse_backend_flag_valid_values() {
-        assert_eq!(parse_backend_flag("smb"), Ok(FuseTBackend::Smb));
         assert_eq!(parse_backend_flag("fskit"), Ok(FuseTBackend::Fskit));
     }
 
@@ -388,6 +387,7 @@ mod backend_tests {
         assert!(parse_backend_flag("SMB").is_err());
         assert!(parse_backend_flag("NFS").is_err());
         assert!(parse_backend_flag("nfs").is_err(), "the nfs backend was removed");
+        assert!(parse_backend_flag("smb").is_err(), "the smb backend was removed");
         assert!(parse_backend_flag("unknown").is_err());
         assert!(parse_backend_flag("").is_err());
     }
@@ -395,7 +395,6 @@ mod backend_tests {
     #[test]
     fn test_backend_passed_as_custom_mount_option() {
         for (backend, expected) in [
-            (FuseTBackend::Smb, &["backend=smb"][..]),
             (FuseTBackend::Fskit, &["backend=fskit"][..]),
         ] {
             let config = super::build_mount_options(false, false, Some(&backend));
