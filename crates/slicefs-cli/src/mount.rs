@@ -368,13 +368,6 @@ pub fn build_mount_options(
     #[cfg(target_os = "macos")]
     if let Some(b) = backend {
         mount_options.push(MountOption::CUSTOM(b.as_mount_option().to_string()));
-        // FUSE-T 1.2.9's NFS server scans its whole attribute cache on every
-        // SETATTR (FuseFS.deleteCacheAttr), so cp -p of a large tree slows down
-        // as the cache grows (78k files: >1 h). SliceFS answers GETATTR from
-        // memory, so the cache is not needed: `noattrcache` -> --attrcache=false.
-        if matches!(b, crate::backend::FuseTBackend::Nfs) {
-            mount_options.push(MountOption::CUSTOM("noattrcache".to_string()));
-        }
     }
 
     let mut cfg = Config::default();
@@ -847,11 +840,9 @@ mod tests {
         assert!(!none.mount_options.iter().any(|o| matches!(o, MountOption::CUSTOM(_))));
     }
 
-    /// The NFS backend turns off FUSE-T's attribute cache (its SETATTR cost grows
-    /// with the cache size); other backends keep their defaults.
+    /// The backend goes to FUSE-T as one custom option, and nothing else.
     #[test]
-    #[cfg(target_os = "macos")]
-    fn test_build_mount_options_nfs_disables_attr_cache() {
+    fn test_build_mount_options_backend_only_custom_option() {
         use crate::backend::FuseTBackend;
         let customs = |b| -> Vec<String> {
             build_mount_options(false, false, Some(b)).mount_options.iter().filter_map(|o| match o {
@@ -859,8 +850,8 @@ mod tests {
                 _ => None,
             }).collect()
         };
-        assert_eq!(customs(&FuseTBackend::Nfs), vec!["backend=nfs", "noattrcache"]);
         assert_eq!(customs(&FuseTBackend::Smb), vec!["backend=smb"]);
+        assert_eq!(customs(&FuseTBackend::Fskit), vec!["backend=fskit"]);
     }
 
     // ── WAL config ────────────────────────────────────────────────────────────

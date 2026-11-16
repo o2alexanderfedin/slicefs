@@ -1,16 +1,17 @@
 //! FUSE-T backend detection and selection for SliceFS.
 //!
-//! Detects the installed FUSE-T version, determines which backend (SMB, FSKit, or NFS)
+//! Detects the installed FUSE-T version, determines which backend (SMB or FSKit)
 //! to use, and handles CLI flag parsing.
 //!
 //! ## Backend selection
 //!
-//! Default: NFS. SMB and FSKit are opt-in via `--backend` (FSKit needs the system
-//! extension enabled; SMB needs Bonjour discovery, which fails on many machines).
+//! Default: SMB. FSKit is opt-in via `--backend fskit` (it needs the system
+//! extension enabled, and FUSE-T 1.2.9 resets FSKit sessions on large trees).
 //!
-//! The `cp` hang that was blamed on a macOS NFS kernel bug (FUSE-T Issue #45) was
-//! caused by fuser's I/O on FUSE-T's stream socket; it is fixed in `vendor/fuser`
-//! (see PATCHES.md). `--force` is accepted but currently unused.
+//! The NFS backend was removed: the macOS NFS client sends an fsync on every
+//! file close, and with the durable write log (#20) each fsync is a disk flush,
+//! so small-file copies were several times slower than on SMB (which sends no
+//! fsync per close). `--force` is accepted but currently unused.
 
 use std::fs;
 use std::io::BufRead;
@@ -24,10 +25,8 @@ use std::process::Command;
 pub enum FuseTBackend {
     /// FSKit backend — macOS 26+ only, requires fuse-t.app 1.2.0+.
     Fskit,
-    /// SMB backend — available since FUSE-T 1.0.35. Recommended default.
+    /// SMB backend — available since FUSE-T 1.0.35. The default.
     Smb,
-    /// NFS backend — the default.
-    Nfs,
 }
 
 impl FuseTBackend {
@@ -38,7 +37,6 @@ impl FuseTBackend {
         match self {
             FuseTBackend::Fskit => "backend=fskit",
             FuseTBackend::Smb => "backend=smb",
-            FuseTBackend::Nfs => "backend=nfs",
         }
     }
 }
@@ -47,14 +45,15 @@ impl FuseTBackend {
 
 /// Parse a `--backend` CLI flag value into a [`FuseTBackend`].
 ///
-/// Accepts `"smb"`, `"nfs"`, or `"fskit"` (case-sensitive).
+/// Accepts `"smb"` or `"fskit"` (case-sensitive).
 pub fn parse_backend_flag(s: &str) -> Result<FuseTBackend, String> {
     match s {
         "smb" => Ok(FuseTBackend::Smb),
-        "nfs" => Ok(FuseTBackend::Nfs),
         "fskit" => Ok(FuseTBackend::Fskit),
+        "nfs" => Err("the nfs backend was removed (each file close cost a disk flush); \
+                      use smb (the default) or fskit".to_string()),
         other => Err(format!(
-            "unknown backend {:?}. Valid values: smb, nfs, fskit",
+            "unknown backend {:?}. Valid values: smb, fskit",
             other
         )),
     }
@@ -171,17 +170,17 @@ pub fn select_backend(
         ),
         Some(backend) => Ok(backend),
         None => {
-            // Default to NFS. FSKit and SMB are opt-in via --backend flag because:
-            // - FSKit requires the system extension to be enabled in System Settings
-            //   (can't detect reliably — fuse-t.app existing != extension enabled)
-            // - SMB requires Bonjour service discovery which fails on many machines
+            // Default to SMB. FSKit is opt-in via --backend because it requires the
+            // system extension to be enabled in System Settings (fuse-t.app existing
+            // != extension enabled), and FUSE-T 1.2.9 resets FSKit sessions on large
+            // trees.
             if fskit_available {
                 eprintln!(
                     "note: FSKit backend available. Use --backend=fskit for best performance \
                      (requires FSKit extension enabled in System Settings > Privacy & Security)."
                 );
             }
-            Ok(FuseTBackend::Nfs)
+            Ok(FuseTBackend::Smb)
         }
     }
 }
@@ -312,8 +311,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_backend_nfs() {
-        assert_eq!(parse_backend_flag("nfs"), Ok(FuseTBackend::Nfs));
+    fn test_parse_backend_nfs_is_removed() {
+        let err = parse_backend_flag("nfs").unwrap_err();
+        assert!(err.contains("removed") && err.contains("smb"), "{err}");
     }
 
     #[test]
@@ -338,40 +338,19 @@ mod tests {
         assert_eq!(FuseTBackend::Fskit.as_mount_option(), "backend=fskit");
     }
 
-    #[test]
-    fn test_as_mount_option_nfs() {
-        assert_eq!(FuseTBackend::Nfs.as_mount_option(), "backend=nfs");
-    }
-
     // ── select_backend ───────────────────────────────────────────────────────
 
     #[test]
-    fn test_select_backend_auto_fskit_unavailable_returns_nfs() {
-        // When FSKit is unavailable and no backend requested, defaults to NFS.
-        // SMB requires Bonjour which doesn't work on all machines.
+    fn test_select_backend_auto_fskit_unavailable_returns_smb() {
         let result = select_backend(None, false, (1, 0, 54), false);
-        assert_eq!(result, Ok(FuseTBackend::Nfs));
+        assert_eq!(result, Ok(FuseTBackend::Smb));
     }
 
     #[test]
-    fn test_select_backend_auto_defaults_to_nfs_even_with_fskit() {
-        // Auto-detect always defaults to NFS because FSKit extension enablement
-        // can't be reliably detected. Users opt-in via --backend=fskit.
+    fn test_select_backend_auto_defaults_to_smb_even_with_fskit() {
+        // FSKit extension enablement can't be detected reliably: opt-in only.
         let result = select_backend(None, false, (1, 0, 54), true);
-        assert_eq!(result, Ok(FuseTBackend::Nfs));
-    }
-
-    #[test]
-    fn test_select_backend_nfs_explicit_returns_ok() {
-        // NFS is no longer blocked — it's the default when FSKit/SMB unavailable.
-        let result = select_backend(Some(FuseTBackend::Nfs), false, (1, 0, 54), false);
-        assert_eq!(result, Ok(FuseTBackend::Nfs));
-    }
-
-    #[test]
-    fn test_select_backend_nfs_with_force_returns_ok() {
-        let result = select_backend(Some(FuseTBackend::Nfs), true, (1, 0, 54), false);
-        assert_eq!(result, Ok(FuseTBackend::Nfs));
+        assert_eq!(result, Ok(FuseTBackend::Smb));
     }
 
     #[test]
@@ -402,9 +381,8 @@ mod tests {
 
     #[test]
     fn test_select_backend_version_exact_minimum_ok() {
-        // Default is NFS when FSKit unavailable.
         let result = select_backend(None, false, (1, 0, 35), false);
-        assert_eq!(result, Ok(FuseTBackend::Nfs));
+        assert_eq!(result, Ok(FuseTBackend::Smb));
     }
 
     #[test]
@@ -544,7 +522,7 @@ mod tests {
     fn test_parse_backend_flag_error_message_mentions_valid_values() {
         let err = parse_backend_flag("unknown").unwrap_err();
         assert!(
-            err.contains("smb") && err.contains("nfs") && err.contains("fskit"),
+            err.contains("smb") && err.contains("fskit"),
             "error should mention valid values, got: {}", err
         );
     }
@@ -588,7 +566,6 @@ mod tests {
     #[test]
     fn test_fuse_t_backend_debug_format() {
         assert_eq!(format!("{:?}", FuseTBackend::Smb), "Smb");
-        assert_eq!(format!("{:?}", FuseTBackend::Nfs), "Nfs");
         assert_eq!(format!("{:?}", FuseTBackend::Fskit), "Fskit");
     }
 

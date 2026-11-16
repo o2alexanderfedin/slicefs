@@ -351,15 +351,9 @@ mod backend_tests {
     };
 
     #[test]
-    fn test_auto_detect_returns_nfs_when_fskit_unavailable() {
+    fn test_auto_detect_returns_smb_when_fskit_unavailable() {
         let result = select_backend(None, false, (1, 0, 54), false);
-        assert_eq!(result, Ok(FuseTBackend::Nfs));
-    }
-
-    #[test]
-    fn test_explicit_nfs_works() {
-        let result = select_backend(Some(FuseTBackend::Nfs), false, (1, 0, 54), false);
-        assert_eq!(result, Ok(FuseTBackend::Nfs));
+        assert_eq!(result, Ok(FuseTBackend::Smb));
     }
 
     #[test]
@@ -386,7 +380,6 @@ mod backend_tests {
     #[test]
     fn test_parse_backend_flag_valid_values() {
         assert_eq!(parse_backend_flag("smb"), Ok(FuseTBackend::Smb));
-        assert_eq!(parse_backend_flag("nfs"), Ok(FuseTBackend::Nfs));
         assert_eq!(parse_backend_flag("fskit"), Ok(FuseTBackend::Fskit));
     }
 
@@ -394,15 +387,14 @@ mod backend_tests {
     fn test_parse_backend_flag_invalid_values() {
         assert!(parse_backend_flag("SMB").is_err());
         assert!(parse_backend_flag("NFS").is_err());
+        assert!(parse_backend_flag("nfs").is_err(), "the nfs backend was removed");
         assert!(parse_backend_flag("unknown").is_err());
         assert!(parse_backend_flag("").is_err());
     }
 
     #[test]
     fn test_backend_passed_as_custom_mount_option() {
-        // NFS also turns off FUSE-T's attribute cache (see build_mount_options).
         for (backend, expected) in [
-            (FuseTBackend::Nfs, &["backend=nfs", "noattrcache"][..]),
             (FuseTBackend::Smb, &["backend=smb"][..]),
             (FuseTBackend::Fskit, &["backend=fskit"][..]),
         ] {
