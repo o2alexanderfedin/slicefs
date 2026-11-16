@@ -51,6 +51,21 @@ All three designs failed review: none can be built and tested without hardware t
 | B: computational-storage offload (chunk + hash, scrub, GC mark on the drive) | Reject | 1 | 2 | 5 | No standard drive, none runs BLAKE3/FastCDC, no emulator, no macOS. The gain is at most 1/(1 − p), with p (the hashing share of write time) unmeasured. Keep: measure p, a batched chunk-and-hash trait, a host scrub. |
 | A: NVMe KV chunk store | Reject | 1 | 1 | 4 | No drive or emulator. 16-byte keys force truncated digests plus a header check on every dedup hit. Review found a race between the GC sweep and a dedup hit (data loss), a 16 GB key journal with no layout, and no host-side root fsync. Helps only the small-files cost, which packs fix everywhere. |
 
+## Emulation changes the verdicts
+
+Every design can be built and tested on Linux without a drive: two emulators cover the missing hardware. The design reviews said "no emulator"; that was wrong.
+
+| Emulator | Emulates | Fit for SliceFS | Limits |
+| --- | --- | --- | --- |
+| [NVMeVirt](https://github.com/snu-csl/nvmevirt) ([FAST 2023](https://www.usenix.org/conference/fast23/presentation/kim-sang-hoon)) | A Linux kernel module that presents a virtual NVMe device: conventional SSD (FTL timing model), ZNS SSD, KV SSD (hash index, SNIA KV API); a computational-storage backend is listed as done in a [2024 talk](https://files.futurememorystorage.com/proceedings/2024/20240807_SSDT-203-1_Shim.pdf) | Design A (KV chunk store) and Design B (compute offload) can be prototyped and tested in a Linux CI VM; write amplification can be estimated with its FTL model | One device type per build; tested on Linux 5.15; out of tree ([mainline proposal, 2024](https://lists.infradead.org/pipermail/linux-nvme/2024-February/045447.html)); timing is a model, not a real drive |
+| [QEMU NVMe emulation](https://qemu.readthedocs.io/en/master/system/devices/nvme.html) | NVMe 1.4 controller with FDP (`fdp=on`, reclaim unit handles), ZNS, Simple Copy | Design C (FDP/ZNS placement, Copy for compaction) can run in CI | No KV command set; no FTL, so write amplification cannot be measured |
+
+Revised verdicts:
+
+- **C (standard NVMe):** still the best fit; the FDP/ZNS/Copy layer can now get CI tests in QEMU. Build the portable pack layer first.
+- **A (KV chunk store):** from reject to **prototype possible** in NVMeVirt. Value stays low (16-byte keys; packs fix the small-files cost), so do it only as an experiment after packs ship.
+- **B (compute offload):** from reject to **experiment possible** in NVMeVirt's computational-storage backend. Still gated on measuring p, the hashing share of write time.
+
 ## Plan
 
 ```mermaid
@@ -87,7 +102,7 @@ Stage 1 is work in the SliceFS codebase now; it pays off on every platform. Stag
 - Syncing about 262k small objects per GiB makes the durability fix slow until packs ship.
 - A copy-on-write location map keyed by random digests rewrites almost every leaf at each commit (the ZFS dedup-table problem), on every platform.
 - If fsync flushes packs, a file close on macOS costs about 4 `F_FULLFSYNC` calls instead of 1.
-- An NVMe backend built with no drive or emulator could be tested only against a mock the team writes, so it would break without anyone noticing.
+- Emulators (NVMeVirt, QEMU) model the commands, not real drive timing or firmware bugs; results from them need a real drive before any default changes.
 - macOS can never use these NVMe features, so any NVMe backend means two storage paths to maintain.
 
 ## Open questions
