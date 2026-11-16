@@ -3,18 +3,20 @@
 //! A segment file is an append-only log of records. Records are framed as:
 //!   record_type: u8
 //!   payload_len: u32 LE
+//!   seq:         u64 LE (records of this segment, from 0)
 //!   payload:     [u8; payload_len]
+//!   crc32c:      u32 LE over all bytes above
 //!
 //! The file begins with a 16-byte header:
 //!   magic:      [u8; 4]  = [0x53, 0x4C, 0x53, 0x47] ("SLSG")
-//!   version:    u32 LE   = 1
+//!   version:    u32 LE   = 2
 //!   segment_id: u64 LE
 //!
 //! RootUpdate payload: 28 bytes — Digest224 as 7×u32 LE
 //! SnapshotRecord payload: 48+ bytes — version(8) + root(28) + created_at(8) + name_len(4) + name_bytes(variable)
 //! EofMarker: no payload (payload_len = 0), terminates iteration
 //!
-//! Legacy: record type 0x01 (DictEntry) is no longer written but silently skipped on read.
+//! The reader stops at the first cut, changed or out-of-sequence record.
 
 pub mod writer;
 pub mod reader;
@@ -100,8 +102,28 @@ pub fn load_store_from_segments(
 /// Magic bytes identifying a SliceFS segment file: "SLSG"
 pub const SEGMENT_MAGIC: [u8; 4] = [0x53, 0x4C, 0x53, 0x47];
 
-/// Segment file format version.
-pub const SEGMENT_VERSION: u32 = 1;
+/// Segment file format version. Version 2 adds a sequence number and a
+/// CRC32C to each record (#20); version 1 files are not read.
+pub const SEGMENT_VERSION: u32 = 2;
+
+/// Bytes of a record frame before the payload: type, payload length, seq.
+pub(crate) const FRAME_HEAD: usize = 1 + 4 + 8;
+
+/// Largest payload the reader accepts (a bad length must not allocate GiBs).
+pub(crate) const MAX_PAYLOAD: usize = 64 << 20;
+
+/// Frame one record: type(u8) + payload_len(u32 LE) + seq(u64 LE) + payload +
+/// crc32c(u32 LE) over all bytes before the CRC.
+pub fn frame_record(record_type: u8, seq: u64, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(FRAME_HEAD + payload.len() + 4);
+    out.push(record_type);
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(&seq.to_le_bytes());
+    out.extend_from_slice(payload);
+    let crc = crc32c::crc32c(&out);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out
+}
 
 /// Record type discriminants.
 ///

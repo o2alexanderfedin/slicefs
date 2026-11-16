@@ -11,6 +11,7 @@ blockset = { path = "../data-id/blockset" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 libc = { workspace = true }
+crc32c = "0.6"
 
 [dev-dependencies]
 proptest = { workspace = true }
