@@ -18,7 +18,6 @@ jobs:
       fail-fast: false
       matrix:
         backend: [smb, fskit]
-    continue-on-error: ${{ matrix.backend == 'fskit' }}
     steps:
       - uses: actions/checkout@v4
 
