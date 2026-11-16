@@ -22,6 +22,12 @@ pub struct StoreIo {
     /// the mark found unreachable (a dedup hit: blockset reads the existing
     /// object and does not write it again).
     touched: Option<HashSet<String>>,
+    /// Writes over an existing object file while tracking was on. The online
+    /// GC mark reads without the lock, so it must not trust a run in which an
+    /// object changed (see `OnlineGc::sweep`).
+    overwrites_while_tracking: u64,
+    /// Counter for unique temp file names (atomic writes).
+    tmp_seq: u64,
 }
 
 impl StoreIo {
@@ -29,7 +35,7 @@ impl StoreIo {
     ///
     /// The directory does not need to exist yet; `write` will create it.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into(), touched: None }
+        Self { root: root.into(), touched: None, overwrites_while_tracking: 0, tmp_seq: 0 }
     }
 
     /// The store directory.
@@ -40,6 +46,12 @@ impl StoreIo {
     /// Start to record each object name that is read or written.
     pub fn start_tracking(&mut self) {
         self.touched = Some(HashSet::new());
+        self.overwrites_while_tracking = 0;
+    }
+
+    /// Writes over an existing object file since tracking started.
+    pub fn overwrites_while_tracking(&self) -> u64 {
+        self.overwrites_while_tracking
     }
 
     /// Stop recording, and drop the record.
@@ -78,15 +90,26 @@ impl Io for StoreIo {
         fs::read(self.full_path(filename))
     }
 
+    /// Write atomically: a reader sees the old file or the new one, never a
+    /// part. (The online GC mark reads objects without the lock.)
     fn write(&mut self, filename: &str, data: &[u8]) -> io::Result<()> {
+        let path = self.full_path(filename);
         if let Some(t) = &mut self.touched {
             t.insert(filename.to_string());
+            if path.exists() {
+                self.overwrites_while_tracking += 1;
+            }
         }
-        let path = self.full_path(filename);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(path, data)
+        let Some(parent) = path.parent() else {
+            return fs::write(path, data);
+        };
+        fs::create_dir_all(parent)?;
+        self.tmp_seq += 1;
+        let tmp = parent.join(format!(".tmp-{}-{}", std::process::id(), self.tmp_seq));
+        fs::write(&tmp, data)?;
+        fs::rename(&tmp, &path).inspect_err(|_| {
+            let _ = fs::remove_file(&tmp);
+        })
     }
 
     fn args(&self) -> EmptyArgs {

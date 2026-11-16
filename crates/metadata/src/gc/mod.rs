@@ -181,7 +181,10 @@ fn mark_parallel(
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().expect("GC mark thread panicked")).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|_| Err(MetaError::Corrupted("GC mark thread panicked".into()))))
+            .collect()
     });
     let mut sets = Vec::with_capacity(results.len());
     for r in results {
@@ -258,6 +261,15 @@ impl OnlineGc {
             }
             // Hold the io lock across the check and the deletes of this batch.
             let io = self.io.lock().unwrap();
+            // The mark read without the lock. If an object file was written
+            // again since tracking started, the mark may have read the old
+            // content (with other child references): do not delete anything.
+            if io.overwrites_while_tracking() > 0 {
+                return Err(std::io::Error::other(format!(
+                    "{} object file(s) changed during the GC; sweep skipped, retry later",
+                    io.overwrites_while_tracking()
+                )));
+            }
             let doomed: Vec<&PathBuf> = batch
                 .iter()
                 .filter(|(name, _)| !io.is_touched(name))
@@ -286,7 +298,10 @@ impl OnlineGc {
                         })
                     })
                     .collect();
-                handles.into_iter().map(|h| h.join().expect("GC sweep thread panicked")).collect()
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap_or_else(|_| Err(std::io::Error::other("GC sweep thread panicked"))))
+                    .collect()
             });
             drop(io);
             for r in per_thread {

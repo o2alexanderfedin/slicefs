@@ -45,7 +45,15 @@ const PICKUP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Run one GC on `fs` and give a one-line outcome for `gc.result`.
 fn run_once(fs: &SliceFsFilesystem, stop: &AtomicBool) -> String {
     let t = Instant::now();
-    match fs.gc_online(stop) {
+    // A panic in the GC must not end the GC thread (or leave gc.running).
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fs.gc_online(stop)))
+        .unwrap_or_else(|p| {
+            let msg = p.downcast_ref::<&str>().map(|s| s.to_string())
+                .or_else(|| p.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown".into());
+            Err(format!("GC panicked: {msg}"))
+        });
+    match result {
         Ok(Some(s)) => format!(
             "ok: kept {} objects, removed {} ({} bytes) in {:.1} s",
             s.objects_kept, s.objects_removed, s.bytes_removed, t.elapsed().as_secs_f64()
@@ -82,8 +90,14 @@ pub fn spawn_online_gc(
                     continue;
                 }
                 let Some(fs) = fs.upgrade() else { break };
-                // Nothing committed since the last GC: nothing new can be garbage.
-                if !requested && last_root.is_some() && fs.meta().current_root() == last_root {
+                // Nothing changed since the last GC: nothing new can be garbage.
+                // (With --commit-interval 0 only the GC commits, so also look
+                // at changes that are not committed yet.)
+                if !requested
+                    && last_root.is_some()
+                    && fs.meta().current_root() == last_root
+                    && !fs.meta().has_uncommitted_changes()
+                {
                     last = Instant::now();
                     continue;
                 }

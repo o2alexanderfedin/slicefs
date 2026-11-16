@@ -176,3 +176,29 @@ fn a_parallel_mark_finds_the_same_live_set_as_one_thread() {
     let refs: Vec<(&str, &[u8])> = files.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
     check_after_remount(fs, dir.path(), &refs);
 }
+
+#[test]
+fn a_changed_object_file_during_gc_stops_the_sweep() {
+    use blockset::Io;
+    let dir = TempDir::new().unwrap();
+    let fs = make_fs(dir.path());
+    let keep = data(20, 300_000);
+    write_file(&fs, "keep.bin", &keep);
+    make_garbage(&fs, "junk.bin", &data(21, 300_000));
+    let before = std::fs::read_dir(dir.path().join("vt0")).unwrap().count();
+
+    let gc = fs.gc_start().unwrap();
+    let live = gc.mark(&no_stop()).unwrap().unwrap();
+    // Write an existing object file again (as blockset does when a node of the
+    // same name gets other bytes): the lock-free mark can not be trusted now.
+    let name = live.iter().next().unwrap().clone();
+    let old = std::fs::read(dir.path().join(&name)).unwrap();
+    fs.io().lock().unwrap().write(&name, &old).unwrap();
+    let err = gc.sweep(&live, &no_stop()).unwrap_err();
+    assert!(err.to_string().contains("changed during the GC"), "{err}");
+    drop(gc);
+    assert_eq!(std::fs::read_dir(dir.path().join("vt0")).unwrap().count(), before, "nothing deleted");
+    // The next run works.
+    assert!(fs.gc_online(&no_stop()).unwrap().unwrap().objects_removed > 50);
+    check_after_remount(fs, dir.path(), &[("keep.bin", &keep)]);
+}
