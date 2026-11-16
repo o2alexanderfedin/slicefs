@@ -3,7 +3,7 @@
 /// Covers:
 /// - `run_gc` on a store with dead entries compacts segments and reports stats
 /// - `run_gc` on a clean store (no dead entries) reports 0 removed
-/// - `run_gc` on a locked store (mount.lock present) refuses to run
+/// - `run_gc` on a locked store with no running mount fails (no mount takes the request)
 /// - CLI parses `gc` subcommand with store path argument
 
 use std::path::PathBuf;
@@ -79,9 +79,10 @@ fn test_run_gc_clean_store_reports_zero_removed() {
     assert!(result.is_ok(), "run_gc should succeed on clean store: {:?}", result.err());
 }
 
-// ── Test 2: run_gc on locked store refuses to run ────────────────────────────
+// ── Test 2: run_gc on a locked store with no mount fails ─────────────────────
 
-/// If mount.lock is present, run_gc should refuse and return an error.
+/// If mount.lock is present, run_gc asks the mount to run the GC. With no
+/// mount to take the request, it returns an error.
 #[test]
 fn test_run_gc_locked_store_refuses() {
     let store_dir = TempDir::new().unwrap();
