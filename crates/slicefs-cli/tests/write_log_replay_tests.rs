@@ -184,3 +184,37 @@ fn a_file_still_open_at_the_crash_keeps_its_fsynced_bytes() {
     let ino = fs.meta().lookup(1, "open.bin").unwrap();
     assert_eq!(fs.test_read(ino, 0, want.len() as u32 + 1).unwrap(), want);
 }
+
+#[test]
+fn a_commit_with_open_files_is_a_clean_cut() {
+    let dir = TempDir::new().unwrap();
+    let (s1, s2) = (data(6, 400_000), data(7, 200_000));
+    let mut b = data(8, 300_000);
+    {
+        let fs = new_fs(dir.path());
+        // Streaming handle, open across the commit.
+        let (a, fa) = create(&fs, 1, "stream.bin");
+        write(&fs, fa, 0, &s1);
+        // A handle that overwrites earlier bytes (not sequential).
+        let (bi, fb) = create(&fs, 1, "rewrite.bin");
+        write(&fs, fb, 0, &b);
+        write(&fs, fb, 1000, &[0xAB; 5000]);
+        b[1000..6000].fill(0xAB);
+        // The commit: everything logged before it must be in the root.
+        let _gate = fs.commit_gate();
+        fs.commit_cut().unwrap();
+        // After the cut: more writes, then fsync, then a crash.
+        write(&fs, fa, s1.len() as u64, &s2);
+        write(&fs, fb, 200_000, &[0xCD; 100]);
+        b[200_000..200_100].fill(0xCD);
+        fsync(&fs, a, fa);
+        fsync(&fs, bi, fb);
+        std::mem::forget(fs);
+    }
+    let fs = reload_and_replay(dir.path());
+    let a = fs.meta().lookup(1, "stream.bin").unwrap();
+    let want: Vec<u8> = s1.iter().chain(s2.iter()).copied().collect();
+    assert_eq!(fs.test_read(a, 0, want.len() as u32 + 1).unwrap(), want);
+    let bi = fs.meta().lookup(1, "rewrite.bin").unwrap();
+    assert_eq!(fs.test_read(bi, 0, b.len() as u32 + 1).unwrap(), b);
+}

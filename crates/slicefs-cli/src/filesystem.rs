@@ -501,7 +501,7 @@ impl SliceFsFilesystem {
             let d256 = state.end(&mut fsa);
             file_roots.push(fsa.end(&d256));
         }
-        let committed = self.meta.commit().map_err(|e| e.to_string()).and_then(|root| {
+        let committed = self.commit_cut().map_err(|e| e.to_string()).and_then(|root| {
             self.meta.flush_wal().map_err(|e| e.to_string())?;
             Ok(root)
         });
@@ -1001,6 +1001,28 @@ impl SliceFsFilesystem {
     /// If `fh` is not in `open_files` (read-only handle or invalid), returns Ok
     /// without error — fsync is a no-op for read-only handles.
     fn flush_buffer_for_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
+        self.flush_handle(ino, fh, false)
+    }
+
+    /// Commit with a clean cut of the write log (#20): first write the content
+    /// of each open write handle into its manifest (Buffered handles too), so
+    /// that the root holds every request logged before the commit. The caller
+    /// holds the commit gate exclusively (no request is in flight).
+    pub fn commit_cut(&self) -> Result<Digest224, MetaError> {
+        let handles: Vec<(u64, u64)> = self.open_files.lock().unwrap()
+            .iter().map(|(&fh, s)| (s.ino, fh)).collect();
+        for (ino, fh) in handles {
+            if let Err(e) = self.flush_handle(ino, fh, true) {
+                return Err(MetaError::Corrupted(format!("cut: flush of open file {ino} failed: errno {e}")));
+            }
+        }
+        self.meta.commit()
+    }
+
+    /// Write the content of handle `fh` into the manifest of `ino`. Buffered
+    /// handles are hashed in full only when `include_buffered` (a commit cut,
+    /// not each fsync: #3).
+    fn flush_handle(&self, ino: u64, fh: u64, include_buffered: bool) -> Result<(), i32> {
         self.settle_pending(fh);
         // 1. Clone state/buf snapshot under open_files lock
         enum FsyncSnapshot {
@@ -1021,7 +1043,7 @@ impl SliceFsFilesystem {
                         // (NFS sends a COMMIT per group of writes; skip the re-hash.)
                         return Ok(());
                     }
-                    if matches!(s.write_mode, WriteMode::Buffered { .. }) {
+                    if !include_buffered && matches!(s.write_mode, WriteMode::Buffered { .. }) {
                         // Hashing a Buffered file means hashing all of it again
                         // (O(n) per fsync, #3). The manifest it would give is not
                         // durable either: metadata reaches disk only at commit
