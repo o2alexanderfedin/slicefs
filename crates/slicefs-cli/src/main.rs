@@ -5,6 +5,7 @@
 mod backend;
 mod cli;
 mod commit_timer;
+mod content;
 mod filesystem;
 mod fuse_callbacks;
 mod handlers;

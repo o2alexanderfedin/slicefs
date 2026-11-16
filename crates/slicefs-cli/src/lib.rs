@@ -3,6 +3,7 @@
 pub mod backend;
 pub mod cli;
 pub mod commit_timer;
+pub mod content;
 pub mod filesystem;
 mod fuse_callbacks;
 #[doc(hidden)]
