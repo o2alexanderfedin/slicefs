@@ -87,4 +87,5 @@ jobs:
             ${{ runner.temp }}/work/*/mount.log
             ${{ runner.temp }}/work/*/mount.err
             ${{ runner.temp }}/work/*/perf.csv
+            ${{ runner.temp }}/work/*/top.log
           if-no-files-found: ignore

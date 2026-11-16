@@ -14,6 +14,11 @@ T=${STEP_TIMEOUT:-3600}
 mkdir -p $R/seed $R/mnt $R/out; echo s > $R/seed/s.txt; echo "version,step,mb,files,secs" > $R/perf.csv
 $B seed $R/store $R/seed >/dev/null 2>&1
 echo "run dir: $R"
+# CPU sampler: a timestamped top snapshot every 30 s in top.log, to see what
+# else uses the CPU when a step is slow.
+( while :; do echo "== $(date +%T)"; sysctl -n vm.loadavg; ps -Ao pid,pcpu,rss,state,comm -r | head -13; sleep 30; done ) > $R/top.log 2>&1 &
+SAMPLER=$!
+trap 'kill $SAMPLER 2>/dev/null' EXIT
 FAILS=0
 
 mount_fs() {
@@ -30,6 +35,7 @@ unmount_fs() {
 # step <name> <timeout> <cmd...>: run with watchdog, print status + duration
 step() {
   local n=$1 t=$2; shift 2; local s=$(date +%s)
+  echo "  [$(date +%T)] $n ..."
   ( "$@" ) >$R/step.out 2>&1 & local p=$!
   while kill -0 $p 2>/dev/null; do
     if [ $(( $(date +%s) - s )) -ge $t ]; then kill -9 $p 2>/dev/null; echo "  $n: HANG (>${t}s)"; FAILS=$((FAILS+1)); return 1; fi
