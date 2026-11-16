@@ -29,7 +29,10 @@ impl WalStrategy for PerOpWal {
         let seg_entry = wal_entry_to_segment(entry);
         let mut writer = self.writer.lock().unwrap();
         writer.write_entry(&seg_entry)?;
-        writer.sync()?;
+        // Operation records are made durable by fsync or commit, not one by one.
+        if !matches!(entry, WalEntry::Op { .. }) {
+            writer.sync()?;
+        }
         Ok(())
     }
 
@@ -55,6 +58,7 @@ impl WalStrategy for PerOpWal {
 pub(crate) fn wal_entry_to_segment(entry: &WalEntry) -> SegmentEntry {
     match entry {
         WalEntry::RootUpdate { root } => SegmentEntry::RootUpdate { root: *root },
+        WalEntry::Op { bytes } => SegmentEntry::Op { bytes: bytes.clone() },
         WalEntry::Snapshot { version, root, created_at, name } => SegmentEntry::SnapshotRecord {
             version: *version,
             root: *root,

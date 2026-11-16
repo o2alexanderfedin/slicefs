@@ -31,6 +31,10 @@ pub enum WalEntry {
     RootUpdate { root: Digest224 },
     /// Persist a snapshot record with version, root, timestamp, and optional name.
     Snapshot { version: u64, root: Digest224, created_at: u64, name: Option<String> },
+    /// A file system request since the last root (#20 write log). The bytes
+    /// are encoded by the file system; the store only keeps them in order.
+    /// Not synced on its own: `flush_and_sync` (fsync, commit) makes it durable.
+    Op { bytes: Vec<u8> },
 }
 
 /// Errors returned by WAL operations.

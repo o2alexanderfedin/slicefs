@@ -92,11 +92,55 @@ pub fn load_store_from_segments(
                         snapshots.push(snap_entry);
                     }
                 }
+                SegmentEntry::Op { .. } => {}
             }
         }
     }
 
     Ok((last_root, snapshots))
+}
+
+/// Like [`load_store_from_segments`], and also return the operation records
+/// after the last `RootUpdate`, in order (the write log, #20). A mount must
+/// replay them on top of the root.
+pub fn load_store_with_log(
+    segments_dir: &Path,
+) -> Result<(Option<Digest224>, Vec<SnapshotEntry>, Vec<Vec<u8>>), SegmentError> {
+    let mut last_root = None;
+    let mut snapshots = Vec::new();
+    let mut ops: Vec<Vec<u8>> = Vec::new();
+    for path in segment_paths(segments_dir)? {
+        for entry in SegmentReader::open(&path)? {
+            match entry {
+                SegmentEntry::RootUpdate { root } => {
+                    last_root = Some(root);
+                    ops.clear();
+                }
+                ref snap @ SegmentEntry::SnapshotRecord { .. } => {
+                    if let Some(s) = snap.as_snapshot_entry() {
+                        snapshots.push(s);
+                    }
+                }
+                SegmentEntry::Op { bytes } => ops.push(bytes),
+            }
+        }
+    }
+    Ok((last_root, snapshots, ops))
+}
+
+/// Segment files of `segments_dir` with at least a header, in id order.
+fn segment_paths(segments_dir: &Path) -> Result<Vec<std::path::PathBuf>, SegmentError> {
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(segments_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            n.starts_with("segment-") && n.ends_with(".seg")
+        })
+        .map(|e| e.path())
+        .filter(|p| std::fs::metadata(p).map(|m| m.len() >= 16).unwrap_or(false))
+        .collect();
+    paths.sort();
+    Ok(paths)
 }
 
 /// Magic bytes identifying a SliceFS segment file: "SLSG"
@@ -133,6 +177,7 @@ pub fn frame_record(record_type: u8, seq: u64, payload: &[u8]) -> Vec<u8> {
 pub enum RecordType {
     RootUpdate     = 0x02,
     SnapshotRecord = 0x03,
+    Op             = 0x10,
     EofMarker      = 0xFF,
 }
 
@@ -142,6 +187,7 @@ impl RecordType {
             0x01 => None, // legacy DictEntry — caller should skip payload_len bytes
             0x02 => Some(RecordType::RootUpdate),
             0x03 => Some(RecordType::SnapshotRecord),
+            0x10 => Some(RecordType::Op),
             0xFF => Some(RecordType::EofMarker),
             _ => None,
         }
@@ -194,6 +240,8 @@ impl SegmentHeader {
 pub enum SegmentEntry {
     RootUpdate     { root: Digest224 },
     SnapshotRecord { version: u64, root: Digest224, created_at: u64, name: Option<String> },
+    /// A file system request since the last root (opaque bytes, #20).
+    Op { bytes: Vec<u8> },
 }
 
 impl SegmentEntry {
@@ -201,12 +249,14 @@ impl SegmentEntry {
         match self {
             SegmentEntry::RootUpdate     { .. } => RecordType::RootUpdate,
             SegmentEntry::SnapshotRecord { .. } => RecordType::SnapshotRecord,
+            SegmentEntry::Op { .. } => RecordType::Op,
         }
     }
 
     /// Serialize payload bytes (does not include type byte or payload_len).
     pub fn payload_bytes(&self) -> Vec<u8> {
         match self {
+            SegmentEntry::Op { bytes } => bytes.clone(),
             SegmentEntry::RootUpdate { root } => {
                 let mut buf = Vec::with_capacity(28);
                 for v in root {

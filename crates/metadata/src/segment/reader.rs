@@ -71,6 +71,7 @@ impl Iterator for SegmentReader {
                 Some(RecordType::EofMarker) => return None,
                 Some(RecordType::RootUpdate) => return SegmentEntry::parse_root_update(&payload),
                 Some(RecordType::SnapshotRecord) => return SegmentEntry::parse_snapshot_record(&payload),
+                Some(RecordType::Op) => return Some(SegmentEntry::Op { bytes: payload }),
                 None => continue, // a type this version does not know
             }
         }
