@@ -958,6 +958,10 @@ impl MetadataStore for DictMetadataStore {
         let root_digest = State::push_all(&mut fsa, &root_bytes);
         // Drop fsa first: this flushes all FileStorage blob files to disk via StoreIo
         drop(fsa);
+        // Make every object written since the last commit durable before the
+        // root that refers to them is logged: after that, log rotation deletes
+        // the segments whose records hold the same data (#20).
+        io_guard.sync_written().map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
         // Drop io_guard to release the lock before WAL logging
         drop(io_guard);
 
