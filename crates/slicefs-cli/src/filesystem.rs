@@ -110,7 +110,7 @@ pub struct SliceFsFilesystem {
     open_files: Mutex<HashMap<u64, OpenFileState>>,
     /// Resumable content readers per inode (see `FileStorageReader`). A reader
     /// whose root no longer matches the file content is replaced on use.
-    readers: Mutex<HashMap<u64, FileStorageReader>>,
+    readers: Mutex<HashMap<u64, Vec<FileStorageReader>>>,
     /// Every open handle (read-only too): fh -> ino. Used to keep an unlinked
     /// inode alive until its last handle closes.
     handles: Mutex<HashMap<u64, u64>>,
@@ -964,18 +964,40 @@ impl SliceFsFilesystem {
             }
         };
 
-        // Read only the requested range through a resumable per-inode reader,
-        // so a sequential read is O(n) overall instead of O(n^2).
+        // Read only the requested range through a resumable reader, so a
+        // sequential read is O(n) overall instead of O(n^2). A client can read
+        // one file with several streams (SMB read-ahead runs ~20 MB away from
+        // the main stream): one reader would restart from the root at each
+        // switch. So each inode keeps up to READERS_PER_INODE readers, and a
+        // read uses the one with the shortest walk to its offset; a new reader
+        // (walk = offset) competes too.
+        const READERS_PER_INODE: usize = 8;
         let mut readers = self.readers.lock().unwrap();
         // Each reader keeps up to READ_WINDOW (4 MiB) of recent bytes: cap the
-        // cache at 32 inodes (at most 128 MiB).
-        if readers.len() >= 32 && !readers.contains_key(&ino) {
+        // cache at 16 inodes (at most 16 x 8 x 4 MiB = 512 MiB).
+        if readers.len() >= 16 && !readers.contains_key(&ino) {
             readers.clear();
         }
-        let reader = readers.entry(ino).or_insert_with(|| FileStorageReader::new(root));
-        if reader.root() != &root {
-            *reader = FileStorageReader::new(root);
-        }
+        let pool = readers.entry(ino).or_default();
+        pool.retain(|r| r.root() == &root);
+        let best = pool.iter().enumerate().min_by_key(|(_, r)| r.walk_cost(offset)).map(|(i, r)| (i, r.walk_cost(offset)));
+        let idx = match best {
+            // Reuse only a reader that needs no restart (cost below the
+            // offset, or zero) and at most a short skip ahead; a backward
+            // jump or a long jump belongs to another stream: a new reader.
+            Some((i, cost)) if cost == 0 || (cost < offset && cost <= 8 << 20) => i,
+            _ => {
+                if pool.len() >= READERS_PER_INODE {
+                    pool.remove(0); // least recently used
+                }
+                pool.push(FileStorageReader::new(root));
+                pool.len() - 1
+            }
+        };
+        // Most recently used last: the front is evicted when the pool is full.
+        let reader_state = pool.remove(idx);
+        pool.push(reader_state);
+        let reader = pool.last_mut().unwrap();
         let mut io = self.io.lock().unwrap();
         let mut out = reader.read_at(&mut *io, offset, size as usize).ok_or(libc::EIO)?;
         // Past the streamed bytes but inside a setattr extension: zeros.
