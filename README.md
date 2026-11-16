@@ -22,7 +22,7 @@ Planning artifacts live in `.planning/` (PROJECT.md, ROADMAP.md, phase plans).
 
 | Platform | Status | FUSE backend |
 |----------|--------|--------------|
-| macOS (Apple Silicon / Intel) | Supported | [FUSE-T](https://www.fuse-t.org/) 1.2.x (SMB backend by default; `--backend fskit` is opt-in and needs the FUSE-T extension enabled in System Settings) |
+| macOS (Apple Silicon / Intel) | Supported | [FUSE-T](https://www.fuse-t.org/) 1.2.x with its FSKit backend (macOS 26+; enable FUSE-T in System Settings > General > Login Items & Extensions > File System Extensions) |
 | Linux | Supported | libfuse (`fuse`, `libfuse-dev`) |
 | Windows | Deferred (v2.x+) | — |
 

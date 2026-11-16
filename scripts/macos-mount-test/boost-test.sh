@@ -2,7 +2,7 @@
 # Boost round trip through a SliceFS mount on macOS (FUSE-T): copy to the mount,
 # copy back, compare; remount and compare again; delete all; GC on the mounted store.
 #
-# usage: boost-test.sh <backend: smb|fskit> <versions...>   e.g. boost-test.sh smb 1_85_0
+# usage: boost-test.sh <backend: fskit> <versions...>   e.g. boost-test.sh fskit 1_85_0
 # env:   SLICEFS    slicefs binary (default: target/release/slicefs)
 #        BOOST_DIR  dir with boost_<v>.tar and x/boost_<v>/ (see fetch-boost.sh)
 #        WORK       work dir (default: a new temp dir)
@@ -92,9 +92,21 @@ step "empty-after-rm" 30 bash -c "[ \$(ls -A $R/mnt | grep -v -e '^s.txt\$' -e '
 before=$(objects)
 step "gc-mounted" $T $B gc $R/store && sed 's/^/      /' $R/step.out
 after=$(objects); echo "  objects: $before -> $after"
-[ "$after" -lt $(( before / 10 + 100 )) ] || { echo "  gc-freed: FAIL"; FAILS=$((FAILS+1)); }
+# Files left on the mount: s.txt, and on FSKit the .fseventsd files of macOS.
+left=$(find $R/mnt -type f -exec stat -f %z {} + 2>/dev/null | awk '{s+=$1} END{print s+0}')
 unmount_fs
 step "gc-offline-check" $T $B gc $R/store && head -1 $R/step.out | sed 's/^/      /'
+# After the GCs, the store holds only the data of the files left: the logical
+# bytes equal their sizes (+ up to 1 MiB: macOS can write .fseventsd at the
+# unmount), and the stored objects are at most 2x that + 1 MiB (block and
+# format cost). A leak of the deleted Boost data (GBs) fails here.
+# "Logical bytes    : 908.24 KiB (930038 bytes)", or "... : 2 B" when small.
+bytes() { $B stats $R/store 2>/dev/null | awk -v k="$1" '$0 ~ "^"k { if (match($0, /\([0-9]+ bytes\)/)) print substr($0, RSTART+1, RLENGTH-8); else { sub(/.*: /, ""); print $1 } }'; }
+logical=$(bytes "Logical bytes"); cas=$(bytes "CAS bytes")
+echo "  left: $left bytes in files; store: logical $logical, CAS $cas bytes"
+if [ -n "$logical" ] && [ "$logical" -ge "$left" ] && [ "$logical" -le $(( left + 1048576 )) ] \
+   && [ "$cas" -le $(( 2 * logical + 1048576 )) ]; then echo "  gc-freed: ok"
+else echo "  gc-freed: FAIL"; FAILS=$((FAILS+1)); fi
 echo "csv: $R/perf.csv"
 echo "RESULT $BK: $FAILS failure(s)"
 [ $FAILS -eq 0 ]
