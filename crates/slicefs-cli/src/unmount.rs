@@ -3,7 +3,8 @@
 //! ## Unmount sequence
 //!
 //! 1. **Soft unmount** — `fusermount3 -u`, `fusermount -u`, `umount`
-//! 2. **Kill processes** — `lsof +D <mountpoint>` + SIGTERM; also kill orphaned FUSE-T daemons
+//! 2. **Kill processes** — `lsof +D <mountpoint>` + SIGTERM; also end the FUSE-T
+//!    server of this mount point (never the servers of other mounts)
 //! 3. **Force unmount** — `diskutil unmount force` (macOS) or `umount -f` / lazy unmount (Linux)
 //! 4. **Clean mount.lock** — remove `<store>/mount.lock` if `--store` provided
 //!
@@ -85,7 +86,9 @@ fn try_soft_unmount(mountpoint: &Path) -> bool {
 /// Kill processes that have files open under `mountpoint`.
 ///
 /// Runs `lsof +D <mountpoint>`, parses PIDs from column 2, sends SIGTERM.
-/// Also kills orphaned FUSE-T NFS daemon processes via `pkill -f go-nfsv4`.
+/// Also ends the FUSE-T server (`go-nfsv4`) of this mount point. Only that
+/// one: every FUSE-T mount on the machine (of any program) has its own
+/// server, and ending another one breaks that mount (ECONNRESET).
 pub(crate) fn kill_processes_at_mountpoint(mountpoint: &Path) {
     let mp = mountpoint.to_string_lossy();
 
@@ -106,8 +109,42 @@ pub(crate) fn kill_processes_at_mountpoint(mountpoint: &Path) {
         }
     }
 
-    // Kill orphaned FUSE-T go-nfsv4 daemon processes.
-    let _ = Command::new("pkill").args(["-f", "go-nfsv4"]).status();
+    // End the FUSE-T server of this mount point.
+    let mut points = vec![mp.to_string()];
+    if let Ok(c) = std::fs::canonicalize(mountpoint) {
+        points.push(c.to_string_lossy().into_owned()); // /tmp -> /private/tmp
+    }
+    if let Ok(out) = Command::new("ps").args(["-axww", "-o", "pid=,command="]).output() {
+        for pid in fuse_t_servers_of(&String::from_utf8_lossy(&out.stdout), &points) {
+            // SAFETY: kill is a safe POSIX syscall when given a valid pid.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+/// PIDs of the `go-nfsv4` processes in `ps -o pid=,command=` output whose
+/// last argument (the mount point) is one of `points`.
+fn fuse_t_servers_of(ps: &str, points: &[String]) -> Vec<i32> {
+    ps.lines()
+        .filter_map(|line| {
+            let (pid, cmd) = line.trim_start().split_once(' ')?;
+            let prog = cmd.split_whitespace().next()?;
+            if !prog.ends_with("/go-nfsv4") && prog != "go-nfsv4" {
+                return None;
+            }
+            let cmd = cmd.trim_end().trim_end_matches('/');
+            points
+                .iter()
+                .any(|p| {
+                    let p = p.trim_end_matches('/');
+                    cmd.strip_suffix(p).is_some_and(|head| head.ends_with(' '))
+                })
+                .then(|| pid.parse().ok())
+                .flatten()
+        })
+        .collect()
 }
 
 // ── Force unmount ─────────────────────────────────────────────────────────────
@@ -194,6 +231,18 @@ mod tests {
             None,
         );
         let _ = result; // Ok or Err — both acceptable (CI may have permissive umount)
+    }
+
+    #[test]
+    fn only_the_server_of_the_mount_point_is_selected() {
+        let ps = "  101 /usr/local/bin/go-nfsv4 --backend fskit /tmp/a/mnt\n\
+                  102 /usr/local/bin/go-nfsv4 --backend smb /tmp/a/mnt2\n\
+                  103 /usr/local/bin/go-nfsv4 --backend smb /other/tmp/a/mnt\n\
+                  104 vim /tmp/a/mnt\n\
+                  105 go-nfsv4 --backend smb /private/tmp/a/mnt/\n";
+        let pts = vec!["/tmp/a/mnt".to_string(), "/private/tmp/a/mnt".to_string()];
+        assert_eq!(fuse_t_servers_of(ps, &pts), vec![101, 105]);
+        assert!(fuse_t_servers_of(ps, &["/nowhere".to_string()]).is_empty());
     }
 
     #[test]

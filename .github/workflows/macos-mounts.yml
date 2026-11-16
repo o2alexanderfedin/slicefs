@@ -1,0 +1,92 @@
+name: macOS mounts
+
+# Real FUSE-T mounts on a fresh macOS VM: the Boost round trip through SliceFS
+# on SMB (the default backend) and on FSKit. The FSKit job first enables the
+# FUSE-T FSKit module without the System Settings GUI (enable-fskit.sh).
+# Long (about 3 to 4 hours per job), so not on every pull request.
+on:
+  workflow_dispatch:
+  push:
+    branches: [develop, main, "ci/**"]
+
+jobs:
+  mounts:
+    name: macOS ${{ matrix.backend }} (Boost round trip)
+    runs-on: macos-26
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [smb, fskit]
+    steps:
+      - uses: actions/checkout@v4
+
+      # crates/data-id is a private repository that GITHUB_TOKEN cannot read.
+      # DATA_ID_DEPLOY_KEY is a read-only deploy key of that repository.
+      - name: Fetch the data-id submodule
+        env:
+          DATA_ID_DEPLOY_KEY: ${{ secrets.DATA_ID_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DATA_ID_DEPLOY_KEY" > ~/.ssh/data_id && chmod 600 ~/.ssh/data_id
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/data_id -o IdentitiesOnly=yes" \
+            git -c url."git@github.com:".insteadOf="https://github.com/" \
+            submodule update --init --recursive
+          rm -f ~/.ssh/data_id
+
+      - name: Install pkg-config and FUSE-T
+        run: |
+          brew install pkg-config
+          brew install --cask macos-fuse-t/cask/fuse-t
+          sw_vers
+
+      - name: Enable the FUSE-T FSKit extension
+        if: matrix.backend == 'fskit'
+        run: scripts/macos-mount-test/enable-fskit.sh
+
+      - name: Cache the Boost download
+        uses: actions/cache@v4
+        with:
+          path: ~/boost
+          key: boost-1_85_0-v1
+
+      - name: Fetch Boost 1.85
+        run: scripts/macos-mount-test/fetch-boost.sh ~/boost 1_85_0
+
+      - name: Build slicefs (release)
+        run: cargo build --release -p slicefs-cli
+
+      - name: Boost round trip (${{ matrix.backend }})
+        env:
+          SLICEFS: target/release/slicefs
+          BOOST_DIR: ~/boost
+          WORK: ${{ runner.temp }}/work
+          # On macOS 26.7 a tree diff on SMB takes about 1 hour (see the README).
+          STEP_TIMEOUT: 5400
+        run: |
+          export BOOST_DIR=$HOME/boost
+          scripts/macos-mount-test/boost-test.sh ${{ matrix.backend }} 1_85_0
+
+      - name: FSKit diagnostics
+        if: matrix.backend == 'fskit' && failure()
+        run: |
+          S="$HOME/Library/Group Containers/group.com.apple.fskit.settings"
+          ls -la "$S" || true
+          plutil -p "$S/enabledModules.plist" || true
+          pluginkit -m -v -p com.apple.fskit.fsmodule || true
+          /usr/bin/log show --last 30m --style compact --predicate \
+            'subsystem BEGINSWITH "com.apple.FSKit" OR process CONTAINS[c] "fskit" OR process == "go-nfsv4"' \
+            | tail -200 || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-mounts-${{ matrix.backend }}
+          path: |
+            ${{ runner.temp }}/work/*/mount.log
+            ${{ runner.temp }}/work/*/mount.err
+            ${{ runner.temp }}/work/*/perf.csv
+            ${{ runner.temp }}/work/*/top.log
+          if-no-files-found: ignore

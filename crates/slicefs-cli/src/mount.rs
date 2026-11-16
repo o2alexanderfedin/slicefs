@@ -368,13 +368,6 @@ pub fn build_mount_options(
     #[cfg(target_os = "macos")]
     if let Some(b) = backend {
         mount_options.push(MountOption::CUSTOM(b.as_mount_option().to_string()));
-        // FUSE-T 1.2.9's NFS server scans its whole attribute cache on every
-        // SETATTR (FuseFS.deleteCacheAttr), so cp -p of a large tree slows down
-        // as the cache grows (78k files: >1 h). SliceFS answers GETATTR from
-        // memory, so the cache is not needed: `noattrcache` -> --attrcache=false.
-        if matches!(b, crate::backend::FuseTBackend::Nfs) {
-            mount_options.push(MountOption::CUSTOM("noattrcache".to_string()));
-        }
     }
 
     let mut cfg = Config::default();
@@ -460,6 +453,7 @@ pub fn run_mount(
     backend: Option<&str>,
     force: bool,
     commit_interval_secs: u64,
+    gc_interval_secs: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Pre-flight: create mountpoint directory if it doesn't exist.
     if !mountpoint.exists() {
@@ -538,6 +532,38 @@ pub fn run_mount(
     );
     fs.set_auto_snapshot(auto_snapshot);
 
+    // Replay the write log (#20): requests after the last root, made durable
+    // by fsync before a crash. Then commit, which cuts the log. Not on a
+    // snapshot mount (read-only; the log stays for the next normal mount).
+    if snapshot_ref.is_none() {
+        let (_, _, pending) = metadata::segment::load_store_with_log(&store_path.join("segments"))
+            .map_err(|e| format!("failed to read the write log: {}", e))?;
+        if !pending.is_empty() {
+            let stats = crate::oplog::replay(&fs, &pending)
+                .map_err(|e| format!("write log replay failed: {}", e))?;
+            slicefs_traits::metadata::MetadataStore::commit(fs.meta().as_ref())
+                .map_err(|e| format!("commit after replay failed: {}", e))?;
+            fs.meta().flush_wal().map_err(|e| format!("sync after replay failed: {}", e))?;
+            println!(
+                "Replayed {} request(s) from the write log ({} skipped).",
+                stats.applied, stats.skipped
+            );
+        }
+    }
+    let fs = Arc::new(fs);
+
+    // GC of the stored objects while mounted (#25). Not on a snapshot mount:
+    // its metadata is the snapshot, not the current root.
+    let online_gc_shutdown = Arc::new(AtomicBool::new(false));
+    let online_gc_handle = snapshot_ref.is_none().then(|| {
+        crate::online_gc::spawn_online_gc(
+            Arc::downgrade(&fs),
+            store_path.to_path_buf(),
+            Duration::from_secs(gc_interval_secs),
+            Arc::clone(&online_gc_shutdown),
+        )
+    });
+
     // Spawn background GC thread.
     // The GC thread holds a Weak<DictMetadataStore> so it exits automatically when
     // the filesystem is dropped. We also use an explicit shutdown flag to stop it
@@ -557,7 +583,7 @@ pub fn run_mount(
     let commit_shutdown = Arc::new(AtomicBool::new(false));
     let commit_handle = (commit_interval_secs > 0).then(|| {
         crate::commit_timer::spawn_commit_timer(
-            Arc::downgrade(fs.meta()),
+            Arc::downgrade(&fs),
             fs.commit_gate(),
             Duration::from_secs(commit_interval_secs),
             Arc::clone(&commit_shutdown),
@@ -566,18 +592,16 @@ pub fn run_mount(
 
     // ── Mount + startup log ────────────────────────────────────────────────────
 
+    // macOS: the unmount watcher prints this when the mount really appears.
     #[cfg(target_os = "macos")]
-    {
-        let backend_name = selected_backend.as_mount_option().trim_start_matches("backend=");
-        println!(
-            "SliceFS mounted at {} (backend: {}, fuse-t: {}.{}.{})",
-            mountpoint.display(),
-            backend_name,
-            fuse_t_version.0,
-            fuse_t_version.1,
-            fuse_t_version.2,
-        );
-    }
+    let mounted_msg = format!(
+        "SliceFS mounted at {} (backend: {}, fuse-t: {}.{}.{})",
+        mountpoint.display(),
+        selected_backend.as_mount_option().trim_start_matches("backend="),
+        fuse_t_version.0,
+        fuse_t_version.1,
+        fuse_t_version.2,
+    );
 
     #[cfg(not(target_os = "macos"))]
     println!("SliceFS mounted at {}", mountpoint.display());
@@ -585,7 +609,36 @@ pub fn run_mount(
     // mount blocks until the FUSE session ends (SIGTERM, Ctrl+C, or unmount).
     // fuser handles signal registration internally — do NOT override with
     // libc::signal as it replaces fuser's session-exit handler.
-    mount(fs, mountpoint, &config)?;
+    // FUSE-T's SMB server does not exit at unmount, so the session would
+    // never end (no destroy, no final commit): end it when the mount is gone.
+    #[cfg(target_os = "macos")]
+    let unmount_watch_shutdown = Arc::new(AtomicBool::new(false));
+    #[cfg(target_os = "macos")]
+    let unmount_watch =
+        crate::fuset_watch::spawn_unmount_watcher(mountpoint, mounted_msg, Arc::clone(&unmount_watch_shutdown));
+
+    #[allow(unused_mut)]
+    let mut mounted = mount(crate::fuse_callbacks::MountedFs(fs), mountpoint, &config);
+
+    #[cfg(target_os = "macos")]
+    {
+        unmount_watch_shutdown.store(true, Ordering::SeqCst);
+        let seen = unmount_watch.join().unwrap_or(true);
+        if mounted.is_ok() && !seen {
+            mounted = Err(std::io::Error::other(format!(
+                "the FUSE-T session ended, but no volume was mounted at {} (backend: {})",
+                mountpoint.display(),
+                selected_backend.as_mount_option().trim_start_matches("backend="),
+            )));
+        }
+    }
+
+    // Stop the GC thread before mount.lock is released, also when mount failed.
+    online_gc_shutdown.store(true, Ordering::SeqCst);
+    if let Some(h) = online_gc_handle {
+        let _ = h.join();
+    }
+    mounted?;
 
     // mount has returned — FUSE session ended, destroy() already called.
     commit_shutdown.store(true, Ordering::SeqCst);
@@ -794,11 +847,10 @@ mod tests {
         assert!(!none.mount_options.iter().any(|o| matches!(o, MountOption::CUSTOM(_))));
     }
 
-    /// The NFS backend turns off FUSE-T's attribute cache (its SETATTR cost grows
-    /// with the cache size); other backends keep their defaults.
-    #[test]
+    /// The backend goes to FUSE-T as one custom option, and nothing else.
     #[cfg(target_os = "macos")]
-    fn test_build_mount_options_nfs_disables_attr_cache() {
+    #[test]
+    fn test_build_mount_options_backend_only_custom_option() {
         use crate::backend::FuseTBackend;
         let customs = |b| -> Vec<String> {
             build_mount_options(false, false, Some(b)).mount_options.iter().filter_map(|o| match o {
@@ -806,8 +858,8 @@ mod tests {
                 _ => None,
             }).collect()
         };
-        assert_eq!(customs(&FuseTBackend::Nfs), vec!["backend=nfs", "noattrcache"]);
         assert_eq!(customs(&FuseTBackend::Smb), vec!["backend=smb"]);
+        assert_eq!(customs(&FuseTBackend::Fskit), vec!["backend=fskit"]);
     }
 
     // ── WAL config ────────────────────────────────────────────────────────────

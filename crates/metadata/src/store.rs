@@ -169,7 +169,15 @@ impl DictMetadataStore {
             let (uid, gid) = (unsafe { libc::getuid() }, unsafe { libc::getgid() });
             #[cfg(not(unix))]
             let (uid, gid) = (0u32, 0u32);
-            let root_meta = InodeMeta::new_directory(1, uid, gid, S_IFDIR | 0o755);
+            let mut root_meta = InodeMeta::new_directory(1, uid, gid, S_IFDIR | 0o755);
+            // A new file system starts now, not at the epoch (shown as 1969).
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            root_meta.mtime_sec = now.as_secs() as _;
+            root_meta.mtime_nsec = now.subsec_nanos() as _;
+            root_meta.ctime_sec = root_meta.mtime_sec;
+            root_meta.ctime_nsec = root_meta.mtime_nsec;
             let root_inode_digest = intern_inode(&mut fsa, &root_meta);
             let root_dir_digest = create_dir_entries(&mut fsa, 1, 1);
             (root_inode_digest, root_dir_digest)
@@ -330,6 +338,27 @@ impl DictMetadataStore {
     ///
     /// IMPORTANT: Do NOT hold any other Mutex when calling this — WAL I/O
     /// may block and holding dict/inode_map locks would cause deadlocks.
+    /// Continue the WAL in a new segment that starts with `root` and every
+    /// snapshot record, and delete the older segments (#20). A failure leaves
+    /// the current segment in use, which is still correct (only larger).
+    fn rotate_wal(&self, root: Digest224) {
+        if let Some(ref w) = *self.wal.lock().unwrap() {
+            let mut seed = vec![WalEntry::RootUpdate { root }];
+            for s in self.list_snapshots() {
+                seed.push(WalEntry::Snapshot { version: s.version, root: s.root, created_at: s.created_at, name: s.name });
+            }
+            if let Err(e) = w.rotate(&seed) {
+                eprintln!("WAL rotation failed (the log keeps growing in the current segment): {e}");
+            }
+        }
+    }
+
+    /// Append a file system request to the write log (#20). Durable after the
+    /// next `flush_wal` (fsync) or commit; a commit makes it part of a root.
+    pub fn log_op(&self, bytes: Vec<u8>) {
+        self.log_wal_entry(&WalEntry::Op { bytes });
+    }
+
     fn log_wal_entry(&self, entry: &WalEntry) {
         if let Some(ref w) = *self.wal.lock().unwrap() {
             // Ignore WAL errors during mutation logging — the in-memory state
@@ -584,6 +613,7 @@ impl DictMetadataStore {
     pub fn commit_root(&self, root: Digest224) -> Result<(), MetaError> {
         *self.last_root.lock().unwrap() = Some(root);
         self.log_wal_entry(&WalEntry::RootUpdate { root });
+        self.rotate_wal(root);
         Ok(())
     }
 }
@@ -928,6 +958,10 @@ impl MetadataStore for DictMetadataStore {
         let root_digest = State::push_all(&mut fsa, &root_bytes);
         // Drop fsa first: this flushes all FileStorage blob files to disk via StoreIo
         drop(fsa);
+        // Make every object written since the last commit durable before the
+        // root that refers to them is logged: after that, log rotation deletes
+        // the segments whose records hold the same data (#20).
+        io_guard.sync_written().map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
         // Drop io_guard to release the lock before WAL logging
         drop(io_guard);
 
@@ -937,10 +971,43 @@ impl MetadataStore for DictMetadataStore {
         // Log RootUpdate to WAL AFTER all nodes are flushed to disk (crash-safe ordering).
         // If we crash between flush and WAL write, the next mount will just re-commit.
         self.log_wal_entry(&WalEntry::RootUpdate { root: root_digest });
+        self.rotate_wal(root_digest);
 
         self.committed_changes.store(changes, Ordering::Relaxed);
         Ok(root_digest)
     }
+}
+
+/// Roots of every stored object that the metadata at `root` reads back: the
+/// root record, its maps, each inode, directory list and xattr set, each file
+/// manifest, and each file root in the manifests. The GC mark phase (#25)
+/// walks the object tree of each of them.
+pub fn referenced_roots(
+    io: &mut impl blockset::Io,
+    root: &Digest224,
+) -> Result<Vec<Digest224>, MetaError> {
+    let bytes = file_storage_get(io, root)
+        .ok_or_else(|| MetaError::Corrupted(format!("missing root node {:?}", root)))?;
+    if !matches!(bytes.len(), 156 | 184 | 200) {
+        return Err(MetaError::Corrupted(format!(
+            "root record: expected 156, 184 or 200 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    let at = |o: usize| parse_digest224(&bytes[o..o + 28]);
+    let (inodes, dirs, manifests, xattrs) = (at(44), at(72), at(100), at(128));
+    let mut out = vec![*root, at(0), inodes, dirs, manifests, xattrs];
+    if bytes.len() >= 184 {
+        out.push(at(156)); // refcounts
+    }
+    for map in [inodes, dirs, xattrs] {
+        out.extend(load_u64_digest_map(io, &map)?.into_values());
+    }
+    for manifest in load_u64_digest_map(io, &manifests)?.into_values() {
+        out.push(manifest);
+        out.extend(load_manifest(io, &manifest)?);
+    }
+    Ok(out)
 }
 
 // ─── helpers for BTreeMap<u64, Digest224> serialization ─────────────────────
@@ -1179,6 +1246,17 @@ fn parse_digest224(bytes: &[u8]) -> Digest224 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn new_store_root_dir_has_current_times() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let store = DictMetadataStore::new(Arc::new(Mutex::new(StoreIo::new(dir.path()))));
+        let root = store.get_inode(1).unwrap();
+        assert!(root.mtime_sec as i64 >= before, "root mtime {} (epoch 0 shows as 1969)", root.mtime_sec);
+        assert!(root.ctime_sec as i64 >= before, "root ctime {}", root.ctime_sec);
+    }
 
     #[test]
     fn cached_dirs_and_inodes_survive_eviction_commit_and_reload() {

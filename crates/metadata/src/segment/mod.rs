@@ -3,18 +3,20 @@
 //! A segment file is an append-only log of records. Records are framed as:
 //!   record_type: u8
 //!   payload_len: u32 LE
+//!   seq:         u64 LE (records of this segment, from 0)
 //!   payload:     [u8; payload_len]
+//!   crc32c:      u32 LE over all bytes above
 //!
 //! The file begins with a 16-byte header:
 //!   magic:      [u8; 4]  = [0x53, 0x4C, 0x53, 0x47] ("SLSG")
-//!   version:    u32 LE   = 1
+//!   version:    u32 LE   = 2
 //!   segment_id: u64 LE
 //!
 //! RootUpdate payload: 28 bytes — Digest224 as 7×u32 LE
 //! SnapshotRecord payload: 48+ bytes — version(8) + root(28) + created_at(8) + name_len(4) + name_bytes(variable)
 //! EofMarker: no payload (payload_len = 0), terminates iteration
 //!
-//! Legacy: record type 0x01 (DictEntry) is no longer written but silently skipped on read.
+//! The reader stops at the first cut, changed or out-of-sequence record.
 
 pub mod writer;
 pub mod reader;
@@ -90,6 +92,7 @@ pub fn load_store_from_segments(
                         snapshots.push(snap_entry);
                     }
                 }
+                SegmentEntry::Op { .. } => {}
             }
         }
     }
@@ -97,11 +100,74 @@ pub fn load_store_from_segments(
     Ok((last_root, snapshots))
 }
 
+/// Like [`load_store_from_segments`], and also return the operation records
+/// after the last `RootUpdate`, in order (the write log, #20). A mount must
+/// replay them on top of the root.
+pub fn load_store_with_log(
+    segments_dir: &Path,
+) -> Result<(Option<Digest224>, Vec<SnapshotEntry>, Vec<Vec<u8>>), SegmentError> {
+    let mut last_root = None;
+    let mut snapshots = Vec::new();
+    let mut ops: Vec<Vec<u8>> = Vec::new();
+    for path in segment_paths(segments_dir)? {
+        for entry in SegmentReader::open(&path)? {
+            match entry {
+                SegmentEntry::RootUpdate { root } => {
+                    last_root = Some(root);
+                    ops.clear();
+                }
+                ref snap @ SegmentEntry::SnapshotRecord { .. } => {
+                    if let Some(s) = snap.as_snapshot_entry() {
+                        snapshots.push(s);
+                    }
+                }
+                SegmentEntry::Op { bytes } => ops.push(bytes),
+            }
+        }
+    }
+    Ok((last_root, snapshots, ops))
+}
+
+/// Segment files of `segments_dir` with at least a header, in id order.
+fn segment_paths(segments_dir: &Path) -> Result<Vec<std::path::PathBuf>, SegmentError> {
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(segments_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            n.starts_with("segment-") && n.ends_with(".seg")
+        })
+        .map(|e| e.path())
+        .filter(|p| std::fs::metadata(p).map(|m| m.len() >= 16).unwrap_or(false))
+        .collect();
+    paths.sort();
+    Ok(paths)
+}
+
 /// Magic bytes identifying a SliceFS segment file: "SLSG"
 pub const SEGMENT_MAGIC: [u8; 4] = [0x53, 0x4C, 0x53, 0x47];
 
-/// Segment file format version.
-pub const SEGMENT_VERSION: u32 = 1;
+/// Segment file format version. Version 2 adds a sequence number and a
+/// CRC32C to each record (#20); version 1 files are not read.
+pub const SEGMENT_VERSION: u32 = 2;
+
+/// Bytes of a record frame before the payload: type, payload length, seq.
+pub(crate) const FRAME_HEAD: usize = 1 + 4 + 8;
+
+/// Largest payload the reader accepts (a bad length must not allocate GiBs).
+pub(crate) const MAX_PAYLOAD: usize = 64 << 20;
+
+/// Frame one record: type(u8) + payload_len(u32 LE) + seq(u64 LE) + payload +
+/// crc32c(u32 LE) over all bytes before the CRC.
+pub fn frame_record(record_type: u8, seq: u64, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(FRAME_HEAD + payload.len() + 4);
+    out.push(record_type);
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(&seq.to_le_bytes());
+    out.extend_from_slice(payload);
+    let crc = crc32c::crc32c(&out);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out
+}
 
 /// Record type discriminants.
 ///
@@ -111,6 +177,7 @@ pub const SEGMENT_VERSION: u32 = 1;
 pub enum RecordType {
     RootUpdate     = 0x02,
     SnapshotRecord = 0x03,
+    Op             = 0x10,
     EofMarker      = 0xFF,
 }
 
@@ -120,6 +187,7 @@ impl RecordType {
             0x01 => None, // legacy DictEntry — caller should skip payload_len bytes
             0x02 => Some(RecordType::RootUpdate),
             0x03 => Some(RecordType::SnapshotRecord),
+            0x10 => Some(RecordType::Op),
             0xFF => Some(RecordType::EofMarker),
             _ => None,
         }
@@ -172,6 +240,8 @@ impl SegmentHeader {
 pub enum SegmentEntry {
     RootUpdate     { root: Digest224 },
     SnapshotRecord { version: u64, root: Digest224, created_at: u64, name: Option<String> },
+    /// A file system request since the last root (opaque bytes, #20).
+    Op { bytes: Vec<u8> },
 }
 
 impl SegmentEntry {
@@ -179,12 +249,14 @@ impl SegmentEntry {
         match self {
             SegmentEntry::RootUpdate     { .. } => RecordType::RootUpdate,
             SegmentEntry::SnapshotRecord { .. } => RecordType::SnapshotRecord,
+            SegmentEntry::Op { .. } => RecordType::Op,
         }
     }
 
     /// Serialize payload bytes (does not include type byte or payload_len).
     pub fn payload_bytes(&self) -> Vec<u8> {
         match self {
+            SegmentEntry::Op { bytes } => bytes.clone(),
             SegmentEntry::RootUpdate { root } => {
                 let mut buf = Vec::with_capacity(28);
                 for v in root {

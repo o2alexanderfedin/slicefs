@@ -47,8 +47,12 @@ fn test_wal_logs_root_update_on_commit() {
     let _root = meta.commit().unwrap();
     meta.shutdown_wal().unwrap();
 
-    // Read back the segment
-    let seg_path = store_dir.path().join("segments").join("segment-000001.seg");
+    // Read back the segment (after a commit the log rotates: one segment
+    // that starts with the new root).
+    let segs: Vec<_> = std::fs::read_dir(store_dir.path().join("segments")).unwrap()
+        .filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    assert_eq!(segs.len(), 1, "one segment after a commit: {segs:?}");
+    let seg_path = segs[0].clone();
     let reader = SegmentReader::open(&seg_path).unwrap();
     let entries: Vec<_> = reader.collect();
 

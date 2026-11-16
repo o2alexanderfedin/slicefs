@@ -97,85 +97,31 @@ fn test_truncated_record_is_skipped() {
     assert_eq!(entries.len(), 1);
 }
 
-/// Write a record with unknown type byte 0xFE — reader skips it and reads subsequent valid records.
+/// A record with an unknown type (good CRC and sequence) is skipped; the
+/// records after it are read.
 #[test]
 fn test_unknown_record_type_skipped() {
     use std::io::Write;
+    use metadata::segment::frame_record;
 
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("seg3.seg");
-
-    // Write header manually
     {
         let mut file = std::fs::File::create(&path).unwrap();
-        // 16-byte segment header: magic(4) + version(4 LE) + segment_id(8 LE)
         file.write_all(&SEGMENT_MAGIC).unwrap();
         file.write_all(&SEGMENT_VERSION.to_le_bytes()).unwrap();
         file.write_all(&42u64.to_le_bytes()).unwrap();
-
-        // Unknown record type 0xFE with a 4-byte payload
-        let payload: [u8; 4] = [0xAA, 0xBB, 0xCC, 0xDD];
-        file.write_all(&[0xFE]).unwrap(); // type
-        file.write_all(&(payload.len() as u32).to_le_bytes()).unwrap(); // payload_len
-        file.write_all(&payload).unwrap();
-
-        // Valid RootUpdate record after it: type(1) + payload_len(4) + root(28)
+        file.write_all(&frame_record(0xFE, 0, &[0xAA, 0xBB, 0xCC, 0xDD])).unwrap();
         let root = make_key(7);
-        file.write_all(&[0x02]).unwrap(); // RootUpdate
-        file.write_all(&28u32.to_le_bytes()).unwrap();
-        for v in &root {
-            file.write_all(&v.to_le_bytes()).unwrap();
-        }
+        let payload: Vec<u8> = root.iter().flat_map(|v| v.to_le_bytes()).collect();
+        file.write_all(&frame_record(0x02, 1, &payload)).unwrap();
     }
 
-    let reader = SegmentReader::open(&path).unwrap();
-    let entries: Vec<SegmentEntry> = reader.collect();
-
+    let entries: Vec<SegmentEntry> = SegmentReader::open(&path).unwrap().collect();
     assert_eq!(entries.len(), 1, "should skip unknown type and read valid entry");
     match &entries[0] {
         SegmentEntry::RootUpdate { root } => assert_eq!(root, &make_key(7)),
         _ => panic!("expected RootUpdate"),
-    }
-}
-
-/// Legacy DictEntry records (type 0x01) are silently skipped on read.
-#[test]
-fn test_legacy_dict_entry_skipped() {
-    use std::io::Write;
-
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("seg_legacy.seg");
-
-    {
-        let mut file = std::fs::File::create(&path).unwrap();
-        // 16-byte segment header
-        file.write_all(&SEGMENT_MAGIC).unwrap();
-        file.write_all(&SEGMENT_VERSION.to_le_bytes()).unwrap();
-        file.write_all(&1u64.to_le_bytes()).unwrap();
-
-        // Legacy DictEntry: type=0x01, payload_len=92, payload=(28+64 zeros)
-        let payload = vec![0u8; 92];
-        file.write_all(&[0x01]).unwrap();
-        file.write_all(&92u32.to_le_bytes()).unwrap();
-        file.write_all(&payload).unwrap();
-
-        // Valid RootUpdate after the legacy record
-        let root = make_key(42);
-        file.write_all(&[0x02]).unwrap();
-        file.write_all(&28u32.to_le_bytes()).unwrap();
-        for v in &root {
-            file.write_all(&v.to_le_bytes()).unwrap();
-        }
-    }
-
-    let reader = SegmentReader::open(&path).unwrap();
-    let entries: Vec<SegmentEntry> = reader.collect();
-
-    // The legacy DictEntry must be skipped; only the RootUpdate is returned.
-    assert_eq!(entries.len(), 1, "legacy DictEntry should be skipped");
-    match &entries[0] {
-        SegmentEntry::RootUpdate { root } => assert_eq!(root, &make_key(42)),
-        _ => panic!("expected RootUpdate after skipping legacy DictEntry"),
     }
 }
 
@@ -217,8 +163,8 @@ fn test_segment_header_magic_and_version() {
     assert_eq!(&magic, &[0x53, 0x4C, 0x53, 0x47], "magic bytes must be SLSG");
     assert_eq!(
         u32::from_le_bytes(version_bytes),
-        1,
-        "version must be 1"
+        2,
+        "version must be 2"
     );
     assert_eq!(&magic, &SEGMENT_MAGIC);
     assert_eq!(u32::from_le_bytes(version_bytes), SEGMENT_VERSION);
