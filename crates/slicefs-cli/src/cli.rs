@@ -58,7 +58,8 @@ pub enum Cmd {
         /// Automatically create a snapshot on clean unmount.
         #[arg(long, default_value_t = false)]
         auto_snapshot: bool,
-        /// FUSE-T backend: smb or fskit (default: smb; fskit is opt-in).
+        /// FUSE-T backend (macOS): fskit, the default and only backend.
+        /// Needs the FUSE-T extension enabled in System Settings.
         #[arg(long, value_name = "BACKEND")]
         backend: Option<String>,
         /// Accepted for compatibility; currently has no effect (no backend is blocked).
