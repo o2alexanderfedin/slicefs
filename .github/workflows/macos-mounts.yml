@@ -1,9 +1,9 @@
 name: macOS mounts
 
 # Real FUSE-T mounts on a fresh macOS VM: the Boost round trip through SliceFS
-# on SMB (must pass) and on FSKit (reported, may fail), plus an FSKit repro
-# with the fuser `simple` example (no SliceFS code).
-# Long (about 20 to 60 min per job), so not on every pull request.
+# on SMB (the default backend) and on FSKit. The FSKit job first enables the
+# FUSE-T FSKit module without the System Settings GUI (enable-fskit.sh).
+# Long (about 1 to 2 hours per job), so not on every pull request.
 on:
   workflow_dispatch:
   push:
@@ -67,13 +67,16 @@ jobs:
           export BOOST_DIR=$HOME/boost
           scripts/macos-mount-test/boost-test.sh ${{ matrix.backend }} 1_85_0
 
-      - name: FSKit repro without SliceFS (fuser simple example)
-        if: matrix.backend == 'fskit' && always()
-        env:
-          WORK: ${{ runner.temp }}/repro
+      - name: FSKit diagnostics
+        if: matrix.backend == 'fskit' && failure()
         run: |
-          scripts/macos-mount-test/build-simple-example.sh ${{ runner.temp }}/bin
-          scripts/macos-mount-test/fskit-repro.sh ${{ runner.temp }}/bin/simple $HOME/boost/x/boost_1_85_0 fskit
+          S="$HOME/Library/Group Containers/group.com.apple.fskit.settings"
+          ls -la "$S" || true
+          plutil -p "$S/enabledModules.plist" || true
+          pluginkit -m -v -p com.apple.fskit.fsmodule || true
+          /usr/bin/log show --last 30m --style compact --predicate \
+            'subsystem BEGINSWITH "com.apple.FSKit" OR process CONTAINS[c] "fskit" OR process == "go-nfsv4"' \
+            | tail -200 || true
 
       - name: Upload logs
         if: always()
@@ -84,5 +87,4 @@ jobs:
             ${{ runner.temp }}/work/*/mount.log
             ${{ runner.temp }}/work/*/mount.err
             ${{ runner.temp }}/work/*/perf.csv
-            ${{ runner.temp }}/repro/*/cp.err
           if-no-files-found: ignore

@@ -6,9 +6,7 @@ Real mounts on macOS through FUSE-T. CI runs them in `.github/workflows/macos-mo
 |---|---|
 | `fetch-boost.sh <dir> 1_85_0` | Download a Boost release as a tar file and an expanded tree (about 78k files) |
 | `boost-test.sh <backend> 1_85_0` | Round trip: tar and tree to the mount and back, compare; remount and compare; delete all; GC on the mounted store; offline GC check |
-| `enable-fskit.sh` | Try to enable the FUSE-T FSKit extension without System Settings (for CI) |
-| `build-simple-example.sh <dir>` | Build the fuser `simple` example with a `FUSET_OPTS` option |
-| `fskit-repro.sh <simple> <tree> <backend>` | Copy a tree into the `simple` example file system and report a connection reset (no SliceFS code) |
+| `enable-fskit.sh` | Enable the FUSE-T FSKit module without System Settings (for CI): adds it to the FSKit `enabledModules.plist` and restarts the FSKit daemons |
 
 Local run:
 
