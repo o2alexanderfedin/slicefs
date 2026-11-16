@@ -12,6 +12,8 @@ use super::{WalEntry, WalError, WalStrategy};
 /// Provides the strongest durability guarantee at the cost of throughput.
 pub struct PerOpWal {
     writer: Mutex<SegmentWriter>,
+    /// Path and id of the current segment (for rotation).
+    loc: Mutex<(std::path::PathBuf, u64)>,
 }
 
 impl PerOpWal {
@@ -20,11 +22,20 @@ impl PerOpWal {
         let writer = SegmentWriter::new(path, segment_id)?;
         Ok(PerOpWal {
             writer: Mutex::new(writer),
+            loc: Mutex::new((path.to_path_buf(), segment_id)),
         })
     }
 }
 
 impl WalStrategy for PerOpWal {
+    fn rotate(&self, seed: &[WalEntry]) -> Result<(), WalError> {
+        let mut writer = self.writer.lock().unwrap();
+        let mut loc = self.loc.lock().unwrap();
+        let (new_writer, new_path, new_id) = super::rotate_segment(&loc.0, loc.1, seed)?;
+        *writer = new_writer;
+        *loc = (new_path, new_id);
+        Ok(())
+    }
     fn log_mutation(&self, entry: &WalEntry) -> Result<(), WalError> {
         let seg_entry = wal_entry_to_segment(entry);
         let mut writer = self.writer.lock().unwrap();

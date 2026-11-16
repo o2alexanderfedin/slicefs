@@ -13,6 +13,8 @@ use super::{WalEntry, WalError, WalStrategy, per_op::wal_entry_to_segment};
 pub struct FlushOnFsyncWal {
     buffer: Mutex<Vec<WalEntry>>,
     writer: Mutex<SegmentWriter>,
+    /// Path and id of the current segment (for rotation).
+    loc: Mutex<(std::path::PathBuf, u64)>,
 }
 
 impl FlushOnFsyncWal {
@@ -22,6 +24,7 @@ impl FlushOnFsyncWal {
         Ok(FlushOnFsyncWal {
             buffer: Mutex::new(Vec::new()),
             writer: Mutex::new(writer),
+            loc: Mutex::new((path.to_path_buf(), segment_id)),
         })
     }
 
@@ -33,6 +36,15 @@ impl FlushOnFsyncWal {
 }
 
 impl WalStrategy for FlushOnFsyncWal {
+    fn rotate(&self, seed: &[WalEntry]) -> Result<(), WalError> {
+        self.buffer.lock().unwrap().clear(); // records before the cut are dead
+        let mut writer = self.writer.lock().unwrap();
+        let mut loc = self.loc.lock().unwrap();
+        let (new_writer, new_path, new_id) = super::rotate_segment(&loc.0, loc.1, seed)?;
+        *writer = new_writer;
+        *loc = (new_path, new_id);
+        Ok(())
+    }
     fn log_mutation(&self, entry: &WalEntry) -> Result<(), WalError> {
         self.buffer.lock().unwrap().push(entry.clone());
         Ok(())
