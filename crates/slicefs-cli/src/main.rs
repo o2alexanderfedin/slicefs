@@ -8,6 +8,7 @@ mod commit_timer;
 mod filesystem;
 mod fuse_callbacks;
 mod handlers;
+mod oplog;
 mod gc;
 mod online_gc;
 #[cfg(target_os = "macos")]

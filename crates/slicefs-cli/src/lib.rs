@@ -5,7 +5,9 @@ pub mod cli;
 pub mod commit_timer;
 pub mod filesystem;
 mod fuse_callbacks;
-pub(crate) mod handlers;
+#[doc(hidden)]
+pub mod handlers;
+pub mod oplog;
 pub mod gc;
 pub mod online_gc;
 #[cfg(target_os = "macos")]

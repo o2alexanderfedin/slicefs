@@ -121,6 +121,8 @@ pub struct SliceFsFilesystem {
     pub(crate) auto_snapshot: bool,
     /// Shared by FUSE callbacks, exclusive for a timed commit (see `commit_gate()`).
     commit_gate: Arc<RwLock<()>>,
+    /// True while the write log is replayed: requests are not logged again.
+    replaying: std::sync::atomic::AtomicBool,
 }
 
 impl SliceFsFilesystem {
@@ -148,6 +150,7 @@ impl SliceFsFilesystem {
             store_path,
             auto_snapshot: false,
             commit_gate: Arc::new(RwLock::new(())),
+            replaying: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -158,6 +161,29 @@ impl SliceFsFilesystem {
 
     /// Every FUSE callback holds this gate shared; the commit timer holds it
     /// exclusively, so a timed commit never sees half of an operation.
+    /// Append a request to the write log (#20), unless the log is being replayed.
+    pub(crate) fn log_record(&self, rec: crate::oplog::Record) {
+        if !self.replaying.load(Ordering::Relaxed) {
+            self.meta.log_op(rec.encode());
+        }
+    }
+
+    /// True while the write log is replayed.
+    pub(crate) fn is_replaying(&self) -> bool {
+        self.replaying.load(Ordering::Relaxed)
+    }
+
+    /// Turn off logging until the returned guard is dropped (replay).
+    pub(crate) fn replay_guard(&self) -> ReplayGuard<'_> {
+        self.replaying.store(true, Ordering::Relaxed);
+        ReplayGuard(&self.replaying)
+    }
+
+    /// The inode of an open handle.
+    pub(crate) fn ino_of_fh(&self, fh: u64) -> Option<u64> {
+        self.open_files.lock().unwrap().get(&fh).map(|s| s.ino)
+    }
+
     pub fn commit_gate(&self) -> Arc<RwLock<()>> {
         Arc::clone(&self.commit_gate)
     }
@@ -241,8 +267,23 @@ pub fn pair_to_system_time(sec: i64, nsec: u32) -> SystemTime {
 }
 
 /// Current time as `(seconds, nanoseconds)`.
+/// Now, or the frozen time of the current logged request (see `oplog::Clock`).
 fn now_pair() -> (i64, u32) {
+    crate::oplog::frozen_now().unwrap_or_else(|| system_time_to_pair(SystemTime::now()))
+}
+
+/// The real current time (not frozen).
+pub(crate) fn system_now() -> (i64, u32) {
     system_time_to_pair(SystemTime::now())
+}
+
+/// Logging is back on when this is dropped (see `SliceFsFilesystem::replay_guard`).
+pub(crate) struct ReplayGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for ReplayGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
 }
 
 /// Convert an [`InodeMeta`] to a fuser [`FileAttr`].
@@ -460,7 +501,7 @@ impl SliceFsFilesystem {
             let d256 = state.end(&mut fsa);
             file_roots.push(fsa.end(&d256));
         }
-        let committed = self.meta.commit().map_err(|e| e.to_string()).and_then(|root| {
+        let committed = self.commit_cut().map_err(|e| e.to_string()).and_then(|root| {
             self.meta.flush_wal().map_err(|e| e.to_string())?;
             Ok(root)
         });
@@ -841,11 +882,9 @@ impl SliceFsFilesystem {
         // Update inode size and mtime
         let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
         inode.size = byte_count;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO);
-        inode.mtime_sec = now.as_secs() as i64;
-        inode.mtime_nsec = now.subsec_nanos();
+        let (now_sec, now_nsec) = now_pair();
+        inode.mtime_sec = now_sec;
+        inode.mtime_nsec = now_nsec;
         inode.ctime_sec = inode.mtime_sec;
         inode.ctime_nsec = inode.mtime_nsec;
         self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
@@ -962,6 +1001,28 @@ impl SliceFsFilesystem {
     /// If `fh` is not in `open_files` (read-only handle or invalid), returns Ok
     /// without error — fsync is a no-op for read-only handles.
     fn flush_buffer_for_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
+        self.flush_handle(ino, fh, false)
+    }
+
+    /// Commit with a clean cut of the write log (#20): first write the content
+    /// of each open write handle into its manifest (Buffered handles too), so
+    /// that the root holds every request logged before the commit. The caller
+    /// holds the commit gate exclusively (no request is in flight).
+    pub fn commit_cut(&self) -> Result<Digest224, MetaError> {
+        let handles: Vec<(u64, u64)> = self.open_files.lock().unwrap()
+            .iter().map(|(&fh, s)| (s.ino, fh)).collect();
+        for (ino, fh) in handles {
+            if let Err(e) = self.flush_handle(ino, fh, true) {
+                return Err(MetaError::Corrupted(format!("cut: flush of open file {ino} failed: errno {e}")));
+            }
+        }
+        self.meta.commit()
+    }
+
+    /// Write the content of handle `fh` into the manifest of `ino`. Buffered
+    /// handles are hashed in full only when `include_buffered` (a commit cut,
+    /// not each fsync: #3).
+    fn flush_handle(&self, ino: u64, fh: u64, include_buffered: bool) -> Result<(), i32> {
         self.settle_pending(fh);
         // 1. Clone state/buf snapshot under open_files lock
         enum FsyncSnapshot {
@@ -982,7 +1043,7 @@ impl SliceFsFilesystem {
                         // (NFS sends a COMMIT per group of writes; skip the re-hash.)
                         return Ok(());
                     }
-                    if matches!(s.write_mode, WriteMode::Buffered { .. }) {
+                    if !include_buffered && matches!(s.write_mode, WriteMode::Buffered { .. }) {
                         // Hashing a Buffered file means hashing all of it again
                         // (O(n) per fsync, #3). The manifest it would give is not
                         // durable either: metadata reaches disk only at commit
@@ -1042,11 +1103,9 @@ impl SliceFsFilesystem {
         // 6. Update inode size and mtime
         let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
         inode.size = byte_count;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO);
-        inode.mtime_sec = now.as_secs() as i64;
-        inode.mtime_nsec = now.subsec_nanos();
+        let (now_sec, now_nsec) = now_pair();
+        inode.mtime_sec = now_sec;
+        inode.mtime_nsec = now_nsec;
         inode.ctime_sec = inode.mtime_sec;
         inode.ctime_nsec = inode.mtime_nsec;
         self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
@@ -1257,11 +1316,9 @@ impl SliceFsFilesystem {
     pub fn test_setattr_mode(&self, ino: u64, mode: u32) -> Result<(), i32> {
         let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
         inode.mode = (inode.mode & S_IFMT) | (mode & 0o7777);
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO);
-        inode.ctime_sec = now.as_secs() as i64;
-        inode.ctime_nsec = now.subsec_nanos();
+        let (now_sec, now_nsec) = now_pair();
+        inode.ctime_sec = now_sec;
+        inode.ctime_nsec = now_nsec;
         self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
         Ok(())
     }
@@ -1280,11 +1337,9 @@ impl SliceFsFilesystem {
         if let Some(g) = gid {
             inode.gid = g;
         }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO);
-        inode.ctime_sec = now.as_secs() as i64;
-        inode.ctime_nsec = now.subsec_nanos();
+        let (now_sec, now_nsec) = now_pair();
+        inode.ctime_sec = now_sec;
+        inode.ctime_nsec = now_nsec;
         self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
         Ok(())
     }
@@ -1294,11 +1349,9 @@ impl SliceFsFilesystem {
         let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
         inode.mtime_sec = mtime_sec;
         inode.mtime_nsec = mtime_nsec;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO);
-        inode.ctime_sec = now.as_secs() as i64;
-        inode.ctime_nsec = now.subsec_nanos();
+        let (now_sec, now_nsec) = now_pair();
+        inode.ctime_sec = now_sec;
+        inode.ctime_nsec = now_nsec;
         self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
         Ok(())
     }
@@ -1541,11 +1594,9 @@ impl SliceFsFilesystem {
 
         // Increment nlinks and update ctime
         inode.nlinks += 1;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO);
-        inode.ctime_sec = now.as_secs() as i64;
-        inode.ctime_nsec = now.subsec_nanos();
+        let (now_sec, now_nsec) = now_pair();
+        inode.ctime_sec = now_sec;
+        inode.ctime_nsec = now_nsec;
         self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
         self.touch_dir(newparent_ino)?;
 
@@ -1651,11 +1702,9 @@ impl SliceFsFilesystem {
 
         // Update ctime on moved inode
         let mut src_inode = self.meta.get_inode(src_ino).map_err(|e| meta_error_to_errno(&e))?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO);
-        src_inode.ctime_sec = now.as_secs() as i64;
-        src_inode.ctime_nsec = now.subsec_nanos();
+        let (now_sec, now_nsec) = now_pair();
+        src_inode.ctime_sec = now_sec;
+        src_inode.ctime_nsec = now_nsec;
         self.meta.update_inode(&src_inode).map_err(|e| meta_error_to_errno(&e))?;
 
         Ok(())
@@ -1906,11 +1955,9 @@ impl SliceFsFilesystem {
         }
 
         // Always update ctime
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO);
-        inode.ctime_sec = now.as_secs() as i64;
-        inode.ctime_nsec = now.subsec_nanos();
+        let (now_sec, now_nsec) = now_pair();
+        inode.ctime_sec = now_sec;
+        inode.ctime_nsec = now_nsec;
 
         self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
         Ok(inode)

@@ -538,6 +538,25 @@ pub fn run_mount(
         Some(store_path.to_path_buf()),
     );
     fs.set_auto_snapshot(auto_snapshot);
+
+    // Replay the write log (#20): requests after the last root, made durable
+    // by fsync before a crash. Then commit, which cuts the log. Not on a
+    // snapshot mount (read-only; the log stays for the next normal mount).
+    if snapshot_ref.is_none() {
+        let (_, _, pending) = metadata::segment::load_store_with_log(&store_path.join("segments"))
+            .map_err(|e| format!("failed to read the write log: {}", e))?;
+        if !pending.is_empty() {
+            let stats = crate::oplog::replay(&fs, &pending)
+                .map_err(|e| format!("write log replay failed: {}", e))?;
+            slicefs_traits::metadata::MetadataStore::commit(fs.meta().as_ref())
+                .map_err(|e| format!("commit after replay failed: {}", e))?;
+            fs.meta().flush_wal().map_err(|e| format!("sync after replay failed: {}", e))?;
+            println!(
+                "Replayed {} request(s) from the write log ({} skipped).",
+                stats.applied, stats.skipped
+            );
+        }
+    }
     let fs = Arc::new(fs);
 
     // GC of the stored objects while mounted (#25). Not on a snapshot mount:
@@ -571,7 +590,7 @@ pub fn run_mount(
     let commit_shutdown = Arc::new(AtomicBool::new(false));
     let commit_handle = (commit_interval_secs > 0).then(|| {
         crate::commit_timer::spawn_commit_timer(
-            Arc::downgrade(fs.meta()),
+            Arc::downgrade(&fs),
             fs.commit_gate(),
             Duration::from_secs(commit_interval_secs),
             Arc::clone(&commit_shutdown),

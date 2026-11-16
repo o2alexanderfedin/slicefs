@@ -63,14 +63,33 @@ if mnt $R/s5 $R/m5 --commit-interval 1; then   # session 2: kill -9 the daemon i
   if mnt $R/s5 $R/m5; then ok "remount after crash"
     step committed-intact 30 cmp $R/committed.bin $R/m5/committed.bin
     step seeded-intact 10 diff $R/src/random.bin $R/m5/random.bin
-    # The commit timer (--commit-interval 1, #18) committed synced.bin: it was
-    # closed ~3 s before the crash. fsync alone does not commit yet (#20).
+    # synced.bin was written with fsync before the crash: the write log (#20)
+    # or the commit timer keeps it.
     step closed-file-survives-crash 30 cmp $R/synced.bin $R/m5/synced.bin
     step partial-consistent 60 bash -c "[ ! -e $R/m5/partial.bin ] || [ \$(stat -c %s $R/m5/partial.bin) -eq \$(cat $R/m5/partial.bin | wc -c) ]"
     echo "    partial.bin after crash: $( [ -e $R/m5/partial.bin ] && stat -c '%s bytes' $R/m5/partial.bin || echo absent)"
     step write-after-crash 10 bash -c "echo again > $R/m5/new.txt && [ \"\$(cat $R/m5/new.txt)\" = again ]"
     umnt $R/m5
     step scrub 120 $B scrub $R/s5
+  fi
+fi
+
+echo "== Phase 05b: fsync is durable without a commit (write log, #20)"
+$B seed $R/s5b $R/src >/dev/null 2>&1
+if mnt $R/s5b $R/m5b --commit-interval 0; then   # no commit: only the write log can keep these
+  head -c 3000000 /dev/urandom > $R/a.bin; head -c 500000 /dev/urandom > $R/c.bin
+  dd if=$R/a.bin of=$R/m5b/a.bin bs=64k conv=fsync status=none
+  mkdir $R/m5b/dir && mv $R/m5b/a.bin $R/m5b/dir/moved.bin
+  dd if=$R/c.bin of=$R/m5b/c.bin bs=64k conv=fsync status=none   # its fsync syncs the rename too
+  kill -9 $MP; sleep 0.5
+  fusermount -uz $R/m5b 2>/dev/null || umount -l $R/m5b 2>/dev/null
+  if mnt $R/s5b $R/m5b; then ok "remount after crash (replay)"
+    grep -h "Replayed" $R/mount.log | tail -1 | sed 's/^/    /'
+    step fsynced-file-survives 30 cmp $R/c.bin $R/m5b/c.bin
+    step renamed-file-survives 30 cmp $R/a.bin $R/m5b/dir/moved.bin
+    step old-name-gone 5 bash -c "[ ! -e $R/m5b/a.bin ]"
+    umnt $R/m5b
+    step scrub-after-replay 120 $B scrub $R/s5b
   fi
 fi
 
