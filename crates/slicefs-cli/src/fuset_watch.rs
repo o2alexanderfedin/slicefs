@@ -55,23 +55,37 @@ fn go_nfsv4_children() -> Vec<i32> {
     }
 }
 
-/// Watch `mountpoint`; see the module docs. Ends when `shutdown` is set or
-/// after it ended the children once.
-pub fn spawn_unmount_watcher(mountpoint: &Path, shutdown: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+/// Watch `mountpoint`; see the module docs. Prints `on_mounted` when the mount
+/// first appears. Ends when `shutdown` is set or after it ended the children
+/// once. Returns true if the mount appeared at all: a FUSE-T session can start
+/// and end without a volume (for example a backend that cannot mount).
+pub fn spawn_unmount_watcher(
+    mountpoint: &Path,
+    on_mounted: String,
+    shutdown: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<bool> {
     // The kernel mount table holds the resolved path (/tmp -> /private/tmp).
     let path: PathBuf = std::fs::canonicalize(mountpoint).unwrap_or_else(|_| mountpoint.to_path_buf());
     std::thread::Builder::new()
         .name("slicefs-unmount-watch".into())
         .spawn(move || {
             let mut seen = false;
-            while !shutdown.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(500));
+            loop {
+                let stop = shutdown.load(Ordering::SeqCst);
                 let mounted = is_mounted(&path);
+                if mounted && !seen {
+                    println!("{on_mounted}");
+                }
+                seen |= mounted;
+                if stop {
+                    return seen;
+                }
                 if mounted {
-                    seen = true;
+                    std::thread::sleep(Duration::from_millis(500));
                     continue;
                 }
                 if !seen {
+                    std::thread::sleep(Duration::from_millis(100));
                     continue; // not mounted yet
                 }
                 for pid in go_nfsv4_children() {
@@ -79,7 +93,7 @@ pub fn spawn_unmount_watcher(mountpoint: &Path, shutdown: Arc<AtomicBool>) -> st
                     // SAFETY: plain kill(2) on our own child.
                     unsafe { libc::kill(pid, libc::SIGKILL) };
                 }
-                return;
+                return true;
             }
         })
         .expect("spawn unmount watcher")
