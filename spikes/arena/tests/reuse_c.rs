@@ -431,3 +431,25 @@ fn records_are_padded_to_the_granule() {
         assert_eq!((s.loc(id).unwrap().off - HEADER_PAGE) % 512, 0);
     }
 }
+
+#[test]
+fn max_dirty_keeps_arenas_dirty_and_a_crash_still_recovers_them() {
+    let d = tempfile::tempdir().unwrap();
+    let mut o = opts(AllocKind::ArenaBest, 64);
+    o.reuse.as_mut().unwrap().max_dirty = 3;
+    let s = ReuseStore::open(d.path(), o).unwrap();
+    let mut all = put_n(&s, 0, 400);
+    s.close().unwrap();
+    for round in 0..5u64 {
+        let live: HashSet<ObjectId> = all.iter().skip(round as usize % 3).step_by(3).map(|x| x.0).collect();
+        all.retain(|x| live.contains(&x.0));
+        gc(&s, &live);
+        all.extend(put_n(&s, 10_000 * (round + 1), 150));
+        s.sync().unwrap();
+        let (dirty, _) = s.dirty_info();
+        assert!(dirty <= 4, "dirty list has {dirty} arenas");
+    }
+    drop(s); // crash
+    let s = ReuseStore::open(d.path(), o).unwrap();
+    check_all(&s, &all);
+}

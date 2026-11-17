@@ -5,6 +5,7 @@
 //! `run_one`.
 
 pub mod a;
+pub mod c;
 
 use crate::file_fork::ObjStore;
 use crate::{Options, Prealloc, SpikeStore};
@@ -64,6 +65,9 @@ pub fn open_store(variant: &str, dir: &Path, size: u64) -> Box<dyn ObjStore> {
         let o = chunk_store::Options { pack_limit: size, ..Default::default() };
         return Box::new(chunk_store::ChunkStore::open(dir, o).unwrap());
     }
+    if let Some(o) = reuse_opts(variant, size) {
+        return Box::new(crate::ReuseStore::open(dir, o).unwrap());
+    }
     Box::new(SpikeStore::open(dir, spike_opts(variant, size)).unwrap())
 }
 
@@ -78,6 +82,45 @@ pub fn spike_opts(variant: &str, size: u64) -> Options {
     o.arena.size = size;
     o.prepare_next = prep;
     o
+}
+
+/// Reuse-mode options (spike C): `C<k>` = reuse with allocator V<k> at
+/// granule 64 on V1 arenas, then any of: `g<G>` granule, `d<K>` keep up to
+/// K arenas dirty (`max_dirty`), `e` evacuation below 10 % live (always on
+/// for V3), `s` recovery scan skips holes (`SEEK_DATA`). E.g. `C4d4`.
+pub fn reuse_opts(variant: &str, size: u64) -> Option<Options> {
+    let rest = variant.strip_prefix('C')?;
+    let b = rest.as_bytes();
+    let kind = crate::AllocKind::parse(&format!("V{}", *b.first()? as char))?;
+    let mut cfg = crate::ReuseCfg { alloc: kind, ..Default::default() };
+    let mut g = 64u32;
+    let mut i = 1;
+    let num = |i: &mut usize| -> Option<u64> {
+        let st = *i;
+        while *i < b.len() && b[*i].is_ascii_digit() {
+            *i += 1;
+        }
+        rest[st..*i].parse().ok()
+    };
+    while i < b.len() {
+        let c = b[i];
+        i += 1;
+        match c {
+            b'g' => g = num(&mut i)? as u32,
+            b'd' => cfg.max_dirty = num(&mut i)? as usize,
+            b'e' => cfg.evacuate_below = Some(0.10),
+            b's' => cfg.seek_data = true,
+            _ => return None,
+        }
+    }
+    if kind == crate::AllocKind::Hybrid {
+        cfg.evacuate_below = Some(0.10);
+    }
+    let mut o = Options::with_prealloc(Prealloc::Sparse);
+    o.arena.size = size;
+    o.arena.granule = g;
+    o.reuse = Some(cfg);
+    Some(o)
 }
 
 /// The arena / pack files of a store directory.
@@ -96,7 +139,7 @@ pub fn data_files(dir: &Path) -> Vec<PathBuf> {
 
 /// Run one bench in this process. Returns false for an unknown bench.
 pub fn run_one(bench: &str, variant: &str, args: &Args) -> bool {
-    if a::run(bench, variant, args) {
+    if a::run(bench, variant, args) || c::run(bench, variant, args) {
         return true;
     }
     false

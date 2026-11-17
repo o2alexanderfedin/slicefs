@@ -14,7 +14,9 @@
 //! - `sync()` runs `full_sync` on every arena written since the last sync,
 //!   then the directory if it changed. Then it writes the checkpoints of the
 //!   dirty arenas the allocator has left since (so a commit pays for them,
-//!   not a put), and rewrites the dirty list once.
+//!   not a put), and rewrites the dirty list once. With `max_dirty = K > 0`
+//!   (not in the plan; measured as a variant) left arenas are checkpointed
+//!   only while more than K arenas are dirty, lowest number first.
 //! - Checkpoints are also written at close (every arena) and after GC (every
 //!   arena that lost records).
 //!
@@ -530,7 +532,16 @@ impl ReuseStore {
     pub fn sync(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         self.sync_written(&mut inner)?;
-        let left: Vec<u64> = inner.left.iter().copied().filter(|&n| Some(n) != inner.target).collect();
+        let mut left: Vec<u64> = inner.left.iter().copied().filter(|&n| Some(n) != inner.target).collect();
+        // `max_dirty` > 0: leave up to that many arenas dirty (no checkpoint
+        // yet; open scans them). Arenas without a checkpoint count too.
+        let k = self.rc.max_dirty;
+        if k > 0 {
+            let dirty_now =
+                inner.dirty.len() + inner.left.iter().filter(|n| !inner.arenas.get(n).is_some_and(|a| a.ckpt)).count();
+            let over = dirty_now.saturating_sub(k);
+            left.truncate(over);
+        }
         if !left.is_empty() {
             self.checkpoint_all(&mut inner, &left)?;
         }
@@ -597,6 +608,21 @@ impl ReuseStore {
     pub fn dirty_info(&self) -> (usize, u64) {
         let i = self.inner.lock().unwrap();
         (i.dirty.len(), i.switches)
+    }
+
+    /// Bench hook (C-B3): put arena `n` into the dirty list, durably, as a
+    /// write into it would.
+    pub fn mark_dirty(&self, n: u64) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.dirty.insert(n) {
+            self.write_dirty(&mut inner)?;
+        }
+        Ok(())
+    }
+
+    /// Numbers of the arenas that are not own arenas.
+    pub fn arena_nums(&self) -> Vec<u64> {
+        self.inner.lock().unwrap().arenas.iter().filter(|(_, a)| !a.own).map(|(&n, _)| n).collect()
     }
 
     pub fn alloc_stats(&self, min: u64) -> alloc::AllocStats {

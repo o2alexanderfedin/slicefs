@@ -177,11 +177,14 @@ pub struct ReuseCfg {
     pub relax_during_gc: bool,
     /// Recovery scan skips holes of a sparse arena (`SEEK_DATA`).
     pub seek_data: bool,
+    /// 0 = checkpoint each arena the allocator left at the next sync (the
+    /// plan). K > 0 = keep up to K arenas dirty.
+    pub max_dirty: usize,
 }
 
 impl Default for ReuseCfg {
     fn default() -> Self {
-        ReuseCfg { alloc: AllocKind::NextFit, evacuate_below: None, relax_during_gc: false, seek_data: false }
+        ReuseCfg { alloc: AllocKind::NextFit, evacuate_below: None, relax_during_gc: false, seek_data: false, max_dirty: 0 }
     }
 }
 
