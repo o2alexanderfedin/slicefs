@@ -464,6 +464,9 @@ pub fn run_mount(
     // Pre-flight: reject if mountpoint is already in use.
     check_mountpoint_not_in_use(mountpoint)?;
 
+    // Pre-flight: refuse a store of an older format (file content in vt0/).
+    crate::content::check_format(store_path)?;
+
     // ── macOS: Backend selection ──────────────────────────────────────────────
     //
     // Detect FUSE-T version and select the best available backend before

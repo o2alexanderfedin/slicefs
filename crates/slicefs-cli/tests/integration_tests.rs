@@ -15,7 +15,6 @@
 //! All tests use `DictMetadataStore` and `SliceFsFilesystem` test_* helpers --
 //! no FUSE mount required.
 
-use blockset::file_storage_get;
 use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
@@ -56,8 +55,7 @@ fn read_content(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
     if manifest.is_empty() {
         return vec![];
     }
-    let mut io = fs.io().lock().unwrap();
-    file_storage_get(&mut *io, &manifest[0]).unwrap_or_default()
+    fs.read_content(&manifest[0]).unwrap_or_default()
 }
 
 /// Create a file with content via test_create + test_write + test_release.
@@ -141,28 +139,19 @@ fn test_seed_roundtrip_various_file_types() {
     let small_ino = store.lookup(1, "small.txt").unwrap();
     let small_manifest = store.get_manifest(small_ino).unwrap();
     assert!(!small_manifest.is_empty());
-    let small_content = {
-        let mut io_g = io.lock().unwrap();
-        file_storage_get(&mut *io_g, &small_manifest[0]).unwrap()
-    };
+    let small_content = slicefs_cli::content::get_all(&slicefs_cli::content::open_read_only(io.lock().unwrap().root()).unwrap(), &small_manifest[0]).unwrap();
     assert_eq!(small_content, b"hello world");
 
     // Verify large file content byte-for-byte
     let large_ino = store.lookup(1, "large.bin").unwrap();
     let large_manifest = store.get_manifest(large_ino).unwrap();
-    let large_readback = {
-        let mut io_g = io.lock().unwrap();
-        file_storage_get(&mut *io_g, &large_manifest[0]).unwrap()
-    };
+    let large_readback = slicefs_cli::content::get_all(&slicefs_cli::content::open_read_only(io.lock().unwrap().root()).unwrap(), &large_manifest[0]).unwrap();
     assert_eq!(large_readback, large_content, "large file must round-trip byte-for-byte");
 
     // Verify binary file
     let bin_ino = store.lookup(1, "binary.bin").unwrap();
     let bin_manifest = store.get_manifest(bin_ino).unwrap();
-    let bin_readback = {
-        let mut io_g = io.lock().unwrap();
-        file_storage_get(&mut *io_g, &bin_manifest[0]).unwrap()
-    };
+    let bin_readback = slicefs_cli::content::get_all(&slicefs_cli::content::open_read_only(io.lock().unwrap().root()).unwrap(), &bin_manifest[0]).unwrap();
     assert_eq!(bin_readback, binary_content, "binary file must round-trip");
 
     // Verify nested directory structure
@@ -172,20 +161,14 @@ fn test_seed_roundtrip_various_file_types() {
 
     let inner_ino = store.lookup(subdir_ino, "inner.txt").unwrap();
     let inner_manifest = store.get_manifest(inner_ino).unwrap();
-    let inner_readback = {
-        let mut io_g = io.lock().unwrap();
-        file_storage_get(&mut *io_g, &inner_manifest[0]).unwrap()
-    };
+    let inner_readback = slicefs_cli::content::get_all(&slicefs_cli::content::open_read_only(io.lock().unwrap().root()).unwrap(), &inner_manifest[0]).unwrap();
     assert_eq!(inner_readback, b"inner content");
 
     // Verify deeply nested file
     let nested_ino = store.lookup(subdir_ino, "nested").unwrap();
     let deep_ino = store.lookup(nested_ino, "deep.txt").unwrap();
     let deep_manifest = store.get_manifest(deep_ino).unwrap();
-    let deep_readback = {
-        let mut io_g = io.lock().unwrap();
-        file_storage_get(&mut *io_g, &deep_manifest[0]).unwrap()
-    };
+    let deep_readback = slicefs_cli::content::get_all(&slicefs_cli::content::open_read_only(io.lock().unwrap().root()).unwrap(), &deep_manifest[0]).unwrap();
     assert_eq!(deep_readback, b"deep content");
 }
 
@@ -777,10 +760,7 @@ fn test_snapshot_preserves_state_after_modifications() {
     let snap_store = DictMetadataStore::load_from_root(io, &snap.root).unwrap();
     let snap_ino = snap_store.lookup(1, "data.txt").unwrap();
     let snap_manifest = snap_store.get_manifest(snap_ino).unwrap();
-    let snap_content = {
-        let mut io_g = fs.io().lock().unwrap();
-        file_storage_get(&mut *io_g, &snap_manifest[0]).unwrap()
-    };
+    let snap_content = fs.read_content(&snap_manifest[0]).unwrap();
     assert_eq!(
         snap_content, b"snapshot version 1",
         "snapshot must preserve original content"

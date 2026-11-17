@@ -11,14 +11,16 @@
 //!    the GC (see `online_gc`) and waits for the outcome.
 //! 2. Loads the segment files to reconstruct the dictionary and last committed root.
 //! 3. Marks every stored object reachable from the current root and the
-//!    snapshot roots, and deletes the other objects in `vt0/` (#25).
+//!    snapshot roots: metadata objects in `vt0/`, file content in the chunk
+//!    store (`packs/`). Deletes the other objects in `vt0/`, and deletes or
+//!    compacts the packs (#25).
 //! 4. Compacts the segment files and prints statistics.
 //!
 //! On a mounted store, the mount's GC thread does the work.
 
 use std::path::Path;
 
-use metadata::gc::{collect_live_set, sweep, GarbageCollector};
+use metadata::gc::{collect_content_keys, collect_live_set, sweep, GarbageCollector};
 use metadata::segment::load_store_from_segments;
 use metadata::store_io::StoreIo;
 
@@ -38,6 +40,7 @@ pub fn run_gc(store_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         return if outcome.starts_with("ok") { Ok(()) } else { Err(outcome.into()) };
     }
 
+    crate::content::check_format(store_path)?;
     let segs_dir = store_path.join("segments");
 
     // Step 2: Load last committed root from segment files (no Dictionary needed).
@@ -57,11 +60,26 @@ pub fn run_gc(store_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut io = StoreIo::new(store_path);
     let live = collect_live_set(&mut io, &roots)
         .map_err(|e| format!("GC mark failed, nothing deleted: {}", e))?;
+    let cs = crate::content::open(store_path)?;
+    let mut ids = std::collections::HashSet::new();
+    let keys = collect_content_keys(&mut io, &roots)
+        .map_err(|e| format!("GC mark failed, nothing deleted: {}", e))?;
+    for k in keys {
+        let objs = chunk_store::file::file_objects(&cs, crate::content::to_id(&k))
+            .map_err(|e| format!("GC mark failed, nothing deleted: {}", e))?;
+        ids.extend(objs);
+    }
+    let boundary = cs.gc_begin()?;
+    let content = cs.gc_finish(&ids, boundary)
+        .map_err(|e| format!("GC of file content failed: {}", e))?;
+    cs.close()?;
     let swept = sweep(store_path, &live)
         .map_err(|e| format!("GC sweep failed: {}", e))?;
     println!(
         "GC objects: kept {}, removed {} ({} bytes)",
-        swept.objects_kept, swept.objects_removed, swept.bytes_removed
+        swept.objects_kept as u64 + content.kept_objects,
+        swept.objects_removed as u64 + content.removed_objects,
+        swept.bytes_removed + content.removed_bytes
     );
 
     let gc = GarbageCollector::new(segs_dir);

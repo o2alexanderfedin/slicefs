@@ -20,7 +20,6 @@
 //!  12. Write-after-fsync with new content
 //!  13. Directory xattr operations
 
-use blockset::file_storage_get;
 use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
@@ -60,8 +59,7 @@ fn read_content(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
     if manifest.is_empty() {
         return vec![];
     }
-    let mut io = fs.io().lock().unwrap();
-    file_storage_get(&mut *io, &manifest[0]).unwrap_or_default()
+    fs.read_content(&manifest[0]).unwrap_or_default()
 }
 
 /// Create a file with content via test_create + test_write + test_release.
@@ -826,10 +824,7 @@ fn test_snapshot_multiple_preserves_each_point_in_time() {
     let store1 = DictMetadataStore::load_from_root(io1, &snap1.root).unwrap();
     let snap1_ino = store1.lookup(1, "evolving.txt").unwrap();
     let snap1_manifest = store1.get_manifest(snap1_ino).unwrap();
-    let snap1_content = {
-        let mut io_g = fs.io().lock().unwrap();
-        file_storage_get(&mut *io_g, &snap1_manifest[0]).unwrap()
-    };
+    let snap1_content = fs.read_content(&snap1_manifest[0]).unwrap();
     assert_eq!(snap1_content, b"state_v1", "snapshot v1 must preserve v1 state");
 
     // Verify snapshot v2
@@ -837,10 +832,7 @@ fn test_snapshot_multiple_preserves_each_point_in_time() {
     let store2 = DictMetadataStore::load_from_root(io2, &snap2.root).unwrap();
     let snap2_ino = store2.lookup(1, "evolving.txt").unwrap();
     let snap2_manifest = store2.get_manifest(snap2_ino).unwrap();
-    let snap2_content = {
-        let mut io_g = fs.io().lock().unwrap();
-        file_storage_get(&mut *io_g, &snap2_manifest[0]).unwrap()
-    };
+    let snap2_content = fs.read_content(&snap2_manifest[0]).unwrap();
     assert_eq!(snap2_content, b"state_v2", "snapshot v2 must preserve v2 state");
 }
 
@@ -883,10 +875,7 @@ fn test_snapshot_preserves_directory_structure() {
     let snap_sub = snap_store.lookup(1, "snapdir").unwrap();
     let snap_inner = snap_store.lookup(snap_sub, "inner.txt").unwrap();
     let snap_manifest = snap_store.get_manifest(snap_inner).unwrap();
-    let content = {
-        let mut io_g = fs.io().lock().unwrap();
-        file_storage_get(&mut *io_g, &snap_manifest[0]).unwrap()
-    };
+    let content = fs.read_content(&snap_manifest[0]).unwrap();
     assert_eq!(content, b"inner data");
 }
 
@@ -1308,10 +1297,7 @@ fn test_crash_recovery_directory_structure_survives() {
     let sub_ino = rebuilt.lookup(1, "persist_dir").unwrap();
     let file_ino = rebuilt.lookup(sub_ino, "persist_file.txt").unwrap();
     let manifest = rebuilt.get_manifest(file_ino).unwrap();
-    let content = {
-        let mut io_g = io.lock().unwrap();
-        file_storage_get(&mut *io_g, &manifest[0]).unwrap()
-    };
+    let content = slicefs_cli::content::get_all(&slicefs_cli::content::open_read_only(io.lock().unwrap().root()).unwrap(), &manifest[0]).unwrap();
     assert_eq!(content, b"durable");
 }
 

@@ -21,8 +21,10 @@ use crate::store_io::StoreIo;
 
 use crate::segment::compaction::{compact_segment, SegmentError};
 
-/// Store path (`vt0/...`) of every object reachable from `roots` (committed
-/// roots: the current one and each snapshot). This is the GC mark phase.
+/// Store path (`vt0/...`) of every metadata object reachable from `roots`
+/// (committed roots: the current one and each snapshot). This is the GC mark
+/// phase of `vt0/`; file content is in the chunk store (see
+/// [`collect_content_keys`]).
 ///
 /// Fails if a reachable object is missing: then the caller must not sweep,
 /// because the live set is not complete.
@@ -32,12 +34,22 @@ pub fn collect_live_set(io: &mut impl Io, roots: &[Digest224]) -> Result<HashSet
     Ok(live)
 }
 
-/// Mark from metadata roots (root records) and file roots (open handles).
+/// The file content keys (chunk store) of `roots`: the GC roots of the chunk
+/// store.
+pub fn collect_content_keys(io: &mut impl Io, roots: &[Digest224]) -> Result<Vec<Digest224>, MetaError> {
+    let mut keys = Vec::new();
+    for root in roots {
+        keys.extend(crate::store::content_keys(io, root)?);
+    }
+    Ok(keys)
+}
+
+/// Mark the metadata objects of `meta_roots` (root records).
 /// Returns `Ok(false)` if `stop` was set before the mark completed.
 fn mark_into(
     io: &mut impl Io,
     meta_roots: &[Digest224],
-    file_roots: &[Digest224],
+    _file_roots: &[Digest224],
     live: &mut HashSet<String>,
     stop: &AtomicBool,
 ) -> Result<bool, MetaError> {
@@ -48,7 +60,6 @@ fn mark_into(
         }
         objects.extend(referenced_roots(io, root)?);
     }
-    objects.extend_from_slice(file_roots);
     for object in objects {
         if stop.load(Ordering::Relaxed) {
             return Ok(false);
@@ -148,7 +159,6 @@ impl Io for PathIo {
 fn mark_parallel(
     store: &Path,
     meta_roots: &[Digest224],
-    file_roots: &[Digest224],
     threads: usize,
     stop: &AtomicBool,
 ) -> Result<Option<HashSet<String>>, MetaError> {
@@ -160,7 +170,6 @@ fn mark_parallel(
         }
         objects.extend(referenced_roots(&mut io, root)?);
     }
-    objects.extend_from_slice(file_roots);
     let threads = threads.clamp(1, objects.len().max(1));
     let results: Vec<Result<Option<HashSet<String>>, MetaError>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
@@ -237,10 +246,20 @@ impl OnlineGc {
         self
     }
 
-    /// The mark phase. `Ok(None)` if `stop` was set first.
+    /// The mark phase of the metadata objects (`vt0/`). `Ok(None)` if `stop`
+    /// was set first.
     pub fn mark(&self, stop: &AtomicBool) -> Result<Option<HashSet<String>>, MetaError> {
         let store = self.io.lock().unwrap().root().to_path_buf();
-        mark_parallel(&store, &self.meta_roots, &self.file_roots, self.threads, stop)
+        mark_parallel(&store, &self.meta_roots, self.threads, stop)
+    }
+
+    /// The roots of the file content (chunk store): the keys of the open
+    /// write handles and of every manifest under the metadata roots.
+    pub fn content_keys(&self) -> Result<Vec<Digest224>, MetaError> {
+        let store = self.io.lock().unwrap().root().to_path_buf();
+        let mut keys = self.file_roots.clone();
+        keys.extend(collect_content_keys(&mut PathIo(store), &self.meta_roots)?);
+        Ok(keys)
     }
 
     /// The sweep phase. Stops early (with partial stats) if `stop` is set.

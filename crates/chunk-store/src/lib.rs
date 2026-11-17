@@ -71,11 +71,15 @@ pub struct Options {
     pub pack_limit: u64,
     /// zstd level; 0 = no compression.
     pub zstd_level: i32,
+    /// Open without changes on disk: no cut of the active pack, no index
+    /// writes, and `put` fails. For tools that read a store that a mount may
+    /// write at the same time.
+    pub read_only: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { pack_limit: 64 << 20, zstd_level: 3 }
+        Options { pack_limit: 64 << 20, zstd_level: 3, read_only: false }
     }
 }
 
@@ -305,7 +309,13 @@ impl ChunkStore {
     /// its last valid record.
     pub fn open(dir: &Path, opts: Options) -> Result<Self> {
         let packs = dir.join("packs");
-        fs::create_dir_all(&packs)?;
+        if opts.read_only {
+            if !packs.is_dir() {
+                return Ok(ChunkStore { packs, opts, inner: Mutex::new(Inner::empty()) });
+            }
+        } else {
+            fs::create_dir_all(&packs)?;
+        }
         let mut nums: Vec<u64> = fs::read_dir(&packs)?
             .filter_map(|e| e.ok())
             .filter_map(|e| {
@@ -334,6 +344,13 @@ impl ChunkStore {
                 Some(e) => e,
                 None => {
                     let (entries, valid) = scan_pack(&pack, num)?;
+                    if opts.read_only {
+                        for (id, l) in entries {
+                            inner.add(id, l);
+                        }
+                        inner.stats.packs += 1;
+                        continue;
+                    }
                     if Some(num) == last {
                         // The newest pack without an index is the active pack.
                         let file = OpenOptions::new().read(true).write(true).open(&pack)?;
@@ -369,6 +386,9 @@ impl ChunkStore {
     /// Store `data` and return its ID. Bytes already in the store are not
     /// written again.
     pub fn put(&self, data: &[u8]) -> Result<ObjectId> {
+        if self.opts.read_only {
+            return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
+        }
         let id = ObjectId::of(data);
         {
             let mut inner = self.inner.lock().unwrap();
@@ -436,6 +456,11 @@ impl ChunkStore {
         }
         inner.touched = Some(HashSet::new());
         Ok(inner.next_pack - 1)
+    }
+
+    /// End a GC without deleting anything (for example after a failed mark).
+    pub fn gc_abort(&self) {
+        self.inner.lock().unwrap().touched = None;
     }
 
     /// End a GC: remove every object of the packs up to `boundary` that is
@@ -613,6 +638,18 @@ fn pack_header(num: u64) -> Vec<u8> {
 }
 
 impl Inner {
+    fn empty() -> Self {
+        Inner {
+            index: HashMap::new(),
+            readers: HashMap::new(),
+            active: None,
+            next_pack: 1,
+            stats: Stats::default(),
+            dir_dirty: false,
+            touched: None,
+        }
+    }
+
     fn touch(&mut self, id: ObjectId) {
         if let Some(t) = self.touched.as_mut() {
             t.insert(id);

@@ -19,29 +19,45 @@ pub type Content = Arc<ChunkStore>;
 pub const FORMAT_FILE: &str = "FORMAT";
 pub const FORMAT: &str = "slicefs-store 4 (file content in packs)\n";
 
-/// Refuse a store of an older format. A store with metadata but without the
-/// format marker was made by an older SliceFS (file content in `vt0/`): the
-/// format changed without a migration. A new (empty) store passes. Call this
-/// before the store is opened (mount, gc, stats, scrub).
+/// Refuse a store of an older format (file content in `vt0/`), whose format
+/// changed without a migration. A store passes if it has the format marker,
+/// or if every file content key of its current root is in the chunk store
+/// (a new store, or one made by code that writes no marker, as in tests).
+/// Call this before the store is opened (mount, gc, stats, scrub).
 pub fn check_format(store: &Path) -> std::io::Result<()> {
     match std::fs::read_to_string(store.join(FORMAT_FILE)) {
-        Ok(s) if s == FORMAT => Ok(()),
-        Ok(s) => Err(std::io::Error::other(format!(
-            "{}: unknown store format {:?}",
-            store.display(),
-            s.trim()
-        ))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && has_old_content(store) => {
-            Err(std::io::Error::other(format!(
-                "{} was made by an older SliceFS (file content in vt0/). The store \
-                 format changed without a migration: copy the files out with the \
-                 older version, then into a new store",
-                store.display()
+        Ok(s) if s == FORMAT => return Ok(()),
+        Ok(s) => {
+            return Err(std::io::Error::other(format!(
+                "{}: unknown store format {:?}",
+                store.display(),
+                s.trim()
             )))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
+    let segs = store.join("segments");
+    if !segs.is_dir() {
+        return Ok(());
+    }
+    let Ok((Some(root), _)) = metadata::segment::load_store_from_segments(&segs) else {
+        return Ok(()); // nothing committed (or a damaged log: later steps report it)
+    };
+    let mut io = metadata::store_io::StoreIo::new(store);
+    let Ok(keys) = metadata::gc::collect_content_keys(&mut io, &[root]) else {
+        return Ok(());
+    };
+    let cs = open_read_only(store)?;
+    if keys.iter().any(|k| !cs.contains(&to_id(k))) {
+        return Err(std::io::Error::other(format!(
+            "{} was made by an older SliceFS (file content in vt0/). The store \
+             format changed without a migration: copy the files out with the \
+             older version, then into a new store",
+            store.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Open the content store of `store` (creating it and the format marker if
@@ -56,9 +72,13 @@ pub fn open(store: &Path) -> std::io::Result<Content> {
     Ok(Arc::new(cs))
 }
 
-/// True if `store` has committed metadata but no format marker.
-fn has_old_content(store: &Path) -> bool {
-    std::fs::read_dir(store.join("segments")).is_ok_and(|mut d| d.next().is_some())
+
+/// Open the content store of `store` for reading only: nothing on disk
+/// changes, also while a mount writes to it (for `scrub`).
+pub fn open_read_only(store: &Path) -> std::io::Result<Content> {
+    let opts = Options { read_only: true, ..Options::default() };
+    let cs = ChunkStore::open(store, opts).map_err(std::io::Error::other)?;
+    Ok(Arc::new(cs))
 }
 
 /// `ObjectId` as the `Digest224` that the metadata stores (7 words, LE).
@@ -150,6 +170,23 @@ impl Reader {
 mod tests {
     use super::*;
 
+    /// A committed store whose file content key is not in the chunk store
+    /// (as with content in vt0/).
+    fn make_old_store(dir: &Path) {
+        use metadata::store::DictMetadataStore;
+        use slicefs_traits::metadata::{InodeMeta, MetadataStore};
+        std::fs::create_dir_all(dir.join("segments")).unwrap();
+        let wal = metadata::wal::create_wal(metadata::wal::WalConfig::PerOp, dir, 1).unwrap();
+        let io = Arc::new(std::sync::Mutex::new(metadata::store_io::StoreIo::new(dir)));
+        let mut meta = DictMetadataStore::new(io);
+        meta.set_wal(wal);
+        let ino = meta.create_inode(&InodeMeta::new_file(0, 0, 0, 0o100644)).unwrap();
+        meta.link(1, "f", ino).unwrap();
+        meta.set_manifest(ino, &[[1, 2, 3, 4, 5, 6, 7]]).unwrap();
+        meta.commit().unwrap();
+        meta.shutdown_wal().unwrap();
+    }
+
     #[test]
     fn digest_and_id_convert_both_ways() {
         let id = ObjectId::of(b"abc");
@@ -168,8 +205,7 @@ mod tests {
         assert!(check_format(tempfile::TempDir::new().unwrap().path()).is_ok(), "an empty store passes");
 
         let old = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir_all(old.path().join("segments")).unwrap();
-        std::fs::write(old.path().join("segments/0000000001.seg"), b"x").unwrap();
+        make_old_store(old.path());
         let err = check_format(old.path()).err().unwrap().to_string();
         assert!(err.contains("older SliceFS"), "{err}");
     }

@@ -100,6 +100,9 @@ const S_IFDIR: u32 = 0o0040_000;
 ///   5. `manifest_data`
 ///   6. `xattr_data`
 ///   7. `refcounts`
+/// A sync run before a root is logged (see `DictMetadataStore::set_pre_root_sync`).
+pub type PreRootSync = Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>;
+
 pub struct DictMetadataStore {
     /// File-backed Io implementation — used for all FileStorageAdd/file_storage_get calls.
     io: Arc<Mutex<StoreIo>>,
@@ -127,6 +130,9 @@ pub struct DictMetadataStore {
     manifest_data: Mutex<BTreeMap<u64, Digest224>>,
     /// Maps inode number → xattr set `Digest224` (only for inodes with xattrs).
     xattr_data: Mutex<BTreeMap<u64, Digest224>>,
+    /// Called in `commit()` after the metadata objects are synced and before
+    /// the root is logged: makes the file content (chunk store) durable.
+    pre_root_sync: Mutex<Option<PreRootSync>>,
     /// Reference counts for content `Digest224`s.
     /// Incremented when a manifest references a block; decremented on manifest replacement or inode deletion.
     refcounts: Mutex<BTreeMap<Digest224, u64>>,
@@ -203,6 +209,7 @@ impl DictMetadataStore {
             committed_changes: AtomicU64::new(0),
             manifest_data: Mutex::new(BTreeMap::new()),
             xattr_data: Mutex::new(BTreeMap::new()),
+            pre_root_sync: Mutex::new(None),
             refcounts: Mutex::new(BTreeMap::new()),
             logical_bytes: AtomicU64::new(0),
             inode_count: AtomicU64::new(1),
@@ -311,6 +318,12 @@ impl DictMetadataStore {
     /// Replaces any previously set WAL (the old one is dropped; not flushed).
     pub fn set_wal(&mut self, wal: Box<dyn WalStrategy>) {
         *self.wal.lock().unwrap() = Some(wal);
+    }
+
+    /// Set the sync that `commit()` runs before it logs a root (see
+    /// `pre_root_sync`).
+    pub fn set_pre_root_sync(&self, f: PreRootSync) {
+        *self.pre_root_sync.lock().unwrap() = Some(f);
     }
 
     /// Flush all buffered WAL mutations to disk and call sync_all.
@@ -964,6 +977,10 @@ impl MetadataStore for DictMetadataStore {
         io_guard.sync_written().map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
         // Drop io_guard to release the lock before WAL logging
         drop(io_guard);
+        // The file content that the root refers to must be durable too.
+        if let Some(f) = self.pre_root_sync.lock().unwrap().as_ref() {
+            f().map_err(|e| MetaError::Corrupted(format!("commit: content sync failed: {e}")))?;
+        }
 
         // Update last_root so background GC can use it
         *self.last_root.lock().unwrap() = Some(root_digest);
@@ -982,10 +999,26 @@ impl MetadataStore for DictMetadataStore {
 /// root record, its maps, each inode, directory list and xattr set, each file
 /// manifest, and each file root in the manifests. The GC mark phase (#25)
 /// walks the object tree of each of them.
+/// The metadata objects (in `vt0/`) that the root record `root` refers to:
+/// the record itself and its maps, the inode, directory and xattr nodes, and
+/// the manifest nodes. File content keys are not here; see [`content_keys`].
 pub fn referenced_roots(
     io: &mut impl blockset::Io,
     root: &Digest224,
 ) -> Result<Vec<Digest224>, MetaError> {
+    referenced(io, root).map(|(meta, _)| meta)
+}
+
+/// The file content keys (in the chunk store) that the root record `root`
+/// refers to: the entries of the manifests.
+pub fn content_keys(io: &mut impl blockset::Io, root: &Digest224) -> Result<Vec<Digest224>, MetaError> {
+    referenced(io, root).map(|(_, content)| content)
+}
+
+fn referenced(
+    io: &mut impl blockset::Io,
+    root: &Digest224,
+) -> Result<(Vec<Digest224>, Vec<Digest224>), MetaError> {
     let bytes = file_storage_get(io, root)
         .ok_or_else(|| MetaError::Corrupted(format!("missing root node {:?}", root)))?;
     if !matches!(bytes.len(), 156 | 184 | 200) {
@@ -1003,11 +1036,12 @@ pub fn referenced_roots(
     for map in [inodes, dirs, xattrs] {
         out.extend(load_u64_digest_map(io, &map)?.into_values());
     }
+    let mut content = Vec::new();
     for manifest in load_u64_digest_map(io, &manifests)?.into_values() {
         out.push(manifest);
-        out.extend(load_manifest(io, &manifest)?);
+        content.extend(load_manifest(io, &manifest)?);
     }
-    Ok(out)
+    Ok((out, content))
 }
 
 // ─── helpers for BTreeMap<u64, Digest224> serialization ─────────────────────
@@ -1166,6 +1200,7 @@ impl DictMetadataStore {
             committed_changes: AtomicU64::new(0),
             manifest_data: Mutex::new(manifest_data),
             xattr_data: Mutex::new(xattr_data),
+            pre_root_sync: Mutex::new(None),
             refcounts: Mutex::new(refcounts),
             logical_bytes: AtomicU64::new(initial_logical_bytes),
             inode_count: AtomicU64::new(initial_inode_count),
