@@ -469,7 +469,7 @@ fn cb3(variant: &str, a: &Args) {
         s.close().unwrap();
     }
     let build_s = t0.elapsed().as_secs_f64();
-    for k in [0usize, 1, 2, 8] {
+    for k in a.str("dirty_list", "0,1,2,8").split(',').map(|x| x.parse::<usize>().unwrap()) {
         {
             let s = ReuseStore::open(d.path(), o).unwrap();
             s.close().unwrap();

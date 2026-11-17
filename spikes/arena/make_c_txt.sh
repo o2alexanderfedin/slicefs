@@ -22,7 +22,7 @@ F=put_mb_s,put_cpu_s_per_gib,sync_ms_mean,sync_ms_p50,sync_ms_p99,commit_full_sy
   echo "== C-B2 =="
   for n in 1 2 4 8; do $S table results/c/cb2_n$n.jsonl --base full --fields sync_ms_p50,sync_ms_mean,sync_ms_p99,cpu_ms_per_sync; done
   echo "== C-B3 (reopen, warm cache; one line per reopen) =="
-  $S table results/c/cb3.jsonl --base C4 --fields wall_s,cpu_s,scanned,scan_mib,objects
+  $S table results/c/cb3.jsonl --base C4 --fields wall_s,cpu_s,scanned,scan_mib,objects; $S table results/c/cb3_45.jsonl --base C4 --fields wall_s,cpu_s,scanned,scan_mib,objects
   echo "== C-B5 (raw) =="
   cat results/c/cb5.jsonl
   echo

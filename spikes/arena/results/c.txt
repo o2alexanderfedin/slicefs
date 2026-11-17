@@ -46,12 +46,17 @@ Not run / limits
 - Power loss: not testable here. kill -9 only (page cache survives).
 - C-B3 cold cache: `purge` needs root; all reopens are warm-cache.
 - C-B5: `tmutil localsnapshot` worked without root; every snapshot was
-  deleted afterwards (`tmutil listlocalsnapshotdates /` lists none).
+  deleted afterwards (`tmutil listlocalsnapshotdates /` and `/System/Volumes/Data` list none).
   The free-space numbers are volume-wide, so other writers add noise
   (two C4 runs: 205 and 159 MiB).
 - C-B2 "fsync each + one F_FULLFSYNC" is measured only; the store never
   relies on it.
 - S3 (mmap under reuse) is not part of this spike.
+- relax_during_gc: built, never measured.
+- V3 (hybrid + evacuation) on disk: crash loop and tests only, not in
+  C-B1 (the simulator showed no gain and 3x the dirty arenas).
+- C-B3 kill -9 is simulated: mark_dirty + drop without close (the files
+  are as a kill leaves them); the real kill -9 runs are the crash loops.
 
 Noise
 - N from spike A (RS vs RS): 11-32 %. So 2N = 22-64 %, which is above every
@@ -71,11 +76,12 @@ C-sim (REDUCE 1 part), 1 GiB live, 10x churn, 64 MiB arenas:
 - Dirty arenas per 8 MiB commit <= 2: V1 1.89 / 1.68 (mean, corpus /
   synth) and V4 1.60 / 1.64 pass. V2 13.5 / 14.0 and V3 5.8 / 5.4 fail.
 - Adversarial (object delete) not worse than compaction, peak space at
-  85 %: V1 1.625 vs CMP 1.579 on the corpus (3 % worse: FAIL), 1.512 vs
-  1.564 synthetic. V4 1.250 vs 1.579 and 1.209 vs 1.564 (pass).
-- So the plan's rule picks no allocator of V1-V3 on the corpus trace.
-  V* = V4 (added here). V1 stays as the plan-grid allocator in every disk
-  table (C1).
+  85 %: V1 1.625 vs CMP 1.579 on the corpus (3 % worse, less than one
+  arena: the values move in steps of 1/16), 1.512 vs 1.564 synthetic. On
+  WA V1 wins by far (1.02 vs 1.78). The rule does not name its metric, so
+  V1 is a marginal pass at best. V4 1.250 vs 1.579 and 1.209 vs 1.564.
+- V* = V4 (added here; better on every metric). V1 stays the plan-grid
+  pick and is in every disk table (C1).
 - V3 evacuation is not needed: it copies 1-11 MiB per run, gives no space
   gain over V1, and has 3x the dirty arenas per commit.
 - The simulator agrees with the disk: compaction peak space 1.55 (sim) vs
@@ -83,37 +89,55 @@ C-sim (REDUCE 1 part), 1 GiB live, 10x churn, 64 MiB arenas:
   13-15 dirty arenas per commit (sim) vs 15.7 F_FULLFSYNC per commit (disk).
 
 Accept rules for C on disk (64 MiB arenas; fills 50/70/85/95 %):
-- WA <= 1.1: C1 1.02 / 1.03 / 1.05 / 1.15, C4d4 1.01 / 1.02 / 1.04 / 1.10.
-  Compaction (V1, RS): 1.34 / 1.40 / 1.63 / 1.61. Most of C's WA is
-  checkpoint rewrites (wa_idx up to 0.14 at 95 %).        C1 FAIL at 95 %
+- WA <= 1.1: C1 1.018 / 1.032 / 1.055 / 1.146, C4d4 1.013 / 1.023 /
+  1.037 / 1.0999. Compaction (V1, RS): 1.34 / 1.40 / 1.63 / 1.61. Most of
+  C's WA is checkpoint rewrites (wa_idx up to 0.14 at 95 %).
+                                C1 FAIL at 95 %; C4d4 at the limit at 95 %
 - Space amplification <= compaction at every fill (peak, amp_pre):
-  50 % 2.05 vs 2.04 (equal), 70 % 1.46 vs 1.80, 85 % 1.33 vs 1.56,
-  95 % 1.10 vs 1.45. Just after a GC at 50 % compaction is lower (1.25 vs
-  2.05): it frees whole arenas at once.              PASS (tie at 50 %)
-- Sync per commit within max(10 %, 2N) of A: mean sync() time vs V1:
-  C1 +54 / +92 / +128 / +286 %, C4d4 +24 / +50 / +39 / +44 %. The
-  deterministic count, F_FULLFSYNC per commit: V1 1.09-1.12, C1 1.71 /
-  2.30 / 2.50 / 4.49, C4d4 1.38 / 1.71 / 1.38 / 1.55. Each arena written
-  in a commit costs one F_FULLFSYNC (C-B2: 21 ms each, linear in N), and
-  RULE W / RULE C add dirty-list and checkpoint writes.            FAIL
+  50 % 2.05 vs V1 2.04 / RS 2.06 (0.4 % above V1, below RS), 70 % 1.46
+  vs 1.80, 85 % 1.33 vs 1.56, 95 % 1.10 vs 1.45. Just after a GC at 50 %
+  compaction is lower (1.25 vs 2.05): it frees whole arenas at once.
+                                   PASS at 70-95 %; a tie at 50 %
+- Sync per commit within max(10 %, 2N) of A. Timing (3 reps; RS vs V1 in
+  the same tables differ by up to 13 % in sync mean, spike A's N is
+  11-32 %, so the time rule alone is inconclusive by the plan): mean
+  sync() vs V1: C1 +54 / +92 / +128 / +286 %, C4d4 +24 / +50 / +39 /
+  +44 %. The decision rests on the deterministic count of F_FULLFSYNC per
+  commit, inside sync() + on the put path (RULE W dirty-list writes; for
+  V1 arena creation and seal), without GC:
+      V1   1.09+0.38 / 1.10+0.37 / 1.11+0.38 / 1.12+0.18  = ~1.3-1.5
+      C1   1.71+0.29 / 2.30+0.59 / 2.50+0.77 / 4.49+1.91  = 2.0-6.4
+      C4d4 1.38+0.17 / 1.71+0.47 / 1.38+0.63 / 1.55+1.56  = 1.6-3.1
+  At C-B2's 21 ms per F_FULLFSYNC (linear in the number of files) that is
+  +11 to +107 ms per commit for C1 and +2 to +38 ms for C4d4. Each
+  put-path sync is a stall of ~20-40 ms under the store mutex (as spike
+  A's boundary put).                                   FAIL (by count)
 - Put throughput within max(5 %, 2N) of A (wall and CPU): CPU per GiB is
   1-17 % lower for C at every fill. Wall MB/s: C1 +2 / -18 / -9 / -43 %,
   C4d4 +9 / -9 / +5 / -19 %. Inside the noise except C1 at 95 %.
-                                     C1 FAIL at 95 %, otherwise in noise
+                   C1 likely FAIL at 95 % (-43 %), otherwise inconclusive
 - Reopen after kill -9 <= 0.5 s: a 64 MiB arena scan costs about 0.105 s
   (warm cache, CPU-bound: CRC + zstd + BLAKE3): 1 dirty 0.13 s, 2 0.24 s,
-  8 0.84 s; clean close 0.03 s. SEEK_DATA changes nothing for full
-  arenas. Crash loop (1 MiB arenas): max reopen 6-20 ms.
-                                          PASS for <= 4 dirty arenas
+  4 0.51 s, 5 0.58 s, 8 0.84 s; clean close 0.03 s. SEEK_DATA changes
+  nothing for full arenas. "kill -9" here = mark_dirty + drop without
+  close (same files as a kill); warm cache. C1 (checkpoint at the next
+  sync) has 1-2 dirty arenas: PASS. C4d4 allows 4 listed + the target:
+  up to ~0.58 s: borderline FAIL. Crash loop (1 MiB arenas): max reopen
+  6-20 ms.
+- C-B4 sequential read after churn at 85 % vs a fresh store with the same
+  files: C1 452 vs 459 MB/s, C4 439 vs 434, C4d4 418 vs 454, V1 404 vs
+  393, RS 422 vs 416 (warm cache; all inside the noise). No measurable
+  fragmentation cost at this size.
 - GC: CPU 18-76 % lower than compaction (no copies), but wall time
   +36 % to +196 %: after each GC every arena that lost records gets a
   checkpoint (about 3 F_FULLFSYNC each).
 
-Verdict: reject reuse as the plan specifies it (C1 fails WA at 95 %, the
-sync rule at every fill, and throughput at 95 %). The best variant
-measured (C4d4) passes WA, space and reopen, and fails only the sync rule
-(+24-55 % F_FULLFSYNC per commit). Its gains are real: peak disk space
--18 to -25 % at 70-95 % fill, WA -25 to -36 %, GC CPU -60 to -75 %.
+Verdict: reject reuse as the plan specifies it (C1 fails WA at 95 % and
+the sync count at every fill; throughput at 95 % is likely worse). The
+best variant measured (C4d4) is at the WA limit at 95 %, borderline on
+reopen, and fails the sync count (5-140 % more F_FULLFSYNC per commit).
+Its gains are real: peak disk space -18 to -25 % at 70-95 % fill, WA -25
+to -36 %, GC CPU -60 to -75 %.
 
 == C-sim: registry corpus (results/c/sim_corpus.*) ==
 trace corpus:/Users/alexanderfedin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f: 9837 files, 17174 chunks, raw 95.8 MiB, stored 23.6 MiB, built in 1.8 s
@@ -665,6 +689,30 @@ load1 median 19.0 (min 17.8, max 19.4); delta vs C4
 | objects | 70272 [70272..70272] | 70272 [70272..70272] (+0.0%) |
 
 load1 median 18.9 (min 18.0, max 19.7); delta vs C4
+
+### cb3 dirty=4 arenas=9
+
+| metric | C4 (n=5) |
+|---|---|
+| wall_s | 0.5082 [0.4493..0.5793] |
+| cpu_s | 0.5012 [0.4463..0.5724] |
+| scanned | 4.00 [4.00..4.00] |
+| scan_mib | 271 [271..271] |
+| objects | 70272 [70272..70272] |
+
+load1 median 21.5 (min 21.5, max 21.5); delta vs C4
+
+### cb3 dirty=5 arenas=9
+
+| metric | C4 (n=5) |
+|---|---|
+| wall_s | 0.5769 [0.5336..0.6112] |
+| cpu_s | 0.5725 [0.5313..0.6079] |
+| scanned | 5.00 [5.00..5.00] |
+| scan_mib | 338 [338..338] |
+| objects | 70272 [70272..70272] |
+
+load1 median 21.4 (min 21.4, max 21.4); delta vs C4
 == C-B5 (raw) ==
 {"bench":"cb5","variant":"C4","git":"21ca9a6","load1":20.30908203125,"snapshot":"taken","tmutil":"NOTE: local snapshots are considered purgeable and may be removed at any time by deleted(8). Created local snapshot with date: 2026-11-16-194713","snapshot_date":"2026-11-16-194713","delete":"ok","user_raw_mib":267.1415367126465,"store_blocks_before_mib":206.44140625,"store_blocks_after_mib":257.15234375,"free_drop_during_churn_mib":159.3046875,"free_drop_total_mib":188.12109375,"free_back_after_delete_mib":135.640625}
 {"bench":"cb5","variant":"V1","git":"21ca9a6","load1":18.62060546875,"snapshot":"taken","tmutil":"NOTE: local snapshots are considered purgeable and may be removed at any time by deleted(8). Created local snapshot with date: 2026-11-16-194934","snapshot_date":"2026-11-16-194934","delete":"ok","user_raw_mib":267.1415367126465,"store_blocks_before_mib":205.6171875,"store_blocks_after_mib":264.87109375,"free_drop_during_churn_mib":265.40234375,"free_drop_total_mib":277.4296875,"free_back_after_delete_mib":205.14453125}

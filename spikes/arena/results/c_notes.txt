@@ -46,12 +46,17 @@ Not run / limits
 - Power loss: not testable here. kill -9 only (page cache survives).
 - C-B3 cold cache: `purge` needs root; all reopens are warm-cache.
 - C-B5: `tmutil localsnapshot` worked without root; every snapshot was
-  deleted afterwards (`tmutil listlocalsnapshotdates /` lists none).
+  deleted afterwards (`tmutil listlocalsnapshotdates /` and `/System/Volumes/Data` list none).
   The free-space numbers are volume-wide, so other writers add noise
   (two C4 runs: 205 and 159 MiB).
 - C-B2 "fsync each + one F_FULLFSYNC" is measured only; the store never
   relies on it.
 - S3 (mmap under reuse) is not part of this spike.
+- relax_during_gc: built, never measured.
+- V3 (hybrid + evacuation) on disk: crash loop and tests only, not in
+  C-B1 (the simulator showed no gain and 3x the dirty arenas).
+- C-B3 kill -9 is simulated: mark_dirty + drop without close (the files
+  are as a kill leaves them); the real kill -9 runs are the crash loops.
 
 Noise
 - N from spike A (RS vs RS): 11-32 %. So 2N = 22-64 %, which is above every
