@@ -23,6 +23,16 @@ use tempfile::TempDir;
 
 const MIB: u64 = 1 << 20;
 
+
+/// `ARENA_TEST_READ=mmap` runs the same tests with the mmap read path
+/// (spike B); default pread.
+fn read_mode() -> arena_spike::ReadMode {
+    match std::env::var("ARENA_TEST_READ").as_deref() {
+        Ok("mmap") => arena_spike::ReadMode::Mmap { advice: arena_spike::Advice::Default },
+        _ => arena_spike::ReadMode::Pread,
+    }
+}
+
 fn random(n: usize, seed: u64) -> Vec<u8> {
     let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     (0..n)
@@ -38,6 +48,7 @@ fn random(n: usize, seed: u64) -> Vec<u8> {
 /// Today's rules (as `chunk-store`), 1 MiB arenas.
 fn today(p: Prealloc) -> Options {
     let mut o = Options::with_prealloc(p);
+    o.read = read_mode();
     o.arena.size = MIB;
     o.gc_seal = SealRule::Always;
     o.close_seals = true;
@@ -47,6 +58,7 @@ fn today(p: Prealloc) -> Options {
 /// The new rules: seal at gc_begin only at size/8; close writes a resumable idx.
 fn new_rules(p: Prealloc) -> Options {
     let mut o = Options::with_prealloc(p);
+    o.read = read_mode();
     o.arena.size = MIB;
     o
 }

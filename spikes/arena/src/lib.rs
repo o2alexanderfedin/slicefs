@@ -30,6 +30,7 @@ pub mod arena;
 pub mod bench;
 pub mod codec;
 pub mod file_fork;
+pub mod map;
 pub mod measure;
 pub mod read;
 pub mod store;

@@ -28,6 +28,9 @@ pub trait ReadPath: Send + Sync {
     fn forget(&self, arena: u64);
 
     fn name(&self) -> &'static str;
+
+    /// For benches and tests that need the concrete path (spike B).
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// `with_record` of the plan: the bytes are valid only inside `f`.
@@ -42,7 +45,7 @@ pub fn with_record<R>(p: &dyn ReadPath, loc: &Loc, f: impl FnOnce(&[u8]) -> R) -
 pub fn make(dir: &Path, opts: &Options) -> io::Result<Box<dyn ReadPath>> {
     match (opts.read_only, opts.read) {
         (true, _) | (_, ReadMode::Pread) => Ok(Box::new(PreadPath::new(dir))),
-        (false, ReadMode::Mmap { .. }) => Err(io::Error::other("mmap read path is spike B (map.rs); not built in spike A")),
+        (false, ReadMode::Mmap { advice }) => Ok(Box::new(crate::map::MmapPath::new(dir, advice))),
     }
 }
 
@@ -85,5 +88,9 @@ impl ReadPath for PreadPath {
 
     fn name(&self) -> &'static str {
         "pread"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }

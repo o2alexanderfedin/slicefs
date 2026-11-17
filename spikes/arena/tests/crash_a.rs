@@ -13,6 +13,16 @@ use tempfile::TempDir;
 
 const MIB: u64 = 1 << 20;
 
+
+/// `ARENA_TEST_READ=mmap` runs the same tests with the mmap read path
+/// (spike B); default pread.
+fn read_mode() -> arena_spike::ReadMode {
+    match std::env::var("ARENA_TEST_READ").as_deref() {
+        Ok("mmap") => arena_spike::ReadMode::Mmap { advice: arena_spike::Advice::Default },
+        _ => arena_spike::ReadMode::Pread,
+    }
+}
+
 fn random(n: usize, seed: u64) -> Vec<u8> {
     let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     (0..n)
@@ -27,6 +37,7 @@ fn random(n: usize, seed: u64) -> Vec<u8> {
 
 fn opts(p: Prealloc) -> Options {
     let mut o = Options::with_prealloc(p);
+    o.read = read_mode();
     o.arena.size = MIB;
     o
 }
@@ -177,6 +188,7 @@ fn case5_a_crash_in_trim_on_seal_before_the_idx_is_accepted(p: Prealloc) {
     let data: Vec<_> = (0..10).map(|i| random(6000, 300 + i)).collect();
     let mut o = opts(p);
     o.arena.trim_on_seal = true;
+    o.read = arena_spike::ReadMode::Pread; // trim_on_seal is refused with mmap
     {
         let s = SpikeStore::open(dir.path(), o).unwrap();
         for d in &data {

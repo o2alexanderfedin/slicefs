@@ -19,6 +19,19 @@ fn main() {
                 std::process::exit(2);
             }
         }
+        Some("sigbus-child") => {
+            // tests/map_b.rs: map the file, say so, wait for the parent to
+            // cut it, then touch a page past the new end (expect SIGBUS).
+            let path = PathBuf::from(&argv[1]);
+            let len = std::fs::metadata(&path).unwrap().len();
+            let m = arena_spike::map::ArenaMap::open(&path, len, arena_spike::Advice::Default).unwrap();
+            println!("mapped");
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).unwrap();
+            let off = len * 3 / 4;
+            let v = m.read_byte(off).unwrap();
+            println!("no-sigbus {v}");
+        }
         Some("suite") => {
             let bench = argv[1].clone();
             let a = Args::parse(&argv[2..]);

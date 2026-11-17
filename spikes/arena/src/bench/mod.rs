@@ -5,6 +5,7 @@
 //! `run_one`.
 
 pub mod a;
+pub mod b;
 
 use crate::file_fork::ObjStore;
 use crate::{Options, Prealloc, SpikeStore};
@@ -60,23 +61,30 @@ pub fn run_dir() -> tempfile::TempDir {
 /// `V0`..`V3` = `SpikeStore` with that preallocation. `size` = pack limit /
 /// arena size.
 pub fn open_store(variant: &str, dir: &Path, size: u64) -> Box<dyn ObjStore> {
-    if variant == "RS" {
+    if variant.starts_with("RS") {
         let o = chunk_store::Options { pack_limit: size, ..Default::default() };
         return Box::new(chunk_store::ChunkStore::open(dir, o).unwrap());
     }
     Box::new(SpikeStore::open(dir, spike_opts(variant, size)).unwrap())
 }
 
-/// `V0`..`V3`; a trailing `P` (e.g. `V1P`) turns on `prepare_next`.
+/// `V0`..`V3`, then flags: `P` (e.g. `V1P`) turns on `prepare_next`; `M`
+/// reads through mmap (advice Default), `R` through mmap with MADV_RANDOM
+/// (spike B). Other trailing letters are labels only (e.g. `V1b` for an
+/// A/A noise run).
 pub fn spike_opts(variant: &str, size: u64) -> Options {
-    let (base, prep) = match variant.strip_suffix('P') {
-        Some(b) => (b, true),
-        None => (variant, false),
-    };
+    let base = variant.get(..2).unwrap_or(variant);
+    let flags = variant.get(2..).unwrap_or("");
     let p = Prealloc::parse(base).unwrap_or_else(|| panic!("unknown variant {variant}"));
     let mut o = Options::with_prealloc(p);
     o.arena.size = size;
-    o.prepare_next = prep;
+    o.prepare_next = flags.contains('P');
+    if flags.contains('M') {
+        o.read = crate::ReadMode::Mmap { advice: crate::Advice::Default };
+    }
+    if flags.contains('R') {
+        o.read = crate::ReadMode::Mmap { advice: crate::Advice::Random };
+    }
     o
 }
 
@@ -97,6 +105,9 @@ pub fn data_files(dir: &Path) -> Vec<PathBuf> {
 /// Run one bench in this process. Returns false for an unknown bench.
 pub fn run_one(bench: &str, variant: &str, args: &Args) -> bool {
     if a::run(bench, variant, args) {
+        return true;
+    }
+    if b::run(bench, variant, args) {
         return true;
     }
     false

@@ -142,6 +142,17 @@ impl SpikeStore {
         Ok(s)
     }
 
+    /// The read path (spike B benches and tests downcast it).
+    pub fn read_path(&self) -> &dyn ReadPath {
+        &*self.read
+    }
+
+    /// Replace the location of `id` (tests only: a corrupt Loc).
+    #[doc(hidden)]
+    pub fn debug_set_loc(&self, id: ObjectId, loc: Loc) {
+        self.inner.lock().unwrap().index.insert(id, loc);
+    }
+
     pub fn options(&self) -> &Options {
         &self.opts
     }
