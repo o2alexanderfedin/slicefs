@@ -59,15 +59,16 @@ fn reads_return_the_written_bytes_at_any_offset() {
 #[test]
 fn a_large_file_uses_a_manifest_tree() {
     let (_d, s) = store();
-    // About 1,500 chunks of 8 KiB: more than one leaf.
-    let data = random(12 << 20, 3);
+    // About 5,000 chunks of 8 KiB: more than LEAF_ENTRIES, so more than one
+    // leaf whatever the content cuts are.
+    let data = random(40 << 20, 3);
     let key = write_in_pieces(&s, &data, 1 << 20);
     let objs = file_objects(&s, key).unwrap();
     let nodes = objs.len() - chunk_store::chunk_ranges(&data).len();
     assert!(nodes >= 3, "a root and at least two leaves, got {nodes} nodes");
-    assert!(LEAF_ENTRIES <= 1024);
+    assert!(LEAF_ENTRIES <= 4096);
     let mut r = FileReader::open(&s, key).unwrap();
-    let mid = 6 << 20;
+    let mid = 20 << 20;
     assert_eq!(r.read(&s, mid as u64, 300_000).unwrap(), &data[mid..mid + 300_000]);
     assert_eq!(r.read(&s, 0, data.len()).unwrap(), data);
 }
