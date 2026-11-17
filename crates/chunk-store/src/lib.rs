@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 
 pub mod file;
 pub mod pack_io;
+pub mod retry;
 pub mod mem;
 
 use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead};
@@ -290,7 +291,8 @@ impl ChunkStore {
     /// scanned; the newest unsealed pack becomes the active pack, cut after
     /// its last valid record.
     pub fn open(dir: &Path, opts: Options) -> Result<Self> {
-        Self::open_with(Arc::new(FileIo::new(dir.join("packs"))), opts)
+        let files = Arc::new(FileIo::new(dir.join("packs")));
+        Self::open_with(Arc::new(retry::RetryingIo::new(files)), opts)
     }
 
     /// Open the store on a storage strategy (files, a mock, ...).
@@ -625,7 +627,8 @@ impl Inner {
     fn check(&self) -> Result<()> {
         if self.failed {
             return Err(Error::Io(io::Error::other(
-                "an earlier sync of the chunk store failed; open the store again",
+                "an earlier sync of the chunk store failed after retries, so writes are stopped; \
+                 data since the last good sync may be lost; unmount and mount the store again",
             )));
         }
         Ok(())

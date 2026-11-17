@@ -11,6 +11,7 @@ zstd.workspace = true
 crc32c = "0.6"
 thiserror.workspace = true
 libc.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

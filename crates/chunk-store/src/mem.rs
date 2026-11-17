@@ -2,7 +2,10 @@
 //! that keeps only the durable state.
 //!
 //! Model: each file has its current bytes and its durable bytes. `sync`
-//! of a pack and `write_durable` make the bytes durable. A new file is
+//! of a pack makes the bytes written since the last sync durable, and
+//! `write_durable` makes the whole file durable. A failed sync acts as on
+//! Linux: the unsaved bytes are marked clean, so a later sync does not save
+//! them unless they are written again (reads still show them until a crash). A new file is
 //! durable in the directory only after `sync_dir` (or `write_durable`).
 //! `crash()` drops every non-durable byte and every non-durable new file.
 //! Removals are durable at once (this is the order the store needs: it
@@ -18,6 +21,8 @@ use std::sync::{Arc, Mutex};
 struct MemFile {
     data: Vec<u8>,
     durable: Vec<u8>,
+    /// Byte ranges written since the last sync (dirty pages).
+    dirty: Vec<(usize, usize)>,
     /// The file name is durable in the directory.
     linked: bool,
 }
@@ -30,9 +35,20 @@ struct State {
     space_left: Option<u64>,
     fail_reads: bool,
     fail_syncs: bool,
+    /// The next this many syncs fail (then they work again).
+    fail_next_syncs: u32,
 }
 
 impl State {
+    /// True if this sync must fail (counts down `fail_next_syncs`).
+    fn sync_fails(&mut self) -> bool {
+        if self.fail_next_syncs > 0 {
+            self.fail_next_syncs -= 1;
+            return true;
+        }
+        self.fail_syncs
+    }
+
     fn grow(&mut self, by: u64) -> io::Result<()> {
         if let Some(left) = self.space_left.as_mut() {
             if by > *left {
@@ -72,6 +88,11 @@ impl MemIo {
     /// and makes nothing durable.
     pub fn set_fail_syncs(&self, on: bool) {
         self.s.lock().unwrap().fail_syncs = on;
+    }
+
+    /// The next `n` syncs fail with EIO; later syncs work.
+    pub fn fail_next_syncs(&self, n: u32) {
+        self.s.lock().unwrap().fail_next_syncs = n;
     }
 
     /// A power loss: keep only what is durable.
@@ -159,6 +180,7 @@ impl PackFile for MemPack {
             f.data.resize(end, 0);
         }
         f.data[offset as usize..end].copy_from_slice(data);
+        f.dirty.push((offset as usize, end));
         Ok(())
     }
 
@@ -171,12 +193,21 @@ impl PackFile for MemPack {
     }
 
     fn sync(&mut self) -> io::Result<()> {
-        let s = self.s.lock().unwrap();
-        if s.fail_syncs {
+        let mut s = self.s.lock().unwrap();
+        let mut f = self.f.lock().unwrap();
+        if s.sync_fails() {
+            // As on Linux: the dirty pages are marked clean without a save.
+            f.dirty.clear();
             return Err(eio());
         }
-        let mut f = self.f.lock().unwrap();
-        f.durable = f.data.clone();
+        let f = &mut *f;
+        f.durable.resize(f.data.len(), 0);
+        for (a, b) in f.dirty.drain(..) {
+            let b = b.min(f.data.len());
+            if a < b {
+                f.durable[a..b].copy_from_slice(&f.data[a..b]);
+            }
+        }
         Ok(())
     }
 }
@@ -209,13 +240,13 @@ impl PackIo for MemIo {
 
     fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> io::Result<()> {
         let mut s = self.s.lock().unwrap();
-        if s.fail_syncs {
+        if s.sync_fails() {
             return Err(eio());
         }
         let cur = s.files.get(&(num, kind)).map_or(0, |f| f.lock().unwrap().data.len());
         s.grow(data.len().saturating_sub(cur) as u64)?;
         // A new file under the name (rename of a temp file): old handles keep the old file.
-        let f = MemFile { data: data.to_vec(), durable: data.to_vec(), linked: true };
+        let f = MemFile { data: data.to_vec(), durable: data.to_vec(), dirty: Vec::new(), linked: true };
         s.files.insert((num, kind), Arc::new(Mutex::new(f)));
         // A durable write syncs the directory too.
         for f in s.files.values() {
@@ -229,8 +260,8 @@ impl PackIo for MemIo {
     }
 
     fn sync_dir(&self) -> io::Result<()> {
-        let s = self.s.lock().unwrap();
-        if s.fail_syncs {
+        let mut s = self.s.lock().unwrap();
+        if s.sync_fails() {
             return Err(eio());
         }
         for f in s.files.values() {
