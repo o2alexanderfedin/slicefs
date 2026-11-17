@@ -84,10 +84,22 @@ pub fn select_hash(store: &Path, name: Option<&str>) -> std::io::Result<()> {
         }
         println!("New objects use hash {} (was {}); stored objects stay readable.", new.name(), current.name());
     }
-    // Write a new marker, then rename it over the old one (never a torn marker).
+    write_marker(store, new)
+}
+
+/// Write the format marker durably: a synced temp file renamed over the old
+/// marker, then a sync of the directory. A power loss leaves the old marker
+/// or the new one, never an empty or torn file.
+fn write_marker(store: &Path, hasher: &dyn ObjectHasher) -> std::io::Result<()> {
+    use std::io::Write;
     let tmp = store.join(format!("{FORMAT_FILE}.tmp"));
-    std::fs::write(&tmp, marker(new))?;
-    std::fs::rename(&tmp, store.join(FORMAT_FILE))
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(marker(hasher).as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, store.join(FORMAT_FILE))?;
+    std::fs::File::open(store)?.sync_all()
 }
 
 /// Refuse a store of an older format, whose format changed without a
@@ -139,7 +151,7 @@ pub fn open(store: &Path) -> std::io::Result<Content> {
     std::fs::create_dir_all(store)?;
     let path = store.join(FORMAT_FILE);
     if !path.exists() {
-        std::fs::write(&path, marker(DEFAULT_HASHER))?;
+        write_marker(store, DEFAULT_HASHER)?;
     }
     let opts = Options { hasher: write_hasher(store)?, ..Options::default() };
     let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;

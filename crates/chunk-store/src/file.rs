@@ -273,7 +273,17 @@ impl FileReader {
                     break (e.id, base + node.starts[i], e.len);
                 }
                 base += node.starts[i];
-                node = self.node(store, &e.id)?;
+                let child = self.node(store, &e.id)?;
+                // The tree may come from a peer: a child must hold exactly
+                // the bytes its parent's entry says, one level lower. Else a
+                // read could slice out of range or stop making progress.
+                if child.len != e.len || child.level + 1 != node.level {
+                    return Err(Error::Corrupt(format!(
+                        "manifest node {:?}: level {} with {} bytes under a level-{} entry of {} bytes",
+                        e.id, child.level, child.len, node.level, e.len
+                    )));
+                }
+                node = child;
             };
             let (zids, zeros) = zero_chunk();
             if len == zeros.len() as u64 && zids.contains(&id) {
@@ -329,6 +339,28 @@ mod tests {
             w.push(s, 0, *e).unwrap();
         }
         w.finish(s).unwrap()
+    }
+
+    // A crafted tree (for example from a peer) must give an error, never a
+    // panic: a child whose length differs from the parent's entry, an empty
+    // child, or a child at the wrong level.
+    #[test]
+    fn a_malformed_tree_is_an_error_not_a_panic() {
+        let s = ChunkStore::open_with(std::sync::Arc::new(MemIo::new()), Options::default()).unwrap();
+        let chunk = s.put(&[7u8; 50]).unwrap();
+        let e = |id, len| Entry { id, len };
+        let leaf = s.put(&encode_node(0, &[e(chunk, 50)])).unwrap();
+        let empty = s.put(&encode_node(0, &[])).unwrap();
+        let wrong_level = s.put(&encode_node(2, &[e(chunk, 50)])).unwrap();
+        for (what, child, claim) in [("longer claim", leaf, 100), ("empty child", empty, 10), ("wrong level", wrong_level, 50)] {
+            let root = s.put(&encode_node(1, &[e(child, claim)])).unwrap();
+            let mut r = FileReader::open(&s, root).unwrap();
+            let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.read(&s, 0, claim as usize)));
+            assert!(matches!(got, Ok(Err(Error::Corrupt(_)))), "{what}: {got:?}");
+        }
+        // A good tree still reads.
+        let root = s.put(&encode_node(1, &[e(leaf, 50)])).unwrap();
+        assert_eq!(FileReader::open(&s, root).unwrap().read(&s, 10, 100).unwrap(), vec![7u8; 40]);
     }
 
     fn fake(n: u32) -> Vec<Entry> {
