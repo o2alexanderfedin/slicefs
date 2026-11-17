@@ -25,7 +25,6 @@ use serde::Serialize;
 use metadata::segment::load_store_from_segments;
 use metadata::snapshot::SnapshotEntry;
 use metadata::store::DictMetadataStore;
-use metadata::store_io::StoreIo;
 use slicefs_traits::metadata::{MetaError, MetadataStore};
 
 const S_IFMT: u32 = 0o170_000;

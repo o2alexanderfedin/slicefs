@@ -80,7 +80,7 @@ fn test_compact_segment_empty_produces_empty_output() {
     let tmp = TempDir::new().unwrap();
     let seg_path = tmp.path().join("segment-001.seg");
 
-    let mut writer = SegmentWriter::new(&seg_path, 1).unwrap();
+    let writer = SegmentWriter::new(&seg_path, 1).unwrap();
     writer.close().unwrap();
 
     let out_dir = tmp.path().join("out");

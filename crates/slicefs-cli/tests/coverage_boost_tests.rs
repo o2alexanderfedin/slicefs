@@ -51,7 +51,6 @@ use fuser::FileType;
 const S_IFREG: u32 = 0o100_000;
 const S_IFDIR: u32 = 0o040_000;
 const S_IFLNK: u32 = 0o120_000;
-const S_IFMT: u32 = 0o170_000;
 
 fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
     let dir = tempfile::tempdir().unwrap();
@@ -1130,7 +1129,7 @@ fn test_statfs_with_store_path_and_written_data() {
     fs.test_write(fh, 0, b"data to fill CAS blocks").unwrap();
     fs.test_release(ino, fh).unwrap();
 
-    let (blocks, bfree, bavail, files, _ffree, bsize) = fs.test_statfs_values();
+    let (blocks, bfree, _bavail, files, _ffree, bsize) = fs.test_statfs_values();
     // blocks > 0 means statvfs/statfs returned real values
     assert!(blocks > 0 || bsize >= 512, "statfs must return sane values for real path");
     assert!(files >= 1, "at least one inode (root) must exist");

@@ -2,28 +2,7 @@
 //!
 //! Parses the CLI arguments and dispatches to the appropriate subcommand.
 
-mod backend;
-mod cli;
-mod commit_timer;
-mod content;
-mod filesystem;
-mod fuse_callbacks;
-mod handlers;
-mod oplog;
-mod gc;
-mod online_gc;
-#[cfg(target_os = "macos")]
-mod fuset_watch;
-mod mount;
-mod scrub;
-mod seed;
-mod signals;
-mod snapshot;
-mod stats;
-mod store_io;
-mod unmount;
-mod util;
-
+use slicefs_cli::{cli, gc, mount, scrub, seed, snapshot, stats, unmount};
 use clap::Parser;
 use cli::{Cli, Cmd};
 

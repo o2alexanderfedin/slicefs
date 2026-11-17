@@ -10,10 +10,8 @@
 //! Tests in this module exercise every handler on both success and error paths
 //! without requiring fuser types (which cannot be constructed in unit tests).
 
-use std::time::SystemTime;
 
 use fuser::FileAttr;
-use slicefs_traits::metadata::InodeMeta;
 
 use crate::filesystem::{inode_to_file_attr, SliceFsFilesystem};
 

@@ -36,7 +36,6 @@ Windows is deferred because `winfsp-rs` is GPL-3; native Projected FS or Dokan a
 ├── crates/
 │   ├── slicefs-traits/        # Trait contracts (metadata, ContentHasher, Chunker, BlockStore, DedupIndex) + ObjectKey
 │   ├── cas-local/             # Reference/test impls of the CAS traits (Blake3 hasher, fixed chunker, stores) — not used by the binary
-│   ├── slicefs-compression/   # Compressors (Zstd, LZ4, None) — not on the write path since v2.0
 │   ├── chunk-store/           # FastCDC + BLAKE3 objects in pack files: index, zstd, crash scan, GC
 │   ├── metadata/              # Inodes, directories, manifests, xattrs, WAL, segments, snapshots, GC mark
 │   └── slicefs-cli/           # `slicefs` binary — mount, unmount, seed, gc, snapshot, stats, scrub

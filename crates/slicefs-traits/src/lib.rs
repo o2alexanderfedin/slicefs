@@ -29,7 +29,6 @@
 
 pub mod block_store;
 pub mod chunk;
-pub mod compressor;
 pub mod dedup_index;
 pub mod key;
 pub mod error;
@@ -41,7 +40,6 @@ pub mod metadata;
 
 pub use block_store::{BlockStore, BlockStoreConfig};
 pub use chunk::{Chunk, Chunker};
-pub use compressor::{AlgorithmId, Compressor, CompressorError};
 pub use dedup_index::{DedupIndex, DedupResult};
 pub use key::*;
 pub use error::CasError;
