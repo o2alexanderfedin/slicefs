@@ -27,7 +27,7 @@ fn make_seeded_store(store_dir: &TempDir) {
     std::fs::create_dir_all(&segs_dir).unwrap();
 
     let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let mut meta = DictMetadataStore::new(io);
     meta.set_wal(wal);
 
@@ -46,7 +46,7 @@ fn make_store_with_dead_entries(store_dir: &TempDir) {
     std::fs::create_dir_all(&segs_dir).unwrap();
 
     let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let mut meta = DictMetadataStore::new(io);
     meta.set_wal(wal);
 
@@ -119,7 +119,7 @@ fn test_run_gc_with_dead_entries_compacts() {
         .expect("segments should be loadable after GC");
     let root = root_opt.expect("root should be present after GC");
 
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let rebuilt = DictMetadataStore::load_from_root(io, &root)
         .expect("store should be reconstructible after GC");
     let ino = rebuilt.lookup(1, "live.txt")

@@ -29,7 +29,7 @@ const S_IFREG: u32 = 0o100_000;
 fn make_fs_per_op(store_dir: &TempDir) -> SliceFsFilesystem {
     std::fs::create_dir_all(store_dir.path().join("segments")).unwrap();
     let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let mut meta = DictMetadataStore::new(io.clone());
     meta.set_wal(wal);
     SliceFsFilesystem::new(meta, io, Some(store_dir.path().to_path_buf()))
@@ -43,7 +43,7 @@ fn reload_store(store_dir: &TempDir) -> DictMetadataStore {
     let (root_opt, _snapshots) = load_store_from_segments(&segs_dir)
         .expect("should load segments after crash");
     let root = root_opt.expect("should have a committed root");
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     DictMetadataStore::load_from_root(io, &root)
         .expect("should reconstruct store from root")
 }
@@ -85,7 +85,7 @@ fn test_sc1_crash_during_write_filesystem_consistent() {
 
     // Should have a committed root (from the commit() after existing.txt)
     let root = root_opt.expect("committed root should be present");
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let rebuilt = DictMetadataStore::load_from_root(io, &root)
         .expect("should reconstruct store");
 
@@ -138,7 +138,7 @@ fn test_sc2_fsync_guarantees_durability() {
 
     assert!(root_opt.is_some(), "root should be present after fsync + crash");
 
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let rebuilt = DictMetadataStore::load_from_root(io, &committed_root)
         .expect("should reconstruct store from committed root");
 
@@ -193,7 +193,7 @@ fn test_sc3_orphaned_blocks_reclaimed_by_gc() {
 
     // Run GC with the current root as the only live root
     let gc = GarbageCollector::new(segs_dir.clone());
-    let mut gc_io = StoreIo::new(store_dir.path());
+    let mut gc_io = StoreIo::open(store_dir.path()).unwrap();
     let stats = gc.run_gc(&mut gc_io, &[root])
         .expect("GC should succeed");
 
@@ -206,7 +206,7 @@ fn test_sc3_orphaned_blocks_reclaimed_by_gc() {
     let (root2_opt, _snapshots2) = load_store_from_segments(&segs_dir)
         .expect("segments should be loadable after GC");
     let root2 = root2_opt.expect("root should still be present after GC");
-    let io2 = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io2 = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let rebuilt = DictMetadataStore::load_from_root(io2, &root2)
         .expect("should reconstruct store after GC");
 

@@ -17,8 +17,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
 
 use slicefs_traits::digest::Digest224;
+use crate::store_io::{NodeRead, NodeWrite};
 use slicefs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, MetadataStore};
-use blockset::{State, Tree, FileStorageAdd, file_storage_get};
 
 use crate::snapshot::SnapshotEntry;
 use crate::store_io::StoreIo;
@@ -167,7 +167,7 @@ impl DictMetadataStore {
         // Build root inode + dir entries via FileStorageAdd, then flush
         let (root_inode_digest, root_dir_digest) = {
             let mut io_guard = io.lock().unwrap();
-            let mut fsa = FileStorageAdd::new(&mut *io_guard);
+            let mut fsa = &mut *io_guard;
             // Use current process uid/gid so the mounting user can write to root.
             // On non-unix, falls back to 0/0 (callers like `seed` update root inode
             // from the source directory metadata afterwards).
@@ -225,7 +225,7 @@ impl DictMetadataStore {
 
 impl DictMetadataStore {
     /// Access the underlying Io backend (for content operations like `State::push_all`
-    /// via `FileStorageAdd::new(&mut *io_guard)`).
+    /// via `&mut *io_guard`).
     ///
     /// # Warning
     /// Do NOT hold this lock while calling any other `DictMetadataStore` method.
@@ -473,7 +473,7 @@ impl DictMetadataStore {
             return;
         }
         let mut io_guard = self.io.lock().unwrap();
-        let mut fsa = FileStorageAdd::new(&mut *io_guard);
+        let mut fsa = &mut *io_guard;
         let mut inode_data = self.inode_data.lock().unwrap();
         let live = &mut *live;
         for ino in live.dirty.drain() {
@@ -498,7 +498,7 @@ impl DictMetadataStore {
             return;
         }
         let mut io_guard = self.io.lock().unwrap();
-        let mut fsa = FileStorageAdd::new(&mut *io_guard);
+        let mut fsa = &mut *io_guard;
         let mut dir_data = self.dir_data.lock().unwrap();
         let live = &mut *live;
         for ino in live.dirty.drain() {
@@ -782,7 +782,7 @@ impl MetadataStore for DictMetadataStore {
         self.changes.fetch_add(1, Ordering::Relaxed);
         let digest = {
             let mut io_guard = self.io.lock().unwrap();
-            let mut fsa = FileStorageAdd::new(&mut *io_guard);
+            let mut fsa = &mut *io_guard;
             intern_manifest(&mut fsa, blocks)
         };
         self.manifest_data.lock().unwrap().insert(ino, digest);
@@ -816,7 +816,7 @@ impl MetadataStore for DictMetadataStore {
 
         let new_digest = {
             let mut io_guard = self.io.lock().unwrap();
-            let mut fsa = FileStorageAdd::new(&mut *io_guard);
+            let mut fsa = &mut *io_guard;
             intern_xattrs(&mut fsa, &xattrs)
         };
 
@@ -874,7 +874,7 @@ impl MetadataStore for DictMetadataStore {
 
         let new_digest = {
             let mut io_guard = self.io.lock().unwrap();
-            let mut fsa = FileStorageAdd::new(&mut *io_guard);
+            let mut fsa = &mut *io_guard;
             intern_xattrs(&mut fsa, &xattrs)
         };
 
@@ -906,7 +906,7 @@ impl MetadataStore for DictMetadataStore {
 
         let inode_map = self.inode_map.lock().unwrap();
         let mut io_guard = self.io.lock().unwrap();
-        let mut fsa = FileStorageAdd::new(&mut *io_guard);
+        let mut fsa = &mut *io_guard;
 
         let inode_map_digest = intern_inode_map(&mut fsa, &inode_map);
         let next_ino = inode_map.next_ino();
@@ -968,9 +968,7 @@ impl MetadataStore for DictMetadataStore {
         root_bytes.extend_from_slice(&self.logical_bytes.load(Ordering::Relaxed).to_le_bytes());
         root_bytes.extend_from_slice(&self.inode_count.load(Ordering::Relaxed).to_le_bytes());
         assert_eq!(root_bytes.len(), 200, "root record must be 200 bytes");
-        let root_digest = State::push_all(&mut fsa, &root_bytes);
-        // Drop fsa first: this flushes all FileStorage blob files to disk via StoreIo
-        drop(fsa);
+        let root_digest = (&mut fsa).put_node(&root_bytes);
         // Make every object written since the last commit durable before the
         // root that refers to them is logged: after that, log rotation deletes
         // the segments whose records hold the same data (#20).
@@ -999,11 +997,11 @@ impl MetadataStore for DictMetadataStore {
 /// root record, its maps, each inode, directory list and xattr set, each file
 /// manifest, and each file root in the manifests. The GC mark phase (#25)
 /// walks the object tree of each of them.
-/// The metadata objects (in `vt0/`) that the root record `root` refers to:
+/// The metadata nodes that the root record `root` refers to:
 /// the record itself and its maps, the inode, directory and xattr nodes, and
 /// the manifest nodes. File content keys are not here; see [`content_keys`].
 pub fn referenced_roots(
-    io: &mut impl blockset::Io,
+    io: &mut impl crate::store_io::NodeRead,
     root: &Digest224,
 ) -> Result<Vec<Digest224>, MetaError> {
     referenced(io, root).map(|(meta, _)| meta)
@@ -1011,15 +1009,15 @@ pub fn referenced_roots(
 
 /// The file content keys (in the chunk store) that the root record `root`
 /// refers to: the entries of the manifests.
-pub fn content_keys(io: &mut impl blockset::Io, root: &Digest224) -> Result<Vec<Digest224>, MetaError> {
+pub fn content_keys(io: &mut impl crate::store_io::NodeRead, root: &Digest224) -> Result<Vec<Digest224>, MetaError> {
     referenced(io, root).map(|(_, content)| content)
 }
 
-fn referenced(
-    io: &mut impl blockset::Io,
+pub(crate) fn referenced(
+    io: &mut impl crate::store_io::NodeRead,
     root: &Digest224,
 ) -> Result<(Vec<Digest224>, Vec<Digest224>), MetaError> {
-    let bytes = file_storage_get(io, root)
+    let bytes = (io).get_node(root)
         .ok_or_else(|| MetaError::Corrupted(format!("missing root node {:?}", root)))?;
     if !matches!(bytes.len(), 156 | 184 | 200) {
         return Err(MetaError::Corrupted(format!(
@@ -1050,7 +1048,7 @@ fn referenced(
 ///
 /// Format: `[count: u64 LE][for each entry: u64 LE ino + 28 bytes Digest224]`
 /// Each entry is 36 bytes; total = 8 + count × 36.
-fn intern_u64_digest_map(storage: &mut impl blockset::StorageAdd, map: &BTreeMap<u64, Digest224>) -> Digest224 {
+fn intern_u64_digest_map(storage: &mut impl crate::store_io::NodeWrite, map: &BTreeMap<u64, Digest224>) -> Digest224 {
     let mut bytes = Vec::with_capacity(8 + map.len() * 36);
     bytes.extend_from_slice(&(map.len() as u64).to_le_bytes());
     for (ino, digest) in map {
@@ -1059,15 +1057,15 @@ fn intern_u64_digest_map(storage: &mut impl blockset::StorageAdd, map: &BTreeMap
             bytes.extend_from_slice(&word.to_le_bytes());
         }
     }
-    State::push_all(storage, &bytes)
+    (storage).put_node(&bytes)
 }
 
 /// Retrieve and deserialize a `BTreeMap<u64, Digest224>` from file-backed storage.
 fn load_u64_digest_map(
-    io: &mut impl blockset::Io,
+    io: &mut impl crate::store_io::NodeRead,
     key: &Digest224,
 ) -> Result<BTreeMap<u64, Digest224>, MetaError> {
-    let bytes = file_storage_get(io, key)
+    let bytes = (io).get_node(key)
         .ok_or_else(|| MetaError::Corrupted(format!("missing u64-digest map node {:?}", key)))?;
 
     if bytes.len() < 8 {
@@ -1109,7 +1107,7 @@ impl DictMetadataStore {
         let mut io_guard = io.lock().unwrap();
 
         // Read root record bytes
-        let bytes = file_storage_get(&mut *io_guard, root)
+        let bytes = (&mut *io_guard).get_node(root)
             .ok_or_else(|| MetaError::Corrupted("missing root node".into()))?;
 
         // Accept the old (156-, 184-byte) formats and the current one (200 bytes).
@@ -1216,7 +1214,7 @@ impl DictMetadataStore {
 ///
 /// Format: `[count: u64 LE][for each entry: 28 bytes Digest224 + 8 bytes u64 LE]`
 /// Each entry is 36 bytes; total = 8 + count × 36.
-fn intern_digest224_u64_map(storage: &mut impl blockset::StorageAdd, map: &BTreeMap<Digest224, u64>) -> Digest224 {
+fn intern_digest224_u64_map(storage: &mut impl crate::store_io::NodeWrite, map: &BTreeMap<Digest224, u64>) -> Digest224 {
     let mut bytes = Vec::with_capacity(8 + map.len() * 36);
     bytes.extend_from_slice(&(map.len() as u64).to_le_bytes());
     for (digest, count) in map {
@@ -1225,15 +1223,15 @@ fn intern_digest224_u64_map(storage: &mut impl blockset::StorageAdd, map: &BTree
         }
         bytes.extend_from_slice(&count.to_le_bytes());
     }
-    State::push_all(storage, &bytes)
+    (storage).put_node(&bytes)
 }
 
 /// Retrieve and deserialize a `BTreeMap<Digest224, u64>` from file-backed storage.
 fn load_digest224_u64_map(
-    io: &mut impl blockset::Io,
+    io: &mut impl crate::store_io::NodeRead,
     key: &Digest224,
 ) -> Result<BTreeMap<Digest224, u64>, MetaError> {
-    let bytes = file_storage_get(io, key)
+    let bytes = (io).get_node(key)
         .ok_or_else(|| MetaError::Corrupted(format!("missing digest224-u64 map node {:?}", key)))?;
 
     if bytes.len() < 8 {
@@ -1287,7 +1285,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let before = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-        let store = DictMetadataStore::new(Arc::new(Mutex::new(StoreIo::new(dir.path()))));
+        let store = DictMetadataStore::new(Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap())));
         let root = store.get_inode(1).unwrap();
         assert!(root.mtime_sec as i64 >= before, "root mtime {} (epoch 0 shows as 1969)", root.mtime_sec);
         assert!(root.ctime_sec as i64 >= before, "root ctime {}", root.ctime_sec);
@@ -1296,7 +1294,7 @@ mod tests {
     #[test]
     fn cached_dirs_and_inodes_survive_eviction_commit_and_reload() {
         let tmp = tempfile::tempdir().unwrap();
-        let io = Arc::new(Mutex::new(StoreIo::new(tmp.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(tmp.path()).unwrap()));
         let store = DictMetadataStore::new(io.clone());
         let mut expect = Vec::new();
         for d in 0..10u64 {
@@ -1353,7 +1351,7 @@ mod tests {
     /// Returns (TempDir, store) — TempDir must be kept alive while store is used.
     fn make_store() -> (TempDir, DictMetadataStore) {
         let dir = TempDir::new().unwrap();
-        let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
         let store = DictMetadataStore::new(io);
         (dir, store)
     }
@@ -1832,8 +1830,8 @@ mod tests {
         let content = b"hello, SliceFS content round-trip test!";
         let content_digest: Digest224 = {
             let mut io_guard = store.io().lock().unwrap();
-            let mut fsa = FileStorageAdd::new(&mut *io_guard);
-            State::push_all(&mut fsa, content)
+            let mut fsa = &mut *io_guard;
+            (&mut fsa).put_node(content)
         };
 
         // Create a file inode and attach the content digest as its manifest.
@@ -1854,7 +1852,7 @@ mod tests {
 
         // Verify the content bytes are retrievable from the file storage via file_storage_get.
         let mut io_guard = reloaded.io().lock().unwrap();
-        let read_back = file_storage_get(&mut *io_guard, &content_digest).expect("content missing");
+        let read_back = (&mut *io_guard).get_node(&content_digest).expect("content missing");
         assert_eq!(read_back, content.as_slice());
     }
 

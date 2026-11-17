@@ -18,7 +18,6 @@
 
 use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::MetaError;
-use blockset::{State, Tree, StorageAdd, Io, file_storage_get};
 
 // ─── serialization helpers ────────────────────────────────────────────────────
 
@@ -81,16 +80,16 @@ fn deserialize_xattrs(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, MetaError>
 /// Returns the `Digest224` key that can later be passed to `load_xattrs`.
 /// An empty list serializes to an empty byte sequence which produces a
 /// canonical empty-content `Digest224`.
-pub fn intern_xattrs(storage: &mut impl StorageAdd, xattrs: &[(String, Vec<u8>)]) -> Digest224 {
+pub fn intern_xattrs(storage: &mut impl crate::store_io::NodeWrite, xattrs: &[(String, Vec<u8>)]) -> Digest224 {
     let bytes = serialize_xattrs(xattrs);
-    State::push_all(storage, &bytes)
+    (storage).put_node(&bytes)
 }
 
 /// Retrieve and deserialize all xattr pairs from file-backed storage.
 ///
 /// Returns `MetaError::Corrupted` if the stored bytes cannot be parsed.
-pub fn load_xattrs(io: &mut impl Io, key: &Digest224) -> Result<Vec<(String, Vec<u8>)>, MetaError> {
-    let bytes = file_storage_get(io, key)
+pub fn load_xattrs(io: &mut impl crate::store_io::NodeRead, key: &Digest224) -> Result<Vec<(String, Vec<u8>)>, MetaError> {
+    let bytes = (io).get_node(key)
         .ok_or_else(|| MetaError::Corrupted(format!("missing xattr node {:?}", key)))?;
     deserialize_xattrs(&bytes)
 }
@@ -131,12 +130,11 @@ pub fn remove_xattr_entry(xattrs: &mut Vec<(String, Vec<u8>)>, name: &str) -> bo
 mod tests {
     use super::*;
     use crate::store_io::StoreIo;
-    use blockset::FileStorageAdd;
     use tempfile::TempDir;
 
     fn make_io() -> (TempDir, StoreIo) {
         let dir = TempDir::new().unwrap();
-        let io = StoreIo::new(dir.path());
+        let io = StoreIo::open(dir.path()).unwrap();
         (dir, io)
     }
 
@@ -204,7 +202,7 @@ mod tests {
     fn test_intern_load_empty() {
         let (_dir, mut io) = make_io();
         let xattrs: Vec<(String, Vec<u8>)> = vec![];
-        let key = { let mut fsa = FileStorageAdd::new(&mut io); intern_xattrs(&mut fsa, &xattrs) };
+        let key = { let mut fsa = &mut io; intern_xattrs(&mut fsa, &xattrs) };
         let recovered = load_xattrs(&mut io, &key).unwrap();
         assert!(recovered.is_empty());
     }
@@ -213,7 +211,7 @@ mod tests {
     fn test_intern_load_single_attr() {
         let (_dir, mut io) = make_io();
         let xattrs = vec![("user.test".to_string(), b"testvalue".to_vec())];
-        let key = { let mut fsa = FileStorageAdd::new(&mut io); intern_xattrs(&mut fsa, &xattrs) };
+        let key = { let mut fsa = &mut io; intern_xattrs(&mut fsa, &xattrs) };
         let recovered = load_xattrs(&mut io, &key).unwrap();
         assert_eq!(recovered, xattrs);
     }
@@ -224,7 +222,7 @@ mod tests {
         let (_dir, mut io) = make_io();
         let value: Vec<u8> = (0..=127u8).collect(); // 128 bytes
         let xattrs = vec![("user.big".to_string(), value)];
-        let key = { let mut fsa = FileStorageAdd::new(&mut io); intern_xattrs(&mut fsa, &xattrs) };
+        let key = { let mut fsa = &mut io; intern_xattrs(&mut fsa, &xattrs) };
         let recovered = load_xattrs(&mut io, &key).unwrap();
         assert_eq!(recovered, xattrs);
     }
@@ -237,7 +235,7 @@ mod tests {
             ("user.b".to_string(), b"val-b".to_vec()),
             ("user.c".to_string(), b"val-c".to_vec()),
         ];
-        let key = { let mut fsa = FileStorageAdd::new(&mut io); intern_xattrs(&mut fsa, &xattrs) };
+        let key = { let mut fsa = &mut io; intern_xattrs(&mut fsa, &xattrs) };
         let recovered = load_xattrs(&mut io, &key).unwrap();
         assert_eq!(recovered, xattrs);
     }
@@ -321,7 +319,7 @@ mod tests {
         ];
 
         let (key1, key2) = {
-            let mut fsa = FileStorageAdd::new(&mut io);
+            let mut fsa = &mut io;
             let k1 = intern_xattrs(&mut fsa, &xattrs1);
             let k2 = intern_xattrs(&mut fsa, &xattrs2);
             (k1, k2)

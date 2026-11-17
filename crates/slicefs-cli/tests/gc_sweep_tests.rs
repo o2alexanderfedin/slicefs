@@ -17,7 +17,7 @@ use tempfile::TempDir;
 fn make_fs(store: &Path) -> SliceFsFilesystem {
     std::fs::create_dir_all(store.join("segments")).unwrap();
     let wal = create_wal(WalConfig::PerOp, store, 1).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(store)));
+    let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
     let mut meta = DictMetadataStore::new(io.clone());
     meta.set_wal(wal);
     SliceFsFilesystem::new(meta, io, Some(store.to_path_buf()))
@@ -42,7 +42,7 @@ fn write_file(fs: &SliceFsFilesystem, name: &str, bytes: &[u8]) {
 
 /// Read `name` from the metadata at `root`, straight from the store objects.
 fn read_at_root(store: &Path, root: &Digest224, name: &str) -> Vec<u8> {
-    let io = Arc::new(Mutex::new(StoreIo::new(store)));
+    let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
     let meta = DictMetadataStore::load_from_root(io, root).unwrap();
     let ino = meta.lookup(1, name).unwrap();
     let manifest = meta.get_manifest(ino).unwrap();
@@ -121,7 +121,7 @@ fn gc_after_deleting_every_file_leaves_an_almost_empty_store() {
         objects(store)
     );
     let (root, _) = load_store_from_segments(&store.join("segments")).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(store)));
+    let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
     let meta = DictMetadataStore::load_from_root(io, &root.unwrap()).unwrap();
     assert!(meta.lookup(1, "f0").is_err());
 }

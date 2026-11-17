@@ -28,7 +28,7 @@ fn write_seeded_store_segments(store_dir: &TempDir) {
     let segs_dir = store_dir.path().join("segments");
     std::fs::create_dir_all(&segs_dir).unwrap();
 
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
     let mut meta = DictMetadataStore::new(io);
     meta.set_wal(wal);
@@ -484,7 +484,7 @@ fn test_load_store_with_multiple_valid_segments() {
     std::fs::create_dir_all(&segs_dir).unwrap();
 
     // Create two rounds of WAL segments (simulating two mount sessions).
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
     let mut meta = DictMetadataStore::new(io);
     meta.set_wal(wal);

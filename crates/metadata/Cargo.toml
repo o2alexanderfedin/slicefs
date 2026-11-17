@@ -8,6 +8,7 @@ license = "AGPL-3.0-or-later"
 [dependencies]
 slicefs-traits = { path = "../slicefs-traits" }
 blockset = { path = "../data-id/blockset" }
+chunk-store = { path = "../chunk-store" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 libc = { workspace = true }

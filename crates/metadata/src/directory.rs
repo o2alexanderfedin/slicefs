@@ -2,7 +2,7 @@
 //!
 //! Each directory entry is recorded in a compact "entry list" stored as a CAS
 //! tree in the blockset Dictionary.  The list contains every entry's:
-//!   - `key`  — `Digest224` = `State::push_all(dict, name.as_bytes())` (name hash)
+//!   - `key`  — `Digest224` = `(dict).put_node(name.as_bytes())` (name hash)
 //!   - `ino`  — `u64` inode number
 //!   - `name` — UTF-8 name bytes
 //!
@@ -26,16 +26,15 @@ use std::collections::BTreeMap;
 
 use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::{DirEntry, MetaError};
-use blockset::{State, Tree, StorageAdd, Io, FileStorageAdd, file_storage_get};
 
 // ─── public primitives ────────────────────────────────────────────────────────
 
 /// Compute the CAS key (name hash) for a directory entry name.
 ///
-/// Uses `State::push_all` which stores the name bytes in the storage backend and
-/// returns a stable `Digest224` key.
-pub fn entry_key(storage: &mut impl StorageAdd, name: &str) -> Digest224 {
-    State::push_all(storage, name.as_bytes())
+/// The same as [`name_key`]; `storage` is not used (the names are in the
+/// entry list).
+pub fn entry_key(_storage: &mut impl crate::store_io::NodeWrite, name: &str) -> Digest224 {
+    name_key(name)
 }
 
 /// Encode an inode number as an inline `Digest256`.
@@ -138,16 +137,16 @@ fn deserialize_entry_list(bytes: &[u8]) -> Result<BTreeMap<Digest224, EntryRecor
     Ok(map)
 }
 
-fn intern_entry_list(storage: &mut impl StorageAdd, entries: &BTreeMap<Digest224, EntryRecord>) -> Digest224 {
+fn intern_entry_list(storage: &mut impl crate::store_io::NodeWrite, entries: &BTreeMap<Digest224, EntryRecord>) -> Digest224 {
     let bytes = serialize_entry_list(entries);
-    State::push_all(storage, &bytes)
+    (storage).put_node(&bytes)
 }
 
 fn load_entry_list(
-    io: &mut impl Io,
+    io: &mut impl crate::store_io::NodeRead,
     list_digest: &Digest224,
 ) -> Result<BTreeMap<Digest224, EntryRecord>, MetaError> {
-    let bytes = file_storage_get(io, list_digest)
+    let bytes = (io).get_node(list_digest)
         .ok_or_else(|| MetaError::Corrupted(format!("missing dir entry list {:?}", list_digest)))?;
     deserialize_entry_list(&bytes)
 }
@@ -159,7 +158,7 @@ fn load_entry_list(
 /// Both entries are stored as part of the entry list. Returns the entry list
 /// `Digest224` which acts as the directory's identity in the metadata store.
 pub fn create_dir_entries(
-    storage: &mut impl StorageAdd,
+    storage: &mut impl crate::store_io::NodeWrite,
     self_ino: u64,
     parent_ino: u64,
 ) -> Digest224 {
@@ -179,7 +178,7 @@ pub fn create_dir_entries(
 /// - `MetaError::InvalidName` if `name` is `.` or `..`
 /// - `MetaError::AlreadyExists(0)` if the name is already in the directory
 pub fn add_dir_entry(
-    io: &mut impl Io,
+    io: &mut impl crate::store_io::NodeWrite,
     dir_digest: &Digest224,
     name: &str,
     ino: u64,
@@ -190,7 +189,7 @@ pub fn add_dir_entry(
     // Read phase: load current entries (io borrow released after this)
     let mut entries = load_entry_list(io, dir_digest)?;
     // Write phase: create FSA and compute key + write new entry list
-    let mut fsa = FileStorageAdd::new(io);
+    let mut fsa = io;
     let key = entry_key(&mut fsa, name);
     if entries.contains_key(&key) {
         return Err(MetaError::AlreadyExists(ino));
@@ -205,7 +204,7 @@ pub fn add_dir_entry(
 /// - `MetaError::InvalidName` if `name` is `.` or `..`
 /// - `MetaError::NotFound(0)` if the name is not in the directory
 pub fn remove_dir_entry(
-    io: &mut impl Io,
+    io: &mut impl crate::store_io::NodeWrite,
     dir_digest: &Digest224,
     name: &str,
 ) -> Result<Digest224, MetaError> {
@@ -215,7 +214,7 @@ pub fn remove_dir_entry(
     // Read phase
     let mut entries = load_entry_list(io, dir_digest)?;
     // Write phase: compute key and write updated list
-    let mut fsa = FileStorageAdd::new(io);
+    let mut fsa = io;
     let key = entry_key(&mut fsa, name);
     if entries.remove(&key).is_none() {
         return Err(MetaError::NotFound(0));
@@ -226,12 +225,12 @@ pub fn remove_dir_entry(
 /// Point the `..` entry of a directory at `parent_ino` (used when a
 /// directory moves to a new parent). Returns the new entry list `Digest224`.
 pub fn set_dotdot(
-    io: &mut impl Io,
+    io: &mut impl crate::store_io::NodeWrite,
     dir_digest: &Digest224,
     parent_ino: u64,
 ) -> Result<Digest224, MetaError> {
     let mut entries = load_entry_list(io, dir_digest)?;
-    let mut fsa = FileStorageAdd::new(io);
+    let mut fsa = io;
     let key = entry_key(&mut fsa, "..");
     entries.insert(key, EntryRecord { key, ino: parent_ino, name: "..".to_string() });
     Ok(intern_entry_list(&mut fsa, &entries))
@@ -242,15 +241,14 @@ pub fn set_dotdot(
 /// Errors:
 /// - `MetaError::NotFound(0)` if the name is not in the directory
 pub fn lookup_dir_entry(
-    io: &mut impl Io,
+    io: &mut impl crate::store_io::NodeRead,
     dir_digest: &Digest224,
     name: &str,
 ) -> Result<u64, MetaError> {
     // Read phase: load entries
     let entries = load_entry_list(io, dir_digest)?;
     // Compute entry key (needs StorageAdd for hashing the name)
-    let mut fsa = FileStorageAdd::new(io);
-    let key = entry_key(&mut fsa, name);
+    let key = name_key(name);
     entries
         .get(&key)
         .map(|r| r.ino)
@@ -259,7 +257,7 @@ pub fn lookup_dir_entry(
 
 /// List all entries in a directory.
 pub fn list_dir_entries(
-    io: &mut impl Io,
+    io: &mut impl crate::store_io::NodeRead,
     dir_digest: &Digest224,
 ) -> Result<Vec<DirEntry>, MetaError> {
     let entries = load_entry_list(io, dir_digest)?;
@@ -276,8 +274,7 @@ pub fn list_dir_entries(
 /// Gives the same `Digest224` as [`entry_key`]: an in-memory `Dictionary`
 /// runs the same tree hash, but the nodes are thrown away.
 pub fn name_key(name: &str) -> Digest224 {
-    let mut scratch = blockset::Dictionary::default();
-    State::push_all(&mut scratch, name.as_bytes())
+    crate::store_io::to_digest(chunk_store::ObjectId::of(name.as_bytes()))
 }
 
 /// A decoded directory entry list that the metadata store holds in memory.
@@ -300,12 +297,12 @@ impl DirList {
     }
 
     /// Read a stored entry list.
-    pub fn load(io: &mut impl Io, digest: &Digest224) -> Result<Self, MetaError> {
+    pub fn load(io: &mut impl crate::store_io::NodeRead, digest: &Digest224) -> Result<Self, MetaError> {
         Ok(DirList { entries: load_entry_list(io, digest)? })
     }
 
     /// Write the list to the store and return its digest.
-    pub fn intern(&self, storage: &mut impl StorageAdd) -> Digest224 {
+    pub fn intern(&self, storage: &mut impl crate::store_io::NodeWrite) -> Digest224 {
         intern_entry_list(storage, &self.entries)
     }
 
@@ -361,14 +358,14 @@ mod tests {
 
     fn make_io() -> (TempDir, StoreIo) {
         let dir = TempDir::new().unwrap();
-        let io = StoreIo::new(dir.path());
+        let io = StoreIo::open(dir.path()).unwrap();
         (dir, io)
     }
 
     #[test]
     fn dir_list_interns_same_digest_as_per_change_path() {
         let (_dir, mut io) = make_io();
-        let mut old = { let mut fsa = FileStorageAdd::new(&mut io); create_dir_entries(&mut fsa, 5, 1) };
+        let mut old = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 5, 1) };
         let mut list = DirList::new_dir(5, 1);
         for (i, n) in ["a", "b.hpp", "c", "dir"].iter().enumerate() {
             old = add_dir_entry(&mut io, &old, n, 10 + i as u64).unwrap();
@@ -378,7 +375,7 @@ mod tests {
         list.remove("c").unwrap();
         old = set_dotdot(&mut io, &old, 7).unwrap();
         list.set_dotdot(7);
-        let new = { let mut fsa = FileStorageAdd::new(&mut io); list.intern(&mut fsa) };
+        let new = { let mut fsa = &mut io; list.intern(&mut fsa) };
         assert_eq!(old, new);
         assert_eq!(list.lookup("b.hpp").unwrap(), 11);
         assert!(matches!(list.lookup("c"), Err(MetaError::NotFound(_))));
@@ -391,7 +388,7 @@ mod tests {
     #[test]
     fn test_create_dir_entries_has_dot_and_dotdot() {
         let (_dir, mut io) = make_io();
-        let dir_d = { let mut fsa = FileStorageAdd::new(&mut io); create_dir_entries(&mut fsa, 1, 1) };
+        let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
         let entries = list_dir_entries(&mut io, &dir_d).unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"."), ". not found: {:?}", names);
@@ -402,7 +399,7 @@ mod tests {
     #[test]
     fn test_create_dir_entries_dot_points_to_self() {
         let (_dir, mut io) = make_io();
-        let dir_d = { let mut fsa = FileStorageAdd::new(&mut io); create_dir_entries(&mut fsa, 5, 2) };
+        let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 5, 2) };
         let entries = list_dir_entries(&mut io, &dir_d).unwrap();
         let dot = entries.iter().find(|e| e.name == ".").unwrap();
         let dotdot = entries.iter().find(|e| e.name == "..").unwrap();
@@ -413,7 +410,7 @@ mod tests {
     #[test]
     fn test_add_dir_entry_appears_in_list() {
         let (_dir, mut io) = make_io();
-        let dir_d = { let mut fsa = FileStorageAdd::new(&mut io); create_dir_entries(&mut fsa, 1, 1) };
+        let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
         let dir_d2 = add_dir_entry(&mut io, &dir_d, "hello", 42).unwrap();
         let entries = list_dir_entries(&mut io, &dir_d2).unwrap();
         let e = entries.iter().find(|e| e.name == "hello").unwrap();
@@ -423,7 +420,7 @@ mod tests {
     #[test]
     fn test_add_dir_entry_duplicate_rejected() {
         let (_dir, mut io) = make_io();
-        let dir_d = { let mut fsa = FileStorageAdd::new(&mut io); create_dir_entries(&mut fsa, 1, 1) };
+        let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
         let dir_d2 = add_dir_entry(&mut io, &dir_d, "foo", 10).unwrap();
         let result = add_dir_entry(&mut io, &dir_d2, "foo", 11);
         assert!(matches!(result, Err(MetaError::AlreadyExists(_))));
@@ -432,7 +429,7 @@ mod tests {
     #[test]
     fn test_lookup_finds_entry() {
         let (_dir, mut io) = make_io();
-        let dir_d = { let mut fsa = FileStorageAdd::new(&mut io); create_dir_entries(&mut fsa, 1, 1) };
+        let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
         let dir_d2 = add_dir_entry(&mut io, &dir_d, "bar", 99).unwrap();
         let ino = lookup_dir_entry(&mut io, &dir_d2, "bar").unwrap();
         assert_eq!(ino, 99);
@@ -441,7 +438,7 @@ mod tests {
     #[test]
     fn test_lookup_not_found() {
         let (_dir, mut io) = make_io();
-        let dir_d = { let mut fsa = FileStorageAdd::new(&mut io); create_dir_entries(&mut fsa, 1, 1) };
+        let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
         let result = lookup_dir_entry(&mut io, &dir_d, "nonexistent");
         assert!(matches!(result, Err(MetaError::NotFound(_))));
     }
@@ -449,7 +446,7 @@ mod tests {
     #[test]
     fn test_remove_dir_entry_gone_from_list() {
         let (_dir, mut io) = make_io();
-        let dir_d = { let mut fsa = FileStorageAdd::new(&mut io); create_dir_entries(&mut fsa, 1, 1) };
+        let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
         let dir_d2 = add_dir_entry(&mut io, &dir_d, "todelete", 77).unwrap();
         let dir_d3 = remove_dir_entry(&mut io, &dir_d2, "todelete").unwrap();
         let entries = list_dir_entries(&mut io, &dir_d3).unwrap();
@@ -459,7 +456,7 @@ mod tests {
     #[test]
     fn test_remove_nonexistent_returns_not_found() {
         let (_dir, mut io) = make_io();
-        let dir_d = { let mut fsa = FileStorageAdd::new(&mut io); create_dir_entries(&mut fsa, 1, 1) };
+        let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
         let result = remove_dir_entry(&mut io, &dir_d, "ghost");
         assert!(matches!(result, Err(MetaError::NotFound(_))));
     }
@@ -467,7 +464,7 @@ mod tests {
     #[test]
     fn test_remove_dot_rejected() {
         let (_dir, mut io) = make_io();
-        let dir_d = { let mut fsa = FileStorageAdd::new(&mut io); create_dir_entries(&mut fsa, 1, 1) };
+        let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
         let result = remove_dir_entry(&mut io, &dir_d, ".");
         assert!(matches!(result, Err(MetaError::InvalidName(_))));
     }
@@ -475,7 +472,7 @@ mod tests {
     #[test]
     fn test_remove_dotdot_rejected() {
         let (_dir, mut io) = make_io();
-        let dir_d = { let mut fsa = FileStorageAdd::new(&mut io); create_dir_entries(&mut fsa, 1, 1) };
+        let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
         let result = remove_dir_entry(&mut io, &dir_d, "..");
         assert!(matches!(result, Err(MetaError::InvalidName(_))));
     }
@@ -483,7 +480,7 @@ mod tests {
     #[test]
     fn test_add_dot_rejected() {
         let (_dir, mut io) = make_io();
-        let dir_d = { let mut fsa = FileStorageAdd::new(&mut io); create_dir_entries(&mut fsa, 1, 1) };
+        let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
         let result = add_dir_entry(&mut io, &dir_d, ".", 5);
         assert!(matches!(result, Err(MetaError::InvalidName(_))));
     }
@@ -491,7 +488,7 @@ mod tests {
     #[test]
     fn test_multiple_entries_round_trip() {
         let (_dir, mut io) = make_io();
-        let dir_d = { let mut fsa = FileStorageAdd::new(&mut io); create_dir_entries(&mut fsa, 1, 1) };
+        let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
         let dir_d = add_dir_entry(&mut io, &dir_d, "alpha", 2).unwrap();
         let dir_d = add_dir_entry(&mut io, &dir_d, "beta", 3).unwrap();
         let dir_d = add_dir_entry(&mut io, &dir_d, "gamma", 4).unwrap();
@@ -505,7 +502,7 @@ mod tests {
     fn test_original_entry_list_unchanged_after_add() {
         // The original dir_digest still resolves to the old list (CAS immutability).
         let (_dir, mut io) = make_io();
-        let dir_d1 = { let mut fsa = FileStorageAdd::new(&mut io); create_dir_entries(&mut fsa, 1, 1) };
+        let dir_d1 = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
         let dir_d2 = add_dir_entry(&mut io, &dir_d1, "x", 7).unwrap();
         assert_ne!(dir_d1, dir_d2);
         // old list still has only . and ..

@@ -21,7 +21,7 @@ const S_IFREG: u32 = 0o100_000;
 fn make_fs(store_dir: &TempDir, wal_config: WalConfig) -> SliceFsFilesystem {
     std::fs::create_dir_all(store_dir.path().join("segments")).unwrap();
     let wal = create_wal(wal_config, store_dir.path(), 1).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let mut meta = DictMetadataStore::new(io.clone());
     meta.set_wal(wal);
     SliceFsFilesystem::new(meta, io, Some(store_dir.path().to_path_buf()))
@@ -128,7 +128,7 @@ fn test_fsync_crash_durability() {
     assert!(loaded_root.is_some(), "a RootUpdate should have been written by fsync+commit");
 
     // Reconstruct the store from the committed root
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let rebuilt = DictMetadataStore::load_from_root(io, &root_digest)
         .expect("should be able to reconstruct store");
 
@@ -185,7 +185,7 @@ fn destroy_keeps_data_of_a_handle_that_is_still_open() {
     // No release: the handle is still open when the file system goes away.
     assert!(fs.test_destroy());
     let root = fs.meta().current_root().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let rebuilt = DictMetadataStore::load_from_root(io.clone(), &root).unwrap();
     let fs2 = SliceFsFilesystem::new(rebuilt, io, None);
     assert_eq!(fs2.test_read(ino, 100, 11).unwrap(), b"after-fsync");

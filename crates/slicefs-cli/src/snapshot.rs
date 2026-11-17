@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex};
 
 use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
-use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
 
 use crate::cli::SnapshotAction;
@@ -62,7 +61,7 @@ pub fn run_snapshot_create(
     })?;
 
     // Reconstruct DictMetadataStore from file-backed StoreIo.
-    let io = Arc::new(Mutex::new(StoreIo::new(store_path)));
+    let io = Arc::new(Mutex::new(crate::content::store_io(store_path)?));
     let mut meta = DictMetadataStore::load_from_root(io, &root)
         .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;
 
@@ -169,7 +168,7 @@ pub fn run_snapshot_switch(
     })?;
 
     // Reconstruct DictMetadataStore from file-backed StoreIo.
-    let io = Arc::new(Mutex::new(StoreIo::new(store_path)));
+    let io = Arc::new(Mutex::new(crate::content::store_io(store_path)?));
     let mut meta = DictMetadataStore::load_from_root(io, &root)
         .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;
 
@@ -279,7 +278,7 @@ mod tests {
         let segs_dir = store_dir.path().join("segments");
         std::fs::create_dir_all(&segs_dir).unwrap();
 
-        let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
         let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
         let mut meta = DictMetadataStore::new(io);
         meta.set_wal(wal);

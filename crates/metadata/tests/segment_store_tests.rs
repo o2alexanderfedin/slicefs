@@ -18,7 +18,7 @@ use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 
 fn make_store() -> (TempDir, DictMetadataStore) {
     let dir = TempDir::new().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let store = DictMetadataStore::new(io);
     (dir, store)
 }

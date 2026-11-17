@@ -17,7 +17,7 @@ const S_IFREG: u32 = 0o100_000;
 
 fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let meta = DictMetadataStore::new(io.clone());
     let fs = SliceFsFilesystem::new(meta, io, None);
     (fs, dir)
@@ -29,7 +29,7 @@ fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
 #[test]
 fn test_logical_bytes_empty_store() {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let meta = DictMetadataStore::new(io);
     assert_eq!(meta.logical_bytes(), 0, "empty store should have 0 logical bytes");
 }
@@ -181,8 +181,8 @@ fn test_physical_bytes_nonzero_after_write() {
     fs.test_write(fh, 0, b"some data content here").expect("write");
     fs.test_release(ino, fh).expect("release");
 
-    // Physical bytes: actual bytes in vt0/ CAS batch files on disk.
-    let vt0_path = dir.path().join("vt0");
+    // Physical bytes: actual bytes in the pack files on disk.
+    let vt0_path = dir.path().join("packs");
     let physical_bytes: u64 = if vt0_path.exists() {
         std::fs::read_dir(&vt0_path)
             .unwrap()
@@ -197,7 +197,7 @@ fn test_physical_bytes_nonzero_after_write() {
 
     assert!(
         physical_bytes > 0,
-        "physical bytes should be > 0 after writing a file (vt0/ must contain data)"
+        "physical bytes should be > 0 after writing a file (packs/ must contain data)"
     );
 }
 
@@ -207,7 +207,7 @@ fn test_physical_bytes_nonzero_after_write() {
 #[test]
 fn test_statfs_empty_filesystem() {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let meta = DictMetadataStore::new(io);
     assert_eq!(
         meta.logical_bytes(),
@@ -242,7 +242,7 @@ fn test_statfs_after_write_reports_logical_bytes() {
 #[test]
 fn test_statfs_files_reflects_inode_count() {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let meta = DictMetadataStore::new(io.clone());
 
     // Start: fresh store has root inode (count = 1)
@@ -267,7 +267,7 @@ fn test_statfs_files_reflects_inode_count() {
 #[test]
 fn test_statfs_blocks_from_host() {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let meta = DictMetadataStore::new(io.clone());
     let fs = SliceFsFilesystem::new(
         meta,
@@ -292,7 +292,7 @@ fn test_statfs_blocks_from_host() {
 #[test]
 fn test_statfs_fallback_no_store_path() {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let meta = DictMetadataStore::new(io.clone());
     let fs = SliceFsFilesystem::new(
         meta,

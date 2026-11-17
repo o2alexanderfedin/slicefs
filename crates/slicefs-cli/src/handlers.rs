@@ -526,7 +526,7 @@ mod tests {
 
     fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
         let meta = DictMetadataStore::new(io.clone());
         let fs = SliceFsFilesystem::new(meta, io, None);
         (fs, dir)

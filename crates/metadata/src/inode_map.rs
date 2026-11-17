@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 
 use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::MetaError;
-use blockset::{State, Tree, StorageAdd, Io, file_storage_get};
 
 /// In-memory inode number → Digest224 key mapping.
 ///
@@ -136,14 +135,14 @@ pub fn deserialize_inode_map(bytes: &[u8]) -> Result<InodeMap, MetaError> {
 /// Serialize and store an `InodeMap` into any `StorageAdd` backend.
 ///
 /// Returns the `Digest224` key that can later be passed to `load_inode_map`.
-pub fn intern_inode_map(storage: &mut impl StorageAdd, map: &InodeMap) -> Digest224 {
+pub fn intern_inode_map(storage: &mut impl crate::store_io::NodeWrite, map: &InodeMap) -> Digest224 {
     let bytes = serialize_inode_map(map);
-    State::push_all(storage, &bytes)
+    (storage).put_node(&bytes)
 }
 
 /// Retrieve and deserialize an `InodeMap` from file-backed storage.
-pub fn load_inode_map(io: &mut impl Io, key: &Digest224) -> Result<InodeMap, MetaError> {
-    let bytes = file_storage_get(io, key)
+pub fn load_inode_map(io: &mut impl crate::store_io::NodeRead, key: &Digest224) -> Result<InodeMap, MetaError> {
+    let bytes = (io).get_node(key)
         .ok_or_else(|| MetaError::Corrupted(format!("missing inode_map node {:?}", key)))?;
     deserialize_inode_map(&bytes)
 }
@@ -230,16 +229,15 @@ mod tests {
     fn test_intern_and_load_round_trip() {
         use crate::store_io::StoreIo;
         use tempfile::TempDir;
-        use blockset::FileStorageAdd;
 
         let dir = TempDir::new().unwrap();
-        let mut io = StoreIo::new(dir.path());
+        let mut io = StoreIo::open(dir.path()).unwrap();
         let mut m = InodeMap::new();
         let d: Digest224 = [9, 8, 7, 6, 5, 4, 3];
         m.insert(2, d);
         m.insert(3, [1; 7]);
         let key = {
-            let mut fsa = FileStorageAdd::new(&mut io);
+            let mut fsa = &mut io;
             intern_inode_map(&mut fsa, &m)
         };
         let recovered = load_inode_map(&mut io, &key).unwrap();
