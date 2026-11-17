@@ -50,7 +50,7 @@ pub enum SegmentError {
 ///
 /// Segment files are read in ascending order by segment_id (encoded in the filename
 /// as `segment-{id:06}.seg`). Legacy DictEntry records (type 0x01) are silently
-/// skipped — file-backed FileStorage nodes are the authoritative data source.
+/// skipped: the metadata nodes in the chunk store are the data.
 /// RootUpdate records update the `last_root` tracker;
 /// SnapshotRecord entries are collected into the returned Vec.
 ///

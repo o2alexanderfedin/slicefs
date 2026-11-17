@@ -122,9 +122,9 @@ impl GarbageCollector {
 
     /// Compact all `.seg` files using only root anchors (no in-memory Dictionary needed).
     ///
-    /// Used by the background GC thread after migration to file-backed storage.
-    /// Segment compaction retains all `RootUpdate` and `SnapshotRecord` entries;
-    /// live-set filtering from file storage will be added in a future plan.
+    /// Used by the background GC thread. Segment compaction keeps all
+    /// `RootUpdate` and `SnapshotRecord` entries; the chunk store has its own
+    /// online GC (`gc::OnlineGc`).
     pub fn run_gc_roots_only(&self, _roots: &[ObjectKey]) -> Result<GcStats, GcError> {
         self.run_gc_inner()
     }

@@ -34,6 +34,8 @@ struct State {
     /// Bytes that writes may still add (sum of all file growth); `None` = no limit.
     space_left: Option<u64>,
     fail_reads: bool,
+    /// After this many more reads, every read fails (`None`: off).
+    fail_reads_after: Option<u32>,
     fail_syncs: bool,
     /// The next this many syncs fail (then they work again).
     fail_next_syncs: u32,
@@ -42,6 +44,18 @@ struct State {
 }
 
 impl State {
+    /// True if this read must fail (counts down `fail_reads_after`).
+    fn read_fails(&mut self) -> bool {
+        match self.fail_reads_after.as_mut() {
+            Some(0) => true,
+            Some(n) => {
+                *n -= 1;
+                self.fail_reads
+            }
+            None => self.fail_reads,
+        }
+    }
+
     /// True if this sync must fail (counts down `fail_next_syncs`).
     fn sync_fails(&mut self) -> bool {
         if self.fail_next_syncs > 0 {
@@ -84,6 +98,17 @@ impl MemIo {
     /// Every read fails with EIO.
     pub fn set_fail_reads(&self, on: bool) {
         self.s.lock().unwrap().fail_reads = on;
+    }
+
+    /// The next `n` reads work, then every read fails with EIO until
+    /// `clear_fail_reads_after` (a failure in the middle of a long operation).
+    pub fn fail_reads_after(&self, n: u32) {
+        self.s.lock().unwrap().fail_reads_after = Some(n);
+    }
+
+    /// End `fail_reads_after`.
+    pub fn clear_fail_reads_after(&self) {
+        self.s.lock().unwrap().fail_reads_after = None;
     }
 
     /// Every sync (pack sync, directory sync, durable write) fails with EIO
@@ -169,8 +194,8 @@ impl Drop for MemPack {
 
 impl PackRead for MemPack {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        let s = self.s.lock().unwrap();
-        if s.fail_reads {
+        let mut s = self.s.lock().unwrap();
+        if s.read_fails() {
             return Err(eio());
         }
         let f = self.f.lock().unwrap();
@@ -243,8 +268,8 @@ impl PackIo for MemIo {
     }
 
     fn read(&self, num: u64, kind: Kind) -> io::Result<Vec<u8>> {
-        let s = self.s.lock().unwrap();
-        if s.fail_reads {
+        let mut s = self.s.lock().unwrap();
+        if s.read_fails() {
             return Err(eio());
         }
         s.files.get(&(num, kind)).map(|f| f.lock().unwrap().data.clone()).ok_or_else(not_found)

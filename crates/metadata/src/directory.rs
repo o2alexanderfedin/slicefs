@@ -125,7 +125,7 @@ fn load_entry_list(
     list_digest: &ObjectKey,
 ) -> Result<BTreeMap<ObjectKey, EntryRecord>, MetaError> {
     let bytes = (io).get_node(list_digest)
-        .ok_or_else(|| MetaError::Corrupted(format!("missing dir entry list {:?}", list_digest)))?;
+        .map_err(|e| crate::store_io::node_err("dir entry list", list_digest, e))?;
     deserialize_entry_list(&bytes)
 }
 

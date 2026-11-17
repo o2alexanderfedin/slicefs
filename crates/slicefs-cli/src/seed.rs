@@ -57,7 +57,7 @@ pub fn run_seed(store_path: &Path, source_dir: &Path, hash: Option<&str>) -> Res
     // Walk source_dir: root maps to inode 1 (the pre-created root dir).
     walk_dir(source_dir, 1, &meta_store, &cs)?;
 
-    // Commit metadata state into FileStorage, get root digest.
+    // Commit the metadata nodes into the chunk store; get the root key.
     let root = meta_store.commit()?;
 
     // Write root digest to segments/segment-000001.seg as a RootUpdate entry.
@@ -107,7 +107,7 @@ fn walk_dir(
     Ok(())
 }
 
-/// Create an inode for a regular file and push its content into FileStorage.
+/// Create an inode for a regular file and write its content into the chunk store.
 /// Returns (ino, content_digest).
 fn seed_file(
     path: &Path,
@@ -118,7 +118,7 @@ fn seed_file(
     let bytes = std::fs::read(path)?;
     let size = bytes.len() as u64;
 
-    // Push content bytes into FileStorage via CDC.
+    // Write the content into the chunk store (FastCDC chunks).
     let content_digest: ObjectKey = content::put_all(cs, &bytes)?;
 
     let inode_meta = file_inode_meta(fs_meta, size);
@@ -244,7 +244,7 @@ mod tests {
         let manifest = reloaded.get_manifest(file_ino).expect("get_manifest failed");
         assert_eq!(manifest.len(), 1, "expected exactly one block in manifest");
 
-        // Retrieve content bytes from FileStorage.
+        // Read the content back from the chunk store.
         let cs = content::open(store_dir.path()).unwrap();
         let read_back = content::get_all(&cs, &manifest[0]).expect("content read failed");
         assert_eq!(read_back, content.as_slice(), "content mismatch after round-trip");

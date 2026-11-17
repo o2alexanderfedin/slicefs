@@ -2156,7 +2156,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
         let content = b"hello, SliceFS content!";
-        // Push content into FileStorage
+        // Write content into the chunk store
 
         let meta_store = DictMetadataStore::new(io.clone());
         let file_meta = InodeMeta::new_file(0, 0, 0, S_IFREG_TEST | 0o644);

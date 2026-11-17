@@ -352,8 +352,11 @@ fn decode_index(b: &[u8], num: u64) -> Result<Option<Vec<(ObjectId, Loc)>>> {
         return Ok(None);
     }
     check_version(body, "index", num)?;
-    let n = u64::from_le_bytes(body[6..14].try_into().unwrap()) as usize;
-    if body.len() != 14 + n * IDX_ENTRY {
+    // The count is untrusted: a size that does not fit (or does not match
+    // the body) makes the index unusable, and the pack scan rebuilds it.
+    let n = u64::from_le_bytes(body[6..14].try_into().unwrap());
+    let size = usize::try_from(n).ok().and_then(|n| n.checked_mul(IDX_ENTRY)).and_then(|s| s.checked_add(14));
+    if size != Some(body.len()) {
         return Ok(None);
     }
     Ok(Some(
@@ -612,6 +615,13 @@ impl ChunkStore {
     /// active pack, which is synced before the old pack is deleted).
     pub fn gc_finish(&self, live: &HashSet<ObjectId>, boundary: u64) -> Result<GcStats> {
         let mut inner = self.inner.lock().unwrap();
+        // The touched set ends with this GC, also when it fails (#63). This
+        // call used it to choose what to remove. A failure can stop the work
+        // at any point, but loses no kept object: old packs are deleted only
+        // after their live copies are synced, and an open rebuilds the index
+        // from the packs. The next GC starts its own set in `gc_begin`, before
+        // its gate commit, so its mark sees everything put before that.
+        // Tests: tests/gc_fault_tests.rs.
         let touched = inner.touched.take().unwrap_or_default();
         inner.check()?;
         let keep = |id: &ObjectId| live.contains(id) || touched.contains(id);
@@ -977,5 +987,33 @@ impl Inner {
         let f = io.open_read(num)?;
         self.readers.insert(num, (Arc::clone(&f), self.tick));
         Ok(f)
+    }
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+
+    /// An index with a valid CRC whose entry count is `n` and whose body has
+    /// no entries.
+    fn index_with_count(n: u64) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(IDX_MAGIC);
+        b.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        b.extend_from_slice(&n.to_le_bytes());
+        let crc = crc32c::crc32c(&b);
+        b.extend_from_slice(&crc.to_le_bytes());
+        b
+    }
+
+    // #64: an entry count whose byte size overflows is refused (the scan of
+    // the pack then rebuilds the index), never a panic or a wrapped length.
+    #[test]
+    fn an_index_with_an_overflowing_count_is_refused() {
+        for n in [1u64 << 63, u64::MAX, u64::MAX / IDX_ENTRY as u64 + 1] {
+            assert!(matches!(decode_index(&index_with_count(n), 1), Ok(None)), "count {n}");
+        }
+        assert!(matches!(decode_index(&index_with_count(0), 1), Ok(Some(v)) if v.is_empty()));
+        assert!(matches!(decode_index(&index_with_count(1), 1), Ok(None)), "count 1 with no entry");
     }
 }

@@ -9,9 +9,10 @@
 //!
 //! ## How integrity verification works
 //!
-//! With FileStorage, integrity is verified by attempting to resolve each live root
-//! through `get_node`. If the root resolves successfully, the Merkle chain
-//! from that root is intact (the hash-chain guarantees all children are valid).
+//! Metadata: each live root node is read with `get_node` (a failure names its
+//! cause: missing, damaged, unknown hash, or I/O). Reading a root checks only
+//! that node; the other metadata nodes (maps, inodes, manifests) are read and
+//! checked in the next step, which loads them to reach the file content.
 //!
 //! File content: every object (manifest nodes and chunks) of every file
 //! under each root is read from the chunk store; each read checks the record
@@ -103,16 +104,13 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
         all_roots.push(snap.root);
     }
 
-    // Step 1: Verify each root resolves through FileStorage.
+    // Step 1: Verify each root node can be read; say why not (#65).
     for root in &all_roots {
         match (&mut io).get_node(root) {
-            Some(_bytes) => {
-                roots_verified += 1;
-                // Root resolves — Merkle chain is intact.
-            }
-            None => {
+            Ok(_bytes) => roots_verified += 1,
+            Err(e) => {
                 let hex = root.to_hex();
-                errors.push(format!("missing or corrupt root {}", &hex[..16]));
+                errors.push(format!("root {}: {e}", &hex[..16]));
             }
         }
     }
