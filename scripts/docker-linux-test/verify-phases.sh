@@ -93,6 +93,24 @@ if mnt $R/s5b $R/m5b --commit-interval 0; then   # no commit: only the write log
   fi
 fi
 
+echo "== FUSET-05: SIGTERM and SIGHUP end the mount cleanly (final commit, no mount.lock)"
+for SIG in TERM HUP; do   # (a background job ignores SIGINT; ignored signals stay ignored)
+  $B seed $R/ss$SIG $R/src >/dev/null 2>&1
+  if mnt $R/ss$SIG $R/ms$SIG --commit-interval 0; then   # no timer: only the final commit keeps the file
+    head -c 300000 /dev/urandom > $R/sig.bin; cp $R/sig.bin $R/ms$SIG/sig.bin
+    kill -$SIG $MP
+    for i in $(seq 30); do kill -0 $MP 2>/dev/null || break; sleep 0.5; done
+    if kill -0 $MP 2>/dev/null; then bad "SIG$SIG-exits" "(still running after 15s)"; kill -9 $MP
+    else ok "SIG$SIG-exits"; fi
+    fusermount -uz $R/ms$SIG 2>/dev/null
+    step "SIG$SIG-no-mount-lock" 5 bash -c "[ ! -e $R/ss$SIG/mount.lock ]"
+    if mnt $R/ss$SIG $R/ms$SIG; then
+      step "SIG$SIG-write-kept" 30 cmp $R/sig.bin $R/ms$SIG/sig.bin
+      umnt $R/ms$SIG
+    fi
+  fi
+done
+
 echo "== Phase 06: two snapshots of the same state do not double-count storage"
 $B seed $R/s6 $R/src >/dev/null 2>&1
 mnt $R/s6 $R/m6 && { head -c 2000000 /dev/urandom > $R/m6/data.bin; umnt $R/m6; }

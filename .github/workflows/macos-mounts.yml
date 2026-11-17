@@ -3,7 +3,9 @@ name: macOS mounts
 # Real FUSE-T mounts on a fresh macOS VM: the Boost round trip through SliceFS
 # on FSKit (the only backend). The job first enables the FUSE-T FSKit module
 # without the System Settings GUI (enable-fskit.sh).
-# Long (about 2.5 hours), so not on every pull request.
+# Long (80-110 min), so it runs only on special occasions: by hand
+# (workflow_dispatch), on main (a release), or on a ci/** branch (push a
+# branch named ci/<anything> to run it on purpose). Not on develop or PRs.
 on:
   workflow_dispatch:
     inputs:
@@ -15,7 +17,7 @@ on:
         type: boolean
         default: false
   push:
-    branches: [develop, main, "ci/**"]
+    branches: [main, "ci/**"]
 
 jobs:
   mounts:
