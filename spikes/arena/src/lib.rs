@@ -3,6 +3,28 @@
 //! shared plan; `chunk-store` itself is not changed, its private parts are
 //! forked here (`codec`, `sys`, `file_fork`) and the real `ChunkStore` stays
 //! the baseline ("RS").
+//!
+//! Where the code differs from the plan's interface sketch (section 2), and
+//! how spikes B and C extend it:
+//! - `Arena::open(dir, num, cfg, idx, Recovery, ro, active)` returns
+//!   `Option<Opened>` (arena, entries, sealed, bytes walked): the store
+//!   passes the idx it loaded and says which arena is the active one, so the
+//!   cut runs only for that arena, inside `open`, before any map exists.
+//!   `None` = bad header and no idx (the file was deleted).
+//! - `ReadPath` is object-safe (`read_record(&Loc, &mut dyn FnMut(&[u8]))`)
+//!   so the store holds a `Box<dyn ReadPath>`; `read::with_record` is the
+//!   generic closure form of the plan. Spike B adds `map.rs` with an
+//!   `MmapPath` and one arm in `read::make`. The store tells the read path
+//!   the length of every arena (`arena_ready`, for each arena at open and
+//!   for each new one; `fixed` = it has its full fixed length) and calls
+//!   `forget` before it unlinks one.
+//! - Spike C: `Recovery` gets a reuse arm, `Arena::write_at` exists (never
+//!   changes the length), `GcToken::Seq` and `Loc::seq` exist (the seq is
+//!   per process, from `Inner::loc`), `Options::reuse` is refused at open
+//!   until `reuse.rs` exists, and `sys::Fault` has the C fault points.
+//! - Extra options for spike A's measurements: `gc_seal` (always / size/8),
+//!   `close_seals` (today's close, or a resumable `open` idx), `walk` (the
+//!   recovery walk of A-B4).
 
 pub mod arena;
 pub mod bench;

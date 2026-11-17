@@ -60,7 +60,28 @@ impl Arena {
     /// A new arena: header page, then the reserve of the variant, then
     /// `full_sync` (V1-V3; V0 syncs at the first `sync`, as today).
     pub fn create(dir: &Path, num: u64, cfg: &ArenaCfg) -> io::Result<Arena> {
-        let path = arena_path(dir, num);
+        Self::create_at(arena_path(dir, num), num, cfg)
+    }
+
+    /// `prepare_next`: make arena `num` as `NNNN.arena.tmp` (a leftover one
+    /// is deleted at open); `install` renames it into place.
+    pub fn create_spare(dir: &Path, num: u64, cfg: &ArenaCfg) -> io::Result<Arena> {
+        let mut tmp = arena_path(dir, num).into_os_string();
+        tmp.push(".tmp");
+        let _ = fs::remove_file(&tmp);
+        Self::create_at(PathBuf::from(tmp), num, cfg)
+    }
+
+    /// Rename a spare into place. The caller syncs the directory before the
+    /// first record in it is reported durable.
+    pub fn install(&mut self, dir: &Path) -> io::Result<()> {
+        let to = arena_path(dir, self.num);
+        fs::rename(&self.path, &to)?;
+        self.path = to;
+        Ok(())
+    }
+
+    fn create_at(path: PathBuf, num: u64, cfg: &ArenaCfg) -> io::Result<Arena> {
         let file = OpenOptions::new().read(true).write(true).create_new(true).open(&path)?;
         let size = cfg.size;
         file.write_all_at(&codec::encode_header(&ArenaHeader { num, size, granule: cfg.granule }), 0)?;

@@ -67,10 +67,16 @@ pub fn open_store(variant: &str, dir: &Path, size: u64) -> Box<dyn ObjStore> {
     Box::new(SpikeStore::open(dir, spike_opts(variant, size)).unwrap())
 }
 
+/// `V0`..`V3`; a trailing `P` (e.g. `V1P`) turns on `prepare_next`.
 pub fn spike_opts(variant: &str, size: u64) -> Options {
-    let p = Prealloc::parse(variant).unwrap_or_else(|| panic!("unknown variant {variant}"));
+    let (base, prep) = match variant.strip_suffix('P') {
+        Some(b) => (b, true),
+        None => (variant, false),
+    };
+    let p = Prealloc::parse(base).unwrap_or_else(|| panic!("unknown variant {variant}"));
     let mut o = Options::with_prealloc(p);
     o.arena.size = size;
+    o.prepare_next = prep;
     o
 }
 

@@ -95,6 +95,7 @@ per_variant!(
     eighth_rule_compaction_into_the_unsealed_active_arena_keeps_live_data,
     eighth_rule_gc_begin_does_not_seal_a_small_active_arena,
     close_writes_a_resumable_idx_and_appends_continue_in_the_same_arena,
+    prepare_next_uses_the_spare_and_leaves_no_tmp_file,
 );
 
 // ── store_tests ──────────────────────────────────────────────────────────────
@@ -505,6 +506,31 @@ fn close_writes_a_resumable_idx_and_appends_continue_in_the_same_arena(p: Preall
     let s = SpikeStore::open(dir.path(), new_rules(p)).unwrap();
     assert_eq!(s.stats().objects, 60);
     for (id, d) in &all {
+        assert_eq!(&s.get(id).unwrap(), d);
+    }
+}
+
+fn prepare_next_uses_the_spare_and_leaves_no_tmp_file(p: Prealloc) {
+    let dir = TempDir::new().unwrap();
+    let mut o = new_rules(p);
+    o.prepare_next = true;
+    let objs;
+    {
+        let s = SpikeStore::open(dir.path(), o).unwrap();
+        objs = put_many(&s, 400, 4000); // about 3 arenas
+        // A large object takes the number the spare was made for.
+        s.put(&random(2 * MIB as usize, 4999)).unwrap();
+        objs.iter().for_each(|(id, d)| assert_eq!(&s.get(id).unwrap(), d));
+        let more = put_many(&s, 200, 5000);
+        more.iter().for_each(|(id, d)| assert_eq!(&s.get(id).unwrap(), d));
+        s.sync().unwrap();
+    }
+    assert!(files(dir.path(), ".tmp").is_empty(), "the unused spare is deleted at drop");
+    let n = files(dir.path(), ".arena").len();
+    assert!(n >= 4, "{n} arenas");
+    let s = SpikeStore::open(dir.path(), o).unwrap();
+    assert_eq!(s.stats().objects, 601);
+    for (id, d) in &objs {
         assert_eq!(&s.get(id).unwrap(), d);
     }
 }

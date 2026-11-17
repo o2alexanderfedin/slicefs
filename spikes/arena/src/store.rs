@@ -15,6 +15,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::thread::JoinHandle;
 
 /// Objects smaller than this are not compressed (as `chunk-store`).
 const MIN_COMPRESS: usize = 64;
@@ -52,6 +53,9 @@ pub struct SpikeStore {
     opts: Options,
     inner: Mutex<Inner>,
     read: Box<dyn ReadPath>,
+    /// `prepare_next`: the next arena, made by a background thread as
+    /// `NNNN.arena.tmp` (number, thread).
+    spare: Mutex<Option<(u64, JoinHandle<io::Result<Arena>>)>>,
 }
 
 impl SpikeStore {
@@ -80,7 +84,7 @@ impl SpikeStore {
         };
         if opts.read_only && !packs.is_dir() {
             let read = read::make(&packs, &opts)?;
-            return Ok(SpikeStore { dir: packs, opts, inner: Mutex::new(inner), read });
+            return Ok(SpikeStore { dir: packs, opts, inner: Mutex::new(inner), read, spare: Mutex::new(None) });
         }
         if !opts.read_only {
             fs::create_dir_all(&packs)?;
@@ -130,7 +134,12 @@ impl SpikeStore {
         for (num, len, fixed) in ready {
             read.arena_ready(num, len, fixed);
         }
-        Ok(SpikeStore { dir: packs, opts, inner: Mutex::new(inner), read })
+        let next = inner.next_arena;
+        let s = SpikeStore { dir: packs, opts, inner: Mutex::new(inner), read, spare: Mutex::new(None) };
+        if s.prepares() {
+            s.start_spare(next);
+        }
+        Ok(s)
     }
 
     pub fn options(&self) -> &Options {
@@ -185,12 +194,46 @@ impl SpikeStore {
         inner.next_arena += 1;
         let mut cfg = self.opts.arena;
         cfg.size = size;
-        let a = Arena::create(&self.dir, num, &cfg)?;
+        let a = match self.take_spare(num, size)? {
+            Some(a) => a,
+            None => Arena::create(&self.dir, num, &cfg)?,
+        };
+        if self.prepares() && size == self.opts.arena.size {
+            self.start_spare(inner.next_arena);
+        }
         inner.arenas.insert(num);
         inner.stats.packs += 1;
         inner.dir_dirty = true;
         self.read.arena_ready(num, a.len(), a.prealloc().fixed());
         Ok(a)
+    }
+
+    fn prepares(&self) -> bool {
+        self.opts.prepare_next && self.opts.arena.prealloc.fixed() && !self.opts.read_only
+    }
+
+    /// Start making arena `num` in the background.
+    fn start_spare(&self, num: u64) {
+        let (dir, cfg) = (self.dir.clone(), self.opts.arena);
+        let h = std::thread::spawn(move || Arena::create_spare(&dir, num, &cfg));
+        if let Some((_, old)) = self.spare.lock().unwrap().replace((num, h)) {
+            discard(old);
+        }
+    }
+
+    /// The spare for arena `num`, renamed into place; waits for it if it is
+    /// still being made (that is never longer than making it inline). A
+    /// spare with another number (a large object took that number) or of
+    /// another size is deleted.
+    fn take_spare(&self, num: u64, size: u64) -> Result<Option<Arena>> {
+        let Some((n, h)) = self.spare.lock().unwrap().take() else { return Ok(None) };
+        if n != num || size != self.opts.arena.size {
+            discard(h);
+            return Ok(None);
+        }
+        let mut a = h.join().map_err(|_| Error::Io(io::Error::other("spare arena thread panicked")))??;
+        a.install(&self.dir)?;
+        Ok(Some(a))
     }
 
     /// Append an encoded record to the active arena (made if there is none).
@@ -466,6 +509,21 @@ impl Inner {
             self.stats.objects += 1;
             self.stats.raw_bytes += l.raw as u64;
             self.stats.stored_bytes += l.stored as u64;
+        }
+    }
+}
+
+/// Wait for a spare that is not used and delete its file.
+fn discard(h: JoinHandle<io::Result<Arena>>) {
+    if let Ok(Ok(a)) = h.join() {
+        let _ = fs::remove_file(a.path());
+    }
+}
+
+impl Drop for SpikeStore {
+    fn drop(&mut self) {
+        if let Some((_, h)) = self.spare.get_mut().unwrap().take() {
+            discard(h);
         }
     }
 }
