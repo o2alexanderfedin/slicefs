@@ -534,6 +534,11 @@ pub fn run_mount(
         Some(store_path.to_path_buf()),
     );
     fs.set_auto_snapshot(auto_snapshot);
+    if fs.content().punches_holes() {
+        println!("Chunk store: GC frees space with hole punching and compaction.");
+    } else {
+        println!("Chunk store: this file system cannot punch holes; GC frees space by compaction only.");
+    }
 
     // Replay the write log (#20): requests after the last root, made durable
     // by fsync before a crash. Then commit, which cuts the log. Not on a

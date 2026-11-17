@@ -329,6 +329,8 @@ pub struct GcStats {
 /// A content-addressed object store in pack files.
 pub struct ChunkStore {
     io: Arc<dyn PackIo>,
+    /// The strategy can punch holes (asked once, at open).
+    punches: bool,
     opts: Options,
     inner: Mutex<Inner>,
 }
@@ -344,7 +346,7 @@ impl ChunkStore {
     /// Open the store on a storage strategy (files, a mock, ...).
     pub fn open_with(io: Arc<dyn PackIo>, opts: Options) -> Result<Self> {
         if !io.prepare(opts.read_only)? {
-            return Ok(ChunkStore { io, opts, inner: Mutex::new(Inner::empty()) });
+            return Ok(ChunkStore { io, punches: false, opts, inner: Mutex::new(Inner::empty()) });
         }
         let mut nums = io.list()?;
         nums.sort_unstable();
@@ -408,7 +410,8 @@ impl ChunkStore {
             }
             inner.stats.packs += 1;
         }
-        Ok(ChunkStore { io, opts, inner: Mutex::new(inner) })
+        let punches = !opts.read_only && io.can_punch();
+        Ok(ChunkStore { io, punches, opts, inner: Mutex::new(inner) })
     }
 
     /// Store `data` and return its ID. Bytes already in the store are not
@@ -589,6 +592,13 @@ impl ChunkStore {
         keep: &dyn Fn(&ObjectId) -> bool,
         st: &mut GcStats,
     ) -> Result<()> {
+        if !self.punches {
+            // No holes here: keep the dead records in the index, so a later
+            // GC still sees their bytes and compacts the pack when it is
+            // mostly dead.
+            st.kept_objects += entries.len() as u64;
+            return Ok(());
+        }
         let rec_end = |l: &Loc| l.offset + (REC_HEADER + l.stored as usize + REC_CRC) as u64;
         let mut sorted: Vec<&(ObjectId, Loc)> = entries.iter().collect();
         sorted.sort_by_key(|(_, l)| l.offset);
@@ -643,8 +653,10 @@ impl ChunkStore {
                 st.packs_punched += 1;
                 st.punched_bytes += ranges.iter().map(|&(_, n)| n).sum::<u64>();
             }
-            // No holes on this file system: the records are gone from the
-            // index, the bytes stay until the pack is compacted or deleted.
+            // The probe said yes, but this punch could not: the records are
+            // gone from the index, their bytes stay until the pack is
+            // compacted or deleted. Rare (for example a file system that
+            // changed under the store).
             Err(e) if e.kind() == io::ErrorKind::Unsupported => {}
             Err(e) => return Err(e.into()),
         }
@@ -709,6 +721,12 @@ impl ChunkStore {
             inner.sync_dir(&*self.io)?;
         }
         Ok(())
+    }
+
+    /// True if GC frees dead space inside packs with holes (the storage can
+    /// punch holes). Else GC frees space only by compaction and deletion.
+    pub fn punches_holes(&self) -> bool {
+        self.punches
     }
 
     /// Current counts.

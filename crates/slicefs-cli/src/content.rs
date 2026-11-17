@@ -68,8 +68,14 @@ pub fn open(store: &Path) -> std::io::Result<Content> {
     if !marker.exists() {
         std::fs::write(&marker, FORMAT)?;
     }
-    let cs = ChunkStore::open(store, Options::default()).map_err(std::io::Error::other)?;
+    let cs = ChunkStore::open_with(storage(store), Options::default()).map_err(std::io::Error::other)?;
     Ok(Arc::new(cs))
+}
+
+/// The storage strategy of a store: chosen here, once, and injected into the
+/// chunk store (the store itself makes no checks of its environment).
+fn storage(store: &Path) -> Arc<dyn chunk_store::pack_io::PackIo> {
+    Arc::new(chunk_store::pack_io::FileIo::new(store.join("packs")))
 }
 
 
@@ -77,7 +83,7 @@ pub fn open(store: &Path) -> std::io::Result<Content> {
 /// changes, also while a mount writes to it (for `scrub`).
 pub fn open_read_only(store: &Path) -> std::io::Result<Content> {
     let opts = Options { read_only: true, ..Options::default() };
-    let cs = ChunkStore::open(store, opts).map_err(std::io::Error::other)?;
+    let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
     Ok(Arc::new(cs))
 }
 

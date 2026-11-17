@@ -269,6 +269,10 @@ impl PackIo for MemIo {
         Ok(Arc::new(self.handle(num)?))
     }
 
+    fn can_punch(&self) -> bool {
+        !self.s.lock().unwrap().no_punch
+    }
+
     /// Zeros in the current bytes; like a real punch, it is durable only
     /// after a sync of the pack (a crash before that brings the bytes back).
     fn punch(&self, num: u64, ranges: &[(u64, u64)]) -> io::Result<()> {

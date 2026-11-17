@@ -200,7 +200,10 @@ fn a_failed_index_write_before_the_punch_punches_nothing() {
 }
 
 #[test]
-fn without_hole_support_the_dead_records_only_leave_the_index() {
+fn without_hole_support_gc_keeps_dead_records_and_compacts_later() {
+    // A disk that cannot punch (for example exFAT): the dead records must
+    // stay in the index, or later GCs would see the pack as fully live and
+    // never free its space.
     let mem = MemIo::new();
     mem.set_no_punch(true);
     let s = mem_store(&mem);
@@ -208,12 +211,17 @@ fn without_hole_support_the_dead_records_only_leave_the_index() {
     let live = three_of_four(&objs);
     let b = s.gc_begin().unwrap();
     let st = s.gc_finish(&live, b).unwrap();
-    assert_eq!(st.packs_punched, 0);
-    assert!((25..=30).contains(&st.removed_objects), "{st:?}");
+    assert_eq!((st.packs_punched, st.removed_objects), (0, 0), "{st:?}");
     check(&s, &objs, &live);
-    drop(s);
-    let s = mem_store(&mem);
-    check(&s, &objs, &live);
+    // Later most objects die: the packs are compacted and the space is freed.
+    let few: HashSet<ObjectId> = objs.iter().step_by(8).map(|(id, _)| *id).collect();
+    let before = s.stats().stored_bytes;
+    let b = s.gc_begin().unwrap();
+    let st = s.gc_finish(&few, b).unwrap();
+    assert!(st.packs_compacted > 0, "{st:?}");
+    assert_eq!(s.stats().objects as usize, few.len());
+    assert!(s.stats().stored_bytes < before / 4);
+    check(&s, &objs, &few);
 }
 
 #[cfg(target_os = "macos")]
