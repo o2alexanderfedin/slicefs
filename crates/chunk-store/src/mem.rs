@@ -11,6 +11,7 @@
 use crate::pack_io::{Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK};
 use std::collections::HashMap;
 use std::io;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -49,6 +50,8 @@ impl State {
 #[derive(Clone, Default)]
 pub struct MemIo {
     s: Arc<Mutex<State>>,
+    /// Pack handles that are open now (like file descriptors).
+    open: Arc<AtomicUsize>,
 }
 
 impl MemIo {
@@ -93,6 +96,12 @@ impl MemIo {
         }
     }
 
+    /// Pack handles that are open now (the file descriptors a real store
+    /// would hold).
+    pub fn open_handles(&self) -> usize {
+        self.open.load(Ordering::SeqCst)
+    }
+
     /// Current length of a file, if it exists.
     pub fn len(&self, num: u64, kind: Kind) -> Option<usize> {
         self.s.lock().unwrap().files.get(&(num, kind)).map(|f| f.lock().unwrap().data.len())
@@ -112,7 +121,8 @@ impl MemIo {
     /// usable after the name is removed.
     fn handle(&self, num: u64) -> io::Result<MemPack> {
         let f = self.s.lock().unwrap().files.get(&(num, Kind::Pack)).cloned().ok_or_else(not_found)?;
-        Ok(MemPack { s: Arc::clone(&self.s), f })
+        self.open.fetch_add(1, Ordering::SeqCst);
+        Ok(MemPack { s: Arc::clone(&self.s), f, open: Arc::clone(&self.open) })
     }
 }
 
@@ -127,6 +137,13 @@ fn eio() -> io::Error {
 struct MemPack {
     s: Arc<Mutex<State>>,
     f: Arc<Mutex<MemFile>>,
+    open: Arc<AtomicUsize>,
+}
+
+impl Drop for MemPack {
+    fn drop(&mut self) {
+        self.open.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl PackRead for MemPack {

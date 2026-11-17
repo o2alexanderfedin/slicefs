@@ -131,6 +131,10 @@ const REC_CRC: usize = 4;
 /// id(28) + offset(8) + stored(4) + raw(4) + flags(1)
 const IDX_ENTRY: usize = ID_LEN + 17;
 const FLAG_ZSTD: u8 = 1;
+/// Pack files that the store keeps open for reads at most (plus the active
+/// pack). More packs than this are opened again when needed, so a large
+/// store does not reach the limit of open files.
+pub const MAX_OPEN_PACKS: usize = 64;
 /// Objects smaller than this are not compressed.
 const MIN_COMPRESS: usize = 64;
 
@@ -289,7 +293,10 @@ struct Active {
 
 struct Inner {
     index: HashMap<ObjectId, Loc>,
-    readers: HashMap<u64, Arc<dyn PackRead>>,
+    /// Open packs for reads, with the tick of their last use (LRU, at most
+    /// `MAX_OPEN_PACKS`).
+    readers: HashMap<u64, (Arc<dyn PackRead>, u64)>,
+    tick: u64,
     active: Option<Active>,
     next_pack: u64,
     stats: Stats,
@@ -345,6 +352,7 @@ impl ChunkStore {
         let mut inner = Inner {
             index: HashMap::new(),
             readers: HashMap::new(),
+            tick: 0,
             active: None,
             next_pack: nums.last().map_or(1, |n| n + 1),
             stats: Stats::default(),
@@ -738,6 +746,7 @@ impl Inner {
         Inner {
             index: HashMap::new(),
             readers: HashMap::new(),
+            tick: 0,
             active: None,
             next_pack: 1,
             stats: Stats::default(),
@@ -794,11 +803,21 @@ impl Inner {
     }
 
     fn reader(&mut self, io: &dyn PackIo, num: u64) -> io::Result<Arc<dyn PackRead>> {
-        if let Some(f) = self.readers.get(&num) {
+        self.tick += 1;
+        if let Some((f, used)) = self.readers.get_mut(&num) {
+            *used = self.tick;
             return Ok(Arc::clone(f));
         }
+        if self.readers.len() >= MAX_OPEN_PACKS {
+            // Close the least recently used pack. A read that holds its
+            // handle keeps it open until the read ends.
+            let oldest = self.readers.iter().min_by_key(|(_, (_, used))| *used).map(|(n, _)| *n);
+            if let Some(n) = oldest {
+                self.readers.remove(&n);
+            }
+        }
         let f = io.open_read(num)?;
-        self.readers.insert(num, Arc::clone(&f));
+        self.readers.insert(num, (Arc::clone(&f), self.tick));
         Ok(f)
     }
 }
