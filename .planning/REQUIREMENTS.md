@@ -193,27 +193,29 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CLI-04 | Phase 7 | Complete |
 | CLI-05 | Phase 7 | Complete |
 | CLI-06 | Phase 3 | Complete |
-| FIX-01 | Phase 8 | Complete |
+| FIX-01 | Phase 8 | Superseded (blockset refcounts removed; reachability GC) |
 | FIX-02 | Phase 8 | Complete |
 | FIX-03 | Phase 8 | Complete |
 | FIX-04 | Phase 8 | Complete |
-| DECOMP-01 | Phase 9 | Complete |
-| DECOMP-02 | Phase 9 | Complete |
-| DECOMP-03 | Phase 9 | Complete |
-| DECOMP-04 | Phase 9 | Complete |
-| STRM-01 | Phase 10 | Complete |
-| STRM-03 | Phase 10 | Complete |
-| STRM-04 | Phase 10 | Complete |
-| STRM-05 | Phase 10 | Complete |
-| STRM-02 | Phase 11 | Complete |
-| FUSET-01 | Phase 12 | Planned |
-| FUSET-02 | Phase 12 | Planned |
-| FUSET-03 | Phase 12 | Planned |
-| FUSET-04 | Phase 12 | Planned |
-| FUSET-05 | Phase 12 | Planned |
-| FUSET-06 | Phase 12 | Planned |
-| FUSET-07 | Phase 12 | Planned |
-| FUSET-08 | Phase 12 | Planned |
+| DECOMP-01 | Phase 9 | Superseded (PR #53: zstd per object in chunk-store) |
+| DECOMP-02 | Phase 9 | Superseded (PR #53) |
+| DECOMP-03 | Phase 9 | Superseded (PR #53) |
+| DECOMP-04 | Phase 9 | Superseded (PR #53) |
+| STRM-01 | Phase 10 | Superseded (chunk_store::file::FileWriter) |
+| STRM-03 | Phase 10 | Superseded (Stream::read) |
+| STRM-04 | Phase 10 | Superseded (finalize_write per handle) |
+| STRM-05 | Phase 10 | Superseded (FileWriter) |
+| STRM-02 | Phase 11 | Superseded (FileWriter) |
+| FUSET-01 | Phase 12 | Complete |
+| FUSET-02 | Phase 12 | Complete (FSKit only) |
+| FUSET-03 | Phase 12 | Superseded (PR #42: NFS/SMB removed) |
+| FUSET-04 | Phase 12 | Complete (minimum FUSE-T 1.2.0) |
+| FUSET-05 | Phase 12 | Complete (PR #59: signals unmount; no watchdog) |
+| FUSET-06 | Phase 12 | Complete |
+| FUSET-07 | Phase 12 | Complete |
+| FUSET-08 | Phase 12 | Superseded (PR #42; code removed in #59) |
+
+Status as of the v2.0 re-audit, 2026-11-17 (`.planning/v2.0-MILESTONE-AUDIT.md`).
 
 **Coverage:**
 - v1 requirements: 43 total, mapped to phases: 43

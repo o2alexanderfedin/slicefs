@@ -18,6 +18,7 @@ on:
         default: false
   push:
     branches: [main, "ci/**"]
+    paths-ignore: [".planning/**", "**/*.md"]   # docs only: no 100-min mount test
 
 jobs:
   mounts:
