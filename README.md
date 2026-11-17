@@ -4,7 +4,7 @@
 
 SliceFS splits files into variable-sized content-addressed blocks, stores each unique block once, and presents the result as a full POSIX filesystem. Dedup is transparent: it's a daily-driver filesystem, not a backup format.
 
-- **Content-addressable storage** in the `chunk-store` crate: FastCDC content-defined chunking (average 8 KiB; boundaries come from the data, so a byte inserted or removed only changes the chunks near it), BLAKE3-224 object IDs, and append-only pack files. File content and metadata nodes are both stored this way (`docs/design/chunk-store.md`).
+- **Content-addressable storage** in the `chunk-store` crate: FastCDC content-defined chunking (average 8 KiB; boundaries come from the data, so a byte inserted or removed only changes the chunks near it), BLAKE3-256 object IDs, and append-only pack files. File content and metadata nodes are both stored this way (`docs/design/chunk-store.md`).
 - **Full POSIX semantics** via [`fuser`](https://crates.io/crates/fuser) — FUSE-T on macOS, libfuse on Linux.
 - **Crash-safe**: write log with crash replay, scrub, and online and offline GC (it deletes, compacts, or punches holes in pack files).
 - **Snapshots**: point-in-time create / list / switch.
@@ -33,7 +33,7 @@ Windows is deferred because `winfsp-rs` is GPL-3; native Projected FS or Dokan a
 ```
 .
 ├── crates/
-│   ├── slicefs-traits/        # Trait contracts (metadata, ContentHasher, Chunker, BlockStore, DedupIndex) + Digest224
+│   ├── slicefs-traits/        # Trait contracts (metadata, ContentHasher, Chunker, BlockStore, DedupIndex) + Digest256
 │   ├── cas-local/             # Reference/test impls of the CAS traits (Blake3 hasher, fixed chunker, stores) — not used by the binary
 │   ├── slicefs-compression/   # Compressors (Zstd, LZ4, None) — not on the write path since v2.0
 │   ├── chunk-store/           # FastCDC + BLAKE3 objects in pack files: index, zstd, crash scan, GC
@@ -107,7 +107,7 @@ Linux users can also run the POSIX conformance suite (pjdfstest) — see `.githu
 
 ## Architecture (one paragraph)
 
-The `slicefs` binary is built from `slicefs-traits`, `metadata`, and `chunk-store`. The FUSE layer (`fuser`) maps VFS operations onto `DictMetadataStore`, which keeps inodes, directories, file manifests, xattrs, and refcounts in memory. On write, file bytes are cut into FastCDC chunks; each chunk is stored once, under its BLAKE3-224 ID, in an append-only pack file, and a file is a manifest tree of chunk IDs. At a commit, the changed metadata nodes are stored in the same packs (in chunks too, so a large map costs only its changed chunks), the active pack is synced once, and a `RootUpdate` is appended to the write log in the segment files. A crash replays the log after the last root. A snapshot is a named, immutable pointer to a committed root.
+The `slicefs` binary is built from `slicefs-traits`, `metadata`, and `chunk-store`. The FUSE layer (`fuser`) maps VFS operations onto `DictMetadataStore`, which keeps inodes, directories, file manifests, xattrs, and refcounts in memory. On write, file bytes are cut into FastCDC chunks; each chunk is stored once, under its BLAKE3-256 ID, in an append-only pack file, and a file is a manifest tree of chunk IDs. At a commit, the changed metadata nodes are stored in the same packs (in chunks too, so a large map costs only its changed chunks), the active pack is synced once, and a `RootUpdate` is appended to the write log in the segment files. A crash replays the log after the last root. A snapshot is a named, immutable pointer to a committed root.
 
 For deep detail, see `.planning/PROJECT.md` and the per-phase artifacts under `.planning/phases/`.
 

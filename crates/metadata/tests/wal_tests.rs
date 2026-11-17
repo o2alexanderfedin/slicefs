@@ -1,11 +1,11 @@
 /// Tests for WalStrategy trait implementations.
 use metadata::segment::{SegmentEntry, SegmentReader};
 use metadata::wal::{NoWal, PerOpWal, FlushOnFsyncWal, PeriodicWal, WalEntry, WalStrategy};
-use slicefs_traits::digest::Digest224;
+use slicefs_traits::digest::Digest256;
 use tempfile::TempDir;
 
-fn make_key(v: u32) -> Digest224 {
-    [v, v + 1, v + 2, v + 3, v + 4, v + 5, v + 6]
+fn make_key(v: u32) -> Digest256 {
+    [v, v + 1, v + 2, v + 3, v + 4, v + 5, v + 6, v + 7]
 }
 
 // ─── NoWal ──────────────────────────────────────────────────────────────────

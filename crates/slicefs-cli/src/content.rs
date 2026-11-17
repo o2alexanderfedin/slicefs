@@ -1,15 +1,15 @@
 //! File content on the chunk store (docs/design/chunk-store.md, step 2).
 //!
 //! File data goes into `<store>/packs/` through `chunk_store`: FastCDC chunks
-//! with BLAKE3-224 IDs, a manifest tree, zstd. The metadata keeps a file's
-//! content key as a `Digest224` (28 bytes, the same size as an `ObjectId`).
+//! with BLAKE3-256 IDs, a manifest tree, zstd. The metadata keeps a file's
+//! content key as a `Digest256` (32 bytes, the same size as an `ObjectId`).
 //! The metadata nodes are in the same chunk store (`metadata::store_io`,
 //! step 3).
 
 use std::path::Path;
 use std::sync::Arc;
 
-use slicefs_traits::digest::Digest224;
+use slicefs_traits::digest::Digest256;
 use chunk_store::file::{FileReader, FileWriter};
 use chunk_store::{ChunkStore, Options};
 
@@ -18,7 +18,7 @@ pub type Content = Arc<ChunkStore>;
 
 /// Marker file of the store format with file content in packs.
 pub const FORMAT_FILE: &str = "FORMAT";
-pub const FORMAT: &str = "slicefs-store 5 (metadata and file content in packs)\n";
+pub const FORMAT: &str = "slicefs-store 6 (metadata and file content in packs, BLAKE3-256 IDs)\n";
 
 /// Refuse a store of an older format, whose format changed without a
 /// migration. A store passes if it has the format marker, or if it has no
@@ -26,16 +26,18 @@ pub const FORMAT: &str = "slicefs-store 5 (metadata and file content in packs)\n
 /// one made by code that writes no marker, as in tests).
 /// Call this before the store is opened (mount, gc, stats, scrub).
 pub fn check_format(store: &Path) -> std::io::Result<()> {
-    let older = || {
+    let older_as = |what: &str| {
         std::io::Error::other(format!(
-            "{} was made by an older SliceFS (metadata in vt0/). The store \
+            "{} was made by an older SliceFS ({what}). The store \
              format changed without a migration: copy the files out with the \
              older version, then into a new store",
             store.display()
         ))
     };
+    let older = || older_as("metadata in vt0/");
     match std::fs::read_to_string(store.join(FORMAT_FILE)) {
         Ok(s) if s == FORMAT => return Ok(()),
+        Ok(s) if s.starts_with("slicefs-store 5 ") => return Err(older_as("224-bit object IDs")),
         Ok(s) if s.starts_with("slicefs-store ") => return Err(older()),
         Ok(s) => {
             return Err(std::io::Error::other(format!(
@@ -145,13 +147,13 @@ impl Stream {
         self.0.is_empty()
     }
 
-    pub fn finish(self, cs: &ChunkStore) -> std::io::Result<Digest224> {
+    pub fn finish(self, cs: &ChunkStore) -> std::io::Result<Digest256> {
         self.0.finish(cs).map(to_digest).map_err(std::io::Error::other)
     }
 }
 
 /// Store `data` as one file content and return its key.
-pub fn put_all(cs: &ChunkStore, data: &[u8]) -> std::io::Result<Digest224> {
+pub fn put_all(cs: &ChunkStore, data: &[u8]) -> std::io::Result<Digest256> {
     let mut s = Stream::default();
     s.push(cs, data)?;
     s.finish(cs)
@@ -159,7 +161,7 @@ pub fn put_all(cs: &ChunkStore, data: &[u8]) -> std::io::Result<Digest224> {
 
 /// All bytes of the content `key`, or `None` if an object is missing or
 /// damaged.
-pub fn get_all(cs: &ChunkStore, key: &Digest224) -> Option<Vec<u8>> {
+pub fn get_all(cs: &ChunkStore, key: &Digest256) -> Option<Vec<u8>> {
     let mut r = FileReader::open(cs, to_id(key)).ok()?;
     let n = r.len() as usize;
     r.read(cs, 0, n).ok()
@@ -169,11 +171,11 @@ pub fn get_all(cs: &ChunkStore, key: &Digest224) -> Option<Vec<u8>> {
 pub struct Reader(FileReader);
 
 impl Reader {
-    pub fn open(cs: &ChunkStore, key: &Digest224) -> std::io::Result<Self> {
+    pub fn open(cs: &ChunkStore, key: &Digest256) -> std::io::Result<Self> {
         FileReader::open(cs, to_id(key)).map(Reader).map_err(std::io::Error::other)
     }
 
-    pub fn key(&self) -> Digest224 {
+    pub fn key(&self) -> Digest256 {
         to_digest(self.0.key())
     }
 
@@ -217,7 +219,7 @@ mod tests {
         meta.set_wal(wal);
         let ino = meta.create_inode(&InodeMeta::new_file(0, 0, 0, 0o100644)).unwrap();
         meta.link(1, "f", ino).unwrap();
-        meta.set_manifest(ino, &[[1, 2, 3, 4, 5, 6, 7]]).unwrap();
+        meta.set_manifest(ino, &[[1, 2, 3, 4, 5, 6, 7, 8]]).unwrap();
         meta.commit().unwrap();
         meta.shutdown_wal().unwrap();
         drop(meta);
@@ -230,7 +232,10 @@ mod tests {
         let d = tempfile::TempDir::new().unwrap();
         std::fs::write(d.path().join(FORMAT_FILE), "slicefs-store 4 (file content in packs)\n").unwrap();
         let err = check_format(d.path()).err().unwrap().to_string();
-        assert!(err.contains("older SliceFS"), "{err}");
+        assert!(err.contains("older SliceFS (metadata in vt0/)"), "{err}");
+        std::fs::write(d.path().join(FORMAT_FILE), "slicefs-store 5 (metadata and file content in packs)\n").unwrap();
+        let err = check_format(d.path()).err().unwrap().to_string();
+        assert!(err.contains("older SliceFS (224-bit object IDs)"), "{err}");
     }
 
     #[test]

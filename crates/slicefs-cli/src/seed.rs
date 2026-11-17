@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use crate::content::{self, Content};
 use metadata::segment::{SegmentWriter, SegmentEntry};
 use metadata::store::DictMetadataStore;
-use slicefs_traits::digest::Digest224;
+use slicefs_traits::digest::Digest256;
 use slicefs_traits::metadata::{InodeMeta, InodeId, MetadataStore};
 
 #[cfg(unix)]
@@ -110,12 +110,12 @@ fn seed_file(
     fs_meta: &std::fs::Metadata,
     meta_store: &DictMetadataStore,
     cs: &Content,
-) -> Result<(InodeId, Digest224), Box<dyn std::error::Error>> {
+) -> Result<(InodeId, Digest256), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
     let size = bytes.len() as u64;
 
     // Push content bytes into FileStorage via CDC.
-    let content_digest: Digest224 = content::put_all(cs, &bytes)?;
+    let content_digest: Digest256 = content::put_all(cs, &bytes)?;
 
     let inode_meta = file_inode_meta(fs_meta, size);
     let ino = meta_store.create_inode(&inode_meta)?;

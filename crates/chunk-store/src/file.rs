@@ -2,7 +2,7 @@
 //! FastCDC, a manifest tree of nodes, and a reader for byte ranges.
 //!
 //! Node format: magic `SFM1`, level `u8`, entry count `u32 LE`, then entries
-//! of `ObjectId` (28 bytes) + byte length `u64 LE`. Level 0 entries are
+//! of `ObjectId` (`ID_LEN` = 32 bytes) + byte length `u64 LE`. Level 0 entries are
 //! chunks; a level `k > 0` entry is a level `k - 1` node and the bytes it
 //! covers.
 //!

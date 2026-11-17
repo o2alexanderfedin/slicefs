@@ -22,7 +22,7 @@ fn commit_time_vs_file_count() {
             m.size = 1000 + i;
             let ino = meta.create_inode(&m).unwrap();
             meta.link(dirs[(i % dirs.len() as u64) as usize], &format!("f{i}"), ino).unwrap();
-            let d = [(i as u32).wrapping_mul(2654435761); 7];
+            let d = [(i as u32).wrapping_mul(2654435761); 8];
             meta.set_manifest(ino, &[d]).unwrap();
             meta.increment_refcount(&d);
         }

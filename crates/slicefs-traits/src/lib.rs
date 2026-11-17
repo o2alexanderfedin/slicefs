@@ -13,7 +13,7 @@
 //! # Metadata Traits (Phase 2)
 //!
 //! - [`MetadataStore`] — Full inode CRUD, directory, manifest, xattr operations
-//! - [`Digest224`] — Content-addressed key of a metadata node or file content
+//! - [`Digest256`] — Content-addressed key of a metadata node or file content
 //!
 //! # Supporting Types
 //!

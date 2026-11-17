@@ -5,7 +5,7 @@
 //! (`crate::store_io::NodeWrite` / `NodeRead`).
 
 use slicefs_traits::metadata::{InodeMeta, MetaError};
-use slicefs_traits::digest::{Digest224};
+use slicefs_traits::digest::{Digest256};
 
 /// Serialize `InodeMeta` to a little-endian buffer of 56 or 60 bytes.
 ///
@@ -76,8 +76,8 @@ pub fn deserialize_inode(buf: &[u8]) -> Result<InodeMeta, MetaError> {
 
 /// Serialize an inode and store it in any `StorageAdd` backend.
 ///
-/// Returns the `Digest224` key that can later be passed to `load_inode`.
-pub fn intern_inode(storage: &mut impl crate::store_io::NodeWrite, meta: &InodeMeta) -> Digest224 {
+/// Returns the `Digest256` key that can later be passed to `load_inode`.
+pub fn intern_inode(storage: &mut impl crate::store_io::NodeWrite, meta: &InodeMeta) -> Digest256 {
     let bytes = serialize_inode(meta);
     (storage).put_node(&bytes)
 }
@@ -85,7 +85,7 @@ pub fn intern_inode(storage: &mut impl crate::store_io::NodeWrite, meta: &InodeM
 /// Retrieve and deserialize an inode from file-backed storage.
 ///
 /// Returns `MetaError::Corrupted` if the key is not found or the data is wrong length.
-pub fn load_inode(io: &mut impl crate::store_io::NodeRead, key: &Digest224) -> Result<InodeMeta, MetaError> {
+pub fn load_inode(io: &mut impl crate::store_io::NodeRead, key: &Digest256) -> Result<InodeMeta, MetaError> {
     let bytes = (io).get_node(key)
         .ok_or_else(|| MetaError::Corrupted(format!("missing inode node {:?}", key)))?;
     deserialize_inode(&bytes)

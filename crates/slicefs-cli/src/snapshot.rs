@@ -215,7 +215,7 @@ pub fn run_snapshot_switch(
 /// We write the new root entry directly to the WAL via the store's log mechanism.
 fn write_root_update(
     meta: &DictMetadataStore,
-    new_root: &slicefs_traits::digest::Digest224,
+    new_root: &slicefs_traits::digest::Digest256,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Use the WAL's log_root_update method if available, or write through the store.
     // DictMetadataStore exposes `commit_root()` for this purpose.

@@ -25,10 +25,10 @@ Measured on the macOS CI round trip (Boost 1.85, 77,655 files, FSKit):
 - Chunking: FastCDC v2020, average 8 KiB (min 4 KiB, max 32 KiB). The minimum is one
   4 KiB disk block; min 2 KiB stored less than 1 % less data on source trees and
   tars, with 5-9 % more chunks.
-- Object ID: BLAKE3 of the uncompressed bytes, 224 bits (28 bytes, the size
-  of the `Digest224` that the metadata already uses, so the metadata types
-  do not change; collision strength 112 bits, the same as the SHA-224 used
-  now). Dedup does not depend on compression.
+- Object ID: BLAKE3 of the uncompressed bytes, the full 256 bits (32 bytes,
+  the size of the `Digest256` that the metadata uses; collision strength
+  128 bits). The store is meant to be global and decentralized, so the IDs
+  keep all bits of the hash. Dedup does not depend on compression.
 - Objects go into append-only pack files: one `fsync` for each pack and
   commit, not one for each object.
 - Compression: zstd, per object, only when it makes the object smaller.
@@ -47,13 +47,13 @@ them.
 | chunk | file data, one FastCDC chunk | file writes |
 | node | serialized metadata: manifest, directory, inode map, xattr, inode | commit |
 
-Both kinds are content-addressed by BLAKE3-224 (28 bytes, type `ObjectId`).
+Both kinds are content-addressed by BLAKE3-256 (32 bytes, type `ObjectId`).
 A chunk and a node with the same bytes are the same object; the kind is not
 part of the ID.
 
 ### File manifest
 
-A file is an ordered list of `(ObjectId, length u64)` entries (36 bytes
+A file is an ordered list of `(ObjectId, length u64)` entries (40 bytes
 each). The file offset of an entry is the sum of the lengths before it.
 
 - The list is split into nodes by content, like the chunks: a node ends
@@ -64,7 +64,7 @@ each). The file offset of an entry is the sum of the lengths before it.
   lengths at each level.
 - Why by content: with a fixed count per node, a chunk added or removed
   near the start moves every later entry, so every later node is stored
-  again (about 0.4 % of the file size). With content cuts, the nodes line up
+  again (about 0.5 % of the file size). With content cuts, the nodes line up
   again after the next cut. In a test with 200,000 chunks (379 nodes), one
   entry added or removed at the start gave 2 new nodes: the first leaf and
   the root.
@@ -77,12 +77,13 @@ a file: FastCDC chunks under a manifest. The maps (inode, directory,
 manifest, xattr, refcount) are written whole at each commit, so the chunks
 matter: after a change of one file in 5,000, the next commit stored 12 KB,
 against 1.36 MB for the first commit (`tests/node_crash_tests.rs`). Roots and
-snapshots stay 28 bytes in the `RootUpdate` and `Snapshot` records.
+snapshots are 32 bytes in the `RootUpdate` and `Snapshot` records.
 
 The metadata and the file content share one `ChunkStore` instance: a commit
 syncs the active pack once, then logs the root. A directory entry key is
-BLAKE3-224 of the name (no object is stored for it). The store format is 5;
-a store of format 4 (metadata in `vt0/`) is refused.
+BLAKE3-256 of the name (no object is stored for it). The store format is 6;
+a store of format 5 (224-bit object IDs) or 4 (metadata in `vt0/`) is
+refused.
 
 ## Pack files
 
@@ -101,7 +102,7 @@ Record:
 
 | Field | Size |
 |---|---|
-| ObjectId | 28 |
+| ObjectId | 32 |
 | flags (bit 0: zstd) | u8 |
 | raw length | u32 LE |
 | stored length | u32 LE |
@@ -119,7 +120,7 @@ Record:
 ### Index in memory
 
 A map `ObjectId → (pack, offset, stored length, raw length, flags)`: about
-52 bytes per object, so 52 MB for one million objects. At open, it is filled
+56 bytes per object, so 56 MB for one million objects. At open, it is filled
 from the `.idx` files of the sealed packs and from a scan of the active
 pack. A later change can use a memory-mapped sorted index if stores get very
 large.
@@ -134,7 +135,8 @@ needed for correctness).
 
 zstd level 3, per object. The compressed form is kept only if it is at least
 1/8 smaller; otherwise the raw bytes are stored (flag bit 0 = 0). Random
-data thus costs about one header per chunk (45 bytes for 8 KiB, 0.5 %).
+data thus costs about one record header and CRC per chunk (45 bytes for
+8 KiB, 0.5 %).
 
 ## Durability and crash safety
 
@@ -262,7 +264,7 @@ writes keep the current handling until #20 part 2.
    scan, with unit and crash tests. No user of it yet.
 2. File data: FastCDC + BLAKE3 + packs for file content and manifests. New
    store format version; old stores are rejected.
-3. Metadata nodes into packs (done; roots stay `Digest224`, the same 28
+3. Metadata nodes into packs (done; roots are `Digest256`, the same 32
    bytes as an `ObjectId`).
 4. GC: pack deletion and compaction, offline and online.
 5. Remove blockset and the `data-id` submodule (done).

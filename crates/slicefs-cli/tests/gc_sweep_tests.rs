@@ -10,7 +10,7 @@ use metadata::store_io::StoreIo;
 use metadata::wal::{create_wal, WalConfig};
 use slicefs_cli::filesystem::SliceFsFilesystem;
 use slicefs_cli::gc::run_gc;
-use slicefs_traits::digest::Digest224;
+use slicefs_traits::digest::Digest256;
 use slicefs_traits::metadata::MetadataStore;
 use tempfile::TempDir;
 
@@ -41,7 +41,7 @@ fn write_file(fs: &SliceFsFilesystem, name: &str, bytes: &[u8]) {
 }
 
 /// Read `name` from the metadata at `root`, straight from the store objects.
-fn read_at_root(store: &Path, root: &Digest224, name: &str) -> Vec<u8> {
+fn read_at_root(store: &Path, root: &Digest256, name: &str) -> Vec<u8> {
     let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
     let meta = DictMetadataStore::load_from_root(io, root).unwrap();
     let ino = meta.lookup(1, name).unwrap();

@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
 
-use slicefs_traits::digest::Digest224;
+use slicefs_traits::digest::{Digest256, DIGEST_BYTES};
 use crate::store_io::{NodeRead, NodeWrite};
 use slicefs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, MetadataStore};
 
@@ -33,6 +33,27 @@ use crate::xattr::{intern_xattrs, load_xattrs, set_xattr_entry, get_xattr_entry,
 
 // S_IFDIR bit mask (POSIX directory type)
 const S_IFMT: u32 = 0o0170_000;
+
+/// Byte layout of the root record that `commit` writes: fixed-width fields,
+/// little-endian. Each `*_DATA` field is the key of a serialized map.
+mod root_rec {
+    use super::DIGEST_BYTES as D;
+    pub const INODE_MAP: usize = 0;
+    pub const ROOT_DIR_INO: usize = INODE_MAP + D;
+    pub const NEXT_INO: usize = ROOT_DIR_INO + 8;
+    pub const INODE_DATA: usize = NEXT_INO + 8;
+    pub const DIR_DATA: usize = INODE_DATA + D;
+    pub const MANIFEST_DATA: usize = DIR_DATA + D;
+    pub const XATTR_DATA: usize = MANIFEST_DATA + D;
+    pub const REFCOUNTS: usize = XATTR_DATA + D;
+    pub const LOGICAL_BYTES: usize = REFCOUNTS + D;
+    pub const INODE_COUNT: usize = LOGICAL_BYTES + 8;
+    /// Total size in bytes (224 with 32-byte digests).
+    pub const SIZE: usize = INODE_COUNT + 8;
+}
+
+/// One entry of a `u64` <-> digest map: a `u64` and a digest.
+const MAP_ENTRY: usize = 8 + DIGEST_BYTES;
 
 /// Longest directory entry name in bytes (statfs reports namelen 255).
 const NAME_MAX: usize = 255;
@@ -108,11 +129,11 @@ pub struct DictMetadataStore {
     io: Arc<Mutex<StoreIo>>,
     /// Inode-number allocator + mapping table.
     inode_map: Mutex<InodeMap>,
-    /// Maps inode number → current inode data `Digest224`.
-    inode_data: Mutex<BTreeMap<u64, Digest224>>,
-    /// Maps directory inode number → entry list `Digest224` as of the last flush.
+    /// Maps inode number → current inode data `Digest256`.
+    inode_data: Mutex<BTreeMap<u64, Digest256>>,
+    /// Maps directory inode number → entry list `Digest256` as of the last flush.
     /// A directory in `dir_live` can be newer than its digest here.
-    dir_data: Mutex<BTreeMap<u64, Digest224>>,
+    dir_data: Mutex<BTreeMap<u64, Digest256>>,
     /// Decoded entry lists of the directories in use, with a dirty flag.
     /// Changes go here; `commit()` writes the dirty ones and updates `dir_data`.
     /// Without this, each create re-wrote the whole entry list (O(n) per entry).
@@ -126,16 +147,16 @@ pub struct DictMetadataStore {
     /// commit timer commits only when they differ.
     changes: AtomicU64,
     committed_changes: AtomicU64,
-    /// Maps file inode number → current manifest `Digest224`.
-    manifest_data: Mutex<BTreeMap<u64, Digest224>>,
-    /// Maps inode number → xattr set `Digest224` (only for inodes with xattrs).
-    xattr_data: Mutex<BTreeMap<u64, Digest224>>,
+    /// Maps file inode number → current manifest `Digest256`.
+    manifest_data: Mutex<BTreeMap<u64, Digest256>>,
+    /// Maps inode number → xattr set `Digest256` (only for inodes with xattrs).
+    xattr_data: Mutex<BTreeMap<u64, Digest256>>,
     /// Called in `commit()` after the metadata objects are synced and before
     /// the root is logged: makes the file content (chunk store) durable.
     pre_root_sync: Mutex<Option<PreRootSync>>,
-    /// Reference counts for content `Digest224`s.
+    /// Reference counts for content `Digest256`s.
     /// Incremented when a manifest references a block; decremented on manifest replacement or inode deletion.
-    refcounts: Mutex<BTreeMap<Digest224, u64>>,
+    refcounts: Mutex<BTreeMap<Digest256, u64>>,
     /// Running total of logical bytes — sum of all inode `size` fields.
     ///
     /// Updated atomically in `create_inode` (+size), `update_inode` (delta),
@@ -152,7 +173,7 @@ pub struct DictMetadataStore {
     /// Set via `set_wal()` after construction. When None, mutations are not logged.
     wal: Mutex<Option<Box<dyn WalStrategy>>>,
     /// Last committed root digest — updated by `commit()`, used by GC to determine live roots.
-    last_root: Mutex<Option<Digest224>>,
+    last_root: Mutex<Option<Digest256>>,
     /// Snapshot index by version number — O(1) lookup (FIX-03).
     snapshots_by_version: Mutex<HashMap<u64, SnapshotEntry>>,
     /// Snapshot name → version mapping — O(1) name lookup (FIX-04).
@@ -241,7 +262,7 @@ impl DictMetadataStore {
     /// Saturates at `u64::MAX` — blocks at `u64::MAX` are *immortal* and will
     /// never be garbage-collected.  A tracing warning is emitted the first time
     /// a block reaches saturation.
-    pub fn increment_refcount(&self, digest: &Digest224) {
+    pub fn increment_refcount(&self, digest: &Digest256) {
         self.changes.fetch_add(1, Ordering::Relaxed);
         let mut rc = self.refcounts.lock().unwrap();
         let val = rc.entry(*digest).or_insert(0);
@@ -264,7 +285,7 @@ impl DictMetadataStore {
     ///
     /// If the current count is `u64::MAX` (saturated / immortal), this is a
     /// no-op — immortal blocks are never freed.
-    pub fn decrement_refcount(&self, digest: &Digest224) {
+    pub fn decrement_refcount(&self, digest: &Digest256) {
         self.changes.fetch_add(1, Ordering::Relaxed);
         let mut rc = self.refcounts.lock().unwrap();
         if let Some(count) = rc.get_mut(digest) {
@@ -281,7 +302,7 @@ impl DictMetadataStore {
     }
 
     /// Return the current reference count for `digest`, or `0` if not tracked.
-    pub fn get_refcount(&self, digest: &Digest224) -> u64 {
+    pub fn get_refcount(&self, digest: &Digest256) -> u64 {
         let rc = self.refcounts.lock().unwrap();
         rc.get(digest).copied().unwrap_or(0)
     }
@@ -354,7 +375,7 @@ impl DictMetadataStore {
     /// Continue the WAL in a new segment that starts with `root` and every
     /// snapshot record, and delete the older segments (#20). A failure leaves
     /// the current segment in use, which is still correct (only larger).
-    fn rotate_wal(&self, root: Digest224) {
+    fn rotate_wal(&self, root: Digest256) {
         if let Some(ref w) = *self.wal.lock().unwrap() {
             let mut seed = vec![WalEntry::RootUpdate { root }];
             for s in self.list_snapshots() {
@@ -513,7 +534,7 @@ impl DictMetadataStore {
         self.changes.load(Ordering::Relaxed) != self.committed_changes.load(Ordering::Relaxed)
     }
 
-    pub fn current_root(&self) -> Option<Digest224> {
+    pub fn current_root(&self) -> Option<Digest256> {
         *self.last_root.lock().unwrap()
     }
 
@@ -605,9 +626,9 @@ impl DictMetadataStore {
     ///
     /// Includes every snapshot root plus the current committed root (if any).
     /// Used by both background GC and offline `slicefs gc`.
-    pub fn snapshot_roots(&self) -> Vec<Digest224> {
+    pub fn snapshot_roots(&self) -> Vec<Digest256> {
         let by_ver = self.snapshots_by_version.lock().unwrap();
-        let mut roots: Vec<Digest224> = by_ver.values().map(|s| s.root).collect();
+        let mut roots: Vec<Digest256> = by_ver.values().map(|s| s.root).collect();
         drop(by_ver);
         if let Some(root) = self.current_root() {
             roots.push(root);
@@ -623,7 +644,7 @@ impl DictMetadataStore {
     /// return this root and the store will be reconstructed from the snapshot state.
     ///
     /// Also updates `last_root` so `current_root()` reflects the change immediately.
-    pub fn commit_root(&self, root: Digest224) -> Result<(), MetaError> {
+    pub fn commit_root(&self, root: Digest256) -> Result<(), MetaError> {
         *self.last_root.lock().unwrap() = Some(root);
         self.log_wal_entry(&WalEntry::RootUpdate { root });
         self.rotate_wal(root);
@@ -778,7 +799,7 @@ impl MetadataStore for DictMetadataStore {
         self.with_dir(parent_ino, |d| d.remove(name).map(|()| ((), true)))
     }
 
-    fn set_manifest(&self, ino: InodeId, blocks: &[Digest224]) -> Result<(), MetaError> {
+    fn set_manifest(&self, ino: InodeId, blocks: &[Digest256]) -> Result<(), MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
         let digest = {
             let mut io_guard = self.io.lock().unwrap();
@@ -789,7 +810,7 @@ impl MetadataStore for DictMetadataStore {
         Ok(())
     }
 
-    fn get_manifest(&self, ino: InodeId) -> Result<Vec<Digest224>, MetaError> {
+    fn get_manifest(&self, ino: InodeId) -> Result<Vec<Digest256>, MetaError> {
         let manifest_data = self.manifest_data.lock().unwrap();
         let digest = manifest_data.get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
         drop(manifest_data);
@@ -886,18 +907,11 @@ impl MetadataStore for DictMetadataStore {
         1
     }
 
-    fn commit(&self) -> Result<Digest224, MetaError> {
-        // Serialize full in-memory state into a root record (184 bytes):
-        //   [inode_map_digest:     28 bytes (Digest224)]
-        //   [root_dir_ino:          8 bytes (u64 LE)]
-        //   [next_ino:              8 bytes (u64 LE)]
-        //   [inode_data_digest:    28 bytes (Digest224)] -- serialized BTreeMap<u64, Digest224>
-        //   [dir_data_digest:      28 bytes (Digest224)] -- serialized BTreeMap<u64, Digest224>
-        //   [manifest_data_digest: 28 bytes (Digest224)]
-        //   [xattr_data_digest:    28 bytes (Digest224)]
-        //   [refcount_data_digest: 28 bytes (Digest224)] -- NEW in v2
-        //
-        // Backward compat: root records of exactly 156 bytes are old format (no refcounts).
+    fn commit(&self) -> Result<Digest256, MetaError> {
+        // Serialize full in-memory state into a root record (layout: `root_rec`):
+        //   inode_map, root_dir_ino (u64), next_ino (u64), the keys of the
+        //   inode, dir, manifest, xattr and refcount maps, logical_bytes (u64)
+        //   and inode_count (u64).
         // Changes made after this point are left for the next commit.
         let changes = self.changes.load(Ordering::Relaxed);
         // Write changed directories and inodes first, so the digest maps are current.
@@ -930,44 +944,23 @@ impl MetadataStore for DictMetadataStore {
         };
         let refcount_data_digest = {
             let rc = self.refcounts.lock().unwrap();
-            intern_digest224_u64_map(&mut fsa, &rc)
+            intern_digest256_u64_map(&mut fsa, &rc)
         };
 
-        let mut root_bytes = Vec::with_capacity(200);
-        // inode_map_digest: 28 bytes
-        for word in &inode_map_digest {
-            root_bytes.extend_from_slice(&word.to_le_bytes());
-        }
-        // root_dir_ino: 8 bytes (always 1)
+        let mut root_bytes = Vec::with_capacity(root_rec::SIZE);
+        put_digest(&mut root_bytes, &inode_map_digest);
+        // root_dir_ino: always 1
         root_bytes.extend_from_slice(&1u64.to_le_bytes());
-        // next_ino: 8 bytes
         root_bytes.extend_from_slice(&next_ino.to_le_bytes());
-        // inode_data_digest: 28 bytes
-        for word in &inode_data_digest {
-            root_bytes.extend_from_slice(&word.to_le_bytes());
+        for d in [&inode_data_digest, &dir_data_digest, &manifest_data_digest,
+                  &xattr_data_digest, &refcount_data_digest] {
+            put_digest(&mut root_bytes, d);
         }
-        // dir_data_digest: 28 bytes
-        for word in &dir_data_digest {
-            root_bytes.extend_from_slice(&word.to_le_bytes());
-        }
-        // manifest_data_digest: 28 bytes
-        for word in &manifest_data_digest {
-            root_bytes.extend_from_slice(&word.to_le_bytes());
-        }
-        // xattr_data_digest: 28 bytes
-        for word in &xattr_data_digest {
-            root_bytes.extend_from_slice(&word.to_le_bytes());
-        }
-        // refcount_data_digest: 28 bytes (new in v2 — 184-byte format)
-        for word in &refcount_data_digest {
-            root_bytes.extend_from_slice(&word.to_le_bytes());
-        }
-
-        // logical_bytes + inode_count (v3, 200 bytes): without them, loading
-        // had to read every inode object just to sum the sizes (O(files) reads).
+        // logical_bytes + inode_count: without them, loading would read every
+        // inode object just to sum the sizes (O(files) reads).
         root_bytes.extend_from_slice(&self.logical_bytes.load(Ordering::Relaxed).to_le_bytes());
         root_bytes.extend_from_slice(&self.inode_count.load(Ordering::Relaxed).to_le_bytes());
-        assert_eq!(root_bytes.len(), 200, "root record must be 200 bytes");
+        assert_eq!(root_bytes.len(), root_rec::SIZE, "root record size");
         let root_digest = (&mut fsa).put_node(&root_bytes);
         // Make every object written since the last commit durable before the
         // root that refers to them is logged: after that, log rotation deletes
@@ -1002,35 +995,31 @@ impl MetadataStore for DictMetadataStore {
 /// the manifest nodes. File content keys are not here; see [`content_keys`].
 pub fn referenced_roots(
     io: &mut impl crate::store_io::NodeRead,
-    root: &Digest224,
-) -> Result<Vec<Digest224>, MetaError> {
+    root: &Digest256,
+) -> Result<Vec<Digest256>, MetaError> {
     referenced(io, root).map(|(meta, _)| meta)
 }
 
 /// The file content keys (in the chunk store) that the root record `root`
 /// refers to: the entries of the manifests.
-pub fn content_keys(io: &mut impl crate::store_io::NodeRead, root: &Digest224) -> Result<Vec<Digest224>, MetaError> {
+pub fn content_keys(io: &mut impl crate::store_io::NodeRead, root: &Digest256) -> Result<Vec<Digest256>, MetaError> {
     referenced(io, root).map(|(_, content)| content)
 }
 
 pub(crate) fn referenced(
     io: &mut impl crate::store_io::NodeRead,
-    root: &Digest224,
-) -> Result<(Vec<Digest224>, Vec<Digest224>), MetaError> {
+    root: &Digest256,
+) -> Result<(Vec<Digest256>, Vec<Digest256>), MetaError> {
     let bytes = (io).get_node(root)
         .ok_or_else(|| MetaError::Corrupted(format!("missing root node {:?}", root)))?;
-    if !matches!(bytes.len(), 156 | 184 | 200) {
-        return Err(MetaError::Corrupted(format!(
-            "root record: expected 156, 184 or 200 bytes, got {}",
-            bytes.len()
-        )));
-    }
-    let at = |o: usize| parse_digest224(&bytes[o..o + 28]);
-    let (inodes, dirs, manifests, xattrs) = (at(44), at(72), at(100), at(128));
-    let mut out = vec![*root, at(0), inodes, dirs, manifests, xattrs];
-    if bytes.len() >= 184 {
-        out.push(at(156)); // refcounts
-    }
+    check_root_len(bytes.len())?;
+    let at = |o: usize| parse_digest256(&bytes[o..o + DIGEST_BYTES]);
+    let (inodes, dirs, manifests, xattrs) = (
+        at(root_rec::INODE_DATA), at(root_rec::DIR_DATA),
+        at(root_rec::MANIFEST_DATA), at(root_rec::XATTR_DATA),
+    );
+    let mut out = vec![*root, at(root_rec::INODE_MAP), inodes, dirs, manifests, xattrs,
+                       at(root_rec::REFCOUNTS)];
     for map in [inodes, dirs, xattrs] {
         out.extend(load_u64_digest_map(io, &map)?.into_values());
     }
@@ -1042,29 +1031,45 @@ pub(crate) fn referenced(
     Ok((out, content))
 }
 
-// ─── helpers for BTreeMap<u64, Digest224> serialization ─────────────────────
+/// Error unless `len` is the size of a root record.
+fn check_root_len(len: usize) -> Result<(), MetaError> {
+    if len != root_rec::SIZE {
+        return Err(MetaError::Corrupted(format!(
+            "root record: expected {} bytes, got {}",
+            root_rec::SIZE, len
+        )));
+    }
+    Ok(())
+}
 
-/// Serialize and store a `BTreeMap<u64, Digest224>` via a StorageAdd backend.
+/// Append `d` as `DIGEST_BYTES` little-endian bytes.
+fn put_digest(buf: &mut Vec<u8>, d: &Digest256) {
+    for word in d {
+        buf.extend_from_slice(&word.to_le_bytes());
+    }
+}
+
+// ─── helpers for BTreeMap<u64, Digest256> serialization ─────────────────────
+
+/// Serialize and store a `BTreeMap<u64, Digest256>` via a StorageAdd backend.
 ///
-/// Format: `[count: u64 LE][for each entry: u64 LE ino + 28 bytes Digest224]`
-/// Each entry is 36 bytes; total = 8 + count × 36.
-fn intern_u64_digest_map(storage: &mut impl crate::store_io::NodeWrite, map: &BTreeMap<u64, Digest224>) -> Digest224 {
-    let mut bytes = Vec::with_capacity(8 + map.len() * 36);
+/// Format: `[count: u64 LE][for each entry: u64 LE ino + Digest256]`
+/// Each entry is `MAP_ENTRY` bytes; total = 8 + count × `MAP_ENTRY`.
+fn intern_u64_digest_map(storage: &mut impl crate::store_io::NodeWrite, map: &BTreeMap<u64, Digest256>) -> Digest256 {
+    let mut bytes = Vec::with_capacity(8 + map.len() * MAP_ENTRY);
     bytes.extend_from_slice(&(map.len() as u64).to_le_bytes());
     for (ino, digest) in map {
         bytes.extend_from_slice(&ino.to_le_bytes());
-        for word in digest {
-            bytes.extend_from_slice(&word.to_le_bytes());
-        }
+        put_digest(&mut bytes, digest);
     }
     (storage).put_node(&bytes)
 }
 
-/// Retrieve and deserialize a `BTreeMap<u64, Digest224>` from file-backed storage.
+/// Retrieve and deserialize a `BTreeMap<u64, Digest256>` from file-backed storage.
 fn load_u64_digest_map(
     io: &mut impl crate::store_io::NodeRead,
-    key: &Digest224,
-) -> Result<BTreeMap<u64, Digest224>, MetaError> {
+    key: &Digest256,
+) -> Result<BTreeMap<u64, Digest256>, MetaError> {
     let bytes = (io).get_node(key)
         .ok_or_else(|| MetaError::Corrupted(format!("missing u64-digest map node {:?}", key)))?;
 
@@ -1075,7 +1080,7 @@ fn load_u64_digest_map(
         )));
     }
     let count = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
-    let expected = 8 + count * 36;
+    let expected = 8 + count * MAP_ENTRY;
     if bytes.len() != expected {
         return Err(MetaError::Corrupted(format!(
             "u64-digest map: expected {} bytes for {} entries, got {}",
@@ -1085,13 +1090,9 @@ fn load_u64_digest_map(
 
     let mut map = BTreeMap::new();
     for i in 0..count {
-        let off = 8 + i * 36;
+        let off = 8 + i * MAP_ENTRY;
         let ino = u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
-        let mut digest: Digest224 = [0u32; 7];
-        for (j, word) in digest.iter_mut().enumerate() {
-            let o = off + 8 + j * 4;
-            *word = u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
-        }
+        let digest = parse_digest256(&bytes[off + 8..off + MAP_ENTRY]);
         map.insert(ino, digest);
     }
     Ok(map)
@@ -1103,54 +1104,27 @@ impl DictMetadataStore {
     ///
     /// Restores all in-memory maps (inode_data, dir_data, manifest_data, xattr_data)
     /// and inode numbering state so that subsequent operations continue seamlessly.
-    pub fn load_from_root(io: Arc<Mutex<StoreIo>>, root: &Digest224) -> Result<Self, MetaError> {
+    pub fn load_from_root(io: Arc<Mutex<StoreIo>>, root: &Digest256) -> Result<Self, MetaError> {
         let mut io_guard = io.lock().unwrap();
 
         // Read root record bytes
         let bytes = (&mut *io_guard).get_node(root)
             .ok_or_else(|| MetaError::Corrupted("missing root node".into()))?;
 
-        // Accept the old (156-, 184-byte) formats and the current one (200 bytes).
-        let (has_refcounts, has_counters) = match bytes.len() {
-            156 => (false, false), // v1 format — no refcounts field
-            184 => (true, false),  // v2 format — includes refcount_data_digest
-            200 => (true, true),   // v3 format — adds logical_bytes and inode_count
-            n => return Err(MetaError::Corrupted(format!(
-                "root record: expected 156, 184 or 200 bytes, got {}",
-                n
-            ))),
-        };
+        check_root_len(bytes.len())?;
+        let digest_at = |o: usize| parse_digest256(&bytes[o..o + DIGEST_BYTES]);
+        let u64_at = |o: usize| u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap());
 
-        // Parse the 7 fixed-width fields
-        let mut off = 0;
-
-        let inode_map_digest = parse_digest224(&bytes[off..off + 28]);
-        off += 28;
-
-        let root_dir_ino = u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
-        off += 8;
-
-        let next_ino = u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
-        off += 8;
-
-        let inode_data_digest = parse_digest224(&bytes[off..off + 28]);
-        off += 28;
-
-        let dir_data_digest = parse_digest224(&bytes[off..off + 28]);
-        off += 28;
-
-        let manifest_data_digest = parse_digest224(&bytes[off..off + 28]);
-        off += 28;
-
-        let xattr_data_digest = parse_digest224(&bytes[off..off + 28]);
-        off += 28;
-
-        // v2 format: read refcount_data_digest at offset 156-184
-        let refcount_data_digest_opt: Option<Digest224> = if has_refcounts {
-            Some(parse_digest224(&bytes[off..off + 28]))
-        } else {
-            None
-        };
+        let inode_map_digest = digest_at(root_rec::INODE_MAP);
+        let root_dir_ino = u64_at(root_rec::ROOT_DIR_INO);
+        let next_ino = u64_at(root_rec::NEXT_INO);
+        let inode_data_digest = digest_at(root_rec::INODE_DATA);
+        let dir_data_digest = digest_at(root_rec::DIR_DATA);
+        let manifest_data_digest = digest_at(root_rec::MANIFEST_DATA);
+        let xattr_data_digest = digest_at(root_rec::XATTR_DATA);
+        let refcount_data_digest = digest_at(root_rec::REFCOUNTS);
+        let initial_logical_bytes = u64_at(root_rec::LOGICAL_BYTES);
+        let initial_inode_count = u64_at(root_rec::INODE_COUNT);
 
         // Load and patch inode_map so next_ino is exactly restored.
         let mut inode_map = load_inode_map(&mut *io_guard, &inode_map_digest)?;
@@ -1160,11 +1134,7 @@ impl DictMetadataStore {
         let dir_data = load_u64_digest_map(&mut *io_guard, &dir_data_digest)?;
         let manifest_data = load_u64_digest_map(&mut *io_guard, &manifest_data_digest)?;
         let xattr_data = load_u64_digest_map(&mut *io_guard, &xattr_data_digest)?;
-        let refcounts = if let Some(ref rc_digest) = refcount_data_digest_opt {
-            load_digest224_u64_map(&mut *io_guard, rc_digest)?
-        } else {
-            BTreeMap::new()
-        };
+        let refcounts = load_digest256_u64_map(&mut *io_guard, &refcount_data_digest)?;
 
         // Sanity: root directory inode must exist
         if !inode_data.contains_key(&root_dir_ino) {
@@ -1173,17 +1143,6 @@ impl DictMetadataStore {
                 root_dir_ino
             )));
         }
-
-        let (initial_logical_bytes, initial_inode_count) = if has_counters {
-            let at = |o: usize| u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap());
-            (at(184), at(192))
-        } else {
-            // Older record: sum the sizes of all inodes (reads every inode).
-            let logical: u64 = inode_data.values().map(|digest| {
-                load_inode(&mut *io_guard, digest).map(|m| m.size).unwrap_or(0)
-            }).sum();
-            (logical, inode_data.len() as u64)
-        };
 
         drop(io_guard);
 
@@ -1210,63 +1169,57 @@ impl DictMetadataStore {
     }
 }
 
-/// Serialize and store a `BTreeMap<Digest224, u64>` via a StorageAdd backend.
+/// Serialize and store a `BTreeMap<Digest256, u64>` via a StorageAdd backend.
 ///
-/// Format: `[count: u64 LE][for each entry: 28 bytes Digest224 + 8 bytes u64 LE]`
-/// Each entry is 36 bytes; total = 8 + count × 36.
-fn intern_digest224_u64_map(storage: &mut impl crate::store_io::NodeWrite, map: &BTreeMap<Digest224, u64>) -> Digest224 {
-    let mut bytes = Vec::with_capacity(8 + map.len() * 36);
+/// Format: `[count: u64 LE][for each entry: Digest256 + u64 LE]`
+/// Each entry is `MAP_ENTRY` bytes; total = 8 + count × `MAP_ENTRY`.
+fn intern_digest256_u64_map(storage: &mut impl crate::store_io::NodeWrite, map: &BTreeMap<Digest256, u64>) -> Digest256 {
+    let mut bytes = Vec::with_capacity(8 + map.len() * MAP_ENTRY);
     bytes.extend_from_slice(&(map.len() as u64).to_le_bytes());
     for (digest, count) in map {
-        for word in digest {
-            bytes.extend_from_slice(&word.to_le_bytes());
-        }
+        put_digest(&mut bytes, digest);
         bytes.extend_from_slice(&count.to_le_bytes());
     }
     (storage).put_node(&bytes)
 }
 
-/// Retrieve and deserialize a `BTreeMap<Digest224, u64>` from file-backed storage.
-fn load_digest224_u64_map(
+/// Retrieve and deserialize a `BTreeMap<Digest256, u64>` from file-backed storage.
+fn load_digest256_u64_map(
     io: &mut impl crate::store_io::NodeRead,
-    key: &Digest224,
-) -> Result<BTreeMap<Digest224, u64>, MetaError> {
+    key: &Digest256,
+) -> Result<BTreeMap<Digest256, u64>, MetaError> {
     let bytes = (io).get_node(key)
-        .ok_or_else(|| MetaError::Corrupted(format!("missing digest224-u64 map node {:?}", key)))?;
+        .ok_or_else(|| MetaError::Corrupted(format!("missing digest256-u64 map node {:?}", key)))?;
 
     if bytes.len() < 8 {
         return Err(MetaError::Corrupted(format!(
-            "digest224-u64 map: expected at least 8 bytes, got {}",
+            "digest256-u64 map: expected at least 8 bytes, got {}",
             bytes.len()
         )));
     }
     let count = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
-    let expected = 8 + count * 36;
+    let expected = 8 + count * MAP_ENTRY;
     if bytes.len() != expected {
         return Err(MetaError::Corrupted(format!(
-            "digest224-u64 map: expected {} bytes for {} entries, got {}",
+            "digest256-u64 map: expected {} bytes for {} entries, got {}",
             expected, count, bytes.len()
         )));
     }
 
     let mut map = BTreeMap::new();
     for i in 0..count {
-        let off = 8 + i * 36;
-        let mut digest: Digest224 = [0u32; 7];
-        for (j, word) in digest.iter_mut().enumerate() {
-            let o = off + j * 4;
-            *word = u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
-        }
-        let count_val = u64::from_le_bytes(bytes[off + 28..off + 36].try_into().unwrap());
+        let off = 8 + i * MAP_ENTRY;
+        let digest = parse_digest256(&bytes[off..off + DIGEST_BYTES]);
+        let count_val = u64::from_le_bytes(bytes[off + DIGEST_BYTES..off + MAP_ENTRY].try_into().unwrap());
         map.insert(digest, count_val);
     }
     Ok(map)
 }
 
-/// Parse a `Digest224` from a 28-byte slice.
-fn parse_digest224(bytes: &[u8]) -> Digest224 {
-    assert_eq!(bytes.len(), 28);
-    let mut d = [0u32; 7];
+/// Parse a `Digest256` from a `DIGEST_BYTES`-byte slice.
+fn parse_digest256(bytes: &[u8]) -> Digest256 {
+    assert_eq!(bytes.len(), DIGEST_BYTES);
+    let mut d: Digest256 = [0u32; DIGEST_BYTES / 4];
     for (i, word) in d.iter_mut().enumerate() {
         let off = i * 4;
         *word = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
@@ -1361,7 +1314,7 @@ mod tests {
         // Leftover per-inode map entries keep deleted content reachable for GC.
         let (_d, store) = make_store();
         let ino = store.create_inode(&new_file_meta()).unwrap();
-        store.set_manifest(ino, &[[9u32; 7]]).unwrap();
+        store.set_manifest(ino, &[[9u32; 8]]).unwrap();
         store.set_xattr(ino, "user.k", b"v").unwrap();
         store.delete_inode(ino).unwrap();
         assert!(store.get_manifest(ino).is_err());
@@ -1476,7 +1429,7 @@ mod tests {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
 
-        let blocks: Vec<Digest224> = (0..5).map(|i| [i as u32; 7]).collect();
+        let blocks: Vec<Digest256> = (0..5).map(|i| [i as u32; 8]).collect();
         store.set_manifest(file_ino, &blocks).unwrap();
         let recovered = store.get_manifest(file_ino).unwrap();
         assert_eq!(recovered, blocks);
@@ -1492,7 +1445,7 @@ mod tests {
     fn test_commit_returns_nonzero_digest() {
         let (_dir, store) = make_store();
         let digest = store.commit().unwrap();
-        assert_ne!(digest, [0u32; 7], "commit should return non-zero digest");
+        assert_ne!(digest, [0u32; 8], "commit should return non-zero digest");
     }
 
     #[test]
@@ -1655,7 +1608,7 @@ mod tests {
         // Add a file
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
         store.link(1, "myfile", file_ino).unwrap();
-        let blocks: Vec<Digest224> = vec![[1u32; 7], [2u32; 7]];
+        let blocks: Vec<Digest256> = vec![[1u32; 8], [2u32; 8]];
         store.set_manifest(file_ino, &blocks).unwrap();
 
         // Add a subdirectory
@@ -1743,7 +1696,7 @@ mod tests {
     fn test_manifest_stable_across_reload() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
-        let blocks: Vec<Digest224> = (0..10).map(|i| [i as u32; 7]).collect();
+        let blocks: Vec<Digest256> = (0..10).map(|i| [i as u32; 8]).collect();
         store.set_manifest(file_ino, &blocks).unwrap();
 
         let root = store.commit().unwrap();
@@ -1777,7 +1730,7 @@ mod tests {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
         store.link(1, "file.txt", file_ino).unwrap();
-        let blocks: Vec<Digest224> = vec![[0xABu32; 7]];
+        let blocks: Vec<Digest256> = vec![[0xABu32; 8]];
         store.set_manifest(file_ino, &blocks).unwrap();
         store.set_xattr(file_ino, "user.tag", b"important").unwrap();
 
@@ -1828,7 +1781,7 @@ mod tests {
 
         // Push content bytes into the store's io via put_node.
         let content = b"hello, SliceFS content round-trip test!";
-        let content_digest: Digest224 = {
+        let content_digest: Digest256 = {
             let mut io_guard = store.io().lock().unwrap();
             let mut fsa = &mut *io_guard;
             (&mut fsa).put_node(content)
@@ -1871,7 +1824,7 @@ mod tests {
         let snap = store.create_snapshot(None).expect("create_snapshot should succeed");
         assert_eq!(snap.version, 1, "first snapshot must have version 1");
         assert!(snap.name.is_none(), "no name expected");
-        assert_ne!(snap.root, [0u32; 7], "snapshot root must not be zero");
+        assert_ne!(snap.root, [0u32; 8], "snapshot root must not be zero");
     }
 
     #[test]
@@ -2027,7 +1980,7 @@ mod tests {
         let snap = SnapshotEntry {
             version: 5,
             name: Some("loaded".to_string()),
-            root: [1u32; 7],
+            root: [1u32; 8],
             created_at: 12345,
         };
         // set_snapshots must load them so list_snapshots returns them
@@ -2044,7 +1997,7 @@ mod tests {
         crate::snapshot::SnapshotEntry {
             version,
             name: name.map(|s| s.to_string()),
-            root: [version as u32; 7],
+            root: [version as u32; 8],
             created_at: version * 1000,
         }
     }
@@ -2164,7 +2117,7 @@ mod tests {
     #[test]
     fn test_refcount_saturates() {
         let (_dir, store) = make_store();
-        let digest: Digest224 = [0xDEu32; 7];
+        let digest: Digest256 = [0xDEu32; 8];
 
         // Manually set refcount to u64::MAX - 1
         {
@@ -2186,7 +2139,7 @@ mod tests {
     #[test]
     fn test_refcount_decrement_saturated() {
         let (_dir, store) = make_store();
-        let digest: Digest224 = [0xABu32; 7];
+        let digest: Digest256 = [0xABu32; 8];
 
         // Set refcount to u64::MAX directly
         {
@@ -2203,11 +2156,11 @@ mod tests {
     #[test]
     fn test_saturated_refcount_count() {
         let (_dir, store) = make_store();
-        let d1: Digest224 = [0x01u32; 7];
-        let d2: Digest224 = [0x02u32; 7];
-        let d3: Digest224 = [0x03u32; 7];
-        let d4: Digest224 = [0x04u32; 7];
-        let d5: Digest224 = [0x05u32; 7];
+        let d1: Digest256 = [0x01u32; 8];
+        let d2: Digest256 = [0x02u32; 8];
+        let d3: Digest256 = [0x03u32; 8];
+        let d4: Digest256 = [0x04u32; 8];
+        let d5: Digest256 = [0x05u32; 8];
 
         {
             let mut rc = store.refcounts.lock().unwrap();

@@ -25,20 +25,19 @@ use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK};
 
 // ── Object IDs and chunking ───────────────────────────────────────────────────
 
-/// BLAKE3 of the uncompressed bytes of an object, 224 bits (28 bytes): the
-/// size of the `Digest224` that the metadata uses for content keys.
+/// BLAKE3 of the uncompressed bytes of an object: the full 256-bit output
+/// (32 bytes), the size of the `Digest256` that the metadata uses for content
+/// keys. A global, decentralized store needs the full 2^128 collision bound.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ObjectId(pub [u8; ID_LEN]);
 
 /// Length of an object ID in bytes.
-pub const ID_LEN: usize = 28;
+pub const ID_LEN: usize = 32;
 
 impl ObjectId {
     /// The ID of `data`.
     pub fn of(data: &[u8]) -> Self {
-        let mut id = [0u8; ID_LEN];
-        blake3::Hasher::new().update(data).finalize_xof().fill(&mut id);
-        ObjectId(id)
+        ObjectId(*blake3::hash(data).as_bytes())
     }
 
     /// Lowercase hex.
@@ -127,10 +126,10 @@ const FORMAT_VERSION: u16 = 1;
 const PACK_PUNCHED: u16 = 0x8000;
 /// magic(4) + version(2) + pack number(8)
 const PACK_HEADER: usize = 14;
-/// id(28) + flags(1) + raw length(4) + stored length(4)
+/// id(ID_LEN) + flags(1) + raw length(4) + stored length(4)
 const REC_HEADER: usize = ID_LEN + 9;
 const REC_CRC: usize = 4;
-/// id(28) + offset(8) + stored(4) + raw(4) + flags(1)
+/// id(ID_LEN) + offset(8) + stored(4) + raw(4) + flags(1)
 const IDX_ENTRY: usize = ID_LEN + 17;
 const FLAG_ZSTD: u8 = 1;
 /// Pack files that the store keeps open for reads at most (plus the active

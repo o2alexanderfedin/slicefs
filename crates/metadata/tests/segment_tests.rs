@@ -2,11 +2,11 @@
 use metadata::segment::{
     SegmentEntry, SegmentReader, SegmentWriter, SEGMENT_MAGIC, SEGMENT_VERSION,
 };
-use slicefs_traits::digest::Digest224;
+use slicefs_traits::digest::Digest256;
 use tempfile::TempDir;
 
-fn make_key(v: u32) -> Digest224 {
-    [v, v + 1, v + 2, v + 3, v + 4, v + 5, v + 6]
+fn make_key(v: u32) -> Digest256 {
+    [v, v + 1, v + 2, v + 3, v + 4, v + 5, v + 6, v + 7]
 }
 
 /// Write 3 RootUpdate records and read them back — all 3 must match.
