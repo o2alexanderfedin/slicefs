@@ -144,16 +144,53 @@ struct Loc {
     flags: u8,
 }
 
-fn encode_record(id: &ObjectId, flags: u8, raw: u32, payload: &[u8]) -> Vec<u8> {
-    let mut r = Vec::with_capacity(REC_HEADER + payload.len() + REC_CRC);
+/// Encode a record into `r` (cleared first).
+fn encode_record_into(r: &mut Vec<u8>, id: &ObjectId, flags: u8, raw: u32, payload: &[u8]) {
+    r.clear();
+    r.reserve(REC_HEADER + payload.len() + REC_CRC);
     r.extend_from_slice(&id.0);
     r.push(flags);
     r.extend_from_slice(&raw.to_le_bytes());
     r.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     r.extend_from_slice(payload);
-    let crc = crc32c::crc32c(&r);
+    let crc = crc32c::crc32c(r);
     r.extend_from_slice(&crc.to_le_bytes());
-    r
+}
+
+/// Largest buffer that a thread keeps after a put.
+const SCRATCH_KEEP: usize = 1 << 20;
+
+/// Per-thread buffers of `put`: a zstd context and two buffers, used again
+/// for each object (spike E: 95 -> 81 us of CPU for each put).
+struct Scratch {
+    zstd: Option<(i32, zstd::bulk::Compressor<'static>)>,
+    compressed: Vec<u8>,
+    record: Vec<u8>,
+}
+
+thread_local! {
+    static SCRATCH: std::cell::RefCell<Scratch> =
+        const { std::cell::RefCell::new(Scratch { zstd: None, compressed: Vec::new(), record: Vec::new() }) };
+}
+
+impl Scratch {
+    /// Compress `data` into `self.compressed`; false if it does not get
+    /// smaller by 1/8 or the compressor fails.
+    fn compress(&mut self, data: &[u8], level: i32) -> bool {
+        if self.zstd.as_ref().is_none_or(|(l, _)| *l != level) {
+            match zstd::bulk::Compressor::new(level) {
+                Ok(c) => self.zstd = Some((level, c)),
+                Err(_) => return false,
+            }
+        }
+        let c = &mut self.zstd.as_mut().unwrap().1;
+        self.compressed.clear();
+        self.compressed.reserve(zstd::zstd_safe::compress_bound(data.len()));
+        match c.compress_to_buffer(data, &mut self.compressed) {
+            Ok(n) => n <= data.len() - data.len() / 8,
+            Err(_) => false,
+        }
+    }
 }
 
 /// Parse the record that starts at `buf[0]`. Returns its location fields and
@@ -375,26 +412,35 @@ impl ChunkStore {
         if data.len() > u32::MAX as usize - REC_HEADER {
             return Err(Error::TooLarge(data.len()));
         }
-        // Compress outside the lock.
-        let compressed = (self.opts.zstd_level > 0 && data.len() >= MIN_COMPRESS)
-            .then(|| zstd::bulk::compress(data, self.opts.zstd_level).ok())
-            .flatten()
-            .filter(|c| c.len() <= data.len() - data.len() / 8);
-        let (flags, payload) = match &compressed {
-            Some(c) => (FLAG_ZSTD, c.as_slice()),
-            None => (0, data),
-        };
-        let rec = encode_record(&id, flags, data.len() as u32, payload);
+        SCRATCH.with(|s| {
+            let s = &mut *s.borrow_mut();
+            // Compress outside the lock.
+            let zstd = self.opts.zstd_level > 0
+                && data.len() >= MIN_COMPRESS
+                && s.compress(data, self.opts.zstd_level);
+            let (flags, payload) = if zstd { (FLAG_ZSTD, s.compressed.as_slice()) } else { (0, data) };
+            encode_record_into(&mut s.record, &id, flags, data.len() as u32, payload);
+            let stored = payload.len() as u32;
 
-        let mut inner = self.inner.lock().unwrap();
-        inner.touch(id);
-        if inner.index.contains_key(&id) {
-            return Ok(id);
-        }
-        inner.check()?;
-        let loc = self.append(&mut inner, &id, &rec, payload.len() as u32, data.len() as u32, flags)?;
-        inner.add(id, loc);
-        Ok(id)
+            let r = (|| {
+                let mut inner = self.inner.lock().unwrap();
+                inner.touch(id);
+                if inner.index.contains_key(&id) {
+                    return Ok(id);
+                }
+                inner.check()?;
+                let loc = self.append(&mut inner, &id, &s.record, stored, data.len() as u32, flags)?;
+                inner.add(id, loc);
+                Ok(id)
+            })();
+            // Chunks and nodes are small; do not keep the buffers of a big object.
+            for b in [&mut s.compressed, &mut s.record] {
+                if b.capacity() > SCRATCH_KEEP {
+                    *b = Vec::new();
+                }
+            }
+            r
+        })
     }
 
     /// Append an encoded record to the active pack (made if there is none),
