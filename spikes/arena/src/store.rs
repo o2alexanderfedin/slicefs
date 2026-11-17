@@ -46,6 +46,8 @@ struct Inner {
     seq: u64,
     /// Arena numbers that exist on disk.
     arenas: HashSet<u64>,
+    /// Bytes written (spike C compares write amplification).
+    io: crate::reuse::IoCounters,
 }
 
 pub struct SpikeStore {
@@ -65,7 +67,7 @@ impl SpikeStore {
             return Err(Error::Io(io::Error::other("trim_on_seal is refused with mmap reads or reuse")));
         }
         if opts.reuse.is_some() {
-            return Err(Error::Io(io::Error::other("reuse mode is spike C; not built in spike A")));
+            return Err(Error::Io(io::Error::other("reuse mode is reuse::ReuseStore")));
         }
         let g = opts.arena.granule.max(1);
         if 4096 % g != 0 {
@@ -81,6 +83,7 @@ impl SpikeStore {
             touched: None,
             seq: 0,
             arenas: HashSet::new(),
+            io: Default::default(),
         };
         if opts.read_only && !packs.is_dir() {
             let read = read::make(&packs, &opts)?;
@@ -186,6 +189,7 @@ impl SpikeStore {
         }
         let loc = self.append(&mut inner, &id, &rec, payload.len() as u32, data.len() as u32, flags)?;
         inner.add(id, loc);
+        inner.io.records += rec.len() as u64;
         Ok(id)
     }
 
@@ -252,6 +256,7 @@ impl SpikeStore {
             let off = a.append(rec)?.ok_or_else(|| Error::Io(io::Error::other("own arena too small")))?;
             let loc = inner.loc(a.num, off, stored, raw, flags);
             a.seal(&[(*id, loc)], IdxState::Sealed)?;
+            inner.io.idx += crate::reuse::idx_bytes(1);
             inner.dir_dirty = false; // write_durable synced the directory
             return Ok(loc);
         }
@@ -344,6 +349,7 @@ impl SpikeStore {
                     .ok_or_else(|| Error::Corrupt(format!("record of {id:?} unreadable during compaction")))?;
                     let nl = self.append(&mut inner, id, &rec, l.stored, l.raw, l.flags)?;
                     inner.index.insert(*id, nl);
+                    inner.io.copies += rec.len() as u64;
                     st.kept_objects += 1;
                 } else {
                     inner.index.remove(id);
@@ -457,6 +463,8 @@ impl SpikeStore {
             self.seal(&mut inner)?;
         } else if let Some(a) = inner.active.as_mut() {
             a.arena.seal(&a.entries, IdxState::Open)?;
+            let n = a.entries.len();
+            inner.io.idx += crate::reuse::idx_bytes(n);
             inner.dir_dirty = false;
         }
         if inner.dir_dirty {
@@ -481,9 +489,15 @@ impl SpikeStore {
         self.inner.lock().unwrap().stats
     }
 
+    /// Bytes written so far (records, compaction copies, idx files).
+    pub fn io(&self) -> crate::reuse::IoCounters {
+        self.inner.lock().unwrap().io
+    }
+
     fn seal(&self, inner: &mut Inner) -> Result<()> {
         let Some(mut a) = inner.active.take() else { return Ok(()) };
         a.arena.seal(&a.entries, IdxState::Sealed)?;
+        inner.io.idx += crate::reuse::idx_bytes(a.entries.len());
         inner.dir_dirty = false; // write_durable synced the directory
         if a.arena.len() != self.opts.arena.size {
             self.read.arena_ready(a.arena.num, a.arena.len(), false);

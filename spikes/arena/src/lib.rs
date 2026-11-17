@@ -18,25 +18,33 @@
 //!   the length of every arena (`arena_ready`, for each arena at open and
 //!   for each new one; `fixed` = it has its full fixed length) and calls
 //!   `forget` before it unlinks one.
-//! - Spike C: `Recovery` gets a reuse arm, `Arena::write_at` exists (never
-//!   changes the length), `GcToken::Seq` and `Loc::seq` exist (the seq is
-//!   per process, from `Inner::loc`), `Options::reuse` is refused at open
-//!   until `reuse.rs` exists, and `sys::Fault` has the C fault points.
+//! - Spike C: reuse mode is its own store type, `reuse::ReuseStore` (same
+//!   surface, same arena files and formats); `SpikeStore::open` refuses
+//!   `Options::reuse`. It uses `Recovery::Reuse` (granule scan with BLAKE3),
+//!   `Arena::write_at`, `GcToken::Seq`, `Loc::seq`, the allocators in
+//!   `alloc.rs` and the fault points `CheckpointWrite` / `DirtyWrite`. The
+//!   read path is the same `ReadPath` (spike B's map plugs in unchanged).
+//!   `SpikeStore::io` / `ReuseStore::io` count the bytes written and
+//!   `sys::full_syncs` the `full_sync` calls (write amplification and sync
+//!   cost of C-B1).
 //! - Extra options for spike A's measurements: `gc_seal` (always / size/8),
 //!   `close_seals` (today's close, or a resumable `open` idx), `walk` (the
 //!   recovery walk of A-B4).
 
+pub mod alloc;
 pub mod arena;
 pub mod bench;
 pub mod codec;
 pub mod file_fork;
 pub mod measure;
 pub mod read;
+pub mod reuse;
 pub mod store;
 pub mod sys;
 pub mod workload;
 
 pub use chunk_store::{chunk_ranges, Error, GcStats, ObjectId, Result, Stats};
+pub use reuse::ReuseStore;
 pub use store::{GcToken, SpikeStore};
 
 /// How an arena file gets its fixed length.
@@ -135,6 +143,30 @@ pub enum AllocKind {
     NextFit,
     SizeClasses,
     Hybrid,
+    /// Spike C addition (not in the plan's grid): best fit inside one target
+    /// arena; when it has no fit, the arena with the most free bytes.
+    ArenaBest,
+}
+
+impl AllocKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            AllocKind::NextFit => "V1",
+            AllocKind::SizeClasses => "V2",
+            AllocKind::Hybrid => "V3",
+            AllocKind::ArenaBest => "V4",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "V1" => AllocKind::NextFit,
+            "V2" => AllocKind::SizeClasses,
+            "V3" => AllocKind::Hybrid,
+            "V4" => AllocKind::ArenaBest,
+            _ => return None,
+        })
+    }
 }
 
 /// Spike C.
@@ -143,6 +175,14 @@ pub struct ReuseCfg {
     pub alloc: AllocKind,
     pub evacuate_below: Option<f32>,
     pub relax_during_gc: bool,
+    /// Recovery scan skips holes of a sparse arena (`SEEK_DATA`).
+    pub seek_data: bool,
+}
+
+impl Default for ReuseCfg {
+    fn default() -> Self {
+        ReuseCfg { alloc: AllocKind::NextFit, evacuate_below: None, relax_during_gc: false, seek_data: false }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

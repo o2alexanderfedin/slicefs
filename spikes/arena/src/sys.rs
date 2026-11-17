@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// `fsync`, and on macOS `F_FULLFSYNC` (a plain fsync there does not flush
 /// the drive cache). Same as `chunk-store`.
 pub fn full_sync(f: &File) -> io::Result<()> {
+    FULL_SYNCS.fetch_add(1, Ordering::Relaxed);
     #[cfg(target_os = "macos")]
     {
         // SAFETY: fcntl F_FULLFSYNC on a valid fd we own.
@@ -18,6 +19,13 @@ pub fn full_sync(f: &File) -> io::Result<()> {
         }
     }
     f.sync_all()
+}
+
+/// `full_sync` calls in this process (spike C counts them per commit).
+pub static FULL_SYNCS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn full_syncs() -> u64 {
+    FULL_SYNCS.load(Ordering::Relaxed)
 }
 
 /// `fsync` only (no F_FULLFSYNC). Measured, never relied on.

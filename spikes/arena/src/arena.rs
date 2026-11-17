@@ -25,6 +25,11 @@ pub enum Recovery {
     /// Spikes A and B: one chain of records from the header page, cut at the
     /// first record that fails.
     Append(Walk),
+    /// Spike C (reuse mode): `scan` = the arena is in the dirty list or has
+    /// no checkpoint: scan at every granule (marker, bounds, CRC, BLAKE3),
+    /// never cut. Otherwise trust its checkpoint. `seek_data`: skip holes
+    /// of a sparse file with `SEEK_DATA`.
+    Reuse { scan: bool, seek_data: bool },
 }
 
 pub struct Arena {
@@ -177,7 +182,19 @@ impl Arena {
             let entries = i.entries.iter().map(to_loc).collect();
             return Ok(Some(Opened { arena: a, entries, sealed: true, walked: 0 }));
         }
-        let Recovery::Append(walk) = rec;
+        let walk = match rec {
+            Recovery::Append(w) => w,
+            Recovery::Reuse { scan, seek_data } => {
+                if let Some(i) = idx.as_ref().filter(|i| !scan && i.state == IdxState::Checkpoint) {
+                    a.hwm = i.hwm;
+                    let entries = i.entries.iter().map(to_loc).collect();
+                    return Ok(Some(Opened { arena: a, entries, sealed: false, walked: 0 }));
+                }
+                let (entries, hwm, walked) = crate::reuse::granule_scan(&a, seek_data)?;
+                a.hwm = hwm;
+                return Ok(Some(Opened { arena: a, entries, sealed: false, walked }));
+            }
+        };
         // Open idx: trust it up to `hwm`, then walk on from there.
         let (mut entries, from) = match &idx {
             Some(i) if i.state == IdxState::Open && i.hwm >= HEADER_PAGE && i.hwm <= flen => {
