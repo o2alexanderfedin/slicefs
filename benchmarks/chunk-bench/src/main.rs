@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! chunk-bench <engine> <label=path>...
-//!   engine: blockset | fastcdc:<avg KiB>   (fastcdc uses min = avg/4, max = avg*4)
+//!   engine: blockset | fastcdc:<avg KiB> (min = avg/4, max = avg*4) | fastcdc:<min>:<avg>:<max> (KiB)
 //!   path:   a file (for example a tar) or a directory (read as a tree, sorted)
 //! ```
 //!
@@ -77,7 +77,7 @@ impl Io for MemIo {
 
 enum Engine {
     Blockset(MemIo),
-    FastCdc { avg: u32, seen: HashSet<[u8; 32]>, new_bytes: u64, new_chunks: u64, refs: u64, sizes: Vec<u32> },
+    FastCdc { min: u32, avg: u32, max: u32, seen: HashSet<[u8; 32]>, new_bytes: u64, new_chunks: u64, refs: u64, sizes: Vec<u32> },
 }
 
 impl Engine {
@@ -87,8 +87,8 @@ impl Engine {
                 let mut fsa = FileStorageAdd::new(io);
                 let _ = State::push_all(&mut fsa, data);
             }
-            Engine::FastCdc { avg, seen, new_bytes, new_chunks, refs, sizes } => {
-                for c in fastcdc::v2020::FastCDC::new(data, *avg / 4, *avg, *avg * 4) {
+            Engine::FastCdc { min, avg, max, seen, new_bytes, new_chunks, refs, sizes } => {
+                for c in fastcdc::v2020::FastCDC::new(data, *min, *avg, *max) {
                     let bytes = &data[c.offset..c.offset + c.length];
                     *refs += 1;
                     sizes.push(c.length as u32);
@@ -131,15 +131,22 @@ fn dist(mut v: Vec<u32>) -> String {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 2 {
-        eprintln!("usage: chunk-bench <blockset|fastcdc:AVG_KIB> <label=path>...");
+        eprintln!("usage: chunk-bench <blockset|fastcdc:AVG_KIB|fastcdc:MIN:AVG:MAX> <label=path>...");
         std::process::exit(2);
     }
     let mut engine = match args[0].as_str() {
         "blockset" => Engine::Blockset(MemIo::default()),
         s if s.starts_with("fastcdc:") => {
-            let kib: u32 = s["fastcdc:".len()..].parse().expect("fastcdc:<avg KiB>");
+            let k: Vec<u32> = s["fastcdc:".len()..].split(':').map(|v| v.parse::<u32>().expect("KiB") * 1024).collect();
+            let (min, avg, max) = match k[..] {
+                [a] => (a / 4, a, a * 4),
+                [mn, a, mx] => (mn, a, mx),
+                _ => panic!("fastcdc:<avg> or fastcdc:<min>:<avg>:<max> (KiB)"),
+            };
             Engine::FastCdc {
-                avg: kib * 1024,
+                min,
+                avg,
+                max,
                 seen: HashSet::new(),
                 new_bytes: 0,
                 new_chunks: 0,

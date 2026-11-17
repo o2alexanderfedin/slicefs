@@ -4,7 +4,6 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use blockset::file_storage_get;
 use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
@@ -24,8 +23,10 @@ fn make_fs(store: &Path) -> SliceFsFilesystem {
     SliceFsFilesystem::new(meta, io, Some(store.to_path_buf()))
 }
 
+/// Stored objects: metadata objects in vt0/ and file content in the chunk store.
 fn objects(store: &Path) -> usize {
-    std::fs::read_dir(store.join("vt0")).map(|d| d.count()).unwrap_or(0)
+    let vt0 = std::fs::read_dir(store.join("vt0")).map(|d| d.count()).unwrap_or(0);
+    vt0 + slicefs_cli::content::open_read_only(store).unwrap().stats().objects as usize
 }
 
 fn data(seed: u64, n: usize) -> Vec<u8> {
@@ -45,8 +46,8 @@ fn read_at_root(store: &Path, root: &Digest224, name: &str) -> Vec<u8> {
     let meta = DictMetadataStore::load_from_root(io, root).unwrap();
     let ino = meta.lookup(1, name).unwrap();
     let manifest = meta.get_manifest(ino).unwrap();
-    let mut io = StoreIo::new(store);
-    file_storage_get(&mut io, &manifest[0]).unwrap()
+    let cs = slicefs_cli::content::open_read_only(store).unwrap();
+    slicefs_cli::content::get_all(&cs, &manifest[0]).unwrap()
 }
 
 #[test]
@@ -74,8 +75,8 @@ fn gc_frees_deleted_files_and_keeps_live_and_snapshot_data() {
     run_gc(store).unwrap();
 
     let after = objects(store);
-    // del.bin is in no root: its ~100 objects go. snap.bin is in the snapshot.
-    assert!(after + 50 < before, "gc must free del.bin objects: before {before}, after {after}");
+    // del.bin is in no root: its ~40 objects go. snap.bin is in the snapshot.
+    assert!(after + 30 < before, "gc must free del.bin objects: before {before}, after {after}");
     let (root, _) = load_store_from_segments(&store.join("segments")).unwrap();
     assert_eq!(read_at_root(store, &root.unwrap(), "keep.bin"), keep);
     assert_eq!(read_at_root(store, &snap_root, "snap.bin"), snap);

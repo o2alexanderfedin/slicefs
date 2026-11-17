@@ -454,6 +454,7 @@ pub fn run_mount(
     force: bool,
     commit_interval_secs: u64,
     gc_interval_secs: u64,
+    zstd_level: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Pre-flight: create mountpoint directory if it doesn't exist.
     if !mountpoint.exists() {
@@ -463,6 +464,9 @@ pub fn run_mount(
 
     // Pre-flight: reject if mountpoint is already in use.
     check_mountpoint_not_in_use(mountpoint)?;
+
+    // Pre-flight: refuse a store of an older format (file content in vt0/).
+    crate::content::check_format(store_path)?;
 
     // ── macOS: Backend selection ──────────────────────────────────────────────
     //
@@ -531,6 +535,17 @@ pub fn run_mount(
         Some(store_path.to_path_buf()),
     );
     fs.set_auto_snapshot(auto_snapshot);
+    if fs.content().punches_holes() {
+        println!("Chunk store: GC frees space with hole punching and compaction.");
+    } else {
+        println!("Chunk store: this file system cannot punch holes; GC frees space by compaction only.");
+    }
+    fs.content().set_zstd_level(zstd_level);
+    if zstd_level > 0 {
+        println!("Compression of new data: zstd level {zstd_level}.");
+    } else {
+        println!("Compression of new data: none.");
+    }
 
     // Replay the write log (#20): requests after the last root, made durable
     // by fsync before a crash. Then commit, which cuts the log. Not on a

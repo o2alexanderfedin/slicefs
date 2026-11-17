@@ -6,6 +6,14 @@ name: macOS mounts
 # Long (about 2.5 hours), so not on every pull request.
 on:
   workflow_dispatch:
+    inputs:
+      versions:
+        description: "Boost versions, space separated (for example 1_83_0 1_84_0 1_85_0)"
+        default: "1_85_0"
+      skip_tree:
+        description: "Copy only the tar files, not the trees (a tree copy takes 30-40 min per version)"
+        type: boolean
+        default: false
   push:
     branches: [develop, main, "ci/**"]
 
@@ -48,10 +56,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/boost
-          key: boost-1_85_0-v1
+          key: boost-${{ inputs.versions || '1_85_0' }}-v1
 
-      - name: Fetch Boost 1.85
-        run: scripts/macos-mount-test/fetch-boost.sh ~/boost 1_85_0
+      - name: Fetch Boost ${{ inputs.versions || '1_85_0' }}
+        run: scripts/macos-mount-test/fetch-boost.sh ~/boost ${{ inputs.versions || '1_85_0' }}
 
       - name: Build slicefs (release)
         run: cargo build --release -p slicefs-cli
@@ -63,9 +71,10 @@ jobs:
           WORK: ${{ runner.temp }}/work
           # The tree copy to the mount takes up to about 1 hour.
           STEP_TIMEOUT: 5400
+          SKIP_TREE: ${{ inputs.skip_tree && '1' || '' }}
         run: |
           export BOOST_DIR=$HOME/boost
-          scripts/macos-mount-test/boost-test.sh ${{ matrix.backend }} 1_85_0
+          scripts/macos-mount-test/boost-test.sh ${{ matrix.backend }} ${{ inputs.versions || '1_85_0' }}
 
       - name: FSKit diagnostics
         if: failure()

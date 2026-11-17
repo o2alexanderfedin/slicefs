@@ -1,16 +1,17 @@
 //! `seed` subcommand — imports a directory tree into a SliceFS CAS store.
 //!
-//! Walks the source directory recursively, chunks file content via `State` CDC,
+//! Walks the source directory recursively, stores file content in the chunk
+//! store (FastCDC + BLAKE3 in `packs/`),
 //! builds inode and directory records in `DictMetadataStore`, then writes a
 //! `RootUpdate` to `segments/segment-000001.seg` for crash-safe recovery.
 //!
-//! File content is stored in `vt0/` batch files via `FileStorageAdd`; no
-//! `dictionary.bin` or `root.bin` files are written.
+//! Metadata objects go to `vt0/`; no `dictionary.bin` or `root.bin` files are
+//! written.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use blockset::{State, Tree, FileStorageAdd};
+use crate::content::{self, Content};
 use metadata::segment::{SegmentWriter, SegmentEntry};
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
@@ -27,13 +28,17 @@ const S_IFDIR: u32 = 0o040_000;
 /// Import a directory tree rooted at `source_dir` into a CAS store at `store_path`.
 ///
 /// Creates:
-/// - `<store_path>/vt0/` — FileStorage batch files (content blocks)
+/// - `<store_path>/packs/` — file content (chunk store)
+/// - `<store_path>/vt0/` — metadata objects
 /// - `<store_path>/segments/segment-000001.seg` — root update segment
 pub fn run_seed(store_path: &Path, source_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(store_path)?;
 
     let io = Arc::new(Mutex::new(StoreIo::new(store_path)));
     let meta_store = DictMetadataStore::new(io.clone());
+    let cs = content::open(store_path)?;
+    let sync = Arc::clone(&cs);
+    meta_store.set_pre_root_sync(Arc::new(move || sync.sync().map_err(std::io::Error::other)));
 
     // Update root inode (ino=1) permissions from source directory.
     // DictMetadataStore::new() creates it with uid=0/gid=0/0o755 by default,
@@ -47,7 +52,7 @@ pub fn run_seed(store_path: &Path, source_dir: &Path) -> Result<(), Box<dyn std:
     meta_store.update_inode(&root_inode)?;
 
     // Walk source_dir: root maps to inode 1 (the pre-created root dir).
-    walk_dir(source_dir, 1, &meta_store, &io)?;
+    walk_dir(source_dir, 1, &meta_store, &cs)?;
 
     // Commit metadata state into FileStorage, get root digest.
     let root = meta_store.commit()?;
@@ -59,6 +64,7 @@ pub fn run_seed(store_path: &Path, source_dir: &Path) -> Result<(), Box<dyn std:
     let mut writer = SegmentWriter::new(&seg_path, 1)?;
     writer.write_entry(&SegmentEntry::RootUpdate { root })?;
     writer.close()?;
+    cs.close()?;
 
     Ok(())
 }
@@ -68,7 +74,7 @@ fn walk_dir(
     dir_path: &Path,
     parent_ino: InodeId,
     meta_store: &DictMetadataStore,
-    io: &Arc<Mutex<StoreIo>>,
+    cs: &Content,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(dir_path)? {
@@ -87,9 +93,9 @@ fn walk_dir(
         if fs_meta.is_dir() {
             let dir_meta = dir_inode_meta(&fs_meta);
             let ino = meta_store.create_directory(parent_ino, &name, &dir_meta)?;
-            walk_dir(&path, ino, meta_store, io)?;
+            walk_dir(&path, ino, meta_store, cs)?;
         } else if fs_meta.is_file() {
-            let (ino, content_digest) = seed_file(&path, &fs_meta, meta_store, io)?;
+            let (ino, content_digest) = seed_file(&path, &fs_meta, meta_store, cs)?;
             meta_store.link(parent_ino, &name, ino)?;
             meta_store.set_manifest(ino, &[content_digest])?;
         }
@@ -104,19 +110,13 @@ fn seed_file(
     path: &Path,
     fs_meta: &std::fs::Metadata,
     meta_store: &DictMetadataStore,
-    io: &Arc<Mutex<StoreIo>>,
+    cs: &Content,
 ) -> Result<(InodeId, Digest224), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
     let size = bytes.len() as u64;
 
     // Push content bytes into FileStorage via CDC.
-    let content_digest: Digest224 = {
-        let mut io_guard = io.lock().unwrap();
-        let mut fsa = FileStorageAdd::new(&mut *io_guard);
-        let digest = State::push_all(&mut fsa, &bytes);
-        drop(fsa);
-        digest
-    };
+    let content_digest: Digest224 = content::put_all(cs, &bytes)?;
 
     let inode_meta = file_inode_meta(fs_meta, size);
     let ino = meta_store.create_inode(&inode_meta)?;
@@ -167,7 +167,6 @@ fn dir_inode_meta(fs_meta: &std::fs::Metadata) -> InodeMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockset::file_storage_get;
     use metadata::segment::load_store_from_segments;
     use metadata::store::DictMetadataStore;
     use metadata::store_io::StoreIo;
@@ -244,10 +243,8 @@ mod tests {
         assert_eq!(manifest.len(), 1, "expected exactly one block in manifest");
 
         // Retrieve content bytes from FileStorage.
-        let read_back = {
-            let mut io_guard = io.lock().unwrap();
-            file_storage_get(&mut *io_guard, &manifest[0]).expect("file_storage_get failed")
-        };
+        let cs = content::open(store_dir.path()).unwrap();
+        let read_back = content::get_all(&cs, &manifest[0]).expect("content read failed");
         assert_eq!(read_back, content.as_slice(), "content mismatch after round-trip");
     }
 

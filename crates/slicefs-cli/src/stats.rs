@@ -105,9 +105,9 @@ pub struct StoreStats {
     pub logical_bytes: u64,
     /// Sum of sizes of distinct file contents in the live tree.
     pub unique_content_bytes: u64,
-    /// Apparent size of vt0/ objects.
+    /// Apparent size of the stored objects (vt0/ and packs/).
     pub physical_bytes: u64,
-    /// Allocated size of vt0/ objects on the host filesystem (st_blocks).
+    /// Allocated size of the stored objects on the host filesystem (st_blocks).
     pub physical_disk_bytes: u64,
     /// Allocated size of the whole store directory (st_blocks).
     pub host_disk_bytes: u64,
@@ -175,15 +175,17 @@ pub fn run_stats(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
         ).into());
     }
 
+    crate::content::check_format(store_path)?;
     let segs_dir = store_path.join("segments");
 
     // Load store from segment replay.
     let (root_opt, snapshots) = load_store_from_segments(&segs_dir)
         .map_err(|e| format!("failed to load segments: {}", e))?;
 
-    // Physical bytes: actual disk usage of vt0/ CAS batch files.
-    let vt0_dir = store_path.join("vt0");
-    let (physical_bytes, physical_disk_bytes) = dir_size(&vt0_dir);
+    // Physical bytes: metadata objects (vt0/) and file content packs (packs/).
+    let (vt0_bytes, vt0_disk) = dir_size(&store_path.join("vt0"));
+    let (pack_bytes, pack_disk) = dir_size(&store_path.join("packs"));
+    let (physical_bytes, physical_disk_bytes) = (vt0_bytes + pack_bytes, vt0_disk + pack_disk);
 
     // Host disk bytes: allocated size of the entire store directory.
     let host_disk_bytes = dir_size(store_path).1;
@@ -255,8 +257,8 @@ fn print_human_stats(stats: &StoreStats) {
     println!("========================");
     println!("Logical bytes    : {}", format_bytes(stats.logical_bytes));
     println!("Unique content   : {} (each distinct file content once)", format_bytes(stats.unique_content_bytes));
-    println!("CAS bytes        : {} (vt0/ objects, apparent size)", format_bytes(stats.physical_bytes));
-    println!("CAS on disk      : {} (vt0/ objects, allocated blocks)", format_bytes(stats.physical_disk_bytes));
+    println!("CAS bytes        : {} (vt0/ + packs/, apparent size)", format_bytes(stats.physical_bytes));
+    println!("CAS on disk      : {} (vt0/ + packs/, allocated blocks)", format_bytes(stats.physical_disk_bytes));
     println!("Host disk used   : {} (whole store, allocated blocks)", format_bytes(stats.host_disk_bytes));
     println!("File dedup ratio : {:.2}x (logical / unique content; whole-file duplicates)", stats.file_dedup_ratio);
     println!("Overall ratio    : {:.2}x (logical / CAS bytes; block dedup and format cost included)", stats.overall_ratio);

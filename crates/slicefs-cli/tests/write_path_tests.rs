@@ -6,7 +6,6 @@
 //! These tests use `DictMetadataStore` and `StoreIo` directly —
 //! no FUSE mount required.
 
-use blockset::file_storage_get;
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use slicefs_cli::filesystem::{SliceFsFilesystem, inode_to_file_attr};
@@ -31,8 +30,7 @@ fn read_content(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
         return vec![];
     }
     let root_digest = manifest[0];
-    let mut io = fs.io().lock().unwrap();
-    file_storage_get(&mut *io, &root_digest).unwrap_or_default()
+    fs.read_content(&root_digest).unwrap_or_default()
 }
 
 // ── Task 1 tests ──────────────────────────────────────────────────────────────

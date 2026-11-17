@@ -13,7 +13,6 @@
 //!   7. Permissions (chmod, chown, mtime)
 //!   8. Dedup verification (content digest equality, refcounts)
 
-use blockset::file_storage_get;
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use slicefs_cli::filesystem::SliceFsFilesystem;
@@ -38,8 +37,7 @@ fn read_content(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
     if manifest.is_empty() {
         return vec![];
     }
-    let mut io = fs.io().lock().unwrap();
-    file_storage_get(&mut *io, &manifest[0]).unwrap_or_default()
+    fs.read_content(&manifest[0]).unwrap_or_default()
 }
 
 // ════════════════════════════════════════════════════════════════════════════

@@ -13,6 +13,10 @@
 //! through `file_storage_get`. If the root resolves successfully, the Merkle chain
 //! from that root is intact (the hash-chain guarantees all children are valid).
 //!
+//! File content: every object (manifest nodes and chunks) of every file
+//! under each root is read from the chunk store; each read checks the record
+//! CRC and the BLAKE3 of the decoded bytes.
+//!
 //! Additionally, the current committed root is verified by reloading the full
 //! `DictMetadataStore` from that root — exercising all inode/directory/manifest
 //! deserialization paths.
@@ -78,6 +82,7 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
         ).into());
     }
 
+    crate::content::check_format(store_path)?;
     let segs_dir = store_path.join("segments");
 
     // Load last committed root + all snapshot roots from segment replay.
@@ -112,6 +117,27 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
                 errors.push(format!("missing or corrupt root {}", &hex[..16]));
             }
         }
+    }
+
+    // Step 1b: Read every object of the file content under each root.
+    let cs = crate::content::open_read_only(store_path)?;
+    match metadata::gc::collect_content_keys(&mut io, &all_roots) {
+        Ok(keys) => {
+            let mut seen = std::collections::HashSet::new();
+            for k in keys {
+                match chunk_store::file::file_objects(&cs, crate::content::to_id(&k)) {
+                    Ok(objs) => {
+                        for id in objs {
+                            if seen.insert(id) && cs.get(&id).is_none() {
+                                errors.push(format!("missing or corrupt content object {}", &id.to_hex()[..16]));
+                            }
+                        }
+                    }
+                    Err(e) => errors.push(format!("file content {}: {e}", &crate::content::to_id(&k).to_hex()[..16])),
+                }
+            }
+        }
+        Err(e) => errors.push(format!("metadata tree corrupt: {e}")),
     }
 
     // Step 2: Verify current metadata tree by full reload from root, and collect saturated blocks.

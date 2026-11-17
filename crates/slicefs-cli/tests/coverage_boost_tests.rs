@@ -35,7 +35,7 @@
 //!   - test_read: no manifest (empty file)
 //!   - XAttr operations via DictMetadataStore directly
 
-use blockset::{State, Tree, FileStorageAdd, file_storage_get};
+
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use slicefs_cli::filesystem::{
@@ -75,8 +75,7 @@ fn read_content(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
     if manifest.is_empty() {
         return vec![];
     }
-    let mut io = fs.io().lock().unwrap();
-    file_storage_get(&mut *io, &manifest[0]).unwrap_or_default()
+    fs.read_content(&manifest[0]).unwrap_or_default()
 }
 
 // ── inode_to_file_attr edge cases ─────────────────────────────────────────────
@@ -366,10 +365,7 @@ fn test_fsync_buffered_mode_flushes_to_cas() {
     assert!(!manifest.is_empty(), "manifest must be set after fsync in buffered mode");
 
     // Verify content is correct
-    let content = {
-        let mut io = fs.io().lock().unwrap();
-        file_storage_get(&mut *io, &manifest[0]).unwrap()
-    };
+    let content = fs.read_content(&manifest[0]).unwrap();
     assert_eq!(&content[..5], b"hello");
     assert_eq!(&content[5..], b"world");
 }

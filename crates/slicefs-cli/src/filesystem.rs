@@ -13,7 +13,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::util::ts;
 
-use blockset::{State, Tree, FileStorageAdd, FileStorageReader, file_storage_get, StorageAdd, Digest224};
+use blockset::Digest224;
+use crate::content::{self, Content, Stream};
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
@@ -46,7 +47,7 @@ pub const REORDER_WINDOW: usize = 64 << 20;
 /// Once a handle transitions to Buffered, it never reverts to Streaming.
 enum WriteMode {
     Streaming {
-        state: State,
+        state: Stream,
         next_expected_offset: u64,
         /// Writes that arrived ahead of `next_expected_offset` (NFS sends
         /// WRITEs in parallel). Non-overlapping; drained into `state` when
@@ -108,9 +109,11 @@ pub struct SliceFsFilesystem {
     pub(crate) meta: Arc<DictMetadataStore>,
     pub(crate) io: Arc<Mutex<StoreIo>>,
     open_files: Mutex<HashMap<u64, OpenFileState>>,
-    /// Resumable content readers per inode (see `FileStorageReader`). A reader
-    /// whose root no longer matches the file content is replaced on use.
-    readers: Mutex<HashMap<u64, Vec<FileStorageReader>>>,
+    /// File content store (`<store>/packs/`).
+    pub(crate) content: Content,
+    /// A content reader per inode (keeps its node and chunk caches). A reader
+    /// whose key no longer matches the file content is replaced on use.
+    readers: Mutex<HashMap<u64, content::Reader>>,
     /// Every open handle (read-only too): fh -> ino. Used to keep an unlinked
     /// inode alive until its last handle closes.
     handles: Mutex<HashMap<u64, u64>>,
@@ -139,9 +142,15 @@ impl SliceFsFilesystem {
         io: Arc<Mutex<StoreIo>>,
         store_path: Option<PathBuf>,
     ) -> Self {
+        let root = io.lock().unwrap().root().to_path_buf();
+        let content = content::open(&root)
+            .unwrap_or_else(|e| panic!("open the content store in {}: {e}", root.display()));
+        let cs = Arc::clone(&content);
+        meta.set_pre_root_sync(Arc::new(move || cs.sync().map_err(std::io::Error::other)));
         Self {
             meta: Arc::new(meta),
             io,
+            content,
             open_files: Mutex::new(HashMap::new()),
             readers: Mutex::new(HashMap::new()),
             handles: Mutex::new(HashMap::new()),
@@ -193,42 +202,51 @@ impl SliceFsFilesystem {
         &self.meta
     }
 
-    /// Access the shared Io backend (used for content reads/writes).
+    /// Access the shared Io backend (metadata objects).
     pub fn io(&self) -> &Arc<Mutex<StoreIo>> {
         &self.io
     }
+
+    /// The file content store.
+    pub fn content(&self) -> &Content {
+        &self.content
+    }
+
+    /// All bytes of the content `key` (for tests and tools).
+    pub fn read_content(&self, key: &Digest224) -> Option<Vec<u8>> {
+        content::get_all(&self.content, key)
+    }
 }
 
-/// Push zeros into the stream until it reaches offset `to` (64 KiB at a time).
-fn push_zeros(state: &mut State, fsa: &mut impl blockset::StorageAdd, next: &mut u64, to: u64) {
-    const ZEROS: [u8; 1 << 16] = [0u8; 1 << 16];
-    while *next < to {
-        let n = (to - *next).min(ZEROS.len() as u64) as usize;
-        state.push_bytes(fsa, &ZEROS[..n]);
-        *next += n as u64;
+/// Push zeros into the stream until it reaches offset `to`.
+fn push_zeros(state: &mut Stream, cs: &chunk_store::ChunkStore, next: &mut u64, to: u64) -> std::io::Result<()> {
+    if *next < to {
+        state.push_zeros(cs, to - *next)?;
+        *next = to;
     }
+    Ok(())
 }
 
 /// Push the pending writes that start before `upto` into the stream in offset
 /// order, with zeros in the gaps, then zeros up to `upto`. Memory stays O(1)
 /// in the gap size. Only for a fresh stream, where unwritten bytes read as zero.
 fn fill_stream(
-    state: &mut State,
-    fsa: &mut impl blockset::StorageAdd,
+    state: &mut Stream,
+    cs: &chunk_store::ChunkStore,
     next: &mut u64,
     pending: &mut BTreeMap<u64, Vec<u8>>,
     upto: u64,
-) {
+) -> std::io::Result<()> {
     while let Some((&o, _)) = pending.first_key_value() {
         if o >= upto {
             break;
         }
-        push_zeros(state, fsa, next, o);
+        push_zeros(state, cs, next, o)?;
         let v = pending.remove(&o).expect("first key exists");
-        state.push_bytes(fsa, &v);
+        state.push(cs, &v)?;
         *next += v.len() as u64;
     }
-    push_zeros(state, fsa, next, upto);
+    push_zeros(state, cs, next, upto)
 }
 
 /// pwrite semantics on a buffer: zero-fill any gap, then copy `data` at `offset`.
@@ -458,19 +476,15 @@ impl SliceFsFilesystem {
 
     /// Finish a clone of a streaming state as a stored root, first appending
     /// zeros from `streamed` up to `min_size` (an extension set by setattr).
-    fn end_padded(&self, state: &State, streamed: u64, min_size: u64) -> Digest224 {
+    fn end_padded(&self, state: &Stream, streamed: u64, min_size: u64) -> Result<Digest224, i32> {
         let mut st = state.clone();
-        let mut io = self.io.lock().unwrap();
-        let mut fsa = FileStorageAdd::new(&mut *io);
-        let mut left = min_size.saturating_sub(streamed);
-        let zeros = vec![0u8; 1 << 16];
-        while left > 0 {
-            let n = left.min(zeros.len() as u64) as usize;
-            st.push_bytes(&mut fsa, &zeros[..n]);
-            left -= n as u64;
-        }
-        let d256 = st.end(&mut fsa);
-        fsa.end(&d256)
+        let cs = &*self.content;
+        st.push_zeros(cs, min_size.saturating_sub(streamed))
+            .and_then(|_| st.finish(cs))
+            .map_err(|e| {
+                eprintln!("[{}][FUSE] content store error: {e}", ts());
+                libc::EIO
+            })
     }
 
     /// Start an online GC (#25). Turns on object tracking in the store, then
@@ -482,13 +496,22 @@ impl SliceFsFilesystem {
     /// refers to yet; a clone of its state, ended, gives a root that covers
     /// them. Pending (out-of-order) writes and Buffered handles are only in
     /// RAM, so they need no root.
-    pub fn gc_start(&self) -> Result<metadata::gc::OnlineGc, String> {
+    pub fn gc_start(&self) -> Result<(metadata::gc::OnlineGc, u64), String> {
         if !Arc::ptr_eq(&self.io, self.meta.io()) {
             return Err("file system and metadata do not share one StoreIo".into());
         }
         let gate = self.commit_gate.write().unwrap_or_else(|e| e.into_inner());
         self.io.lock().unwrap().start_tracking();
-        let states: Vec<State> = self.open_files.lock().unwrap().values()
+        // From here the content store records each object put or read, and
+        // the GC changes only packs up to `boundary`.
+        let boundary = match self.content.gc_begin() {
+            Ok(b) => b,
+            Err(e) => {
+                self.io.lock().unwrap().stop_tracking();
+                return Err(format!("GC start: content store error: {e}"));
+            }
+        };
+        let states: Vec<Stream> = self.open_files.lock().unwrap().values()
             .filter_map(|s| match &s.write_mode {
                 WriteMode::Streaming { state, .. } => Some(state.clone()),
                 WriteMode::Buffered { .. } => None,
@@ -496,10 +519,14 @@ impl SliceFsFilesystem {
             .collect();
         let mut file_roots = Vec::with_capacity(states.len());
         for state in states {
-            let mut io = self.io.lock().unwrap();
-            let mut fsa = FileStorageAdd::new(&mut *io);
-            let d256 = state.end(&mut fsa);
-            file_roots.push(fsa.end(&d256));
+            match state.finish(&self.content) {
+                Ok(k) => file_roots.push(k),
+                Err(e) => {
+                    self.io.lock().unwrap().stop_tracking();
+                    self.content.gc_abort();
+                    return Err(format!("GC start: content store error: {e}"));
+                }
+            }
         }
         let committed = self.commit_cut().map_err(|e| e.to_string()).and_then(|root| {
             self.meta.flush_wal().map_err(|e| e.to_string())?;
@@ -510,6 +537,7 @@ impl SliceFsFilesystem {
             Ok(root) => root,
             Err(e) => {
                 self.io.lock().unwrap().stop_tracking();
+                self.content.gc_abort();
                 return Err(format!("GC start: commit failed: {e}"));
             }
         };
@@ -519,7 +547,7 @@ impl SliceFsFilesystem {
                 meta_roots.push(r);
             }
         }
-        Ok(metadata::gc::OnlineGc::new(Arc::clone(&self.io), meta_roots, file_roots))
+        Ok((metadata::gc::OnlineGc::new(Arc::clone(&self.io), meta_roots, file_roots), boundary))
     }
 
     /// Run a full online GC: start, mark, sweep. `Ok(None)` if `stop` was set
@@ -528,12 +556,63 @@ impl SliceFsFilesystem {
         &self,
         stop: &std::sync::atomic::AtomicBool,
     ) -> Result<Option<metadata::gc::SweepStats>, String> {
-        let gc = self.gc_start()?;
-        let Some(live) = gc.mark(stop).map_err(|e| format!("GC mark failed, nothing deleted: {e}"))? else {
+        let (gc, boundary) = self.gc_start()?;
+        let live = match gc.mark(stop) {
+            Ok(Some(live)) => live,
+            Ok(None) => {
+                self.content.gc_abort();
+                return Ok(None);
+            }
+            Err(e) => {
+                self.content.gc_abort();
+                return Err(format!("GC mark failed, nothing deleted: {e}"));
+            }
+        };
+        let Some(content) = self.gc_content(&gc, boundary, stop)? else {
             return Ok(None);
         };
-        let stats = gc.sweep(&live, stop).map_err(|e| format!("GC sweep failed: {e}"))?;
+        let mut stats = gc.sweep(&live, stop).map_err(|e| format!("GC sweep failed: {e}"))?;
+        stats.objects_kept += content.kept_objects as usize;
+        stats.objects_removed += content.removed_objects as usize;
+        stats.bytes_removed += content.removed_bytes;
         Ok((!stop.load(Ordering::Relaxed)).then_some(stats))
+    }
+
+    /// The file content part of an online GC: mark the content keys of `gc`
+    /// in the content store, then delete and compact its packs up to
+    /// `boundary` (from `gc_start`). `Ok(None)` if `stop` was set first. On an
+    /// error or a stop, nothing of the content store is deleted.
+    pub fn gc_content(
+        &self,
+        gc: &metadata::gc::OnlineGc,
+        boundary: u64,
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<chunk_store::GcStats>, String> {
+        let cs = &self.content;
+        let marked = (|| -> Result<Option<HashSet<chunk_store::ObjectId>>, String> {
+            let keys = gc.content_keys().map_err(|e| format!("GC mark failed, nothing deleted: {e}"))?;
+            let mut ids = HashSet::new();
+            for k in keys {
+                if stop.load(Ordering::Relaxed) {
+                    return Ok(None);
+                }
+                let objs = chunk_store::file::file_objects(cs, content::to_id(&k))
+                    .map_err(|e| format!("GC mark failed, nothing deleted: {e}"))?;
+                ids.extend(objs);
+            }
+            Ok(Some(ids))
+        })();
+        match marked {
+            Ok(Some(ids)) => cs.gc_finish(&ids, boundary).map(Some).map_err(|e| format!("GC of file content failed: {e}")),
+            Ok(None) => {
+                cs.gc_abort();
+                Ok(None)
+            }
+            Err(e) => {
+                cs.gc_abort();
+                Err(e)
+            }
+        }
     }
 
     /// The open write handle of `ino` that holds the most data, if any.
@@ -554,22 +633,14 @@ impl SliceFsFilesystem {
 
     /// Current content of a streaming handle: what it streamed so far, or the
     /// committed file content if it has not streamed anything yet.
-    fn handle_content(&self, ino: u64, state: &State, streamed: u64) -> Vec<u8> {
+    fn handle_content(&self, ino: u64, state: &Stream, streamed: u64) -> Vec<u8> {
         if streamed > 0 {
-            let digest: Digest224 = {
-                let mut io = self.io.lock().unwrap();
-                let mut fsa = FileStorageAdd::new(&mut *io);
-                let d256 = state.clone().end(&mut fsa);
-                fsa.end(&d256)
-            };
-            let mut io = self.io.lock().unwrap();
-            file_storage_get(&mut *io, &digest).unwrap_or_default()
+            state.clone().finish(&self.content).ok()
+                .and_then(|k| content::get_all(&self.content, &k))
+                .unwrap_or_default()
         } else {
             match self.meta.get_manifest(ino) {
-                Ok(m) if !m.is_empty() => {
-                    let mut io = self.io.lock().unwrap();
-                    file_storage_get(&mut *io, &m[0]).unwrap_or_default()
-                }
+                Ok(m) if !m.is_empty() => content::get_all(&self.content, &m[0]).unwrap_or_default(),
                 _ => Vec::new(),
             }
         }
@@ -588,13 +659,9 @@ impl SliceFsFilesystem {
                 // Pending writes exist only on a fresh stream: the gaps are zeros.
                 // Stream them in order; no full-file buffer.
                 let upto = pending.iter().next_back().map(|(&o, v)| o + v.len() as u64).unwrap_or(0);
-                let mut io = self.io.lock().unwrap();
-                let mut fsa = FileStorageAdd::new(&mut *io);
-                fill_stream(state, &mut fsa, next_expected_offset, pending, upto);
-                if let Some(e) = fsa.take_io_error() {
-                    eprintln!("[{}][FUSE] settle: CAS I/O error: {}", ts(), e);
+                if let Err(e) = fill_stream(state, &self.content, next_expected_offset, pending, upto) {
+                    eprintln!("[{}][FUSE] settle: content store error: {}", ts(), e);
                 }
-                drop(fsa);
                 file_state.byte_count = file_state.byte_count.max(*next_expected_offset);
                 file_state.cas_committed = false;
             }
@@ -668,7 +735,7 @@ impl SliceFsFilesystem {
         let fh = self.open_handle(ino);
         self.open_files.lock().unwrap().insert(fh, OpenFileState {
             ino,
-            write_mode: WriteMode::Streaming { state: State::default(), next_expected_offset: 0, pending: BTreeMap::new() },
+            write_mode: WriteMode::Streaming { state: Stream::default(), next_expected_offset: 0, pending: BTreeMap::new() },
             byte_count: 0,
             cas_committed: false,
             last_committed_root: None,
@@ -714,12 +781,7 @@ impl SliceFsFilesystem {
                 // A jump past the reorder window is a sparse write, not NFS
                 // reordering: stream the gap as zeros (O(1) memory) and go on.
                 if fresh && !overlaps_pending && offset > *next_expected_offset + REORDER_WINDOW as u64 {
-                    let io_err = {
-                        let mut io = self.io.lock().unwrap();
-                        let mut fsa = FileStorageAdd::new(&mut *io);
-                        fill_stream(state, &mut fsa, next_expected_offset, pending, offset);
-                        fsa.take_io_error()
-                    };
+                    let io_err = fill_stream(state, &self.content, next_expected_offset, pending, offset).err();
                     if let Some(e) = io_err {
                         eprintln!("[{}][FUSE] test_write: CAS I/O error while filling a gap: {}", ts(), e);
                         self.open_files.lock().unwrap().insert(fh, file_state);
@@ -738,17 +800,7 @@ impl SliceFsFilesystem {
                         next += v.len() as u64;
                         chunks.push(v);
                     }
-                    let io_err = {
-                        let mut io = self.io.lock().unwrap();
-                        let mut fsa = FileStorageAdd::new(&mut *io);
-                        for c in &chunks {
-                            state.push_bytes(&mut fsa, c);
-                        }
-                        // Take error before fsa drops (drop may flush more nodes).
-                        let err = fsa.take_io_error();
-                        drop(fsa);
-                        err
-                    };
+                    let io_err = chunks.iter().try_for_each(|c| state.push(&self.content, c)).err();
                     if let Some(e) = io_err {
                         eprintln!("[{}][FUSE] test_write: CAS I/O error during push_bytes: {}", ts(), e);
                         // Re-insert state before returning error
@@ -848,16 +900,9 @@ impl SliceFsFilesystem {
         // Finalize to CAS based on write mode
         let new_digest: Digest224 = match write_mode {
             WriteMode::Streaming { state, next_expected_offset, .. } => {
-                self.end_padded(&state, next_expected_offset, min_size)
+                self.end_padded(&state, next_expected_offset, min_size)?
             }
-            WriteMode::Buffered { buf } => {
-                let mut io = self.io.lock().unwrap();
-                let mut fsa = FileStorageAdd::new(&mut *io);
-                let mut fresh = State::default();
-                fresh.push_bytes(&mut fsa, &buf);
-                let d256 = fresh.end(&mut fsa);
-                fsa.end(&d256)
-            }
+            WriteMode::Buffered { buf } => content::put_all(&self.content, &buf).map_err(|_| libc::EIO)?,
         };
 
         // If the digest matches last committed root (fsync already committed this exact state),
@@ -920,7 +965,7 @@ impl SliceFsFilesystem {
         // In Buffered mode, clone buf directly (no CAS roundtrip needed).
         // In Streaming mode, clone State for materialization.
         enum WriterSnapshot {
-            Streaming(State),
+            Streaming(Stream),
         }
 
         let pending_fh = self.open_files.lock().unwrap().iter()
@@ -951,10 +996,7 @@ impl SliceFsFilesystem {
         let root: Digest224 = match writer_snapshot {
             Some(WriterSnapshot::Streaming(snapshot)) => {
                 // Uncommitted content: finish a clone of the writer to get a root.
-                let mut io = self.io.lock().unwrap();
-                let mut fsa = FileStorageAdd::new(&mut *io);
-                let d256 = snapshot.end(&mut fsa);
-                fsa.end(&d256)
+                snapshot.finish(&self.content).map_err(|_| libc::EIO)?
             }
             None => {
                 // Fall back to committed manifest
@@ -964,42 +1006,17 @@ impl SliceFsFilesystem {
             }
         };
 
-        // Read only the requested range through a resumable reader, so a
-        // sequential read is O(n) overall instead of O(n^2). A client can read
-        // one file with several streams (SMB read-ahead runs ~20 MB away from
-        // the main stream): one reader would restart from the root at each
-        // switch. So each inode keeps up to READERS_PER_INODE readers, and a
-        // read uses the one with the shortest walk to its offset; a new reader
-        // (walk = offset) competes too.
-        const READERS_PER_INODE: usize = 8;
+        // A reader per inode keeps its node and chunk caches between reads.
         let mut readers = self.readers.lock().unwrap();
-        // Each reader keeps up to READ_WINDOW (4 MiB) of recent bytes: cap the
-        // cache at 16 inodes (at most 16 x 8 x 4 MiB = 512 MiB).
-        if readers.len() >= 16 && !readers.contains_key(&ino) {
+        if readers.len() >= 64 && !readers.contains_key(&ino) {
             readers.clear();
         }
-        let pool = readers.entry(ino).or_default();
-        pool.retain(|r| r.root() == &root);
-        let best = pool.iter().enumerate().min_by_key(|(_, r)| r.walk_cost(offset)).map(|(i, r)| (i, r.walk_cost(offset)));
-        let idx = match best {
-            // Reuse only a reader that needs no restart (cost below the
-            // offset, or zero) and at most a short skip ahead; a backward
-            // jump or a long jump belongs to another stream: a new reader.
-            Some((i, cost)) if cost == 0 || (cost < offset && cost <= 8 << 20) => i,
-            _ => {
-                if pool.len() >= READERS_PER_INODE {
-                    pool.remove(0); // least recently used
-                }
-                pool.push(FileStorageReader::new(root));
-                pool.len() - 1
-            }
-        };
-        // Most recently used last: the front is evicted when the pool is full.
-        let reader_state = pool.remove(idx);
-        pool.push(reader_state);
-        let reader = pool.last_mut().unwrap();
-        let mut io = self.io.lock().unwrap();
-        let mut out = reader.read_at(&mut *io, offset, size as usize).ok_or(libc::EIO)?;
+        if readers.get(&ino).map_or(true, |r| r.key() != root) {
+            let r = content::Reader::open(&self.content, &root).map_err(|_| libc::EIO)?;
+            readers.insert(ino, r);
+        }
+        let reader = readers.get_mut(&ino).unwrap();
+        let mut out = reader.read(&self.content, offset, size as usize).map_err(|_| libc::EIO)?;
         // Past the streamed bytes but inside a setattr extension: zeros.
         if let Some(logical) = logical_size {
             let want = logical.saturating_sub(offset).min(size as u64) as usize;
@@ -1079,7 +1096,7 @@ impl SliceFsFilesystem {
         // pending bytes durable (#20), so the manifest takes the streamed prefix.
         // 1. Clone state/buf snapshot under open_files lock
         enum FsyncSnapshot {
-            Streaming(State, u64, u64),
+            Streaming(Stream, u64, u64),
             Buffered(Vec<u8>),
         }
 
@@ -1120,16 +1137,9 @@ impl SliceFsFilesystem {
         // 2. Materialize under io lock
         let new_digest: Digest224 = match snapshot {
             FsyncSnapshot::Streaming(state_snapshot, streamed, min_size) => {
-                self.end_padded(&state_snapshot, streamed, min_size)
+                self.end_padded(&state_snapshot, streamed, min_size)?
             }
-            FsyncSnapshot::Buffered(buf_clone) => {
-                let mut io = self.io.lock().unwrap();
-                let mut fsa = FileStorageAdd::new(&mut *io);
-                let mut fresh = State::default();
-                fresh.push_bytes(&mut fsa, &buf_clone);
-                let d256 = fresh.end(&mut fsa);
-                fsa.end(&d256)
-            }
+            FsyncSnapshot::Buffered(buf_clone) => content::put_all(&self.content, &buf_clone).map_err(|_| libc::EIO)?,
         };
 
         // 3. Decrement old committed root if any
@@ -1240,7 +1250,7 @@ impl SliceFsFilesystem {
                         if new_size == 0 {
                             // Fast path: reset to empty Streaming State
                             let old_root = s.last_committed_root.take();
-                            s.write_mode = WriteMode::Streaming { state: State::default(), next_expected_offset: 0, pending: BTreeMap::new() };
+                            s.write_mode = WriteMode::Streaming { state: Stream::default(), next_expected_offset: 0, pending: BTreeMap::new() };
                             s.byte_count = 0;
                             s.min_size = 0;
                             s.cas_committed = false;
@@ -1265,10 +1275,8 @@ impl SliceFsFilesystem {
 
                             // Push into fresh State
                             let new_state_and_count = {
-                                let mut io = self.io.lock().unwrap();
-                                let mut fsa = FileStorageAdd::new(&mut *io);
-                                let mut fresh = State::default();
-                                fresh.push_bytes(&mut fsa, &content);
+                                let mut fresh = Stream::default();
+                                fresh.push(&self.content, &content).map_err(|_| libc::EIO)?;
                                 (fresh, content.len() as u64)
                             };
 
@@ -1328,26 +1336,21 @@ impl SliceFsFilesystem {
         if new_size == 0 {
             self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
         } else {
-            let mut st = State::default();
+            let mut st = Stream::default();
             let mut written = 0u64;
             if let Some(root) = old_manifest.first() {
-                let mut reader = FileStorageReader::new(*root);
+                let mut reader = content::Reader::open(&self.content, root).map_err(|_| libc::EIO)?;
                 while written < new_size {
                     let want = (new_size - written).min(1 << 20) as usize;
-                    let chunk = {
-                        let mut io = self.io.lock().unwrap();
-                        reader.read_at(&mut *io, written, want).ok_or(libc::EIO)?
-                    };
+                    let chunk = reader.read(&self.content, written, want).map_err(|_| libc::EIO)?;
                     if chunk.is_empty() {
                         break;
                     }
-                    let mut io = self.io.lock().unwrap();
-                    let mut fsa = FileStorageAdd::new(&mut *io);
-                    st.push_bytes(&mut fsa, &chunk);
+                    st.push(&self.content, &chunk).map_err(|_| libc::EIO)?;
                     written += chunk.len() as u64;
                 }
             }
-            let new_digest = self.end_padded(&st, written, new_size);
+            let new_digest = self.end_padded(&st, written, new_size)?;
             self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
             self.meta.increment_refcount(&new_digest);
         }
@@ -1805,13 +1808,7 @@ impl SliceFsFilesystem {
         self.touch_dir(parent_ino)?;
 
         // Store target as CAS content (raw bytes — v3 format, no compression)
-        let content_digest = {
-            let mut io = self.io.lock().unwrap();
-            let mut fsa = FileStorageAdd::new(&mut *io);
-            let digest = State::push_all(&mut fsa, target_bytes);
-            drop(fsa);
-            digest
-        };
+        let content_digest = content::put_all(&self.content, target_bytes).map_err(|_| libc::EIO)?;
         self.meta
             .set_manifest(ino, &[content_digest])
             .map_err(|_| libc::EIO)?;
@@ -1834,11 +1831,7 @@ impl SliceFsFilesystem {
             return Ok(String::new());
         }
         let root_digest = manifest[0];
-        let raw_bytes: Vec<u8> = {
-            let mut io = self.io.lock().unwrap();
-            file_storage_get(&mut *io, &root_digest)
-                .ok_or(libc::EINVAL)?
-        };
+        let raw_bytes: Vec<u8> = content::get_all(&self.content, &root_digest).ok_or(libc::EINVAL)?;
         String::from_utf8(raw_bytes).map_err(|_| libc::EINVAL)
     }
 
@@ -1896,7 +1889,7 @@ impl SliceFsFilesystem {
                 fh,
                 OpenFileState {
                     ino,
-                    write_mode: WriteMode::Streaming { state: State::default(), next_expected_offset: 0, pending: BTreeMap::new() },
+                    write_mode: WriteMode::Streaming { state: Stream::default(), next_expected_offset: 0, pending: BTreeMap::new() },
                     byte_count: 0,
                     cas_committed: false,
                     last_committed_root: None,
@@ -2134,6 +2127,10 @@ impl SliceFsFilesystem {
                 let _ = self.meta.create_snapshot(Some("auto-unmount".to_string()));
             }
             let _ = self.meta.shutdown_wal();
+            // Seal the active pack (sync, index), so the next open needs no scan.
+            if let Err(e) = self.content.close() {
+                eprintln!("[{}][FUSE] destroy: content store close failed: {}", ts(), e);
+            }
             true
         } else {
             false
@@ -2145,7 +2142,6 @@ impl SliceFsFilesystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockset::file_storage_get;
     use metadata::store::DictMetadataStore;
     use metadata::store_io::StoreIo;
     use slicefs_traits::metadata::{InodeMeta, MetadataStore};
@@ -2223,29 +2219,20 @@ mod tests {
         let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
         let content = b"hello, SliceFS content!";
         // Push content into FileStorage
-        let root_digest224 = {
-            let mut io_guard = io.lock().unwrap();
-            let mut fsa = FileStorageAdd::new(&mut *io_guard);
-            let digest = State::push_all(&mut fsa, content);
-            drop(fsa);
-            digest
-        };
 
         let meta_store = DictMetadataStore::new(io.clone());
         let file_meta = InodeMeta::new_file(0, 0, 0, S_IFREG_TEST | 0o644);
         let ino = meta_store.create_inode(&file_meta).unwrap();
         meta_store.link(1, "testfile", ino).unwrap();
-        meta_store.set_manifest(ino, &[root_digest224]).unwrap();
 
         let fs = SliceFsFilesystem::new(meta_store, io.clone(), None);
+        let root_digest224 = content::put_all(fs.content(), content).unwrap();
+        fs.meta.set_manifest(ino, &[root_digest224]).unwrap();
 
         let manifest = fs.meta.get_manifest(ino).unwrap();
         assert!(!manifest.is_empty());
 
-        let bytes = {
-            let mut io_guard = io.lock().unwrap();
-            file_storage_get(&mut *io_guard, &manifest[0]).unwrap()
-        };
+        let bytes = fs.read_content(&manifest[0]).unwrap();
 
         assert_eq!(bytes, content);
     }
@@ -2255,26 +2242,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
         let content = b"hello, SliceFS offset test!";
-        let root_digest224 = {
-            let mut io_guard = io.lock().unwrap();
-            let mut fsa = FileStorageAdd::new(&mut *io_guard);
-            let digest = State::push_all(&mut fsa, content);
-            drop(fsa);
-            digest
-        };
 
         let meta_store = DictMetadataStore::new(io.clone());
         let file_meta = InodeMeta::new_file(0, 0, 0, S_IFREG_TEST | 0o644);
         let ino = meta_store.create_inode(&file_meta).unwrap();
-        meta_store.set_manifest(ino, &[root_digest224]).unwrap();
 
         let fs = SliceFsFilesystem::new(meta_store, io.clone(), None);
+        let root_digest224 = content::put_all(fs.content(), content).unwrap();
+        fs.meta.set_manifest(ino, &[root_digest224]).unwrap();
 
         let manifest = fs.meta.get_manifest(ino).unwrap();
-        let bytes = {
-            let mut io_guard = io.lock().unwrap();
-            file_storage_get(&mut *io_guard, &manifest[0]).unwrap()
-        };
+        let bytes = fs.read_content(&manifest[0]).unwrap();
         let offset = 7usize;
         let bytes_from_offset = &bytes[offset..];
 
