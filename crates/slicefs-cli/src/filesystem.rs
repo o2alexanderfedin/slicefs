@@ -91,6 +91,10 @@ struct OpenFileState {
     /// writing it). Bytes between the stream end and this size are zeros;
     /// they are added at fsync/release instead of materializing the file.
     min_size: u64,
+    /// Time of the last change to the content through this state. The flush
+    /// stamps it as the file's mtime, so a flush at fsync, release or commit
+    /// (or at the end of a replay) does not move mtime to its own time.
+    modified: Option<(i64, u32)>,
 }
 
 /// FUSE filesystem adapter backed by a [`DictMetadataStore`].
@@ -690,7 +694,7 @@ impl SliceFsFilesystem {
             ino,
             write_mode: WriteMode::Streaming { state: Stream::default(), next_expected_offset: 0, pending: BTreeMap::new() },
             byte_count: 0,
-            cas_committed: false,
+            cas_committed: false,            modified: None,
             last_committed_root: None,
             min_size: 0,
         });
@@ -763,7 +767,7 @@ impl SliceFsFilesystem {
                     }
                     *next_expected_offset = next;
                     file_state.byte_count = file_state.byte_count.max(next);
-                    file_state.cas_committed = false;
+                    file_state.cas_committed = false;                    file_state.modified = Some(now_pair());
                     Ok(data.len() as u32)
                 } else if fresh && offset > *next_expected_offset && !overlaps_pending
                     && pending_bytes + data.len() <= REORDER_WINDOW
@@ -771,7 +775,7 @@ impl SliceFsFilesystem {
                     // Ahead of the stream: wait in the reorder window.
                     pending.insert(offset, data.to_vec());
                     file_state.byte_count = file_state.byte_count.max(end);
-                    file_state.cas_committed = false;
+                    file_state.cas_committed = false;                    file_state.modified = Some(now_pair());
                     Ok(data.len() as u32)
                 } else {
                     // Random write: switch to Buffered mode.
@@ -790,7 +794,7 @@ impl SliceFsFilesystem {
                     let old_root = file_state.last_committed_root.take();
                     file_state.byte_count = buf.len() as u64;
                     file_state.write_mode = WriteMode::Buffered { buf };
-                    file_state.cas_committed = false;
+                    file_state.cas_committed = false;                    file_state.modified = Some(now_pair());
                     if let Some(old) = old_root {
                         self.meta.decrement_refcount(&old);
                     }
@@ -801,7 +805,7 @@ impl SliceFsFilesystem {
                 // Standard pwrite into buffer -- no io lock needed
                 pwrite_into(buf, offset, data);
                 file_state.byte_count = buf.len() as u64;
-                file_state.cas_committed = false;
+                file_state.cas_committed = false;                file_state.modified = Some(now_pair());
                 Ok(data.len() as u32)
             }
         };
@@ -858,8 +862,8 @@ impl SliceFsFilesystem {
     /// Commit the write state of `fh` (if any) to the inode's manifest.
     fn finalize_write(&self, ino: u64, fh: u64) -> Result<(), i32> {
         self.settle_pending(fh);
-        let (write_mode, byte_count, cas_committed, last_committed_root, min_size) = match self.open_files.lock().unwrap().remove(&fh) {
-            Some(s) => (s.write_mode, s.byte_count, s.cas_committed, s.last_committed_root, s.min_size),
+        let (write_mode, byte_count, cas_committed, last_committed_root, min_size, modified) = match self.open_files.lock().unwrap().remove(&fh) {
+            Some(s) => (s.write_mode, s.byte_count, s.cas_committed, s.last_committed_root, s.min_size, s.modified),
             None => return Ok(()), // Already closed
         };
 
@@ -908,14 +912,7 @@ impl SliceFsFilesystem {
         }
 
         // Update inode size and mtime
-        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-        inode.size = byte_count;
-        let (now_sec, now_nsec) = now_pair();
-        inode.mtime_sec = now_sec;
-        inode.mtime_nsec = now_nsec;
-        inode.ctime_sec = inode.mtime_sec;
-        inode.ctime_nsec = inode.mtime_nsec;
-        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
+        self.stamp_content(ino, byte_count, modified)?;
 
         Ok(())
     }
@@ -1022,6 +1019,22 @@ impl SliceFsFilesystem {
     ///
     /// If `fh` is not in `open_files` (read-only handle or invalid), returns Ok
     /// without error — fsync is a no-op for read-only handles.
+    /// The content of `ino` is now `size` bytes, last changed at `modified`
+    /// (now if unknown): set size, mtime and ctime. ctime does not go back
+    /// past a later change (a chmod after the last write).
+    fn stamp_content(&self, ino: u64, size: u64, modified: Option<(i64, u32)>) -> Result<(), i32> {
+        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
+        inode.size = size;
+        let (sec, nsec) = modified.unwrap_or_else(now_pair);
+        inode.mtime_sec = sec;
+        inode.mtime_nsec = nsec;
+        if (sec, nsec) > (inode.ctime_sec, inode.ctime_nsec) {
+            inode.ctime_sec = sec;
+            inode.ctime_nsec = nsec;
+        }
+        self.meta.update_inode(&inode).map_err(|_| libc::EIO)
+    }
+
     fn flush_buffer_for_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
         self.flush_handle(ino, fh, false)
     }
@@ -1043,28 +1056,43 @@ impl SliceFsFilesystem {
         // Bytes that are only in RAM (pending out-of-order writes, Buffered
         // buffers) are not hashed under the gate: they are logged again after
         // the cut, so replay puts them on top of the root.
-        let mut relog: Vec<Op> = Vec::new();
+        // The records carry the time of the last write, not the commit time:
+        // replay stamps it as the mtime. A last record puts back a later
+        // ctime (the truncate in replay sets ctime to the write time).
+        let mut relog: Vec<Record> = Vec::new();
         {
             let open_files = self.open_files.lock().unwrap();
             for &(_, fh) in &handles {
                 let Some(s) = open_files.get(&fh) else { continue };
+                let ino = s.ino;
+                let time = s.modified.unwrap_or_else(now_pair);
+                let before = relog.len();
                 match &s.write_mode {
                     WriteMode::Streaming { pending, .. } => {
                         for (&off, data) in pending {
-                            relog.push(Op::Write { ino: s.ino, offset: off, data: data.clone() });
+                            relog.push(Record { time, op: Op::Write { ino, offset: off, data: data.clone() } });
                         }
                     }
                     WriteMode::Buffered { buf } => {
-                        relog.push(Op::Truncate { ino: s.ino });
-                        relog.push(Op::Write { ino: s.ino, offset: 0, data: buf.clone() });
+                        relog.push(Record { time, op: Op::Truncate { ino } });
+                        relog.push(Record { time, op: Op::Write { ino, offset: 0, data: buf.clone() } });
+                    }
+                }
+                if relog.len() > before {
+                    if let Ok(inode) = self.meta.get_inode(ino) {
+                        let ctime = (inode.ctime_sec, inode.ctime_nsec);
+                        if ctime > time {
+                            relog.push(Record { time: ctime, op: Op::Setattr {
+                                ino, mode: None, uid: None, gid: None, size: None, atime: None, mtime: Some(time),
+                            } });
+                        }
                     }
                 }
             }
         }
         let root = self.meta.commit()?;
-        let time = now_pair();
-        for op in relog {
-            self.log_record(Record { time, op });
+        for rec in relog {
+            self.log_record(rec);
         }
         Ok(root)
     }
@@ -1084,7 +1112,7 @@ impl SliceFsFilesystem {
             Buffered(Vec<u8>),
         }
 
-        let (snapshot, byte_count, old_root) = {
+        let (snapshot, byte_count, old_root, modified) = {
             let mut open_files = self.open_files.lock().unwrap();
             match open_files.get_mut(&fh) {
                 Some(s) => {
@@ -1111,7 +1139,7 @@ impl SliceFsFilesystem {
                             FsyncSnapshot::Streaming(state.clone(), *next_expected_offset, s.min_size),
                         WriteMode::Buffered { buf } => FsyncSnapshot::Buffered(buf.clone()),
                     };
-                    (snap, s.byte_count, s.last_committed_root)
+                    (snap, s.byte_count, s.last_committed_root, s.modified)
                 }
                 None => return Ok(()), // No write handle -- fsync is a no-op
             }
@@ -1148,14 +1176,7 @@ impl SliceFsFilesystem {
         }
 
         // 6. Update inode size and mtime
-        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-        inode.size = byte_count;
-        let (now_sec, now_nsec) = now_pair();
-        inode.mtime_sec = now_sec;
-        inode.mtime_nsec = now_nsec;
-        inode.ctime_sec = inode.mtime_sec;
-        inode.ctime_nsec = inode.mtime_nsec;
-        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
+        self.stamp_content(ino, byte_count, modified)?;
 
         Ok(())
     }
@@ -1185,7 +1206,7 @@ impl SliceFsFilesystem {
                         && (s.byte_count > 0 || !self.has_content(ino)) => {
                         s.min_size = new_size;
                         s.byte_count = new_size;
-                        s.cas_committed = false;
+                        s.cas_committed = false;                        s.modified = Some(now_pair());
                         true
                     }
                     _ => false,
@@ -1215,7 +1236,7 @@ impl SliceFsFilesystem {
                             *buf = Vec::new();
                             s.byte_count = 0;
                             s.min_size = 0;
-                            s.cas_committed = false;
+                            s.cas_committed = false;                            s.modified = Some(now_pair());
                             drop(open_files);
 
                             if let Some(old) = old_root {
@@ -1226,7 +1247,7 @@ impl SliceFsFilesystem {
                             buf.resize(new_size as usize, 0);
                             s.byte_count = buf.len() as u64;
                             s.min_size = 0;
-                            s.cas_committed = false;
+                            s.cas_committed = false;                            s.modified = Some(now_pair());
                             drop(open_files);
                         }
                     }
@@ -1237,7 +1258,7 @@ impl SliceFsFilesystem {
                             s.write_mode = WriteMode::Streaming { state: Stream::default(), next_expected_offset: 0, pending: BTreeMap::new() };
                             s.byte_count = 0;
                             s.min_size = 0;
-                            s.cas_committed = false;
+                            s.cas_committed = false;                            s.modified = Some(now_pair());
                             drop(open_files);
 
                             if let Some(old) = old_root {
@@ -1274,7 +1295,7 @@ impl SliceFsFilesystem {
                                 };
                                 s.byte_count = new_state_and_count.1;
                                 s.min_size = 0;
-                                s.cas_committed = false;
+                                s.cas_committed = false;                                s.modified = Some(now_pair());
                                 s.last_committed_root = None;
                             }
                             drop(open_files);
@@ -1880,7 +1901,7 @@ impl SliceFsFilesystem {
                     ino,
                     write_mode: WriteMode::Streaming { state: Stream::default(), next_expected_offset: 0, pending: BTreeMap::new() },
                     byte_count: 0,
-                    cas_committed: false,
+                    cas_committed: false,                    modified: None,
                     last_committed_root: None,
                     min_size: 0,
                 },

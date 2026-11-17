@@ -278,3 +278,43 @@ fn two_write_handles_on_one_file_share_their_writes() {
         assert_eq!(fs.test_read(f, 0, m.size as u32 + 1).unwrap(), b"BBAAAAAACC", "live content");
     });
 }
+
+// A commit logs the bytes of a Buffered handle again (they are only in RAM).
+// After a crash, replay must give the file the mtime of its last write and
+// the ctime of its last change, not the time of the commit or of the replay.
+#[test]
+fn a_commit_keeps_the_times_of_a_buffered_file() {
+    let dir = TempDir::new().unwrap();
+    let mut want = data(10, 50_000);
+    want[100..400].fill(0xEE);
+    {
+        let fs = new_fs(dir.path());
+        let (ino, fh) = {
+            let _t = oplog::Clock::freeze_at((1_700_000_000, 0));
+            let (ino, fh) = create(&fs, 1, "buf.bin");
+            write(&fs, fh, 0, &data(10, 50_000));
+            write(&fs, fh, 100, &[0xEE; 300]); // not sequential: Buffered
+            (ino, fh)
+        };
+        assert!(!fs.test_is_streaming(fh));
+        {
+            let _t = oplog::Clock::freeze_at((1_700_000_100, 0));
+            assert!(matches!(h::handle_setattr(&fs, ino, Some(S_IFREG | 0o600), None, None, None, None, None, None),
+                h::AttrResult::Ok(_)));
+        }
+        {
+            let _t = oplog::Clock::freeze_at((1_700_000_500, 0));
+            let _gate = fs.commit_gate();
+            fs.commit_cut().unwrap();
+        }
+        fs.meta().flush_wal().unwrap();
+        std::mem::forget(fs); // a crash with the handle open
+    }
+    let fs = reload_and_replay(dir.path());
+    let ino = fs.meta().lookup(1, "buf.bin").unwrap();
+    let m = fs.meta().get_inode(ino).unwrap();
+    assert_eq!(fs.test_read(ino, 0, want.len() as u32 + 1).unwrap(), want);
+    assert_eq!((m.size, m.mode), (50_000, S_IFREG | 0o600));
+    assert_eq!((m.mtime_sec, m.mtime_nsec), (1_700_000_000, 0), "mtime is the time of the last write");
+    assert_eq!((m.ctime_sec, m.ctime_nsec), (1_700_000_100, 0), "ctime is the time of the chmod");
+}
