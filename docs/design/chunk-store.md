@@ -56,11 +56,18 @@ part of the ID.
 A file is an ordered list of `(ObjectId, length u64)` entries (36 bytes
 each). The file offset of an entry is the sum of the lengths before it.
 
-- Up to 1,024 entries: the list is one manifest node.
-- More entries: the list is split into leaf nodes of 1,024 entries, and an
-  index node holds `(ObjectId of the leaf, byte length of the leaf range)`.
-  The tree has as many levels as it needs. A read finds its range with a
-  binary search on the lengths at each level.
+- The list is split into nodes by content, like the chunks: a node ends
+  after an entry whose ID matches a bit pattern (1 entry in 512), with at
+  least 64 and at most 4,096 entries. An index node holds `(ObjectId of the
+  node, byte length of its range)`, cut the same way. The tree has as many
+  levels as it needs. A read finds its range with a binary search on the
+  lengths at each level.
+- Why by content: with a fixed count per node, a chunk added or removed
+  near the start moves every later entry, so every later node is stored
+  again (about 0.4 % of the file size). With content cuts, the nodes line up
+  again after the next cut. In a test with 200,000 chunks (379 nodes), one
+  entry added or removed at the start gave 2 new nodes: the first leaf and
+  the root.
 - The size of the file is in the inode. An empty file has no manifest.
 
 The other metadata (directories, inode map, xattrs) keeps its current

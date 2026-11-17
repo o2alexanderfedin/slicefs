@@ -4,16 +4,36 @@
 //! Node format: magic `SFM1`, level `u8`, entry count `u32 LE`, then entries
 //! of `ObjectId` (28 bytes) + byte length `u64 LE`. Level 0 entries are
 //! chunks; a level `k > 0` entry is a level `k - 1` node and the bytes it
-//! covers. A node holds at most `LEAF_ENTRIES` entries. The tree depends
-//! only on the chunk sequence, so the key of a file does not depend on the
-//! sizes of the writes that made it.
+//! covers.
+//!
+//! The nodes are cut by content, as the chunks are: a node ends after an
+//! entry whose ID matches a bit pattern (1 in `NODE_CUT_ONE_IN`), with at
+//! least `NODE_MIN` and at most `LEAF_ENTRIES` entries. So a chunk added or
+//! removed near the start of a file changes only the nodes up to the next
+//! cut (and their parents), not every node after it. The tree depends only
+//! on the chunk sequence, so the key of a file does not depend on the sizes
+//! of the writes that made it.
 
 use crate::{chunk_ranges, ChunkStore, Error, ObjectId, Result, CHUNK_MAX, ID_LEN};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-/// Entries per manifest node.
-pub const LEAF_ENTRIES: usize = 1024;
+/// Most entries in a manifest node (a forced cut).
+pub const LEAF_ENTRIES: usize = 4096;
+
+/// Fewest entries in a manifest node before a content cut (the last node of
+/// a level can have fewer).
+pub const NODE_MIN: usize = 64;
+
+/// A node ends after about one entry in this many (a power of two).
+pub const NODE_CUT_ONE_IN: u32 = 512;
+
+/// True if a node may end after an entry with this ID. The ID is a BLAKE3
+/// hash, so its bytes are uniform.
+fn is_cut(id: &ObjectId) -> bool {
+    let w = u32::from_le_bytes(id.0[ID_LEN - 4..].try_into().unwrap());
+    w & (NODE_CUT_ONE_IN - 1) == 0
+}
 
 const NODE_MAGIC: &[u8; 4] = b"SFM1";
 const ENTRY: usize = ID_LEN + 8;
@@ -139,7 +159,8 @@ impl FileWriter {
             self.levels.resize_with(level + 1, Vec::new);
         }
         self.levels[level].push(e);
-        if self.levels[level].len() == LEAF_ENTRIES {
+        let n = self.levels[level].len();
+        if n == LEAF_ENTRIES || (n >= NODE_MIN && is_cut(&e.id)) {
             let entries = std::mem::take(&mut self.levels[level]);
             let node = self.put_node(store, level, &entries)?;
             self.push(store, level + 1, node)?;
@@ -293,4 +314,71 @@ pub fn file_objects(store: &ChunkStore, key: ObjectId) -> Result<Vec<ObjectId>> 
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mem::MemIo;
+    use crate::Options;
+
+    /// A manifest of `entries` (fake chunks: only the nodes are stored).
+    fn build(s: &ChunkStore, entries: &[Entry]) -> ObjectId {
+        let mut w = FileWriter::default();
+        for e in entries {
+            w.push(s, 0, *e).unwrap();
+        }
+        w.finish(s).unwrap()
+    }
+
+    fn fake(n: u32) -> Vec<Entry> {
+        (0..n).map(|i| Entry { id: ObjectId::of(&i.to_le_bytes()), len: 8192 }).collect()
+    }
+
+    /// A chunk added or removed at the start changes only a few nodes, not
+    /// every node after it (about 200,000 chunks: a 1.6 GB file).
+    #[test]
+    fn a_shift_at_the_start_changes_few_nodes() {
+        let s = ChunkStore::open_with(Arc::new(MemIo::new()), Options::default()).unwrap();
+        let base = fake(200_000);
+        build(&s, &base);
+        let nodes = s.stats().objects;
+        assert!(nodes > 300, "{nodes} nodes");
+
+        let mut ins = vec![Entry { id: ObjectId::of(b"new"), len: 100 }];
+        ins.extend_from_slice(&base);
+        let before = s.stats().objects;
+        build(&s, &ins);
+        let added = s.stats().objects - before;
+        eprintln!("insert: {added} new nodes of {nodes}");
+        assert!(added <= 6, "insert: {added} new nodes of {nodes}");
+
+        let before = s.stats().objects;
+        build(&s, &base[1..]);
+        let added = s.stats().objects - before;
+        eprintln!("delete: {added} new nodes of {nodes}");
+        assert!(added <= 6, "delete: {added} new nodes of {nodes}");
+    }
+
+    #[test]
+    fn nodes_stay_within_the_size_limits() {
+        let s = ChunkStore::open_with(Arc::new(MemIo::new()), Options::default()).unwrap();
+        let root = build(&s, &fake(100_000));
+        let mut todo = vec![root];
+        let mut sizes = Vec::new();
+        while let Some(id) = todo.pop() {
+            let n = load_node(&s, &id).unwrap();
+            sizes.push(n.entries.len());
+            if n.level > 0 {
+                todo.extend(n.entries.iter().map(|e| e.id));
+            }
+        }
+        // Every node but the last of its level has NODE_MIN..=LEAF_ENTRIES.
+        let small = sizes.iter().filter(|&&n| n < NODE_MIN).count();
+        assert!(small <= 3, "{small} small nodes: {sizes:?}");
+        assert!(sizes.iter().all(|&n| n <= LEAF_ENTRIES));
+        let leaves = sizes.len() - 1;
+        let mean = 100_000 / leaves.max(1);
+        assert!((300..=1200).contains(&mean), "mean {mean} entries per leaf");
+    }
 }
