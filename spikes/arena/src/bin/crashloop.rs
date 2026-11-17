@@ -6,8 +6,10 @@
 //! a child (`crashloop child ...`) that opens the store (this runs the
 //! recovery of the previous kill) and loops: put 8 objects (6 recorded as
 //! roots, 2 garbage), `sync()`, append the 6 root ids to the side file
-//! `roots` and `full_sync` it. Every 16 rounds it runs a GC with the root
-//! set as the live set (the garbage is removed, small or mostly-dead arenas
+//! `roots` and `full_sync` it. Right after open and every `--gc_every`
+//! (3) rounds it runs a GC with the root set as the live set (a `#gc` line
+//! in the side file counts them; spike A ran it every 16 rounds, which a
+//! child killed within 730 ms seldom reached) (the garbage is removed, small or mostly-dead arenas
 //! are compacted). The parent sends SIGKILL at a random time, then opens
 //! the store itself and checks that every recorded id `get()`s with bytes
 //! whose BLAKE3 is the id (`get` checks the hash; the parent checks it
@@ -165,6 +167,10 @@ fn child(a: &Args) {
     let mut meta: std::collections::HashMap<ObjectId, (u64, usize)> = Default::default();
     let mut side = OpenOptions::new().create(true).append(true).open(dir.join("roots")).unwrap();
     let mut rng = Rng::new(seed);
+    let gc_every = a.u64("gc_every", 3);
+    // A GC right after open (children live only a few rounds).
+    store.gc(&live);
+    side.write_all(b"#gc\n").unwrap();
     let mut round = 0u64;
     loop {
         let s = rng.next();
@@ -207,8 +213,9 @@ fn child(a: &Args) {
         side.write_all(line.as_bytes()).unwrap();
         sys::full_sync(&side).unwrap();
         round += 1;
-        if round % 16 == 0 {
+        if round % gc_every == 0 {
             store.gc(&live);
+            side.write_all(b"#gc\n").unwrap();
         }
     }
 }
@@ -222,7 +229,7 @@ fn run(a: &Args) {
     let dir = td.path().to_owned();
     let exe = std::env::current_exe().unwrap();
     let mut extra = Vec::new();
-    for k in ["churn", "live_cap"] {
+    for k in ["churn", "live_cap", "gc_every"] {
         if let Some(v) = a.0.get(k) {
             extra.push(format!("--{k}"));
             extra.push(v.clone());
@@ -240,7 +247,7 @@ fn run(a: &Args) {
             .spawn()
             .unwrap();
         // Give the child time to open (recovery), then kill at a random time.
-        let wait = 30 + rng.below(700);
+        let wait = 30 + rng.below(a.u64("wait_ms", 700));
         std::thread::sleep(Duration::from_millis(wait));
         if let Ok(Some(st)) = c.try_wait() {
             // The child must not exit on its own.
@@ -285,6 +292,7 @@ fn run(a: &Args) {
         .n("arenas_final", arenas as f64)
         .n("reopen_ms_max", open_ms_max)
         .n("retired_final", roots_full(&dir).1.len() as f64)
+        .n("gcs_done", fs::read_to_string(dir.join("roots")).unwrap_or_default().lines().filter(|l| *l == "#gc").count() as f64)
         .n("wall_s", t0.elapsed().as_secs_f64());
     r.emit();
     if bad > 0 || child_fail > 0 {

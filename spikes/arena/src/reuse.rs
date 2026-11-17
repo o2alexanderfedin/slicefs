@@ -735,21 +735,23 @@ impl ReuseStore {
             if list_changed {
                 self.write_dirty(&mut inner)?;
             }
-            if !doomed.is_empty() {
-                for &n in &doomed {
-                    self.read.forget(n);
-                    let _ = fs::remove_file(arena::idx_path(&self.dir, n));
-                    fs::remove_file(arena::arena_path(&self.dir, n))?;
-                    inner.arenas.remove(&n);
-                    inner.stats.packs -= 1;
-                }
-                sys::sync_dir(&self.dir)?;
-            }
             inner.alloc.set_bump_only(false);
         }
-        // Publish the freed extents once no reader can still use them.
+        // Once no reader can still use them (a reader holds the gate from
+        // its index lookup to the end of its copy-out): delete the doomed
+        // arenas and publish the freed extents. Lock order: gate, inner.
         let _w = self.gate.write().unwrap();
         let mut inner = self.inner.lock().unwrap();
+        if !doomed.is_empty() {
+            for &n in &doomed {
+                self.read.forget(n);
+                let _ = fs::remove_file(arena::idx_path(&self.dir, n));
+                fs::remove_file(arena::arena_path(&self.dir, n))?;
+                inner.arenas.remove(&n);
+                inner.stats.packs -= 1;
+            }
+            sys::sync_dir(&self.dir)?;
+        }
         for (a, off, len) in pending {
             if !doomed.contains(&a) {
                 inner.alloc.free(a, off, len);

@@ -387,8 +387,14 @@ fn v3_evacuates_a_sparse_arena() {
 /// never wrong bytes.
 #[test]
 fn readers_during_gc_and_reuse_never_miss_a_live_object() {
+    for k in KINDS {
+        readers_during_gc(k);
+    }
+}
+
+fn readers_during_gc(k: AllocKind) {
     let d = tempfile::tempdir().unwrap();
-    let s = Arc::new(ReuseStore::open(d.path(), opts(AllocKind::NextFit, 64)).unwrap());
+    let s = Arc::new(ReuseStore::open(d.path(), opts(k, 64)).unwrap());
     let stable = put_n(&s, 0, 200);
     s.sync().unwrap();
     let stable = Arc::new(stable);

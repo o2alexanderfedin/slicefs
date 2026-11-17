@@ -78,6 +78,21 @@ impl Any {
         }
     }
 
+    fn stored_len(&self, id: &ObjectId) -> Option<u32> {
+        match self {
+            Any::Rs(s) => s.stored_len(id),
+            Any::A(s) => s.stored_len(id),
+            Any::C(s) => s.loc(id).map(|l| l.stored),
+        }
+    }
+
+    /// Record bytes of the live set (stored + 45 each), the same measure
+    /// for every variant (the index of a compacting store still holds dead
+    /// objects of the arenas it kept).
+    fn live_rec(&self, live: &HashSet<ObjectId>) -> u64 {
+        live.iter().map(|id| self.stored_len(id).expect("live object missing") as u64 + REC_OVER).sum()
+    }
+
     /// Bytes written so far, by the store's own counters (RS: none).
     fn io(&self) -> Option<crate::reuse::IoCounters> {
         match self {
@@ -228,6 +243,8 @@ fn cb1(variant: &str, a: &Args) {
     let (mut amp_pre, mut amp_post, mut nalloc) = (Vec::new(), Vec::new(), Vec::new());
     let mut user_rec = 0u64; // record bytes of new objects (unpadded)
     let mut gcs = 0u64;
+    let mut gc_syncs = 0u64;
+    let mut index_extra = Vec::new();
     let mut gcst = GcStats::default();
     let mut rounds = 0u64;
     let base = |s: &dyn ObjStore| {
@@ -258,20 +275,22 @@ fn cb1(variant: &str, a: &Args) {
             poll.poll(d.path());
             let pre = allocated(d.path());
             let live = live_set(&files);
-            let (t, u0) = (Instant::now(), Usage::now());
+            let (t, u0, f0) = (Instant::now(), Usage::now(), sys::full_syncs());
             let g = st.gc(&live);
             gc_wall += t.elapsed().as_secs_f64();
             gc_cpu += cpu(&u0, &Usage::now());
+            gc_syncs += sys::full_syncs() - f0;
             poll.poll(d.path());
             gcs += 1;
             gcst.removed_objects += g.removed_objects;
             gcst.packs_deleted += g.packs_deleted;
             gcst.packs_compacted += g.packs_compacted;
             let x = s.stats();
-            let live_rec = (x.stored_bytes + REC_OVER * x.objects).max(1) as f64;
+            let live_rec = st.live_rec(&live).max(1) as f64;
             amp_pre.push(pre as f64 / live_rec);
             amp_post.push(allocated(d.path()) as f64 / live_rec);
             nalloc.push(x.packs as f64);
+            index_extra.push(x.objects as f64 - live.len() as f64);
         }
     }
     c.commit(s);
@@ -306,9 +325,15 @@ fn cb1(variant: &str, a: &Args) {
         .n("arenas", half(&nalloc))
         .n("user_raw_mib", user_raw as f64 / MIB as f64)
         .n("user_rec_mib", user_rec as f64 / MIB as f64);
+    r.n("index_extra_objects", half(&index_extra));
     if variant != "RS" {
-        r.n("full_syncs_per_commit", (sys::full_syncs() - fs0) as f64 / c.sync_lat.len().max(1) as f64);
-        r.n("full_syncs_per_commit_p50", median(&c.syncs_per_commit));
+        // Commit only (the sync() call), and everything incl. GC per commit.
+        let ncommit = c.sync_lat.len().max(1) as f64;
+        r.n("commit_full_syncs_mean", c.syncs_per_commit.iter().sum::<f64>() / ncommit);
+        r.n("commit_full_syncs_p50", median(&c.syncs_per_commit));
+        r.n("commit_full_syncs_max", c.syncs_per_commit.iter().copied().fold(0.0, f64::max));
+        r.n("gc_full_syncs", gc_syncs as f64);
+        r.n("all_full_syncs_per_commit", (sys::full_syncs() - fs0) as f64 / ncommit);
     }
     match (io0, st.io()) {
         (Some(i0), Some(i1)) => {
