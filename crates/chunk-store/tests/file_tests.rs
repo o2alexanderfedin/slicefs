@@ -130,3 +130,39 @@ fn a_missing_object_is_an_error_not_wrong_data() {
     let key = write_in_pieces(&s2, &random(100_000, 6), 100_000);
     assert!(FileReader::open(&s, key).is_err());
 }
+
+#[test]
+fn zero_chunks_read_back_without_the_store() {
+    let (_d, s) = store();
+    let mut w = FileWriter::new();
+    w.write(&s, b"head").unwrap();
+    w.write_zeros(&s, 1 << 20).unwrap();
+    w.write(&s, b"tail").unwrap();
+    let key = w.finish(&s).unwrap();
+    let mut r = FileReader::open(&s, key).unwrap();
+    let all = r.read(&s, 0, 8 + (1 << 20)).unwrap();
+    assert_eq!(&all[..4], b"head");
+    assert!(all[4..4 + (1 << 20)].iter().all(|&b| b == 0));
+    assert_eq!(&all[4 + (1 << 20)..], b"tail");
+    // Odd offsets inside the zero run, across chunk ends.
+    for &(off, n) in &[(5u64, 100usize), (32_000, 70_000), ((1 << 20) - 10, 30)] {
+        let got = r.read(&s, off, n).unwrap();
+        let end = (off as usize + n).min(all.len());
+        assert_eq!(got, all[off as usize..end].to_vec(), "at {off}+{n}");
+    }
+}
+
+#[test]
+fn zero_chunks_need_no_read_of_the_store() {
+    let mem = chunk_store::mem::MemIo::new();
+    let s = ChunkStore::open_with(std::sync::Arc::new(mem.clone()), Options::default()).unwrap();
+    let mut w = FileWriter::new();
+    w.write_zeros(&s, 1 << 20).unwrap();
+    let key = w.finish(&s).unwrap();
+    let mut r = FileReader::open(&s, key).unwrap(); // reads the root node
+    mem.set_fail_reads(true);
+    // 1 MiB of zeros is 32 zero chunks of CHUNK_MAX: no store read at all.
+    let got = r.read(&s, 0, 1 << 20).unwrap();
+    assert_eq!(got.len(), 1 << 20);
+    assert!(got.iter().all(|&b| b == 0));
+}
