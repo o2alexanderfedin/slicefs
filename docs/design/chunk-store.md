@@ -64,9 +64,18 @@ each). The file offset of an entry is the sum of the lengths before it.
 - The size of the file is in the inode. An empty file has no manifest.
 
 The other metadata (directories, inode map, xattrs) keeps its current
-logical layout. Only the storage of its nodes moves from `State::push_all`
-into node objects. Roots and snapshots stay 28 bytes in the `RootUpdate` and
-`Snapshot` records.
+logical layout. Only the storage of its nodes moved from `State::push_all`
+into the chunk store (`metadata::store_io`, step 3). A node is stored like
+a file: FastCDC chunks under a manifest. The maps (inode, directory,
+manifest, xattr, refcount) are written whole at each commit, so the chunks
+matter: after a change of one file in 5,000, the next commit stored 12 KB,
+against 1.36 MB for the first commit (`tests/node_crash_tests.rs`). Roots and
+snapshots stay 28 bytes in the `RootUpdate` and `Snapshot` records.
+
+The metadata and the file content share one `ChunkStore` instance: a commit
+syncs the active pack once, then logs the root. A directory entry key is
+BLAKE3-224 of the name (no object is stored for it). The store format is 5;
+a store of format 4 (metadata in `vt0/`) is refused.
 
 ## Pack files
 
@@ -179,8 +188,9 @@ down next to the strategy.
 
 ## GC
 
-Mark: the same as today, from the current root and each snapshot, through
-the metadata nodes and the manifests, into a set of live `ObjectId`s.
+Mark (`metadata::gc::live_objects`): from the current root and each
+snapshot, through the metadata nodes and the manifests, into one set of live
+`ObjectId`s: the objects of every node and of every file content.
 
 `gc_begin` seals the active pack, so every object so far is in a sealed
 pack. Sweep (`gc_finish`), for each sealed pack up to that point:
@@ -245,7 +255,8 @@ writes keep the current handling until #20 part 2.
    scan, with unit and crash tests. No user of it yet.
 2. File data: FastCDC + BLAKE3 + packs for file content and manifests. New
    store format version; old stores are rejected.
-3. Metadata nodes into packs; roots become `ObjectId`.
+3. Metadata nodes into packs (done; roots stay `Digest224`, the same 28
+   bytes as an `ObjectId`).
 4. GC: pack deletion and compaction, offline and online.
 5. Remove blockset and the `data-id` submodule.
 

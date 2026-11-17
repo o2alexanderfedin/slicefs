@@ -484,6 +484,7 @@ name = "metadata"
 version = "0.1.0"
 dependencies = [
  "blockset",
+ "chunk-store",
  "crc32c",
  "libc",
  "proptest",

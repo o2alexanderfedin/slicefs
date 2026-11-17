@@ -36,7 +36,7 @@ const S_IFDIR: u32 = 0o040_000;
 
 fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let meta = DictMetadataStore::new(io.clone());
     let fs = SliceFsFilesystem::new(meta, io, None);
     (fs, dir)
@@ -46,7 +46,7 @@ fn fresh_fs_with_wal() -> (SliceFsFilesystem, TempDir) {
     let dir = TempDir::new().unwrap();
     std::fs::create_dir_all(dir.path().join("segments")).unwrap();
     let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let mut meta = DictMetadataStore::new(io.clone());
     meta.set_wal(wal);
     let fs = SliceFsFilesystem::new(meta, io, Some(dir.path().to_path_buf()));
@@ -820,7 +820,7 @@ fn test_snapshot_multiple_preserves_each_point_in_time() {
     assert_eq!(current, b"state_v3_final");
 
     // Verify snapshot v1
-    let io1 = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io1 = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let store1 = DictMetadataStore::load_from_root(io1, &snap1.root).unwrap();
     let snap1_ino = store1.lookup(1, "evolving.txt").unwrap();
     let snap1_manifest = store1.get_manifest(snap1_ino).unwrap();
@@ -828,7 +828,7 @@ fn test_snapshot_multiple_preserves_each_point_in_time() {
     assert_eq!(snap1_content, b"state_v1", "snapshot v1 must preserve v1 state");
 
     // Verify snapshot v2
-    let io2 = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io2 = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let store2 = DictMetadataStore::load_from_root(io2, &snap2.root).unwrap();
     let snap2_ino = store2.lookup(1, "evolving.txt").unwrap();
     let snap2_manifest = store2.get_manifest(snap2_ino).unwrap();
@@ -870,7 +870,7 @@ fn test_snapshot_preserves_directory_structure() {
     assert!(fs.meta().lookup(1, "snapdir").is_err());
 
     // Snapshot should still have the directory
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let snap_store = DictMetadataStore::load_from_root(io, &snap.root).unwrap();
     let snap_sub = snap_store.lookup(1, "snapdir").unwrap();
     let snap_inner = snap_store.lookup(snap_sub, "inner.txt").unwrap();
@@ -1274,7 +1274,7 @@ fn test_crash_recovery_directory_structure_survives() {
     {
         std::fs::create_dir_all(store_dir.path().join("segments")).unwrap();
         let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
-        let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
         let mut meta = DictMetadataStore::new(io.clone());
         meta.set_wal(wal);
         let fs = SliceFsFilesystem::new(meta, io, Some(store_dir.path().to_path_buf()));
@@ -1291,7 +1291,7 @@ fn test_crash_recovery_directory_structure_survives() {
     let segs_dir = store_dir.path().join("segments");
     let (root_opt, _) = load_store_from_segments(&segs_dir).unwrap();
     let root = root_opt.expect("root must exist");
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let rebuilt = DictMetadataStore::load_from_root(io.clone(), &root).unwrap();
 
     let sub_ino = rebuilt.lookup(1, "persist_dir").unwrap();
@@ -1308,7 +1308,7 @@ fn test_crash_recovery_metadata_survives() {
     {
         std::fs::create_dir_all(store_dir.path().join("segments")).unwrap();
         let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
-        let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
         let mut meta = DictMetadataStore::new(io.clone());
         meta.set_wal(wal);
         let fs = SliceFsFilesystem::new(meta, io, Some(store_dir.path().to_path_buf()));
@@ -1326,7 +1326,7 @@ fn test_crash_recovery_metadata_survives() {
     let segs_dir = store_dir.path().join("segments");
     let (root_opt, _) = load_store_from_segments(&segs_dir).unwrap();
     let root = root_opt.unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let rebuilt = DictMetadataStore::load_from_root(io, &root).unwrap();
 
     let file_ino = rebuilt.lookup(1, "meta_persist.txt").unwrap();
@@ -1419,7 +1419,7 @@ fn test_seed_empty_directory() {
     let segs_dir = store_dir.path().join("segments");
     let (root_opt, _) = load_store_from_segments(&segs_dir).unwrap();
     let root = root_opt.expect("root should exist even for empty seed");
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let store = DictMetadataStore::load_from_root(io, &root).unwrap();
 
     // Root should exist -- verify it's a valid store with a root inode
@@ -1443,7 +1443,7 @@ fn test_seed_with_symlink() {
     let segs_dir = store_dir.path().join("segments");
     let (root_opt, _) = load_store_from_segments(&segs_dir).unwrap();
     let root = root_opt.unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let store = DictMetadataStore::load_from_root(io, &root).unwrap();
 
     // target.txt must exist

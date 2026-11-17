@@ -5,7 +5,7 @@
 //! builds inode and directory records in `DictMetadataStore`, then writes a
 //! `RootUpdate` to `segments/segment-000001.seg` for crash-safe recovery.
 //!
-//! Metadata objects go to `vt0/`; no `dictionary.bin` or `root.bin` files are
+//! Metadata nodes and file content go to `packs/`; no `dictionary.bin` or `root.bin` files are
 //! written.
 
 use std::path::Path;
@@ -14,7 +14,6 @@ use std::sync::{Arc, Mutex};
 use crate::content::{self, Content};
 use metadata::segment::{SegmentWriter, SegmentEntry};
 use metadata::store::DictMetadataStore;
-use metadata::store_io::StoreIo;
 use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::{InodeMeta, InodeId, MetadataStore};
 
@@ -29,14 +28,14 @@ const S_IFDIR: u32 = 0o040_000;
 ///
 /// Creates:
 /// - `<store_path>/packs/` — file content (chunk store)
-/// - `<store_path>/vt0/` — metadata objects
+/// - `<store_path>/packs/` — metadata nodes and file content
 /// - `<store_path>/segments/segment-000001.seg` — root update segment
 pub fn run_seed(store_path: &Path, source_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(store_path)?;
 
-    let io = Arc::new(Mutex::new(StoreIo::new(store_path)));
+    let io = Arc::new(Mutex::new(content::store_io(store_path)?));
     let meta_store = DictMetadataStore::new(io.clone());
-    let cs = content::open(store_path)?;
+    let cs = Arc::clone(io.lock().unwrap().store());
     let sync = Arc::clone(&cs);
     meta_store.set_pre_root_sync(Arc::new(move || sync.sync().map_err(std::io::Error::other)));
 
@@ -177,7 +176,7 @@ mod tests {
         tempfile::tempdir().expect("failed to create tempdir")
     }
 
-    /// Seed an empty directory — store/segments/ and store/vt0/ are created (no dictionary.bin).
+    /// Seed an empty directory — store/segments/ and store/packs/ are created (no dictionary.bin).
     #[test]
     fn test_seed_empty_directory() {
         let store_dir = make_tempdir();
@@ -186,10 +185,9 @@ mod tests {
         run_seed(store_dir.path(), source_dir.path()).expect("seed failed");
 
         let segs_dir = store_dir.path().join("segments");
-        let vt0_dir = store_dir.path().join("vt0");
-
         assert!(segs_dir.is_dir(), "segments/ must exist after seed");
-        assert!(vt0_dir.is_dir(), "vt0/ must exist after seed (FileStorage batch files)");
+        assert!(store_dir.path().join("packs").is_dir(), "packs/ must exist after seed (metadata nodes)");
+        assert!(!store_dir.path().join("vt0").exists(), "nothing is stored in vt0/ any more");
 
         // dictionary.bin must NOT exist
         assert!(
@@ -232,7 +230,7 @@ mod tests {
         let root = root_opt.expect("no root found");
 
         // Reconstruct metadata store
-        let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
         let reloaded = DictMetadataStore::load_from_root(io.clone(), &root).expect("load_from_root failed");
 
         // Find the file inode via lookup.
@@ -270,7 +268,7 @@ mod tests {
         let (root_opt, _) = load_store_from_segments(&segs_dir).expect("load failed");
         let root = root_opt.expect("no root found");
 
-        let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
         let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
 
         // top.txt in root
@@ -301,7 +299,7 @@ mod tests {
         let (root_opt, _) = load_store_from_segments(&segs_dir).expect("load failed");
         let root = root_opt.expect("no root");
 
-        let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
         let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
 
         let ino = reloaded.lookup(1, "sized.bin").unwrap();

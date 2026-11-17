@@ -1,42 +1,30 @@
-//! Mark-and-sweep GC engine for SliceFS metadata.
+//! Mark-and-sweep GC engine for SliceFS.
 //!
 //! This module provides:
-//! - `collect_live_set` + `sweep`: mark-and-sweep of the stored objects (offline)
-//! - `OnlineGc`: the same on a mounted store
+//! - [`live_objects`]: the GC mark. Metadata nodes and file content are both
+//!   in the chunk store, so the mark is one set of `ObjectId`s, and the sweep
+//!   is `ChunkStore::gc_finish`.
+//! - `OnlineGc`: the mark on a mounted store
 //! - `GarbageCollector`: compacts the metadata segment files
 
 pub mod background;
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use blockset::{file_storage_mark, Io};
+use chunk_store::{ChunkStore, ObjectId};
 use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::MetaError;
 
-use crate::store::referenced_roots;
-use crate::store_io::StoreIo;
+use crate::store::referenced;
+use crate::store_io::{to_id, NodeRead, NodeReader};
 
 use crate::segment::compaction::{compact_segment, SegmentError};
 
-/// Store path (`vt0/...`) of every metadata object reachable from `roots`
-/// (committed roots: the current one and each snapshot). This is the GC mark
-/// phase of `vt0/`; file content is in the chunk store (see
-/// [`collect_content_keys`]).
-///
-/// Fails if a reachable object is missing: then the caller must not sweep,
-/// because the live set is not complete.
-pub fn collect_live_set(io: &mut impl Io, roots: &[Digest224]) -> Result<HashSet<String>, MetaError> {
-    let mut live = HashSet::new();
-    mark_into(io, roots, &[], &mut live, &AtomicBool::new(false))?;
-    Ok(live)
-}
-
-/// The file content keys (chunk store) of `roots`: the GC roots of the chunk
-/// store.
-pub fn collect_content_keys(io: &mut impl Io, roots: &[Digest224]) -> Result<Vec<Digest224>, MetaError> {
+/// The file content keys (chunk store) of `roots`.
+pub fn collect_content_keys(io: &mut impl NodeRead, roots: &[Digest224]) -> Result<Vec<Digest224>, MetaError> {
     let mut keys = Vec::new();
     for root in roots {
         keys.extend(crate::store::content_keys(io, root)?);
@@ -44,299 +32,64 @@ pub fn collect_content_keys(io: &mut impl Io, roots: &[Digest224]) -> Result<Vec
     Ok(keys)
 }
 
-/// Mark the metadata objects of `meta_roots` (root records).
-/// Returns `Ok(false)` if `stop` was set before the mark completed.
-fn mark_into(
-    io: &mut impl Io,
-    meta_roots: &[Digest224],
-    _file_roots: &[Digest224],
-    live: &mut HashSet<String>,
-    stop: &AtomicBool,
-) -> Result<bool, MetaError> {
-    let mut objects = Vec::new();
-    for root in meta_roots {
-        if stop.load(Ordering::Relaxed) {
-            return Ok(false);
-        }
-        objects.extend(referenced_roots(io, root)?);
-    }
-    for object in objects {
-        if stop.load(Ordering::Relaxed) {
-            return Ok(false);
-        }
-        if !file_storage_mark(io, &object, live) {
-            return Err(MetaError::Corrupted(format!("missing object under root {:?}", object)));
-        }
-    }
-    Ok(true)
-}
-
-/// Result of a sweep.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SweepStats {
-    pub objects_kept: usize,
-    pub objects_removed: usize,
-    pub bytes_removed: u64,
-}
-
-/// Names (`vt0/...`) and paths of the files in `<store>/vt0/` that have the
-/// object format: a 45-character base32 name, with a `.` prefix for internal
-/// nodes. Other files are not listed, so the GC never touches them.
-fn object_files(store: &Path) -> std::io::Result<Vec<(String, PathBuf)>> {
-    let entries = match std::fs::read_dir(store.join("vt0")) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e),
-    };
-    let mut out = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let b32 = name.strip_prefix('.').unwrap_or(name);
-        if b32.len() == 45 && b32.bytes().all(|b| b.is_ascii_alphanumeric()) {
-            out.push((format!("vt0/{name}"), entry.path()));
-        }
-    }
-    Ok(out)
-}
-
-/// Delete each object in `<store>/vt0/` that is not in `live`. This is the
-/// offline GC sweep phase (the store is not mounted). See [`OnlineGc`] for
-/// a mounted store.
-pub fn sweep(store: &Path, live: &HashSet<String>) -> std::io::Result<SweepStats> {
-    let mut stats = SweepStats::default();
-    for (name, path) in object_files(store)? {
-        if live.contains(&name) {
-            stats.objects_kept += 1;
-            continue;
-        }
-        let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        std::fs::remove_file(&path)?;
-        stats.objects_removed += 1;
-        stats.bytes_removed += len;
-    }
-    Ok(stats)
-}
-
-/// Objects deleted per hold of the `io` lock in an online sweep. Small, so
-/// file system requests wait only a short time; the deletes of one batch run
-/// on several threads.
-const SWEEP_BATCH: usize = 512;
-
-/// Threads for the online mark and sweep.
-fn gc_threads() -> usize {
-    std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8)
-}
-
-/// `Io` for the online mark: plain file reads, without the `io` lock and
-/// without the touched record.
+/// The GC mark: every chunk-store object that the metadata roots
+/// `meta_roots` (the current root and each snapshot) reach, through their
+/// nodes and file content, and the objects of the file contents
+/// `file_roots` (open write handles). `Ok(None)` if `stop` was set first.
 ///
-/// Safe without the lock: the mark reads only objects that are reachable from
-/// the roots, and each of them was written in full before the GC start
-/// commit returned. Content-addressed objects are not written again (blockset
-/// compares an existing object first and skips an equal write), so no write
-/// can change a file under the reader. Only the GC deletes objects.
-struct PathIo(PathBuf);
-
-impl Io for PathIo {
-    type Args = std::vec::IntoIter<String>;
-    fn read(&mut self, name: &str) -> std::io::Result<Vec<u8>> {
-        std::fs::read(self.0.join(name))
-    }
-    fn write(&mut self, _name: &str, _data: &[u8]) -> std::io::Result<()> {
-        Err(std::io::Error::other("the GC mark does not write"))
-    }
-    fn args(&self) -> Self::Args {
-        Vec::new().into_iter()
-    }
-    fn print(&mut self, _text: &str) {}
-}
-
-/// Mark on `threads` threads. Each thread marks a share of the roots into its
-/// own set (a subtree shared between shares is read once per thread); the
-/// sets are merged at the end. `Ok(None)` if `stop` was set first.
-fn mark_parallel(
-    store: &Path,
+/// Fails if a reachable object is missing: then the caller must not sweep,
+/// because the live set is not complete.
+pub fn live_objects(
+    cs: &Arc<ChunkStore>,
     meta_roots: &[Digest224],
-    threads: usize,
+    file_roots: &[Digest224],
     stop: &AtomicBool,
-) -> Result<Option<HashSet<String>>, MetaError> {
-    let mut io = PathIo(store.to_path_buf());
-    let mut objects = Vec::new();
+) -> Result<Option<HashSet<ObjectId>>, MetaError> {
+    let mut io = NodeReader(Arc::clone(cs));
+    let mut values: Vec<Digest224> = file_roots.to_vec();
     for root in meta_roots {
         if stop.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        objects.extend(referenced_roots(&mut io, root)?);
+        let (nodes, content) = referenced(&mut io, root)?;
+        values.extend(nodes);
+        values.extend(content);
     }
-    let threads = threads.clamp(1, objects.len().max(1));
-    let results: Vec<Result<Option<HashSet<String>>, MetaError>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..threads)
-            .map(|t| {
-                let objects = &objects;
-                scope.spawn(move || {
-                    let mut io = PathIo(store.to_path_buf());
-                    let mut live = HashSet::new();
-                    for object in objects.iter().skip(t).step_by(threads) {
-                        if stop.load(Ordering::Relaxed) {
-                            return Ok(None);
-                        }
-                        if !file_storage_mark(&mut io, object, &mut live) {
-                            return Err(MetaError::Corrupted(format!("missing object under root {:?}", object)));
-                        }
-                    }
-                    Ok(Some(live))
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_else(|_| Err(MetaError::Corrupted("GC mark thread panicked".into()))))
-            .collect()
-    });
-    let mut sets = Vec::with_capacity(results.len());
-    for r in results {
-        match r? {
-            Some(set) => sets.push(set),
-            None => return Ok(None),
+    values.sort_unstable();
+    values.dedup();
+    let mut live = HashSet::new();
+    for v in values {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(None);
         }
-    }
-    // Merge into the biggest set (fewest inserts).
-    sets.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    let mut sets = sets.into_iter();
-    let mut live = sets.next().unwrap_or_default();
-    for s in sets {
-        live.extend(s);
+        let objs = chunk_store::file::file_objects(cs, to_id(&v))
+            .map_err(|e| MetaError::Corrupted(format!("GC mark: object {v:?}: {e}")))?;
+        live.extend(objs);
     }
     Ok(Some(live))
 }
 
 /// A GC run on a mounted store.
 ///
-/// The caller first turns on tracking in the store's `StoreIo`, then takes the
-/// roots (a commit, and a root for each open streaming handle), then creates
-/// this value. From then on:
-/// - an object that is reachable from the roots is in the live set (mark);
-/// - an object that is read or written after tracking started is touched.
-///
-/// The sweep deletes an object only if it is neither live nor touched. It
-/// checks and deletes under the `io` lock, and each read and write takes that
-/// lock too, so no writer can start to depend on an object between the check
-/// and the delete.
-///
-/// Dropping the value turns off the tracking, also after a panic or an early
-/// return.
+/// The caller first calls `ChunkStore::gc_begin` (from then on the chunk
+/// store keeps each object that is put or read), then takes the roots (a
+/// commit, and a root for each open streaming handle), then creates this
+/// value, marks with [`OnlineGc::live`], and ends with
+/// `ChunkStore::gc_finish` (or `gc_abort`).
 pub struct OnlineGc {
-    io: Arc<Mutex<StoreIo>>,
+    cs: Arc<ChunkStore>,
     meta_roots: Vec<Digest224>,
     file_roots: Vec<Digest224>,
-    threads: usize,
 }
 
 impl OnlineGc {
-    /// `io` must track already (see the type docs).
-    pub fn new(io: Arc<Mutex<StoreIo>>, meta_roots: Vec<Digest224>, file_roots: Vec<Digest224>) -> Self {
-        OnlineGc { io, meta_roots, file_roots, threads: gc_threads() }
+    pub fn new(cs: Arc<ChunkStore>, meta_roots: Vec<Digest224>, file_roots: Vec<Digest224>) -> Self {
+        OnlineGc { cs, meta_roots, file_roots }
     }
 
-    /// Use `threads` threads for the mark and the sweep (at least 1).
-    pub fn with_threads(mut self, threads: usize) -> Self {
-        self.threads = threads.max(1);
-        self
-    }
-
-    /// The mark phase of the metadata objects (`vt0/`). `Ok(None)` if `stop`
-    /// was set first.
-    pub fn mark(&self, stop: &AtomicBool) -> Result<Option<HashSet<String>>, MetaError> {
-        let store = self.io.lock().unwrap().root().to_path_buf();
-        mark_parallel(&store, &self.meta_roots, self.threads, stop)
-    }
-
-    /// The roots of the file content (chunk store): the keys of the open
-    /// write handles and of every manifest under the metadata roots.
-    pub fn content_keys(&self) -> Result<Vec<Digest224>, MetaError> {
-        let store = self.io.lock().unwrap().root().to_path_buf();
-        let mut keys = self.file_roots.clone();
-        keys.extend(collect_content_keys(&mut PathIo(store), &self.meta_roots)?);
-        Ok(keys)
-    }
-
-    /// The sweep phase. Stops early (with partial stats) if `stop` is set.
-    pub fn sweep(&self, live: &HashSet<String>, stop: &AtomicBool) -> std::io::Result<SweepStats> {
-        let store = self.io.lock().unwrap().root().to_path_buf();
-        let mut stats = SweepStats::default();
-        let mut candidates = Vec::new();
-        for (name, path) in object_files(&store)? {
-            if live.contains(&name) {
-                stats.objects_kept += 1;
-            } else {
-                candidates.push((name, path));
-            }
-        }
-        for batch in candidates.chunks(SWEEP_BATCH) {
-            if stop.load(Ordering::Relaxed) {
-                break;
-            }
-            // Hold the io lock across the check and the deletes of this batch.
-            let io = self.io.lock().unwrap();
-            // The mark read without the lock. If an object file was written
-            // again since tracking started, the mark may have read the old
-            // content (with other child references): do not delete anything.
-            if io.overwrites_while_tracking() > 0 {
-                return Err(std::io::Error::other(format!(
-                    "{} object file(s) changed during the GC; sweep skipped, retry later",
-                    io.overwrites_while_tracking()
-                )));
-            }
-            let doomed: Vec<&PathBuf> = batch
-                .iter()
-                .filter(|(name, _)| !io.is_touched(name))
-                .map(|(_, path)| path)
-                .collect();
-            stats.objects_kept += batch.len() - doomed.len();
-            let threads = self.threads.min(doomed.len()).max(1);
-            let per_thread: Vec<std::io::Result<(usize, u64)>> = std::thread::scope(|scope| {
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let doomed = &doomed;
-                        scope.spawn(move || {
-                            let (mut n, mut bytes) = (0usize, 0u64);
-                            for path in doomed.iter().skip(t).step_by(threads) {
-                                let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                                match std::fs::remove_file(path) {
-                                    Ok(()) => {
-                                        n += 1;
-                                        bytes += len;
-                                    }
-                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                                    Err(e) => return Err(e),
-                                }
-                            }
-                            Ok((n, bytes))
-                        })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|h| h.join().unwrap_or_else(|_| Err(std::io::Error::other("GC sweep thread panicked"))))
-                    .collect()
-            });
-            drop(io);
-            for r in per_thread {
-                let (n, bytes) = r?;
-                stats.objects_removed += n;
-                stats.bytes_removed += bytes;
-            }
-        }
-        Ok(stats)
-    }
-}
-
-impl Drop for OnlineGc {
-    fn drop(&mut self) {
-        let mut io = self.io.lock().unwrap_or_else(|e| e.into_inner());
-        io.stop_tracking();
+    /// The mark. `Ok(None)` if `stop` was set first.
+    pub fn live(&self, stop: &AtomicBool) -> Result<Option<HashSet<ObjectId>>, MetaError> {
+        live_objects(&self.cs, &self.meta_roots, &self.file_roots, stop)
     }
 }
 
@@ -377,10 +130,10 @@ impl GarbageCollector {
     }
 
     /// Compact all `.seg` files in `segments_dir`. Same as `run_gc_roots_only`;
-    /// the stored objects are swept by [`collect_live_set`] and [`sweep`].
+    /// the stored objects are swept by `ChunkStore::gc_finish`.
     pub fn run_gc(
         &self,
-        io: &mut impl Io,
+        io: &mut impl crate::store_io::NodeRead,
         roots: &[Digest224],
     ) -> Result<GcStats, GcError> {
         let _ = (io, roots);

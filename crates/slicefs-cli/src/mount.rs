@@ -295,7 +295,7 @@ pub fn load_store(
     })?;
 
     // Step 4: Reconstruct metadata store using file-backed StoreIo.
-    let io = Arc::new(Mutex::new(StoreIo::new(store_path)));
+    let io = Arc::new(Mutex::new(crate::content::store_io(store_path)?));
     let mut meta = DictMetadataStore::load_from_root(io.clone(), &root)
         .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;
 
@@ -465,7 +465,7 @@ pub fn run_mount(
     // Pre-flight: reject if mountpoint is already in use.
     check_mountpoint_not_in_use(mountpoint)?;
 
-    // Pre-flight: refuse a store of an older format (file content in vt0/).
+    // Pre-flight: refuse a store of an older format (metadata in vt0/).
     crate::content::check_format(store_path)?;
 
     // ── macOS: Backend selection ──────────────────────────────────────────────
@@ -692,7 +692,7 @@ mod tests {
         let segs_dir = store_dir.path().join("segments");
         std::fs::create_dir_all(&segs_dir).unwrap();
 
-        let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
         let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
         let mut meta = DictMetadataStore::new(io);
         meta.set_wal(wal);
