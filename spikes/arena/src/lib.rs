@@ -130,6 +130,19 @@ pub enum Walk {
     HoleBounded,
 }
 
+/// How `gc_finish` frees the dead records of a sealed arena that still has
+/// live ones (spike D).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GcMode {
+    /// Spike A / `chunk-store`: copy the live records of a mostly dead or
+    /// small arena into the active one and delete the old arena.
+    Compact,
+    /// Spike D: punch holes over the block-aligned dead space of every
+    /// arena (`F_PUNCHHOLE` / `FALLOC_FL_PUNCH_HOLE`). Live records never
+    /// move; an arena with no live record is still deleted.
+    Punch,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AllocKind {
     NextFit,
@@ -163,6 +176,8 @@ pub struct Options {
     /// resumable idx. For A-B3.
     pub close_seals: bool,
     pub walk: Walk,
+    /// Spike D.
+    pub gc: GcMode,
 }
 
 impl Default for Options {
@@ -177,6 +192,7 @@ impl Default for Options {
             gc_seal: SealRule::Eighth,
             close_seals: false,
             walk: Walk::Window,
+            gc: GcMode::Compact,
         }
     }
 }

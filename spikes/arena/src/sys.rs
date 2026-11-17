@@ -168,6 +168,11 @@ pub enum Fault {
     CheckpointWrite = 3,
     /// Spike C: during the dirty-list rewrite.
     DirtyWrite = 4,
+    /// Spike D: after the idx without the dead entries is durable, before
+    /// the first punch.
+    PunchAfterIdx = 5,
+    /// Spike D: after the first punch of an arena, before the rest.
+    PunchMidway = 6,
 }
 
 thread_local! {
@@ -186,4 +191,63 @@ pub fn hit(f: Fault) -> io::Result<()> {
         return Err(io::Error::other(format!("injected fault {f:?}")));
     }
     Ok(())
+}
+
+// ── Hole punching (spike D) ───────────────────────────────────────────────────
+
+/// Free the disk blocks of `[off, off + len)` without changing the file
+/// length; the range then reads as zeros. `off` and `len` must be multiples
+/// of the file system block size (`fs_block_size`). macOS: `F_PUNCHHOLE`
+/// (APFS); Linux: `fallocate(PUNCH_HOLE | KEEP_SIZE)`. Needs a write fd.
+pub fn punch_hole(f: &File, off: u64, len: u64) -> io::Result<()> {
+    if len == 0 {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: zeroed fpunchhole_t is valid (flags and reserved must be 0).
+        let mut a: libc::fpunchhole_t = unsafe { std::mem::zeroed() };
+        a.fp_offset = off as libc::off_t;
+        a.fp_length = len as libc::off_t;
+        // SAFETY: valid fd and a valid fpunchhole_t.
+        if unsafe { libc::fcntl(f.as_raw_fd(), libc::F_PUNCHHOLE, &a) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mode = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
+        // SAFETY: valid fd.
+        if unsafe { libc::fallocate(f.as_raw_fd(), mode, off as libc::off_t, len as libc::off_t) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (f, off, len);
+        Err(io::Error::other("punch_hole not supported"))
+    }
+}
+
+/// The file system block size of the volume of `path` (`statfs f_bsize`):
+/// the unit of `punch_hole`.
+pub fn fs_block_size(path: &Path) -> io::Result<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(io::Error::other)?;
+    // SAFETY: zeroed statfs is a valid out buffer; c is NUL-terminated.
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(st.f_bsize as u64)
+}
+
+/// The block-aligned part of `[start, end)`: `start` rounded up, `end`
+/// rounded down to `block`. `None` if no whole block is inside.
+pub fn aligned_inside(start: u64, end: u64, block: u64) -> Option<(u64, u64)> {
+    let s = start.div_ceil(block) * block;
+    let e = end / block * block;
+    (e > s).then_some((s, e - s))
 }

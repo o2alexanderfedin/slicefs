@@ -19,6 +19,14 @@ pub fn idx_path(dir: &Path, num: u64) -> PathBuf {
     dir.join(format!("{num:016x}.idx"))
 }
 
+/// Spike D: this file exists (made durable before the first punch) when
+/// arena `num` has holes. Such an arena is sealed for good: it is never
+/// taken as the active arena, never cut, and without its idx it is read
+/// with `Arena::resync` (a chain walk would stop at the first hole).
+pub fn punched_path(dir: &Path, num: u64) -> PathBuf {
+    dir.join(format!("{num:016x}.punched"))
+}
+
 /// How `open` finds the valid records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Recovery {
@@ -177,6 +185,17 @@ impl Arena {
             let entries = i.entries.iter().map(to_loc).collect();
             return Ok(Some(Opened { arena: a, entries, sealed: true, walked: 0 }));
         }
+        if punched_path(dir, num).exists() {
+            // Spike D: a punched arena without a sealed idx. Never cut it.
+            let mut entries = a.resync()?;
+            entries.sort_unstable_by_key(|e| e.1.off);
+            a.hwm = entries.last().map_or(HEADER_PAGE, |(_, l)| l.off + codec::rec_len(l.stored) as u64);
+            if !ro {
+                a.write_idx(&entries, IdxState::Sealed)?;
+            }
+            let walked = a.len;
+            return Ok(Some(Opened { arena: a, entries, sealed: true, walked }));
+        }
         let Recovery::Append(walk) = rec;
         // Open idx: trust it up to `hwm`, then walk on from there.
         let (mut entries, from) = match &idx {
@@ -251,6 +270,61 @@ impl Arena {
             }
         }
         Ok((out, pos.min(end.max(from)), read))
+    }
+
+    /// Spike D: every record of an arena with holes. Holes cut the chain of
+    /// records, so this does not walk it: it looks for the marker at every
+    /// byte of the data regions (`SEEK_DATA` skips holes) and accepts a
+    /// record only if marker, bounds and CRC pass **and** BLAKE3 of the
+    /// decoded bytes is its id (after a hole the framing is lost, and a
+    /// payload may hold a valid-looking inner record). After an accepted
+    /// record it jumps over it. An id found twice keeps its first record.
+    pub fn resync(&self) -> io::Result<Vec<(ObjectId, Loc)>> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let max_rec = codec::rec_len(self.max_stored);
+        let mut pos = HEADER_PAGE;
+        let mut buf = Vec::new();
+        while pos < self.len {
+            // Next data region.
+            let Some(start) = sys::seek_data(&self.file, pos).unwrap_or(Some(pos)).filter(|&s| s < self.len) else { break };
+            let end = sys::seek_hole(&self.file, start).unwrap_or(self.len).min(self.len);
+            pos = start.max(pos);
+            // Scan [pos, end) in windows; a window holds the largest record.
+            while pos < end {
+                let n = ((self.len - pos) as usize).min(WINDOW + max_rec);
+                buf.resize(n, 0);
+                self.file.read_exact_at(&mut buf, pos)?;
+                let scan_to = ((end - pos) as usize).min(WINDOW).min(n);
+                let mut i = 0usize;
+                let mut next = pos + scan_to as u64;
+                while i < scan_to {
+                    if buf[i] != 0x53 || i + 4 > n || u32::from_le_bytes(buf[i..i + 4].try_into().unwrap()) != codec::MARKER {
+                        i += 1;
+                        continue;
+                    }
+                    if let Decoded::Ok(h) = codec::decode_record(&buf[i..], self.max_stored) {
+                        if seen.contains(&h.id) || !content_matches(&buf[i..], &h) {
+                            i += 1;
+                            continue;
+                        }
+                        let off = pos + i as u64;
+                        seen.insert(h.id);
+                        out.push((h.id, Loc { arena: self.num, off, stored: h.stored, raw: h.raw, flags: h.flags, seq: 0 }));
+                        let skip = codec::padded_len(h.stored, self.granule) as usize;
+                        if i + skip >= scan_to {
+                            next = off + skip as u64;
+                            break;
+                        }
+                        i += skip;
+                    } else {
+                        i += 1;
+                    }
+                }
+                pos = next;
+            }
+        }
+        Ok(out)
     }
 
     /// Recovery cut of the active arena at `valid` (plan section 3): the
@@ -354,17 +428,7 @@ impl Arena {
     }
 
     fn write_idx(&self, entries: &[(ObjectId, Loc)], state: IdxState) -> io::Result<()> {
-        let dir = self.path.parent().unwrap();
-        let idx = Idx {
-            num: self.num,
-            state,
-            hwm: self.hwm,
-            entries: entries
-                .iter()
-                .map(|(id, l)| IdxEntry { id: *id, off: l.off, stored: l.stored, raw: l.raw, flags: l.flags })
-                .collect(),
-        };
-        sys::write_durable(&idx_path(dir, self.num), &codec::encode_idx(&idx))
+        write_idx_file(self.path.parent().unwrap(), self.num, state, self.hwm, entries).map(|_| ())
     }
 
     pub fn file(&self) -> &File {
@@ -400,6 +464,32 @@ impl Arena {
     /// Payload bound of the decoder for this arena.
     pub fn max_stored(&self) -> u32 {
         self.max_stored
+    }
+}
+
+/// Write the idx of arena `num` durably; returns its length.
+pub fn write_idx_file(dir: &Path, num: u64, state: IdxState, hwm: u64, entries: &[(ObjectId, Loc)]) -> io::Result<usize> {
+    let idx = Idx {
+        num,
+        state,
+        hwm,
+        entries: entries
+            .iter()
+            .map(|(id, l)| IdxEntry { id: *id, off: l.off, stored: l.stored, raw: l.raw, flags: l.flags })
+            .collect(),
+    };
+    let b = codec::encode_idx(&idx);
+    sys::write_durable(&idx_path(dir, num), &b)?;
+    Ok(b.len())
+}
+
+/// BLAKE3 of the record's decoded bytes is its id.
+fn content_matches(buf: &[u8], h: &codec::RecHead) -> bool {
+    let p = codec::payload(buf, h.stored);
+    if h.flags & codec::FLAG_ZSTD != 0 {
+        zstd::bulk::decompress(p, h.raw as usize).is_ok_and(|d| ObjectId::of(&d) == h.id)
+    } else {
+        ObjectId::of(p) == h.id
     }
 }
 

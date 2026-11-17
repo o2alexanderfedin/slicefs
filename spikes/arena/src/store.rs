@@ -9,7 +9,7 @@ use crate::arena::{self, Arena, Recovery};
 use crate::codec::{self, IdxState, FLAG_ZSTD, HEADER_PAGE, MAX_STORED};
 use crate::read::{self, ReadPath};
 use crate::sys;
-use crate::{Error, GcStats, Loc, ObjectId, Options, Prealloc, ReadMode, Result, SealRule, Stats};
+use crate::{Error, GcMode, GcStats, Loc, ObjectId, Options, Prealloc, ReadMode, Result, SealRule, Stats};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
@@ -46,6 +46,26 @@ struct Inner {
     seq: u64,
     /// Arena numbers that exist on disk.
     arenas: HashSet<u64>,
+    /// Spike D: the arena that was active at `gc_begin` (never punched).
+    gc_active: Option<u64>,
+    /// Spike D: the next punch GC punches the dead space of every sealed
+    /// arena, not only of the arenas with newly dead records (it frees what
+    /// a crash between the idx rewrite and the punch left).
+    sweep_all: bool,
+    punch: PunchStats,
+}
+
+/// Spike D counters (since open).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PunchStats {
+    /// `punch_hole` calls.
+    pub calls: u64,
+    /// Bytes of the punched ranges (aligned; a range may already be a hole).
+    pub bytes: u64,
+    /// Arenas whose idx was rewritten for a punch.
+    pub arenas: u64,
+    /// Bytes of the rewritten idx files.
+    pub idx_bytes: u64,
 }
 
 pub struct SpikeStore {
@@ -81,6 +101,9 @@ impl SpikeStore {
             touched: None,
             seq: 0,
             arenas: HashSet::new(),
+            gc_active: None,
+            sweep_all: true,
+            punch: PunchStats::default(),
         };
         if opts.read_only && !packs.is_dir() {
             let read = read::make(&packs, &opts)?;
@@ -103,6 +126,18 @@ impl SpikeStore {
             }
         }
         nums.sort_unstable();
+        // Spike D: a `.punched` mark whose arena is gone (a crash between the
+        // two unlinks) must not mark a new arena with the same number.
+        if !opts.read_only {
+            for e in fs::read_dir(&packs)? {
+                let name = e?.file_name().to_string_lossy().into_owned();
+                if let Some(n) = name.strip_suffix(".punched").and_then(|h| u64::from_str_radix(h, 16).ok()) {
+                    if nums.binary_search(&n).is_err() {
+                        let _ = fs::remove_file(packs.join(&name));
+                    }
+                }
+            }
+        }
         inner.next_arena = nums.last().map_or(1, |n| n + 1);
         let idxs: Vec<_> = nums.iter().map(|&n| arena::load_idx(&packs, n)).collect();
         // The active arena: the newest without a sealed idx.
@@ -110,7 +145,9 @@ impl SpikeStore {
             .iter()
             .zip(&idxs)
             .rev()
-            .find(|(_, i)| i.as_ref().is_none_or(|i| i.state != IdxState::Sealed))
+            .find(|(n, i)| {
+                i.as_ref().is_none_or(|i| i.state != IdxState::Sealed) && !arena::punched_path(&packs, **n).exists()
+            })
             .map(|(n, _)| *n);
         let rec = Recovery::Append(opts.walk);
         // (arena, logical length, has the full fixed length) for the read path.
@@ -288,11 +325,14 @@ impl SpikeStore {
             self.seal(&mut inner)?;
         }
         inner.touched = Some(HashSet::new());
+        inner.gc_active = inner.active.as_ref().map(|a| a.arena.num);
         Ok(GcToken::Boundary(inner.next_arena - 1))
     }
 
     pub fn gc_abort(&self) {
-        self.inner.lock().unwrap().touched = None;
+        let mut inner = self.inner.lock().unwrap();
+        inner.touched = None;
+        inner.gc_active = None;
     }
 
     /// End a GC: remove every object of the arenas up to the boundary (not
@@ -305,6 +345,9 @@ impl SpikeStore {
         let GcToken::Boundary(boundary) = token else {
             return Err(Error::Io(io::Error::other("seq tokens are spike C")));
         };
+        if self.opts.gc == GcMode::Punch {
+            return self.gc_finish_punch(live, boundary);
+        }
         let mut inner = self.inner.lock().unwrap();
         let touched = inner.touched.take().unwrap_or_default();
         let keep = |id: &ObjectId| live.contains(id) || touched.contains(id);
@@ -391,12 +434,127 @@ impl SpikeStore {
             self.read.forget(num);
             let _ = fs::remove_file(arena::idx_path(&self.dir, num));
             fs::remove_file(arena::arena_path(&self.dir, num))?;
+            let _ = fs::remove_file(arena::punched_path(&self.dir, num));
             inner.arenas.remove(&num);
             inner.stats.packs -= 1;
         }
         sys::sync_dir(&self.dir)?;
         inner.dir_dirty = false;
         Ok(st)
+    }
+
+    /// Spike D: end a GC by punching holes. For every sealed arena up to the
+    /// boundary (not the one active at `gc_begin`, not the active one):
+    /// - no live record left: delete the arena (as compaction does);
+    /// - otherwise, if it has newly dead records (or this is the first punch
+    ///   GC since open): drop them from the index, make the `.punched` mark
+    ///   durable (first time only), rewrite the sealed idx without them
+    ///   (durable), and only then punch the block-aligned part of every gap
+    ///   between live records, up to the file length. Live records never
+    ///   move; nothing is copied.
+    ///
+    /// The order makes a crash at any point safe: before the idx rewrite the
+    /// old idx and all bytes are there; after it the dead records are no
+    /// longer indexed, so a lost punch only leaks space until the first GC
+    /// after the next open punches every gap again. A punched record is never
+    /// listed by a durable idx, so a reopen never dedups a `put` onto zeros.
+    fn gc_finish_punch(&self, live: &HashSet<ObjectId>, boundary: u64) -> Result<GcStats> {
+        let mut inner = self.inner.lock().unwrap();
+        let touched = inner.touched.take().unwrap_or_default();
+        let keep = |id: &ObjectId| live.contains(id) || touched.contains(id);
+        let gc_active = inner.gc_active.take();
+        let active_now = inner.active.as_ref().map(|a| a.arena.num);
+        let skip = |n: u64| n > boundary || Some(n) == gc_active || Some(n) == active_now;
+        let mut by_arena: HashMap<u64, Vec<(ObjectId, Loc)>> = HashMap::new();
+        for (id, l) in &inner.index {
+            if !skip(l.arena) {
+                by_arena.entry(l.arena).or_default().push((*id, *l));
+            }
+        }
+        let sweep_all = std::mem::replace(&mut inner.sweep_all, false);
+        let bs = sys::fs_block_size(&self.dir)?;
+        let g = self.opts.arena.granule;
+        let mut st = GcStats::default();
+        let mut doomed = Vec::new();
+        let mut nums: Vec<u64> = inner.arenas.iter().copied().filter(|&n| !skip(n)).collect();
+        nums.sort_unstable();
+        for num in nums {
+            let entries = by_arena.remove(&num).unwrap_or_default();
+            let (lv, dead): (Vec<(ObjectId, Loc)>, Vec<(ObjectId, Loc)>) = entries.iter().copied().partition(|(id, _)| keep(id));
+            for (id, l) in &dead {
+                inner.index.remove(id);
+                inner.stats.objects -= 1;
+                inner.stats.raw_bytes -= l.raw as u64;
+                inner.stats.stored_bytes -= l.stored as u64;
+                st.removed_objects += 1;
+                st.removed_bytes += l.stored as u64;
+            }
+            st.kept_objects += lv.len() as u64;
+            if lv.is_empty() {
+                st.packs_deleted += 1;
+                doomed.push(num);
+                continue;
+            }
+            if dead.is_empty() && !sweep_all {
+                continue;
+            }
+            let mark = arena::punched_path(&self.dir, num);
+            if !mark.exists() {
+                sys::write_durable(&mark, b"SFPH")?;
+            }
+            let mut lv = lv;
+            lv.sort_unstable_by_key(|e| e.1.off);
+            if !dead.is_empty() {
+                let hwm = entries.iter().map(|(_, l)| l.off + codec::padded_len(l.stored, g)).max().unwrap_or(HEADER_PAGE);
+                inner.punch.idx_bytes += arena::write_idx_file(&self.dir, num, IdxState::Sealed, hwm, &lv)? as u64;
+                inner.punch.arenas += 1;
+            }
+            sys::hit(sys::Fault::PunchAfterIdx)?;
+            let f = fs::OpenOptions::new().write(true).open(arena::arena_path(&self.dir, num))?;
+            let flen = f.metadata()?.len();
+            let mut gaps = Vec::new();
+            let mut cursor = HEADER_PAGE;
+            for (_, l) in &lv {
+                if l.off > cursor {
+                    gaps.push((cursor, l.off));
+                }
+                cursor = cursor.max(l.off + codec::padded_len(l.stored, g));
+            }
+            gaps.push((cursor, flen));
+            let mut first = true;
+            for (a, b) in gaps {
+                if let Some((off, len)) = sys::aligned_inside(a, b, bs) {
+                    sys::punch_hole(&f, off, len)?;
+                    inner.punch.calls += 1;
+                    inner.punch.bytes += len;
+                    if first {
+                        sys::hit(sys::Fault::PunchMidway)?;
+                        first = false;
+                    }
+                }
+            }
+            st.packs_compacted += 1; // here: arenas punched
+        }
+        if doomed.is_empty() {
+            return Ok(st);
+        }
+        sys::sync_dir(&self.dir)?;
+        for num in doomed {
+            self.read.forget(num);
+            let _ = fs::remove_file(arena::idx_path(&self.dir, num));
+            fs::remove_file(arena::arena_path(&self.dir, num))?;
+            let _ = fs::remove_file(arena::punched_path(&self.dir, num));
+            inner.arenas.remove(&num);
+            inner.stats.packs -= 1;
+        }
+        sys::sync_dir(&self.dir)?;
+        inner.dir_dirty = false;
+        Ok(st)
+    }
+
+    /// Spike D counters.
+    pub fn punch_stats(&self) -> PunchStats {
+        self.inner.lock().unwrap().punch
     }
 
     /// The bytes of `id`, or `None` if the store does not have the object or

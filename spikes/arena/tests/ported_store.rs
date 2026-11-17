@@ -14,7 +14,7 @@
 
 use arena_spike::codec::rec_len;
 use arena_spike::file_fork::{file_objects, FileReader, FileWriter, ObjStore, LEAF_ENTRIES};
-use arena_spike::{chunk_ranges, ObjectId, Options, Prealloc, SealRule, SpikeStore};
+use arena_spike::{chunk_ranges, GcMode, ObjectId, Options, Prealloc, SealRule, SpikeStore};
 use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::FileExt;
@@ -41,13 +41,23 @@ fn today(p: Prealloc) -> Options {
     o.arena.size = MIB;
     o.gc_seal = SealRule::Always;
     o.close_seals = true;
+    o.gc = gc_mode();
     o
+}
+
+/// `ARENA_GC=punch` runs every ported test with spike D's punch GC.
+fn gc_mode() -> GcMode {
+    match std::env::var("ARENA_GC").as_deref() {
+        Ok("punch") => GcMode::Punch,
+        _ => GcMode::Compact,
+    }
 }
 
 /// The new rules: seal at gc_begin only at size/8; close writes a resumable idx.
 fn new_rules(p: Prealloc) -> Options {
     let mut o = Options::with_prealloc(p);
     o.arena.size = MIB;
+    o.gc = gc_mode();
     o
 }
 
