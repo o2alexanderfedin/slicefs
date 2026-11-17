@@ -31,6 +31,7 @@ pub mod bench;
 pub mod codec;
 pub mod file_fork;
 pub mod measure;
+pub mod mmap_write;
 pub mod read;
 pub mod store;
 pub mod sys;
