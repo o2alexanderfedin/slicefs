@@ -109,6 +109,11 @@ pub struct SliceFsFilesystem {
     pub(crate) meta: Arc<DictMetadataStore>,
     pub(crate) io: Arc<Mutex<StoreIo>>,
     open_files: Mutex<HashMap<u64, OpenFileState>>,
+    /// A second (third, ...) write handle of an inode shares the write state
+    /// of the first: alias fh -> the fh that holds the state in `open_files`.
+    /// POSIX: every handle writes the same file. With a state per handle,
+    /// the last close won and the other handle's bytes were lost.
+    write_alias: Mutex<HashMap<u64, u64>>,
     /// File content store (`<store>/packs/`).
     pub(crate) content: Content,
     /// A content reader per inode (keeps its node and chunk caches). A reader
@@ -151,6 +156,7 @@ impl SliceFsFilesystem {
             io,
             content,
             open_files: Mutex::new(HashMap::new()),
+            write_alias: Mutex::new(HashMap::new()),
             readers: Mutex::new(HashMap::new()),
             handles: Mutex::new(HashMap::new()),
             orphans: Mutex::new(HashSet::new()),
@@ -184,7 +190,14 @@ impl SliceFsFilesystem {
 
     /// The inode of an open handle.
     pub(crate) fn ino_of_fh(&self, fh: u64) -> Option<u64> {
+        let fh = self.owner_fh(fh);
         self.open_files.lock().unwrap().get(&fh).map(|s| s.ino)
+    }
+
+    /// The handle that holds the write state of `fh`: `fh` itself, or the
+    /// first write handle of the same inode (see `write_alias`).
+    fn owner_fh(&self, fh: u64) -> u64 {
+        self.write_alias.lock().unwrap().get(&fh).copied().unwrap_or(fh)
     }
 
     pub fn commit_gate(&self) -> Arc<RwLock<()>> {
@@ -588,6 +601,7 @@ impl SliceFsFilesystem {
     /// it to Buffered mode so its content is complete (read, fsync, truncate,
     /// release need the whole picture; gaps become zero bytes).
     fn settle_pending(&self, fh: u64) {
+        let fh = self.owner_fh(fh);
         let mut file_state = match self.open_files.lock().unwrap().remove(&fh) {
             Some(s) => s,
             None => return,
@@ -609,6 +623,7 @@ impl SliceFsFilesystem {
 
     /// Test hook: true if handle `fh` is still in Streaming mode.
     pub fn test_is_streaming(&self, fh: u64) -> bool {
+        let fh = self.owner_fh(fh);
         matches!(self.open_files.lock().unwrap().get(&fh).map(|s| &s.write_mode), Some(WriteMode::Streaming { .. }))
     }
 
@@ -696,6 +711,7 @@ impl SliceFsFilesystem {
     /// Fallback transition: release open_files before io for materialization,
     /// re-acquire open_files to swap WriteMode. FUSE serializes per-fh writes.
     pub fn test_write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, i32> {
+        let fh = self.owner_fh(fh);
         if offset.checked_add(data.len() as u64).map_or(true, |end| end > MAX_FILE_SIZE) {
             return Err(libc::EFBIG);
         }
@@ -805,6 +821,35 @@ impl SliceFsFilesystem {
     /// Refcount lifecycle: decrements old committed root if different from new digest,
     /// increments new digest. Empty files (byte_count==0) set empty manifest without CAS push.
     pub fn test_release(&self, ino: u64, fh: u64) -> Result<(), i32> {
+        // A handle that shares another's write state: only the handle ends.
+        if self.write_alias.lock().unwrap().remove(&fh).is_some() {
+            self.close_handle(fh);
+            return Ok(());
+        }
+        // The holder of a shared state closes while other write handles are
+        // open: one of them takes the state over (nothing is written yet).
+        let heir = {
+            let mut alias = self.write_alias.lock().unwrap();
+            let heir = alias.iter().find(|(_, o)| **o == fh).map(|(a, _)| *a);
+            if let Some(h) = heir {
+                alias.remove(&h);
+                for owner in alias.values_mut() {
+                    if *owner == fh {
+                        *owner = h;
+                    }
+                }
+            }
+            heir
+        };
+        if let Some(h) = heir {
+            let mut open_files = self.open_files.lock().unwrap();
+            if let Some(st) = open_files.remove(&fh) {
+                open_files.insert(h, st);
+            }
+            drop(open_files);
+            self.close_handle(fh);
+            return Ok(());
+        }
         let result = self.finalize_write(ino, fh);
         self.close_handle(fh);
         result
@@ -1028,6 +1073,7 @@ impl SliceFsFilesystem {
     /// handles are hashed in full only when `include_buffered` (a commit cut,
     /// not each fsync: #3).
     fn flush_handle(&self, ino: u64, fh: u64, include_buffered: bool) -> Result<(), i32> {
+        let fh = self.owner_fh(fh);
         // Pending (out-of-order) bytes stay pending: settling them here would
         // stream zeros for the gaps, and the late writes that fill the gaps
         // would then force the handle into Buffered mode. The write log keeps
@@ -1127,7 +1173,7 @@ impl SliceFsFilesystem {
         }
         // A size change without a handle still belongs to an open write
         // handle of the file (the NFS SETATTR from cp carries no handle).
-        let fh = fh.filter(|f| self.open_files.lock().unwrap().contains_key(f))
+        let fh = fh.map(|f| self.owner_fh(f)).filter(|f| self.open_files.lock().unwrap().contains_key(f))
             .or_else(|| self.write_handle_of(ino));
         if let Some(fh_val) = fh {
             // Extending a streaming handle: record the size, no materializing.
@@ -1823,6 +1869,11 @@ impl SliceFsFilesystem {
         let fh = self.open_handle(ino);
 
         if is_write {
+            // Another write handle of this inode is open: share its state.
+            let owner = self.open_files.lock().unwrap().iter().find(|(_, st)| st.ino == ino).map(|(&f, _)| f);
+            if let Some(owner) = owner {
+                self.write_alias.lock().unwrap().insert(fh, owner);
+            } else {
             self.open_files.lock().unwrap().insert(
                 fh,
                 OpenFileState {
@@ -1834,11 +1885,14 @@ impl SliceFsFilesystem {
                     min_size: 0,
                 },
             );
+            }
 
             // FUSE_ATOMIC_O_TRUNC
             if flags & libc::O_TRUNC != 0 {
                 if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
-                    self.open_files.lock().unwrap().remove(&fh);
+                    if self.write_alias.lock().unwrap().remove(&fh).is_none() {
+                        self.open_files.lock().unwrap().remove(&fh);
+                    }
                     self.close_handle(fh);
                     return Err(e);
                 }
@@ -2039,7 +2093,8 @@ impl SliceFsFilesystem {
 
     /// Release with read-only handle check (matches FUSE release behavior).
     pub fn test_release_full(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        if !self.open_files.lock().unwrap().contains_key(&fh) {
+        let shared = self.write_alias.lock().unwrap().contains_key(&fh);
+        if !shared && !self.open_files.lock().unwrap().contains_key(&fh) {
             self.close_handle(fh); // read-only handle, no write state
             return Ok(());
         }

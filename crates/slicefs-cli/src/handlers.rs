@@ -223,6 +223,17 @@ pub fn handle_fsync(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> EmptyResult {
     }
 }
 
+/// Handle `fsyncdir`: make the write log durable, so the directory changes
+/// so far (create, rename, unlink, link, ...) survive a crash. Without this
+/// the kernel took ENOSYS as "nothing to do" and an fsync of a directory
+/// returned 0 with nothing durable.
+pub fn handle_fsyncdir(fs: &SliceFsFilesystem) -> EmptyResult {
+    match fs.meta().flush_wal() {
+        Ok(()) => EmptyResult::Ok,
+        Err(_) => EmptyResult::Error(libc::EIO),
+    }
+}
+
 /// Handle `statfs`: compute filesystem statistics.
 pub fn handle_statfs(fs: &SliceFsFilesystem) -> StatfsResult {
     let (blocks, bfree, bavail, files, ffree, bsize) = fs.compute_statfs();

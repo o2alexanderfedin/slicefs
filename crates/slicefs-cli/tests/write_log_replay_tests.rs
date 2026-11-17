@@ -241,3 +241,40 @@ fn a_commit_keeps_out_of_order_bytes_pending_and_the_handle_streaming() {
     let ino = fs.meta().lookup(1, "ooo.bin").unwrap();
     assert_eq!(fs.test_read(ino, 0, want.len() as u32 + 1).unwrap(), want);
 }
+
+// A request that fails after it took an inode number (EEXIST here) logs
+// nothing. Replay must still give later creates the inodes they had, or the
+// store would not mount after a crash.
+#[test]
+fn a_failed_create_or_mkdir_does_not_break_replay() {
+    check(|fs| {
+        let (a, fa) = create(fs, 1, "a");
+        release(fs, a, fa);
+        assert!(matches!(h::handle_create(fs, 1, "a", S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR), CreateResult::Error(_)));
+        assert!(matches!(h::handle_mkdir(fs, 1, "d", S_IFDIR | 0o755, 0o022, 501, 20), EntryResult::Ok(..)));
+        assert!(matches!(h::handle_mkdir(fs, 1, "d", S_IFDIR | 0o755, 0o022, 501, 20), EntryResult::Error(_)));
+        let (b, fb) = create(fs, 1, "b");
+        write(fs, fb, 0, b"data");
+        fsync(fs, b, fb);
+        release(fs, b, fb);
+    });
+}
+
+// Two write handles on one file share one write state (POSIX: both write
+// the same file). Before, each handle kept its own copy and the last close
+// won, so the first handle's bytes were lost, and replay gave a different
+// result than the live mount.
+#[test]
+fn two_write_handles_on_one_file_share_their_writes() {
+    check(|fs| {
+        let (f, h1) = create(fs, 1, "f");
+        let h2 = match h::handle_open(fs, f, libc::O_RDWR) { OpenResult::Ok(fh, _) => fh, _ => panic!("open") };
+        write(fs, h1, 0, b"AAAAAAAA");
+        write(fs, h2, 0, b"BB");
+        release(fs, f, h1);
+        write(fs, h2, 8, b"CC");
+        release(fs, f, h2);
+        let m = fs.meta().get_inode(f).unwrap();
+        assert_eq!(fs.test_read(f, 0, m.size as u32 + 1).unwrap(), b"BBAAAAAACC", "live content");
+    });
+}

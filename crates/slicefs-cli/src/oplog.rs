@@ -223,6 +223,11 @@ pub fn replay(fs: &SliceFsFilesystem, records: &[Vec<u8>]) -> Result<ReplayStats
         let rec = Record::decode(bytes).ok_or_else(|| format!("write log record {i}: cannot decode"))?;
         let _clock = Clock::freeze_at(rec.time);
         let bad = |what: &str| format!("write log record {i} ({what}) did not replay: {:?}", rec.op);
+        // A create logged the inode it got: take the same one, skipping any
+        // number that a failed request used up without a record.
+        if let Op::Create { ino, .. } | Op::Mkdir { ino, .. } | Op::Mknod { ino, .. } | Op::Symlink { ino, .. } = &rec.op {
+            fs.meta().advance_next_ino(*ino);
+        }
         match &rec.op {
             Op::Create { parent, name, mode, umask, uid, gid, flags, ino } => {
                 match handlers::handle_create(fs, *parent, name, *mode, *umask, *uid, *gid, *flags) {

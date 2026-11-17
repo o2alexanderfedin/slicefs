@@ -37,12 +37,16 @@ impl FlushOnFsyncWal {
 
 impl WalStrategy for FlushOnFsyncWal {
     fn rotate(&self, seed: &[WalEntry]) -> Result<(), WalError> {
-        self.buffer.lock().unwrap().clear(); // records before the cut are dead
+        // Lock order as in flush_and_sync: buffer, then writer.
+        let mut buffer = self.buffer.lock().unwrap();
         let mut writer = self.writer.lock().unwrap();
         let mut loc = self.loc.lock().unwrap();
+        // If the new segment cannot be made, keep the buffer: it holds the new
+        // root's record, and the next flush writes it to the current segment.
         let (new_writer, new_path, new_id) = super::rotate_segment(&loc.0, loc.1, seed)?;
         *writer = new_writer;
         *loc = (new_path, new_id);
+        buffer.clear(); // records before the cut are dead
         Ok(())
     }
     fn log_mutation(&self, entry: &WalEntry) -> Result<(), WalError> {
