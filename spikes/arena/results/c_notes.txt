@@ -1,0 +1,61 @@
+Spike C: reuse of free space inside arenas, instead of compaction
+=================================================================
+
+Machine: macOS 26.2, Intel, 32 threads, APFS. load1 was 17-41 during
+the runs (see the load1 line of every table). Raw data: results/c/*.jsonl.
+Release build; one process per run; variants interleaved round-robin.
+
+Variants
+- RS    the real chunk_store::ChunkStore (packs + compaction).
+- V1    spike A arenas (sparse fixed size) + today's compaction rules.
+- C1    reuse, allocator V1 next fit, G = 64, V1 arenas (the plan's pick
+        rule; see below).
+- C2    reuse, V2 size classes (one run at 85 %, to check the simulator).
+- C3    reuse, V3 hybrid + evacuation below 10 % live (crash loop only).
+- C4    reuse, V4 arena best fit (added by this spike after the first grid;
+        not in the plan).
+- C4d4  C4 with max_dirty = 4 (left arenas stay dirty up to 4; not in the
+        plan).
+- `s`   suffix: recovery scan skips holes with SEEK_DATA.
+
+Definitions
+- Fill level f: at every GC a fraction f of the store's data is live. The
+  store gets 512 MiB of files first; each GC cycle writes
+  B = live * (1/f - 1) of new files and deletes files of about the same
+  size, in 4 rounds, then GCs with the objects of the remaining files as
+  the live set. Same for every variant (sim and disk).
+- Space amplification: st_blocks*512 of the data files (pack/arena/idx) /
+  record bytes of the live set (stored + 45 per live object; taken from the
+  harness, not from the store's index, because a compacting store's index
+  still holds dead objects of arenas it kept). amp_pre = just before a GC
+  (the peak), amp_post = just after. Mean over the GCs of the second half.
+- WA: bytes the store wrote (records + padding + GC copies + idx and
+  checkpoint files + dirty-list rewrites) / record bytes of new objects.
+  RS has no counters: its WA is from polling pack/idx file sizes (append-
+  only), marked "dir-poll". V1 has the same rules and its own counter;
+  both agree (1.63 vs 1.64 at 85 %).
+- commit_full_syncs: full_sync (F_FULLFSYNC) calls inside sync() per
+  commit (8 MiB). gc_full_syncs: total in GC.
+- C-B1 runs use 64 MiB arenas, 512 MiB live, 1.5x churn (each run under
+  ~1 min). Not steady state for compaction; the simulator covers 10x churn.
+  cb1s: scale model with 16 MiB arenas and 2.5x churn (1 rep): its space
+  and WA numbers are useful, its sync numbers are not P* numbers (a commit
+  is half an arena there).
+
+Not run / limits
+- Power loss: not testable here. kill -9 only (page cache survives).
+- C-B3 cold cache: `purge` needs root; all reopens are warm-cache.
+- C-B5: `tmutil localsnapshot` worked without root; every snapshot was
+  deleted afterwards (`tmutil listlocalsnapshotdates /` lists none).
+  The free-space numbers are volume-wide, so other writers add noise
+  (two C4 runs: 205 and 159 MiB).
+- C-B2 "fsync each + one F_FULLFSYNC" is measured only; the store never
+  relies on it.
+- S3 (mmap under reuse) is not part of this spike.
+
+Noise
+- N from spike A (RS vs RS): 11-32 %. So 2N = 22-64 %, which is above every
+  stated time threshold (10 %, 5 %). Time-based rules below are applied as
+  max(stated, 2N) with N = 11 % (the lower A value for A-B1 wall) and are
+  marked "inside noise" when the result depends on N. Byte and call counts
+  (WA, space, full_sync per commit) are deterministic and decide.

@@ -30,6 +30,7 @@ pub fn run(bench: &str, variant: &str, a: &Args) -> bool {
         "cb1" => cb1(variant, a),
         "cb2" => cb2(variant, a),
         "cb3" => cb3(variant, a),
+        "cb5" => cb5(variant, a),
         _ => return false,
     }
     true
@@ -495,4 +496,86 @@ fn cb3(variant: &str, a: &Args) {
             r.emit();
         }
     }
+}
+
+/// C-B5: churn under an APFS local snapshot (`tmutil localsnapshot`). Fill
+/// `--live_mib` (256) of files, take a snapshot, churn `--churn` (1.0) x
+/// live at 85 % with GCs, then delete the snapshot. Reports the volume's
+/// free bytes (f_bavail, volume-wide, so other writers add noise) and the
+/// store's st_blocks at each step. If `tmutil` refuses, the run says so.
+fn cb5(variant: &str, a: &Args) {
+    use std::process::Command;
+    let live_target = a.u64("live_mib", 256) * MIB;
+    let churn = a.f64("churn", 1.0);
+    let fill = 0.85;
+    let d = run_dir();
+    let st = Any::open(variant, d.path(), 64 * MIB);
+    let s = st.s();
+    let mut c = Churn { sync_lat: Vec::new(), syncs_per_commit: Vec::new(), since_sync: 0, user_raw: 0 };
+    let mut rng = Rng::new(55);
+    let mut seed = 5_000_000u64;
+    let mut files = Vec::new();
+    let mut live_raw = 0;
+    while live_raw < live_target {
+        let f = c.write_file(s, seed);
+        seed += 1;
+        live_raw += f.len;
+        files.push(f);
+    }
+    c.commit(s);
+    let mut r = Rec::new("cb5", variant);
+    let free0 = sys::free_bytes(d.path()).unwrap_or(0) as f64;
+    let blocks0 = allocated(d.path()) as f64;
+    let out = Command::new("tmutil").arg("localsnapshot").output();
+    let (ok, msg) = match &out {
+        Ok(o) => (o.status.success(), format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))),
+        Err(e) => (false, e.to_string()),
+    };
+    let date = msg.split_whitespace().last().unwrap_or("").to_string();
+    r.s("snapshot", if ok { "taken" } else { "not run" }).s("tmutil", &msg.trim().replace('\n', " "));
+    if !ok {
+        r.emit();
+        return;
+    }
+    let free1 = sys::free_bytes(d.path()).unwrap_or(0) as f64;
+    let b = (live_target as f64 * (1.0 / fill - 1.0)) as u64;
+    let round = (b / 4).max(1);
+    c.user_raw = 0;
+    let mut rounds = 0;
+    while (c.user_raw as f64) < churn * live_target as f64 {
+        let mut w = 0;
+        while w < round {
+            let f = c.write_file(s, seed);
+            seed += 1;
+            w += f.len;
+            files.push(f);
+        }
+        let mut del = 0;
+        while del < round && files.len() > 1 {
+            let i = rng.below(files.len() as u64 - 1) as usize;
+            del += files.swap_remove(i).len;
+        }
+        rounds += 1;
+        if rounds % 4 == 0 {
+            c.commit(s);
+            st.gc(&live_set(&files));
+        }
+    }
+    c.commit(s);
+    let free2 = sys::free_bytes(d.path()).unwrap_or(0) as f64;
+    let blocks2 = allocated(d.path()) as f64;
+    let del = Command::new("tmutil").args(["deletelocalsnapshots", &date]).output();
+    let del_ok = del.as_ref().is_ok_and(|o| o.status.success());
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let free3 = sys::free_bytes(d.path()).unwrap_or(0) as f64;
+    let m = MIB as f64;
+    r.s("snapshot_date", &date)
+        .s("delete", if del_ok { "ok" } else { "failed" })
+        .n("user_raw_mib", c.user_raw as f64 / m)
+        .n("store_blocks_before_mib", blocks0 / m)
+        .n("store_blocks_after_mib", blocks2 / m)
+        .n("free_drop_during_churn_mib", (free1 - free2) / m)
+        .n("free_drop_total_mib", (free0 - free2) / m)
+        .n("free_back_after_delete_mib", (free3 - free2) / m);
+    r.emit();
 }
