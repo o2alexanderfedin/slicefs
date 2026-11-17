@@ -1,0 +1,2 @@
+{"bench":"bb6","variant":"V1","git":"a540285","load1":25.2578125,"objects":108021,"miss":0,"mapped":0,"rss_open_mib":35.359375,"rss_pass_mib":41.40234375,"rss_unmap_mib":41.40625,"footprint_open_mib":20.49609375,"footprint_pass_mib":24.38671875,"footprint_unmap_mib":24.38671875}
+{"bench":"bb6","variant":"V1M","git":"a540285","load1":25.2578125,"objects":108021,"miss":0,"mapped":17,"rss_open_mib":34.69140625,"rss_pass_mib":1070.6328125,"rss_unmap_mib":38.8515625,"footprint_open_mib":18.234375,"footprint_pass_mib":21.4921875,"footprint_unmap_mib":21.4921875}

@@ -1,0 +1,500 @@
+# Spike B results (macOS 26.2, Intel, 32 threads, APFS; load1 24-51 during the runs)
+# Data sets: 1 GiB raw each. rand = 108,021 objects in 17 arenas; z2 = 107,666 objects in 9 arenas (534 MiB stored).
+
+## Summaries: median [min..max] (delta against the baseline column: V1 pread, or pread for bb1, V1M for bb5, RS for bb7)
+noise N (wall_s): halves 2.3 %, V1 vs V1b 3.8 %  (runs 6)
+noise N (cpu_s): halves 1.4 %, V1 vs V1b 2.6 %  (runs 6)
+
+### bb2_rand_random  (n per variant: RS=5, V1=5, V1M=5; load1 43-49)
+| field | RS | V1 | V1M |
+|---|---|---|---|
+| wall_s | 2.735 [2.386..2.81] (-0.9 %) | 2.76 [2.696..2.794] | 1.884 [1.875..1.902] (-31.7 %) |
+| cpu_s | 2.32 [2.301..2.441] (-0.4 %) | 2.328 [2.294..2.357] | 1.572 [1.559..1.591] (-32.5 %) |
+| user_s | 1.55 [1.525..1.553] (-1.2 %) | 1.568 [1.545..1.583] | 1.562 [1.549..1.567] (-0.4 %) |
+| sys_s | 0.7943 [0.7477..0.905] (+4.5 %) | 0.7603 [0.7492..0.7739] | 0.01012 [0.009037..0.0244] (-98.7 %) |
+| cpu_us_per_op | 11.6 [11.51..12.21] (-0.4 %) | 11.64 [11.47..11.79] | 7.862 [7.797..7.955] (-32.5 %) |
+| wall_us_per_op | 13.67 [11.93..14.05] (-0.9 %) | 13.8 [13.48..13.97] | 9.418 [9.373..9.508] (-31.7 %) |
+| mib_per_s_wall | 695.9 [678.5..797.7] (+0.8 %) | 690.1 [682.5..706] | 1012 [1001..1014] (+46.7 %) |
+| minflt | 1726 [1519..1815] (-1.9 %) | 1759 [1586..1784] | 1048 [1026..1062] (-40.4 %) |
+| majflt | 0 [0..0] | 0 [0..0] | 0 [0..0] |
+| miss | 0 [0..0] | 0 [0..0] | 0 [0..0] |
+
+### bb2_z2_random  (n per variant: RS=5, V1=5, V1M=5; load1 33-44)
+| field | RS | V1 | V1M |
+|---|---|---|---|
+| wall_s | 5.294 [5.12..5.457] (+2.3 %) | 5.175 [4.919..5.85] | 4.283 [4.218..4.561] (-17.2 %) |
+| cpu_s | 5.135 [5.009..5.342] (+1.0 %) | 5.082 [4.808..5.447] | 4.263 [4.202..4.527] (-16.1 %) |
+| user_s | 4.368 [4.271..4.608] (-0.2 %) | 4.375 [4.126..4.703] | 4.234 [4.176..4.5] (-3.2 %) |
+| sys_s | 0.7382 [0.7258..0.7861] (+2.7 %) | 0.7185 [0.6815..0.7973] | 0.02701 [0.02515..0.02902] (-96.2 %) |
+| cpu_us_per_op | 25.68 [25.05..26.71] (+1.0 %) | 25.41 [24.04..27.24] | 21.32 [21.01..22.63] (-16.1 %) |
+| wall_us_per_op | 26.47 [25.6..27.28] (+2.3 %) | 25.88 [24.6..29.25] | 21.42 [21.09..22.8] (-17.2 %) |
+| mib_per_s_wall | 360.7 [349.4..373.4] (-2.2 %) | 368.6 [326.8..388.2] | 445.7 [418..452.6] (+20.9 %) |
+| minflt | 1537 [1523..1567] (-0.9 %) | 1551 [1457..1575] | 1374 [1328..1434] (-11.4 %) |
+| majflt | 0 [0..0] | 0 [0..0] | 0 [0..0] |
+| miss | 0 [0..0] | 0 [0..0] | 0 [0..0] |
+
+### bb2_rand_seq  (n per variant: RS=5, V1=5, V1M=5; load1 44-48)
+| field | RS | V1 | V1M |
+|---|---|---|---|
+| wall_s | 1.313 [1.295..1.608] (-1.0 %) | 1.327 [1.317..1.417] | 0.9137 [0.8987..0.9227] (-31.1 %) |
+| cpu_s | 1.283 [1.263..1.417] (-1.0 %) | 1.296 [1.284..1.355] | 0.9046 [0.8914..0.9134] (-30.2 %) |
+| user_s | 0.8917 [0.8697..0.9265] (-2.1 %) | 0.911 [0.8815..0.9282] | 0.8605 [0.8526..0.8671] (-5.5 %) |
+| sys_s | 0.4033 [0.3758..0.4906] (+1.7 %) | 0.3966 [0.3849..0.4269] | 0.04407 [0.03745..0.04735] (-88.9 %) |
+| cpu_us_per_op | 1253 [1234..1384] (-1.0 %) | 1266 [1254..1323] | 883.4 [870.5..891.9] (-30.2 %) |
+| wall_us_per_op | 1282 [1265..1570] (-1.0 %) | 1296 [1287..1384] | 892.3 [877.6..901] (-31.1 %) |
+| mib_per_s_wall | 779.9 [637..790.7] (+1.0 %) | 771.9 [722.4..777.3] | 1121 [1110..1139] (+45.2 %) |
+| minflt | 1.214e+04 [1.144e+04..1.3e+04] (+1.1 %) | 1.2e+04 [1.142e+04..1.284e+04] | 1.329e+04 [1.267e+04..1.509e+04] (+10.7 %) |
+| majflt | 0 [0..0] | 0 [0..0] | 0 [0..0] |
+| miss | 0 [0..0] | 0 [0..0] | 0 [0..0] |
+
+### bb2_z2_seq  (n per variant: RS=5, V1=5, V1M=5; load1 30-32)
+| field | RS | V1 | V1M |
+|---|---|---|---|
+| wall_s | 2.911 [2.761..3.064] (+1.1 %) | 2.879 [2.822..3.129] | 2.486 [2.42..2.543] (-13.7 %) |
+| cpu_s | 2.827 [2.701..2.944] (-0.3 %) | 2.835 [2.771..3.001] | 2.473 [2.408..2.5] (-12.8 %) |
+| user_s | 2.429 [2.314..2.54] (-1.1 %) | 2.457 [2.354..2.505] | 2.4 [2.349..2.432] (-2.3 %) |
+| sys_s | 0.3977 [0.3865..0.4629] (-5.7 %) | 0.4216 [0.3785..0.496] | 0.07246 [0.05844..0.08833] (-82.8 %) |
+| cpu_us_per_op | 2760 [2637..2875] (-0.3 %) | 2769 [2706..2930] | 2415 [2351..2441] (-12.8 %) |
+| wall_us_per_op | 2842 [2697..2992] (+1.1 %) | 2811 [2756..3056] | 2428 [2363..2483] (-13.7 %) |
+| mib_per_s_wall | 351.8 [334.2..370.8] (-1.1 %) | 355.7 [327.3..362.8] | 411.9 [402.7..423.2] (+15.8 %) |
+| minflt | 1.403e+04 [1.394e+04..1.615e+04] (+6.3 %) | 1.32e+04 [1.305e+04..1.46e+04] | 1.332e+04 [1.297e+04..1.387e+04] (+0.9 %) |
+| majflt | 0 [0..0] | 0 [0..0] | 0 [0..0] |
+| miss | 0 [0..0] | 0 [0..0] | 0 [0..0] |
+
+### bb3_warm_fresh  (n per variant: RS=3, V1=3, V1M=3; load1 30-30)
+| field | RS | V1 | V1M |
+|---|---|---|---|
+| wall_s | 2.205 [2.199..2.288] (-7.8 %) | 2.392 [2.308..2.521] | 1.96 [1.922..1.969] (-18.1 %) |
+| cpu_s | 2.174 [2.15..2.232] (-5.1 %) | 2.291 [2.253..2.427] | 1.951 [1.916..1.964] (-14.8 %) |
+| user_s | 1.457 [1.377..1.457] (-1.3 %) | 1.476 [1.474..1.52] | 1.71 [1.674..1.721] (+15.9 %) |
+| sys_s | 0.7728 [0.7175..0.7756] (-5.4 %) | 0.8169 [0.7776..0.9072] | 0.2421 [0.2408..0.2428] (-70.4 %) |
+| cpu_us_per_op | 10.87 [10.75..11.16] (-5.1 %) | 11.46 [11.27..12.14] | 9.756 [9.581..9.818] (-14.8 %) |
+| wall_us_per_op | 11.03 [10.99..11.44] (-7.8 %) | 11.96 [11.54..12.6] | 9.799 [9.612..9.845] (-18.1 %) |
+| mib_per_s_wall | 864.5 [830.5..865.6] (+8.8 %) | 794.5 [756.3..824.5] | 972.8 [965.3..989.9] (+22.4 %) |
+| minflt | 1813 [1703..1860] (+6.6 %) | 1700 [1488..1770] | 2.377e+05 [2.376e+05..2.38e+05] (+13880.2 %) |
+| majflt | 0 [0..0] | 0 [0..0] | 0 [0..0] |
+| miss | 0 [0..0] | 0 [0..0] | 0 [0..0] |
+
+### bb3_cold  (n per variant: RS=3, V1=3, V1M=3; load1 26-30)
+| field | RS | V1 | V1M |
+|---|---|---|---|
+| wall_s | 23.33 [23.1..24.51] (+0.6 %) | 23.19 [21.63..23.33] | 11.17 [10.59..11.55] (-51.8 %) |
+| cpu_s | 6.624 [5.94..7.101] (+1.5 %) | 6.527 [6.313..7.156] | 3.894 [3.851..4.5] (-40.3 %) |
+| user_s | 2.052 [1.947..2.149] (-2.7 %) | 2.108 [2.029..2.223] | 1.838 [1.81..2.076] (-12.8 %) |
+| sys_s | 4.572 [3.993..4.951] (+3.5 %) | 4.418 [4.284..4.933] | 2.056 [2.041..2.424] (-53.5 %) |
+| cpu_us_per_op | 33.12 [29.7..35.5] (+1.5 %) | 32.63 [31.56..35.78] | 19.47 [19.26..22.5] (-40.3 %) |
+| wall_us_per_op | 116.6 [115.5..122.5] (+0.6 %) | 115.9 [108.2..116.7] | 55.84 [52.97..57.77] (-51.8 %) |
+| mib_per_s_wall | 81.72 [77.55..82.4] (-0.3 %) | 81.96 [81.71..87.98] | 170.2 [164.7..180] (+107.6 %) |
+| minflt | 1579 [1517..1615] (+9.3 %) | 1445 [1374..1449] | 868 [865..907] (-39.9 %) |
+| majflt | 0 [0..0] | 0 [0..0] | 2.366e+05 [2.366e+05..2.37e+05] |
+| miss | 0 [0..0] | 0 [0..0] | 0 [0..0] |
+cold_valid: RS:yes(0.0000), V1:yes(0.0000), V1M:yes(0.0000), V1:yes(0.0000), V1M:yes(0.0000), RS:yes(0.0000), V1M:yes(0.0000), RS:yes(0.0000), V1:yes(0.0000)
+
+### bb1_random  (n per variant: pread=5, mmap=5; load1 29-29)
+| field | pread | mmap |
+|---|---|---|
+| wall_s | 0.9343 [0.8483..1.131] | 0.3019 [0.2931..0.3327] (-67.7 %) |
+| cpu_s | 0.9145 [0.8408..1.069] | 0.3006 [0.2924..0.3311] (-67.1 %) |
+| user_s | 0.2199 [0.2125..0.231] | 0.2988 [0.2914..0.3208] (+35.9 %) |
+| sys_s | 0.6946 [0.6278..0.8382] | 0.001043 [0.000836..0.01021] (-99.8 %) |
+| cpu_us_per_op | 4.572 [4.204..5.346] | 1.503 [1.462..1.655] (-67.1 %) |
+| minflt | 10 [10..10] | 1 [1..1] (-90.0 %) |
+| majflt | 0 [0..0] | 0 [0..0] |
+
+### bb1_offset  (n per variant: pread=5, mmap=5; load1 28-29)
+| field | pread | mmap |
+|---|---|---|
+| wall_s | 0.7888 [0.7618..0.8716] | 0.2293 [0.2244..0.254] (-70.9 %) |
+| cpu_s | 0.7516 [0.746..0.8167] | 0.229 [0.2239..0.2528] (-69.5 %) |
+| user_s | 0.1928 [0.1916..0.2022] | 0.2285 [0.2233..0.2463] (+18.5 %) |
+| sys_s | 0.5588 [0.5544..0.6146] | 0.001426 [0.000514..0.006598] (-99.7 %) |
+| cpu_us_per_op | 3.758 [3.73..4.084] | 1.145 [1.12..1.264] (-69.5 %) |
+| minflt | 10 [1..10] | 1 [1..1] (-90.0 %) |
+| majflt | 0 [0..0] | 0 [0..0] |
+
+### bb4_t1  (n per variant: V1=3, V1M=3; load1 29-29)
+| field | V1 | V1M |
+|---|---|---|
+| ops_per_s | 8.741e+04 [8.175e+04..8.98e+04] | 1.379e+05 [1.369e+05..1.431e+05] (+57.8 %) |
+| cpu_us_per_op | 11.31 [11.02..11.81] | 7.221 [6.964..7.274] (-36.1 %) |
+| wall_s | 1.144 [1.114..1.223] | 0.7249 [0.6988..0.7306] (-36.6 %) |
+| cpu_s | 1.131 [1.102..1.181] | 0.7221 [0.6964..0.7274] (-36.1 %) |
+| miss | 0 [0..0] | 0 [0..0] |
+
+### bb4_t1_gate  (n per variant: V1=3, V1M=3; load1 29-30)
+| field | V1 | V1M |
+|---|---|---|
+| ops_per_s | 8.179e+04 [7.977e+04..8.965e+04] | 1.416e+05 [1.168e+05..1.468e+05] (+73.1 %) |
+| cpu_us_per_op | 11.63 [11.04..11.94] | 7.044 [6.798..7.767] (-39.5 %) |
+| wall_s | 1.223 [1.115..1.254] | 0.7061 [0.6814..0.8559] (-42.2 %) |
+| cpu_s | 1.163 [1.104..1.194] | 0.7044 [0.6798..0.7767] (-39.5 %) |
+| miss | 0 [0..0] | 0 [0..0] |
+
+### bb4_t1_lookup  (n per variant: V1=3, V1M=3; load1 29-30)
+| field | V1 | V1M |
+|---|---|---|
+| ops_per_s | 3.742e+06 [3.551e+06..4.21e+06] | 3.816e+06 [3.728e+06..4.081e+06] (+2.0 %) |
+| cpu_us_per_op | 0.2666 [0.2378..0.2805] | 0.2609 [0.2454..0.2674] (-2.1 %) |
+| wall_s | 0.02673 [0.02375..0.02816] | 0.02621 [0.02451..0.02682] (-1.9 %) |
+| cpu_s | 0.02666 [0.02378..0.02805] | 0.02609 [0.02454..0.02674] (-2.1 %) |
+| miss | 0 [0..0] | 0 [0..0] |
+
+### bb4_t4  (n per variant: V1=3, V1M=3; load1 28-29)
+| field | V1 | V1M |
+|---|---|---|
+| ops_per_s | 2.59e+05 [2.57e+05..2.742e+05] | 3.746e+05 [3.555e+05..3.802e+05] (+44.6 %) |
+| cpu_us_per_op | 14.08 [13.62..14.28] | 9.791 [9.651..10.29] (-30.5 %) |
+| wall_s | 1.544 [1.459..1.556] | 1.068 [1.052..1.125] (-30.8 %) |
+| cpu_s | 5.634 [5.448..5.713] | 3.917 [3.86..4.115] (-30.5 %) |
+| miss | 0 [0..0] | 0 [0..0] |
+
+### bb4_t4_gate  (n per variant: V1=3, V1M=3; load1 28-29)
+| field | V1 | V1M |
+|---|---|---|
+| ops_per_s | 2.58e+05 [2.545e+05..2.72e+05] | 3.698e+05 [3.567e+05..3.728e+05] (+43.3 %) |
+| cpu_us_per_op | 14.26 [13.75..14.54] | 9.866 [9.852..10.12] (-30.8 %) |
+| wall_s | 1.55 [1.47..1.572] | 1.082 [1.073..1.121] (-30.2 %) |
+| cpu_s | 5.704 [5.501..5.817] | 3.947 [3.941..4.049] (-30.8 %) |
+| miss | 0 [0..0] | 0 [0..0] |
+
+### bb4_t4_lookup  (n per variant: V1=3, V1M=3; load1 28-28)
+| field | V1 | V1M |
+|---|---|---|
+| ops_per_s | 9.164e+05 [9.159e+05..1.274e+06] | 9.067e+05 [9.008e+05..1.086e+06] (-1.1 %) |
+| cpu_us_per_op | 3.226 [2.487..3.265] | 3.297 [2.816..3.298] (+2.2 %) |
+| wall_s | 0.4365 [0.314..0.4367] | 0.4412 [0.3682..0.4441] (+1.1 %) |
+| cpu_s | 1.291 [0.9949..1.306] | 1.319 [1.126..1.319] (+2.2 %) |
+| miss | 0 [0..0] | 0 [0..0] |
+
+### bb4_t16  (n per variant: V1=3, V1M=3; load1 28-30)
+| field | V1 | V1M |
+|---|---|---|
+| ops_per_s | 4.604e+05 [4.328e+05..4.787e+05] | 4.664e+05 [4.646e+05..4.903e+05] (+1.3 %) |
+| cpu_us_per_op | 30.26 [29.19..30.37] | 29.3 [28.8..30.14] (-3.1 %) |
+| wall_s | 3.475 [3.342..3.697] | 3.43 [3.264..3.444] (-1.3 %) |
+| cpu_s | 48.41 [46.71..48.6] | 46.89 [46.08..48.22] (-3.1 %) |
+| miss | 0 [0..0] | 0 [0..0] |
+
+### bb4_t16_gate  (n per variant: V1=3, V1M=3; load1 30-32)
+| field | V1 | V1M |
+|---|---|---|
+| ops_per_s | 4.823e+05 [4.796e+05..4.824e+05] | 4.8e+05 [4.763e+05..4.9e+05] (-0.5 %) |
+| cpu_us_per_op | 29.65 [29.56..29.79] | 29.39 [29.36..29.58] (-0.9 %) |
+| wall_s | 3.317 [3.317..3.336] | 3.334 [3.265..3.359] (+0.5 %) |
+| cpu_s | 47.44 [47.29..47.67] | 47.02 [46.98..47.33] (-0.9 %) |
+| miss | 0 [0..0] | 0 [0..0] |
+
+### bb4_t16_lookup  (n per variant: V1=3, V1M=3; load1 32-34)
+| field | V1 | V1M |
+|---|---|---|
+| ops_per_s | 1.137e+06 [1.114e+06..1.272e+06] | 1.199e+06 [1.173e+06..1.252e+06] (+5.4 %) |
+| cpu_us_per_op | 11.71 [10.57..11.9] | 11.33 [10.76..11.34] (-3.3 %) |
+| wall_s | 1.407 [1.258..1.436] | 1.334 [1.278..1.364] (-5.2 %) |
+| cpu_s | 18.73 [16.9..19.04] | 18.12 [17.21..18.14] (-3.3 %) |
+| miss | 0 [0..0] | 0 [0..0] |
+
+### bb5_random  (n per variant: V1M=3, V1R=3; load1 24-33)
+| field | V1M | V1R |
+|---|---|---|
+| wall_s | 11.32 [10.19..11.8] | 41.9 [39.58..43.6] (+270.1 %) |
+| cpu_s | 3.981 [3.796..4.051] | 11.15 [11.13..11.35] (+180.1 %) |
+| user_s | 1.824 [1.794..1.868] | 2.328 [2.277..2.329] (+27.6 %) |
+| sys_s | 2.157 [2.003..2.184] | 8.874 [8.804..9.019] (+311.4 %) |
+| cpu_us_per_op | 19.91 [18.98..20.26] | 55.76 [55.66..56.74] (+180.1 %) |
+| wall_us_per_op | 56.62 [50.97..58.99] | 209.5 [197.9..218] (+270.1 %) |
+| mib_per_s_wall | 168.4 [161.1..186.7] | 45.36 [43.73..48.08] (-73.1 %) |
+| minflt | 898 [847..906] | 882 [846..895] (-1.8 %) |
+| majflt | 2.366e+05 [2.366e+05..2.37e+05] | 2.366e+05 [2.366e+05..2.37e+05] (+0.0 %) |
+| miss | 0 [0..0] | 0 [0..0] |
+cold_valid: V1M:yes(0.0000), V1R:yes(0.0000), V1R:yes(0.0000), V1M:yes(0.0000), V1M:yes(0.0000), V1R:yes(0.0000)
+
+### bb5_seq  (n per variant: V1M=3, V1R=3; load1 24-26)
+| field | V1M | V1R |
+|---|---|---|
+| wall_s | 5.816 [5.658..5.834] | 26.69 [26.55..31.35] (+358.9 %) |
+| cpu_s | 2.666 [2.639..2.731] | 9.933 [9.897..10.36] (+272.6 %) |
+| user_s | 1.199 [1.194..1.201] | 1.705 [1.643..1.707] (+42.1 %) |
+| sys_s | 1.465 [1.445..1.532] | 8.254 [8.228..8.649] (+463.5 %) |
+| cpu_us_per_op | 2603 [2577..2667] | 9700 [9665..1.011e+04] (+272.6 %) |
+| wall_us_per_op | 5680 [5525..5697] | 2.607e+04 [2.593e+04..3.061e+04] (+358.9 %) |
+| mib_per_s_wall | 176.1 [175.5..181] | 38.36 [32.67..38.57] (-78.2 %) |
+| minflt | 9192 [8271..9685] | 8530 [7083..8670] (-7.2 %) |
+| majflt | 2.641e+05 [2.641e+05..2.641e+05] | 2.641e+05 [2.641e+05..2.641e+05] (+0.0 %) |
+| miss | 0 [0..0] | 0 [0..0] |
+cold_valid: V1M:yes(0.0000), V1R:yes(0.0000), V1R:yes(0.0000), V1M:yes(0.0000), V1M:yes(0.0000), V1R:yes(0.0000)
+
+### bb6  (n per variant: V1=1, V1M=1; load1 25-25)
+| field | V1 | V1M |
+|---|---|---|
+| mapped | 0 [0..0] | 17 [17..17] |
+| rss_open_mib | 35.36 [35.36..35.36] | 34.69 [34.69..34.69] (-1.9 %) |
+| rss_pass_mib | 41.4 [41.4..41.4] | 1071 [1071..1071] (+2485.9 %) |
+| rss_unmap_mib | 41.41 [41.41..41.41] | 38.85 [38.85..38.85] (-6.2 %) |
+| footprint_open_mib | 20.5 [20.5..20.5] | 18.23 [18.23..18.23] (-11.0 %) |
+| footprint_pass_mib | 24.39 [24.39..24.39] | 21.49 [21.49..21.49] (-11.9 %) |
+| footprint_unmap_mib | 24.39 [24.39..24.39] | 21.49 [21.49..21.49] (-11.9 %) |
+| miss | 0 [0..0] | 0 [0..0] |
+
+### bb7  (n per variant: RS=1, V1=1, V1M=1; load1 25-25)
+| field | RS | V1 | V1M |
+|---|---|---|---|
+| objects | 1.799e+04 [1.799e+04..1.799e+04] | 1.399e+04 [1.399e+04..1.399e+04] (-22.2 %) | 1.399e+04 [1.399e+04..1.399e+04] (-22.2 %) |
+| arenas | 2000 [2000..2000] | 2000 [2000..2000] (+0.0 %) | 2000 [2000..2000] (+0.0 %) |
+| miss | 1.572e+04 [1.572e+04..1.572e+04] | 1.222e+04 [1.222e+04..1.222e+04] (-22.2 %) | 0 [0..0] (-100.0 %) |
+| first_miss | 2277 [2277..2277] | 1771 [1771..1771] (-22.2 %) | -1 [-1..-1] (-100.0 %) |
+| fds_before | 3 [3..3] | 3 [3..3] (+0.0 %) | 3 [3..3] (+0.0 %) |
+| fds_after | 256 [256..256] | 256 [256..256] (+0.0 %) | 3 [3..3] (-98.8 %) |
+| mapped | 0 [0..0] | 0 [0..0] | 2000 [2000..2000] |
+| wall_s | 0.06577 [0.06577..0.06577] | 0.05585 [0.05585..0.05585] (-15.1 %) | 1.218 [1.218..1.218] (+1751.6 %) |
+MISSES: RS:15715, V1:12223
+
+## Crash loop (kill -9, V1 + mmap)
+{"bench":"crashloop","variant":"V1M","git":"cce2161","load1":36.3740234375,"cfg":"kills=50 size_mib=4","kills":50,"child_early_exits":0,"roots_checked":29328,"roots_bad":0,"roots_final":1332,"arenas_final":4,"reopen_ms_max":41.592911,"wall_s":21.780393613}
+
+## Tests
+test a_corrupt_loc_past_the_end_of_the_arena_makes_get_return_none ... ok
+test a_map_of_the_wrong_length_is_refused ... ok
+test a_torn_tail_is_cut_before_the_map_and_synced_objects_read_through_the_map ... ok
+test active_arena_reads_through_the_map_see_every_put_across_seals ... coherence: 200000 objects in 38.3 s, 113 arenas, 400000 reads checked, 113 mapped, 0 bad
+test an_arena_unlinked_while_mapped_stays_readable_and_its_space_comes_back_after_unmap ... unlink while mapped: allocated 33554432, free space gain after munmap 33505280
+test grow_arenas_under_mmap_mode_use_pread ... ok
+test touching_a_mapped_page_past_a_cut_kills_the_child_with_sigbus ... ok
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 42.14s
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.36s
+test result: ok. 84 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.31s
+
+## Data set build
+== prep_rand: bprep --variants V1,RS --reps 1 --set rand --mib 1024
+{"bench":"bprep","variant":"V1","git":"a540285","load1":48.1015625,"set":"rand","mib":1024,"wall_s":22.960794927,"user_s":7.374718,"sys_s":13.2641,"cpu_s":20.638818,"minflt":120663,"majflt":0,"objects":108021,"files":128,"arenas":17,"stored_mib":1027.12553024292}
+{"bench":"bprep","variant":"RS","git":"a540285","load1":45.17138671875,"set":"rand","mib":1024,"wall_s":19.328185234,"user_s":7.230057,"sys_s":10.322589,"cpu_s":17.552646000000003,"minflt":120240,"majflt":0,"objects":108021,"files":128,"arenas":17,"stored_mib":1027.12553024292}
+lines:        2
+== prep_z2: bprep --variants V1,RS --reps 1 --set z2 --mib 1024
+{"bench":"bprep","variant":"V1","git":"a540285","load1":41.447265625,"set":"z2","mib":1024,"wall_s":29.160952318,"user_s":16.406699,"sys_s":11.232738,"cpu_s":27.639437,"minflt":125155,"majflt":0,"objects":107666,"files":128,"arenas":9,"stored_mib":533.7018852233887}
+{"bench":"bprep","variant":"RS","git":"a540285","load1":38.97216796875,"set":"z2","mib":1024,"wall_s":30.792578536,"user_s":16.537611,"sys_s":12.288927,"cpu_s":28.826538,"minflt":117152,"majflt":0,"objects":107666,"files":128,"arenas":9,"stored_mib":533.7018852233887}
+lines:        2
+== prep7: bprep7 --variants V1,RS --reps 1 --arenas 2000
+{"bench":"bprep7","variant":"V1","git":"a540285","load1":51.0732421875,"wall_s":197.205459999,"user_s":1.066722,"sys_s":5.096372,"cpu_s":6.163093999999999,"minflt":6602,"majflt":0,"objects":13994,"arenas":2000}
+{"bench":"bprep7","variant":"RS","git":"a540285","load1":40.68359375,"wall_s":145.672851466,"user_s":0.973645,"sys_s":3.577004,"cpu_s":4.550649,"minflt":2917,"majflt":0,"objects":17992,"arenas":2000}
+lines:        2
+
+## Raw run log
+== noise: bget --variants V1,V1b --reps 3 --set rand --order random --state warm_mapped
+{"bench":"bget","variant":"V1","git":"a540285","load1":42.515625,"set":"rand","order":"random","state":"warm_mapped","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.5342853979999997,"user_s":1.575781,"sys_s":0.852255,"cpu_s":2.428036,"minflt":1745,"majflt":0,"ops":200000,"miss":0,"mib":1903.1123332977295,"cpu_us_per_op":12.140179999999999,"wall_us_per_op":12.671426989999999,"mib_per_s_wall":750.9463357203662,"mib_per_s_cpu":783.8072966371707,"mapped":0}
+{"bench":"bget","variant":"V1b","git":"a540285","load1":42.515625,"set":"rand","order":"random","state":"warm_mapped","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.529546893,"user_s":1.595015,"sys_s":0.855533,"cpu_s":2.450548,"minflt":1752,"majflt":0,"ops":200000,"miss":0,"mib":1903.1123332977295,"cpu_us_per_op":12.25274,"wall_us_per_op":12.647734465000001,"mib_per_s_wall":752.3530552306427,"mib_per_s_cpu":776.6068378573812,"mapped":0}
+{"bench":"bget","variant":"V1b","git":"a540285","load1":42.63427734375,"set":"rand","order":"random","state":"warm_mapped","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.480714899,"user_s":1.567561,"sys_s":0.832923,"cpu_s":2.400484,"minflt":1840,"majflt":0,"ops":200000,"miss":0,"mib":1906.5942306518555,"cpu_us_per_op":12.00242,"wall_us_per_op":12.403574494999999,"mib_per_s_wall":768.5664448665269,"mib_per_s_cpu":794.2540881971534,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":42.4228515625,"set":"rand","order":"random","state":"warm_mapped","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.617347878,"user_s":1.576686,"sys_s":0.886619,"cpu_s":2.463305,"minflt":1704,"majflt":0,"ops":200000,"miss":0,"mib":1906.5942306518555,"cpu_us_per_op":12.316525,"wall_us_per_op":13.08673939,"mib_per_s_wall":728.445097679849,"mib_per_s_cpu":773.9984413833672,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":42.4228515625,"set":"rand","order":"random","state":"warm_mapped","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.587179456,"user_s":1.59477,"sys_s":0.891259,"cpu_s":2.4860290000000003,"minflt":1752,"majflt":0,"ops":200000,"miss":0,"mib":1900.6304607391357,"cpu_us_per_op":12.430145000000001,"wall_us_per_op":12.935897279999999,"mib_per_s_wall":734.6341809924822,"mib_per_s_cpu":764.5246538713488,"mapped":0}
+{"bench":"bget","variant":"V1b","git":"a540285","load1":42.30859375,"set":"rand","order":"random","state":"warm_mapped","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.490506198,"user_s":1.542449,"sys_s":0.853586,"cpu_s":2.396035,"minflt":1816,"majflt":0,"ops":200000,"miss":0,"mib":1900.6304607391357,"cpu_us_per_op":11.980175,"wall_us_per_op":12.45253099,"mib_per_s_wall":763.150263294039,"mib_per_s_cpu":793.2398569883728,"mapped":0}
+lines:        6
+== bb2_rand_random: bget --variants RS,V1,V1M --reps 5 --set rand --order random --state warm_mapped
+{"bench":"bget","variant":"RS","git":"a540285","load1":43.32470703125,"set":"rand","order":"random","state":"warm_mapped","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.734884929,"user_s":1.536495,"sys_s":0.904953,"cpu_s":2.441448,"minflt":1810,"majflt":0,"ops":200000,"miss":0,"mib":1903.1123332977295,"cpu_us_per_op":12.20724,"wall_us_per_op":13.674424645,"mib_per_s_wall":695.8655967999338,"mib_per_s_cpu":779.5014816198131,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":43.32470703125,"set":"rand","order":"random","state":"warm_mapped","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.754340105,"user_s":1.561905,"sys_s":0.765565,"cpu_s":2.32747,"minflt":1759,"majflt":0,"ops":200000,"miss":0,"mib":1903.1123332977295,"cpu_us_per_op":11.63735,"wall_us_per_op":13.771700525,"mib_per_s_wall":690.9503767682785,"mib_per_s_cpu":817.6742700433215,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":44.33935546875,"set":"rand","order":"random","state":"warm_mapped","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.87640008,"user_s":1.551239,"sys_s":0.009586,"cpu_s":1.5608250000000001,"minflt":1062,"majflt":0,"ops":200000,"miss":0,"mib":1903.1123332977295,"cpu_us_per_op":7.804125000000001,"wall_us_per_op":9.3820004,"mib_per_s_wall":1014.2359050089838,"mib_per_s_cpu":1219.2989818190567,"mapped":17}
+{"bench":"bget","variant":"V1","git":"a540285","load1":44.33935546875,"set":"rand","order":"random","state":"warm_mapped","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.793695159,"user_s":1.575365,"sys_s":0.755593,"cpu_s":2.330958,"minflt":1784,"majflt":0,"ops":200000,"miss":0,"mib":1906.5942306518555,"cpu_us_per_op":11.65479,"wall_us_per_op":13.968475795,"mib_per_s_wall":682.4632331518657,"mib_per_s_cpu":817.9444806177785,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":45.59326171875,"set":"rand","order":"random","state":"warm_mapped","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.883529927,"user_s":1.565415,"sys_s":0.009037,"cpu_s":1.574452,"minflt":1062,"majflt":0,"ops":200000,"miss":0,"mib":1906.5942306518555,"cpu_us_per_op":7.87226,"wall_us_per_op":9.417649635,"mib_per_s_wall":1012.2452546791179,"mib_per_s_cpu":1210.95735573511,"mapped":17}
+{"bench":"bget","variant":"RS","git":"a540285","load1":46.18603515625,"set":"rand","order":"random","state":"warm_mapped","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.810096839,"user_s":1.550056,"sys_s":0.811684,"cpu_s":2.36174,"minflt":1815,"majflt":0,"ops":200000,"miss":0,"mib":1906.5942306518555,"cpu_us_per_op":11.808700000000002,"wall_us_per_op":14.050484195,"mib_per_s_wall":678.4799029667374,"mib_per_s_cpu":807.2837105912824,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":46.18603515625,"set":"rand","order":"random","state":"warm_mapped","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.874590815,"user_s":1.562255,"sys_s":0.010117,"cpu_s":1.5723719999999999,"minflt":1026,"majflt":0,"ops":200000,"miss":0,"mib":1900.6304607391357,"cpu_us_per_op":7.861859999999999,"wall_us_per_op":9.372954074999999,"mib_per_s_wall":1013.8908424872101,"mib_per_s_cpu":1208.7664119808392,"mapped":17}
+{"bench":"bget","variant":"RS","git":"a540285","load1":46.7314453125,"set":"rand","order":"random","state":"warm_mapped","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.648832722,"user_s":1.553346,"sys_s":0.747679,"cpu_s":2.301025,"minflt":1523,"majflt":0,"ops":200000,"miss":0,"mib":1900.6304607391357,"cpu_us_per_op":11.505125000000001,"wall_us_per_op":13.24416361,"mib_per_s_wall":717.5351032752516,"mib_per_s_cpu":825.9929643263918,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":47.1533203125,"set":"rand","order":"random","state":"warm_mapped","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.759633602,"user_s":1.583134,"sys_s":0.773881,"cpu_s":2.357015,"minflt":1586,"majflt":0,"ops":200000,"miss":0,"mib":1900.6304607391357,"cpu_us_per_op":11.785075,"wall_us_per_op":13.79816801,"mib_per_s_wall":688.7256552325223,"mib_per_s_cpu":806.3718138149887,"mapped":0}
+{"bench":"bget","variant":"RS","git":"a540285","load1":47.1533203125,"set":"rand","order":"random","state":"warm_mapped","rep":3,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.768908718,"user_s":1.549722,"sys_s":0.769856,"cpu_s":2.319578,"minflt":1519,"majflt":0,"ops":200000,"miss":0,"mib":1904.5225505828857,"cpu_us_per_op":11.59789,"wall_us_per_op":13.84454359,"mib_per_s_wall":687.8242457767024,"mib_per_s_cpu":821.06424124685,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":47.861328125,"set":"rand","order":"random","state":"warm_mapped","rep":3,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.759611917,"user_s":1.567948,"sys_s":0.760347,"cpu_s":2.328295,"minflt":1641,"majflt":0,"ops":200000,"miss":0,"mib":1904.5225505828857,"cpu_us_per_op":11.641474999999998,"wall_us_per_op":13.798059585,"mib_per_s_wall":690.1414430233763,"mib_per_s_cpu":817.9902248567669,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":47.861328125,"set":"rand","order":"random","state":"warm_mapped","rep":3,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.901152416,"user_s":1.54906,"sys_s":0.010346,"cpu_s":1.559406,"minflt":1037,"majflt":0,"ops":200000,"miss":0,"mib":1904.5225505828857,"cpu_us_per_op":7.79703,"wall_us_per_op":9.50576208,"mib_per_s_wall":1001.7726798517167,"mib_per_s_cpu":1221.3128271809173,"mapped":17}
+{"bench":"bget","variant":"V1","git":"a540285","load1":48.4326171875,"set":"rand","order":"random","state":"warm_mapped","rep":4,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.696132917,"user_s":1.54454,"sys_s":0.749247,"cpu_s":2.293787,"minflt":1766,"majflt":0,"ops":200000,"miss":0,"mib":1903.4203672409058,"cpu_us_per_op":11.468935,"wall_us_per_op":13.480664585,"mib_per_s_wall":705.9816506965283,"mib_per_s_cpu":829.8156573565487,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":48.71826171875,"set":"rand","order":"random","state":"warm_mapped","rep":4,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.901687809,"user_s":1.566559,"sys_s":0.024403,"cpu_s":1.590962,"minflt":1048,"majflt":0,"ops":200000,"miss":0,"mib":1903.4203672409058,"cpu_us_per_op":7.954809999999999,"wall_us_per_op":9.508439045,"mib_per_s_wall":1000.9110634420151,"mib_per_s_cpu":1196.3958707001839,"mapped":17}
+{"bench":"bget","variant":"RS","git":"a540285","load1":48.71826171875,"set":"rand","order":"random","state":"warm_mapped","rep":4,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.386044355,"user_s":1.5246,"sys_s":0.794347,"cpu_s":2.318947,"minflt":1726,"majflt":0,"ops":200000,"miss":0,"mib":1903.4203672409058,"cpu_us_per_op":11.594735,"wall_us_per_op":11.930221775,"mib_per_s_wall":797.7305045701489,"mib_per_s_cpu":820.8123632152463,"mapped":0}
+lines:       15
+== bb2_rand_seq: bget --variants RS,V1,V1M --reps 5 --set rand --order seq --state warm_mapped
+{"bench":"bget","variant":"RS","git":"a540285","load1":47.69970703125,"set":"rand","order":"seq","state":"warm_mapped","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.295037759,"user_s":0.887697,"sys_s":0.37577,"cpu_s":1.263467,"minflt":11438,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":1233.8544921875,"wall_us_per_op":1264.6853115234373,"mib_per_s_wall":790.7105355682529,"mib_per_s_cpu":810.4683383103794,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":47.69970703125,"set":"rand","order":"seq","state":"warm_mapped","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.320645952,"user_s":0.900435,"sys_s":0.386879,"cpu_s":1.2873139999999998,"minflt":12279,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":1257.1425781249998,"wall_us_per_op":1289.6933125,"mib_per_s_wall":775.3781385913793,"mib_per_s_cpu":795.4547220025573,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":47.69970703125,"set":"rand","order":"seq","state":"warm_mapped","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":0.913666404,"user_s":0.860534,"sys_s":0.037453,"cpu_s":0.897987,"minflt":12667,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":876.9404296875,"wall_us_per_op":892.25234765625,"mib_per_s_wall":1120.7591693390098,"mib_per_s_cpu":1140.3283121025138,"mapped":17}
+{"bench":"bget","variant":"V1","git":"a540285","load1":47.0029296875,"set":"rand","order":"seq","state":"warm_mapped","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.341249793,"user_s":0.91206,"sys_s":0.39655,"cpu_s":1.30861,"minflt":11971,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":1277.939453125,"wall_us_per_op":1309.8142509765626,"mib_per_s_wall":763.4670330197024,"mib_per_s_cpu":782.5096858498712,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":47.0029296875,"set":"rand","order":"seq","state":"warm_mapped","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":0.914905072,"user_s":0.86454,"sys_s":0.044068,"cpu_s":0.908608,"minflt":13346,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":887.3125,"wall_us_per_op":893.461984375,"mib_per_s_wall":1119.241800421454,"mib_per_s_cpu":1126.9986616890892,"mapped":17}
+{"bench":"bget","variant":"RS","git":"a540285","load1":46.20166015625,"set":"rand","order":"seq","state":"warm_mapped","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.354748876,"user_s":0.904313,"sys_s":0.403338,"cpu_s":1.307651,"minflt":12051,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":1277.0029296875,"wall_us_per_op":1322.99694921875,"mib_per_s_wall":755.8596416949528,"mib_per_s_cpu":783.0835597571524,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":46.20166015625,"set":"rand","order":"seq","state":"warm_mapped","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":0.91004655,"user_s":0.857274,"sys_s":0.047347,"cpu_s":0.904621,"minflt":13268,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":883.4189453125,"wall_us_per_op":888.717333984375,"mib_per_s_wall":1125.2171660889214,"mib_per_s_cpu":1131.965762457427,"mapped":17}
+{"bench":"bget","variant":"RS","git":"a540285","load1":46.20166015625,"set":"rand","order":"seq","state":"warm_mapped","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.607585227,"user_s":0.926546,"sys_s":0.490609,"cpu_s":1.417155,"minflt":12822,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":1383.9404296875,"wall_us_per_op":1569.9074482421875,"mib_per_s_wall":636.9802252481137,"mib_per_s_cpu":722.5744537471202,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":45.54443359375,"set":"rand","order":"seq","state":"warm_mapped","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.417468022,"user_s":0.928248,"sys_s":0.426854,"cpu_s":1.355102,"minflt":12845,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":1323.341796875,"wall_us_per_op":1384.2461152343749,"mib_per_s_wall":722.4148863373794,"mib_per_s_cpu":755.6626733633335,"mapped":0}
+{"bench":"bget","variant":"RS","git":"a540285","load1":45.54443359375,"set":"rand","order":"seq","state":"warm_mapped","rep":3,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.312857694,"user_s":0.89168,"sys_s":0.383463,"cpu_s":1.275143,"minflt":12142,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":1245.2568359375,"wall_us_per_op":1282.0875917968751,"mib_per_s_wall":779.9779097764117,"mib_per_s_cpu":803.0471876487579,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":45.54443359375,"set":"rand","order":"seq","state":"warm_mapped","rep":3,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.31744156,"user_s":0.88149,"sys_s":0.402453,"cpu_s":1.283943,"minflt":11417,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":1253.8505859375,"wall_us_per_op":1286.5640234375,"mib_per_s_wall":777.2640784157439,"mib_per_s_cpu":797.5431931168283,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":44.93994140625,"set":"rand","order":"seq","state":"warm_mapped","rep":3,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":0.898679935,"user_s":0.852582,"sys_s":0.038771,"cpu_s":0.891353,"minflt":13288,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":870.4619140625,"wall_us_per_op":877.6171240234374,"mib_per_s_wall":1139.4490520142747,"mib_per_s_cpu":1148.8153402748408,"mapped":17}
+{"bench":"bget","variant":"V1","git":"a540285","load1":44.93994140625,"set":"rand","order":"seq","state":"warm_mapped","rep":4,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.326661263,"user_s":0.91104,"sys_s":0.384938,"cpu_s":1.2959779999999999,"minflt":12005,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":1265.6035156249998,"wall_us_per_op":1295.5676396484375,"mib_per_s_wall":771.8624403673418,"mib_per_s_cpu":790.1368696073546,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":44.2236328125,"set":"rand","order":"seq","state":"warm_mapped","rep":4,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":0.922653875,"user_s":0.86713,"sys_s":0.046221,"cpu_s":0.9133509999999999,"minflt":15091,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":891.9443359374999,"wall_us_per_op":901.0291748046875,"mib_per_s_wall":1109.8419762232072,"mib_per_s_cpu":1121.1461968071421,"mapped":17}
+{"bench":"bget","variant":"RS","git":"a540285","load1":44.2236328125,"set":"rand","order":"seq","state":"warm_mapped","rep":4,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.313013518,"user_s":0.869677,"sys_s":0.413698,"cpu_s":1.283375,"minflt":12996,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":1253.2958984375,"wall_us_per_op":1282.239763671875,"mib_per_s_wall":779.8853446381654,"mib_per_s_cpu":797.8961722022012,"mapped":0}
+lines:       15
+== bb2_z2_random: bget --variants RS,V1,V1M --reps 5 --set z2 --order random --state warm_mapped
+{"bench":"bget","variant":"RS","git":"a540285","load1":43.64501953125,"set":"z2","order":"random","state":"warm_mapped","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":5.456914972,"user_s":4.608226,"sys_s":0.733381,"cpu_s":5.341607,"minflt":1537,"majflt":0,"ops":200000,"miss":0,"mib":1906.4810256958008,"cpu_us_per_op":26.708035,"wall_us_per_op":27.28457486,"mib_per_s_wall":349.36975112827554,"mib_per_s_cpu":356.9115110295087,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":43.19287109375,"set":"z2","order":"random","state":"warm_mapped","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":5.562190449,"user_s":4.703499,"sys_s":0.743712,"cpu_s":5.447211,"minflt":1575,"majflt":0,"ops":200000,"miss":0,"mib":1906.4810256958008,"cpu_us_per_op":27.236055,"wall_us_per_op":27.810952245000003,"mib_per_s_wall":342.7572362320959,"mib_per_s_cpu":349.9921383063371,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":43.01708984375,"set":"z2","order":"random","state":"warm_mapped","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":4.560776403,"user_s":4.499806,"sys_s":0.027007,"cpu_s":4.526813000000001,"minflt":1374,"majflt":0,"ops":200000,"miss":0,"mib":1906.4810256958008,"cpu_us_per_op":22.634065000000003,"wall_us_per_op":22.803882015000003,"mib_per_s_wall":418.0167711010236,"mib_per_s_cpu":421.153033203669,"mapped":9}
+{"bench":"bget","variant":"V1","git":"a540285","load1":41.57421875,"set":"z2","order":"random","state":"warm_mapped","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":4.919046311,"user_s":4.126188,"sys_s":0.681511,"cpu_s":4.8076989999999995,"minflt":1551,"majflt":0,"ops":200000,"miss":0,"mib":1909.4093418121338,"cpu_us_per_op":24.038494999999998,"wall_us_per_op":24.595231554999998,"mib_per_s_wall":388.1665715450374,"mib_per_s_cpu":397.15659025495023,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":40.16650390625,"set":"z2","order":"random","state":"warm_mapped","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":4.283444938,"user_s":4.234028,"sys_s":0.029025,"cpu_s":4.263053,"minflt":1338,"majflt":0,"ops":200000,"miss":0,"mib":1909.4093418121338,"cpu_us_per_op":21.315265,"wall_us_per_op":21.417224689999998,"mib_per_s_wall":445.7648853783711,"mib_per_s_cpu":447.8971623885825,"mapped":9}
+{"bench":"bget","variant":"RS","git":"a540285","load1":40.15283203125,"set":"z2","order":"random","state":"warm_mapped","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":5.294156865,"user_s":4.367906,"sys_s":0.767282,"cpu_s":5.135187999999999,"minflt":1523,"majflt":0,"ops":200000,"miss":0,"mib":1909.4093418121338,"cpu_us_per_op":25.675939999999997,"wall_us_per_op":26.470784325,"mib_per_s_wall":360.66353727358506,"mib_per_s_cpu":371.82851763404454,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":39.09912109375,"set":"z2","order":"random","state":"warm_mapped","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":4.218135863,"user_s":4.176487,"sys_s":0.025153,"cpu_s":4.20164,"minflt":1328,"majflt":0,"ops":200000,"miss":0,"mib":1909.076421737671,"cpu_us_per_op":21.0082,"wall_us_per_op":21.090679314999996,"mib_per_s_wall":452.58770313289716,"mib_per_s_cpu":454.36458662276414,"mapped":9}
+{"bench":"bget","variant":"RS","git":"a540285","load1":36.857421875,"set":"z2","order":"random","state":"warm_mapped","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":5.340605298,"user_s":4.355158,"sys_s":0.786114,"cpu_s":5.141272000000001,"minflt":1551,"majflt":0,"ops":200000,"miss":0,"mib":1909.076421737671,"cpu_us_per_op":25.706360000000004,"wall_us_per_op":26.70302649,"mib_per_s_wall":357.46442869548883,"mib_per_s_cpu":371.3237544595327,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":36.86865234375,"set":"z2","order":"random","state":"warm_mapped","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":5.175440993,"user_s":4.332478,"sys_s":0.718521,"cpu_s":5.050999,"minflt":1457,"majflt":0,"ops":200000,"miss":0,"mib":1909.076421737671,"cpu_us_per_op":25.254995,"wall_us_per_op":25.877204965,"mib_per_s_wall":368.87222254485687,"mib_per_s_cpu":377.9601662438798,"mapped":0}
+{"bench":"bget","variant":"RS","git":"a540285","load1":35.7578125,"set":"z2","order":"random","state":"warm_mapped","rep":3,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":5.119607683,"user_s":4.27129,"sys_s":0.738195,"cpu_s":5.009485,"minflt":1533,"majflt":0,"ops":200000,"miss":0,"mib":1911.4862957000732,"cpu_us_per_op":25.047424999999997,"wall_us_per_op":25.598038415,"mib_per_s_wall":373.3657760627424,"mib_per_s_cpu":381.5734143729492,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":36.01708984375,"set":"z2","order":"random","state":"warm_mapped","rep":3,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":5.849873245,"user_s":4.645506,"sys_s":0.797305,"cpu_s":5.442811,"minflt":1505,"majflt":0,"ops":200000,"miss":0,"mib":1911.4862957000732,"cpu_us_per_op":27.214055,"wall_us_per_op":29.249366225000003,"mib_per_s_wall":326.75687414831725,"mib_per_s_cpu":351.19468519117663,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":34.814453125,"set":"z2","order":"random","state":"warm_mapped","rep":3,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":4.298947174,"user_s":4.241051,"sys_s":0.027269,"cpu_s":4.26832,"minflt":1382,"majflt":0,"ops":200000,"miss":0,"mib":1911.4862957000732,"cpu_us_per_op":21.3416,"wall_us_per_op":21.49473587,"mib_per_s_wall":444.64056391777217,"mib_per_s_cpu":447.8310660166232,"mapped":9}
+{"bench":"bget","variant":"V1","git":"a540285","load1":33.7080078125,"set":"z2","order":"random","state":"warm_mapped","rep":4,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":5.171859172,"user_s":4.374805,"sys_s":0.707112,"cpu_s":5.081917000000001,"minflt":1566,"majflt":0,"ops":200000,"miss":0,"mib":1906.565341949463,"cpu_us_per_op":25.409585000000003,"wall_us_per_op":25.859295859999996,"mib_per_s_wall":368.6421610765126,"mib_per_s_cpu":375.1665644971106,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":33.09033203125,"set":"z2","order":"random","state":"warm_mapped","rep":4,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":4.27803094,"user_s":4.226458,"sys_s":0.026101,"cpu_s":4.252559,"minflt":1434,"majflt":0,"ops":200000,"miss":0,"mib":1906.565341949463,"cpu_us_per_op":21.262794999999997,"wall_us_per_op":21.3901547,"mib_per_s_wall":445.6642246606713,"mib_per_s_cpu":448.33366026184774,"mapped":9}
+{"bench":"bget","variant":"RS","git":"a540285","load1":32.6025390625,"set":"z2","order":"random","state":"warm_mapped","rep":4,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":5.256148587,"user_s":4.384499,"sys_s":0.725833,"cpu_s":5.110332,"minflt":1567,"majflt":0,"ops":200000,"miss":0,"mib":1906.565341949463,"cpu_us_per_op":25.55166,"wall_us_per_op":26.280742935000003,"mib_per_s_wall":362.7304879974206,"mib_per_s_cpu":373.08052430829605,"mapped":0}
+lines:       15
+== bb2_z2_seq: bget --variants RS,V1,V1M --reps 5 --set z2 --order seq --state warm_mapped
+{"bench":"bget","variant":"RS","git":"a540285","load1":31.83349609375,"set":"z2","order":"seq","state":"warm_mapped","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.76135779,"user_s":2.314145,"sys_s":0.386518,"cpu_s":2.700663,"minflt":14030,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2637.3662109375,"wall_us_per_op":2696.638466796875,"mib_per_s_wall":370.83206084641427,"mib_per_s_cpu":379.1661529039351,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":31.83349609375,"set":"z2","order":"seq","state":"warm_mapped","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.878948704,"user_s":2.456712,"sys_s":0.378463,"cpu_s":2.835175,"minflt":14097,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2768.7255859375,"wall_us_per_op":2811.47334375,"mib_per_s_wall":355.68539258002704,"mib_per_s_cpu":361.17699965610586,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":31.4462890625,"set":"z2","order":"seq","state":"warm_mapped","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.419546877,"user_s":2.349339,"sys_s":0.058438,"cpu_s":2.4077770000000003,"minflt":13324,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2351.3447265625005,"wall_us_per_op":2362.838747070313,"mib_per_s_wall":423.21973991661577,"mib_per_s_cpu":425.288554546372,"mapped":9}
+{"bench":"bget","variant":"V1","git":"a540285","load1":30.609375,"set":"z2","order":"seq","state":"warm_mapped","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.828995514,"user_s":2.354047,"sys_s":0.421639,"cpu_s":2.775686,"minflt":14602,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2710.630859375,"wall_us_per_op":2762.690931640625,"mib_per_s_wall":361.965932760401,"mib_per_s_cpu":368.91780986754264,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":30.609375,"set":"z2","order":"seq","state":"warm_mapped","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.543085048,"user_s":2.399986,"sys_s":0.088327,"cpu_s":2.488313,"minflt":13872,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2429.9931640625,"wall_us_per_op":2483.4814921875,"mib_per_s_wall":402.66054051370446,"mib_per_s_cpu":411.5237914201308,"mapped":9}
+{"bench":"bget","variant":"RS","git":"a540285","load1":31.6015625,"set":"z2","order":"seq","state":"warm_mapped","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":3.007009032,"user_s":2.540037,"sys_s":0.39134,"cpu_s":2.931377,"minflt":16152,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2862.6728515625,"wall_us_per_op":2936.5322578125,"mib_per_s_wall":340.53772007426414,"mib_per_s_cpu":349.32388430420247,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":31.6015625,"set":"z2","order":"seq","state":"warm_mapped","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.459338104,"user_s":2.361812,"sys_s":0.077021,"cpu_s":2.438833,"minflt":13446,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2381.6728515625,"wall_us_per_op":2401.6973671875,"mib_per_s_wall":416.37219312566714,"mib_per_s_cpu":419.87294743018487,"mapped":9}
+{"bench":"bget","variant":"RS","git":"a540285","load1":32.19384765625,"set":"z2","order":"seq","state":"warm_mapped","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":3.063952222,"user_s":2.485319,"sys_s":0.458915,"cpu_s":2.9442340000000002,"minflt":13985,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2875.2285156250005,"wall_us_per_op":2992.140841796875,"mib_per_s_wall":334.2088667856518,"mib_per_s_cpu":347.7984426509577,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":31.37744140625,"set":"z2","order":"seq","state":"warm_mapped","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":3.128846779,"user_s":2.504712,"sys_s":0.496031,"cpu_s":3.000743,"minflt":13201,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2930.4130859375,"wall_us_per_op":3055.514432617187,"mib_per_s_wall":327.277131904579,"mib_per_s_cpu":341.24881737622985,"mapped":0}
+{"bench":"bget","variant":"RS","git":"a540285","load1":31.37744140625,"set":"z2","order":"seq","state":"warm_mapped","rep":3,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.91055111,"user_s":2.350374,"sys_s":0.462883,"cpu_s":2.813257,"minflt":13939,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2747.3212890625,"wall_us_per_op":2842.3350683593753,"mib_per_s_wall":351.82340433114746,"mib_per_s_cpu":363.99091871094606,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":31.74755859375,"set":"z2","order":"seq","state":"warm_mapped","rep":3,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":3.065479228,"user_s":2.504074,"sys_s":0.463932,"cpu_s":2.968006,"minflt":13072,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2898.443359375,"wall_us_per_op":2993.63205859375,"mib_per_s_wall":334.04238745016215,"mib_per_s_cpu":345.0127796237609,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":32.087890625,"set":"z2","order":"seq","state":"warm_mapped","rep":3,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.516574692,"user_s":2.432223,"sys_s":0.067813,"cpu_s":2.500036,"minflt":12973,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2441.44140625,"wall_us_per_op":2457.59247265625,"mib_per_s_wall":406.9022879611793,"mib_per_s_cpu":409.5941018449334,"mapped":9}
+{"bench":"bget","variant":"V1","git":"a540285","load1":32.087890625,"set":"z2","order":"seq","state":"warm_mapped","rep":4,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.822369174,"user_s":2.357528,"sys_s":0.413276,"cpu_s":2.770804,"minflt":13047,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2705.86328125,"wall_us_per_op":2756.2198964843747,"mib_per_s_wall":362.8157540243883,"mib_per_s_cpu":369.56782219168156,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":31.27978515625,"set":"z2","order":"seq","state":"warm_mapped","rep":4,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.4857748060000002,"user_s":2.400611,"sys_s":0.07246,"cpu_s":2.473071,"minflt":13127,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2415.1083984375,"wall_us_per_op":2427.5144589843753,"mib_per_s_wall":411.9439932886664,"mib_per_s_cpu":414.06008966180104,"mapped":9}
+{"bench":"bget","variant":"RS","git":"a540285","load1":30.37646484375,"set":"z2","order":"seq","state":"warm_mapped","rep":4,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.895187896,"user_s":2.428938,"sys_s":0.397681,"cpu_s":2.826619,"minflt":14844,"majflt":0,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2760.3701171875,"wall_us_per_op":2827.3319296874997,"mib_per_s_wall":353.69034300494326,"mib_per_s_cpu":362.2702599819785,"mapped":0}
+lines:       15
+== bb3_warm_fresh: bget --variants RS,V1,V1M --reps 3 --set rand --order random --state warm_fresh
+{"bench":"bget","variant":"RS","git":"a540285","load1":30.37646484375,"set":"rand","order":"random","state":"warm_fresh","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.198535874,"user_s":1.376746,"sys_s":0.772842,"cpu_s":2.149588,"minflt":1703,"majflt":0,"ops":200000,"miss":0,"mib":1903.1123332977295,"cpu_us_per_op":10.74794,"wall_us_per_op":10.99267937,"mib_per_s_wall":865.6271456854697,"mib_per_s_cpu":885.3381826181247,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":29.86572265625,"set":"rand","order":"random","state":"warm_fresh","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.308098726,"user_s":1.475552,"sys_s":0.777562,"cpu_s":2.253114,"minflt":1700,"majflt":0,"ops":200000,"miss":0,"mib":1903.1123332977295,"cpu_us_per_op":11.26557,"wall_us_per_op":11.540493629999999,"mib_per_s_wall":824.5367981272954,"mib_per_s_cpu":844.6586960525431,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":29.86572265625,"set":"rand","order":"random","state":"warm_fresh","rep":0,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.922445596,"user_s":1.674124,"sys_s":0.242114,"cpu_s":1.9162379999999999,"minflt":237664,"majflt":0,"ops":200000,"miss":0,"mib":1903.1123332977295,"cpu_us_per_op":9.58119,"wall_us_per_op":9.61222798,"mib_per_s_wall":989.9434019134289,"mib_per_s_cpu":993.1502941167693,"mapped":17}
+{"bench":"bget","variant":"V1","git":"a540285","load1":30.11669921875,"set":"rand","order":"random","state":"warm_fresh","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.5208639919999998,"user_s":1.51988,"sys_s":0.907238,"cpu_s":2.427118,"minflt":1770,"majflt":0,"ops":200000,"miss":0,"mib":1906.5942306518555,"cpu_us_per_op":12.13559,"wall_us_per_op":12.60431996,"mib_per_s_wall":756.3257028949048,"mib_per_s_cpu":785.5383342103084,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":30.11669921875,"set":"rand","order":"random","state":"warm_fresh","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.959899442,"user_s":1.710366,"sys_s":0.240775,"cpu_s":1.951141,"minflt":238023,"majflt":0,"ops":200000,"miss":0,"mib":1906.5942306518555,"cpu_us_per_op":9.755705,"wall_us_per_op":9.79949721,"mib_per_s_wall":972.8020682052194,"mib_per_s_cpu":977.1688620411624,"mapped":17}
+{"bench":"bget","variant":"RS","git":"a540285","load1":29.54638671875,"set":"rand","order":"random","state":"warm_fresh","rep":1,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.205388197,"user_s":1.456658,"sys_s":0.717535,"cpu_s":2.174193,"minflt":1860,"majflt":0,"ops":200000,"miss":0,"mib":1906.5942306518555,"cpu_us_per_op":10.870964999999998,"wall_us_per_op":11.026940985,"mib_per_s_wall":864.5163845736568,"mib_per_s_cpu":876.920416288644,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":29.54638671875,"set":"rand","order":"random","state":"warm_fresh","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":1.9689235790000001,"user_s":1.720718,"sys_s":0.2428,"cpu_s":1.9635179999999999,"minflt":237603,"majflt":0,"ops":200000,"miss":0,"mib":1900.6304607391357,"cpu_us_per_op":9.81759,"wall_us_per_op":9.844617895,"mib_per_s_wall":965.3144901156855,"mib_per_s_cpu":967.9720077631761,"mapped":17}
+{"bench":"bget","variant":"RS","git":"a540285","load1":30.46337890625,"set":"rand","order":"random","state":"warm_fresh","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.2884681000000002,"user_s":1.456698,"sys_s":0.775557,"cpu_s":2.2322550000000003,"minflt":1813,"majflt":0,"ops":200000,"miss":0,"mib":1900.6304607391357,"cpu_us_per_op":11.161275000000002,"wall_us_per_op":11.442340500000002,"mib_per_s_wall":830.5252149851403,"mib_per_s_cpu":851.4396700821078,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":30.46337890625,"set":"rand","order":"random","state":"warm_fresh","rep":2,"resident_mean":1,"resident_max":1,"cold_valid":"n/a","wall_s":2.392105146,"user_s":1.474249,"sys_s":0.816947,"cpu_s":2.291196,"minflt":1488,"majflt":0,"ops":200000,"miss":0,"mib":1900.6304607391357,"cpu_us_per_op":11.455979999999998,"wall_us_per_op":11.96052573,"mib_per_s_wall":794.5430258019,"mib_per_s_cpu":829.5363909238389,"mapped":0}
+lines:        9
+== bb3_cold: bget --variants RS,V1,V1M --reps 3 --set rand --order random --state cold
+{"bench":"bget","variant":"RS","git":"a540285","load1":29.81982421875,"set":"rand","order":"random","state":"cold","rep":0,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":23.096810706,"user_s":2.149342,"sys_s":4.951293,"cpu_s":7.100635,"minflt":1615,"majflt":0,"ops":200000,"miss":0,"mib":1903.1123332977295,"cpu_us_per_op":35.503175,"wall_us_per_op":115.48405353,"mib_per_s_wall":82.39719143575725,"mib_per_s_cpu":268.02001980072623,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":28.36962890625,"set":"rand","order":"random","state":"cold","rep":0,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":21.631270482,"user_s":2.108277,"sys_s":4.418274,"cpu_s":6.526551,"minflt":1445,"majflt":0,"ops":200000,"miss":0,"mib":1903.1123332977295,"cpu_us_per_op":32.632755,"wall_us_per_op":108.15635241000001,"mib_per_s_wall":87.97968361966366,"mib_per_s_cpu":291.5954128448133,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":28.17529296875,"set":"rand","order":"random","state":"cold","rep":0,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":11.553096173,"user_s":2.075979,"sys_s":2.424236,"cpu_s":4.500215,"minflt":865,"majflt":236607,"ops":200000,"miss":0,"mib":1903.1123332977295,"cpu_us_per_op":22.501075,"wall_us_per_op":57.765480865,"mib_per_s_wall":164.727472601273,"mib_per_s_cpu":422.89364692525345,"mapped":17}
+{"bench":"bget","variant":"V1","git":"a540285","load1":29.73388671875,"set":"rand","order":"random","state":"cold","rep":1,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":23.332620528,"user_s":2.223135,"sys_s":4.933159,"cpu_s":7.156294,"minflt":1449,"majflt":0,"ops":200000,"miss":0,"mib":1906.5942306518555,"cpu_us_per_op":35.78147,"wall_us_per_op":116.66310263999999,"mib_per_s_wall":81.71367756844425,"mib_per_s_cpu":266.42200986318556,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":29.50537109375,"set":"rand","order":"random","state":"cold","rep":1,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":10.594341725,"user_s":1.81024,"sys_s":2.040768,"cpu_s":3.851008,"minflt":907,"majflt":237020,"ops":200000,"miss":0,"mib":1906.5942306518555,"cpu_us_per_op":19.25504,"wall_us_per_op":52.971708625,"mib_per_s_wall":179.9634446520419,"mib_per_s_cpu":495.0896572149046,"mapped":17}
+{"bench":"bget","variant":"RS","git":"a540285","load1":26.33154296875,"set":"rand","order":"random","state":"cold","rep":1,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":23.329496003,"user_s":1.947222,"sys_s":3.992951,"cpu_s":5.940173,"minflt":1517,"majflt":0,"ops":200000,"miss":0,"mib":1906.5942306518555,"cpu_us_per_op":29.700865,"wall_us_per_op":116.647480015,"mib_per_s_wall":81.72462150089662,"mib_per_s_cpu":320.966111702783,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":25.94384765625,"set":"rand","order":"random","state":"cold","rep":2,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":11.168747807999999,"user_s":1.837859,"sys_s":2.055772,"cpu_s":3.893631,"minflt":868,"majflt":236556,"ops":200000,"miss":0,"mib":1900.6304607391357,"cpu_us_per_op":19.468155000000003,"wall_us_per_op":55.843739039999996,"mib_per_s_wall":170.17399742679694,"mib_per_s_cpu":488.1383111905406,"mapped":17}
+{"bench":"bget","variant":"RS","git":"a540285","load1":25.5205078125,"set":"rand","order":"random","state":"cold","rep":2,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":24.507590555,"user_s":2.051645,"sys_s":4.571997,"cpu_s":6.623642,"minflt":1579,"majflt":0,"ops":200000,"miss":0,"mib":1900.6304607391357,"cpu_us_per_op":33.11821,"wall_us_per_op":122.537952775,"mib_per_s_wall":77.55272622470723,"mib_per_s_cpu":286.94643532049827,"mapped":0}
+{"bench":"bget","variant":"V1","git":"a540285","load1":28.892578125,"set":"rand","order":"random","state":"cold","rep":2,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":23.188385695,"user_s":2.029035,"sys_s":4.283728,"cpu_s":6.312763,"minflt":1374,"majflt":0,"ops":200000,"miss":0,"mib":1900.6304607391357,"cpu_us_per_op":31.563814999999998,"wall_us_per_op":115.941928475,"mib_per_s_wall":81.96475967488153,"mib_per_s_cpu":301.07743007921187,"mapped":0}
+lines:        9
+== bb1_random: bb1 --variants pread,mmap --reps 5 --order random
+{"bench":"bb1","variant":"pread","git":"a540285","load1":28.58056640625,"order":"random","rep":0,"reads":200000,"acc":859986736,"wall_s":1.130799824,"user_s":0.231037,"sys_s":0.83818,"cpu_s":1.069217,"minflt":10,"majflt":0,"cpu_us_per_op":5.346085,"wall_us_per_op":5.65399912}
+{"bench":"bb1","variant":"mmap","git":"a540285","load1":28.58056640625,"order":"random","rep":0,"reads":200000,"acc":859986736,"wall_s":0.332651586,"user_s":0.320843,"sys_s":0.010207,"cpu_s":0.33105,"minflt":1,"majflt":0,"cpu_us_per_op":1.6552499999999999,"wall_us_per_op":1.66325793}
+{"bench":"bb1","variant":"mmap","git":"a540285","load1":28.58056640625,"order":"random","rep":1,"reads":200000,"acc":2445854326,"wall_s":0.295514774,"user_s":0.294156,"sys_s":0.000836,"cpu_s":0.294992,"minflt":1,"majflt":0,"cpu_us_per_op":1.4749599999999998,"wall_us_per_op":1.4775738699999998}
+{"bench":"bb1","variant":"pread","git":"a540285","load1":29.33447265625,"order":"random","rep":1,"reads":200000,"acc":2445854326,"wall_s":0.934281552,"user_s":0.228604,"sys_s":0.695,"cpu_s":0.923604,"minflt":10,"majflt":0,"cpu_us_per_op":4.6180200000000005,"wall_us_per_op":4.67140776}
+{"bench":"bb1","variant":"pread","git":"a540285","load1":29.33447265625,"order":"random","rep":2,"reads":200000,"acc":1469673483,"wall_s":0.863085417,"user_s":0.212477,"sys_s":0.634379,"cpu_s":0.846856,"minflt":10,"majflt":0,"cpu_us_per_op":4.234280000000001,"wall_us_per_op":4.3154270850000005}
+{"bench":"bb1","variant":"mmap","git":"a540285","load1":29.33447265625,"order":"random","rep":2,"reads":200000,"acc":1469673483,"wall_s":0.319255787,"user_s":0.317261,"sys_s":0.000978,"cpu_s":0.318239,"minflt":1,"majflt":0,"cpu_us_per_op":1.591195,"wall_us_per_op":1.596278935}
+{"bench":"bb1","variant":"mmap","git":"a540285","load1":29.33447265625,"order":"random","rep":3,"reads":200000,"acc":3819406821,"wall_s":0.301857875,"user_s":0.298752,"sys_s":0.001846,"cpu_s":0.30059800000000003,"minflt":1,"majflt":0,"cpu_us_per_op":1.5029900000000003,"wall_us_per_op":1.509289375}
+{"bench":"bb1","variant":"pread","git":"a540285","load1":29.1474609375,"order":"random","rep":3,"reads":200000,"acc":3819406821,"wall_s":0.848313124,"user_s":0.212989,"sys_s":0.627778,"cpu_s":0.8407669999999999,"minflt":10,"majflt":0,"cpu_us_per_op":4.203835,"wall_us_per_op":4.24156562}
+{"bench":"bb1","variant":"pread","git":"a540285","load1":29.1474609375,"order":"random","rep":4,"reads":200000,"acc":2658881554,"wall_s":0.935875291,"user_s":0.219876,"sys_s":0.694619,"cpu_s":0.914495,"minflt":10,"majflt":0,"cpu_us_per_op":4.572475,"wall_us_per_op":4.679376455}
+{"bench":"bb1","variant":"mmap","git":"a540285","load1":29.1474609375,"order":"random","rep":4,"reads":200000,"acc":2658881554,"wall_s":0.293054379,"user_s":0.291394,"sys_s":0.001043,"cpu_s":0.292437,"minflt":1,"majflt":0,"cpu_us_per_op":1.462185,"wall_us_per_op":1.4652718949999999}
+lines:       10
+== bb1_offset: bb1 --variants pread,mmap --reps 5 --order offset
+{"bench":"bb1","variant":"pread","git":"a540285","load1":29.1474609375,"order":"offset","rep":0,"reads":200000,"acc":18860951,"wall_s":0.871614952,"user_s":0.202168,"sys_s":0.614567,"cpu_s":0.816735,"minflt":1,"majflt":0,"cpu_us_per_op":4.083675,"wall_us_per_op":4.358074760000001}
+{"bench":"bb1","variant":"mmap","git":"a540285","load1":29.1474609375,"order":"offset","rep":0,"reads":200000,"acc":18860951,"wall_s":0.22444359,"user_s":0.223286,"sys_s":0.000663,"cpu_s":0.223949,"minflt":1,"majflt":0,"cpu_us_per_op":1.119745,"wall_us_per_op":1.12221795}
+{"bench":"bb1","variant":"mmap","git":"a540285","load1":28.49462890625,"order":"offset","rep":1,"reads":200000,"acc":18860951,"wall_s":0.229347587,"user_s":0.228536,"sys_s":0.000514,"cpu_s":0.22904999999999998,"minflt":1,"majflt":0,"cpu_us_per_op":1.1452499999999999,"wall_us_per_op":1.146737935}
+{"bench":"bb1","variant":"pread","git":"a540285","load1":28.49462890625,"order":"offset","rep":1,"reads":200000,"acc":18860951,"wall_s":0.788761283,"user_s":0.195115,"sys_s":0.566832,"cpu_s":0.761947,"minflt":10,"majflt":0,"cpu_us_per_op":3.809735,"wall_us_per_op":3.9438064150000005}
+{"bench":"bb1","variant":"pread","git":"a540285","load1":28.49462890625,"order":"offset","rep":2,"reads":200000,"acc":18860951,"wall_s":0.811220122,"user_s":0.19283,"sys_s":0.558774,"cpu_s":0.7516039999999999,"minflt":1,"majflt":0,"cpu_us_per_op":3.7580199999999997,"wall_us_per_op":4.0561006100000006}
+{"bench":"bb1","variant":"mmap","git":"a540285","load1":28.49462890625,"order":"offset","rep":2,"reads":200000,"acc":18860951,"wall_s":0.253995015,"user_s":0.246251,"sys_s":0.006598,"cpu_s":0.252849,"minflt":1,"majflt":0,"cpu_us_per_op":1.2642449999999998,"wall_us_per_op":1.269975075}
+{"bench":"bb1","variant":"mmap","git":"a540285","load1":27.97412109375,"order":"offset","rep":3,"reads":200000,"acc":18860951,"wall_s":0.235852505,"user_s":0.233204,"sys_s":0.001528,"cpu_s":0.234732,"minflt":1,"majflt":0,"cpu_us_per_op":1.1736600000000001,"wall_us_per_op":1.179262525}
+{"bench":"bb1","variant":"pread","git":"a540285","load1":27.97412109375,"order":"offset","rep":3,"reads":200000,"acc":18860951,"wall_s":0.761762551,"user_s":0.191578,"sys_s":0.554391,"cpu_s":0.745969,"minflt":10,"majflt":0,"cpu_us_per_op":3.729845,"wall_us_per_op":3.808812755}
+{"bench":"bb1","variant":"pread","git":"a540285","load1":27.97412109375,"order":"offset","rep":4,"reads":200000,"acc":18860951,"wall_s":0.774065044,"user_s":0.192754,"sys_s":0.558533,"cpu_s":0.7512869999999999,"minflt":10,"majflt":0,"cpu_us_per_op":3.7564349999999997,"wall_us_per_op":3.87032522}
+{"bench":"bb1","variant":"mmap","git":"a540285","load1":27.97412109375,"order":"offset","rep":4,"reads":200000,"acc":18860951,"wall_s":0.228068471,"user_s":0.225417,"sys_s":0.001426,"cpu_s":0.22684300000000002,"minflt":1,"majflt":0,"cpu_us_per_op":1.134215,"wall_us_per_op":1.140342355}
+lines:       10
+== bb4_t1: bb4 --variants V1,V1M --reps 3 --threads 1
+{"bench":"bb4","variant":"V1","git":"a540285","load1":28.69677734375,"threads":1,"gate":0,"lookup":0,"rep":0,"wall_s":1.144037154,"user_s":0.719679,"sys_s":0.410862,"cpu_s":1.130541,"minflt":1611,"majflt":0,"ops":100000,"miss":0,"ops_per_s":87409.74858234367,"cpu_us_per_op":11.30541}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":28.69677734375,"threads":1,"gate":0,"lookup":0,"rep":0,"wall_s":0.698847381,"user_s":0.690761,"sys_s":0.005595,"cpu_s":0.696356,"minflt":860,"majflt":0,"ops":100000,"miss":0,"ops_per_s":143092.7591900069,"cpu_us_per_op":6.963559999999999}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":28.69677734375,"threads":1,"gate":0,"lookup":0,"rep":1,"wall_s":0.730570238,"user_s":0.720432,"sys_s":0.00695,"cpu_s":0.727382,"minflt":992,"majflt":0,"ops":100000,"miss":0,"ops_per_s":136879.37832474365,"cpu_us_per_op":7.27382}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":28.69677734375,"threads":1,"gate":0,"lookup":0,"rep":1,"wall_s":1.113621406,"user_s":0.710766,"sys_s":0.391607,"cpu_s":1.102373,"minflt":1554,"majflt":0,"ops":100000,"miss":0,"ops_per_s":89797.1244636797,"cpu_us_per_op":11.02373}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":28.880859375,"threads":1,"gate":0,"lookup":0,"rep":2,"wall_s":1.223167885,"user_s":0.739761,"sys_s":0.44119,"cpu_s":1.180951,"minflt":1589,"majflt":0,"ops":100000,"miss":0,"ops_per_s":81754.92606233689,"cpu_us_per_op":11.80951}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":28.880859375,"threads":1,"gate":0,"lookup":0,"rep":2,"wall_s":0.724940987,"user_s":0.715834,"sys_s":0.006256,"cpu_s":0.72209,"minflt":916,"majflt":0,"ops":100000,"miss":0,"ops_per_s":137942.26260240408,"cpu_us_per_op":7.220899999999999}
+lines:        6
+== bb4_t1_gate: bb4 --variants V1,V1M --reps 3 --threads 1 --gate 1
+{"bench":"bb4","variant":"V1","git":"a540285","load1":28.880859375,"threads":1,"gate":1,"lookup":0,"rep":0,"wall_s":1.2226369240000001,"user_s":0.736127,"sys_s":0.458368,"cpu_s":1.1944949999999999,"minflt":1801,"majflt":0,"ops":100000,"miss":0,"ops_per_s":81790.43020624493,"cpu_us_per_op":11.944949999999999}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":28.72998046875,"threads":1,"gate":1,"lookup":0,"rep":0,"wall_s":0.706123446,"user_s":0.699489,"sys_s":0.004896,"cpu_s":0.704385,"minflt":760,"majflt":0,"ops":100000,"miss":0,"ops_per_s":141618.29714970264,"cpu_us_per_op":7.04385}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":28.72998046875,"threads":1,"gate":1,"lookup":0,"rep":1,"wall_s":0.855932204,"user_s":0.767583,"sys_s":0.009118,"cpu_s":0.776701,"minflt":1034,"majflt":0,"ops":100000,"miss":0,"ops_per_s":116831.68308503088,"cpu_us_per_op":7.767009999999999}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":28.72998046875,"threads":1,"gate":1,"lookup":0,"rep":1,"wall_s":1.115460842,"user_s":0.725987,"sys_s":0.37802,"cpu_s":1.1040070000000002,"minflt":1681,"majflt":0,"ops":100000,"miss":0,"ops_per_s":89649.04569908694,"cpu_us_per_op":11.040070000000002}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":29.71240234375,"threads":1,"gate":1,"lookup":0,"rep":2,"wall_s":1.253539833,"user_s":0.747391,"sys_s":0.415925,"cpu_s":1.163316,"minflt":1644,"majflt":0,"ops":100000,"miss":0,"ops_per_s":79774.09043371021,"cpu_us_per_op":11.63316}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":29.71240234375,"threads":1,"gate":1,"lookup":0,"rep":2,"wall_s":0.681356573,"user_s":0.675691,"sys_s":0.004087,"cpu_s":0.679778,"minflt":751,"majflt":0,"ops":100000,"miss":0,"ops_per_s":146766.0311247926,"cpu_us_per_op":6.7977799999999995}
+lines:        6
+== bb4_t1_lookup: bb4 --variants V1,V1M --reps 3 --threads 1 --lookup 1
+{"bench":"bb4","variant":"V1","git":"a540285","load1":29.71240234375,"threads":1,"gate":0,"lookup":1,"rep":0,"wall_s":0.026726012,"user_s":0.026413,"sys_s":0.000246,"cpu_s":0.026659,"minflt":19,"majflt":0,"ops":100000,"miss":0,"ops_per_s":3741673.093613817,"cpu_us_per_op":0.26659}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":29.71240234375,"threads":1,"gate":0,"lookup":1,"rep":0,"wall_s":0.026824405,"user_s":0.02655,"sys_s":0.000194,"cpu_s":0.026744,"minflt":19,"majflt":0,"ops":100000,"miss":0,"ops_per_s":3727948.485716645,"cpu_us_per_op":0.26744}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":29.71240234375,"threads":1,"gate":0,"lookup":1,"rep":1,"wall_s":0.026206433,"user_s":0.025759,"sys_s":0.000329,"cpu_s":0.026088,"minflt":16,"majflt":0,"ops":100000,"miss":0,"ops_per_s":3815856.9691647845,"cpu_us_per_op":0.26088}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":29.71240234375,"threads":1,"gate":0,"lookup":1,"rep":1,"wall_s":0.023752885,"user_s":0.023627,"sys_s":0.000151,"cpu_s":0.023777999999999997,"minflt":16,"majflt":0,"ops":100000,"miss":0,"ops_per_s":4210014.909767803,"cpu_us_per_op":0.23777999999999996}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":29.71240234375,"threads":1,"gate":0,"lookup":1,"rep":2,"wall_s":0.028158102,"user_s":0.026944,"sys_s":0.001109,"cpu_s":0.028052999999999998,"minflt":18,"majflt":0,"ops":100000,"miss":0,"ops_per_s":3551375.7283782833,"cpu_us_per_op":0.28053}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":28.9345703125,"threads":1,"gate":0,"lookup":1,"rep":2,"wall_s":0.024505173,"user_s":0.024377,"sys_s":0.000162,"cpu_s":0.024539,"minflt":17,"majflt":0,"ops":100000,"miss":0,"ops_per_s":4080771.0274071516,"cpu_us_per_op":0.24539}
+lines:        6
+== bb4_t4: bb4 --variants V1,V1M --reps 3 --threads 4
+{"bench":"bb4","variant":"V1","git":"a540285","load1":28.9345703125,"threads":4,"gate":0,"lookup":0,"rep":0,"wall_s":1.544230786,"user_s":3.136499,"sys_s":2.497155,"cpu_s":5.633654,"minflt":1896,"majflt":0,"ops":400000,"miss":0,"ops_per_s":259028.6397774225,"cpu_us_per_op":14.084135}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":28.9345703125,"threads":4,"gate":0,"lookup":0,"rep":0,"wall_s":1.125270501,"user_s":3.342902,"sys_s":0.772321,"cpu_s":4.115223,"minflt":1174,"majflt":0,"ops":400000,"miss":0,"ops_per_s":355470.08443261415,"cpu_us_per_op":10.2880575}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":28.458984375,"threads":4,"gate":0,"lookup":0,"rep":1,"wall_s":1.052126782,"user_s":3.252334,"sys_s":0.608127,"cpu_s":3.860461,"minflt":1100,"majflt":0,"ops":400000,"miss":0,"ops_per_s":380182.3191304335,"cpu_us_per_op":9.6511525}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":28.458984375,"threads":4,"gate":0,"lookup":0,"rep":1,"wall_s":1.55639302,"user_s":3.181611,"sys_s":2.531495,"cpu_s":5.713106,"minflt":1930,"majflt":0,"ops":400000,"miss":0,"ops_per_s":257004.4936336196,"cpu_us_per_op":14.282765}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":28.458984375,"threads":4,"gate":0,"lookup":0,"rep":2,"wall_s":1.458931359,"user_s":3.147291,"sys_s":2.300744,"cpu_s":5.448035,"minflt":2002,"majflt":0,"ops":400000,"miss":0,"ops_per_s":274173.2827472934,"cpu_us_per_op":13.620087499999999}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":27.94140625,"threads":4,"gate":0,"lookup":0,"rep":2,"wall_s":1.067938408,"user_s":3.270163,"sys_s":0.646409,"cpu_s":3.9165720000000004,"minflt":1152,"majflt":0,"ops":400000,"miss":0,"ops_per_s":374553.4358569488,"cpu_us_per_op":9.791430000000002}
+lines:        6
+== bb4_t4_gate: bb4 --variants V1,V1M --reps 3 --threads 4 --gate 1
+{"bench":"bb4","variant":"V1","git":"a540285","load1":27.94140625,"threads":4,"gate":1,"lookup":0,"rep":0,"wall_s":1.550341127,"user_s":3.166417,"sys_s":2.537423,"cpu_s":5.70384,"minflt":1695,"majflt":0,"ops":400000,"miss":0,"ops_per_s":258007.73328772048,"cpu_us_per_op":14.259599999999999}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":27.94140625,"threads":4,"gate":1,"lookup":0,"rep":0,"wall_s":1.072887676,"user_s":3.334957,"sys_s":0.611633,"cpu_s":3.94659,"minflt":1130,"majflt":0,"ops":400000,"miss":0,"ops_per_s":372825.607887773,"cpu_us_per_op":9.866475}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":28.98681640625,"threads":4,"gate":1,"lookup":0,"rep":1,"wall_s":1.081775545,"user_s":3.292572,"sys_s":0.648244,"cpu_s":3.940816,"minflt":1114,"majflt":0,"ops":400000,"miss":0,"ops_per_s":369762.47230658185,"cpu_us_per_op":9.852039999999999}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":28.98681640625,"threads":4,"gate":1,"lookup":0,"rep":1,"wall_s":1.572014123,"user_s":3.249614,"sys_s":2.56727,"cpu_s":5.816884,"minflt":1898,"majflt":0,"ops":400000,"miss":0,"ops_per_s":254450.64019949647,"cpu_us_per_op":14.54221}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":28.42724609375,"threads":4,"gate":1,"lookup":0,"rep":2,"wall_s":1.470399607,"user_s":3.163863,"sys_s":2.33721,"cpu_s":5.501073,"minflt":1644,"majflt":0,"ops":400000,"miss":0,"ops_per_s":272034.89316492993,"cpu_us_per_op":13.7526825}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":28.42724609375,"threads":4,"gate":1,"lookup":0,"rep":2,"wall_s":1.121314431,"user_s":3.308578,"sys_s":0.740709,"cpu_s":4.049287,"minflt":1120,"majflt":0,"ops":400000,"miss":0,"ops_per_s":356724.2059332776,"cpu_us_per_op":10.123217499999999}
+lines:        6
+== bb4_t4_lookup: bb4 --variants V1,V1M --reps 3 --threads 4 --lookup 1
+{"bench":"bb4","variant":"V1","git":"a540285","load1":28.42724609375,"threads":4,"gate":0,"lookup":1,"rep":0,"wall_s":0.436474329,"user_s":0.317249,"sys_s":0.988587,"cpu_s":1.305836,"minflt":38,"majflt":0,"ops":400000,"miss":0,"ops_per_s":916434.1942318445,"cpu_us_per_op":3.26459}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":28.42724609375,"threads":4,"gate":0,"lookup":1,"rep":0,"wall_s":0.368172835,"user_s":0.262786,"sys_s":0.863629,"cpu_s":1.126415,"minflt":38,"majflt":0,"ops":400000,"miss":0,"ops_per_s":1086446.2610338973,"cpu_us_per_op":2.8160374999999997}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":27.83203125,"threads":4,"gate":0,"lookup":1,"rep":1,"wall_s":0.441162484,"user_s":0.324197,"sys_s":0.994936,"cpu_s":1.3191330000000001,"minflt":31,"majflt":0,"ops":400000,"miss":0,"ops_per_s":906695.4115708533,"cpu_us_per_op":3.2978325}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":27.83203125,"threads":4,"gate":0,"lookup":1,"rep":1,"wall_s":0.436721214,"user_s":0.314195,"sys_s":0.976379,"cpu_s":1.2905739999999999,"minflt":31,"majflt":0,"ops":400000,"miss":0,"ops_per_s":915916.1203467436,"cpu_us_per_op":3.2264349999999995}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":27.83203125,"threads":4,"gate":0,"lookup":1,"rep":2,"wall_s":0.314009023,"user_s":0.210928,"sys_s":0.783983,"cpu_s":0.994911,"minflt":33,"majflt":0,"ops":400000,"miss":0,"ops_per_s":1273848.7454228345,"cpu_us_per_op":2.4872775}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":27.83203125,"threads":4,"gate":0,"lookup":1,"rep":2,"wall_s":0.44406452,"user_s":0.320856,"sys_s":0.997912,"cpu_s":1.318768,"minflt":34,"majflt":0,"ops":400000,"miss":0,"ops_per_s":900770.0052235653,"cpu_us_per_op":3.29692}
+lines:        6
+== bb4_t16: bb4 --variants V1,V1M --reps 3 --threads 16
+{"bench":"bb4","variant":"V1","git":"a540285","load1":28.48583984375,"threads":16,"gate":0,"lookup":0,"rep":0,"wall_s":3.696579393,"user_s":14.918123,"sys_s":33.491142,"cpu_s":48.409265000000005,"minflt":2121,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":432832.5811234646,"cpu_us_per_op":30.255790625000003}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":29.00732421875,"threads":16,"gate":0,"lookup":0,"rep":0,"wall_s":3.430400008,"user_s":15.187696,"sys_s":30.897263,"cpu_s":46.084959,"minflt":1351,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":466417.9093600329,"cpu_us_per_op":28.803099375}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":29.08642578125,"threads":16,"gate":0,"lookup":0,"rep":1,"wall_s":3.443749616,"user_s":15.054541,"sys_s":33.167917,"cpu_s":48.222458,"minflt":1265,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":464609.85216992616,"cpu_us_per_op":30.13903625}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":29.08642578125,"threads":16,"gate":0,"lookup":0,"rep":1,"wall_s":3.47539586,"user_s":14.613297,"sys_s":33.982312,"cpu_s":48.595608999999996,"minflt":2166,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":460379.2098664697,"cpu_us_per_op":30.372255624999998}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":30.4404296875,"threads":16,"gate":0,"lookup":0,"rep":2,"wall_s":3.342191369,"user_s":14.462813,"sys_s":32.24834,"cpu_s":46.711152999999996,"minflt":2218,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":478727.82355928584,"cpu_us_per_op":29.194470624999997}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":30.24462890625,"threads":16,"gate":0,"lookup":0,"rep":2,"wall_s":3.26362766,"user_s":14.578618,"sys_s":32.307734,"cpu_s":46.886352,"minflt":1370,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":490252.0038085472,"cpu_us_per_op":29.30397}
+lines:        6
+== bb4_t16_gate: bb4 --variants V1,V1M --reps 3 --threads 16 --gate 1
+{"bench":"bb4","variant":"V1","git":"a540285","load1":31.666015625,"threads":16,"gate":1,"lookup":0,"rep":0,"wall_s":3.31706511,"user_s":14.425412,"sys_s":32.867591,"cpu_s":47.293003,"minflt":2190,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":482354.11333243316,"cpu_us_per_op":29.558126875}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":31.666015625,"threads":16,"gate":1,"lookup":0,"rep":0,"wall_s":3.265263408,"user_s":14.710365,"sys_s":32.307245,"cpu_s":47.017610000000005,"minflt":1407,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":490006.40992085007,"cpu_us_per_op":29.38600625}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":30.4111328125,"threads":16,"gate":1,"lookup":0,"rep":1,"wall_s":3.358908397,"user_s":14.748463,"sys_s":32.584066,"cpu_s":47.332529,"minflt":1389,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":476345.2321084539,"cpu_us_per_op":29.582830625}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":31.5791015625,"threads":16,"gate":1,"lookup":0,"rep":1,"wall_s":3.335902708,"user_s":14.395079,"sys_s":33.270801,"cpu_s":47.66588,"minflt":2234,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":479630.29502118204,"cpu_us_per_op":29.791175000000003}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":31.29248046875,"threads":16,"gate":1,"lookup":0,"rep":2,"wall_s":3.317132345,"user_s":14.409123,"sys_s":33.027612,"cpu_s":47.436735,"minflt":2272,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":482344.3364904393,"cpu_us_per_op":29.647959375}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":31.29248046875,"threads":16,"gate":1,"lookup":0,"rep":2,"wall_s":3.333575497,"user_s":14.893367,"sys_s":32.090272,"cpu_s":46.983639,"minflt":1388,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":479965.130965204,"cpu_us_per_op":29.364774374999996}
+lines:        6
+== bb4_t16_lookup: bb4 --variants V1,V1M --reps 3 --threads 16 --lookup 1
+{"bench":"bb4","variant":"V1","git":"a540285","load1":32.14990234375,"threads":16,"gate":0,"lookup":1,"rep":0,"wall_s":1.257907603,"user_s":1.163871,"sys_s":15.740367,"cpu_s":16.904238,"minflt":80,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":1271953.5172409639,"cpu_us_per_op":10.56514875}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":32.14990234375,"threads":16,"gate":0,"lookup":1,"rep":0,"wall_s":1.2777239,"user_s":1.183877,"sys_s":16.030123,"cpu_s":17.214,"minflt":86,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":1252226.7134550742,"cpu_us_per_op":10.75875}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":33.3388671875,"threads":16,"gate":0,"lookup":1,"rep":1,"wall_s":1.334173342,"user_s":1.242173,"sys_s":16.881055,"cpu_s":18.123228,"minflt":86,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":1199244.4681899513,"cpu_us_per_op":11.327017500000002}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":33.3388671875,"threads":16,"gate":0,"lookup":1,"rep":1,"wall_s":1.435864067,"user_s":1.290029,"sys_s":17.751593,"cpu_s":19.041622,"minflt":82,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":1114311.6098329104,"cpu_us_per_op":11.901013749999999}
+{"bench":"bb4","variant":"V1","git":"a540285","load1":33.3388671875,"threads":16,"gate":0,"lookup":1,"rep":2,"wall_s":1.40671457,"user_s":1.250642,"sys_s":17.482,"cpu_s":18.732642,"minflt":81,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":1137402.0246338956,"cpu_us_per_op":11.707901249999999}
+{"bench":"bb4","variant":"V1M","git":"a540285","load1":33.5517578125,"threads":16,"gate":0,"lookup":1,"rep":2,"wall_s":1.364228812,"user_s":1.232758,"sys_s":16.908188,"cpu_s":18.140946,"minflt":73,"majflt":0,"ops":1600000,"miss":0,"ops_per_s":1172823.7858093267,"cpu_us_per_op":11.33809125}
+lines:        6
+== bb5_random: bget --variants V1M,V1R --reps 3 --set rand --order random --state cold
+{"bench":"bget","variant":"V1M","git":"a540285","load1":32.56640625,"set":"rand","order":"random","state":"cold","rep":0,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":10.193015665,"user_s":1.793533,"sys_s":2.002923,"cpu_s":3.796456,"minflt":847,"majflt":236607,"ops":200000,"miss":0,"mib":1903.1123332977295,"cpu_us_per_op":18.982280000000003,"wall_us_per_op":50.96507832500001,"mib_per_s_wall":186.70748636563872,"mib_per_s_cpu":501.2865507456769,"mapped":17}
+{"bench":"bget","variant":"V1R","git":"a540285","load1":30.03271484375,"set":"rand","order":"random","state":"cold","rep":0,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":39.583986478,"user_s":2.328341,"sys_s":8.803831,"cpu_s":11.132172,"minflt":846,"majflt":236607,"ops":200000,"miss":0,"mib":1903.1123332977295,"cpu_us_per_op":55.66086000000001,"wall_us_per_op":197.91993238999999,"mib_per_s_wall":48.07783405937251,"mib_per_s_cpu":170.95606619244919,"mapped":17}
+{"bench":"bget","variant":"V1R","git":"a540285","load1":26.8291015625,"set":"rand","order":"random","state":"cold","rep":1,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":43.603687871,"user_s":2.32873,"sys_s":9.01868,"cpu_s":11.34741,"minflt":895,"majflt":237020,"ops":200000,"miss":0,"mib":1906.5942306518555,"cpu_us_per_op":56.737049999999996,"wall_us_per_op":218.018439355,"mib_per_s_wall":43.72552698506715,"mib_per_s_cpu":168.02021171807976,"mapped":17}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":27.353515625,"set":"rand","order":"random","state":"cold","rep":1,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":11.323398881,"user_s":1.867597,"sys_s":2.183895,"cpu_s":4.051492,"minflt":898,"majflt":237020,"ops":200000,"miss":0,"mib":1906.5942306518555,"cpu_us_per_op":20.25746,"wall_us_per_op":56.61699440499999,"mib_per_s_wall":168.37649637610215,"mib_per_s_cpu":470.5906442989041,"mapped":17}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":27.03271484375,"set":"rand","order":"random","state":"cold","rep":2,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":11.797281843,"user_s":1.824244,"sys_s":2.157177,"cpu_s":3.981421,"minflt":906,"majflt":236556,"ops":200000,"miss":0,"mib":1900.6304607391357,"cpu_us_per_op":19.907105,"wall_us_per_op":58.986409215,"mib_per_s_wall":161.10748950758418,"mib_per_s_cpu":477.37490226206563,"mapped":17}
+{"bench":"bget","variant":"V1R","git":"a540285","load1":24.21142578125,"set":"rand","order":"random","state":"cold","rep":2,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":41.904597039,"user_s":2.276524,"sys_s":8.874489,"cpu_s":11.151013,"minflt":882,"majflt":236556,"ops":200000,"miss":0,"mib":1900.6304607391357,"cpu_us_per_op":55.755065,"wall_us_per_op":209.52298519500002,"mib_per_s_wall":45.35613262120732,"mib_per_s_cpu":170.4446457679796,"mapped":17}
+lines:        6
+== bb5_seq: bget --variants V1M,V1R --reps 3 --set rand --order seq --state cold
+{"bench":"bget","variant":"V1M","git":"a540285","load1":23.7236328125,"set":"rand","order":"seq","state":"cold","rep":0,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":5.8339523159999995,"user_s":1.194166,"sys_s":1.444774,"cpu_s":2.63894,"minflt":9685,"majflt":264137,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2577.08984375,"wall_us_per_op":5697.21905859375,"mib_per_s_wall":175.52423203590683,"mib_per_s_cpu":388.0345896458427,"mapped":17}
+{"bench":"bget","variant":"V1R","git":"a540285","load1":25.90771484375,"set":"rand","order":"seq","state":"cold","rep":0,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":31.345676902,"user_s":1.707079,"sys_s":8.649284,"cpu_s":10.356363,"minflt":8530,"majflt":264137,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":10113.6357421875,"wall_us_per_op":30611.012599609378,"mib_per_s_wall":32.667981718865484,"mib_per_s_cpu":98.87641057000415,"mapped":17}
+{"bench":"bget","variant":"V1R","git":"a540285","load1":24.83837890625,"set":"rand","order":"seq","state":"cold","rep":1,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":26.693672924,"user_s":1.643298,"sys_s":8.253888,"cpu_s":9.897186,"minflt":7083,"majflt":264137,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":9665.220703125,"wall_us_per_op":26068.039964843752,"mib_per_s_wall":38.36115033384306,"mib_per_s_cpu":103.46375222209626,"mapped":17}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":24.53076171875,"set":"rand","order":"seq","state":"cold","rep":1,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":5.816296016,"user_s":1.199354,"sys_s":1.532145,"cpu_s":2.7314990000000003,"minflt":9192,"majflt":264137,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2667.4794921875005,"wall_us_per_op":5679.976578125,"mib_per_s_wall":176.05706401171588,"mib_per_s_cpu":374.885731241344,"mapped":17}
+{"bench":"bget","variant":"V1M","git":"a540285","load1":23.98095703125,"set":"rand","order":"seq","state":"cold","rep":2,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":5.657917533,"user_s":1.201002,"sys_s":1.46472,"cpu_s":2.6657219999999997,"minflt":8271,"majflt":264137,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":2603.2441406249995,"wall_us_per_op":5525.310090820312,"mib_per_s_wall":180.98531730579043,"mib_per_s_cpu":384.13608020641317,"mapped":17}
+{"bench":"bget","variant":"V1R","git":"a540285","load1":23.8876953125,"set":"rand","order":"seq","state":"cold","rep":2,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":26.548192785,"user_s":1.704766,"sys_s":8.22846,"cpu_s":9.933226,"minflt":8670,"majflt":264137,"ops":1024,"miss":0,"mib":1024,"cpu_us_per_op":9700.416015625,"wall_us_per_op":25925.969516601563,"mib_per_s_wall":38.57136371928753,"mib_per_s_cpu":103.0883622299543,"mapped":17}
+lines:        6
+fs_usage: needs root, not run
+== bb6: bb6 --variants V1,V1M --reps 1 --set rand
+{"bench":"bb6","variant":"V1","git":"a540285","load1":25.2578125,"objects":108021,"miss":0,"mapped":0,"rss_open_mib":35.359375,"rss_pass_mib":41.40234375,"rss_unmap_mib":41.40625,"footprint_open_mib":20.49609375,"footprint_pass_mib":24.38671875,"footprint_unmap_mib":24.38671875}
+{"bench":"bb6","variant":"V1M","git":"a540285","load1":25.2578125,"objects":108021,"miss":0,"mapped":17,"rss_open_mib":34.69140625,"rss_pass_mib":1070.6328125,"rss_unmap_mib":38.8515625,"footprint_open_mib":18.234375,"footprint_pass_mib":21.4921875,"footprint_unmap_mib":21.4921875}
+lines:        2
+== bb7: bb7 --variants RS,V1,V1M --reps 1 --nofile 256
+{"bench":"bb7","variant":"RS","git":"a540285","load1":25.2578125,"nofile":256,"setrlimit":"ok","objects":17992,"arenas":2000,"miss":15715,"first_miss":2277,"fds_before":3,"fds_after":256,"mapped":0,"wall_s":0.065771527,"user_s":0.039783,"sys_s":0.025464,"cpu_s":0.065247,"minflt":141,"majflt":0}
+{"bench":"bb7","variant":"V1","git":"a540285","load1":25.2578125,"nofile":256,"setrlimit":"ok","objects":13994,"arenas":2000,"miss":12223,"first_miss":1771,"fds_before":3,"fds_after":256,"mapped":0,"wall_s":0.055854757,"user_s":0.031145,"sys_s":0.024235,"cpu_s":0.05538,"minflt":71,"majflt":0}
+{"bench":"bb7","variant":"V1M","git":"a540285","load1":25.2578125,"nofile":256,"setrlimit":"ok","objects":13994,"arenas":2000,"miss":0,"first_miss":-1,"fds_before":3,"fds_after":3,"mapped":2000,"wall_s":1.217851594,"user_s":0.155292,"sys_s":0.340732,"cpu_s":0.496024,"minflt":15877,"majflt":12278}
+lines:        3

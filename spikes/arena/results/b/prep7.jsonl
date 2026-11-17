@@ -1,0 +1,2 @@
+{"bench":"bprep7","variant":"V1","git":"a540285","load1":51.0732421875,"wall_s":197.205459999,"user_s":1.066722,"sys_s":5.096372,"cpu_s":6.163093999999999,"minflt":6602,"majflt":0,"objects":13994,"arenas":2000}
+{"bench":"bprep7","variant":"RS","git":"a540285","load1":40.68359375,"wall_s":145.672851466,"user_s":0.973645,"sys_s":3.577004,"cpu_s":4.550649,"minflt":2917,"majflt":0,"objects":17992,"arenas":2000}

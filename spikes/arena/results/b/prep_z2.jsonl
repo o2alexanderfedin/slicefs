@@ -1,0 +1,2 @@
+{"bench":"bprep","variant":"V1","git":"a540285","load1":41.447265625,"set":"z2","mib":1024,"wall_s":29.160952318,"user_s":16.406699,"sys_s":11.232738,"cpu_s":27.639437,"minflt":125155,"majflt":0,"objects":107666,"files":128,"arenas":9,"stored_mib":533.7018852233887}
+{"bench":"bprep","variant":"RS","git":"a540285","load1":38.97216796875,"set":"z2","mib":1024,"wall_s":30.792578536,"user_s":16.537611,"sys_s":12.288927,"cpu_s":28.826538,"minflt":117152,"majflt":0,"objects":107666,"files":128,"arenas":9,"stored_mib":533.7018852233887}
