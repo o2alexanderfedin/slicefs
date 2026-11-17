@@ -1,0 +1,1 @@
+{"bench":"crashloop","variant":"V1M","git":"cce2161","load1":36.3740234375,"cfg":"kills=50 size_mib=4","kills":50,"child_early_exits":0,"roots_checked":29328,"roots_bad":0,"roots_final":1332,"arenas_final":4,"reopen_ms_max":41.592911,"wall_s":21.780393613}

@@ -140,6 +140,44 @@ pub fn resident_fraction(path: &Path) -> io::Result<f64> {
     Ok(ArenaMap::open(path, len, Advice::Default)?.resident())
 }
 
+/// (resident size, phys_footprint) of this process, bytes (B-B6).
+pub fn footprint() -> (u64, u64) {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: zeroed rusage_info_v2 is a valid out buffer of the flavor.
+        let mut ri: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+        let r = unsafe {
+            libc::proc_pid_rusage(
+                libc::getpid(),
+                libc::RUSAGE_INFO_V2,
+                &mut ri as *mut libc::rusage_info_v2 as *mut libc::rusage_info_t,
+            )
+        };
+        if r == 0 {
+            return (ri.ri_resident_size, ri.ri_phys_footprint);
+        }
+    }
+    (0, 0)
+}
+
+/// Set RLIMIT_NOFILE (soft) to `n` (B-B7). True on success.
+pub fn set_nofile(n: u64) -> bool {
+    let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: plain syscalls with valid structs.
+    unsafe {
+        libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl);
+        rl.rlim_cur = n;
+        libc::setrlimit(libc::RLIMIT_NOFILE, &rl) == 0
+    }
+}
+
+/// Number of open fds below `max` (`fcntl(F_GETFD)` on each; works at
+/// EMFILE, unlike listing /dev/fd).
+pub fn open_fds(max: i32) -> usize {
+    // SAFETY: F_GETFD on any number is harmless.
+    (0..max).filter(|&fd| unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1).count()
+}
+
 /// The mmap read path (spike B).
 pub struct MmapPath {
     dir: PathBuf,
