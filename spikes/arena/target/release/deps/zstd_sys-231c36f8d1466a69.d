@@ -1,9 +1,0 @@
-/Users/alexanderfedin/projects/slicefs/.claude/worktrees/wf_6fd0291a-cdd-5/spikes/arena/target/release/deps/zstd_sys-231c36f8d1466a69.d: /Users/alexanderfedin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-sys-2.1.3+zstd.1.5.7/src/lib.rs /Users/alexanderfedin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-sys-2.1.3+zstd.1.5.7/src/bindings_zstd.rs /Users/alexanderfedin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-sys-2.1.3+zstd.1.5.7/src/bindings_zdict.rs
-
-/Users/alexanderfedin/projects/slicefs/.claude/worktrees/wf_6fd0291a-cdd-5/spikes/arena/target/release/deps/libzstd_sys-231c36f8d1466a69.rlib: /Users/alexanderfedin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-sys-2.1.3+zstd.1.5.7/src/lib.rs /Users/alexanderfedin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-sys-2.1.3+zstd.1.5.7/src/bindings_zstd.rs /Users/alexanderfedin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-sys-2.1.3+zstd.1.5.7/src/bindings_zdict.rs
-
-/Users/alexanderfedin/projects/slicefs/.claude/worktrees/wf_6fd0291a-cdd-5/spikes/arena/target/release/deps/libzstd_sys-231c36f8d1466a69.rmeta: /Users/alexanderfedin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-sys-2.1.3+zstd.1.5.7/src/lib.rs /Users/alexanderfedin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-sys-2.1.3+zstd.1.5.7/src/bindings_zstd.rs /Users/alexanderfedin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-sys-2.1.3+zstd.1.5.7/src/bindings_zdict.rs
-
-/Users/alexanderfedin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-sys-2.1.3+zstd.1.5.7/src/lib.rs:
-/Users/alexanderfedin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-sys-2.1.3+zstd.1.5.7/src/bindings_zstd.rs:
-/Users/alexanderfedin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-sys-2.1.3+zstd.1.5.7/src/bindings_zdict.rs:
