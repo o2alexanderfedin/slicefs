@@ -7,7 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// The two kinds of file of one pack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -31,6 +31,9 @@ impl Kind {
 pub fn pack_name(num: u64, kind: Kind) -> String {
     format!("{num:016x}.{}", kind.ext())
 }
+
+/// Punched ranges must start and end on a multiple of this.
+pub const PUNCH_BLOCK: u64 = 4096;
 
 /// Reads of an open pack.
 pub trait PackRead: Send + Sync {
@@ -67,6 +70,15 @@ pub trait PackIo: Send + Sync {
     fn open_rw(&self, num: u64) -> io::Result<Box<dyn PackFile>>;
     /// Open a pack for reads.
     fn open_read(&self, num: u64) -> io::Result<Arc<dyn PackRead>>;
+    /// True if `punch` frees disk blocks here. GC punches only then; else
+    /// it keeps dead records in the index, so that compaction still counts
+    /// their bytes.
+    fn can_punch(&self) -> bool;
+    /// Free the disk blocks of `(offset, length)` ranges of a pack; the
+    /// ranges read as zeros after this, and the file length does not change.
+    /// Each range is aligned to [`PUNCH_BLOCK`]. An error of kind
+    /// `Unsupported` means the file system cannot punch holes.
+    fn punch(&self, num: u64, ranges: &[(u64, u64)]) -> io::Result<()>;
 }
 
 // ── Files ─────────────────────────────────────────────────────────────────────
@@ -74,11 +86,26 @@ pub trait PackIo: Send + Sync {
 /// Packs as files in a directory, with pread and pwrite.
 pub struct FileIo {
     dir: PathBuf,
+    /// Result of the hole probe (see `can_punch`).
+    punches: OnceLock<bool>,
 }
 
 impl FileIo {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        FileIo { dir: dir.into() }
+        FileIo { dir: dir.into(), punches: OnceLock::new() }
+    }
+
+    /// Punch a hole in a small probe file in the pack directory.
+    fn probe_punch(&self) -> bool {
+        let path = self.dir.join("punch-probe.tmp");
+        let ok = (|| -> io::Result<()> {
+            let f = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path)?;
+            f.write_all_at(&[1u8; 3 * PUNCH_BLOCK as usize], 0)?;
+            punch_hole(&f, PUNCH_BLOCK, PUNCH_BLOCK)
+        })()
+        .is_ok();
+        let _ = fs::remove_file(&path);
+        ok
     }
 
     fn path(&self, num: u64, kind: Kind) -> PathBuf {
@@ -159,6 +186,52 @@ impl PackIo for FileIo {
     fn open_read(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
         Ok(Arc::new(FilePack(File::open(self.path(num, Kind::Pack))?)))
     }
+
+    fn can_punch(&self) -> bool {
+        *self.punches.get_or_init(|| self.probe_punch())
+    }
+
+    fn punch(&self, num: u64, ranges: &[(u64, u64)]) -> io::Result<()> {
+        let f = OpenOptions::new().write(true).open(self.path(num, Kind::Pack))?;
+        for &(offset, len) in ranges {
+            punch_hole(&f, offset, len)?;
+        }
+        Ok(())
+    }
+}
+
+fn unsupported_if(e: io::Error) -> io::Error {
+    match e.raw_os_error() {
+        Some(libc::EOPNOTSUPP) | Some(libc::ENOTSUP) => io::Error::new(io::ErrorKind::Unsupported, e),
+        _ => e,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn punch_hole(f: &File, offset: u64, len: u64) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let arg = libc::fpunchhole_t { fp_flags: 0, reserved: 0, fp_offset: offset as libc::off_t, fp_length: len as libc::off_t };
+    // SAFETY: fcntl F_PUNCHHOLE on a valid fd with a valid argument.
+    if unsafe { libc::fcntl(f.as_raw_fd(), libc::F_PUNCHHOLE, &arg) } == -1 {
+        return Err(unsupported_if(io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn punch_hole(f: &File, offset: u64, len: u64) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let mode = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
+    // SAFETY: fallocate on a valid fd.
+    if unsafe { libc::fallocate(f.as_raw_fd(), mode, offset as libc::off_t, len as libc::off_t) } == -1 {
+        return Err(unsupported_if(io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn punch_hole(_: &File, _: u64, _: u64) -> io::Result<()> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
 /// `fsync`, and on macOS `F_FULLFSYNC` (a plain fsync there does not flush

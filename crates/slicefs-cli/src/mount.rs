@@ -535,6 +535,11 @@ pub fn run_mount(
         Some(store_path.to_path_buf()),
     );
     fs.set_auto_snapshot(auto_snapshot);
+    if fs.content().punches_holes() {
+        println!("Chunk store: GC frees space with hole punching and compaction.");
+    } else {
+        println!("Chunk store: this file system cannot punch holes; GC frees space by compaction only.");
+    }
     fs.content().set_zstd_level(zstd_level);
     if zstd_level > 0 {
         println!("Compression of new data: zstd level {zstd_level}.");
