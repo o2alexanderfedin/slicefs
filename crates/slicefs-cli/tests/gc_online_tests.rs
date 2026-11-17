@@ -174,7 +174,8 @@ fn a_parallel_mark_finds_the_same_live_set_as_one_thread() {
     let many = many.with_threads(8);
     let live_many = many.mark(&no_stop()).unwrap().unwrap();
     let content = fs.gc_content(&many, boundary, &no_stop()).unwrap().unwrap();
-    assert!(content.removed_objects > 30, "{content:?}");
+    // junk.bin (300,000 random bytes) is the garbage: all of it goes.
+    assert!(content.removed_bytes >= 300_000, "{content:?}");
     assert_eq!(live_one, live_many);
     let stats = many.sweep(&live_many, &no_stop()).unwrap();
     assert!(stats.objects_removed > 0, "{stats:?}");

@@ -22,7 +22,9 @@ Measured on the macOS CI round trip (Boost 1.85, 77,655 files, FSKit):
 
 ## Goals
 
-- Chunking: FastCDC v2020, average 8 KiB (min 2 KiB, max 32 KiB).
+- Chunking: FastCDC v2020, average 8 KiB (min 4 KiB, max 32 KiB). The minimum is one
+  4 KiB disk block; min 2 KiB stored less than 1 % less data on source trees and
+  tars, with 5-9 % more chunks.
 - Object ID: BLAKE3 of the uncompressed bytes, 224 bits (28 bytes, the size
   of the `Digest224` that the metadata already uses, so the metadata types
   do not change; collision strength 112 bits, the same as the SHA-224 used
