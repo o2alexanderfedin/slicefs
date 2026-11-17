@@ -8,7 +8,7 @@ use metadata::segment::{SegmentEntry, SegmentReader, SegmentWriter};
 use tempfile::TempDir;
 
 fn root(i: u32) -> SegmentEntry {
-    SegmentEntry::RootUpdate { root: [i, i + 1, i + 2, i + 3, i + 4, i + 5, i + 6] }
+    SegmentEntry::RootUpdate { root: slicefs_traits::key::ObjectKey::example(i) }
 }
 
 /// Write `n` records; return the file length after each record.

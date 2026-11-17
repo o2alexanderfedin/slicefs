@@ -157,7 +157,7 @@ fn test_two_identical_files_share_content_digest() {
 
     let m1 = fs.meta().get_manifest(ino1).unwrap();
     let m2 = fs.meta().get_manifest(ino2).unwrap();
-    assert_eq!(m1, m2, "identical content must share the same Digest224");
+    assert_eq!(m1, m2, "identical content must share the same ObjectKey");
 
     let rc = fs.meta().get_refcount(&m1[0]);
     assert_eq!(rc, 2, "refcount must be 2 after two files with same content");

@@ -9,11 +9,11 @@
 //!
 //! The file begins with a 16-byte header:
 //!   magic:      [u8; 4]  = [0x53, 0x4C, 0x53, 0x47] ("SLSG")
-//!   version:    u32 LE   = 2
+//!   version:    u32 LE   = 3
 //!   segment_id: u64 LE
 //!
-//! RootUpdate payload: 28 bytes — Digest224 as 7×u32 LE
-//! SnapshotRecord payload: 48+ bytes — version(8) + root(28) + created_at(8) + name_len(4) + name_bytes(variable)
+//! RootUpdate payload: `KEY_BYTES` (33) bytes — ObjectKey (tag + digest)
+//! SnapshotRecord payload: `SNAPSHOT_MIN` (53)+ bytes — version(8) + root(KEY_BYTES) + created_at(8) + name_len(4) + name_bytes(variable)
 //! EofMarker: no payload (payload_len = 0), terminates iteration
 //!
 //! The reader stops at the first cut, changed or out-of-sequence record.
@@ -26,7 +26,14 @@ pub use writer::SegmentWriter;
 pub use reader::SegmentReader;
 
 use std::path::Path;
-use slicefs_traits::digest::Digest224;
+use slicefs_traits::key::{ObjectKey, KEY_BYTES};
+
+/// Offsets in a SnapshotRecord payload.
+const SNAPSHOT_ROOT: usize = 8;
+const SNAPSHOT_CREATED_AT: usize = SNAPSHOT_ROOT + KEY_BYTES;
+pub(crate) const SNAPSHOT_NAME_LEN: usize = SNAPSHOT_CREATED_AT + 8;
+/// Size of a SnapshotRecord payload without a name.
+pub(crate) const SNAPSHOT_MIN: usize = SNAPSHOT_NAME_LEN + 4;
 use thiserror::Error;
 
 use crate::snapshot::SnapshotEntry;
@@ -50,8 +57,8 @@ pub enum SegmentError {
 /// Returns `(Option<last_root_digest>, Vec<SnapshotEntry>)`.
 pub fn load_store_from_segments(
     segments_dir: &Path,
-) -> Result<(Option<Digest224>, Vec<SnapshotEntry>), SegmentError> {
-    let mut last_root: Option<Digest224> = None;
+) -> Result<(Option<ObjectKey>, Vec<SnapshotEntry>), SegmentError> {
+    let mut last_root: Option<ObjectKey> = None;
     let mut snapshots: Vec<SnapshotEntry> = Vec::new();
 
     // Collect segment files and sort by name (which encodes segment_id numerically)
@@ -105,7 +112,7 @@ pub fn load_store_from_segments(
 /// replay them on top of the root.
 pub fn load_store_with_log(
     segments_dir: &Path,
-) -> Result<(Option<Digest224>, Vec<SnapshotEntry>, Vec<Vec<u8>>), SegmentError> {
+) -> Result<(Option<ObjectKey>, Vec<SnapshotEntry>, Vec<Vec<u8>>), SegmentError> {
     let mut last_root = None;
     let mut snapshots = Vec::new();
     let mut ops: Vec<Vec<u8>> = Vec::new();
@@ -147,8 +154,9 @@ fn segment_paths(segments_dir: &Path) -> Result<Vec<std::path::PathBuf>, Segment
 pub const SEGMENT_MAGIC: [u8; 4] = [0x53, 0x4C, 0x53, 0x47];
 
 /// Segment file format version. Version 2 adds a sequence number and a
-/// CRC32C to each record (#20); version 1 files are not read.
-pub const SEGMENT_VERSION: u32 = 2;
+/// CRC32C to each record (#20); version 3 has 33-byte tagged keys. Older
+/// files are not read.
+pub const SEGMENT_VERSION: u32 = 3;
 
 /// Bytes of a record frame before the payload: type, payload length, seq.
 pub(crate) const FRAME_HEAD: usize = 1 + 4 + 8;
@@ -238,8 +246,8 @@ impl SegmentHeader {
 /// A logical entry in a segment file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SegmentEntry {
-    RootUpdate     { root: Digest224 },
-    SnapshotRecord { version: u64, root: Digest224, created_at: u64, name: Option<String> },
+    RootUpdate     { root: ObjectKey },
+    SnapshotRecord { version: u64, root: ObjectKey, created_at: u64, name: Option<String> },
     /// A file system request since the last root (opaque bytes, #20).
     Op { bytes: Vec<u8> },
 }
@@ -258,22 +266,16 @@ impl SegmentEntry {
         match self {
             SegmentEntry::Op { bytes } => bytes.clone(),
             SegmentEntry::RootUpdate { root } => {
-                let mut buf = Vec::with_capacity(28);
-                for v in root {
-                    buf.extend_from_slice(&v.to_le_bytes());
-                }
-                buf
+                root.0.to_vec()
             }
             SegmentEntry::SnapshotRecord { version, root, created_at, name } => {
                 let name_bytes = name.as_deref().unwrap_or("").as_bytes();
                 let name_len = name_bytes.len() as u32;
-                let mut buf = Vec::with_capacity(48 + name_bytes.len());
+                let mut buf = Vec::with_capacity(SNAPSHOT_MIN + name_bytes.len());
                 // version: u64 LE (8 bytes)
                 buf.extend_from_slice(&version.to_le_bytes());
-                // root: 7×u32 LE (28 bytes)
-                for v in root {
-                    buf.extend_from_slice(&v.to_le_bytes());
-                }
+                // root: KEY_BYTES (tag + digest)
+                buf.extend_from_slice(&root.0);
                 // created_at: u64 LE (8 bytes)
                 buf.extend_from_slice(&created_at.to_le_bytes());
                 // name_len: u32 LE (4 bytes)
@@ -285,32 +287,28 @@ impl SegmentEntry {
         }
     }
 
-    /// Parse a RootUpdate from a 28-byte payload.
+    /// Parse a RootUpdate from a `KEY_BYTES`-byte payload.
     pub fn parse_root_update(payload: &[u8]) -> Option<Self> {
-        if payload.len() < 28 { return None; }
-        let root: Digest224 = std::array::from_fn(|i| {
-            u32::from_le_bytes(payload[i*4..i*4+4].try_into().unwrap())
-        });
+        if payload.len() < KEY_BYTES { return None; }
+        let root = ObjectKey::read(payload, 0);
         Some(SegmentEntry::RootUpdate { root })
     }
 
     /// Parse a SnapshotRecord from a payload.
     ///
-    /// Layout: version(8) + root(28) + created_at(8) + name_len(4) + name_bytes(name_len)
-    /// Minimum 48 bytes (name_len = 0).
+    /// Layout: version(8) + root(KEY_BYTES) + created_at(8) + name_len(4) + name_bytes(name_len)
+    /// Minimum `SNAPSHOT_MIN` bytes (name_len = 0).
     pub fn parse_snapshot_record(payload: &[u8]) -> Option<Self> {
-        if payload.len() < 48 { return None; }
+        if payload.len() < SNAPSHOT_MIN { return None; }
         let version = u64::from_le_bytes(payload[0..8].try_into().unwrap());
-        let root: Digest224 = std::array::from_fn(|i| {
-            u32::from_le_bytes(payload[8 + i*4..8 + i*4 + 4].try_into().unwrap())
-        });
-        let created_at = u64::from_le_bytes(payload[36..44].try_into().unwrap());
-        let name_len = u32::from_le_bytes(payload[44..48].try_into().unwrap()) as usize;
-        if payload.len() < 48 + name_len { return None; }
+        let root = ObjectKey::read(payload, SNAPSHOT_ROOT);
+        let created_at = u64::from_le_bytes(payload[SNAPSHOT_CREATED_AT..SNAPSHOT_NAME_LEN].try_into().unwrap());
+        let name_len = u32::from_le_bytes(payload[SNAPSHOT_NAME_LEN..SNAPSHOT_MIN].try_into().unwrap()) as usize;
+        if payload.len() < SNAPSHOT_MIN + name_len { return None; }
         let name = if name_len == 0 {
             None
         } else {
-            let name_bytes = &payload[48..48 + name_len];
+            let name_bytes = &payload[SNAPSHOT_MIN..SNAPSHOT_MIN + name_len];
             Some(String::from_utf8(name_bytes.to_vec()).ok()?)
         };
         Some(SegmentEntry::SnapshotRecord { version, root, created_at, name })

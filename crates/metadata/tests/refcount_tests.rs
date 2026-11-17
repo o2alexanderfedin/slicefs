@@ -5,13 +5,13 @@
 use std::sync::{Arc, Mutex};
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
-use slicefs_traits::digest::Digest224;
+use slicefs_traits::key::ObjectKey;
 use slicefs_traits::metadata::MetadataStore;
 use tempfile::TempDir;
 
-/// A simple non-zero Digest224 for testing.
-fn make_digest(seed: u32) -> Digest224 {
-    [seed, seed + 1, seed + 2, seed + 3, seed + 4, seed + 5, seed + 6]
+/// A simple non-zero ObjectKey for testing.
+fn make_digest(seed: u32) -> ObjectKey {
+    ObjectKey::example(seed)
 }
 
 fn make_store() -> (TempDir, DictMetadataStore) {

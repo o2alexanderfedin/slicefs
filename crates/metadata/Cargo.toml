@@ -14,5 +14,8 @@ libc = { workspace = true }
 crc32c = "0.6"
 
 [dev-dependencies]
+# Registers a second hasher (`chunk_store::hash::TestKeyedBlake3`) for tests
+# of a change of the write hash.
+chunk-store = { path = "../chunk-store", features = ["test-hasher"] }
 proptest = { workspace = true }
 tempfile = { workspace = true }

@@ -50,9 +50,13 @@ use crate::util::ts;
 /// 3. Load state from segment files.
 /// 4. Reconstruct `DictMetadataStore` via `load_from_root`.
 /// 5. Create WAL with `wal_config` and attach it to the store.
+///
+/// `hash` is `--hash`: a new write hash, recorded under the mount lock
+/// before the store opens (`None` keeps the recorded one).
 pub fn load_store(
     store_path: &Path,
     wal_config: WalConfig,
+    hash: Option<&str>,
 ) -> Result<(DictMetadataStore, Arc<Mutex<StoreIo>>, MountLock), Box<dyn std::error::Error>> {
     // Step 1: Reject legacy format — migration path removed.
     if store_path.join("dictionary.bin").exists() {
@@ -92,7 +96,9 @@ pub fn load_store(
         format!("no committed state found in segments at {}", segs_dir.display())
     })?;
 
-    // Step 4: Reconstruct metadata store using file-backed StoreIo.
+    // Step 4: Reconstruct metadata store using file-backed StoreIo, with the
+    // write hash of `--hash` (recorded now, under the lock).
+    crate::content::select_hash(store_path, hash)?;
     let io = Arc::new(Mutex::new(crate::content::store_io(store_path)?));
     let mut meta = DictMetadataStore::load_from_root(io.clone(), &root)
         .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;
@@ -253,6 +259,7 @@ pub fn run_mount(
     commit_interval_secs: u64,
     gc_interval_secs: u64,
     zstd_level: i32,
+    hash: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Pre-flight: create mountpoint directory if it doesn't exist.
     if !mountpoint.exists() {
@@ -290,7 +297,7 @@ pub fn run_mount(
 
     let wal_config = parse_wal_config(wal_strategy);
 
-    let (meta, io, _mount_lock) = load_store(store_path, wal_config)?;
+    let (meta, io, _mount_lock) = load_store(store_path, wal_config, hash)?;
 
     // If mounting a snapshot: resolve it and load from snapshot root (read-only).
     #[cfg(target_os = "macos")]
@@ -513,7 +520,7 @@ mod tests {
         let store_dir = tempfile::tempdir().unwrap();
         write_seeded_store_segments(&store_dir);
 
-        let (meta, _io, _lock) = load_store(store_dir.path(), WalConfig::NoWal).expect("load_store failed");
+        let (meta, _io, _lock) = load_store(store_dir.path(), WalConfig::NoWal, None).expect("load_store failed");
 
         // Inode 1 must exist and be a directory (root)
         let root_meta = meta.get_inode(1).expect("root inode missing");
@@ -526,7 +533,7 @@ mod tests {
         let store_dir = tempfile::tempdir().unwrap();
         write_seeded_store_segments(&store_dir);
 
-        let (meta, _io, _lock) = load_store(store_dir.path(), WalConfig::NoWal).expect("load_store failed");
+        let (meta, _io, _lock) = load_store(store_dir.path(), WalConfig::NoWal, None).expect("load_store failed");
 
         // hello.txt was seeded
         let ino = meta.lookup(1, "hello.txt").expect("hello.txt not found");
@@ -539,7 +546,7 @@ mod tests {
         // Write a dictionary.bin to simulate legacy format
         std::fs::write(store_dir.path().join("dictionary.bin"), b"").unwrap();
 
-        let result = load_store(store_dir.path(), WalConfig::NoWal);
+        let result = load_store(store_dir.path(), WalConfig::NoWal, None);
         assert!(result.is_err(), "should reject legacy format");
         let msg = result.err().unwrap().to_string();
         assert!(
@@ -553,7 +560,7 @@ mod tests {
     fn test_load_store_rejects_missing_store() {
         let store_dir = tempfile::tempdir().unwrap();
         // No dictionary.bin, no segments/ — should fail.
-        let result = load_store(store_dir.path(), WalConfig::NoWal);
+        let result = load_store(store_dir.path(), WalConfig::NoWal, None);
         assert!(result.is_err(), "should fail with missing store");
         let msg = result.err().unwrap().to_string();
         assert!(
@@ -568,7 +575,7 @@ mod tests {
         let store_dir = tempfile::tempdir().unwrap();
         write_seeded_store_segments(&store_dir);
 
-        let (meta, _io, _lock) = load_store(store_dir.path(), WalConfig::NoWal)
+        let (meta, _io, _lock) = load_store(store_dir.path(), WalConfig::NoWal, None)
             .expect("load_store from segments failed");
 
         // hello.txt was seeded
@@ -771,7 +778,7 @@ mod tests {
         std::fs::write(&lock_path, b"stale").unwrap();
 
         // load_store should detect DirtyMount, remove the stale lock, and recover.
-        let result = load_store(store_dir.path(), WalConfig::NoWal);
+        let result = load_store(store_dir.path(), WalConfig::NoWal, None);
         assert!(result.is_ok(), "dirty mount recovery should succeed");
 
         // The store should be loadable — hello.txt was seeded.

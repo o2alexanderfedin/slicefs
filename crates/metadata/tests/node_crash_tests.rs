@@ -22,7 +22,7 @@ fn a_committed_root_loads_after_a_crash() {
     for i in 0..20 {
         let ino = meta.create_inode(&InodeMeta::new_file(0, 0, 0, 0o100644)).unwrap();
         meta.link(1, &format!("f{i}"), ino).unwrap();
-        meta.set_manifest(ino, &[[i, 2, 3, 4, 5, 6, 7]]).unwrap();
+        meta.set_manifest(ino, &[slicefs_traits::key::ObjectKey::example(i)]).unwrap();
         inos.push(ino);
     }
     let root = meta.commit().unwrap();
@@ -35,7 +35,7 @@ fn a_committed_root_loads_after_a_crash() {
     let meta = DictMetadataStore::load_from_root(open(&mem), &root).unwrap();
     for (i, ino) in inos.iter().enumerate() {
         assert_eq!(meta.lookup(1, &format!("f{i}")).unwrap(), *ino);
-        assert_eq!(meta.get_manifest(*ino).unwrap(), vec![[i as u32, 2, 3, 4, 5, 6, 7]]);
+        assert_eq!(meta.get_manifest(*ino).unwrap(), vec![slicefs_traits::key::ObjectKey::example(i as u32)]);
     }
     assert!(meta.lookup(1, "late").is_err(), "not in the committed root");
 }
@@ -63,12 +63,12 @@ fn a_small_change_stores_little_at_the_next_commit() {
     for i in 0..5000u32 {
         let ino = meta.create_inode(&InodeMeta::new_file(0, 0, 0, 0o100644)).unwrap();
         meta.link(1, &format!("f{i}"), ino).unwrap();
-        meta.set_manifest(ino, &[[i, 2, 3, 4, 5, 6, 7]]).unwrap();
+        meta.set_manifest(ino, &[slicefs_traits::key::ObjectKey::example(i)]).unwrap();
         last = ino;
     }
     meta.commit().unwrap();
     let full = cs.stats().stored_bytes;
-    meta.set_manifest(last, &[[9, 9, 9, 9, 9, 9, 9]]).unwrap();
+    meta.set_manifest(last, &[slicefs_traits::key::ObjectKey::example(9)]).unwrap();
     meta.commit().unwrap();
     let grew = cs.stats().stored_bytes - full;
     eprintln!("first commit {full} bytes, next commit +{grew} bytes");

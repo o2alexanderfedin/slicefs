@@ -80,6 +80,11 @@ pub enum Cmd {
         /// change at each mount.
         #[arg(long, value_name = "SPEC", default_value = "zstd:3", value_parser = crate::content::parse_compression)]
         compression: i32,
+        /// Hash of the IDs of new objects (`blake3-256`). Default: the hash
+        /// that the store records (blake3-256 for a new store). A new hash is
+        /// recorded; objects of the old hash stay readable.
+        #[arg(long, value_name = "NAME", value_parser = crate::content::parse_hash)]
+        hash: Option<String>,
     },
 
     /// Unmount a SliceFS filesystem mounted at the given path.
@@ -97,6 +102,11 @@ pub enum Cmd {
         store: PathBuf,
         /// Source directory to ingest.
         source_dir: PathBuf,
+        /// Hash of the IDs of new objects (`blake3-256`). Default: the hash
+        /// that the store records (blake3-256 for a new store). A new hash is
+        /// recorded; objects of the old hash stay readable.
+        #[arg(long, value_name = "NAME", value_parser = crate::content::parse_hash)]
+        hash: Option<String>,
     },
 
     /// Run offline garbage collection on a SliceFS block store.
@@ -206,11 +216,35 @@ mod tests {
     fn test_seed() {
         let cli = Cli::try_parse_from(["slicefs", "seed", "/data", "/src"]).unwrap();
         match cli.command {
-            Cmd::Seed { store, source_dir } => {
+            Cmd::Seed { store, source_dir, hash } => {
                 assert_eq!(store, PathBuf::from("/data"));
                 assert_eq!(source_dir, PathBuf::from("/src"));
+                assert!(hash.is_none(), "no --hash: keep the store's recorded hash");
             }
             _ => panic!("expected Seed"),
+        }
+    }
+
+    /// `--hash` takes a known hash name; an unknown one is refused with the
+    /// list of the known names.
+    #[test]
+    fn test_hash_flag() {
+        let cli = Cli::try_parse_from(["slicefs", "mount", "/mnt", "--store", "/data", "--hash", "blake3-256"]).unwrap();
+        match cli.command {
+            Cmd::Mount { hash, .. } => assert_eq!(hash.as_deref(), Some("blake3-256")),
+            _ => panic!("expected Mount"),
+        }
+        let cli = Cli::try_parse_from(["slicefs", "seed", "/data", "/src", "--hash", "blake3-256"]).unwrap();
+        match cli.command {
+            Cmd::Seed { hash, .. } => assert_eq!(hash.as_deref(), Some("blake3-256")),
+            _ => panic!("expected Seed"),
+        }
+        for args in [
+            &["slicefs", "mount", "/mnt", "--store", "/data", "--hash", "md5"][..],
+            &["slicefs", "seed", "/data", "/src", "--hash", "md5"][..],
+        ] {
+            let err = Cli::try_parse_from(args).err().expect("an unknown hash is refused").to_string();
+            assert!(err.contains("unknown hash \"md5\"") && err.contains("blake3-256"), "{err}");
         }
     }
 

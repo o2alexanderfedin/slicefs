@@ -2,21 +2,21 @@
 //!
 //! Each directory entry is recorded in a compact "entry list", stored as one
 //! node in the chunk store. The list contains every entry's:
-//!   - `key`  — `Digest224` = BLAKE3-224 of the name (see [`name_key`])
+//!   - `key`  — `ObjectKey` = BLAKE3-256 of the name (see [`name_key`])
 //!   - `ino`  — `u64` inode number
 //!   - `name` — UTF-8 name bytes
 //!
 //! The whole list is re-serialized only when entries are added or removed; each
 //! re-serialization is cheap (compact binary format, only name strings + keys).
 //!
-//! Lookup is O(log n) via an in-memory BTreeMap keyed by `Digest224` name hash —
+//! Lookup is O(log n) via an in-memory BTreeMap keyed by `ObjectKey` name hash —
 //! far better than O(n) linear scan and consistent with the per-entry-CAS design.
 //!
 //! Entry list wire format:
 //! ```text
 //! [count: u32 LE]
 //! for each entry:
-//!   [key:      7 × u32 LE  = 28 bytes]
+//!   [key:      tag + digest = 33 bytes]
 //!   [ino:      u64 LE      = 8 bytes ]
 //!   [name_len: u32 LE      = 4 bytes ]
 //!   [name:     name_len bytes        ]
@@ -24,7 +24,7 @@
 
 use std::collections::BTreeMap;
 
-use slicefs_traits::digest::Digest224;
+use slicefs_traits::key::{ObjectKey, KEY_BYTES};
 use slicefs_traits::metadata::{DirEntry, MetaError};
 
 // ─── public primitives ────────────────────────────────────────────────────────
@@ -33,7 +33,7 @@ use slicefs_traits::metadata::{DirEntry, MetaError};
 ///
 /// The same as [`name_key`]; `storage` is not used (the names are in the
 /// entry list).
-pub fn entry_key(_storage: &mut impl crate::store_io::NodeWrite, name: &str) -> Digest224 {
+pub fn entry_key(_storage: &mut impl crate::store_io::NodeWrite, name: &str) -> ObjectKey {
     name_key(name)
 }
 
@@ -41,8 +41,8 @@ pub fn entry_key(_storage: &mut impl crate::store_io::NodeWrite, name: &str) -> 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EntryRecord {
-    /// SHA-224 of the entry name bytes.
-    key: Digest224,
+    /// BLAKE3-256 of the entry name bytes.
+    key: ObjectKey,
     /// Inode number this entry resolves to.
     ino: u64,
     /// Entry name (needed for listing).
@@ -51,14 +51,12 @@ struct EntryRecord {
 
 // ─── entry list serialization ─────────────────────────────────────────────────
 
-fn serialize_entry_list(entries: &BTreeMap<Digest224, EntryRecord>) -> Vec<u8> {
+fn serialize_entry_list(entries: &BTreeMap<ObjectKey, EntryRecord>) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for e in entries.values() {
-        // key: 28 bytes
-        for word in &e.key {
-            buf.extend_from_slice(&word.to_le_bytes());
-        }
+        // key: KEY_BYTES
+        buf.extend_from_slice(&e.key.0);
         // ino: 8 bytes
         buf.extend_from_slice(&e.ino.to_le_bytes());
         // name: 4-byte length + bytes
@@ -69,7 +67,7 @@ fn serialize_entry_list(entries: &BTreeMap<Digest224, EntryRecord>) -> Vec<u8> {
     buf
 }
 
-fn deserialize_entry_list(bytes: &[u8]) -> Result<BTreeMap<Digest224, EntryRecord>, MetaError> {
+fn deserialize_entry_list(bytes: &[u8]) -> Result<BTreeMap<ObjectKey, EntryRecord>, MetaError> {
     // An empty slice means zero entries (can happen for empty node).
     if bytes.is_empty() {
         return Ok(BTreeMap::new());
@@ -85,16 +83,12 @@ fn deserialize_entry_list(bytes: &[u8]) -> Result<BTreeMap<Digest224, EntryRecor
     let mut i = 4;
 
     for _ in 0..count {
-        // key: 28 bytes
-        if i + 28 > bytes.len() {
+        // key: KEY_BYTES
+        if i + KEY_BYTES > bytes.len() {
             return Err(MetaError::Corrupted("entry list truncated at key".into()));
         }
-        let mut key: Digest224 = [0u32; 7];
-        for (j, word) in key.iter_mut().enumerate() {
-            let off = i + j * 4;
-            *word = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
-        }
-        i += 28;
+        let key = ObjectKey::read(bytes, i);
+        i += KEY_BYTES;
 
         // ino: 8 bytes
         if i + 8 > bytes.len() {
@@ -121,15 +115,15 @@ fn deserialize_entry_list(bytes: &[u8]) -> Result<BTreeMap<Digest224, EntryRecor
     Ok(map)
 }
 
-fn intern_entry_list(storage: &mut impl crate::store_io::NodeWrite, entries: &BTreeMap<Digest224, EntryRecord>) -> Digest224 {
+fn intern_entry_list(storage: &mut impl crate::store_io::NodeWrite, entries: &BTreeMap<ObjectKey, EntryRecord>) -> ObjectKey {
     let bytes = serialize_entry_list(entries);
     (storage).put_node(&bytes)
 }
 
 fn load_entry_list(
     io: &mut impl crate::store_io::NodeRead,
-    list_digest: &Digest224,
-) -> Result<BTreeMap<Digest224, EntryRecord>, MetaError> {
+    list_digest: &ObjectKey,
+) -> Result<BTreeMap<ObjectKey, EntryRecord>, MetaError> {
     let bytes = (io).get_node(list_digest)
         .ok_or_else(|| MetaError::Corrupted(format!("missing dir entry list {:?}", list_digest)))?;
     deserialize_entry_list(&bytes)
@@ -140,12 +134,12 @@ fn load_entry_list(
 /// Create the initial `.` and `..` entries for a new directory.
 ///
 /// Both entries are stored as part of the entry list. Returns the entry list
-/// `Digest224` which acts as the directory's identity in the metadata store.
+/// `ObjectKey` which acts as the directory's identity in the metadata store.
 pub fn create_dir_entries(
     storage: &mut impl crate::store_io::NodeWrite,
     self_ino: u64,
     parent_ino: u64,
-) -> Digest224 {
+) -> ObjectKey {
     let dot_key = entry_key(storage, ".");
     let dotdot_key = entry_key(storage, "..");
 
@@ -158,15 +152,15 @@ pub fn create_dir_entries(
 
 /// Add a single directory entry `name → ino`.
 ///
-/// Returns the new entry list `Digest224`.  Errors:
+/// Returns the new entry list `ObjectKey`.  Errors:
 /// - `MetaError::InvalidName` if `name` is `.` or `..`
 /// - `MetaError::AlreadyExists(0)` if the name is already in the directory
 pub fn add_dir_entry(
     io: &mut impl crate::store_io::NodeWrite,
-    dir_digest: &Digest224,
+    dir_digest: &ObjectKey,
     name: &str,
     ino: u64,
-) -> Result<Digest224, MetaError> {
+) -> Result<ObjectKey, MetaError> {
     if name == "." || name == ".." {
         return Err(MetaError::InvalidName(name.to_string()));
     }
@@ -184,14 +178,14 @@ pub fn add_dir_entry(
 
 /// Remove a directory entry by name.
 ///
-/// Returns the new entry list `Digest224`.  Errors:
+/// Returns the new entry list `ObjectKey`.  Errors:
 /// - `MetaError::InvalidName` if `name` is `.` or `..`
 /// - `MetaError::NotFound(0)` if the name is not in the directory
 pub fn remove_dir_entry(
     io: &mut impl crate::store_io::NodeWrite,
-    dir_digest: &Digest224,
+    dir_digest: &ObjectKey,
     name: &str,
-) -> Result<Digest224, MetaError> {
+) -> Result<ObjectKey, MetaError> {
     if name == "." || name == ".." {
         return Err(MetaError::InvalidName(name.to_string()));
     }
@@ -207,12 +201,12 @@ pub fn remove_dir_entry(
 }
 
 /// Point the `..` entry of a directory at `parent_ino` (used when a
-/// directory moves to a new parent). Returns the new entry list `Digest224`.
+/// directory moves to a new parent). Returns the new entry list `ObjectKey`.
 pub fn set_dotdot(
     io: &mut impl crate::store_io::NodeWrite,
-    dir_digest: &Digest224,
+    dir_digest: &ObjectKey,
     parent_ino: u64,
-) -> Result<Digest224, MetaError> {
+) -> Result<ObjectKey, MetaError> {
     let mut entries = load_entry_list(io, dir_digest)?;
     let mut fsa = io;
     let key = entry_key(&mut fsa, "..");
@@ -226,7 +220,7 @@ pub fn set_dotdot(
 /// - `MetaError::NotFound(0)` if the name is not in the directory
 pub fn lookup_dir_entry(
     io: &mut impl crate::store_io::NodeRead,
-    dir_digest: &Digest224,
+    dir_digest: &ObjectKey,
     name: &str,
 ) -> Result<u64, MetaError> {
     // Read phase: load entries
@@ -241,7 +235,7 @@ pub fn lookup_dir_entry(
 /// List all entries in a directory.
 pub fn list_dir_entries(
     io: &mut impl crate::store_io::NodeRead,
-    dir_digest: &Digest224,
+    dir_digest: &ObjectKey,
 ) -> Result<Vec<DirEntry>, MetaError> {
     let entries = load_entry_list(io, dir_digest)?;
     Ok(entries
@@ -254,10 +248,12 @@ pub fn list_dir_entries(
 
 /// Hash a name to its entry key without writing anything to the store.
 ///
-/// Gives the same `Digest224` as [`entry_key`]: an in-memory `Dictionary`
-/// runs the same tree hash, but the nodes are thrown away.
-pub fn name_key(name: &str) -> Digest224 {
-    crate::store_io::to_digest(chunk_store::ObjectId::of(name.as_bytes()))
+/// Gives the same `ObjectKey` as [`entry_key`]. The key is a lookup key,
+/// not a content address: it must stay the same for the life of a store, so
+/// it is always BLAKE3-256, never the store's write hash (which can change).
+pub fn name_key(name: &str) -> ObjectKey {
+    use chunk_store::ObjectHasher;
+    crate::store_io::to_key(chunk_store::Blake3_256.id(name.as_bytes()))
 }
 
 /// A decoded directory entry list that the metadata store holds in memory.
@@ -267,7 +263,7 @@ pub fn name_key(name: &str) -> Digest224 {
 /// digest of the old copy-on-every-change path.
 #[derive(Debug, Clone, Default)]
 pub struct DirList {
-    entries: BTreeMap<Digest224, EntryRecord>,
+    entries: BTreeMap<ObjectKey, EntryRecord>,
 }
 
 impl DirList {
@@ -280,12 +276,12 @@ impl DirList {
     }
 
     /// Read a stored entry list.
-    pub fn load(io: &mut impl crate::store_io::NodeRead, digest: &Digest224) -> Result<Self, MetaError> {
+    pub fn load(io: &mut impl crate::store_io::NodeRead, digest: &ObjectKey) -> Result<Self, MetaError> {
         Ok(DirList { entries: load_entry_list(io, digest)? })
     }
 
     /// Write the list to the store and return its digest.
-    pub fn intern(&self, storage: &mut impl crate::store_io::NodeWrite) -> Digest224 {
+    pub fn intern(&self, storage: &mut impl crate::store_io::NodeWrite) -> ObjectKey {
         intern_entry_list(storage, &self.entries)
     }
 

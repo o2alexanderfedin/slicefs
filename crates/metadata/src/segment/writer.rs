@@ -87,7 +87,7 @@ impl SegmentWriter {
 #[cfg(test)]
 mod sync_tests {
     use super::*;
-    use slicefs_traits::digest::Digest224;
+    use slicefs_traits::key::ObjectKey;
 
     #[test]
     fn sync_skips_disk_flush_when_nothing_was_written() {
@@ -98,7 +98,7 @@ mod sync_tests {
         w.sync().unwrap();
         w.sync().unwrap();
         assert_eq!(w.disk_syncs(), 1, "no new bytes: no disk flush");
-        let root: Digest224 = [7; 7];
+        let root: ObjectKey = ObjectKey::example(7);
         w.write_entry(&SegmentEntry::RootUpdate { root }).unwrap();
         w.sync().unwrap();
         assert_eq!(w.disk_syncs(), 2);

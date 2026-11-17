@@ -25,4 +25,7 @@ serde_json     = { workspace = true }
 sha2-compress  = { workspace = true }
 
 [dev-dependencies]
+# Registers a second hasher (`chunk_store::hash::TestKeyedBlake3`) for tests
+# of a change of the write hash.
+chunk-store = { path = "../chunk-store", features = ["test-hasher"] }
 tempfile = { workspace = true }
