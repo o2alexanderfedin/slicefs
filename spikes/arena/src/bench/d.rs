@@ -187,6 +187,36 @@ impl Store {
         }
     }
 
+    fn stored_len(&self, id: &ObjectId) -> u64 {
+        match self {
+            Store::Rs(s) => s.stored_len(id),
+            Store::Spike(s) => s.stored_len(id),
+        }
+        .unwrap_or(0) as u64
+    }
+
+    /// The spike's count of record bytes written since open (0 for RS).
+    fn appended(&self) -> u64 {
+        match self {
+            Store::Spike(s) => s.appended(),
+            Store::Rs(_) => 0,
+        }
+    }
+
+    /// Data bytes written between two points: the spike counts them (its
+    /// files have a fixed length); RS packs only grow or are new, so
+    /// `written` of the two snapshots is exact for them.
+    fn wrote(&self, w0: u64, s0: &Snap, s1: &Snap) -> u64 {
+        match self {
+            Store::Spike(s) => s.appended() - w0,
+            Store::Rs(_) => written(s0, s1).0,
+        }
+    }
+
+    fn live_stored(&self, live: &HashSet<ObjectId>) -> u64 {
+        live.iter().map(|id| self.stored_len(id)).sum()
+    }
+
     fn punches(&self) -> u64 {
         match self {
             Store::Spike(s) => s.punch_stats().calls,
@@ -209,8 +239,10 @@ pub fn d_opts(variant: &str, size: u64) -> Options {
     o
 }
 
+type Snap = HashMap<PathBuf, (u64, u64, u64)>;
+
 /// Per file: (length, inode, allocated bytes).
-fn snapshot(dir: &Path) -> HashMap<PathBuf, (u64, u64, u64)> {
+fn snapshot(dir: &Path) -> Snap {
     let mut m = HashMap::new();
     for e in fs::read_dir(dir.join("packs")).unwrap().flatten() {
         if let Ok(md) = e.metadata() {
@@ -394,11 +426,17 @@ fn dgc(variant: &str, a: &Args) {
     let (rb, rw0, rc0) = read_back(s.obj(), &units, &dead);
     let snap0 = snapshot(d.path());
     let stats0 = s.obj().stats();
+    // Stored bytes plus record overhead of the objects no live unit uses.
+    let n_dead = all.iter().filter(|id| !live.contains(id)).count() as u64;
+    let dead_target = all.iter().filter(|id| !live.contains(id)).map(|id| s.stored_len(id)).sum::<u64>()
+        + n_dead * crate::codec::rec_len(0) as u64;
+    let w0 = s.appended();
     let span = Span::start();
     let gs = s.gc(&live);
     let m = span.end();
     let snap1 = snapshot(d.path());
-    let (wd, wi) = written(&snap0, &snap1);
+    let (_, wi) = written(&snap0, &snap1);
+    let wd = s.wrote(w0, &snap0, &snap1);
     let (_, rw1, rc1) = read_back(s.obj(), &units, &dead);
     let stats1 = s.obj().stats();
     let mut r = Rec::new("dgc", variant);
@@ -418,8 +456,11 @@ fn dgc(variant: &str, a: &Args) {
         r.n("pred_dead_rec_bytes", pd as f64).n("pred_punchable", pp as f64);
         r.n("pred_frac", if pd > 0 { pp as f64 / pd as f64 } else { f64::NAN });
     }
-    r.n("freed_frac", if dead_stored > 0.0 { freed / dead_stored } else { f64::NAN });
-    r.n("space_amp", alloc_sum(&snap1) as f64 / stats1.stored_bytes.max(1) as f64);
+    r.n("dead_target", dead_target as f64).n("dead_objects", n_dead as f64);
+    r.n("freed_frac", if dead_target > 0 { freed / dead_target as f64 } else { f64::NAN });
+    let ls = s.live_stored(&live);
+    r.n("live_stored", ls as f64).n("space_amp", alloc_sum(&snap1) as f64 / ls.max(1) as f64);
+    r.n("space_amp_before", alloc_sum(&snap0) as f64 / ls.max(1) as f64);
     r.n("read_mib", rb as f64 / MIB as f64);
     r.n("read_before_wall_s", rw0).n("read_before_cpu_s", rc0).n("read_after_wall_s", rw1).n("read_after_cpu_s", rc1);
     r.emit();
@@ -443,6 +484,7 @@ fn dchurn(variant: &str, a: &Args) {
     let (mut gc_wall, mut gc_cpu) = (0.0, 0.0);
     let mut user_bytes = 0u64;
     let mut amps = Vec::new();
+    let r_live;
     let mut rng = workload::Rng::new(seed ^ 0xc0ffee);
     for round in 0..rounds {
         let n = (units.len() as f64 * churn) as usize;
@@ -451,9 +493,11 @@ fn dchurn(variant: &str, a: &Args) {
             units.swap_remove(i);
         }
         let s0 = snapshot(d.path());
+        let w0 = s.appended();
         let new = fill(s.obj(), (total as f64 * churn) as u64, &pattern, a.u64("file_mib", 1), seed + 1000 + round);
         let s1 = snapshot(d.path());
-        user_bytes += written(&s0, &s1).0;
+        let w1 = s.appended();
+        user_bytes += s.wrote(w0, &s0, &s1);
         units.extend(new);
         let live: HashSet<ObjectId> = units.iter().flat_map(|u| u.1.iter().copied()).collect();
         let span = Span::start();
@@ -462,16 +506,16 @@ fn dchurn(variant: &str, a: &Args) {
         gc_wall += m.wall_s;
         gc_cpu += m.cpu_s();
         let s2 = snapshot(d.path());
-        let (a1, b1) = written(&s1, &s2);
-        wd += a1;
-        wi += b1;
-        let st = s.obj().stats();
-        amps.push(alloc_sum(&s2) as f64 / st.stored_bytes.max(1) as f64);
+        wd += s.wrote(w1, &s1, &s2);
+        wi += written(&s1, &s2).1;
+        amps.push(alloc_sum(&s2) as f64 / s.live_stored(&live).max(1) as f64);
     }
     let all_dead = vec![false; units.len()];
     let (rb, rw, rc) = read_back(s.obj(), &units, &all_dead);
     let snap_end = snapshot(d.path());
     let st = s.obj().stats();
+    let live: HashSet<ObjectId> = units.iter().flat_map(|u| u.1.iter().copied()).collect();
+    r_live = s.live_stored(&live);
     let mut r = Rec::new("dchurn", variant);
     r.s("pattern", &pattern).n("rounds", rounds as f64).n("churn", churn).n("rep", a.u64("rep", 0) as f64);
     r.n("gc_wall_s", gc_wall).n("gc_cpu_s", gc_cpu);
@@ -481,7 +525,7 @@ fn dchurn(variant: &str, a: &Args) {
         r.n(&format!("amp_r{}", i + 1), *x);
     }
     r.n("alloc_start", alloc_sum(&snap_start) as f64).n("alloc_end", alloc_sum(&snap_end) as f64);
-    r.n("stored_end", st.stored_bytes as f64).n("files_end", data_files(d.path()).len() as f64);
+    r.n("live_stored_end", r_live as f64).n("stored_end", st.stored_bytes as f64).n("files_end", data_files(d.path()).len() as f64);
     r.n("read_mib", rb as f64 / MIB as f64).n("read_wall_s", rw).n("read_cpu_s", rc);
     r.emit();
 }

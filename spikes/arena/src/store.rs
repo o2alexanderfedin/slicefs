@@ -53,6 +53,8 @@ struct Inner {
     /// a crash between the idx rewrite and the punch left).
     sweep_all: bool,
     punch: PunchStats,
+    /// Record bytes written to arenas since open (puts and compaction copies).
+    appended: u64,
 }
 
 /// Spike D counters (since open).
@@ -104,6 +106,7 @@ impl SpikeStore {
             gc_active: None,
             sweep_all: true,
             punch: PunchStats::default(),
+            appended: 0,
         };
         if opts.read_only && !packs.is_dir() {
             let read = read::make(&packs, &opts)?;
@@ -279,6 +282,7 @@ impl SpikeStore {
     /// size, as `chunk-store`. A record too large for an arena, or with a
     /// payload over `MAX_STORED`, gets an arena of its own, sealed at once.
     fn append(&self, inner: &mut Inner, id: &ObjectId, rec: &[u8], stored: u32, raw: u32, flags: u8) -> Result<Loc> {
+        inner.appended += rec.len() as u64;
         let size = self.opts.arena.size;
         if rec.len() as u64 > size - HEADER_PAGE || stored > MAX_STORED {
             let own = (HEADER_PAGE + rec.len() as u64).div_ceil(4096) * 4096;
@@ -550,6 +554,11 @@ impl SpikeStore {
         sys::sync_dir(&self.dir)?;
         inner.dir_dirty = false;
         Ok(st)
+    }
+
+    /// Record bytes written to arenas since open (puts and GC copies).
+    pub fn appended(&self) -> u64 {
+        self.inner.lock().unwrap().appended
     }
 
     /// Spike D counters.
