@@ -1,20 +1,20 @@
-//! InodeMap: monotonically-allocated inode numbers mapped to Digest224 values.
+//! InodeMap: monotonically-allocated inode numbers mapped to ObjectKey values.
 //!
-//! Provides an in-memory mapping from inode number (u64) to the CAS key (Digest224)
+//! Provides an in-memory mapping from inode number (u64) to the CAS key (ObjectKey)
 //! of its serialized inode data. The full map is stored as one node in the
 //! chunk store, and loaded from it.
 
 use std::collections::BTreeMap;
 
-use slicefs_traits::digest::Digest224;
+use slicefs_traits::key::{ObjectKey, KEY_BYTES};
 use slicefs_traits::metadata::MetaError;
 
-/// In-memory inode number → Digest224 key mapping.
+/// In-memory inode number → ObjectKey key mapping.
 ///
 /// Inode 1 is reserved for the root directory and is never allocated by
 /// `allocate_ino`. Allocation starts at 2 and increases monotonically.
 pub struct InodeMap {
-    map: BTreeMap<u64, Digest224>,
+    map: BTreeMap<u64, ObjectKey>,
     next_ino: u64,
 }
 
@@ -34,23 +34,23 @@ impl InodeMap {
         ino
     }
 
-    /// Record a mapping from `ino` to the given Digest224 key.
-    pub fn insert(&mut self, ino: u64, digest: Digest224) {
+    /// Record a mapping from `ino` to the given ObjectKey key.
+    pub fn insert(&mut self, ino: u64, digest: ObjectKey) {
         self.map.insert(ino, digest);
     }
 
-    /// Look up the Digest224 for `ino`.
-    pub fn get(&self, ino: u64) -> Option<&Digest224> {
+    /// Look up the ObjectKey for `ino`.
+    pub fn get(&self, ino: u64) -> Option<&ObjectKey> {
         self.map.get(&ino)
     }
 
-    /// Remove and return the Digest224 for `ino`.
-    pub fn remove(&mut self, ino: u64) -> Option<Digest224> {
+    /// Remove and return the ObjectKey for `ino`.
+    pub fn remove(&mut self, ino: u64) -> Option<ObjectKey> {
         self.map.remove(&ino)
     }
 
     /// Iterate over all (ino, digest) pairs in sorted order.
-    pub fn entries(&self) -> impl Iterator<Item = (&u64, &Digest224)> {
+    pub fn entries(&self) -> impl Iterator<Item = (&u64, &ObjectKey)> {
         self.map.iter()
     }
 
@@ -77,34 +77,34 @@ impl Default for InodeMap {
 
 // ─── serialization ───────────────────────────────────────────────────────────
 //
-// Each entry is a 36-byte record:
-//   [0..8]   ino        u64 LE
-//   [8..36]  digest     Digest224 (7 × u32 LE = 28 bytes)
+// Each entry is a `RECORD`-byte (41) record:
+//   [0..8]        ino        u64 LE
+//   [8..RECORD]   digest     ObjectKey (tag + digest, `KEY_BYTES` bytes)
 //
 // After all entries the `next_ino` is NOT stored: on deserialization it is
 // recovered as max(keys) + 1 (or 2 for an empty map).
 
-/// Serialize `InodeMap` to a flat byte vector of 36-byte records.
+const RECORD: usize = 8 + KEY_BYTES;
+
+/// Serialize `InodeMap` to a flat byte vector of `RECORD`-byte records.
 pub fn serialize_inode_map(map: &InodeMap) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(map.map.len() * 36);
+    let mut buf = Vec::with_capacity(map.map.len() * RECORD);
     for (ino, digest) in &map.map {
         buf.extend_from_slice(&ino.to_le_bytes());
-        for word in digest {
-            buf.extend_from_slice(&word.to_le_bytes());
-        }
+        buf.extend_from_slice(&digest.0);
     }
     buf
 }
 
-/// Deserialize an `InodeMap` from 36-byte records.
+/// Deserialize an `InodeMap` from `RECORD`-byte records.
 ///
 /// Sets `next_ino` to `max(keys) + 1`, or 2 for an empty map.
-/// Returns `MetaError::Corrupted` if the byte length is not a multiple of 36.
+/// Returns `MetaError::Corrupted` if the byte length is not a multiple of `RECORD`.
 pub fn deserialize_inode_map(bytes: &[u8]) -> Result<InodeMap, MetaError> {
-    if bytes.len() % 36 != 0 {
+    if bytes.len() % RECORD != 0 {
         return Err(MetaError::Corrupted(format!(
-            "inode map: expected multiple-of-36 bytes, got {}",
-            bytes.len()
+            "inode map: expected a multiple of {} bytes, got {}",
+            RECORD, bytes.len()
         )));
     }
 
@@ -114,16 +114,12 @@ pub fn deserialize_inode_map(bytes: &[u8]) -> Result<InodeMap, MetaError> {
     let mut i = 0;
     while i < bytes.len() {
         let ino = u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap());
-        let mut digest: Digest224 = [0u32; 7];
-        for (j, word) in digest.iter_mut().enumerate() {
-            let offset = i + 8 + j * 4;
-            *word = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-        }
+        let digest = ObjectKey::read(bytes, i + 8);
         map.insert(ino, digest);
         if ino > max_ino {
             max_ino = ino;
         }
-        i += 36;
+        i += RECORD;
     }
 
     Ok(InodeMap {
@@ -134,14 +130,14 @@ pub fn deserialize_inode_map(bytes: &[u8]) -> Result<InodeMap, MetaError> {
 
 /// Serialize and store an `InodeMap` into any `StorageAdd` backend.
 ///
-/// Returns the `Digest224` key that can later be passed to `load_inode_map`.
-pub fn intern_inode_map(storage: &mut impl crate::store_io::NodeWrite, map: &InodeMap) -> Digest224 {
+/// Returns the `ObjectKey` key that can later be passed to `load_inode_map`.
+pub fn intern_inode_map(storage: &mut impl crate::store_io::NodeWrite, map: &InodeMap) -> ObjectKey {
     let bytes = serialize_inode_map(map);
     (storage).put_node(&bytes)
 }
 
 /// Retrieve and deserialize an `InodeMap` from file-backed storage.
-pub fn load_inode_map(io: &mut impl crate::store_io::NodeRead, key: &Digest224) -> Result<InodeMap, MetaError> {
+pub fn load_inode_map(io: &mut impl crate::store_io::NodeRead, key: &ObjectKey) -> Result<InodeMap, MetaError> {
     let bytes = (io).get_node(key)
         .ok_or_else(|| MetaError::Corrupted(format!("missing inode_map node {:?}", key)))?;
     deserialize_inode_map(&bytes)
@@ -164,7 +160,7 @@ mod tests {
     #[test]
     fn test_insert_and_get() {
         let mut m = InodeMap::new();
-        let digest: Digest224 = [1, 2, 3, 4, 5, 6, 7];
+        let digest: ObjectKey = ObjectKey::example(1);
         m.insert(42, digest);
         assert_eq!(m.get(42), Some(&digest));
         assert_eq!(m.get(99), None);
@@ -173,7 +169,7 @@ mod tests {
     #[test]
     fn test_remove() {
         let mut m = InodeMap::new();
-        let digest: Digest224 = [10, 20, 30, 40, 50, 60, 70];
+        let digest: ObjectKey = ObjectKey::example(10);
         m.insert(5, digest);
         assert_eq!(m.remove(5), Some(digest));
         assert_eq!(m.get(5), None);
@@ -192,10 +188,10 @@ mod tests {
     #[test]
     fn test_serialize_single_entry() {
         let mut m = InodeMap::new();
-        let digest: Digest224 = [1, 2, 3, 4, 5, 6, 7];
+        let digest: ObjectKey = ObjectKey::example(1);
         m.insert(10, digest);
         let bytes = serialize_inode_map(&m);
-        assert_eq!(bytes.len(), 36);
+        assert_eq!(bytes.len(), RECORD);
         let recovered = deserialize_inode_map(&bytes).unwrap();
         assert_eq!(recovered.get(10), Some(&digest));
         assert_eq!(recovered.next_ino(), 11);
@@ -204,14 +200,14 @@ mod tests {
     #[test]
     fn test_serialize_multiple_entries() {
         let mut m = InodeMap::new();
-        let d1: Digest224 = [1, 0, 0, 0, 0, 0, 0];
-        let d2: Digest224 = [0, 2, 0, 0, 0, 0, 0];
-        let d3: Digest224 = [0, 0, 3, 0, 0, 0, 0];
+        let d1: ObjectKey = ObjectKey::example(1);
+        let d2: ObjectKey = ObjectKey::example(2);
+        let d3: ObjectKey = ObjectKey::example(3);
         m.insert(2, d1);
         m.insert(5, d2);
         m.insert(3, d3);
         let bytes = serialize_inode_map(&m);
-        assert_eq!(bytes.len(), 108); // 3 × 36
+        assert_eq!(bytes.len(), 3 * RECORD);
         let recovered = deserialize_inode_map(&bytes).unwrap();
         assert_eq!(recovered.get(2), Some(&d1));
         assert_eq!(recovered.get(5), Some(&d2));
@@ -233,25 +229,25 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut io = StoreIo::open(dir.path()).unwrap();
         let mut m = InodeMap::new();
-        let d: Digest224 = [9, 8, 7, 6, 5, 4, 3];
+        let d: ObjectKey = ObjectKey::example(9);
         m.insert(2, d);
-        m.insert(3, [1; 7]);
+        m.insert(3, ObjectKey::example(1));
         let key = {
             let mut fsa = &mut io;
             intern_inode_map(&mut fsa, &m)
         };
         let recovered = load_inode_map(&mut io, &key).unwrap();
         assert_eq!(recovered.get(2), Some(&d));
-        assert_eq!(recovered.get(3), Some(&[1u32; 7]));
+        assert_eq!(recovered.get(3), Some(&ObjectKey::example(1)));
         assert_eq!(recovered.next_ino(), 4);
     }
 
     #[test]
     fn test_next_ino_after_deserialize_is_max_plus_one() {
         let mut m = InodeMap::new();
-        m.insert(2, [0u32; 7]);
-        m.insert(10, [1u32; 7]);
-        m.insert(7, [2u32; 7]);
+        m.insert(2, ObjectKey::example(0));
+        m.insert(10, ObjectKey::example(1));
+        m.insert(7, ObjectKey::example(2));
         let bytes = serialize_inode_map(&m);
         let recovered = deserialize_inode_map(&bytes).unwrap();
         assert_eq!(recovered.next_ino(), 11);
@@ -260,7 +256,7 @@ mod tests {
     proptest! {
         #[test]
         fn prop_serialize_round_trip(
-            entries in prop::collection::vec((any::<u64>(), any::<[u32; 7]>()), 0..20)
+            entries in prop::collection::vec((any::<u64>(), (any::<u8>(), any::<[u8; 32]>()).prop_map(|(t, d)| ObjectKey::new(t, d))), 0..20)
         ) {
             let mut m = InodeMap::new();
             for (ino, digest) in &entries {

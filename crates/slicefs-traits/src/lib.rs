@@ -13,7 +13,7 @@
 //! # Metadata Traits (Phase 2)
 //!
 //! - [`MetadataStore`] — Full inode CRUD, directory, manifest, xattr operations
-//! - [`Digest224`] — Content-addressed key of a metadata node or file content
+//! - [`ObjectKey`] — Tagged, content-addressed key of a metadata node or file content
 //!
 //! # Supporting Types
 //!
@@ -29,9 +29,8 @@
 
 pub mod block_store;
 pub mod chunk;
-pub mod compressor;
 pub mod dedup_index;
-pub mod digest;
+pub mod key;
 pub mod error;
 pub mod hash;
 pub mod metadata;
@@ -41,9 +40,8 @@ pub mod metadata;
 
 pub use block_store::{BlockStore, BlockStoreConfig};
 pub use chunk::{Chunk, Chunker};
-pub use compressor::{AlgorithmId, Compressor, CompressorError};
 pub use dedup_index::{DedupIndex, DedupResult};
-pub use digest::*;
+pub use key::*;
 pub use error::CasError;
 pub use hash::{ChunkHash, ContentHasher};
 pub use metadata::*;

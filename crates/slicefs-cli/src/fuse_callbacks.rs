@@ -611,7 +611,7 @@ impl Filesystem for MountedFs {
         };
         match handle_link(self, ino.0, newparent.0, name_str) {
             EntryResult::Ok(new_ino, attr) => {
-                eprintln!("[{}][FUSE] link: EXIT ino={}, newparent={}, newname={:?} -> ok, nlink={}", ts(), ino.0, newparent.0, newname, attr.nlink);
+                eprintln!("[{}][FUSE] link: EXIT ino={}, newparent={}, newname={:?} -> ok, ino={}, nlink={}", ts(), ino.0, newparent.0, newname, new_ino, attr.nlink);
                 reply.entry(&TTL, &attr, Generation(0));
             }
             EntryResult::Error(errno) => {

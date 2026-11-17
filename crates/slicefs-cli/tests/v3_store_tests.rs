@@ -4,7 +4,7 @@
 //!   DECOMP-01: Raw bytes are written to CAS without a compression header
 //!   DECOMP-02: Bytes retrieved from CAS are identical to bytes written
 //!   DECOMP-03: test_read returns the exact raw bytes that were written
-//!   DECOMP-04: Identical raw content produces the same Digest224 (dedup)
+//!   DECOMP-04: Identical raw content produces the same ObjectKey (dedup)
 
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
@@ -43,7 +43,7 @@ fn test_write_raw_no_compression() {
     fs.test_write(fh, 0, content).expect("write should succeed");
     fs.test_release(ino, fh).expect("release should succeed");
 
-    // Get the manifest digest — the root Digest224 of the stored content
+    // Get the manifest digest — the root ObjectKey of the stored content
     let manifest = fs
         .meta()
         .get_manifest(ino)
@@ -97,7 +97,7 @@ fn test_read_returns_raw_bytes() {
     );
 }
 
-/// DECOMP-04: Identical raw content produces the same Digest224 (content-addressed dedup).
+/// DECOMP-04: Identical raw content produces the same ObjectKey (content-addressed dedup).
 ///
 /// Two files with the same content must share the same manifest digest.
 /// This proves that dedup works on raw bytes (not on compressed bytes,
@@ -134,9 +134,9 @@ fn test_raw_content_dedup() {
     assert!(!manifest1.is_empty(), "file 1 manifest must be non-empty");
     assert!(!manifest2.is_empty(), "file 2 manifest must be non-empty");
 
-    // DECOMP-04: same raw content → same Digest224 → dedup
+    // DECOMP-04: same raw content → same ObjectKey → dedup
     assert_eq!(
         manifest1[0], manifest2[0],
-        "identical raw content must produce the same Digest224 (content-addressed dedup)"
+        "identical raw content must produce the same ObjectKey (content-addressed dedup)"
     );
 }

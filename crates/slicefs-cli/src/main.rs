@@ -2,28 +2,7 @@
 //!
 //! Parses the CLI arguments and dispatches to the appropriate subcommand.
 
-mod backend;
-mod cli;
-mod commit_timer;
-mod content;
-mod filesystem;
-mod fuse_callbacks;
-mod handlers;
-mod oplog;
-mod gc;
-mod online_gc;
-#[cfg(target_os = "macos")]
-mod fuset_watch;
-mod mount;
-mod scrub;
-mod seed;
-mod signals;
-mod snapshot;
-mod stats;
-mod store_io;
-mod unmount;
-mod util;
-
+use slicefs_cli::{cli, gc, mount, scrub, seed, snapshot, stats, unmount};
 use clap::Parser;
 use cli::{Cli, Cmd};
 
@@ -32,7 +11,7 @@ fn main() {
     let json = cli.json;
 
     match cli.command {
-        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force, commit_interval, gc_interval, compression } => {
+        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force, commit_interval, gc_interval, compression, hash } => {
             if let Err(e) = mount::run_mount(
                 &store,
                 &mountpoint,
@@ -47,6 +26,7 @@ fn main() {
                 commit_interval,
                 gc_interval,
                 compression,
+                hash.as_deref(),
             ) {
                 if json {
                     eprintln!("{{\"error\": \"{e}\"}}");
@@ -66,8 +46,8 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Cmd::Seed { store, source_dir } => {
-            if let Err(e) = seed::run_seed(&store, &source_dir) {
+        Cmd::Seed { store, source_dir, hash } => {
+            if let Err(e) = seed::run_seed(&store, &source_dir, hash.as_deref()) {
                 if json {
                     eprintln!("{{\"error\": \"{e}\"}}");
                 } else {

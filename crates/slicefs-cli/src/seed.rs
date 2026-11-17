@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use crate::content::{self, Content};
 use metadata::segment::{SegmentWriter, SegmentEntry};
 use metadata::store::DictMetadataStore;
-use slicefs_traits::digest::Digest224;
+use slicefs_traits::key::ObjectKey;
 use slicefs_traits::metadata::{InodeMeta, InodeId, MetadataStore};
 
 #[cfg(unix)]
@@ -30,8 +30,12 @@ const S_IFDIR: u32 = 0o040_000;
 /// - `<store_path>/packs/` — file content (chunk store)
 /// - `<store_path>/packs/` — metadata nodes and file content
 /// - `<store_path>/segments/segment-000001.seg` — root update segment
-pub fn run_seed(store_path: &Path, source_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// `hash` is `--hash`: the write hash of the new objects (`None`: the
+/// store's recorded hash, blake3-256 for a new store).
+pub fn run_seed(store_path: &Path, source_dir: &Path, hash: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(store_path)?;
+    content::select_hash(store_path, hash)?;
 
     let io = Arc::new(Mutex::new(content::store_io(store_path)?));
     let meta_store = DictMetadataStore::new(io.clone());
@@ -110,12 +114,12 @@ fn seed_file(
     fs_meta: &std::fs::Metadata,
     meta_store: &DictMetadataStore,
     cs: &Content,
-) -> Result<(InodeId, Digest224), Box<dyn std::error::Error>> {
+) -> Result<(InodeId, ObjectKey), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
     let size = bytes.len() as u64;
 
     // Push content bytes into FileStorage via CDC.
-    let content_digest: Digest224 = content::put_all(cs, &bytes)?;
+    let content_digest: ObjectKey = content::put_all(cs, &bytes)?;
 
     let inode_meta = file_inode_meta(fs_meta, size);
     let ino = meta_store.create_inode(&inode_meta)?;
@@ -182,7 +186,7 @@ mod tests {
         let store_dir = make_tempdir();
         let source_dir = make_tempdir();
 
-        run_seed(store_dir.path(), source_dir.path()).expect("seed failed");
+        run_seed(store_dir.path(), source_dir.path(), None).expect("seed failed");
 
         let segs_dir = store_dir.path().join("segments");
         assert!(segs_dir.is_dir(), "segments/ must exist after seed");
@@ -202,7 +206,7 @@ mod tests {
         let store_dir = make_tempdir();
         let source_dir = make_tempdir();
 
-        run_seed(store_dir.path(), source_dir.path()).expect("seed failed");
+        run_seed(store_dir.path(), source_dir.path(), None).expect("seed failed");
 
         let segs_dir = store_dir.path().join("segments");
         let seg_file = segs_dir.join("segment-000001.seg");
@@ -222,7 +226,7 @@ mod tests {
         let content = b"hello from SliceFS seed test";
         std::fs::write(source_dir.path().join("hello.txt"), content).unwrap();
 
-        run_seed(store_dir.path(), source_dir.path()).expect("seed failed");
+        run_seed(store_dir.path(), source_dir.path(), None).expect("seed failed");
 
         // Load from segments to get root
         let segs_dir = store_dir.path().join("segments");
@@ -261,7 +265,7 @@ mod tests {
         std::fs::write(source_dir.path().join("top.txt"), b"top level").unwrap();
         std::fs::write(source_dir.path().join("a").join("b").join("deep.txt"), b"deep file").unwrap();
 
-        run_seed(store_dir.path(), source_dir.path()).expect("seed failed");
+        run_seed(store_dir.path(), source_dir.path(), None).expect("seed failed");
 
         // Reload from segments.
         let segs_dir = store_dir.path().join("segments");
@@ -293,7 +297,7 @@ mod tests {
         let content: Vec<u8> = (0u8..200u8).collect();
         std::fs::write(source_dir.path().join("sized.bin"), &content).unwrap();
 
-        run_seed(store_dir.path(), source_dir.path()).expect("seed failed");
+        run_seed(store_dir.path(), source_dir.path(), None).expect("seed failed");
 
         let segs_dir = store_dir.path().join("segments");
         let (root_opt, _) = load_store_from_segments(&segs_dir).expect("load failed");

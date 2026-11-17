@@ -21,7 +21,6 @@ use slicefs_traits::metadata::MetadataStore;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
-const S_IFREG: u32 = 0o100_000;
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
 
@@ -288,7 +287,7 @@ fn test_sc5_wal_replay_on_dirty_mount() {
     std::fs::write(store_dir.path().join("mount.lock"), b"stale pid").unwrap();
 
     // load_store should detect dirty mount, remove stale lock, and reload from segments
-    let (meta, _io, _lock) = load_store(store_dir.path(), WalConfig::PerOp)
+    let (meta, _io, _lock) = load_store(store_dir.path(), WalConfig::PerOp, None)
         .expect("load_store should succeed on dirty mount (WAL replay)");
 
     // Both files must be accessible — WAL replay preserved state

@@ -11,8 +11,8 @@ pub struct SnapshotEntry {
     pub version: u64,
     /// Optional human-readable name/tag.
     pub name: Option<String>,
-    /// Root `Digest224` captured at snapshot time.
-    pub root: slicefs_traits::digest::Digest224,
+    /// Root `ObjectKey` captured at snapshot time.
+    pub root: slicefs_traits::key::ObjectKey,
     /// Creation time as Unix seconds (UTC).
     pub created_at: u64,
 }
@@ -20,11 +20,11 @@ pub struct SnapshotEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::segment::SegmentEntry;
-    use slicefs_traits::digest::Digest224;
+    use crate::segment::{SegmentEntry, SNAPSHOT_MIN, SNAPSHOT_NAME_LEN};
+    use slicefs_traits::key::ObjectKey;
 
-    fn make_root(v: u32) -> Digest224 {
-        [v; 7]
+    fn make_root(v: u32) -> ObjectKey {
+        ObjectKey::example(v)
     }
 
     #[test]
@@ -66,8 +66,8 @@ mod tests {
             name: None,
         };
         let payload = entry.payload_bytes();
-        // version(8) + root(28) + created_at(8) + name_len(4) = 48 bytes
-        assert_eq!(payload.len(), 48, "no-name payload must be 48 bytes");
+        // version(8) + root(33) + created_at(8) + name_len(4) = 53 bytes
+        assert_eq!(payload.len(), SNAPSHOT_MIN, "no-name payload must be SNAPSHOT_MIN bytes");
 
         let parsed = SegmentEntry::parse_snapshot_record(&payload)
             .expect("parse_snapshot_record must succeed");
@@ -84,8 +84,8 @@ mod tests {
             name: Some("test".to_string()),
         };
         let payload = entry.payload_bytes();
-        // 48 + len("test")=4 = 52 bytes
-        assert_eq!(payload.len(), 52, "named payload must be 48 + name_len bytes");
+        // SNAPSHOT_MIN + len("test")
+        assert_eq!(payload.len(), SNAPSHOT_MIN + 4, "named payload must be SNAPSHOT_MIN + name_len bytes");
 
         let parsed = SegmentEntry::parse_snapshot_record(&payload)
             .expect("parse_snapshot_record with name must succeed");
@@ -102,8 +102,7 @@ mod tests {
             name: None,
         };
         let payload = entry.payload_bytes();
-        // name_len is at bytes 44..48
-        let name_len = u32::from_le_bytes(payload[44..48].try_into().unwrap());
+        let name_len = u32::from_le_bytes(payload[SNAPSHOT_NAME_LEN..SNAPSHOT_MIN].try_into().unwrap());
         assert_eq!(name_len, 0, "name_len must be 0 for name=None");
     }
 
@@ -112,7 +111,7 @@ mod tests {
         let short = [0u8; 10];
         assert!(
             SegmentEntry::parse_snapshot_record(&short).is_none(),
-            "must return None for payload shorter than 48 bytes"
+            "must return None for payload shorter than SNAPSHOT_MIN bytes"
         );
     }
 }

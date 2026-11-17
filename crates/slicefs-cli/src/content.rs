@@ -1,24 +1,94 @@
 //! File content on the chunk store (docs/design/chunk-store.md, step 2).
 //!
 //! File data goes into `<store>/packs/` through `chunk_store`: FastCDC chunks
-//! with BLAKE3-224 IDs, a manifest tree, zstd. The metadata keeps a file's
-//! content key as a `Digest224` (28 bytes, the same size as an `ObjectId`).
+//! with tagged object IDs (a hash tag + a 32-byte digest), a manifest tree,
+//! zstd. The metadata keeps a file's content key as an `ObjectKey` (the same
+//! 33 bytes as an `ObjectId`).
+//!
+//! The format marker (`FORMAT`) also records the write hash of the store:
+//! the hash of the IDs of new objects, as a line `hash <name>`. A marker
+//! without that line means blake3-256.
 //! The metadata nodes are in the same chunk store (`metadata::store_io`,
 //! step 3).
 
 use std::path::Path;
 use std::sync::Arc;
 
-use slicefs_traits::digest::Digest224;
+use slicefs_traits::key::ObjectKey;
 use chunk_store::file::{FileReader, FileWriter};
-use chunk_store::{ChunkStore, Options};
+use chunk_store::{hasher_by_name, hasher_names, ChunkStore, ObjectHasher, Options, DEFAULT_HASHER};
 
 /// Shared handle of the content store.
 pub type Content = Arc<ChunkStore>;
 
 /// Marker file of the store format with file content in packs.
 pub const FORMAT_FILE: &str = "FORMAT";
-pub const FORMAT: &str = "slicefs-store 5 (metadata and file content in packs)\n";
+/// The first line of the marker.
+pub const FORMAT: &str = "slicefs-store 6 (metadata and file content in packs, tagged object IDs)\n";
+/// Prefix of the marker line that records the write hash.
+const HASH_LINE: &str = "hash ";
+
+/// The marker of a store whose new objects use `hasher`.
+pub fn marker(hasher: &dyn ObjectHasher) -> String {
+    format!("{FORMAT}{HASH_LINE}{}\n", hasher.name())
+}
+
+fn read_marker(store: &Path) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(store.join(FORMAT_FILE)) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The write hash that the marker of `store` records: blake3-256 if there is
+/// no marker or no hash line. A name this build does not know is an error.
+pub fn write_hasher(store: &Path) -> std::io::Result<&'static dyn ObjectHasher> {
+    let Some(m) = read_marker(store)? else { return Ok(DEFAULT_HASHER) };
+    let Some(name) = m.lines().skip(1).find_map(|l| l.strip_prefix(HASH_LINE)).map(str::trim) else {
+        return Ok(DEFAULT_HASHER);
+    };
+    hasher_by_name(name).ok_or_else(|| {
+        std::io::Error::other(format!(
+            "{} records the write hash {name:?}, which this SliceFS does not know (known: {})",
+            store.display(),
+            hasher_names()
+        ))
+    })
+}
+
+/// Parse `--hash`: the name of a known hasher.
+pub fn parse_hash(s: &str) -> Result<String, String> {
+    hasher_by_name(s)
+        .map(|h| h.name().to_string())
+        .ok_or_else(|| format!("unknown hash {s:?}; known: {}", hasher_names()))
+}
+
+/// Make `name` (if given) the write hash of `store`: new objects use it,
+/// objects of the old hash stay readable (each is verified by its own tag).
+/// Records it in the marker (made for a new store) and, if it changes the
+/// hash of an existing store, prints one line. Call before the store opens.
+pub fn select_hash(store: &Path, name: Option<&str>) -> std::io::Result<()> {
+    let Some(name) = name else { return Ok(()) };
+    let new = hasher_by_name(name).ok_or_else(|| std::io::Error::other(parse_hash(name).unwrap_err()))?;
+    std::fs::create_dir_all(store)?;
+    let old = read_marker(store)?;
+    if let Some(m) = &old {
+        if !m.starts_with(FORMAT) {
+            check_format(store)?; // the message for an older format
+            return Err(std::io::Error::other(format!("{}: unknown store format {:?}", store.display(), m.trim())));
+        }
+        let current = write_hasher(store)?;
+        if current.name() == new.name() {
+            return Ok(());
+        }
+        println!("New objects use hash {} (was {}); stored objects stay readable.", new.name(), current.name());
+    }
+    // Write a new marker, then rename it over the old one (never a torn marker).
+    let tmp = store.join(format!("{FORMAT_FILE}.tmp"));
+    std::fs::write(&tmp, marker(new))?;
+    std::fs::rename(&tmp, store.join(FORMAT_FILE))
+}
 
 /// Refuse a store of an older format, whose format changed without a
 /// migration. A store passes if it has the format marker, or if it has no
@@ -26,16 +96,18 @@ pub const FORMAT: &str = "slicefs-store 5 (metadata and file content in packs)\n
 /// one made by code that writes no marker, as in tests).
 /// Call this before the store is opened (mount, gc, stats, scrub).
 pub fn check_format(store: &Path) -> std::io::Result<()> {
-    let older = || {
+    let older_as = |what: &str| {
         std::io::Error::other(format!(
-            "{} was made by an older SliceFS (metadata in vt0/). The store \
+            "{} was made by an older SliceFS ({what}). The store \
              format changed without a migration: copy the files out with the \
              older version, then into a new store",
             store.display()
         ))
     };
+    let older = || older_as("metadata in vt0/");
     match std::fs::read_to_string(store.join(FORMAT_FILE)) {
-        Ok(s) if s == FORMAT => return Ok(()),
+        Ok(s) if s.starts_with(FORMAT) => return Ok(()),
+        Ok(s) if s.starts_with("slicefs-store 5 ") => return Err(older_as("224-bit object IDs")),
         Ok(s) if s.starts_with("slicefs-store ") => return Err(older()),
         Ok(s) => {
             return Err(std::io::Error::other(format!(
@@ -65,11 +137,12 @@ pub fn check_format(store: &Path) -> std::io::Result<()> {
 /// needed).
 pub fn open(store: &Path) -> std::io::Result<Content> {
     std::fs::create_dir_all(store)?;
-    let marker = store.join(FORMAT_FILE);
-    if !marker.exists() {
-        std::fs::write(&marker, FORMAT)?;
+    let path = store.join(FORMAT_FILE);
+    if !path.exists() {
+        std::fs::write(&path, marker(DEFAULT_HASHER))?;
     }
-    let cs = ChunkStore::open_with(storage(store), Options::default()).map_err(std::io::Error::other)?;
+    let opts = Options { hasher: write_hasher(store)?, ..Options::default() };
+    let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
     Ok(Arc::new(cs))
 }
 
@@ -97,7 +170,7 @@ pub fn store_io_read_only(store: &Path) -> std::io::Result<metadata::store_io::S
 /// Open the content store of `store` for reading only: nothing on disk
 /// changes, also while a mount writes to it (for `scrub`).
 pub fn open_read_only(store: &Path) -> std::io::Result<Content> {
-    let opts = Options { read_only: true, ..Options::default() };
+    let opts = Options { read_only: true, hasher: write_hasher(store)?, ..Options::default() };
     let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
     Ok(Arc::new(cs))
 }
@@ -122,7 +195,7 @@ pub fn parse_compression(s: &str) -> Result<i32, String> {
     }
 }
 
-pub use metadata::store_io::{to_digest, to_id};
+pub use metadata::store_io::{to_key, to_id};
 
 /// A content stream of a file being written. `clone()` + `finish()` gives the content so far.
 #[derive(Clone, Default)]
@@ -145,13 +218,13 @@ impl Stream {
         self.0.is_empty()
     }
 
-    pub fn finish(self, cs: &ChunkStore) -> std::io::Result<Digest224> {
-        self.0.finish(cs).map(to_digest).map_err(std::io::Error::other)
+    pub fn finish(self, cs: &ChunkStore) -> std::io::Result<ObjectKey> {
+        self.0.finish(cs).map(to_key).map_err(std::io::Error::other)
     }
 }
 
 /// Store `data` as one file content and return its key.
-pub fn put_all(cs: &ChunkStore, data: &[u8]) -> std::io::Result<Digest224> {
+pub fn put_all(cs: &ChunkStore, data: &[u8]) -> std::io::Result<ObjectKey> {
     let mut s = Stream::default();
     s.push(cs, data)?;
     s.finish(cs)
@@ -159,7 +232,7 @@ pub fn put_all(cs: &ChunkStore, data: &[u8]) -> std::io::Result<Digest224> {
 
 /// All bytes of the content `key`, or `None` if an object is missing or
 /// damaged.
-pub fn get_all(cs: &ChunkStore, key: &Digest224) -> Option<Vec<u8>> {
+pub fn get_all(cs: &ChunkStore, key: &ObjectKey) -> Option<Vec<u8>> {
     let mut r = FileReader::open(cs, to_id(key)).ok()?;
     let n = r.len() as usize;
     r.read(cs, 0, n).ok()
@@ -169,12 +242,12 @@ pub fn get_all(cs: &ChunkStore, key: &Digest224) -> Option<Vec<u8>> {
 pub struct Reader(FileReader);
 
 impl Reader {
-    pub fn open(cs: &ChunkStore, key: &Digest224) -> std::io::Result<Self> {
+    pub fn open(cs: &ChunkStore, key: &ObjectKey) -> std::io::Result<Self> {
         FileReader::open(cs, to_id(key)).map(Reader).map_err(std::io::Error::other)
     }
 
-    pub fn key(&self) -> Digest224 {
-        to_digest(self.0.key())
+    pub fn key(&self) -> ObjectKey {
+        to_key(self.0.key())
     }
 
     pub fn len(&self) -> u64 {
@@ -193,7 +266,6 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chunk_store::ObjectId;
 
     #[test]
     fn compression_specs_parse_to_zstd_levels() {
@@ -217,7 +289,7 @@ mod tests {
         meta.set_wal(wal);
         let ino = meta.create_inode(&InodeMeta::new_file(0, 0, 0, 0o100644)).unwrap();
         meta.link(1, "f", ino).unwrap();
-        meta.set_manifest(ino, &[[1, 2, 3, 4, 5, 6, 7]]).unwrap();
+        meta.set_manifest(ino, &[ObjectKey::example(1)]).unwrap();
         meta.commit().unwrap();
         meta.shutdown_wal().unwrap();
         drop(meta);
@@ -230,13 +302,16 @@ mod tests {
         let d = tempfile::TempDir::new().unwrap();
         std::fs::write(d.path().join(FORMAT_FILE), "slicefs-store 4 (file content in packs)\n").unwrap();
         let err = check_format(d.path()).err().unwrap().to_string();
-        assert!(err.contains("older SliceFS"), "{err}");
+        assert!(err.contains("older SliceFS (metadata in vt0/)"), "{err}");
+        std::fs::write(d.path().join(FORMAT_FILE), "slicefs-store 5 (metadata and file content in packs)\n").unwrap();
+        let err = check_format(d.path()).err().unwrap().to_string();
+        assert!(err.contains("older SliceFS (224-bit object IDs)"), "{err}");
     }
 
     #[test]
     fn digest_and_id_convert_both_ways() {
-        let id = ObjectId::of(b"abc");
-        assert_eq!(to_id(&to_digest(id)), id);
+        let id = chunk_store::ObjectHasher::id(&chunk_store::Blake3_256, b"abc");
+        assert_eq!(to_id(&to_key(id)), id);
     }
 
     #[test]
@@ -245,7 +320,7 @@ mod tests {
         let cs = open(d.path()).unwrap();
         let k = put_all(&cs, b"hello").unwrap();
         assert_eq!(get_all(&cs, &k).unwrap(), b"hello");
-        assert_eq!(std::fs::read_to_string(d.path().join(FORMAT_FILE)).unwrap(), FORMAT);
+        assert_eq!(std::fs::read_to_string(d.path().join(FORMAT_FILE)).unwrap(), marker(DEFAULT_HASHER));
         drop(cs);
         assert!(check_format(d.path()).is_ok(), "a store with the marker passes");
         assert!(check_format(tempfile::TempDir::new().unwrap().path()).is_ok(), "an empty store passes");

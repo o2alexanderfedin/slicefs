@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use slicefs_traits::digest::Digest224;
+use slicefs_traits::key::ObjectKey;
 
 use metadata::gc::{live_objects, GarbageCollector};
 use metadata::segment::compaction::compact_segment;
@@ -25,15 +25,15 @@ fn live_objects_fails_on_a_missing_root() {
     let dir = TempDir::new().unwrap();
     let io = StoreIo::open(dir.path()).unwrap();
     let stop = AtomicBool::new(false);
-    assert!(live_objects(io.store(), &[[1, 2, 3, 4, 5, 6, 7]], &[], &stop).is_err());
-    assert!(live_objects(io.store(), &[], &[[1, 2, 3, 4, 5, 6, 7]], &stop).is_err(), "a missing file root too");
+    assert!(live_objects(io.store(), &[ObjectKey::example(1)], &[], &stop).is_err());
+    assert!(live_objects(io.store(), &[], &[ObjectKey::example(1)], &stop).is_err(), "a missing file root too");
     assert!(live_objects(io.store(), &[], &[], &stop).unwrap().unwrap().is_empty());
 }
 
 // ─── Task 1 tests: compact_segment ──────────────────────────────────────────
 
-fn make_root_key(v: u32) -> Digest224 {
-    [v, v+1, v+2, v+3, v+4, v+5, v+6]
+fn make_root_key(v: u32) -> ObjectKey {
+    ObjectKey::example(v)
 }
 
 /// compact_segment retains RootUpdate and SnapshotRecord entries.
@@ -80,7 +80,7 @@ fn test_compact_segment_empty_produces_empty_output() {
     let tmp = TempDir::new().unwrap();
     let seg_path = tmp.path().join("segment-001.seg");
 
-    let mut writer = SegmentWriter::new(&seg_path, 1).unwrap();
+    let writer = SegmentWriter::new(&seg_path, 1).unwrap();
     writer.close().unwrap();
 
     let out_dir = tmp.path().join("out");

@@ -21,16 +21,16 @@ pub use flush_on_fsync::FlushOnFsyncWal;
 pub use periodic::PeriodicWal;
 
 use std::path::Path;
-use slicefs_traits::digest::Digest224;
+use slicefs_traits::key::ObjectKey;
 use thiserror::Error;
 
 /// A logical WAL entry representing a metadata state change.
 #[derive(Debug, Clone)]
 pub enum WalEntry {
     /// Update the filesystem root digest.
-    RootUpdate { root: Digest224 },
+    RootUpdate { root: ObjectKey },
     /// Persist a snapshot record with version, root, timestamp, and optional name.
-    Snapshot { version: u64, root: Digest224, created_at: u64, name: Option<String> },
+    Snapshot { version: u64, root: ObjectKey, created_at: u64, name: Option<String> },
     /// A file system request since the last root (#20 write log). The bytes
     /// are encoded by the file system; the store only keeps them in order.
     /// Not synced on its own: `flush_and_sync` (fsync, commit) makes it durable.

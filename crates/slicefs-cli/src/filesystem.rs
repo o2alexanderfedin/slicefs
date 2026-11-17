@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::util::ts;
 
-use slicefs_traits::digest::Digest224;
+use slicefs_traits::key::ObjectKey;
 use crate::content::{self, Content, Stream};
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use metadata::store::DictMetadataStore;
@@ -73,7 +73,7 @@ enum WriteMode {
 /// - Non-sequential write: one-way transition to `WriteMode::Buffered`.
 /// - `cas_committed` set to `true` after fsync/flush commits to CAS.
 /// - `cas_committed` set to `false` when new writes arrive (dirty again).
-/// - `last_committed_root` tracks the most recently committed Digest224
+/// - `last_committed_root` tracks the most recently committed ObjectKey
 ///   for refcount decrement-on-overwrite.
 struct OpenFileState {
     ino: u64,
@@ -84,9 +84,9 @@ struct OpenFileState {
     /// True if the manifest was committed to CAS by a prior flush/fsync and the
     /// state has not been dirtied by subsequent writes.
     cas_committed: bool,
-    /// The most recently committed Digest224 root. Used to decrement refcount
+    /// The most recently committed ObjectKey root. Used to decrement refcount
     /// when a new root is committed (fsync or release), preventing refcount leaks.
-    last_committed_root: Option<Digest224>,
+    last_committed_root: Option<ObjectKey>,
     /// Size set by setattr while streaming (macOS cp extends the file before
     /// writing it). Bytes between the stream end and this size are zeros;
     /// they are added at fsync/release instead of materializing the file.
@@ -104,7 +104,7 @@ struct OpenFileState {
 /// `store_path` is the on-disk store root used by `destroy()` to persist state.
 ///
 /// Raw bytes flow directly into the Merkle tree (v3 store format — no compression header).
-/// Digest224 is computed on raw bytes, enabling content-addressed deduplication.
+/// ObjectKey is computed on raw bytes, enabling content-addressed deduplication.
 pub struct SliceFsFilesystem {
     pub(crate) meta: Arc<DictMetadataStore>,
     pub(crate) io: Arc<Mutex<StoreIo>>,
@@ -207,7 +207,7 @@ impl SliceFsFilesystem {
     }
 
     /// All bytes of the content `key` (for tests and tools).
-    pub fn read_content(&self, key: &Digest224) -> Option<Vec<u8>> {
+    pub fn read_content(&self, key: &ObjectKey) -> Option<Vec<u8>> {
         content::get_all(&self.content, key)
     }
 }
@@ -438,7 +438,7 @@ impl SliceFsFilesystem {
     /// ftruncate(fd, 0) takes effect at once: empty the committed manifest and
     /// release its root, unless that root is `released` (already released by
     /// the handle). Later writes on the handle then start from an empty file.
-    fn clear_manifest(&self, ino: u64, released: Option<Digest224>) -> Result<(), i32> {
+    fn clear_manifest(&self, ino: u64, released: Option<ObjectKey>) -> Result<(), i32> {
         if let Ok(m) = self.meta.get_manifest(ino) {
             if let Some(root) = m.first() {
                 if Some(*root) != released {
@@ -451,7 +451,7 @@ impl SliceFsFilesystem {
 
     /// Finish a clone of a streaming state as a stored root, first appending
     /// zeros from `streamed` up to `min_size` (an extension set by setattr).
-    fn end_padded(&self, state: &Stream, streamed: u64, min_size: u64) -> Result<Digest224, i32> {
+    fn end_padded(&self, state: &Stream, streamed: u64, min_size: u64) -> Result<ObjectKey, i32> {
         let mut st = state.clone();
         let cs = &*self.content;
         st.push_zeros(cs, min_size.saturating_sub(streamed))
@@ -836,7 +836,7 @@ impl SliceFsFilesystem {
         }
 
         // Finalize to CAS based on write mode
-        let new_digest: Digest224 = match write_mode {
+        let new_digest: ObjectKey = match write_mode {
             WriteMode::Streaming { state, next_expected_offset, .. } => {
                 self.end_padded(&state, next_expected_offset, min_size)?
             }
@@ -931,7 +931,7 @@ impl SliceFsFilesystem {
         };
         // open_files lock released
 
-        let root: Digest224 = match writer_snapshot {
+        let root: ObjectKey = match writer_snapshot {
             Some(WriterSnapshot::Streaming(snapshot)) => {
                 // Uncommitted content: finish a clone of the writer to get a root.
                 snapshot.finish(&self.content).map_err(|_| libc::EIO)?
@@ -968,7 +968,7 @@ impl SliceFsFilesystem {
     /// Flush the streaming state for `fh` to CAS without closing the handle.
     ///
     /// Uses clone+end pattern: clones the in-progress State, calls end() on the
-    /// clone to produce a Digest224 snapshot, sets manifest, keeps original State
+    /// clone to produce a ObjectKey snapshot, sets manifest, keeps original State
     /// alive for further writes. After fsync, subsequent writes continue appending
     /// to the same State accumulator.
     ///
@@ -985,7 +985,7 @@ impl SliceFsFilesystem {
     /// of each open write handle into its manifest (Buffered handles too), so
     /// that the root holds every request logged before the commit. The caller
     /// holds the commit gate exclusively (no request is in flight).
-    pub fn commit_cut(&self) -> Result<Digest224, MetaError> {
+    pub fn commit_cut(&self) -> Result<ObjectKey, MetaError> {
         use crate::oplog::{Op, Record};
         let handles: Vec<(u64, u64)> = self.open_files.lock().unwrap()
             .iter().map(|(&fh, s)| (s.ino, fh)).collect();
@@ -1073,7 +1073,7 @@ impl SliceFsFilesystem {
         // open_files lock released here
 
         // 2. Materialize under io lock
-        let new_digest: Digest224 = match snapshot {
+        let new_digest: ObjectKey = match snapshot {
             FsyncSnapshot::Streaming(state_snapshot, streamed, min_size) => {
                 self.end_padded(&state_snapshot, streamed, min_size)?
             }
@@ -2164,8 +2164,8 @@ mod tests {
         meta_store.link(1, "testfile", ino).unwrap();
 
         let fs = SliceFsFilesystem::new(meta_store, io.clone(), None);
-        let root_digest224 = content::put_all(fs.content(), content).unwrap();
-        fs.meta.set_manifest(ino, &[root_digest224]).unwrap();
+        let root_key = content::put_all(fs.content(), content).unwrap();
+        fs.meta.set_manifest(ino, &[root_key]).unwrap();
 
         let manifest = fs.meta.get_manifest(ino).unwrap();
         assert!(!manifest.is_empty());
@@ -2186,8 +2186,8 @@ mod tests {
         let ino = meta_store.create_inode(&file_meta).unwrap();
 
         let fs = SliceFsFilesystem::new(meta_store, io.clone(), None);
-        let root_digest224 = content::put_all(fs.content(), content).unwrap();
-        fs.meta.set_manifest(ino, &[root_digest224]).unwrap();
+        let root_key = content::put_all(fs.content(), content).unwrap();
+        fs.meta.set_manifest(ino, &[root_key]).unwrap();
 
         let manifest = fs.meta.get_manifest(ino).unwrap();
         let bytes = fs.read_content(&manifest[0]).unwrap();

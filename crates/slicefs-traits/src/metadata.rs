@@ -4,7 +4,7 @@
 //! DirEntry, and MetaError. These are the foundational data types used
 //! throughout the metadata engine (Phase 2+).
 
-use crate::digest::Digest224;
+use crate::key::ObjectKey;
 use thiserror::Error;
 
 /// Inode number type. Inode 1 is the FUSE root directory.
@@ -140,7 +140,7 @@ impl InodeMeta {
 /// interior mutability (`Mutex`, `RwLock`) and be shared behind `Arc<dyn MetadataStore>`.
 ///
 /// The store keeps its nodes in the chunk store. `commit()` flushes in-memory state
-/// and returns the root Digest224 that uniquely identifies the filesystem snapshot.
+/// and returns the root ObjectKey that uniquely identifies the filesystem snapshot.
 pub trait MetadataStore: Send + Sync {
     /// Assign a new inode number and store `meta`. Returns the assigned `InodeId`.
     fn create_inode(&self, meta: &InodeMeta) -> Result<InodeId, MetaError>;
@@ -178,10 +178,10 @@ pub trait MetadataStore: Send + Sync {
     fn unlink(&self, parent_ino: InodeId, name: &str) -> Result<(), MetaError>;
 
     /// Store the ordered list of block keys (manifest) for file inode `ino`.
-    fn set_manifest(&self, ino: InodeId, blocks: &[Digest224]) -> Result<(), MetaError>;
+    fn set_manifest(&self, ino: InodeId, blocks: &[ObjectKey]) -> Result<(), MetaError>;
 
     /// Retrieve the manifest (ordered block keys) for file inode `ino`.
-    fn get_manifest(&self, ino: InodeId) -> Result<Vec<Digest224>, MetaError>;
+    fn get_manifest(&self, ino: InodeId) -> Result<Vec<ObjectKey>, MetaError>;
 
     /// Set an extended attribute `name` to `value` on inode `ino`.
     fn set_xattr(&self, ino: InodeId, name: &str, value: &[u8]) -> Result<(), MetaError>;
@@ -200,6 +200,6 @@ pub trait MetadataStore: Send + Sync {
 
     /// Persist the current in-memory state to the Dictionary and return the root digest.
     ///
-    /// Callers use the returned `Digest224` as the filesystem snapshot identifier.
-    fn commit(&self) -> Result<Digest224, MetaError>;
+    /// Callers use the returned `ObjectKey` as the filesystem snapshot identifier.
+    fn commit(&self) -> Result<ObjectKey, MetaError>;
 }
