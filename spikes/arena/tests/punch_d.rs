@@ -422,3 +422,35 @@ fn a_later_gc_joins_old_holes_with_newly_dead_neighbours() {
         assert_eq!(s.get(&o.0).as_deref(), Some(o.1.as_slice()));
     }
 }
+
+/// The index check: a punched range that an idx still lists (the wrong
+/// order, punch before the idx rewrite, then a crash). `get` detects it
+/// (marker fails: `None`, never wrong bytes), but `contains` stays true and
+/// a `put` of the same bytes dedups onto the zeros, so the object stays
+/// unreadable. This is why the idx is rewritten durably before any punch.
+#[test]
+fn a_punched_record_still_in_the_idx_reads_none_and_a_put_does_not_repair_it() {
+    let d = TempDir::new().unwrap();
+    let mut o = opts(Prealloc::Sparse);
+    o.zstd_level = 0;
+    let s = SpikeStore::open(d.path(), o).unwrap();
+    s.put(&random(5000, 70)).unwrap();
+    let x = random(20000, 71);
+    let id = s.put(&x).unwrap();
+    s.sync().unwrap();
+    s.seal_active().unwrap();
+    let l = s.loc(&id).unwrap();
+    drop(s);
+    let f = fs::OpenOptions::new().write(true).open(arena_file(d.path(), l.arena)).unwrap();
+    // The blocks from the one that holds the record header to the last
+    // whole block of the record.
+    let start = l.off / 4096 * 4096;
+    let end = (l.off + rec_len(l.stored) as u64) / 4096 * 4096;
+    sys::punch_hole(&f, start, end - start).unwrap();
+    drop(f);
+    let s = SpikeStore::open(d.path(), o).unwrap();
+    assert!(s.contains(&id));
+    assert!(s.get(&id).is_none(), "a punched record must not read as data");
+    assert_eq!(s.put(&x).unwrap(), id);
+    assert!(s.get(&id).is_none(), "expected the put to dedup onto the punched record");
+}

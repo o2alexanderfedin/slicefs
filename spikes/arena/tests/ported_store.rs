@@ -319,7 +319,10 @@ fn live_objects_stay_readable_and_mostly_dead_packs_are_compacted(p: Prealloc) {
     assert_eq!(st.removed_objects, 300);
     assert!(st.packs_compacted > 0);
     let after = files(dir.path(), ".arena").len();
-    assert!(after < before, "{before} -> {after}");
+    // Punch mode keeps every arena with a live record (it punches holes).
+    if gc_mode() == GcMode::Compact {
+        assert!(after < before, "{before} -> {after}");
+    }
     for (id, d) in &objs {
         assert_eq!(s.get(id).as_deref() == Some(d.as_slice()), live.contains(id));
     }
@@ -453,7 +456,10 @@ fn eighth_rule_compaction_into_the_unsealed_active_arena_keeps_live_data(p: Prea
     assert_eq!(s.active().unwrap().0, start_active, "not sealed: under size/8");
     let st = s.gc_finish(&live, b).unwrap();
     assert!(st.packs_compacted > 0);
-    assert!(s.active().is_none_or(|a| a.0 > start_active), "compaction filled the start arena");
+    // Punch mode copies nothing, so the start arena stays active.
+    if gc_mode() == GcMode::Compact {
+        assert!(s.active().is_none_or(|a| a.0 > start_active), "compaction filled the start arena");
+    }
     for (id, d) in &objs {
         if live.contains(id) {
             assert_eq!(s.get(id).as_deref(), Some(d.as_slice()), "live object lost");
