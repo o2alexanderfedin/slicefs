@@ -1,0 +1,190 @@
+//! Storage strategies: every file operation of the store goes through
+//! [`PackIo`], so the store can run on real files ([`FileIo`]), on an
+//! in-memory mock with faults ([`crate::mem::MemIo`]), or later on other
+//! read and write paths (for example mmap) without changes in the store.
+
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::fs::FileExt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// The two kinds of file of one pack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kind {
+    /// The records.
+    Pack,
+    /// The index of a sealed pack.
+    Idx,
+}
+
+impl Kind {
+    fn ext(self) -> &'static str {
+        match self {
+            Kind::Pack => "pack",
+            Kind::Idx => "idx",
+        }
+    }
+}
+
+/// File name of a pack file.
+pub fn pack_name(num: u64, kind: Kind) -> String {
+    format!("{num:016x}.{}", kind.ext())
+}
+
+/// Reads of an open pack.
+pub trait PackRead: Send + Sync {
+    /// Fill `buf` from `offset`; a short file is an error.
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()>;
+}
+
+/// The active pack: reads and writes.
+pub trait PackFile: PackRead {
+    fn write_at(&mut self, data: &[u8], offset: u64) -> io::Result<()>;
+    fn set_len(&mut self, len: u64) -> io::Result<()>;
+    /// Make every write so far durable (F_FULLFSYNC on macOS).
+    fn sync(&mut self) -> io::Result<()>;
+}
+
+/// The directory of pack files.
+pub trait PackIo: Send + Sync {
+    /// Make the directory if needed. With `read_only`, make nothing and
+    /// return whether the directory exists.
+    fn prepare(&self, read_only: bool) -> io::Result<bool>;
+    /// Numbers of every `.pack` file.
+    fn list(&self) -> io::Result<Vec<u64>>;
+    fn exists(&self, num: u64, kind: Kind) -> bool;
+    /// The whole file.
+    fn read(&self, num: u64, kind: Kind) -> io::Result<Vec<u8>>;
+    /// Replace the file atomically and durably (also syncs the directory).
+    fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> io::Result<()>;
+    fn remove(&self, num: u64, kind: Kind) -> io::Result<()>;
+    /// Make creations and removals durable.
+    fn sync_dir(&self) -> io::Result<()>;
+    /// Make a new, empty pack; it must not exist.
+    fn create(&self, num: u64) -> io::Result<Box<dyn PackFile>>;
+    /// Open a pack for reads and writes.
+    fn open_rw(&self, num: u64) -> io::Result<Box<dyn PackFile>>;
+    /// Open a pack for reads.
+    fn open_read(&self, num: u64) -> io::Result<Arc<dyn PackRead>>;
+}
+
+// ── Files ─────────────────────────────────────────────────────────────────────
+
+/// Packs as files in a directory, with pread and pwrite.
+pub struct FileIo {
+    dir: PathBuf,
+}
+
+impl FileIo {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        FileIo { dir: dir.into() }
+    }
+
+    fn path(&self, num: u64, kind: Kind) -> PathBuf {
+        self.dir.join(pack_name(num, kind))
+    }
+}
+
+struct FilePack(File);
+
+impl PackRead for FilePack {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        self.0.read_exact_at(buf, offset)
+    }
+}
+
+impl PackFile for FilePack {
+    fn write_at(&mut self, data: &[u8], offset: u64) -> io::Result<()> {
+        self.0.write_all_at(data, offset)
+    }
+    fn set_len(&mut self, len: u64) -> io::Result<()> {
+        self.0.set_len(len)
+    }
+    fn sync(&mut self) -> io::Result<()> {
+        full_sync(&self.0)
+    }
+}
+
+impl PackIo for FileIo {
+    fn prepare(&self, read_only: bool) -> io::Result<bool> {
+        if read_only {
+            return Ok(self.dir.is_dir());
+        }
+        fs::create_dir_all(&self.dir)?;
+        Ok(true)
+    }
+
+    fn list(&self) -> io::Result<Vec<u64>> {
+        Ok(fs::read_dir(&self.dir)?
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                let hex = n.strip_suffix(".pack")?;
+                u64::from_str_radix(hex, 16).ok()
+            })
+            .collect())
+    }
+
+    fn exists(&self, num: u64, kind: Kind) -> bool {
+        self.path(num, kind).exists()
+    }
+
+    fn read(&self, num: u64, kind: Kind) -> io::Result<Vec<u8>> {
+        fs::read(self.path(num, kind))
+    }
+
+    fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> io::Result<()> {
+        write_durable(&self.path(num, kind), data)
+    }
+
+    fn remove(&self, num: u64, kind: Kind) -> io::Result<()> {
+        fs::remove_file(self.path(num, kind))
+    }
+
+    fn sync_dir(&self) -> io::Result<()> {
+        sync_dir(&self.dir)
+    }
+
+    fn create(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
+        let f = OpenOptions::new().read(true).write(true).create_new(true).open(self.path(num, Kind::Pack))?;
+        Ok(Box::new(FilePack(f)))
+    }
+
+    fn open_rw(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
+        let f = OpenOptions::new().read(true).write(true).open(self.path(num, Kind::Pack))?;
+        Ok(Box::new(FilePack(f)))
+    }
+
+    fn open_read(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
+        Ok(Arc::new(FilePack(File::open(self.path(num, Kind::Pack))?)))
+    }
+}
+
+/// `fsync`, and on macOS `F_FULLFSYNC` (a plain fsync there does not flush
+/// the drive cache).
+fn full_sync(f: &File) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: fcntl F_FULLFSYNC on a valid fd we own.
+        if unsafe { libc::fcntl(f.as_raw_fd(), libc::F_FULLFSYNC) } == 0 {
+            return Ok(());
+        }
+    }
+    f.sync_all()
+}
+
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    full_sync(&File::open(dir)?)
+}
+
+/// Write `data` to `path` atomically and durably.
+fn write_durable(path: &Path, data: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    let mut f = File::create(&tmp)?;
+    f.write_all(data)?;
+    full_sync(&f)?;
+    fs::rename(&tmp, path)?;
+    sync_dir(path.parent().unwrap())
+}

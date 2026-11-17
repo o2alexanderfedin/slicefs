@@ -10,14 +10,16 @@
 //! with a bad CRC or a short read, and the pack is cut there.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::ops::Range;
-use std::os::unix::fs::FileExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 pub mod file;
+pub mod pack_io;
+pub mod mem;
+
+use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead};
 
 // ── Object IDs and chunking ───────────────────────────────────────────────────
 
@@ -138,10 +140,6 @@ struct Loc {
     flags: u8,
 }
 
-fn pack_name(num: u64, ext: &str) -> String {
-    format!("{num:016x}.{ext}")
-}
-
 fn encode_record(id: &ObjectId, flags: u8, raw: u32, payload: &[u8]) -> Vec<u8> {
     let mut r = Vec::with_capacity(REC_HEADER + payload.len() + REC_CRC);
     r.extend_from_slice(&id.0);
@@ -175,18 +173,17 @@ fn decode_record(buf: &[u8]) -> Option<(ObjectId, u8, u32, u32, usize)> {
 
 /// Scan a pack: the records up to the first bad one, and the length of the
 /// valid part.
-fn scan_pack(path: &Path, num: u64) -> io::Result<(Vec<(ObjectId, Loc)>, u64)> {
-    let buf = fs::read(path)?;
+fn scan_pack(buf: &[u8], num: u64) -> (Vec<(ObjectId, Loc)>, u64) {
     let mut out = Vec::new();
     if buf.len() < PACK_HEADER || &buf[..4] != PACK_MAGIC {
-        return Ok((out, 0));
+        return (out, 0);
     }
     let mut pos = PACK_HEADER;
     while let Some((id, flags, raw, stored, total)) = decode_record(&buf[pos..]) {
         out.push((id, Loc { pack: num, offset: pos as u64, stored, raw, flags }));
         pos += total;
     }
-    Ok((out, pos as u64))
+    (out, pos as u64)
 }
 
 fn encode_index(entries: &[(ObjectId, Loc)]) -> Vec<u8> {
@@ -235,39 +232,11 @@ fn decode_index(b: &[u8], num: u64) -> Option<Vec<(ObjectId, Loc)>> {
     )
 }
 
-/// `fsync`, and on macOS `F_FULLFSYNC` (a plain fsync there does not flush
-/// the drive cache).
-fn full_sync(f: &File) -> io::Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::fd::AsRawFd;
-        // SAFETY: fcntl F_FULLFSYNC on a valid fd we own.
-        if unsafe { libc::fcntl(f.as_raw_fd(), libc::F_FULLFSYNC) } == 0 {
-            return Ok(());
-        }
-    }
-    f.sync_all()
-}
-
-fn sync_dir(dir: &Path) -> io::Result<()> {
-    full_sync(&File::open(dir)?)
-}
-
-/// Write `data` to `path` atomically and durably.
-fn write_durable(path: &Path, data: &[u8]) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    let mut f = File::create(&tmp)?;
-    f.write_all(data)?;
-    full_sync(&f)?;
-    fs::rename(&tmp, path)?;
-    sync_dir(path.parent().unwrap())
-}
-
 // ── Store ─────────────────────────────────────────────────────────────────────
 
 struct Active {
     num: u64,
-    file: File,
+    file: Box<dyn PackFile>,
     len: u64,
     entries: Vec<(ObjectId, Loc)>,
     /// Bytes appended since the last sync.
@@ -276,7 +245,7 @@ struct Active {
 
 struct Inner {
     index: HashMap<ObjectId, Loc>,
-    readers: HashMap<u64, Arc<File>>,
+    readers: HashMap<u64, Arc<dyn PackRead>>,
     active: Option<Active>,
     next_pack: u64,
     stats: Stats,
@@ -285,6 +254,10 @@ struct Inner {
     /// While a GC runs: every object put or read since `gc_begin`. GC keeps
     /// them even if its mark did not find them.
     touched: Option<HashSet<ObjectId>>,
+    /// A sync failed. After that, a later sync can succeed without the data
+    /// (Linux can mark the pages clean), so the store refuses every write and
+    /// sync until it is opened again; the open scan finds the durable state.
+    failed: bool,
 }
 
 /// Outcome of a GC.
@@ -300,7 +273,7 @@ pub struct GcStats {
 
 /// A content-addressed object store in pack files.
 pub struct ChunkStore {
-    packs: PathBuf,
+    io: Arc<dyn PackIo>,
     opts: Options,
     inner: Mutex<Inner>,
 }
@@ -310,22 +283,15 @@ impl ChunkStore {
     /// scanned; the newest unsealed pack becomes the active pack, cut after
     /// its last valid record.
     pub fn open(dir: &Path, opts: Options) -> Result<Self> {
-        let packs = dir.join("packs");
-        if opts.read_only {
-            if !packs.is_dir() {
-                return Ok(ChunkStore { packs, opts, inner: Mutex::new(Inner::empty()) });
-            }
-        } else {
-            fs::create_dir_all(&packs)?;
+        Self::open_with(Arc::new(FileIo::new(dir.join("packs"))), opts)
+    }
+
+    /// Open the store on a storage strategy (files, a mock, ...).
+    pub fn open_with(io: Arc<dyn PackIo>, opts: Options) -> Result<Self> {
+        if !io.prepare(opts.read_only)? {
+            return Ok(ChunkStore { io, opts, inner: Mutex::new(Inner::empty()) });
         }
-        let mut nums: Vec<u64> = fs::read_dir(&packs)?
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let n = e.file_name().to_string_lossy().into_owned();
-                let hex = n.strip_suffix(".pack")?;
-                u64::from_str_radix(hex, 16).ok()
-            })
-            .collect();
+        let mut nums = io.list()?;
         nums.sort_unstable();
 
         let mut inner = Inner {
@@ -336,16 +302,15 @@ impl ChunkStore {
             stats: Stats::default(),
             dir_dirty: false,
             touched: None,
+            failed: false,
         };
         let last = nums.last().copied();
         for num in nums {
-            let pack = packs.join(pack_name(num, "pack"));
-            let idx = packs.join(pack_name(num, "idx"));
-            let loaded = fs::read(&idx).ok().and_then(|b| decode_index(&b, num));
+            let loaded = io.read(num, Kind::Idx).ok().and_then(|b| decode_index(&b, num));
             let entries = match loaded {
                 Some(e) => e,
                 None => {
-                    let (entries, valid) = scan_pack(&pack, num)?;
+                    let (entries, valid) = scan_pack(&io.read(num, Kind::Pack)?, num);
                     if opts.read_only {
                         for (id, l) in entries {
                             inner.add(id, l);
@@ -355,16 +320,16 @@ impl ChunkStore {
                     }
                     if Some(num) == last {
                         // The newest pack without an index is the active pack.
-                        let file = OpenOptions::new().read(true).write(true).open(&pack)?;
+                        let mut file = io.open_rw(num)?;
                         let valid = if valid < PACK_HEADER as u64 {
                             file.set_len(0)?;
-                            file.write_all_at(&pack_header(num), 0)?;
+                            file.write_at(&pack_header(num), 0)?;
                             PACK_HEADER as u64
                         } else {
                             file.set_len(valid)?;
                             valid
                         };
-                        full_sync(&file)?;
+                        file.sync()?;
                         inner.next_pack = num + 1;
                         for (id, l) in &entries {
                             inner.add(*id, *l);
@@ -373,7 +338,7 @@ impl ChunkStore {
                         inner.active = Some(Active { num, file, len: valid, entries, dirty: false });
                         continue;
                     }
-                    write_durable(&idx, &encode_index(&entries))?;
+                    io.write_durable(num, Kind::Idx, &encode_index(&entries))?;
                     entries
                 }
             };
@@ -382,7 +347,7 @@ impl ChunkStore {
             }
             inner.stats.packs += 1;
         }
-        Ok(ChunkStore { packs, opts, inner: Mutex::new(inner) })
+        Ok(ChunkStore { io, opts, inner: Mutex::new(inner) })
     }
 
     /// Store `data` and return its ID. Bytes already in the store are not
@@ -418,6 +383,7 @@ impl ChunkStore {
         if inner.index.contains_key(&id) {
             return Ok(id);
         }
+        inner.check()?;
         let loc = self.append(&mut inner, &id, &rec, payload.len() as u32, data.len() as u32, flags)?;
         inner.add(id, loc);
         Ok(id)
@@ -429,15 +395,14 @@ impl ChunkStore {
         if inner.active.is_none() {
             let num = inner.next_pack;
             inner.next_pack += 1;
-            let path = self.packs.join(pack_name(num, "pack"));
-            let file = OpenOptions::new().read(true).write(true).create_new(true).open(&path)?;
-            file.write_all_at(&pack_header(num), 0)?;
+            let mut file = self.io.create(num)?;
+            file.write_at(&pack_header(num), 0)?;
             inner.active = Some(Active { num, file, len: PACK_HEADER as u64, entries: Vec::new(), dirty: true });
             inner.stats.packs += 1;
             inner.dir_dirty = true;
         }
         let a = inner.active.as_mut().unwrap();
-        a.file.write_all_at(rec, a.len)?;
+        a.file.write_at(rec, a.len)?;
         let loc = Loc { pack: a.num, offset: a.len, stored, raw, flags };
         a.len += rec.len() as u64;
         a.entries.push((*id, loc));
@@ -453,6 +418,7 @@ impl ChunkStore {
     /// Returns the last pack number that the GC may change.
     pub fn gc_begin(&self) -> Result<u64> {
         let mut inner = self.inner.lock().unwrap();
+        inner.check()?;
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
             self.seal(&mut inner)?;
         }
@@ -473,6 +439,7 @@ impl ChunkStore {
     pub fn gc_finish(&self, live: &HashSet<ObjectId>, boundary: u64) -> Result<GcStats> {
         let mut inner = self.inner.lock().unwrap();
         let touched = inner.touched.take().unwrap_or_default();
+        inner.check()?;
         let keep = |id: &ObjectId| live.contains(id) || touched.contains(id);
         let active = inner.active.as_ref().map(|a| a.num);
         let mut by_pack: HashMap<u64, Vec<(ObjectId, Loc)>> = HashMap::new();
@@ -500,11 +467,11 @@ impl ChunkStore {
                 continue;
             }
             // Delete, or compact: copy the live records first.
-            let file = inner.reader(&self.packs, num)?;
+            let file = inner.reader(&*self.io, num)?;
             for (id, l) in entries {
                 if keep(id) {
                     let mut rec = vec![0u8; rec_len(l) as usize];
-                    file.read_exact_at(&mut rec, l.offset)?;
+                    file.read_at(&mut rec, l.offset)?;
                     let nl = self.append(&mut inner, id, &rec, l.stored, l.raw, l.flags)?;
                     inner.index.insert(*id, nl);
                     st.kept_objects += 1;
@@ -526,7 +493,7 @@ impl ChunkStore {
         }
         // Packs that the index no longer uses at all (older copies).
         for num in 1..=boundary {
-            if Some(num) != active && !by_pack.contains_key(&num) && self.packs.join(pack_name(num, "pack")).exists() {
+            if Some(num) != active && !by_pack.contains_key(&num) && self.io.exists(num, Kind::Pack) {
                 doomed.push(num);
             }
         }
@@ -534,21 +501,15 @@ impl ChunkStore {
             return Ok(st);
         }
         // The copies must be durable before the originals go.
-        if let Some(a) = inner.active.as_mut() {
-            if a.dirty {
-                full_sync(&a.file)?;
-                a.dirty = false;
-            }
-        }
-        sync_dir(&self.packs)?;
+        inner.sync_active()?;
+        inner.sync_dir(&*self.io)?;
         for num in doomed {
-            let _ = fs::remove_file(self.packs.join(pack_name(num, "idx")));
-            fs::remove_file(self.packs.join(pack_name(num, "pack")))?;
+            let _ = self.io.remove(num, Kind::Idx);
+            self.io.remove(num, Kind::Pack)?;
             inner.readers.remove(&num);
             inner.stats.packs -= 1;
         }
-        sync_dir(&self.packs)?;
-        inner.dir_dirty = false;
+        inner.sync_dir(&*self.io)?;
         Ok(st)
     }
 
@@ -559,11 +520,11 @@ impl ChunkStore {
             let mut inner = self.inner.lock().unwrap();
             let loc = *inner.index.get(id)?;
             inner.touch(*id);
-            let file = inner.reader(&self.packs, loc.pack).ok()?;
+            let file = inner.reader(&*self.io, loc.pack).ok()?;
             (loc, file)
         };
         let mut buf = vec![0u8; REC_HEADER + loc.stored as usize + REC_CRC];
-        file.read_exact_at(&mut buf, loc.offset).ok()?;
+        file.read_at(&mut buf, loc.offset).ok()?;
         let (rid, flags, raw, _, _) = decode_record(&buf)?;
         if rid != *id {
             return None;
@@ -591,15 +552,10 @@ impl ChunkStore {
     /// not touch the disk.
     pub fn sync(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(a) = inner.active.as_mut() {
-            if a.dirty {
-                full_sync(&a.file)?;
-                a.dirty = false;
-            }
-        }
+        inner.check()?;
+        inner.sync_active()?;
         if inner.dir_dirty {
-            sync_dir(&self.packs)?;
-            inner.dir_dirty = false;
+            inner.sync_dir(&*self.io)?;
         }
         Ok(())
     }
@@ -607,12 +563,12 @@ impl ChunkStore {
     /// Seal the active pack (sync, write its index). Call at unmount.
     pub fn close(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
+        inner.check()?;
         if inner.active.is_some() {
             self.seal(&mut inner)?;
         }
         if inner.dir_dirty {
-            sync_dir(&self.packs)?;
-            inner.dir_dirty = false;
+            inner.sync_dir(&*self.io)?;
         }
         Ok(())
     }
@@ -623,9 +579,13 @@ impl ChunkStore {
     }
 
     fn seal(&self, inner: &mut Inner) -> Result<()> {
+        inner.sync_active()?;
         let Some(a) = inner.active.take() else { return Ok(()) };
-        full_sync(&a.file)?;
-        write_durable(&self.packs.join(pack_name(a.num, "idx")), &encode_index(&a.entries))?;
+        if let Err(e) = self.io.write_durable(a.num, Kind::Idx, &encode_index(&a.entries)) {
+            // The pack is synced; without its index it is scanned at open.
+            inner.failed = true;
+            return Err(e.into());
+        }
         inner.dir_dirty = false; // write_durable synced the directory
         Ok(())
     }
@@ -649,7 +609,40 @@ impl Inner {
             stats: Stats::default(),
             dir_dirty: false,
             touched: None,
+            failed: false,
         }
+    }
+
+    fn check(&self) -> Result<()> {
+        if self.failed {
+            return Err(Error::Io(io::Error::other(
+                "an earlier sync of the chunk store failed; open the store again",
+            )));
+        }
+        Ok(())
+    }
+
+    /// Sync the active pack if it has new bytes. A failure is final.
+    fn sync_active(&mut self) -> Result<()> {
+        if let Some(a) = self.active.as_mut() {
+            if a.dirty {
+                if let Err(e) = a.file.sync() {
+                    self.failed = true;
+                    return Err(e.into());
+                }
+                a.dirty = false;
+            }
+        }
+        Ok(())
+    }
+
+    fn sync_dir(&mut self, io: &dyn PackIo) -> Result<()> {
+        if let Err(e) = io.sync_dir() {
+            self.failed = true;
+            return Err(e.into());
+        }
+        self.dir_dirty = false;
+        Ok(())
     }
 
     fn touch(&mut self, id: ObjectId) {
@@ -666,11 +659,11 @@ impl Inner {
         }
     }
 
-    fn reader(&mut self, packs: &Path, num: u64) -> io::Result<Arc<File>> {
+    fn reader(&mut self, io: &dyn PackIo, num: u64) -> io::Result<Arc<dyn PackRead>> {
         if let Some(f) = self.readers.get(&num) {
             return Ok(Arc::clone(f));
         }
-        let f = Arc::new(File::open(packs.join(pack_name(num, "pack")))?);
+        let f = io.open_read(num)?;
         self.readers.insert(num, Arc::clone(&f));
         Ok(f)
     }
