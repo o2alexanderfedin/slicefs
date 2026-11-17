@@ -151,4 +151,13 @@ impl PackIo for RetryingIo {
     fn open_read(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
         self.inner.open_read(num)
     }
+    fn can_punch(&self) -> bool {
+        self.inner.can_punch()
+    }
+    /// Not retried: the index is already durable without the punched
+    /// records, so a failed punch only leaves their bytes on disk; GC
+    /// reports the error, and a later GC compacts or deletes the pack.
+    fn punch(&self, num: u64, ranges: &[(u64, u64)]) -> io::Result<()> {
+        self.inner.punch(num, ranges)
+    }
 }

@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::ops::Range;
 use std::path::Path;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub mod file;
@@ -20,7 +21,7 @@ pub mod pack_io;
 pub mod retry;
 pub mod mem;
 
-use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead};
+use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK};
 
 // ── Object IDs and chunking ───────────────────────────────────────────────────
 
@@ -121,6 +122,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 const PACK_MAGIC: &[u8; 4] = b"SFPK";
 const IDX_MAGIC: &[u8; 4] = b"SFIX";
 const FORMAT_VERSION: u16 = 1;
+/// Bit in the version field of a pack header: GC punched holes in the
+/// pack. Such a pack is never the active pack and never cut at open.
+const PACK_PUNCHED: u16 = 0x8000;
 /// magic(4) + version(2) + pack number(8)
 const PACK_HEADER: usize = 14;
 /// id(28) + flags(1) + raw length(4) + stored length(4)
@@ -145,16 +149,53 @@ struct Loc {
     flags: u8,
 }
 
-fn encode_record(id: &ObjectId, flags: u8, raw: u32, payload: &[u8]) -> Vec<u8> {
-    let mut r = Vec::with_capacity(REC_HEADER + payload.len() + REC_CRC);
+/// Encode a record into `r` (cleared first).
+fn encode_record_into(r: &mut Vec<u8>, id: &ObjectId, flags: u8, raw: u32, payload: &[u8]) {
+    r.clear();
+    r.reserve(REC_HEADER + payload.len() + REC_CRC);
     r.extend_from_slice(&id.0);
     r.push(flags);
     r.extend_from_slice(&raw.to_le_bytes());
     r.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     r.extend_from_slice(payload);
-    let crc = crc32c::crc32c(&r);
+    let crc = crc32c::crc32c(r);
     r.extend_from_slice(&crc.to_le_bytes());
-    r
+}
+
+/// Largest buffer that a thread keeps after a put.
+const SCRATCH_KEEP: usize = 1 << 20;
+
+/// Per-thread buffers of `put`: a zstd context and two buffers, used again
+/// for each object (spike E: 95 -> 81 us of CPU for each put).
+struct Scratch {
+    zstd: Option<(i32, zstd::bulk::Compressor<'static>)>,
+    compressed: Vec<u8>,
+    record: Vec<u8>,
+}
+
+thread_local! {
+    static SCRATCH: std::cell::RefCell<Scratch> =
+        const { std::cell::RefCell::new(Scratch { zstd: None, compressed: Vec::new(), record: Vec::new() }) };
+}
+
+impl Scratch {
+    /// Compress `data` into `self.compressed`; false if it does not get
+    /// smaller by 1/8 or the compressor fails.
+    fn compress(&mut self, data: &[u8], level: i32) -> bool {
+        if self.zstd.as_ref().is_none_or(|(l, _)| *l != level) {
+            match zstd::bulk::Compressor::new(level) {
+                Ok(c) => self.zstd = Some((level, c)),
+                Err(_) => return false,
+            }
+        }
+        let c = &mut self.zstd.as_mut().unwrap().1;
+        self.compressed.clear();
+        self.compressed.reserve(zstd::zstd_safe::compress_bound(data.len()));
+        match c.compress_to_buffer(data, &mut self.compressed) {
+            Ok(n) => n <= data.len() - data.len() / 8,
+            Err(_) => false,
+        }
+    }
 }
 
 /// Parse the record that starts at `buf[0]`. Returns its location fields and
@@ -189,6 +230,47 @@ fn scan_pack(buf: &[u8], num: u64) -> (Vec<(ObjectId, Loc)>, u64) {
         pos += total;
     }
     (out, pos as u64)
+}
+
+fn is_punched(pack: &[u8]) -> bool {
+    pack.len() >= PACK_HEADER && &pack[..4] == PACK_MAGIC && u16::from_le_bytes([pack[4], pack[5]]) & PACK_PUNCHED != 0
+}
+
+/// The record at `buf[0]` if it is valid and its bytes hash to its ID.
+fn verified_record(buf: &[u8]) -> Option<(ObjectId, u8, u32, u32, usize)> {
+    let (id, flags, raw, stored, total) = decode_record(buf)?;
+    let payload = &buf[REC_HEADER..REC_HEADER + stored as usize];
+    let ok = if flags & FLAG_ZSTD != 0 {
+        zstd::bulk::decompress(payload, raw as usize).is_ok_and(|d| ObjectId::of(&d) == id)
+    } else {
+        raw == stored && ObjectId::of(payload) == id
+    };
+    ok.then_some((id, flags, raw, stored, total))
+}
+
+/// Scan a sealed pack that may have holes or damage: at each position, take
+/// a record only if its CRC is good and its bytes hash to its ID; else move
+/// on by one byte (zero runs are skipped). A punched gap or a damaged record
+/// costs only itself, not the records after it.
+fn resync_scan(buf: &[u8], num: u64) -> Vec<(ObjectId, Loc)> {
+    let mut out = Vec::new();
+    if buf.len() < PACK_HEADER || &buf[..4] != PACK_MAGIC {
+        return out;
+    }
+    let mut pos = PACK_HEADER;
+    while pos + REC_HEADER + REC_CRC <= buf.len() {
+        if let Some((id, flags, raw, stored, total)) = verified_record(&buf[pos..]) {
+            out.push((id, Loc { pack: num, offset: pos as u64, stored, raw, flags }));
+            pos += total;
+            continue;
+        }
+        // A record never starts with 8 zero bytes (its ID is a hash): skip zeros.
+        match buf[pos..].iter().position(|&b| b != 0) {
+            Some(nz) => pos += nz.saturating_sub(7).max(1),
+            None => break,
+        }
+    }
+    out
 }
 
 fn encode_index(entries: &[(ObjectId, Loc)]) -> Vec<u8> {
@@ -277,11 +359,19 @@ pub struct GcStats {
     pub removed_bytes: u64,
     pub packs_deleted: u64,
     pub packs_compacted: u64,
+    /// Packs where GC punched holes over dead records.
+    pub packs_punched: u64,
+    /// Bytes in the punched ranges.
+    pub punched_bytes: u64,
 }
 
 /// A content-addressed object store in pack files.
 pub struct ChunkStore {
     io: Arc<dyn PackIo>,
+    /// The strategy can punch holes (asked once, at open).
+    punches: bool,
+    /// zstd level for new objects (0 = none); starts as `opts.zstd_level`.
+    zstd_level: AtomicI32,
     opts: Options,
     inner: Mutex<Inner>,
 }
@@ -298,7 +388,8 @@ impl ChunkStore {
     /// Open the store on a storage strategy (files, a mock, ...).
     pub fn open_with(io: Arc<dyn PackIo>, opts: Options) -> Result<Self> {
         if !io.prepare(opts.read_only)? {
-            return Ok(ChunkStore { io, opts, inner: Mutex::new(Inner::empty()) });
+            let zstd_level = AtomicI32::new(opts.zstd_level);
+            return Ok(ChunkStore { io, punches: false, zstd_level, opts, inner: Mutex::new(Inner::empty()) });
         }
         let mut nums = io.list()?;
         nums.sort_unstable();
@@ -320,7 +411,12 @@ impl ChunkStore {
             let entries = match loaded {
                 Some(e) => e,
                 None => {
-                    let (entries, valid) = scan_pack(&io.read(num, Kind::Pack)?, num);
+                    let buf = io.read(num, Kind::Pack)?;
+                    let active = Some(num) == last && !is_punched(&buf);
+                    // The active pack is cut at its first bad record. A sealed
+                    // pack (its index is lost) may have holes or damage in the
+                    // middle, so it is resynced past them.
+                    let (entries, valid) = if active { scan_pack(&buf, num) } else { (resync_scan(&buf, num), 0) };
                     if opts.read_only {
                         for (id, l) in entries {
                             inner.add(id, l);
@@ -328,7 +424,7 @@ impl ChunkStore {
                         inner.stats.packs += 1;
                         continue;
                     }
-                    if Some(num) == last {
+                    if active {
                         // The newest pack without an index is the active pack.
                         let mut file = io.open_rw(num)?;
                         let valid = if valid < PACK_HEADER as u64 {
@@ -357,7 +453,9 @@ impl ChunkStore {
             }
             inner.stats.packs += 1;
         }
-        Ok(ChunkStore { io, opts, inner: Mutex::new(inner) })
+        let punches = !opts.read_only && io.can_punch();
+        let zstd_level = AtomicI32::new(opts.zstd_level);
+        Ok(ChunkStore { io, punches, zstd_level, opts, inner: Mutex::new(inner) })
     }
 
     /// Store `data` and return its ID. Bytes already in the store are not
@@ -377,26 +475,34 @@ impl ChunkStore {
         if data.len() > u32::MAX as usize - REC_HEADER {
             return Err(Error::TooLarge(data.len()));
         }
-        // Compress outside the lock.
-        let compressed = (self.opts.zstd_level > 0 && data.len() >= MIN_COMPRESS)
-            .then(|| zstd::bulk::compress(data, self.opts.zstd_level).ok())
-            .flatten()
-            .filter(|c| c.len() <= data.len() - data.len() / 8);
-        let (flags, payload) = match &compressed {
-            Some(c) => (FLAG_ZSTD, c.as_slice()),
-            None => (0, data),
-        };
-        let rec = encode_record(&id, flags, data.len() as u32, payload);
+        SCRATCH.with(|s| {
+            let s = &mut *s.borrow_mut();
+            // Compress outside the lock.
+            let level = self.zstd_level.load(Ordering::Relaxed);
+            let zstd = level > 0 && data.len() >= MIN_COMPRESS && s.compress(data, level);
+            let (flags, payload) = if zstd { (FLAG_ZSTD, s.compressed.as_slice()) } else { (0, data) };
+            encode_record_into(&mut s.record, &id, flags, data.len() as u32, payload);
+            let stored = payload.len() as u32;
 
-        let mut inner = self.inner.lock().unwrap();
-        inner.touch(id);
-        if inner.index.contains_key(&id) {
-            return Ok(id);
-        }
-        inner.check()?;
-        let loc = self.append(&mut inner, &id, &rec, payload.len() as u32, data.len() as u32, flags)?;
-        inner.add(id, loc);
-        Ok(id)
+            let r = (|| {
+                let mut inner = self.inner.lock().unwrap();
+                inner.touch(id);
+                if inner.index.contains_key(&id) {
+                    return Ok(id);
+                }
+                inner.check()?;
+                let loc = self.append(&mut inner, &id, &s.record, stored, data.len() as u32, flags)?;
+                inner.add(id, loc);
+                Ok(id)
+            })();
+            // Chunks and nodes are small; do not keep the buffers of a big object.
+            for b in [&mut s.compressed, &mut s.record] {
+                if b.capacity() > SCRATCH_KEEP {
+                    *b = Vec::new();
+                }
+            }
+            r
+        })
     }
 
     /// Append an encoded record to the active pack (made if there is none),
@@ -473,7 +579,7 @@ impl ChunkStore {
                 continue;
             }
             if live_bytes > 0 && live_bytes * 2 >= total && !small {
-                st.kept_objects += entries.len() as u64;
+                self.punch_pack(&mut inner, num, entries, &keep, &mut st)?;
                 continue;
             }
             // Delete, or compact: copy the live records first.
@@ -521,6 +627,92 @@ impl ChunkStore {
         }
         inner.sync_dir(&*self.io)?;
         Ok(st)
+    }
+
+    /// GC of a mostly live pack: free the disk blocks of the dead gaps.
+    ///
+    /// Order: (1) drop the dead records in the punched ranges from the index
+    /// and write the pack's index durably without them; (2) mark the pack as
+    /// punched in its header and sync; (3) punch. A crash at any point leaves
+    /// an index that lists only bytes that are still there, and a punched pack
+    /// is resynced at open, never cut.
+    fn punch_pack(
+        &self,
+        inner: &mut Inner,
+        num: u64,
+        entries: &[(ObjectId, Loc)],
+        keep: &dyn Fn(&ObjectId) -> bool,
+        st: &mut GcStats,
+    ) -> Result<()> {
+        if !self.punches {
+            // No holes here: keep the dead records in the index, so a later
+            // GC still sees their bytes and compacts the pack when it is
+            // mostly dead.
+            st.kept_objects += entries.len() as u64;
+            return Ok(());
+        }
+        let rec_end = |l: &Loc| l.offset + (REC_HEADER + l.stored as usize + REC_CRC) as u64;
+        let mut sorted: Vec<&(ObjectId, Loc)> = entries.iter().collect();
+        sorted.sort_by_key(|(_, l)| l.offset);
+        let end = sorted.iter().map(|(_, l)| rec_end(l)).max().unwrap_or(0);
+        // Gaps between live records, cut to whole blocks inside them.
+        let mut ranges = Vec::new();
+        let mut from = PACK_HEADER as u64;
+        let lives = sorted.iter().filter(|(id, _)| keep(id)).map(|(_, l)| (l.offset, rec_end(l)));
+        for (s, e) in lives.chain(std::iter::once((end, end))) {
+            let a = from.div_ceil(PUNCH_BLOCK) * PUNCH_BLOCK;
+            let b = s / PUNCH_BLOCK * PUNCH_BLOCK;
+            if b > a {
+                ranges.push((a, b - a));
+            }
+            from = from.max(e);
+        }
+        let hits = |l: &Loc, a: u64, n: u64| l.offset < a + n && rec_end(l) > a;
+        let victims: Vec<&(ObjectId, Loc)> = sorted
+            .iter()
+            .copied()
+            .filter(|(id, l)| !keep(id) && ranges.iter().any(|&(a, n)| hits(l, a, n)))
+            .collect();
+        let gone: HashSet<ObjectId> = victims.iter().map(|(id, _)| *id).collect();
+        // Keep only the ranges with a dead record (skip holes of earlier GCs).
+        ranges.retain(|&(a, n)| victims.iter().any(|(_, l)| hits(l, a, n)));
+        if victims.is_empty() {
+            st.kept_objects += entries.len() as u64;
+            return Ok(());
+        }
+        for (id, l) in &victims {
+            inner.index.remove(id);
+            inner.stats.objects -= 1;
+            inner.stats.raw_bytes -= l.raw as u64;
+            inner.stats.stored_bytes -= l.stored as u64;
+            st.removed_objects += 1;
+            st.removed_bytes += l.stored as u64;
+        }
+        let rest: Vec<(ObjectId, Loc)> = entries.iter().filter(|(id, _)| !gone.contains(id)).copied().collect();
+        st.kept_objects += rest.len() as u64;
+        let marked = (|| -> io::Result<()> {
+            self.io.write_durable(num, Kind::Idx, &encode_index(&rest))?;
+            let mut f = self.io.open_rw(num)?;
+            f.write_at(&pack_header_with(num, PACK_PUNCHED), 0)?;
+            f.sync()
+        })();
+        if let Err(e) = marked {
+            inner.failed = true;
+            return Err(e.into());
+        }
+        match self.io.punch(num, &ranges) {
+            Ok(()) => {
+                st.packs_punched += 1;
+                st.punched_bytes += ranges.iter().map(|&(_, n)| n).sum::<u64>();
+            }
+            // The probe said yes, but this punch could not: the records are
+            // gone from the index, their bytes stay until the pack is
+            // compacted or deleted. Rare (for example a file system that
+            // changed under the store).
+            Err(e) if e.kind() == io::ErrorKind::Unsupported => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(())
     }
 
     /// The bytes of `id`, or `None` if the store does not have the object or
@@ -583,6 +775,24 @@ impl ChunkStore {
         Ok(())
     }
 
+    /// True if GC frees dead space inside packs with holes (the storage can
+    /// punch holes). Else GC frees space only by compaction and deletion.
+    pub fn punches_holes(&self) -> bool {
+        self.punches
+    }
+
+    /// Set the zstd level of new objects (0 = no compression). Objects
+    /// already stored keep their form: each record says if it is compressed,
+    /// so the level needs no record on disk and can change at any time.
+    pub fn set_zstd_level(&self, level: i32) {
+        self.zstd_level.store(level, Ordering::Relaxed);
+    }
+
+    /// The zstd level of new objects (0 = no compression).
+    pub fn zstd_level(&self) -> i32 {
+        self.zstd_level.load(Ordering::Relaxed)
+    }
+
     /// Current counts.
     pub fn stats(&self) -> Stats {
         self.inner.lock().unwrap().stats
@@ -602,9 +812,13 @@ impl ChunkStore {
 }
 
 fn pack_header(num: u64) -> Vec<u8> {
+    pack_header_with(num, 0)
+}
+
+fn pack_header_with(num: u64, flags: u16) -> Vec<u8> {
     let mut h = Vec::with_capacity(PACK_HEADER);
     h.extend_from_slice(PACK_MAGIC);
-    h.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    h.extend_from_slice(&(FORMAT_VERSION | flags).to_le_bytes());
     h.extend_from_slice(&num.to_le_bytes());
     h
 }

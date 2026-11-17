@@ -68,17 +68,44 @@ pub fn open(store: &Path) -> std::io::Result<Content> {
     if !marker.exists() {
         std::fs::write(&marker, FORMAT)?;
     }
-    let cs = ChunkStore::open(store, Options::default()).map_err(std::io::Error::other)?;
+    let cs = ChunkStore::open_with(storage(store), Options::default()).map_err(std::io::Error::other)?;
     Ok(Arc::new(cs))
 }
 
+/// The storage strategy of a store: chosen here, once, and injected into the
+/// chunk store (the store itself makes no checks of its environment). Files,
+/// with a retry of failed syncs that rewrites the unsynced data first.
+fn storage(store: &Path) -> Arc<dyn chunk_store::pack_io::PackIo> {
+    let files = Arc::new(chunk_store::pack_io::FileIo::new(store.join("packs")));
+    Arc::new(chunk_store::retry::RetryingIo::new(files))
+}
 
 /// Open the content store of `store` for reading only: nothing on disk
 /// changes, also while a mount writes to it (for `scrub`).
 pub fn open_read_only(store: &Path) -> std::io::Result<Content> {
     let opts = Options { read_only: true, ..Options::default() };
-    let cs = ChunkStore::open(store, opts).map_err(std::io::Error::other)?;
+    let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
     Ok(Arc::new(cs))
+}
+
+/// Parse `--compression`: `none`, `zstd` (level 3) or `zstd:LEVEL` (1-22).
+/// Returns the zstd level, 0 for none.
+pub fn parse_compression(s: &str) -> Result<i32, String> {
+    match s {
+        "none" | "off" => Ok(0),
+        "zstd" => Ok(3),
+        _ => {
+            let level = s
+                .strip_prefix("zstd:")
+                .and_then(|l| l.parse::<i32>().ok())
+                .ok_or_else(|| format!("unknown compression {s:?}; use zstd, zstd:LEVEL or none"))?;
+            if (1..=22).contains(&level) {
+                Ok(level)
+            } else {
+                Err(format!("zstd level {level} is not in 1-22"))
+            }
+        }
+    }
 }
 
 /// `ObjectId` as the `Digest224` that the metadata stores (7 words, LE).
@@ -169,6 +196,16 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compression_specs_parse_to_zstd_levels() {
+        assert_eq!(parse_compression("none"), Ok(0));
+        assert_eq!(parse_compression("zstd"), Ok(3));
+        assert_eq!(parse_compression("zstd:19"), Ok(19));
+        assert!(parse_compression("zstd:0").is_err());
+        assert!(parse_compression("zstd:23").is_err());
+        assert!(parse_compression("lz4").is_err());
+    }
 
     /// A committed store whose file content key is not in the chunk store
     /// (as with content in vt0/).

@@ -75,6 +75,11 @@ pub enum Cmd {
         /// (0 = only when `slicefs gc` asks for one).
         #[arg(long, value_name = "SECS", default_value_t = crate::online_gc::DEFAULT_GC_INTERVAL_SECS)]
         gc_interval: u64,
+        /// Compression of new file data in this mount: `zstd`, `zstd:LEVEL`
+        /// (1-22) or `none`. Data already stored keeps its form, so this can
+        /// change at each mount.
+        #[arg(long, value_name = "SPEC", default_value = "zstd:3", value_parser = crate::content::parse_compression)]
+        compression: i32,
     },
 
     /// Unmount a SliceFS filesystem mounted at the given path.

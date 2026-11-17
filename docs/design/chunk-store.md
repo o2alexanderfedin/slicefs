@@ -145,10 +145,17 @@ At open:
   read, and cut the pack there. The objects after that point were not
   synced, so no root refers to them. Write-log replay writes them again.
 
-A failed sync is final. On Linux, the kernel can mark the pages clean after
-a failed `fsync`, so a retry can succeed without the data. After any failed
-sync, the store refuses every write and sync until it is opened again. The
-open scan then finds the true durable state.
+A failed sync is retried, but not as a plain second `fsync`. On Linux, the
+kernel can mark the pages clean after a failed `fsync`, so a plain retry can
+succeed without the data. The decorator `RetryingIo` (`retry.rs`) keeps
+every write since the last good sync of a pack. When a sync fails, it writes
+them again and then syncs, after 10 ms, 100 ms and 500 ms. A durable write
+of a whole file is retried as a whole. The mount injects it over `FileIo`
+(`content::storage()`); the store does not know about it.
+
+If the sync still fails after the retries, it is final: the store refuses
+every write and sync until it is opened again. The open scan then finds the
+true durable state.
 
 ## Storage strategies
 
@@ -157,7 +164,8 @@ The store does every file operation through the `PackIo` trait
 directory sync. The open handles are `PackFile` (the active pack) and
 `PackRead` (reads). `ChunkStore::open_with` takes the strategy.
 
-- `FileIo`: real files with `pread` and `pwrite`. `ChunkStore::open` uses it.
+- `FileIo`: real files with `pread` and `pwrite`. `ChunkStore::open` uses it
+  inside `RetryingIo`.
 - `MemIo` (`mem.rs`): an in-memory mock for tests. It can inject `ENOSPC`,
   `EIO` on reads, and failed syncs, and `crash()` keeps only the durable
   bytes.
@@ -181,7 +189,33 @@ pack. Sweep (`gc_finish`), for each sealed pack up to that point:
 - Less than half of its bytes live, or smaller than 1/8 of the pack limit:
   copy the live records (as they are, no re-compression) into the active
   pack, sync it, update the index, then delete the old pack.
-- Otherwise: keep it.
+- Otherwise, if it has dead records: punch holes (`F_PUNCHHOLE` on macOS,
+  `fallocate(PUNCH_HOLE)` on Linux) over the whole 4 KiB blocks of the gaps
+  between live records. Spike D measured GC write amplification 1.02 with
+  punching against about 1.6 with compaction only
+  (`docs/research/arena-spikes.md`).
+
+Punch order, so that a crash never leaves an index entry over zeros:
+
+1. Drop the dead records in the punched ranges from the index, and write
+   the pack's `.idx` durably without them. A dead record with no whole block
+   stays in the index; a later GC punches it when a neighbour dies.
+2. Set the "punched" bit in the pack header and sync the pack.
+3. Punch.
+
+A punched pack is never the active pack and is never cut at open. If its
+index is lost, the open resyncs it: it takes a record only where the CRC is
+good and the bytes hash to the ID, and skips holes and damage. Every sealed
+pack without a valid index is resynced this way; only the active pack is
+cut at its first bad record.
+
+Not every file system can punch holes (for example exFAT). The storage
+strategy says so (`PackIo::can_punch`; `FileIo` probes it once with a small
+file), and the store asks once, at open. Without holes, GC keeps the dead
+records of a mostly live pack in the index, so that a later GC still counts
+their bytes and compacts the pack when it is mostly dead. The mount prints
+which way GC frees space. The mount (`content::open`) chooses the strategy
+and injects it into the store.
 
 The small-pack rule merges the packs that each `gc_begin` seals; it rewrites
 at most 1/8 of the pack limit per GC.

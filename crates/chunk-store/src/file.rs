@@ -10,7 +10,7 @@
 
 use crate::{chunk_ranges, ChunkStore, Error, ObjectId, Result, CHUNK_MAX, ID_LEN};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Entries per manifest node.
 pub const LEAF_ENTRIES: usize = 1024;
@@ -192,6 +192,17 @@ pub struct FileReader {
 
 const NODE_CACHE: usize = 16;
 
+/// FastCDC cuts a run of zeros into chunks of `CHUNK_MAX` zero bytes, which
+/// all have this ID. A reader serves them from one shared zero buffer: no
+/// lookup, no I/O, no decompression (a flyweight for sparse files).
+fn zero_chunk() -> &'static (ObjectId, Vec<u8>) {
+    static ZERO: OnceLock<(ObjectId, Vec<u8>)> = OnceLock::new();
+    ZERO.get_or_init(|| {
+        let z = vec![0u8; CHUNK_MAX as usize];
+        (ObjectId::of(&z), z)
+    })
+}
+
 impl FileReader {
     /// Open the content `key`.
     pub fn open(store: &ChunkStore, key: ObjectId) -> Result<Self> {
@@ -243,6 +254,14 @@ impl FileReader {
                 base += node.starts[i];
                 node = self.node(store, &e.id)?;
             };
+            let (zid, zeros) = zero_chunk();
+            if id == *zid && len == zeros.len() as u64 {
+                let from = (pos - start) as usize;
+                let to = ((end - start).min(len)) as usize;
+                out.extend_from_slice(&zeros[from..to]);
+                pos = start + to as u64;
+                continue;
+            }
             if self.chunk.as_ref().map(|(c, _)| *c) != Some(id) {
                 let bytes = store.get(&id).ok_or(Error::Missing(id))?;
                 if bytes.len() as u64 != len {

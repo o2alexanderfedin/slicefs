@@ -11,7 +11,7 @@
 //! Removals are durable at once (this is the order the store needs: it
 //! syncs copies before it removes originals).
 
-use crate::pack_io::{Kind, PackFile, PackIo, PackRead};
+use crate::pack_io::{Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK};
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -37,6 +37,8 @@ struct State {
     fail_syncs: bool,
     /// The next this many syncs fail (then they work again).
     fail_next_syncs: u32,
+    fail_punch: bool,
+    no_punch: bool,
 }
 
 impl State {
@@ -93,6 +95,16 @@ impl MemIo {
     /// The next `n` syncs fail with EIO; later syncs work.
     pub fn fail_next_syncs(&self, n: u32) {
         self.s.lock().unwrap().fail_next_syncs = n;
+    }
+
+    /// Every punch fails with EIO (and punches nothing).
+    pub fn set_fail_punch(&self, on: bool) {
+        self.s.lock().unwrap().fail_punch = on;
+    }
+
+    /// Punch is not supported (like a file system without holes).
+    pub fn set_no_punch(&self, on: bool) {
+        self.s.lock().unwrap().no_punch = on;
     }
 
     /// A power loss: keep only what is durable.
@@ -286,5 +298,32 @@ impl PackIo for MemIo {
 
     fn open_read(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
         Ok(Arc::new(self.handle(num)?))
+    }
+
+    fn can_punch(&self) -> bool {
+        !self.s.lock().unwrap().no_punch
+    }
+
+    /// Zeros in the current bytes; like a real punch, it is durable only
+    /// after a sync of the pack (a crash before that brings the bytes back).
+    fn punch(&self, num: u64, ranges: &[(u64, u64)]) -> io::Result<()> {
+        let s = self.s.lock().unwrap();
+        if s.no_punch {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        if s.fail_punch {
+            return Err(eio());
+        }
+        let mut f = s.files.get(&(num, Kind::Pack)).ok_or_else(not_found)?.lock().unwrap();
+        for &(offset, len) in ranges {
+            if offset % PUNCH_BLOCK != 0 || len % PUNCH_BLOCK != 0 {
+                return Err(io::Error::from_raw_os_error(libc::EINVAL));
+            }
+            let end = ((offset + len) as usize).min(f.data.len());
+            let start = (offset as usize).min(end);
+            f.data[start..end].fill(0);
+            f.dirty.push((start, end));
+        }
+        Ok(())
     }
 }
