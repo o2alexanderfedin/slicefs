@@ -1,7 +1,9 @@
 ---
 phase: 11
 slug: non-sequential-write-handling
-status: draft
+status: superseded
+closed: 2026-11-17
+closed_reason: "The buffer-mode fallback was replaced by FileWriter. Non-sequential writes are covered by write_path_tests.rs and by pjdfstest in CI."
 nyquist_compliant: false
 wave_0_complete: false
 created: 2026-03-30

@@ -1,7 +1,9 @@
 ---
 phase: 08
 slug: correctness-fixes
-status: draft
+status: closed
+closed: 2026-11-17
+closed_reason: "FIX-01 is superseded (blockset refcounts removed). FIX-02 is covered by slicefs-cli/tests/statfs_tests.rs. FIX-03/04 are covered by the store.rs unit tests test_find_snapshot_by_version_string, test_find_snapshot_by_name and test_find_snapshot_returns_none_for_unknown."
 nyquist_compliant: false
 wave_0_complete: false
 created: 2026-03-30

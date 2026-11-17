@@ -1,7 +1,9 @@
 ---
 phase: 10
 slug: streaming-writes-core
-status: draft
+status: superseded
+closed: 2026-11-17
+closed_reason: "Streaming writes go through chunk_store::file::FileWriter (content::Stream). They are covered by chunk-store/tests/file_tests.rs and slicefs-cli streaming_tests.rs and write_path_tests.rs."
 nyquist_compliant: false
 wave_0_complete: false
 created: 2026-03-30
