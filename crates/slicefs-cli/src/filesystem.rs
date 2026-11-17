@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::util::ts;
 
-use blockset::Digest224;
+use slicefs_traits::digest::Digest224;
 use crate::content::{self, Content, Stream};
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use metadata::store::DictMetadataStore;

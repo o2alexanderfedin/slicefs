@@ -258,7 +258,7 @@ writes keep the current handling until #20 part 2.
 3. Metadata nodes into packs (done; roots stay `Digest224`, the same 28
    bytes as an `ObjectId`).
 4. GC: pack deletion and compaction, offline and online.
-5. Remove blockset and the `data-id` submodule.
+5. Remove blockset and the `data-id` submodule (done).
 
 Each step keeps all tests green, and steps 2 and 4 run the macOS Boost round
 trip.

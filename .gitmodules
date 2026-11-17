@@ -1,3 +1,0 @@
-[submodule "crates/data-id"]
-	path = crates/data-id
-	url = https://github.com/o2alexanderfedin/data-id.git

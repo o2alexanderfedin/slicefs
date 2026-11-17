@@ -4,11 +4,11 @@
 
 SliceFS splits files into variable-sized content-addressed blocks, stores each unique block once, and presents the result as a full POSIX filesystem. Dedup is transparent: it's a daily-driver filesystem, not a backup format.
 
-- **Content-addressable storage** built on the [`blockset`](https://github.com/o2alexanderfedin/data-id) engine: content-defined chunking (boundaries come from the data, so a byte inserted or removed only changes the chunks near it) and a SHA-224 Merkle tree. Hashers, chunkers, block stores, and dedup indexes are defined as traits for future backends.
+- **Content-addressable storage** in the `chunk-store` crate: FastCDC content-defined chunking (average 8 KiB; boundaries come from the data, so a byte inserted or removed only changes the chunks near it), BLAKE3-224 object IDs, and append-only pack files. File content and metadata nodes are both stored this way (`docs/design/chunk-store.md`).
 - **Full POSIX semantics** via [`fuser`](https://crates.io/crates/fuser) — FUSE-T on macOS, libfuse on Linux.
-- **Crash-safe**: WAL, refcounts, scrub, and GC (segment compaction; orphan-block cleanup is not implemented yet).
+- **Crash-safe**: write log with crash replay, scrub, and online and offline GC (it deletes, compacts, or punches holes in pack files).
 - **Snapshots**: point-in-time create / list / switch.
-- **No write-path compression** since v2.0: blocks are stored raw, so dedup works on the original bytes. The `slicefs-compression` crate (Zstd, LZ4, None) is kept for planned segment-level compression (v2.1).
+- **Compression**: zstd per object (dedup works on the original bytes, before compression). `slicefs mount --compression zstd[:LEVEL]|none` sets it for the new data of a mount. 8 Boost releases (1.80 to 1.87, as tars) in one store: 6,222 MiB of data in 891 MiB (6.99x).
 
 ## Status
 
@@ -36,9 +36,9 @@ Windows is deferred because `winfsp-rs` is GPL-3; native Projected FS or Dokan a
 │   ├── slicefs-traits/        # Trait contracts (metadata, ContentHasher, Chunker, BlockStore, DedupIndex) + Digest224
 │   ├── cas-local/             # Reference/test impls of the CAS traits (Blake3 hasher, fixed chunker, stores) — not used by the binary
 │   ├── slicefs-compression/   # Compressors (Zstd, LZ4, None) — not on the write path since v2.0
-│   ├── metadata/              # Inodes, directories, manifests, xattrs, WAL, segments, snapshots, GC
-│   ├── slicefs-cli/           # `slicefs` binary — mount, unmount, seed, gc, snapshot, stats, scrub
-│   └── data-id/               # [git submodule] blockset — upstream Merkle-CAS engine (Sergey Shandar)
+│   ├── chunk-store/           # FastCDC + BLAKE3 objects in pack files: index, zstd, crash scan, GC
+│   ├── metadata/              # Inodes, directories, manifests, xattrs, WAL, segments, snapshots, GC mark
+│   └── slicefs-cli/           # `slicefs` binary — mount, unmount, seed, gc, snapshot, stats, scrub
 ├── benchmarks/
 ├── .github/workflows/ci.yml   # Linux CI: cargo test + pjdfstest
 └── .planning/                 # Design docs, roadmap, phase artifacts
@@ -49,15 +49,9 @@ Windows is deferred because `winfsp-rs` is GPL-3; native Projected FS or Dokan a
 Requires Rust **1.95+** (edition 2024).
 
 ```sh
-git clone --recurse-submodules https://github.com/o2alexanderfedin/slicefs.git
+git clone https://github.com/o2alexanderfedin/slicefs.git
 cd slicefs
 cargo build --release
-```
-
-If you already cloned without submodules:
-
-```sh
-git submodule update --init --recursive
 ```
 
 ### Platform prerequisites
@@ -113,7 +107,7 @@ Linux users can also run the POSIX conformance suite (pjdfstest) — see `.githu
 
 ## Architecture (one paragraph)
 
-The `slicefs` binary is built from `slicefs-traits`, `metadata`, and the `blockset` engine (the `data-id` submodule). The FUSE layer (`fuser`) maps VFS operations onto `DictMetadataStore`, which keeps inodes, directories, file manifests, xattrs, and refcounts in memory and persists them through blockset file storage (`StoreIo` is the blockset I/O adapter rooted at the store directory). On write, file bytes are pushed into blockset (`State::push_all`), which splits them into content-defined chunks and builds a SHA-224 Merkle tree; identical chunks are stored once. A file manifest is an ordered list of 28-byte `Digest224` hashes. Each commit appends a `RootUpdate` to the WAL; WAL entries and snapshot records live in append-only segment files that GC compacts. On read, the digests are resolved through blockset and the raw bytes are returned. A snapshot is a named, immutable pointer to a committed root `Digest224`.
+The `slicefs` binary is built from `slicefs-traits`, `metadata`, and `chunk-store`. The FUSE layer (`fuser`) maps VFS operations onto `DictMetadataStore`, which keeps inodes, directories, file manifests, xattrs, and refcounts in memory. On write, file bytes are cut into FastCDC chunks; each chunk is stored once, under its BLAKE3-224 ID, in an append-only pack file, and a file is a manifest tree of chunk IDs. At a commit, the changed metadata nodes are stored in the same packs (in chunks too, so a large map costs only its changed chunks), the active pack is synced once, and a `RootUpdate` is appended to the write log in the segment files. A crash replays the log after the last root. A snapshot is a named, immutable pointer to a committed root.
 
 For deep detail, see `.planning/PROJECT.md` and the per-phase artifacts under `.planning/phases/`.
 
@@ -123,8 +117,6 @@ SliceFS is **dual-licensed**:
 
 - **AGPL-3.0-or-later** for open-source and internal use — see [LICENSE](./LICENSE).
 - **Commercial license** for organizations that need to avoid AGPL's source-disclosure obligations (e.g. embedding in closed-source products or offering a proprietary hosted service) — see [COMMERCIAL-LICENSE.md](./COMMERCIAL-LICENSE.md).
-
-The upstream `blockset` crate (`crates/data-id/blockset`) is GPL-3.0-or-later; AGPL-3.0-or-later is compatible with it via GPLv3 §13.
 
 ## Contributors
 

@@ -9,9 +9,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use blockset::Digest224;
+use slicefs_traits::digest::Digest224;
 use chunk_store::file::{FileReader, FileWriter};
-use chunk_store::{ChunkStore, ObjectId, Options};
+use chunk_store::{ChunkStore, Options};
 
 /// Shared handle of the content store.
 pub type Content = Arc<ChunkStore>;
@@ -194,6 +194,7 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chunk_store::ObjectId;
 
     #[test]
     fn compression_specs_parse_to_zstd_levels() {
