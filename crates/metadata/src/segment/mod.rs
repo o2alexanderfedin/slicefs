@@ -74,8 +74,9 @@ pub fn load_store_from_segments(
         })
         .collect();
 
-    // Sort lexicographically — segment-000001.seg < segment-000002.seg etc.
-    seg_paths.sort();
+    // By segment id, not by name: past id 999999 the name has more digits
+    // ("segment-1000000.seg" < "segment-999999.seg" as text).
+    seg_paths.sort_by_key(|p| segment_order(p));
 
     for path in &seg_paths {
         // Skip empty segment files (created by WAL init but never written to,
@@ -146,8 +147,28 @@ fn segment_paths(segments_dir: &Path) -> Result<Vec<std::path::PathBuf>, Segment
         .map(|e| e.path())
         .filter(|p| std::fs::metadata(p).map(|m| m.len() >= 16).unwrap_or(false))
         .collect();
-    paths.sort();
+    paths.sort_by_key(|p| segment_order(p));
     Ok(paths)
+}
+
+/// Sort key of a segment file: its numeric id (then the name, for a name
+/// that has no number).
+fn segment_order(p: &std::path::Path) -> (u64, String) {
+    let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let id = name.strip_prefix("segment-").and_then(|n| n.strip_suffix(".seg")).and_then(|n| n.parse().ok());
+    (id.unwrap_or(u64::MAX), name)
+}
+
+#[cfg(test)]
+mod order_tests {
+    #[test]
+    fn segments_sort_by_id_past_six_digits() {
+        let mut v: Vec<std::path::PathBuf> =
+            ["segment-1000000.seg", "segment-999999.seg", "segment-000002.seg"].iter().map(|n| n.into()).collect();
+        v.sort_by_key(|p| super::segment_order(p));
+        let names: Vec<_> = v.iter().map(|p| p.to_string_lossy().to_string()).collect();
+        assert_eq!(names, ["segment-000002.seg", "segment-999999.seg", "segment-1000000.seg"]);
+    }
 }
 
 /// Magic bytes identifying a SliceFS segment file: "SLSG"

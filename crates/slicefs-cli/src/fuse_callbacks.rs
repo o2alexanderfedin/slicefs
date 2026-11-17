@@ -22,7 +22,7 @@ use fuser::{
 use crate::filesystem::{SliceFsFilesystem, TTL};
 use crate::util::ts;
 use crate::handlers::{
-    handle_create, handle_flush, handle_fsync, handle_getattr, handle_getlk,
+    handle_create, handle_flush, handle_fsync, handle_fsyncdir, handle_getattr, handle_getlk,
     handle_getxattr, handle_link, handle_listxattr, handle_lookup, handle_mkdir,
     handle_mknod, handle_open, handle_read, handle_readdir, handle_readlink,
     handle_release, handle_removexattr, handle_rename, handle_rmdir, handle_setattr,
@@ -278,6 +278,26 @@ impl Filesystem for MountedFs {
     /// If `fh` has a write buffer, it is flushed through the CAS pipeline and
     /// the buffer is reset to empty (file handle stays open for subsequent writes).
     /// The WAL is then synced to disk to ensure durability.
+    /// Make the directory changes so far durable (see `handle_fsyncdir`).
+    fn fsyncdir(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        _datasync: bool,
+        reply: ReplyEmpty,
+    ) {
+        let gate = self.commit_gate();
+        let _op = gate.read().unwrap_or_else(|e| e.into_inner());
+        match handle_fsyncdir(self) {
+            EmptyResult::Ok => reply.ok(),
+            EmptyResult::Error(e) => {
+                eprintln!("[{}][FUSE] fsyncdir: ino={} -> error {}", ts(), ino.0, e);
+                reply.error(Errno::EIO);
+            }
+        }
+    }
+
     fn fsync(
         &self,
         _req: &Request,

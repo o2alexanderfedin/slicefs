@@ -14,7 +14,7 @@
 //!   7. `refcounts`
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, Ordering}};
 
 use slicefs_traits::key::{ObjectKey, KEY_BYTES};
 use crate::store_io::{NodeRead, NodeWrite};
@@ -172,6 +172,11 @@ pub struct DictMetadataStore {
     ///
     /// Set via `set_wal()` after construction. When None, mutations are not logged.
     wal: Mutex<Option<Box<dyn WalStrategy>>>,
+    /// An append to the write log failed since the last log rotation: the
+    /// log may have a torn record, and records after it cannot be read. Until
+    /// the next commit (which starts a new segment from the root), every
+    /// `flush_wal` fails, so an fsync never reports durable what is not.
+    wal_failed: AtomicBool,
     /// Last committed root digest — updated by `commit()`, used by GC to determine live roots.
     last_root: Mutex<Option<ObjectKey>>,
     /// Snapshot index by version number — O(1) lookup (FIX-03).
@@ -235,6 +240,7 @@ impl DictMetadataStore {
             logical_bytes: AtomicU64::new(0),
             inode_count: AtomicU64::new(1),
             wal: Mutex::new(None),
+            wal_failed: AtomicBool::new(false),
             last_root: Mutex::new(None),
             snapshots_by_version: Mutex::new(HashMap::new()),
             snapshots_by_name: Mutex::new(HashMap::new()),
@@ -352,6 +358,11 @@ impl DictMetadataStore {
     /// This is called by the fsync FUSE callback to ensure durability.
     /// Returns Ok(()) when no WAL is configured.
     pub fn flush_wal(&self) -> Result<(), WalError> {
+        if self.wal_failed.load(Ordering::SeqCst) {
+            return Err(WalError::Io(std::io::Error::other(
+                "an earlier write-log append failed; nothing is durable until the next commit",
+            )));
+        }
         if let Some(ref w) = *self.wal.lock().unwrap() {
             w.flush_and_sync()?;
         }
@@ -381,9 +392,22 @@ impl DictMetadataStore {
             for s in self.list_snapshots() {
                 seed.push(WalEntry::Snapshot { version: s.version, root: s.root, created_at: s.created_at, name: s.name });
             }
-            if let Err(e) = w.rotate(&seed) {
-                eprintln!("WAL rotation failed (the log keeps growing in the current segment): {e}");
+            match w.rotate(&seed) {
+                // A new segment that starts with the root: the log is whole.
+                Ok(()) => self.wal_failed.store(false, Ordering::SeqCst),
+                Err(e) => eprintln!("WAL rotation failed (the log keeps growing in the current segment): {e}"),
             }
+        }
+    }
+
+    /// Make the next new inode number at least `ino` (never lower). Replay
+    /// of the write log calls this before each create: a request that failed
+    /// after it took an inode number (for example EEXIST) logged nothing, so
+    /// replay skips that number the same way the live mount did.
+    pub fn advance_next_ino(&self, ino: InodeId) {
+        let mut m = self.inode_map.lock().unwrap();
+        if m.next_ino() < ino {
+            m.set_next_ino(ino);
         }
     }
 
@@ -395,9 +419,13 @@ impl DictMetadataStore {
 
     fn log_wal_entry(&self, entry: &WalEntry) {
         if let Some(ref w) = *self.wal.lock().unwrap() {
-            // Ignore WAL errors during mutation logging — the in-memory state
-            // is already correct. WAL failures are surfaced via flush_wal/shutdown_wal.
-            let _ = w.log_mutation(entry);
+            // The in-memory state is already correct. A failed append is
+            // reported by every later flush_wal (fsync) until the next
+            // commit rotates the log (#20).
+            if let Err(e) = w.log_mutation(entry) {
+                eprintln!("write log append failed (fsync fails until the next commit): {e}");
+                self.wal_failed.store(true, Ordering::SeqCst);
+            }
         }
     }
 
@@ -1168,6 +1196,7 @@ impl DictMetadataStore {
             logical_bytes: AtomicU64::new(initial_logical_bytes),
             inode_count: AtomicU64::new(initial_inode_count),
             wal: Mutex::new(None),
+            wal_failed: AtomicBool::new(false),
             last_root: Mutex::new(Some(*root)),
             snapshots_by_version: Mutex::new(HashMap::new()),
             snapshots_by_name: Mutex::new(HashMap::new()),
