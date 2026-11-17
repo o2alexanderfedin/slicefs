@@ -10,7 +10,7 @@
 //! ## How integrity verification works
 //!
 //! With FileStorage, integrity is verified by attempting to resolve each live root
-//! through `file_storage_get`. If the root resolves successfully, the Merkle chain
+//! through `get_node`. If the root resolves successfully, the Merkle chain
 //! from that root is intact (the hash-chain guarantees all children are valid).
 //!
 //! File content: every object (manifest nodes and chunks) of every file
@@ -30,7 +30,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use blockset::file_storage_get;
+use metadata::store_io::NodeRead;
 use serde::Serialize;
 
 use metadata::segment::load_store_from_segments;
@@ -89,7 +89,7 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
     let (root_opt, snapshots) = load_store_from_segments(&segs_dir)
         .map_err(|e| format!("failed to load segments: {}", e))?;
 
-    let mut io = StoreIo::new(store_path);
+    let mut io = crate::content::store_io_read_only(store_path)?;
     let mut roots_verified = 0usize;
     let mut errors: Vec<String> = Vec::new();
 
@@ -104,7 +104,7 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
 
     // Step 1: Verify each root resolves through FileStorage.
     for root in &all_roots {
-        match file_storage_get(&mut io, root) {
+        match (&mut io).get_node(root) {
             Some(_bytes) => {
                 roots_verified += 1;
                 // Root resolves — Merkle chain is intact.
@@ -120,7 +120,7 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
     }
 
     // Step 1b: Read every object of the file content under each root.
-    let cs = crate::content::open_read_only(store_path)?;
+    let cs = Arc::clone(io.store());
     match metadata::gc::collect_content_keys(&mut io, &all_roots) {
         Ok(keys) => {
             let mut seen = std::collections::HashSet::new();
@@ -143,7 +143,7 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
     // Step 2: Verify current metadata tree by full reload from root, and collect saturated blocks.
     let mut saturated_blocks = 0usize;
     if let Some(root) = root_opt {
-        let io_arc = Arc::new(Mutex::new(StoreIo::new(store_path)));
+        let io_arc = Arc::new(Mutex::new(StoreIo::new(store_path, Arc::clone(&cs))));
         match DictMetadataStore::load_from_root(io_arc, &root) {
             Ok(meta) => {
                 saturated_blocks = meta.saturated_refcount_count();
@@ -240,7 +240,7 @@ mod tests {
         let segs_dir = dir.path().join("segments");
         std::fs::create_dir_all(&segs_dir).unwrap();
 
-        let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
         let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
         let mut meta = DictMetadataStore::new(io);
         meta.set_wal(wal);

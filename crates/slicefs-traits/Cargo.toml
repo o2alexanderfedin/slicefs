@@ -8,4 +8,3 @@ description = "CAS trait contracts for the SliceFS filesystem (ContentHasher, Ch
 
 [dependencies]
 thiserror.workspace = true
-blockset = { path = "../data-id/blockset" }

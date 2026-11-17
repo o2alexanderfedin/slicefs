@@ -3,10 +3,9 @@ name = "chunk-bench"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Benchmark FastCDC + BLAKE3 against blockset on real data (#17)"
+description = "Measure FastCDC + BLAKE3 chunking on real data (#17)"
 
 [dependencies]
 fastcdc.workspace = true
 blake3.workspace = true
 libc.workspace = true
-blockset = { path = "../../crates/data-id/blockset" }

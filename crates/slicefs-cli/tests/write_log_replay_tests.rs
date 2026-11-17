@@ -23,7 +23,7 @@ const S_IFDIR: u32 = 0o040_000;
 fn new_fs(store: &Path) -> SliceFsFilesystem {
     std::fs::create_dir_all(store.join("segments")).unwrap();
     let wal = create_wal(WalConfig::PerOp, store, 1).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(store)));
+    let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
     let mut meta = DictMetadataStore::new(io.clone());
     meta.set_wal(wal);
     let fs = SliceFsFilesystem::new(meta, io, Some(store.to_path_buf()));
@@ -34,7 +34,7 @@ fn new_fs(store: &Path) -> SliceFsFilesystem {
 /// What a mount after a crash does: the last root, then replay the log.
 fn reload_and_replay(store: &Path) -> SliceFsFilesystem {
     let (root, snaps, ops) = load_store_with_log(&store.join("segments")).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(store)));
+    let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
     let mut meta = DictMetadataStore::load_from_root(io.clone(), &root.unwrap()).unwrap();
     meta.set_snapshots(snaps);
     let wal = create_wal(WalConfig::PerOp, store, 99).unwrap();

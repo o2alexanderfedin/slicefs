@@ -17,7 +17,7 @@ const S_IFREG: u32 = 0o100_000;
 
 fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let meta = DictMetadataStore::new(io.clone());
     let fs = SliceFsFilesystem::new(meta, io, None);
     (fs, dir)
@@ -28,7 +28,7 @@ fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
 /// In v1/v2 format, the CAS stored `[AlgorithmId byte] + [compressed_or_raw_bytes]`.
 /// In v3, the content bytes are stored directly: `[raw_bytes]`.
 ///
-/// This test writes known bytes, reads them back via `file_storage_get` at
+/// This test writes known bytes, reads them back via `get_node` at
 /// the manifest digest, and asserts:
 ///   - Stored length == raw input length (no extra header byte)
 ///   - Stored bytes == raw input exactly (no header, no encoding)
@@ -50,10 +50,10 @@ fn test_write_raw_no_compression() {
         .expect("manifest must exist after release");
     assert!(!manifest.is_empty(), "manifest must be non-empty after writing content");
 
-    // Read bytes back via file_storage_get — bypasses the filesystem read path
+    // Read bytes back via get_node — bypasses the filesystem read path
     let stored = {
         fs.read_content(&manifest[0])
-            .expect("file_storage_get must succeed for stored content")
+            .expect("stored content must read back")
     };
 
     // DECOMP-01: no compression header — length must equal raw input length exactly
@@ -72,7 +72,7 @@ fn test_write_raw_no_compression() {
 
 /// DECOMP-03: test_read returns the exact raw bytes that were written.
 ///
-/// Exercises the filesystem read path (manifest → file_storage_get → slice).
+/// Exercises the filesystem read path (manifest → get_node → slice).
 /// Asserts the round-trip: write raw bytes, read back via test_read, exact match.
 #[test]
 fn test_read_returns_raw_bytes() {

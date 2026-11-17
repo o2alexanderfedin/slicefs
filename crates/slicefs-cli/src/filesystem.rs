@@ -1,7 +1,7 @@
 //! `SliceFsFilesystem` — FUSE adapter for SliceFS.
 //!
 //! Implements `fuser::Filesystem` using `DictMetadataStore` for inode/directory/manifest
-//! lookups and blockset `GetBytes` for file content reads.
+//! lookups and the chunk store for file content reads.
 //!
 //! Write callbacks (create, write, release, setattr) are fully implemented in Phase 4.
 
@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::util::ts;
 
-use blockset::Digest224;
+use slicefs_traits::digest::Digest224;
 use crate::content::{self, Content, Stream};
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use metadata::store::DictMetadataStore;
@@ -62,8 +62,8 @@ enum WriteMode {
 /// Per-handle state for a writable file descriptor.
 ///
 /// Created on `open()` when `O_WRONLY` or `O_RDWR` flags are present.
-/// Removed on `release()`. Writes are streamed incrementally through the
-/// blockset `State` Merkle tree accumulator — O(log N) memory regardless
+/// Removed on `release()`. Writes are streamed incrementally into FastCDC
+/// chunks and a manifest tree (`content::Stream`) — O(log N) memory regardless
 /// of file size — unless a non-sequential write triggers fallback to
 /// Buffered mode (O(N) memory).
 ///
@@ -97,7 +97,7 @@ struct OpenFileState {
 ///
 /// `meta` provides all inode/directory/manifest metadata.
 /// `io` is the shared `StoreIo` used for file content reads/writes via
-/// `file_storage_get` / `FileStorageAdd`. It is the same `Arc<Mutex<StoreIo>>`
+/// `get_node` / `put_node`. It is the same `Arc<Mutex<StoreIo>>`
 /// held by `meta`, accessed via `meta.io().clone()`.
 ///
 /// `open_files` tracks per-handle write buffers; `next_fh` allocates unique handles.
@@ -142,9 +142,8 @@ impl SliceFsFilesystem {
         io: Arc<Mutex<StoreIo>>,
         store_path: Option<PathBuf>,
     ) -> Self {
-        let root = io.lock().unwrap().root().to_path_buf();
-        let content = content::open(&root)
-            .unwrap_or_else(|e| panic!("open the content store in {}: {e}", root.display()));
+        // Metadata nodes and file content share one chunk store.
+        let content = Arc::clone(io.lock().unwrap().store());
         let cs = Arc::clone(&content);
         meta.set_pre_root_sync(Arc::new(move || cs.sync().map_err(std::io::Error::other)));
         Self {
@@ -476,17 +475,13 @@ impl SliceFsFilesystem {
         if !Arc::ptr_eq(&self.io, self.meta.io()) {
             return Err("file system and metadata do not share one StoreIo".into());
         }
+        if !Arc::ptr_eq(self.io.lock().unwrap().store(), &self.content) {
+            return Err("metadata and file content do not share one chunk store".into());
+        }
         let gate = self.commit_gate.write().unwrap_or_else(|e| e.into_inner());
-        self.io.lock().unwrap().start_tracking();
-        // From here the content store records each object put or read, and
-        // the GC changes only packs up to `boundary`.
-        let boundary = match self.content.gc_begin() {
-            Ok(b) => b,
-            Err(e) => {
-                self.io.lock().unwrap().stop_tracking();
-                return Err(format!("GC start: content store error: {e}"));
-            }
-        };
+        // From here the chunk store keeps each object put or read (nodes and
+        // file content), and the GC changes only packs up to `boundary`.
+        let boundary = self.content.gc_begin().map_err(|e| format!("GC start: chunk store error: {e}"))?;
         let states: Vec<Stream> = self.open_files.lock().unwrap().values()
             .filter_map(|s| match &s.write_mode {
                 WriteMode::Streaming { state, .. } => Some(state.clone()),
@@ -498,9 +493,8 @@ impl SliceFsFilesystem {
             match state.finish(&self.content) {
                 Ok(k) => file_roots.push(k),
                 Err(e) => {
-                    self.io.lock().unwrap().stop_tracking();
                     self.content.gc_abort();
-                    return Err(format!("GC start: content store error: {e}"));
+                    return Err(format!("GC start: chunk store error: {e}"));
                 }
             }
         }
@@ -512,7 +506,6 @@ impl SliceFsFilesystem {
         let root = match committed {
             Ok(root) => root,
             Err(e) => {
-                self.io.lock().unwrap().stop_tracking();
                 self.content.gc_abort();
                 return Err(format!("GC start: commit failed: {e}"));
             }
@@ -523,41 +516,23 @@ impl SliceFsFilesystem {
                 meta_roots.push(r);
             }
         }
-        Ok((metadata::gc::OnlineGc::new(Arc::clone(&self.io), meta_roots, file_roots), boundary))
+        Ok((metadata::gc::OnlineGc::new(Arc::clone(&self.content), meta_roots, file_roots), boundary))
     }
 
     /// Run a full online GC: start, mark, sweep. `Ok(None)` if `stop` was set
-    /// before the GC completed (then nothing more is deleted).
+    /// before the GC completed (then nothing is deleted).
     pub fn gc_online(
         &self,
         stop: &std::sync::atomic::AtomicBool,
-    ) -> Result<Option<metadata::gc::SweepStats>, String> {
+    ) -> Result<Option<chunk_store::GcStats>, String> {
         let (gc, boundary) = self.gc_start()?;
-        let live = match gc.mark(stop) {
-            Ok(Some(live)) => live,
-            Ok(None) => {
-                self.content.gc_abort();
-                return Ok(None);
-            }
-            Err(e) => {
-                self.content.gc_abort();
-                return Err(format!("GC mark failed, nothing deleted: {e}"));
-            }
-        };
-        let Some(content) = self.gc_content(&gc, boundary, stop)? else {
-            return Ok(None);
-        };
-        let mut stats = gc.sweep(&live, stop).map_err(|e| format!("GC sweep failed: {e}"))?;
-        stats.objects_kept += content.kept_objects as usize;
-        stats.objects_removed += content.removed_objects as usize;
-        stats.bytes_removed += content.removed_bytes;
-        Ok((!stop.load(Ordering::Relaxed)).then_some(stats))
+        self.gc_content(&gc, boundary, stop)
     }
 
-    /// The file content part of an online GC: mark the content keys of `gc`
-    /// in the content store, then delete and compact its packs up to
-    /// `boundary` (from `gc_start`). `Ok(None)` if `stop` was set first. On an
-    /// error or a stop, nothing of the content store is deleted.
+    /// The mark and sweep of an online GC: mark the objects of `gc` (metadata
+    /// nodes and file content), then delete and compact the packs up to
+    /// `boundary` (from `gc_start`). `Ok(None)` if `stop` was set first. On
+    /// an error or a stop, nothing is deleted.
     pub fn gc_content(
         &self,
         gc: &metadata::gc::OnlineGc,
@@ -565,28 +540,15 @@ impl SliceFsFilesystem {
         stop: &std::sync::atomic::AtomicBool,
     ) -> Result<Option<chunk_store::GcStats>, String> {
         let cs = &self.content;
-        let marked = (|| -> Result<Option<HashSet<chunk_store::ObjectId>>, String> {
-            let keys = gc.content_keys().map_err(|e| format!("GC mark failed, nothing deleted: {e}"))?;
-            let mut ids = HashSet::new();
-            for k in keys {
-                if stop.load(Ordering::Relaxed) {
-                    return Ok(None);
-                }
-                let objs = chunk_store::file::file_objects(cs, content::to_id(&k))
-                    .map_err(|e| format!("GC mark failed, nothing deleted: {e}"))?;
-                ids.extend(objs);
-            }
-            Ok(Some(ids))
-        })();
-        match marked {
-            Ok(Some(ids)) => cs.gc_finish(&ids, boundary).map(Some).map_err(|e| format!("GC of file content failed: {e}")),
+        match gc.live(stop) {
+            Ok(Some(ids)) => cs.gc_finish(&ids, boundary).map(Some).map_err(|e| format!("GC failed: {e}")),
             Ok(None) => {
                 cs.gc_abort();
                 Ok(None)
             }
             Err(e) => {
                 cs.gc_abort();
-                Err(e)
+                Err(format!("GC mark failed, nothing deleted: {e}"))
             }
         }
     }
@@ -927,7 +889,7 @@ impl SliceFsFilesystem {
     /// Read `size` bytes from inode `ino` starting at `offset`.
     ///
     /// Supports read-during-write (STRM-03): checks for open write handles on
-    /// the inode and materializes uncommitted content via clone+end+file_storage_get.
+    /// the inode and materializes uncommitted content via clone+end+get_node.
     /// Cross-handle reads work — a read-only handle sees uncommitted writes from
     /// a separate write handle on the same inode.
     ///
@@ -2128,7 +2090,7 @@ mod tests {
 
     fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
         let meta = DictMetadataStore::new(io.clone());
         let fs = SliceFsFilesystem::new(meta, io, None);
         (fs, dir)
@@ -2192,7 +2154,7 @@ mod tests {
     #[test]
     fn test_read_returns_correct_bytes() {
         let dir = tempfile::tempdir().unwrap();
-        let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
         let content = b"hello, SliceFS content!";
         // Push content into FileStorage
 
@@ -2216,7 +2178,7 @@ mod tests {
     #[test]
     fn test_read_with_offset() {
         let dir = tempfile::tempdir().unwrap();
-        let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
         let content = b"hello, SliceFS offset test!";
 
         let meta_store = DictMetadataStore::new(io.clone());
@@ -2241,7 +2203,7 @@ mod tests {
         // Fresh store has 1 inode (root), so inode_count() == 1 != 1_000_000.
         let dir = tempfile::TempDir::new().unwrap();
         let io = Arc::new(std::sync::Mutex::new(
-            metadata::store_io::StoreIo::new(dir.path()),
+            metadata::store_io::StoreIo::open(dir.path()).unwrap(),
         ));
         let meta = metadata::store::DictMetadataStore::new(io.clone());
         let fs = super::SliceFsFilesystem::new(
@@ -2258,7 +2220,7 @@ mod tests {
 
     fn fresh_fs_with_store() -> (SliceFsFilesystem, TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
         let meta = DictMetadataStore::new(io.clone());
         let fs = SliceFsFilesystem::new(meta, io, Some(dir.path().to_path_buf()));
         (fs, dir)
@@ -3516,7 +3478,7 @@ mod tests {
     #[test]
     fn test_statfs_invalid_path_cstring() {
         let dir = tempfile::tempdir().unwrap();
-        let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
         let meta = DictMetadataStore::new(io.clone());
         // Create a path with a NUL byte which can't convert to CString
         let bad_path = PathBuf::from("/tmp/\0bad");

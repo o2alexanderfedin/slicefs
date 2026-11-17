@@ -16,7 +16,7 @@ fn make_digest(seed: u32) -> Digest224 {
 
 fn make_store() -> (TempDir, DictMetadataStore) {
     let dir = TempDir::new().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let store = DictMetadataStore::new(io);
     (dir, store)
 }

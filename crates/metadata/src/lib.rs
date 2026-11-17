@@ -1,8 +1,9 @@
 //! Metadata engine for SliceFS — inode table, directory tree, file manifests,
-//! xattrs built on data-id's CAS Dictionary.
+//! xattrs.
 //!
 //! This crate provides concrete implementations of the metadata traits defined
-//! in `slicefs-traits`. The storage backend is a data-id `Dictionary`.
+//! in `slicefs-traits`. The nodes are stored in the chunk store
+//! (`store_io`), next to the file content.
 
 pub mod inode;
 pub mod inode_map;

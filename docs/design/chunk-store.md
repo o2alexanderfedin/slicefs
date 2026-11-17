@@ -56,17 +56,33 @@ part of the ID.
 A file is an ordered list of `(ObjectId, length u64)` entries (36 bytes
 each). The file offset of an entry is the sum of the lengths before it.
 
-- Up to 1,024 entries: the list is one manifest node.
-- More entries: the list is split into leaf nodes of 1,024 entries, and an
-  index node holds `(ObjectId of the leaf, byte length of the leaf range)`.
-  The tree has as many levels as it needs. A read finds its range with a
-  binary search on the lengths at each level.
+- The list is split into nodes by content, like the chunks: a node ends
+  after an entry whose ID matches a bit pattern (1 entry in 512), with at
+  least 64 and at most 4,096 entries. An index node holds `(ObjectId of the
+  node, byte length of its range)`, cut the same way. The tree has as many
+  levels as it needs. A read finds its range with a binary search on the
+  lengths at each level.
+- Why by content: with a fixed count per node, a chunk added or removed
+  near the start moves every later entry, so every later node is stored
+  again (about 0.4 % of the file size). With content cuts, the nodes line up
+  again after the next cut. In a test with 200,000 chunks (379 nodes), one
+  entry added or removed at the start gave 2 new nodes: the first leaf and
+  the root.
 - The size of the file is in the inode. An empty file has no manifest.
 
 The other metadata (directories, inode map, xattrs) keeps its current
-logical layout. Only the storage of its nodes moves from `State::push_all`
-into node objects. Roots and snapshots stay 28 bytes in the `RootUpdate` and
-`Snapshot` records.
+logical layout. Only the storage of its nodes moved from `State::push_all`
+into the chunk store (`metadata::store_io`, step 3). A node is stored like
+a file: FastCDC chunks under a manifest. The maps (inode, directory,
+manifest, xattr, refcount) are written whole at each commit, so the chunks
+matter: after a change of one file in 5,000, the next commit stored 12 KB,
+against 1.36 MB for the first commit (`tests/node_crash_tests.rs`). Roots and
+snapshots stay 28 bytes in the `RootUpdate` and `Snapshot` records.
+
+The metadata and the file content share one `ChunkStore` instance: a commit
+syncs the active pack once, then logs the root. A directory entry key is
+BLAKE3-224 of the name (no object is stored for it). The store format is 5;
+a store of format 4 (metadata in `vt0/`) is refused.
 
 ## Pack files
 
@@ -179,8 +195,9 @@ down next to the strategy.
 
 ## GC
 
-Mark: the same as today, from the current root and each snapshot, through
-the metadata nodes and the manifests, into a set of live `ObjectId`s.
+Mark (`metadata::gc::live_objects`): from the current root and each
+snapshot, through the metadata nodes and the manifests, into one set of live
+`ObjectId`s: the objects of every node and of every file content.
 
 `gc_begin` seals the active pack, so every object so far is in a sealed
 pack. Sweep (`gc_finish`), for each sealed pack up to that point:
@@ -245,9 +262,10 @@ writes keep the current handling until #20 part 2.
    scan, with unit and crash tests. No user of it yet.
 2. File data: FastCDC + BLAKE3 + packs for file content and manifests. New
    store format version; old stores are rejected.
-3. Metadata nodes into packs; roots become `ObjectId`.
+3. Metadata nodes into packs (done; roots stay `Digest224`, the same 28
+   bytes as an `ObjectId`).
 4. GC: pack deletion and compaction, offline and online.
-5. Remove blockset and the `data-id` submodule.
+5. Remove blockset and the `data-id` submodule (done).
 
 Each step keeps all tests green, and steps 2 and 4 run the macOS Boost round
 trip.

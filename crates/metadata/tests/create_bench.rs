@@ -9,7 +9,7 @@ use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 
 fn run(label: &str, n: u64, files_per_dir: u64) {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let meta = DictMetadataStore::new(io);
     let mut cur = 1;
     let t0 = Instant::now();
