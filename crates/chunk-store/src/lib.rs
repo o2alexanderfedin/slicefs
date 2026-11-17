@@ -307,12 +307,24 @@ fn resync_scan(buf: &[u8], num: u64) -> Result<Vec<(ObjectId, Loc)>> {
         return Ok(out);
     }
     let mut pos = PACK_HEADER;
+    // True where a record must start (the first one, or right after a good
+    // one). There a record with an unknown hash tag is real (a newer store):
+    // an error, so its objects are not dropped without a word. After skipped
+    // damage, a CRC match can be chance (1 in 2^32 per position), so there an
+    // unknown tag only means "no record here".
+    let mut aligned = true;
     while pos + REC_HEADER + REC_CRC <= buf.len() {
-        if let Some((id, flags, raw, stored, total)) = verified_record(&buf[pos..])? {
+        let rec = match verified_record(&buf[pos..]) {
+            Err(Error::UnknownHash(_)) if !aligned => None,
+            r => r?,
+        };
+        if let Some((id, flags, raw, stored, total)) = rec {
             out.push((id, Loc { pack: num, offset: pos as u64, stored, raw, flags }));
             pos += total;
+            aligned = true;
             continue;
         }
+        aligned = false;
         // A record never starts with 8 zero bytes (its ID is a hash): skip zeros.
         match buf[pos..].iter().position(|&b| b != 0) {
             Some(nz) => pos += nz.saturating_sub(7).max(1),
@@ -993,6 +1005,7 @@ impl Inner {
 #[cfg(test)]
 mod index_tests {
     use super::*;
+    use crate::hash::{Blake3_256, ObjectHasher};
 
     /// An index with a valid CRC whose entry count is `n` and whose body has
     /// no entries.
@@ -1004,6 +1017,38 @@ mod index_tests {
         let crc = crc32c::crc32c(&b);
         b.extend_from_slice(&crc.to_le_bytes());
         b
+    }
+
+    fn record(id: &ObjectId, payload: &[u8]) -> Vec<u8> {
+        let mut r = Vec::new();
+        encode_record_into(&mut r, id, 0, payload.len() as u32, payload);
+        r
+    }
+
+    // A CRC-valid record with an unknown tag: real where a record must start
+    // (an error), chance after skipped damage (no record there).
+    #[test]
+    fn the_resync_scan_treats_an_unknown_tag_by_position() {
+        let good_data = b"good record".to_vec();
+        let good = Blake3_256.id(&good_data);
+        let mut unknown = ObjectId([0u8; ID_LEN]);
+        unknown.0[0] = 0xEE; // no hasher has this tag
+        unknown.0[1] = 1;
+        let odd = record(&unknown, b"looks like a record");
+
+        // Aligned: right after a good record.
+        let mut pack = pack_header(1);
+        pack.extend(record(&good, &good_data));
+        pack.extend(&odd);
+        assert!(matches!(resync_scan(&pack, 1), Err(Error::UnknownHash(_))));
+
+        // After damage: skipped, and the good record after it is found.
+        let mut pack = pack_header(1);
+        pack.extend([0xAB; 5]);
+        pack.extend(&odd);
+        pack.extend(record(&good, &good_data));
+        let found = resync_scan(&pack, 1).expect("an unknown tag after damage is not an error");
+        assert_eq!(found.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![good]);
     }
 
     // #64: an entry count whose byte size overflows is refused (the scan of
