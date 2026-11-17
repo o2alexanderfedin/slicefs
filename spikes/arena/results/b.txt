@@ -2,6 +2,7 @@
 # Data sets: 1 GiB raw each. rand = 108,021 objects in 17 arenas; z2 = 107,666 objects in 9 arenas (534 MiB stored).
 
 ## Summaries: median [min..max] (delta against the baseline column: V1 pread, or pread for bb1, V1M for bb5, RS for bb7)
+# bb3_cold: 200k gets over 108k objects (about 84 % of the data touched). bb3_cold_sparse: 10k gets (about 9 %).
 noise N (wall_s): halves 2.3 %, V1 vs V1b 3.8 %  (runs 6)
 noise N (cpu_s): halves 1.4 %, V1 vs V1b 2.6 %  (runs 6)
 
@@ -87,6 +88,21 @@ noise N (cpu_s): halves 1.4 %, V1 vs V1b 2.6 %  (runs 6)
 | mib_per_s_wall | 81.72 [77.55..82.4] (-0.3 %) | 81.96 [81.71..87.98] | 170.2 [164.7..180] (+107.6 %) |
 | minflt | 1579 [1517..1615] (+9.3 %) | 1445 [1374..1449] | 868 [865..907] (-39.9 %) |
 | majflt | 0 [0..0] | 0 [0..0] | 2.366e+05 [2.366e+05..2.37e+05] |
+| miss | 0 [0..0] | 0 [0..0] | 0 [0..0] |
+cold_valid: RS:yes(0.0000), V1:yes(0.0000), V1M:yes(0.0000), V1:yes(0.0000), V1M:yes(0.0000), RS:yes(0.0000), V1M:yes(0.0000), RS:yes(0.0000), V1:yes(0.0000)
+
+### bb3_cold_sparse  (n per variant: RS=3, V1=3, V1M=3; load1 27-31)
+| field | RS | V1 | V1M |
+|---|---|---|---|
+| wall_s | 2.707 [2.255..2.926] (+5.3 %) | 2.572 [2.292..2.836] | 3.068 [2.907..3.079] (+19.3 %) |
+| cpu_s | 0.5677 [0.5619..0.5905] (+2.2 %) | 0.5555 [0.5352..0.566] | 0.751 [0.7118..0.7592] (+35.2 %) |
+| user_s | 0.1348 [0.1302..0.1441] (+0.3 %) | 0.1345 [0.131..0.1397] | 0.164 [0.1594..0.164] (+22.0 %) |
+| sys_s | 0.4329 [0.4318..0.4465] (+2.0 %) | 0.4245 [0.3956..0.4315] | 0.5869 [0.5524..0.5952] (+38.3 %) |
+| cpu_us_per_op | 56.77 [56.19..59.05] (+2.2 %) | 55.55 [53.52..56.6] | 75.1 [71.18..75.92] (+35.2 %) |
+| wall_us_per_op | 270.7 [225.5..292.6] (+5.3 %) | 257.2 [229.2..283.6] | 306.8 [290.7..307.9] (+19.3 %) |
+| mib_per_s_wall | 35.14 [32.41..42.01] (-4.7 %) | 36.87 [33.54..41.33] | 30.91 [30.89..32.58] (-16.2 %) |
+| minflt | 831 [699..907] (+20.6 %) | 689 [622..709] | 559 [519..628] (-18.9 %) |
+| majflt | 0 [0..0] | 0 [0..0] | 3.186e+04 [3.181e+04..3.203e+04] |
 | miss | 0 [0..0] | 0 [0..0] | 0 [0..0] |
 cold_valid: RS:yes(0.0000), V1:yes(0.0000), V1M:yes(0.0000), V1:yes(0.0000), V1M:yes(0.0000), RS:yes(0.0000), V1M:yes(0.0000), RS:yes(0.0000), V1:yes(0.0000)
 
@@ -251,7 +267,7 @@ MISSES: RS:15715, V1:12223
 ## Crash loop (kill -9, V1 + mmap)
 {"bench":"crashloop","variant":"V1M","git":"cce2161","load1":36.3740234375,"cfg":"kills=50 size_mib=4","kills":50,"child_early_exits":0,"roots_checked":29328,"roots_bad":0,"roots_final":1332,"arenas_final":4,"reopen_ms_max":41.592911,"wall_s":21.780393613}
 
-## Tests
+## Tests (first run at cce2161; rerun at the final code below)
 test a_corrupt_loc_past_the_end_of_the_arena_makes_get_return_none ... ok
 test a_map_of_the_wrong_length_is_refused ... ok
 test a_torn_tail_is_cut_before_the_map_and_synced_objects_read_through_the_map ... ok
@@ -262,6 +278,38 @@ test touching_a_mapped_page_past_a_cut_kills_the_child_with_sigbus ... ok
 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 42.14s
 test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.36s
 test result: ok. 84 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.31s
+
+## Tests on the final code (cargo test --release; then ARENA_TEST_READ=mmap)
+     Running unittests src/lib.rs (target/release/deps/arena_spike-950fbd172820b04a)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests src/bin/bench.rs (target/release/deps/bench-62228ed0914916a4)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests src/bin/crashloop.rs (target/release/deps/crashloop-2c56689e51bb00fe)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests src/bin/summarize.rs (target/release/deps/summarize-717ad0fa5472c3c3)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/crash_a.rs (target/release/deps/crash_a-8a5f0544559d2d16)
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.72s
+     Running tests/map_b.rs (target/release/deps/map_b-e6633f96daefcf7a)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 42.39s
+     Running tests/ported_store.rs (target/release/deps/ported_store-d92dc909f546d3a9)
+test result: ok. 84 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.05s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/crash_a.rs (target/release/deps/crash_a-8a5f0544559d2d16)
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.59s
+     Running tests/ported_store.rs (target/release/deps/ported_store-d92dc909f546d3a9)
+test result: ok. 84 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.80s
+
+## Sparse cold run log
+{"bench":"bget","variant":"RS","git":"da22121","load1":26.96337890625,"set":"rand","order":"random","state":"cold","rep":0,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":2.254735365,"user_s":0.130157,"sys_s":0.431766,"cpu_s":0.561923,"minflt":699,"majflt":0,"ops":10000,"miss":0,"mib":94.71120643615723,"cpu_us_per_op":56.192299999999996,"wall_us_per_op":225.47353650000002,"mib_per_s_wall":42.005464546460075,"mib_per_s_cpu":168.54837128246618,"mapped":0}
+{"bench":"bget","variant":"V1","git":"da22121","load1":29.12841796875,"set":"rand","order":"random","state":"cold","rep":0,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":2.291710765,"user_s":0.139692,"sys_s":0.395553,"cpu_s":0.535245,"minflt":709,"majflt":0,"ops":10000,"miss":0,"mib":94.71120643615723,"cpu_us_per_op":53.524499999999996,"wall_us_per_op":229.1710765,"mib_per_s_wall":41.3277311790946,"mib_per_s_cpu":176.9492595655396,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"da22121","load1":28.55712890625,"set":"rand","order":"random","state":"cold","rep":0,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":2.907420438,"user_s":0.16402,"sys_s":0.586945,"cpu_s":0.7509650000000001,"minflt":519,"majflt":31811,"ops":10000,"miss":0,"mib":94.71120643615723,"cpu_us_per_op":75.0965,"wall_us_per_op":290.74204380000003,"mib_per_s_wall":32.57568296565618,"mib_per_s_cpu":126.11933503712851,"mapped":17}
+{"bench":"bget","variant":"V1","git":"da22121","load1":27.80078125,"set":"rand","order":"random","state":"cold","rep":1,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":2.8363172199999998,"user_s":0.134476,"sys_s":0.431492,"cpu_s":0.565968,"minflt":689,"majflt":0,"ops":10000,"miss":0,"mib":95.12100601196289,"cpu_us_per_op":56.5968,"wall_us_per_op":283.631722,"mib_per_s_wall":33.53680094075052,"mib_per_s_cpu":168.0678165761366,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"da22121","load1":30.65673828125,"set":"rand","order":"random","state":"cold","rep":1,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":3.079306746,"user_s":0.164026,"sys_s":0.595157,"cpu_s":0.759183,"minflt":559,"majflt":32028,"ops":10000,"miss":0,"mib":95.12100601196289,"cpu_us_per_op":75.9183,"wall_us_per_op":307.9306746,"mib_per_s_wall":30.89039639702166,"mib_per_s_cpu":125.29390938938685,"mapped":17}
+{"bench":"bget","variant":"RS","git":"da22121","load1":31.08447265625,"set":"rand","order":"random","state":"cold","rep":1,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":2.706872003,"user_s":0.144064,"sys_s":0.44645,"cpu_s":0.590514,"minflt":907,"majflt":0,"ops":10000,"miss":0,"mib":95.12100601196289,"cpu_us_per_op":59.051399999999994,"wall_us_per_op":270.6872003,"mib_per_s_wall":35.140562947395075,"mib_per_s_cpu":161.08171188483743,"mapped":0}
+{"bench":"bget","variant":"V1M","git":"da22121","load1":30.75732421875,"set":"rand","order":"random","state":"cold","rep":2,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":3.067872947,"user_s":0.159406,"sys_s":0.552402,"cpu_s":0.711808,"minflt":628,"majflt":31864,"ops":10000,"miss":0,"mib":94.8220272064209,"cpu_us_per_op":71.18079999999999,"wall_us_per_op":306.7872947,"mib_per_s_wall":30.908068503666392,"mib_per_s_cpu":133.21292709048072,"mapped":17}
+{"bench":"bget","variant":"RS","git":"da22121","load1":29.8955078125,"set":"rand","order":"random","state":"cold","rep":2,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":2.9258483699999998,"user_s":0.13482,"sys_s":0.432909,"cpu_s":0.5677289999999999,"minflt":831,"majflt":0,"ops":10000,"miss":0,"mib":94.8220272064209,"cpu_us_per_op":56.77289999999999,"wall_us_per_op":292.584837,"mib_per_s_wall":32.4083873172214,"mib_per_s_cpu":167.0198760437126,"mapped":0}
+{"bench":"bget","variant":"V1","git":"da22121","load1":28.84130859375,"set":"rand","order":"random","state":"cold","rep":2,"resident_mean":0,"resident_max":0,"cold_valid":"yes","wall_s":2.571654094,"user_s":0.131034,"sys_s":0.424473,"cpu_s":0.555507,"minflt":622,"majflt":0,"ops":10000,"miss":0,"mib":94.8220272064209,"cpu_us_per_op":55.5507,"wall_us_per_op":257.1654094,"mib_per_s_wall":36.87199900937412,"mib_per_s_cpu":170.69456767677258,"mapped":0}
 
 ## Data set build
 == prep_rand: bprep --variants V1,RS --reps 1 --set rand --mib 1024

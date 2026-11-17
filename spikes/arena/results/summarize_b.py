@@ -1,5 +1,5 @@
 import json, sys, glob, os, statistics as st
-R = '/Users/alexanderfedin/projects/slicefs/.claude/worktrees/wf_6fd0291a-cdd-6/spikes/arena/results/b'
+R = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'b')
 def load(name):
     p = os.path.join(R, name + '.jsonl')
     if not os.path.exists(p): return []
@@ -51,7 +51,7 @@ def noise():
     return out
 noise()
 G = ['wall_s', 'cpu_s', 'user_s', 'sys_s', 'cpu_us_per_op', 'wall_us_per_op', 'mib_per_s_wall', 'minflt', 'majflt', 'miss']
-for n in ['bb2_rand_random', 'bb2_z2_random', 'bb2_rand_seq', 'bb2_z2_seq', 'bb3_warm_fresh', 'bb3_cold']:
+for n in ['bb2_rand_random', 'bb2_z2_random', 'bb2_rand_seq', 'bb2_z2_seq', 'bb3_warm_fresh', 'bb3_cold', 'bb3_cold_sparse']:
     table(n, G, 'V1')
 for n in ['bb1_random', 'bb1_offset']:
     table(n, ['wall_s', 'cpu_s', 'user_s', 'sys_s', 'cpu_us_per_op', 'minflt', 'majflt'], 'pread')
