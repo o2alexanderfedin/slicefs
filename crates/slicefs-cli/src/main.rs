@@ -17,6 +17,7 @@ mod fuset_watch;
 mod mount;
 mod scrub;
 mod seed;
+mod signals;
 mod snapshot;
 mod stats;
 mod store_io;

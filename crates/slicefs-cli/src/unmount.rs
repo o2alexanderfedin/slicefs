@@ -58,7 +58,7 @@ pub fn run_unmount(
 /// Try soft unmount via `fusermount3 -u`, `fusermount -u`, and `umount`.
 ///
 /// Returns `true` if any succeeds.
-fn try_soft_unmount(mountpoint: &Path) -> bool {
+pub(crate) fn try_soft_unmount(mountpoint: &Path) -> bool {
     let mp = mountpoint.to_string_lossy();
     let programs: &[(&str, &[&str])] = &[
         ("fusermount3", &["-u"]),
