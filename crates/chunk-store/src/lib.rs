@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::ops::Range;
 use std::path::Path;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub mod file;
@@ -318,6 +319,8 @@ pub struct GcStats {
 /// A content-addressed object store in pack files.
 pub struct ChunkStore {
     io: Arc<dyn PackIo>,
+    /// zstd level for new objects (0 = none); starts as `opts.zstd_level`.
+    zstd_level: AtomicI32,
     opts: Options,
     inner: Mutex<Inner>,
 }
@@ -333,7 +336,7 @@ impl ChunkStore {
     /// Open the store on a storage strategy (files, a mock, ...).
     pub fn open_with(io: Arc<dyn PackIo>, opts: Options) -> Result<Self> {
         if !io.prepare(opts.read_only)? {
-            return Ok(ChunkStore { io, opts, inner: Mutex::new(Inner::empty()) });
+            return Ok(ChunkStore { io, zstd_level: AtomicI32::new(opts.zstd_level), opts, inner: Mutex::new(Inner::empty()) });
         }
         let mut nums = io.list()?;
         nums.sort_unstable();
@@ -392,7 +395,7 @@ impl ChunkStore {
             }
             inner.stats.packs += 1;
         }
-        Ok(ChunkStore { io, opts, inner: Mutex::new(inner) })
+        Ok(ChunkStore { io, zstd_level: AtomicI32::new(opts.zstd_level), opts, inner: Mutex::new(inner) })
     }
 
     /// Store `data` and return its ID. Bytes already in the store are not
@@ -415,9 +418,8 @@ impl ChunkStore {
         SCRATCH.with(|s| {
             let s = &mut *s.borrow_mut();
             // Compress outside the lock.
-            let zstd = self.opts.zstd_level > 0
-                && data.len() >= MIN_COMPRESS
-                && s.compress(data, self.opts.zstd_level);
+            let level = self.zstd_level.load(Ordering::Relaxed);
+            let zstd = level > 0 && data.len() >= MIN_COMPRESS && s.compress(data, level);
             let (flags, payload) = if zstd { (FLAG_ZSTD, s.compressed.as_slice()) } else { (0, data) };
             encode_record_into(&mut s.record, &id, flags, data.len() as u32, payload);
             let stored = payload.len() as u32;
@@ -625,6 +627,18 @@ impl ChunkStore {
             inner.sync_dir(&*self.io)?;
         }
         Ok(())
+    }
+
+    /// Set the zstd level of new objects (0 = no compression). Objects
+    /// already stored keep their form: each record says if it is compressed,
+    /// so the level needs no record on disk and can change at any time.
+    pub fn set_zstd_level(&self, level: i32) {
+        self.zstd_level.store(level, Ordering::Relaxed);
+    }
+
+    /// The zstd level of new objects (0 = no compression).
+    pub fn zstd_level(&self) -> i32 {
+        self.zstd_level.load(Ordering::Relaxed)
     }
 
     /// Current counts.

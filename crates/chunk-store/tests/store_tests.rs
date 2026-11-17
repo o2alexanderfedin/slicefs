@@ -196,3 +196,24 @@ fn one_inserted_byte_changes_only_the_chunks_near_it() {
     let common = a.intersection(&b).count();
     assert!(common + 3 >= a.len(), "{common} of {} chunks kept", a.len());
 }
+
+#[test]
+fn the_compression_level_can_change_and_old_objects_stay_readable() {
+    let dir = TempDir::new().unwrap();
+    let s = ChunkStore::open(dir.path(), Options::default()).unwrap();
+    let text = |i: u32| format!("{i} the same words again and again; ").repeat(300).into_bytes();
+    let a = s.put(&text(1)).unwrap();
+    let packed = s.stats().stored_bytes;
+    assert!(packed < text(1).len() as u64 / 4, "zstd is on by default");
+    s.set_zstd_level(0);
+    assert_eq!(s.zstd_level(), 0);
+    let b = s.put(&text(2)).unwrap();
+    assert_eq!(s.stats().stored_bytes - packed, text(2).len() as u64, "stored raw");
+    s.close().unwrap();
+    drop(s);
+    // The level is not kept: a new open starts with the option again.
+    let s = ChunkStore::open(dir.path(), Options::default()).unwrap();
+    assert_eq!(s.zstd_level(), Options::default().zstd_level);
+    assert_eq!(s.get(&a).unwrap(), text(1));
+    assert_eq!(s.get(&b).unwrap(), text(2));
+}
