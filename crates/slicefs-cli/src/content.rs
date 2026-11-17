@@ -9,9 +9,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use blockset::Digest224;
+use slicefs_traits::digest::Digest224;
 use chunk_store::file::{FileReader, FileWriter};
-use chunk_store::{ChunkStore, ObjectId, Options};
+use chunk_store::{ChunkStore, Options};
 
 /// Shared handle of the content store.
 pub type Content = Arc<ChunkStore>;
@@ -124,8 +124,7 @@ pub fn parse_compression(s: &str) -> Result<i32, String> {
 
 pub use metadata::store_io::{to_digest, to_id};
 
-/// A content stream: the replacement of the blockset `State` for a file
-/// being written. `clone()` + `finish()` gives the content so far.
+/// A content stream of a file being written. `clone()` + `finish()` gives the content so far.
 #[derive(Clone, Default)]
 pub struct Stream(FileWriter);
 
@@ -194,6 +193,7 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chunk_store::ObjectId;
 
     #[test]
     fn compression_specs_parse_to_zstd_levels() {

@@ -13,8 +13,7 @@
 //! # Metadata Traits (Phase 2)
 //!
 //! - [`MetadataStore`] — Full inode CRUD, directory, manifest, xattr operations
-//! - [`StorageAdd`] / [`StorageGet`] — data-id Dictionary storage interface
-//! - [`Digest224`] / [`Digest256`] — Content-addressed identity types from blockset
+//! - [`Digest224`] — Content-addressed key of a metadata node or file content
 //!
 //! # Supporting Types
 //!
@@ -36,7 +35,6 @@ pub mod digest;
 pub mod error;
 pub mod hash;
 pub mod metadata;
-pub mod storage;
 
 // Re-export all public types for ergonomic imports:
 // `use slicefs_traits::{ContentHasher, ChunkHash, CasError, ...}`
@@ -49,4 +47,3 @@ pub use digest::*;
 pub use error::CasError;
 pub use hash::{ChunkHash, ContentHasher};
 pub use metadata::*;
-pub use storage::*;

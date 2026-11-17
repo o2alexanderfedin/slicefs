@@ -31,7 +31,7 @@ fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
     (fs, dir)
 }
 
-/// Read file content via manifest + file_storage_get (same pipeline as real FUSE read)
+/// Read file content via manifest + get_node (same pipeline as real FUSE read)
 fn read_content(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
     let manifest = fs.meta().get_manifest(ino).unwrap();
     if manifest.is_empty() {

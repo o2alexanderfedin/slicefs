@@ -213,7 +213,7 @@ mod tests {
         assert!(root_opt.is_some(), "segment must contain a RootUpdate");
     }
 
-    /// Seed a directory with one file — content is retrievable via file_storage_get.
+    /// Seed a directory with one file — content is retrievable via get_node.
     #[test]
     fn test_seed_single_file_content_round_trip() {
         let store_dir = make_tempdir();

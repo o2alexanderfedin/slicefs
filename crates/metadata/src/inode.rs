@@ -1,10 +1,8 @@
 //! InodeMeta binary serialization for SliceFS.
 //!
 //! Provides 56/72-byte little-endian pack/unpack of `InodeMeta`, plus
-//! Io-backed `intern_inode` and `load_inode` for CAS storage.
-//!
-//! `intern_inode` accepts any `blockset::StorageAdd` impl (e.g. `FileStorageAdd`).
-//! `load_inode` uses `file_storage_get` via `&mut impl crate::store_io::NodeRead` — works with any Io backend.
+//! `intern_inode` and `load_inode`, which store and load it as one node
+//! (`crate::store_io::NodeWrite` / `NodeRead`).
 
 use slicefs_traits::metadata::{InodeMeta, MetaError};
 use slicefs_traits::digest::{Digest224};

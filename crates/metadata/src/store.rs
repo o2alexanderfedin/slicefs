@@ -1,8 +1,8 @@
-//! `DictMetadataStore` — MetadataStore backed by file-based FileStorage (blockset Io).
+//! `DictMetadataStore` — MetadataStore whose nodes are in the chunk store.
 //!
-//! All state is held in-memory as `Mutex`-guarded maps; `commit()` serializes
-//! everything via `FileStorageAdd` (flushed to disk) then writes a `RootUpdate`
-//! to the WAL for crash-safe ordering.
+//! All state is held in-memory as `Mutex`-guarded maps; `commit()` stores the
+//! changed nodes, syncs the chunk store, then writes a `RootUpdate` to the WAL
+//! for crash-safe ordering.
 //!
 //! Locking order (always acquire in this order to prevent deadlocks):
 //!   1. `inode_map`
@@ -88,7 +88,7 @@ fn check_name(name: &str) -> Result<(), MetaError> {
 }
 const S_IFDIR: u32 = 0o0040_000;
 
-/// Concrete `MetadataStore` backed by file-based FileStorage (blockset Io).
+/// Concrete `MetadataStore`; its nodes are in the chunk store (`StoreIo`).
 ///
 /// All operations are lock-safe and `Send + Sync`.
 ///
@@ -104,7 +104,7 @@ const S_IFDIR: u32 = 0o0040_000;
 pub type PreRootSync = Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>;
 
 pub struct DictMetadataStore {
-    /// File-backed Io implementation — used for all FileStorageAdd/file_storage_get calls.
+    /// Node store — used for all put_node/get_node calls.
     io: Arc<Mutex<StoreIo>>,
     /// Inode-number allocator + mapping table.
     inode_map: Mutex<InodeMap>,
@@ -164,7 +164,7 @@ impl DictMetadataStore {
     pub fn new(io: Arc<Mutex<StoreIo>>) -> Self {
         let mut inode_map = InodeMap::new();
 
-        // Build root inode + dir entries via FileStorageAdd, then flush
+        // Build root inode + dir entries via put_node, then flush
         let (root_inode_digest, root_dir_digest) = {
             let mut io_guard = io.lock().unwrap();
             let mut fsa = &mut *io_guard;
@@ -224,7 +224,7 @@ impl DictMetadataStore {
 // Note: Default is no longer impl'd — DictMetadataStore::new() requires an io: Arc<Mutex<StoreIo>>
 
 impl DictMetadataStore {
-    /// Access the underlying Io backend (for content operations like `State::push_all`
+    /// Access the node store (for content operations like `put_node`
     /// via `&mut *io_guard`).
     ///
     /// # Warning
@@ -1817,7 +1817,7 @@ mod tests {
         assert!(names.contains(&".."), ".. missing after reload");
     }
 
-    /// Verify that content pushed into `store.io()` via `FileStorageAdd` is
+    /// Verify that content pushed into `store.io()` via `put_node` is
     /// accessible after a commit + `load_from_root` cycle.
     ///
     /// This proves the seed command's design is sound: file content and metadata
@@ -1826,7 +1826,7 @@ mod tests {
     fn test_io_accessor_content_survives_reload() {
         let (_dir, store) = make_store();
 
-        // Push content bytes into the store's io via FileStorageAdd.
+        // Push content bytes into the store's io via put_node.
         let content = b"hello, SliceFS content round-trip test!";
         let content_digest: Digest224 = {
             let mut io_guard = store.io().lock().unwrap();
@@ -1850,7 +1850,7 @@ mod tests {
         let manifest = reloaded.get_manifest(file_ino).unwrap();
         assert_eq!(manifest, vec![content_digest]);
 
-        // Verify the content bytes are retrievable from the file storage via file_storage_get.
+        // Verify the content bytes are retrievable from the node store via get_node.
         let mut io_guard = reloaded.io().lock().unwrap();
         let read_back = (&mut *io_guard).get_node(&content_digest).expect("content missing");
         assert_eq!(read_back, content.as_slice());

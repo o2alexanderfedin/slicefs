@@ -1,9 +1,9 @@
 //! Extended attribute (xattr) storage for SliceFS.
 //!
 //! Xattrs are stored as a flat list of (name, value) pairs serialized as a
-//! concatenated byte stream and pushed into the blockset Dictionary via
-//! `State::push_all`. The returned `Digest224` acts as the identity key for the
-//! entire xattr set of a given inode.
+//! concatenated byte stream and stored as one node in the chunk store. Its
+//! `Digest224` acts as the identity key for the entire xattr set of a given
+//! inode.
 //!
 //! Entry wire format (little-endian):
 //! ```text
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn test_intern_load_large_value() {
-        // > 31 bytes triggers the CAS tree path in blockset
+        // A value larger than an inline value
         let (_dir, mut io) = make_io();
         let value: Vec<u8> = (0..=127u8).collect(); // 128 bytes
         let xattrs = vec![("user.big".to_string(), value)];

@@ -35,7 +35,7 @@ fn make_file(fs: &SliceFsFilesystem, parent_ino: u64, name: &str) -> u64 {
     ino
 }
 
-/// Read the content of a file via manifest + file_storage_get.
+/// Read the content of a file via manifest + get_node.
 fn read_content(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
     let manifest = fs.meta().get_manifest(ino).unwrap_or_default();
     if manifest.is_empty() {

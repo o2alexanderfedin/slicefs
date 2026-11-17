@@ -2,8 +2,8 @@
 //!
 //! A file manifest is an ordered list of `Digest224` block hashes that together
 //! compose a file's content.  The manifest is stored as a flat byte sequence
-//! (28 bytes per block hash: 7 × u32 LE) in the blockset Dictionary via
-//! `State::push_all`, which returns a single `Digest224` key for the whole list.
+//! (28 bytes per block hash: 7 × u32 LE) as one node in the chunk store, with
+//! a single `Digest224` key for the whole list.
 
 use slicefs_traits::digest::Digest224;
 use slicefs_traits::metadata::MetaError;

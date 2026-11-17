@@ -112,13 +112,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blockset"
-version = "0.1.0"
-dependencies = [
- "sha2-compress",
-]
-
-[[package]]
 name = "cas-local"
 version = "0.1.0"
 dependencies = [
@@ -159,7 +152,6 @@ name = "chunk-bench"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "blockset",
  "fastcdc",
  "libc",
 ]
@@ -483,7 +475,6 @@ dependencies = [
 name = "metadata"
 version = "0.1.0"
 dependencies = [
- "blockset",
  "chunk-store",
  "crc32c",
  "libc",
@@ -872,7 +863,6 @@ checksum = "b2aa850e253778c88a04c3d7323b043aeda9d3e30d5971937c1855769763678e"
 name = "slicefs-cli"
 version = "0.1.0"
 dependencies = [
- "blockset",
  "chunk-store",
  "clap",
  "fuser",
@@ -901,7 +891,6 @@ dependencies = [
 name = "slicefs-traits"
 version = "0.1.0"
 dependencies = [
- "blockset",
  "thiserror",
 ]
 

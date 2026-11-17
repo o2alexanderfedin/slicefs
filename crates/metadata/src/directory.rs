@@ -1,8 +1,8 @@
 //! Per-entry directory CAS subtrees for SliceFS.
 //!
-//! Each directory entry is recorded in a compact "entry list" stored as a CAS
-//! tree in the blockset Dictionary.  The list contains every entry's:
-//!   - `key`  — `Digest224` = `(dict).put_node(name.as_bytes())` (name hash)
+//! Each directory entry is recorded in a compact "entry list", stored as one
+//! node in the chunk store. The list contains every entry's:
+//!   - `key`  — `Digest224` = BLAKE3-224 of the name (see [`name_key`])
 //!   - `ino`  — `u64` inode number
 //!   - `name` — UTF-8 name bytes
 //!
@@ -35,22 +35,6 @@ use slicefs_traits::metadata::{DirEntry, MetaError};
 /// entry list).
 pub fn entry_key(_storage: &mut impl crate::store_io::NodeWrite, name: &str) -> Digest224 {
     name_key(name)
-}
-
-/// Encode an inode number as an inline `Digest256`.
-///
-/// 8 bytes always fits within the inline (non-hash) capacity of a `Digest256`.
-pub fn ino_to_digest256(ino: u64) -> slicefs_traits::digest::Digest256 {
-    blockset::from_bytes(&ino.to_le_bytes()).expect("8-byte value always fits inline")
-}
-
-/// Decode an inode number from an inline `Digest256`.
-pub fn digest256_to_ino(d: &slicefs_traits::digest::Digest256) -> u64 {
-    let bytes = blockset::to_data(d);
-    let mut arr = [0u8; 8];
-    let len = bytes.len().min(8);
-    arr[..len].copy_from_slice(&bytes[..len]);
-    u64::from_le_bytes(arr)
 }
 
 // ─── entry list internal representation ──────────────────────────────────────
@@ -86,7 +70,7 @@ fn serialize_entry_list(entries: &BTreeMap<Digest224, EntryRecord>) -> Vec<u8> {
 }
 
 fn deserialize_entry_list(bytes: &[u8]) -> Result<BTreeMap<Digest224, EntryRecord>, MetaError> {
-    // An empty slice means zero entries (can happen for empty push_all result).
+    // An empty slice means zero entries (can happen for empty node).
     if bytes.is_empty() {
         return Ok(BTreeMap::new());
     }
@@ -247,7 +231,6 @@ pub fn lookup_dir_entry(
 ) -> Result<u64, MetaError> {
     // Read phase: load entries
     let entries = load_entry_list(io, dir_digest)?;
-    // Compute entry key (needs StorageAdd for hashing the name)
     let key = name_key(name);
     entries
         .get(&key)
