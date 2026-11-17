@@ -5,4 +5,3 @@
 //! `DictMetadataStore`.
 
 pub use metadata::store_io::StoreIo;
-pub use metadata::store_io::EmptyArgs;

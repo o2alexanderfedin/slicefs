@@ -1,14 +1,11 @@
 //! InodeMeta binary serialization for SliceFS.
 //!
 //! Provides 56/72-byte little-endian pack/unpack of `InodeMeta`, plus
-//! Io-backed `intern_inode` and `load_inode` for CAS storage.
-//!
-//! `intern_inode` accepts any `blockset::StorageAdd` impl (e.g. `FileStorageAdd`).
-//! `load_inode` uses `file_storage_get` via `&mut impl Io` — works with any Io backend.
+//! `intern_inode` and `load_inode`, which store and load it as one node
+//! (`crate::store_io::NodeWrite` / `NodeRead`).
 
 use slicefs_traits::metadata::{InodeMeta, MetaError};
 use slicefs_traits::digest::{Digest224};
-use blockset::{State, Tree, StorageAdd, Io, file_storage_get};
 
 /// Serialize `InodeMeta` to a little-endian buffer of 56 or 60 bytes.
 ///
@@ -80,16 +77,16 @@ pub fn deserialize_inode(buf: &[u8]) -> Result<InodeMeta, MetaError> {
 /// Serialize an inode and store it in any `StorageAdd` backend.
 ///
 /// Returns the `Digest224` key that can later be passed to `load_inode`.
-pub fn intern_inode(storage: &mut impl StorageAdd, meta: &InodeMeta) -> Digest224 {
+pub fn intern_inode(storage: &mut impl crate::store_io::NodeWrite, meta: &InodeMeta) -> Digest224 {
     let bytes = serialize_inode(meta);
-    State::push_all(storage, &bytes)
+    (storage).put_node(&bytes)
 }
 
 /// Retrieve and deserialize an inode from file-backed storage.
 ///
 /// Returns `MetaError::Corrupted` if the key is not found or the data is wrong length.
-pub fn load_inode(io: &mut impl Io, key: &Digest224) -> Result<InodeMeta, MetaError> {
-    let bytes = file_storage_get(io, key)
+pub fn load_inode(io: &mut impl crate::store_io::NodeRead, key: &Digest224) -> Result<InodeMeta, MetaError> {
+    let bytes = (io).get_node(key)
         .ok_or_else(|| MetaError::Corrupted(format!("missing inode node {:?}", key)))?;
     deserialize_inode(&bytes)
 }
@@ -255,13 +252,12 @@ mod tests {
     fn test_intern_and_load_roundtrip() {
         use crate::store_io::StoreIo;
         use tempfile::TempDir;
-        use blockset::FileStorageAdd;
 
         let dir = TempDir::new().unwrap();
-        let mut io = StoreIo::new(dir.path());
+        let mut io = StoreIo::open(dir.path()).unwrap();
         let original = sample_meta();
         let key = {
-            let mut fsa = FileStorageAdd::new(&mut io);
+            let mut fsa = &mut io;
             intern_inode(&mut fsa, &original)
         };
         let recovered = load_inode(&mut io, &key).expect("load_inode failed");

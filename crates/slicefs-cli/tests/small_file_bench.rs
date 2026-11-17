@@ -10,7 +10,7 @@ use std::time::Instant;
 #[ignore]
 fn small_file_cost() {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let fs = SliceFsFilesystem::new(DictMetadataStore::new(io.clone()), io, None);
     let n = 2000;
     let (mut tc, mut tw, mut tf, mut tr) = (0.0, 0.0, 0.0, 0.0);
@@ -38,7 +38,7 @@ fn small_file_cost() {
 #[ignore]
 fn sparse_2gib_write_cost() {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let fs = SliceFsFilesystem::new(DictMetadataStore::new(io.clone()), io, None);
     let (ino, fh) = fs.test_create(1, "big", 0o100_644, 0o022, 0, 0).unwrap();
     let t = Instant::now();
@@ -54,7 +54,7 @@ fn sparse_2gib_write_cost() {
 #[ignore]
 fn mid_file_read_cost() {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let fs = SliceFsFilesystem::new(DictMetadataStore::new(io.clone()), io, None);
     let (ino, fh) = fs.test_create(1, "big", 0o100_644, 0o022, 0, 0).unwrap();
     let chunk: Vec<u8> = (0..1u32 << 20).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
@@ -75,7 +75,7 @@ fn mid_file_read_cost() {
 #[ignore]
 fn zero_gap_memory() {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let fs = SliceFsFilesystem::new(DictMetadataStore::new(io.clone()), io, None);
     let rss = || { let o = std::process::Command::new("ps").args(["-o", "rss=", "-p", &std::process::id().to_string()]).output().unwrap(); String::from_utf8_lossy(&o.stdout).trim().to_string() };
     let (ino, fh) = fs.test_create(1, "z", 0o100_644, 0o022, 0, 0).unwrap();

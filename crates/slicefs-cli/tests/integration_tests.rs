@@ -32,7 +32,7 @@ const S_IFDIR: u32 = 0o040_000;
 
 fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let meta = DictMetadataStore::new(io.clone());
     let fs = SliceFsFilesystem::new(meta, io, None);
     (fs, dir)
@@ -42,14 +42,14 @@ fn fresh_fs_with_wal() -> (SliceFsFilesystem, TempDir) {
     let dir = TempDir::new().unwrap();
     std::fs::create_dir_all(dir.path().join("segments")).unwrap();
     let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let mut meta = DictMetadataStore::new(io.clone());
     meta.set_wal(wal);
     let fs = SliceFsFilesystem::new(meta, io, Some(dir.path().to_path_buf()));
     (fs, dir)
 }
 
-/// Read file content via manifest + file_storage_get.
+/// Read file content via manifest + get_node.
 fn read_content(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
     let manifest = fs.meta().get_manifest(ino).unwrap_or_default();
     if manifest.is_empty() {
@@ -117,7 +117,7 @@ fn test_seed_roundtrip_various_file_types() {
         load_store_from_segments(&segs_dir).expect("should load segments");
     let root = root_opt.expect("root should exist after seed");
 
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let store = DictMetadataStore::load_from_root(io.clone(), &root)
         .expect("should reconstruct store from root");
 
@@ -188,7 +188,7 @@ fn test_seed_preserves_directory_structure() {
     let segs_dir = store_dir.path().join("segments");
     let (root_opt, _) = load_store_from_segments(&segs_dir).unwrap();
     let root = root_opt.unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let store = DictMetadataStore::load_from_root(io, &root).unwrap();
 
     let a_ino = store.lookup(1, "a").unwrap();
@@ -756,7 +756,7 @@ fn test_snapshot_preserves_state_after_modifications() {
     assert_eq!(current_content, b"modified after snapshot");
 
     // Load the snapshot root and verify it has the original content
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let snap_store = DictMetadataStore::load_from_root(io, &snap.root).unwrap();
     let snap_ino = snap_store.lookup(1, "data.txt").unwrap();
     let snap_manifest = snap_store.get_manifest(snap_ino).unwrap();
@@ -810,7 +810,7 @@ fn test_crash_recovery_committed_data_survives() {
         let (fs, _) = {
             std::fs::create_dir_all(store_dir.path().join("segments")).unwrap();
             let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
-            let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+            let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
             let mut meta = DictMetadataStore::new(io.clone());
             meta.set_wal(wal);
             let fs = SliceFsFilesystem::new(meta, io, Some(store_dir.path().to_path_buf()));
@@ -834,7 +834,7 @@ fn test_crash_recovery_committed_data_survives() {
     let segs_dir = store_dir.path().join("segments");
     let (root_opt, _) = load_store_from_segments(&segs_dir).unwrap();
     let root = root_opt.expect("committed root must exist");
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let rebuilt = DictMetadataStore::load_from_root(io, &root).unwrap();
 
     // Committed file must be present
@@ -852,7 +852,7 @@ fn test_crash_recovery_fsynced_data_survives() {
     {
         std::fs::create_dir_all(store_dir.path().join("segments")).unwrap();
         let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
-        let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
         let mut meta = DictMetadataStore::new(io.clone());
         meta.set_wal(wal);
         let fs = SliceFsFilesystem::new(meta, io, Some(store_dir.path().to_path_buf()));
@@ -869,7 +869,7 @@ fn test_crash_recovery_fsynced_data_survives() {
     let segs_dir = store_dir.path().join("segments");
     let (root_opt, _) = load_store_from_segments(&segs_dir).unwrap();
     let root = root_opt.unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let rebuilt = DictMetadataStore::load_from_root(io, &root).unwrap();
 
     let ino = rebuilt.lookup(1, "fsynced.txt").unwrap();
@@ -1342,7 +1342,7 @@ fn test_seed_then_mount_and_modify() {
     let segs_dir = store_dir.path().join("segments");
     let (root_opt, _) = load_store_from_segments(&segs_dir).unwrap();
     let root = root_opt.unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
     let store = DictMetadataStore::load_from_root(io.clone(), &root).unwrap();
 
     // Wrap in filesystem for test operations

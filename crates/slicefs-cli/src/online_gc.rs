@@ -96,7 +96,7 @@ fn run_once(fs: &SliceFsFilesystem, stop: &AtomicBool) -> String {
     match result {
         Ok(Some(s)) => format!(
             "ok: kept {} objects, removed {} ({} bytes) in {:.1} s",
-            s.objects_kept, s.objects_removed, s.bytes_removed, t.elapsed().as_secs_f64()
+            s.kept_objects, s.removed_objects, s.removed_bytes, t.elapsed().as_secs_f64()
         ),
         Ok(None) => "stopped: the mount is shutting down".to_string(),
         Err(e) => format!("error: {e}"),

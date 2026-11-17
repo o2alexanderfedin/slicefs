@@ -25,13 +25,13 @@ const S_IFDIR: u32 = 0o040_000;
 
 fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let meta = DictMetadataStore::new(io.clone());
     let fs = SliceFsFilesystem::new(meta, io, None);
     (fs, dir)
 }
 
-/// Read file content via manifest + file_storage_get (same pipeline as real FUSE read)
+/// Read file content via manifest + get_node (same pipeline as real FUSE read)
 fn read_content(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
     let manifest = fs.meta().get_manifest(ino).unwrap();
     if manifest.is_empty() {

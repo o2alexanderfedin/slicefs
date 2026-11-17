@@ -12,7 +12,7 @@ use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 fn commit_time_vs_file_count() {
     for &n in &[1_000u64, 10_000, 78_000] {
         let dir = tempfile::tempdir().unwrap();
-        let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
         let meta = DictMetadataStore::new(io);
         let dirs: Vec<u64> = (0..(n / 100).max(1))
             .map(|i| meta.create_directory(1, &format!("d{i}"), &InodeMeta::new_directory(0, 0, 0, 0o040_755)).unwrap())

@@ -64,7 +64,7 @@ dedup() {
   CAS_PREV=$cas
 }
 stats() { echo "  stats: $($B stats $R/store 2>/dev/null | awk -F': ' '/Logical|CAS bytes/{printf "%s=%s  ", $1, $2}' | tr -s ' ')"; }
-objects() { find $R/store/vt0 -type f 2>/dev/null | wc -l | tr -d ' '; }
+objects() { bytes "CAS bytes"; }
 mb() { du -sm "$1" | cut -f1; }
 
 mount_fs
@@ -112,7 +112,7 @@ step "rm-all" $T rm -rf $R/mnt/trees $R/mnt/boost_*.tar
 step "empty-after-rm" 30 bash -c "[ \$(ls -A $R/mnt | grep -v -e '^s.txt\$' -e '^.fseventsd\$' | wc -l) -eq 0 ]"
 before=$(objects)
 step "gc-mounted" $T $B gc $R/store && sed 's/^/      /' $R/step.out
-after=$(objects); echo "  objects: $before -> $after"
+after=$(objects); echo "  CAS bytes: $before -> $after"
 # Files left on the mount: s.txt, and on FSKit the .fseventsd files of macOS.
 left=$(find $R/mnt -type f -exec stat -f %z {} + 2>/dev/null | awk '{s+=$1} END{print s+0}')
 unmount_fs

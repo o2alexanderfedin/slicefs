@@ -10,7 +10,7 @@
 //! Reports:
 //! - Logical bytes (sum of all inode sizes before deduplication)
 //! - Unique content bytes (each distinct file content counted once)
-//! - Stored bytes (apparent size of vt0/ objects) and on-disk bytes (allocated blocks)
+//! - Stored bytes (apparent size of the packs) and on-disk bytes (allocated blocks)
 //! - File dedup ratio (logical / unique content) — whole-file duplicates only
 //! - Overall ratio (logical / stored) — all savings, including block-level
 //!   dedup inside and across files, minus the object-format cost
@@ -105,7 +105,7 @@ pub struct StoreStats {
     pub logical_bytes: u64,
     /// Sum of sizes of distinct file contents in the live tree.
     pub unique_content_bytes: u64,
-    /// Apparent size of the stored objects (vt0/ and packs/).
+    /// Apparent size of the stored objects (packs/).
     pub physical_bytes: u64,
     /// Allocated size of the stored objects on the host filesystem (st_blocks).
     pub physical_disk_bytes: u64,
@@ -182,17 +182,15 @@ pub fn run_stats(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
     let (root_opt, snapshots) = load_store_from_segments(&segs_dir)
         .map_err(|e| format!("failed to load segments: {}", e))?;
 
-    // Physical bytes: metadata objects (vt0/) and file content packs (packs/).
-    let (vt0_bytes, vt0_disk) = dir_size(&store_path.join("vt0"));
-    let (pack_bytes, pack_disk) = dir_size(&store_path.join("packs"));
-    let (physical_bytes, physical_disk_bytes) = (vt0_bytes + pack_bytes, vt0_disk + pack_disk);
+    // Physical bytes: the packs (metadata nodes and file content).
+    let (physical_bytes, physical_disk_bytes) = dir_size(&store_path.join("packs"));
 
     // Host disk bytes: allocated size of the entire store directory.
     let host_disk_bytes = dir_size(store_path).1;
 
     // Reconstruct the live tree for logical bytes and content sharing.
     let (logical_bytes, content) = if let Some(ref root) = root_opt {
-        let io = Arc::new(Mutex::new(StoreIo::new(store_path)));
+        let io = Arc::new(Mutex::new(crate::content::store_io_read_only(store_path)?));
         let meta = DictMetadataStore::load_from_root(io, root)
             .map_err(|e| format!("failed to reconstruct metadata: {}", e))?;
         let content = content_stats(&meta)
@@ -257,8 +255,8 @@ fn print_human_stats(stats: &StoreStats) {
     println!("========================");
     println!("Logical bytes    : {}", format_bytes(stats.logical_bytes));
     println!("Unique content   : {} (each distinct file content once)", format_bytes(stats.unique_content_bytes));
-    println!("CAS bytes        : {} (vt0/ + packs/, apparent size)", format_bytes(stats.physical_bytes));
-    println!("CAS on disk      : {} (vt0/ + packs/, allocated blocks)", format_bytes(stats.physical_disk_bytes));
+    println!("CAS bytes        : {} (packs/, apparent size)", format_bytes(stats.physical_bytes));
+    println!("CAS on disk      : {} (packs/, allocated blocks)", format_bytes(stats.physical_disk_bytes));
     println!("Host disk used   : {} (whole store, allocated blocks)", format_bytes(stats.host_disk_bytes));
     println!("File dedup ratio : {:.2}x (logical / unique content; whole-file duplicates)", stats.file_dedup_ratio);
     println!("Overall ratio    : {:.2}x (logical / CAS bytes; block dedup and format cost included)", stats.overall_ratio);
@@ -323,7 +321,7 @@ mod tests {
         let segs_dir = dir.path().join("segments");
         std::fs::create_dir_all(&segs_dir).unwrap();
 
-        let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
         let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
         let mut meta = DictMetadataStore::new(io);
         meta.set_wal(wal);
@@ -338,7 +336,7 @@ mod tests {
     #[test]
     fn test_content_stats_groups_files_by_content() {
         let dir = tempfile::tempdir().unwrap();
-        let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
         let meta = DictMetadataStore::new(io);
         let d1 = [1u32; 7];
         let d2 = [2u32; 7];

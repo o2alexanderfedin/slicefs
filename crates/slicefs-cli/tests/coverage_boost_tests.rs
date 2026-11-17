@@ -55,7 +55,7 @@ const S_IFMT: u32 = 0o170_000;
 
 fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let meta = DictMetadataStore::new(io.clone());
     let fs = SliceFsFilesystem::new(meta, io, None);
     (fs, dir)
@@ -63,13 +63,13 @@ fn fresh_fs() -> (SliceFsFilesystem, TempDir) {
 
 fn fresh_fs_with_path() -> (SliceFsFilesystem, TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let meta = DictMetadataStore::new(io.clone());
     let fs = SliceFsFilesystem::new(meta, io, Some(dir.path().to_path_buf()));
     (fs, dir)
 }
 
-/// Read file content via manifest + file_storage_get.
+/// Read file content via manifest + get_node.
 fn read_content(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
     let manifest = fs.meta().get_manifest(ino).unwrap_or_default();
     if manifest.is_empty() {
@@ -1285,7 +1285,7 @@ fn test_dir_size_exercised_via_compute_statfs() {
     // dir_size is called by compute_statfs to calculate physical bytes.
     // We exercise it by having a real store_path with CAS files on disk.
     let dir = tempfile::tempdir().unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
     let meta = DictMetadataStore::new(io.clone());
     let fs = SliceFsFilesystem::new(meta, io, Some(dir.path().to_path_buf()));
 

@@ -20,7 +20,7 @@
 //!
 //! The command blocks until the FUSE session ends (SIGTERM, Ctrl+C, or `slicefs unmount`).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -34,208 +34,6 @@ use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
 use crate::filesystem::SliceFsFilesystem;
 use crate::util::ts;
-
-// ── Signal handling (macOS only) ──────────────────────────────────────────────
-
-/// Set by SIGTERM/SIGINT handler to coordinate watchdog shutdown.
-///
-/// Signal-safe: only an atomic store is performed in the handler.
-static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
-
-/// Register SIGTERM and SIGINT handlers that set SHUTDOWN_REQUESTED.
-///
-/// This is belt-and-suspenders alongside fuser's own signal handling — it
-/// ensures the watchdog thread sees the shutdown flag and stops health checks
-/// promptly after the signal arrives.
-///
-/// # Safety
-///
-/// `libc::signal` is unsafe. The handler only performs a single atomic store
-/// (signal-safe per POSIX).
-#[cfg(target_os = "macos")]
-unsafe fn register_signal_handlers() {
-    extern "C" fn handler(_sig: libc::c_int) {
-        SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
-    }
-    libc::signal(libc::SIGTERM, handler as libc::sighandler_t);
-    libc::signal(libc::SIGINT, handler as libc::sighandler_t);
-}
-
-// ── Watchdog thread ───────────────────────────────────────────────────────────
-
-/// Spawn a watchdog thread that monitors mount health.
-///
-/// Polls `std::fs::metadata(mountpoint)` every `interval`. If the metadata
-/// call fails (ENOENT, ENOTCONN, etc.), the mount is considered dead and
-/// `umount -f <mountpoint>` is invoked as a last resort.
-///
-/// The watchdog also monitors the `SHUTDOWN_REQUESTED` static and the
-/// `shutdown` flag so it exits cleanly after `mount()` returns.
-///
-/// Pattern mirrors the existing background GC thread.
-fn spawn_watchdog(
-    mountpoint: PathBuf,
-    interval: Duration,
-    shutdown: Arc<AtomicBool>,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        loop {
-            // Sleep in small increments so shutdown flag is checked promptly.
-            let end = std::time::Instant::now() + interval;
-            while std::time::Instant::now() < end {
-                if shutdown.load(Ordering::SeqCst) || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            }
-
-            if shutdown.load(Ordering::SeqCst) || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
-                break;
-            }
-
-            // NOTE: Do NOT use std::fs::metadata() for health checks — it will hang
-            // on a dead FUSE-T mount point, blocking the
-            // watchdog thread and preventing clean shutdown. Instead, check if the
-            // go-nfsv4 child process is still alive.
-            let nfs_alive = std::process::Command::new("pgrep")
-                .arg("-f")
-                .arg(format!("go-nfsv4.*{}", mountpoint.display()))
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-
-            if !nfs_alive {
-                eprintln!(
-                    "[{}][watchdog] go-nfsv4 process not found for {} — mount is dead",
-                    ts(), mountpoint.display()
-                );
-                break;
-            }
-        }
-    })
-}
-
-// ── fuse-t.ini fallback (macOS only) ─────────────────────────────────────────
-
-/// Path to the fuse-t.ini configuration file.
-#[cfg(target_os = "macos")]
-const FUSE_T_INI_PATH: &str = "/Library/Application Support/fuse-t/cfg/fuse-t.ini";
-
-/// RAII guard that restores the original fuse-t.ini content on drop.
-///
-/// Created before injecting a temporary backend override; dropped after the
-/// mount attempt regardless of success or panic.
-#[cfg(target_os = "macos")]
-struct FuseTIniGuard {
-    path: PathBuf,
-    original: Option<Vec<u8>>,
-}
-
-#[cfg(target_os = "macos")]
-impl Drop for FuseTIniGuard {
-    fn drop(&mut self) {
-        if let Some(ref content) = self.original {
-            let _ = std::fs::write(&self.path, content);
-        }
-    }
-}
-
-/// Temporarily inject `backend=<value>` into fuse-t.ini, call `f()`, then
-/// restore the original content (even on panic — via `FuseTIniGuard` Drop).
-///
-/// Steps:
-/// 1. Read existing ini (may not exist — that is OK).
-/// 2. Write modified version with `backend=<value>` under `[Default]` to a
-///    `.tmp` sibling file.
-/// 3. Atomic rename `.tmp` -> original path.
-/// 4. Call `f()`.
-/// 5. `FuseTIniGuard` drop restores original content.
-///
-/// This is only called as a fallback when the primary CUSTOM mount-option
-/// approach fails. On FUSE-T 1.0.54+ it will never be triggered in practice.
-#[cfg(target_os = "macos")]
-fn with_fuse_t_ini_backend<F, R>(backend: &str, f: F) -> Result<R, Box<dyn std::error::Error>>
-where
-    F: FnOnce() -> Result<R, Box<dyn std::error::Error>>,
-{
-    let ini_path = PathBuf::from(FUSE_T_INI_PATH);
-    let original = std::fs::read(&ini_path).ok();
-
-    // Build modified ini content.
-    let modified = if let Some(ref content) = original {
-        inject_backend_into_ini(std::str::from_utf8(content).unwrap_or(""), backend)
-    } else {
-        // Create a minimal ini with the backend entry.
-        format!("[Default]\nbackend={}\n", backend)
-    };
-
-    // Write directly to the ini file. Atomic tmp+rename is not possible because
-    // the parent directory (/Library/Application Support/fuse-t/cfg/) is root-owned
-    // and non-writable by regular users — creating a .tmp file would fail with
-    // "Permission denied". The ini file itself can be made user-writable with chmod.
-    std::fs::write(&ini_path, &modified)?;
-
-    // Guard restores original on drop (even on panic).
-    let _guard = FuseTIniGuard { path: ini_path, original };
-
-    f()
-}
-
-/// Inject or replace `backend=<value>` under the `[Default]` section in an
-/// ini-format string.  Returns the modified string.
-#[cfg(target_os = "macos")]
-fn inject_backend_into_ini(ini: &str, backend: &str) -> String {
-    let new_entry = format!("backend={}", backend);
-    let mut result = String::new();
-    let mut in_default = false;
-    let mut injected = false;
-
-    for line in ini.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with('[') {
-            // Entering a new section — if we were in [Default] and haven't
-            // injected yet, do it before moving to the next section.
-            if in_default && !injected {
-                result.push_str(&new_entry);
-                result.push('\n');
-                injected = true;
-            }
-            in_default = trimmed.eq_ignore_ascii_case("[Default]");
-            result.push_str(line);
-            result.push('\n');
-        } else if in_default && trimmed.starts_with("backend=") {
-            // Replace existing backend line.
-            result.push_str(&new_entry);
-            result.push('\n');
-            injected = true;
-        } else {
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
-
-    if !injected {
-        // No [Default] section existed, or we never saw a backend= line and
-        // we're still in [Default] at EOF.
-        if in_default {
-            result.push_str(&new_entry);
-            result.push('\n');
-        } else {
-            // Append a new [Default] section.
-            if !result.is_empty() && !result.ends_with('\n') {
-                result.push('\n');
-            }
-            result.push_str("[Default]\n");
-            result.push_str(&new_entry);
-            result.push('\n');
-        }
-    }
-
-    result
-}
 
 // ── Store loading ─────────────────────────────────────────────────────────────
 
@@ -295,7 +93,7 @@ pub fn load_store(
     })?;
 
     // Step 4: Reconstruct metadata store using file-backed StoreIo.
-    let io = Arc::new(Mutex::new(StoreIo::new(store_path)));
+    let io = Arc::new(Mutex::new(crate::content::store_io(store_path)?));
     let mut meta = DictMetadataStore::load_from_root(io.clone(), &root)
         .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;
 
@@ -465,7 +263,7 @@ pub fn run_mount(
     // Pre-flight: reject if mountpoint is already in use.
     check_mountpoint_not_in_use(mountpoint)?;
 
-    // Pre-flight: refuse a store of an older format (file content in vt0/).
+    // Pre-flight: refuse a store of an older format (metadata in vt0/).
     crate::content::check_format(store_path)?;
 
     // ── macOS: Backend selection ──────────────────────────────────────────────
@@ -621,9 +419,15 @@ pub fn run_mount(
     #[cfg(not(target_os = "macos"))]
     println!("SliceFS mounted at {}", mountpoint.display());
 
-    // mount blocks until the FUSE session ends (SIGTERM, Ctrl+C, or unmount).
-    // fuser handles signal registration internally — do NOT override with
-    // libc::signal as it replaces fuser's session-exit handler.
+    // mount blocks until the FUSE session ends. SIGTERM, SIGINT and SIGHUP
+    // unmount the mount point, so the session ends and destroy() runs (the
+    // vendored fuser registers no signal handlers).
+    {
+        let mp = mountpoint.to_path_buf();
+        if let Err(e) = crate::signals::install(move |_| crate::unmount::try_soft_unmount(&mp)) {
+            eprintln!("[{}] WARNING: no signal handlers ({e}); stop the mount with `slicefs unmount`", ts());
+        }
+    }
     // The FUSE-T server may not exit at unmount (its SMB server did not), so
     // the session would never end (no destroy, no final commit): end it when
     // the mount is gone.
@@ -692,7 +496,7 @@ mod tests {
         let segs_dir = store_dir.path().join("segments");
         std::fs::create_dir_all(&segs_dir).unwrap();
 
-        let io = Arc::new(Mutex::new(StoreIo::new(store_dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
         let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
         let mut meta = DictMetadataStore::new(io);
         meta.set_wal(wal);
@@ -899,44 +703,6 @@ mod tests {
         assert!(matches!(parse_wal_config(Some("periodic")), WalConfig::Periodic { .. }));
     }
 
-    // ── inject_backend_into_ini ───────────────────────────────────────────────
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_inject_backend_replaces_existing() {
-        let ini = "[Default]\nbackend=nfs\nfoo=bar\n";
-        let result = inject_backend_into_ini(ini, "smb");
-        assert!(result.contains("backend=smb"), "should replace backend=nfs with backend=smb");
-        assert!(!result.contains("backend=nfs"), "old backend line should be gone");
-        assert!(result.contains("foo=bar"), "unrelated keys should be preserved");
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_inject_backend_adds_when_absent() {
-        let ini = "[Default]\nfoo=bar\n";
-        let result = inject_backend_into_ini(ini, "smb");
-        assert!(result.contains("backend=smb"), "should add backend=smb entry");
-        assert!(result.contains("foo=bar"), "unrelated keys should be preserved");
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_inject_backend_creates_section_when_missing() {
-        let ini = "[Other]\nfoo=bar\n";
-        let result = inject_backend_into_ini(ini, "fskit");
-        assert!(result.contains("backend=fskit"), "should add [Default] section with backend=fskit");
-        assert!(result.contains("[Default]"), "should add [Default] section header");
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_inject_backend_empty_ini() {
-        let result = inject_backend_into_ini("", "smb");
-        assert!(result.contains("backend=smb"), "should handle empty ini");
-        assert!(result.contains("[Default]"), "should add [Default] section");
-    }
-
     // ── next_segment_id ───────────────────────────────────────────────────────
 
     #[test]
@@ -1014,53 +780,6 @@ mod tests {
         assert!(ino.is_ok(), "hello.txt should be accessible after dirty mount recovery");
     }
 
-    // ── SHUTDOWN_REQUESTED atomic ─────────────────────────────────────────────
-
-    #[test]
-    fn test_shutdown_requested_atomic_default_false() {
-        // SHUTDOWN_REQUESTED is a static; verify it starts as false in a clean test run.
-        // Note: this test can only assert the initial value is not permanently stuck
-        // because other tests may have set it. We just verify the load doesn't panic.
-        let val = SHUTDOWN_REQUESTED.load(Ordering::SeqCst);
-        // val is either true or false — we can't assert a specific value in test
-        // isolation since it's a static. Just exercise the atomic load path.
-        let _ = val;
-    }
-
-    #[test]
-    fn test_shutdown_requested_can_be_set_and_read() {
-        // Exercise the store/load path of SHUTDOWN_REQUESTED.
-        // Save original, set to true, read back, restore.
-        let original = SHUTDOWN_REQUESTED.load(Ordering::SeqCst);
-        SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
-        let after_set = SHUTDOWN_REQUESTED.load(Ordering::SeqCst);
-        // Restore original value.
-        SHUTDOWN_REQUESTED.store(original, Ordering::SeqCst);
-        assert!(after_set, "SHUTDOWN_REQUESTED should read back as true after store(true)");
-    }
-
-    // ── spawn_watchdog shutdown ───────────────────────────────────────────────
-
-    #[test]
-    fn test_spawn_watchdog_exits_on_shutdown_flag() {
-        use std::sync::atomic::AtomicBool;
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let shutdown_clone = Arc::clone(&shutdown);
-
-        let handle = spawn_watchdog(
-            std::path::PathBuf::from("/tmp/nonexistent_mount"),
-            Duration::from_millis(100),
-            shutdown_clone,
-        );
-
-        // Signal shutdown immediately.
-        shutdown.store(true, Ordering::SeqCst);
-
-        // Thread should exit promptly (well within 2 seconds).
-        let result = handle.join();
-        assert!(result.is_ok(), "watchdog thread should exit cleanly");
-    }
-
     // ── parse_wal_config unknown strategy fallback ────────────────────────────
 
     #[test]
@@ -1069,46 +788,6 @@ mod tests {
         assert!(matches!(parse_wal_config(Some("invalid-strategy")), WalConfig::PerOp));
         assert!(matches!(parse_wal_config(Some("FLUSH-ON-FSYNC")), WalConfig::PerOp));
         assert!(matches!(parse_wal_config(Some("")), WalConfig::PerOp));
-    }
-
-    // ── inject_backend_into_ini additional cases ──────────────────────────────
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_inject_backend_multiple_sections_injects_in_default_only() {
-        let ini = "[Other]\nkey=val\n[Default]\nbackend=nfs\n[Third]\nanother=one\n";
-        let result = inject_backend_into_ini(ini, "smb");
-        assert!(result.contains("backend=smb"), "should inject backend=smb");
-        assert!(!result.contains("backend=nfs"), "should not keep old backend=nfs");
-        assert!(result.contains("[Other]"), "should preserve other sections");
-        assert!(result.contains("[Third]"), "should preserve third section");
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_inject_backend_fskit_into_empty_ini() {
-        let result = inject_backend_into_ini("", "fskit");
-        assert!(result.contains("backend=fskit"), "should add backend=fskit to empty ini");
-        assert!(result.contains("[Default]"), "should add [Default] section");
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_inject_backend_nfs_backend() {
-        let ini = "[Default]\nbackend=smb\n";
-        let result = inject_backend_into_ini(ini, "nfs");
-        assert!(result.contains("backend=nfs"), "should replace with backend=nfs");
-        assert!(!result.contains("backend=smb"), "old backend=smb should be removed");
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_inject_backend_default_section_without_backend_key() {
-        // [Default] section exists but has no backend= key
-        let ini = "[Default]\nother_key=other_val\n";
-        let result = inject_backend_into_ini(ini, "fskit");
-        assert!(result.contains("backend=fskit"), "should inject backend=fskit");
-        assert!(result.contains("other_key=other_val"), "should preserve existing keys");
     }
 
     // ── build_mount_options additional combinations ───────────────────────────

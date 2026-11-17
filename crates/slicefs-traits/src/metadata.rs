@@ -139,7 +139,7 @@ impl InodeMeta {
 /// All methods take `&self` (not `&mut self`) so implementations can use
 /// interior mutability (`Mutex`, `RwLock`) and be shared behind `Arc<dyn MetadataStore>`.
 ///
-/// The store is backed by a data-id Dictionary. `commit()` flushes in-memory state
+/// The store keeps its nodes in the chunk store. `commit()` flushes in-memory state
 /// and returns the root Digest224 that uniquely identifies the filesystem snapshot.
 pub trait MetadataStore: Send + Sync {
     /// Assign a new inode number and store `meta`. Returns the assigned `InodeId`.

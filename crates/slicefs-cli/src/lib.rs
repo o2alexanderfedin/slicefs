@@ -16,6 +16,7 @@ pub mod fuset_watch;
 pub mod mount;
 pub mod snapshot;
 pub mod seed;
+pub mod signals;
 mod store_io;
 pub(crate) mod util;
 mod unmount;

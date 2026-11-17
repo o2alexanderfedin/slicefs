@@ -13,7 +13,7 @@ use tempfile::TempDir;
 fn store(dir: &TempDir, config: WalConfig) -> DictMetadataStore {
     std::fs::create_dir_all(dir.path().join("segments")).unwrap();
     let wal = create_wal(config, dir.path(), 1).unwrap();
-    let mut meta = DictMetadataStore::new(Arc::new(Mutex::new(StoreIo::new(dir.path()))));
+    let mut meta = DictMetadataStore::new(Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap())));
     meta.set_wal(wal);
     meta
 }

@@ -8,23 +8,26 @@ use std::time::Duration;
 
 use slicefs_traits::digest::Digest224;
 
-use metadata::gc::{collect_live_set, GarbageCollector};
+use metadata::gc::{live_objects, GarbageCollector};
 use metadata::segment::compaction::compact_segment;
 use metadata::segment::{SegmentEntry, SegmentReader, SegmentWriter};
 
-// ─── collect_live_set ───────────────────────────────────────────────────────
+// ─── live_objects ───────────────────────────────────────────────────────
 // The full mark-and-sweep is tested end to end in slicefs-cli/tests/gc_sweep_tests.rs.
 
 /// A root that is not in the store gives an error, not an empty or partial
 /// live set: a sweep after a partial mark would delete live objects.
 #[test]
-fn collect_live_set_fails_on_a_missing_root() {
+fn live_objects_fails_on_a_missing_root() {
     use metadata::store_io::StoreIo;
+    use std::sync::atomic::AtomicBool;
     use tempfile::TempDir;
     let dir = TempDir::new().unwrap();
-    let mut io = StoreIo::new(dir.path());
-    assert!(collect_live_set(&mut io, &[[1, 2, 3, 4, 5, 6, 7]]).is_err());
-    assert!(collect_live_set(&mut io, &[]).unwrap().is_empty());
+    let io = StoreIo::open(dir.path()).unwrap();
+    let stop = AtomicBool::new(false);
+    assert!(live_objects(io.store(), &[[1, 2, 3, 4, 5, 6, 7]], &[], &stop).is_err());
+    assert!(live_objects(io.store(), &[], &[[1, 2, 3, 4, 5, 6, 7]], &stop).is_err(), "a missing file root too");
+    assert!(live_objects(io.store(), &[], &[], &stop).unwrap().unwrap().is_empty());
 }
 
 // ─── Task 1 tests: compact_segment ──────────────────────────────────────────
@@ -141,7 +144,7 @@ mod background_gc_tests {
 
     fn make_store() -> (tempfile::TempDir, Arc<DictMetadataStore>) {
         let tmp = tempfile::TempDir::new().unwrap();
-        let io = Arc::new(Mutex::new(StoreIo::new(tmp.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(tmp.path()).unwrap()));
         let store = Arc::new(DictMetadataStore::new(io));
         (tmp, store)
     }
@@ -275,7 +278,7 @@ fn test_gc_preserves_snapshot_blocks() {
         use std::sync::Mutex;
         use metadata::store_io::StoreIo;
         let store_io_dir = TempDir::new().unwrap();
-        let io = std::sync::Arc::new(Mutex::new(StoreIo::new(store_io_dir.path())));
+        let io = std::sync::Arc::new(Mutex::new(StoreIo::open(store_io_dir.path()).unwrap()));
         let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
         let mut meta = DictMetadataStore::new(io);
         meta.set_wal(wal);
@@ -317,7 +320,7 @@ fn test_snapshot_roots_includes_all_anchors() {
     let io = {
         use std::sync::{Arc, Mutex};
         use metadata::store_io::StoreIo;
-        Arc::new(Mutex::new(StoreIo::new(store_io_dir.path())))
+        Arc::new(Mutex::new(StoreIo::open(store_io_dir.path()).unwrap()))
     };
     let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
     let mut meta = DictMetadataStore::new(io);

@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn timer_commits_changes_and_waits_for_the_gate() {
         let dir = tempfile::tempdir().unwrap();
-        let io = Arc::new(Mutex::new(StoreIo::new(dir.path())));
+        let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
         let fs = Arc::new(SliceFsFilesystem::new(DictMetadataStore::new(io.clone()), io.clone(), None));
         let stop = Arc::new(AtomicBool::new(false));
         let h = spawn_commit_timer(Arc::downgrade(&fs), fs.commit_gate(), Duration::from_millis(200), stop.clone());

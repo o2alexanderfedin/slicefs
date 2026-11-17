@@ -1,47 +1,116 @@
-//! `StoreIo` — implements `blockset::Io` backed by a directory on disk.
+//! `StoreIo`: the metadata nodes (inodes, directory lists, maps, manifests,
+//! root records) in the chunk store, next to the file content.
 //!
-//! The store root directory contains blob files named with their blockset
-//! relative paths (e.g., `vt0/<base32>`). `StoreIo` simply joins those
-//! relative filenames with the store root to produce absolute paths.
+//! A node is stored like a file: FastCDC chunks under a manifest tree
+//! (`chunk_store::file`). So a big map that changes in a few places between
+//! commits stores only the changed chunks again. The node key is the
+//! `ObjectId` of the manifest root, as a `Digest224`.
+//!
+//! The metadata and the file content share one `ChunkStore`: a commit syncs
+//! its active pack once, then logs the root.
 
-use std::collections::HashSet;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use blockset::Io;
+use chunk_store::file::{FileReader, FileWriter};
+use chunk_store::{ChunkStore, ObjectId};
+use slicefs_traits::digest::Digest224;
 
-/// Blockset `Io` implementation backed by a filesystem directory.
-///
-/// Blob files are stored as `<store_root>/<filename>` where `filename` is
-/// the relative path produced by blockset (e.g., `vt0/ABCDEF`).
+/// Read nodes by key.
+pub trait NodeRead {
+    /// The bytes of the node `key`, or `None` if it is missing or damaged.
+    fn get_node(&mut self, key: &Digest224) -> Option<Vec<u8>>;
+}
+
+/// Store nodes.
+pub trait NodeWrite: NodeRead {
+    /// Store `bytes` as one node and return its key. An error is kept and
+    /// returned by the next sync (so a commit never logs a root over it).
+    fn put_node(&mut self, bytes: &[u8]) -> Digest224;
+}
+
+impl<T: NodeRead + ?Sized> NodeRead for &mut T {
+    fn get_node(&mut self, key: &Digest224) -> Option<Vec<u8>> {
+        (**self).get_node(key)
+    }
+}
+
+impl<T: NodeWrite + ?Sized> NodeWrite for &mut T {
+    fn put_node(&mut self, bytes: &[u8]) -> Digest224 {
+        (**self).put_node(bytes)
+    }
+}
+
+/// `ObjectId` as the `Digest224` that the metadata stores (7 words, LE).
+pub fn to_digest(id: ObjectId) -> Digest224 {
+    let mut d = [0u32; 7];
+    for (w, c) in d.iter_mut().zip(id.0.chunks_exact(4)) {
+        *w = u32::from_le_bytes(c.try_into().unwrap());
+    }
+    d
+}
+
+/// The `ObjectId` of a key from the metadata.
+pub fn to_id(d: &Digest224) -> ObjectId {
+    let mut id = [0u8; 28];
+    for (c, w) in id.chunks_exact_mut(4).zip(d.iter()) {
+        c.copy_from_slice(&w.to_le_bytes());
+    }
+    ObjectId(id)
+}
+
+/// Store `bytes` as one value (a file or a node) and return its key.
+pub fn put_value(cs: &ChunkStore, bytes: &[u8]) -> chunk_store::Result<Digest224> {
+    let mut w = FileWriter::default();
+    w.write(cs, bytes)?;
+    w.finish(cs).map(to_digest)
+}
+
+/// All bytes of the value `key`, or `None` if an object is missing or
+/// damaged.
+pub fn get_value(cs: &ChunkStore, key: &Digest224) -> Option<Vec<u8>> {
+    let mut r = FileReader::open(cs, to_id(key)).ok()?;
+    let n = r.len() as usize;
+    r.read(cs, 0, n).ok()
+}
+
+/// Read-only node access on a shared chunk store, without the `StoreIo`
+/// lock (for the GC mark and for readers in other threads).
+#[derive(Clone)]
+pub struct NodeReader(pub Arc<ChunkStore>);
+
+impl NodeRead for NodeReader {
+    fn get_node(&mut self, key: &Digest224) -> Option<Vec<u8>> {
+        get_value(&self.0, key)
+    }
+}
+
+/// The node store of a mounted (or opened) store directory.
 pub struct StoreIo {
     root: PathBuf,
-    /// While an online GC runs: the name of each object read or written.
-    /// The sweep keeps these, because a writer can depend on an object that
-    /// the mark found unreachable (a dedup hit: blockset reads the existing
-    /// object and does not write it again).
-    touched: Option<HashSet<String>>,
-    /// Writes over an existing object file while tracking was on. The online
-    /// GC mark reads without the lock, so it must not trust a run in which an
-    /// object changed (see `OnlineGc::sweep`).
-    overwrites_while_tracking: u64,
-    /// Counter for unique temp file names (atomic writes).
-    tmp_seq: u64,
-    /// Files written since the last `sync_written` (and their directories):
-    /// a commit must make them durable before the root that refers to them.
-    unsynced: Vec<PathBuf>,
-    unsynced_dirs: HashSet<PathBuf>,
+    cs: Arc<ChunkStore>,
+    /// The first put error since the last sync.
+    failed: Option<io::Error>,
+    /// Nodes put since the last `sync_written`.
+    unsynced: usize,
     /// Number of `sync_written` calls that had something to sync (for tests).
     syncs: u64,
 }
 
 impl StoreIo {
-    /// Create a new `StoreIo` rooted at the given directory.
-    ///
-    /// The directory does not need to exist yet; `write` will create it.
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into(), touched: None, overwrites_while_tracking: 0, tmp_seq: 0, unsynced: Vec::new(), unsynced_dirs: HashSet::new(), syncs: 0 }
+    /// Nodes of the store directory `root`, in `cs` (the chunk store of that
+    /// directory, shared with the file content).
+    pub fn new(root: impl Into<PathBuf>, cs: Arc<ChunkStore>) -> Self {
+        Self { root: root.into(), cs, failed: None, unsynced: 0, syncs: 0 }
+    }
+
+    /// Open the chunk store of `root` (in `root/packs/`) for a `StoreIo`
+    /// that is the only user of that directory (tests, tools).
+    pub fn open(root: impl Into<PathBuf>) -> io::Result<Self> {
+        let root = root.into();
+        let cs = ChunkStore::open(&root, chunk_store::Options::default()).map_err(io::Error::other)?;
+        Ok(Self::new(root, Arc::new(cs)))
     }
 
     /// The store directory.
@@ -49,151 +118,56 @@ impl StoreIo {
         &self.root
     }
 
-    /// Start to record each object name that is read or written.
-    pub fn start_tracking(&mut self) {
-        self.touched = Some(HashSet::new());
-        self.overwrites_while_tracking = 0;
+    /// The chunk store.
+    pub fn store(&self) -> &Arc<ChunkStore> {
+        &self.cs
     }
 
-    /// Files written since the last `sync_written`.
+    /// Nodes put since the last `sync_written`.
     pub fn unsynced_count(&self) -> usize {
-        self.unsynced.len()
+        self.unsynced
     }
 
-    /// Number of syncs that had files to sync.
+    /// Number of syncs that had nodes to sync.
     pub fn sync_count(&self) -> u64 {
         self.syncs
     }
 
-    /// Make every file written since the last call durable, with the
-    /// directory entries that name them. A commit calls this before it writes
-    /// the root (a power loss must not leave a root that names objects that
-    /// never reached the disk). Linux: one `syncfs`. Other systems: `fsync`
-    /// of each file and directory, then one `F_FULLFSYNC` on macOS (a plain
-    /// macOS fsync does not flush the drive cache).
+    /// Make every node put since the last call durable (with all other
+    /// objects of the chunk store). A commit calls this before it logs the
+    /// root. Returns a put error kept since the last call.
     pub fn sync_written(&mut self) -> io::Result<()> {
-        if self.unsynced.is_empty() {
+        if let Some(e) = self.failed.take() {
+            return Err(e);
+        }
+        if self.unsynced == 0 {
             return Ok(());
         }
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::fd::AsRawFd;
-            let dir = fs::File::open(&self.root)?;
-            // SAFETY: syncfs on a valid fd we own.
-            if unsafe { libc::syncfs(dir.as_raw_fd()) } != 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            use std::os::fd::AsRawFd;
-            for path in self.unsynced.iter().chain(self.unsynced_dirs.iter()) {
-                match fs::File::open(path) {
-                    // SAFETY: plain fsync on a valid fd we own.
-                    Ok(f) => {
-                        if unsafe { libc::fsync(f.as_raw_fd()) } != 0 {
-                            return Err(io::Error::last_os_error());
-                        }
-                    }
-                    // Deleted since (GC, a newer write): nothing to sync.
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let dir = fs::File::open(&self.root)?;
-                // SAFETY: fcntl F_FULLFSYNC on a valid fd we own.
-                if unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_FULLFSYNC) } != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-            }
-        }
-        self.unsynced.clear();
-        self.unsynced_dirs.clear();
+        self.cs.sync().map_err(io::Error::other)?;
+        self.unsynced = 0;
         self.syncs += 1;
         Ok(())
     }
+}
 
-    /// Writes over an existing object file since tracking started.
-    pub fn overwrites_while_tracking(&self) -> u64 {
-        self.overwrites_while_tracking
-    }
-
-    /// Stop recording, and drop the record.
-    pub fn stop_tracking(&mut self) {
-        self.touched = None;
-    }
-
-    /// True if tracking is on and `name` was read or written since it started.
-    pub fn is_touched(&self, name: &str) -> bool {
-        self.touched.as_ref().is_some_and(|t| t.contains(name))
-    }
-
-    /// Full path for a blockset-relative filename.
-    fn full_path(&self, filename: &str) -> PathBuf {
-        self.root.join(filename)
+impl NodeRead for StoreIo {
+    fn get_node(&mut self, key: &Digest224) -> Option<Vec<u8>> {
+        get_value(&self.cs, key)
     }
 }
 
-/// Iterator type for `StoreIo::args` — always empty.
-pub struct EmptyArgs;
-
-impl Iterator for EmptyArgs {
-    type Item = String;
-    fn next(&mut self) -> Option<String> {
-        None
-    }
-}
-
-impl Io for StoreIo {
-    type Args = EmptyArgs;
-
-    fn read(&mut self, filename: &str) -> io::Result<Vec<u8>> {
-        if let Some(t) = &mut self.touched {
-            t.insert(filename.to_string());
-        }
-        fs::read(self.full_path(filename))
-    }
-
-    /// Write atomically: a reader sees the old file or the new one, never a
-    /// part. (The online GC mark reads objects without the lock.)
-    fn write(&mut self, filename: &str, data: &[u8]) -> io::Result<()> {
-        let path = self.full_path(filename);
-        if let Some(t) = &mut self.touched {
-            t.insert(filename.to_string());
-            if path.exists() {
-                self.overwrites_while_tracking += 1;
+impl NodeWrite for StoreIo {
+    fn put_node(&mut self, bytes: &[u8]) -> Digest224 {
+        self.unsynced += 1;
+        match put_value(&self.cs, bytes) {
+            Ok(k) => k,
+            Err(e) => {
+                if self.failed.is_none() {
+                    self.failed = Some(io::Error::other(e));
+                }
+                [0; 7]
             }
         }
-        let Some(parent) = path.parent() else {
-            return fs::write(path, data);
-        };
-        self.tmp_seq += 1;
-        let tmp = parent.join(format!(".tmp-{}-{}", std::process::id(), self.tmp_seq));
-        // Create the directory only when it is missing: a create_dir_all per
-        // object costs a stat/mkdir per object write (#4).
-        match fs::write(&tmp, data) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir_all(parent)?;
-                fs::write(&tmp, data)?;
-            }
-            r => r?,
-        }
-        fs::rename(&tmp, &path).inspect_err(|_| {
-            let _ = fs::remove_file(&tmp);
-        })?;
-        self.unsynced_dirs.insert(parent.to_path_buf());
-        self.unsynced.push(path);
-        Ok(())
-    }
-
-    fn args(&self) -> EmptyArgs {
-        EmptyArgs
-    }
-
-    fn print(&mut self, _text: &str) {
-        // no-op: blockset print output is not used in SliceFS
     }
 }
 
@@ -203,44 +177,35 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_store_io_roundtrip() {
+    fn a_node_reads_back_and_equal_bytes_share_a_key() {
         let dir = TempDir::new().unwrap();
-        let mut io = StoreIo::new(dir.path());
-
-        let data = b"hello, SliceFS!";
-        io.write("vt0/testblob", data).unwrap();
-
-        let read_back = io.read("vt0/testblob").unwrap();
-        assert_eq!(read_back, data);
+        let mut io = StoreIo::open(dir.path()).unwrap();
+        let a = io.put_node(b"hello, SliceFS!");
+        assert_eq!(io.get_node(&a).unwrap(), b"hello, SliceFS!");
+        assert_eq!(io.put_node(b"hello, SliceFS!"), a);
+        let empty = io.put_node(b"");
+        assert_eq!(io.get_node(&empty).unwrap(), b"");
+        assert_ne!(empty, a);
     }
 
     #[test]
-    fn test_store_io_creates_subdirs() {
+    fn a_missing_node_is_none() {
         let dir = TempDir::new().unwrap();
-        let mut io = StoreIo::new(dir.path());
-
-        io.write("a/b/c/blob", b"data").unwrap();
-        let read_back = io.read("a/b/c/blob").unwrap();
-        assert_eq!(read_back, b"data");
-    }
-
-    /// The directory is created again if it was removed after a write (the
-    /// write does not depend on a remembered "exists" state).
-    #[test]
-    fn test_store_io_recreates_a_removed_dir() {
-        let dir = TempDir::new().unwrap();
-        let mut io = StoreIo::new(dir.path());
-        io.write("vt0/a", b"1").unwrap();
-        fs::remove_dir_all(dir.path().join("vt0")).unwrap();
-        io.write("vt0/b", b"2").unwrap();
-        assert_eq!(io.read("vt0/b").unwrap(), b"2");
+        let mut io = StoreIo::open(dir.path()).unwrap();
+        assert!(io.get_node(&[1, 2, 3, 4, 5, 6, 7]).is_none());
     }
 
     #[test]
-    fn test_store_io_missing_file() {
+    fn sync_written_syncs_only_after_puts() {
         let dir = TempDir::new().unwrap();
-        let mut io = StoreIo::new(dir.path());
-        let result = io.read("nonexistent");
-        assert!(result.is_err());
+        let mut io = StoreIo::open(dir.path()).unwrap();
+        io.sync_written().unwrap();
+        assert_eq!(io.sync_count(), 0);
+        io.put_node(b"x");
+        assert_eq!(io.unsynced_count(), 1);
+        io.sync_written().unwrap();
+        assert_eq!((io.unsynced_count(), io.sync_count()), (0, 1));
+        io.sync_written().unwrap();
+        assert_eq!(io.sync_count(), 1);
     }
 }
