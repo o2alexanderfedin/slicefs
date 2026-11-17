@@ -5,6 +5,7 @@
 //! `run_one`.
 
 pub mod a;
+pub mod e;
 
 use crate::file_fork::ObjStore;
 use crate::{Options, Prealloc, SpikeStore};
@@ -96,7 +97,7 @@ pub fn data_files(dir: &Path) -> Vec<PathBuf> {
 
 /// Run one bench in this process. Returns false for an unknown bench.
 pub fn run_one(bench: &str, variant: &str, args: &Args) -> bool {
-    if a::run(bench, variant, args) {
+    if a::run(bench, variant, args) || e::run(bench, variant, args) {
         return true;
     }
     false

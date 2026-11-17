@@ -1,0 +1,17 @@
+a_reserve_mmap: exit0 | last: S done | msync=ok fullsync=ok pwrite= | remount: equal (detach2=ok)
+a_sparse_mmap: exit0 | last: S done | msync=ok fullsync=ENOSPC pwrite= | remount: differs first_off=4096 bad_pages=1024 zero_pages=1024 of 1024 (detach2=ok)
+a_zeroed_mmap: exit0 | last: S done | msync=ok fullsync=ok pwrite= | remount: equal (detach2=ok)
+a_reserve_pwrite: exit0 | last: S done | msync= fullsync=ok pwrite=ok | remount: equal (detach2=ok)
+a_sparse_pwrite: exit0 | last: S done | msync= fullsync=ok pwrite=ENOSPC | remount: differs first_off=4096 bad_pages=1024 zero_pages=1024 of 1024 (detach2=ok)
+b_hole_mmap: exit0 | last: S done | msync=ok fullsync=ENOSPC pwrite= | remount: differs first_off=4194304 bad_pages=256 zero_pages=256 of 256 (detach2=ok)
+b_hole_pwrite: exit0 | last: S done | msync= fullsync=ok pwrite=ENOSPC | remount: differs first_off=4194304 bad_pages=256 zero_pages=256 of 256 (detach2=ok)
+b_prealloc_peof_mmap: exit0 | last: S done | msync=ok fullsync=ENOSPC pwrite= | remount: differs first_off=4194304 bad_pages=256 zero_pages=256 of 256 (detach2=ok)
+b_prealloc_vol: exit0 | last: S done | msync= fullsync= pwrite= | remount: n/a
+b_rezero_mmap: exit0 | last: S done | msync=ok fullsync=ok pwrite= | remount: equal (detach2=ok)
+c_clone_written_mmap: exit0 | last: S done | msync=ok fullsync=ENOSPC pwrite= | remount: differs first_off=4194304 bad_pages=256 zero_pages=0 of 256 (detach2=ok)
+c_clone_written_pwrite: exit0 | last: S done | msync= fullsync=ENOSPC pwrite=ok | remount: differs first_off=4194304 bad_pages=256 zero_pages=0 of 256 (detach2=ok)
+c_clone_fresh_mmap: exit0 | last: S done | msync=ok fullsync=ENOSPC pwrite= | remount: differs first_off=4096 bad_pages=1024 zero_pages=1024 of 1024 (detach2=ok)
+c_clone_fresh_pwrite: exit0 | last: S done | msync= fullsync=ENOSPC pwrite=ok | remount: differs first_off=4096 bad_pages=1024 zero_pages=1024 of 1024 (detach2=ok)
+d_detach_mmap: SIGBUS | last: S resumed | msync=ok fullsync=ok pwrite= | remount: n/a
+d_detach_handler: exit0 | last: S done | msync=ok fullsync=ok pwrite=EIO | remount: n/a
+h_handler_eof: SIGBUS | last: S no_handler_store start | msync= fullsync= pwrite= | remount: n/a
