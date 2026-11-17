@@ -200,3 +200,25 @@ fn a_gc_that_fails_before_its_copies_are_durable_loses_nothing() {
         assert_eq!(&s.get(id).unwrap(), d, "a live object was lost");
     }
 }
+
+#[test]
+fn reads_from_many_packs_keep_few_files_open() {
+    // Spike B: with about 2,000 packs and a limit of 256 open files, reads
+    // failed with EMFILE, because the store kept one open file per pack.
+    let mem = MemIo::new();
+    let small = Options { pack_limit: 16 * 1024, ..Options::default() };
+    let s = ChunkStore::open_with(Arc::new(mem.clone()), small.clone()).unwrap();
+    let objs = put_many(&s, 300, 90); // about 2 objects per pack: 150 packs
+    s.close().unwrap();
+    drop(s);
+    let s = ChunkStore::open_with(Arc::new(mem.clone()), small).unwrap();
+    for (id, d) in &objs {
+        assert_eq!(&s.get(id).unwrap(), d);
+    }
+    assert!(mem.open_handles() <= chunk_store::MAX_OPEN_PACKS, "{} pack handles open", mem.open_handles());
+    // And the cache still serves every pack again.
+    for (id, d) in objs.iter().rev() {
+        assert_eq!(&s.get(id).unwrap(), d);
+    }
+    assert!(mem.open_handles() <= chunk_store::MAX_OPEN_PACKS);
+}
