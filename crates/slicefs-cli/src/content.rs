@@ -73,11 +73,12 @@ pub fn open(store: &Path) -> std::io::Result<Content> {
 }
 
 /// The storage strategy of a store: chosen here, once, and injected into the
-/// chunk store (the store itself makes no checks of its environment).
+/// chunk store (the store itself makes no checks of its environment). Files,
+/// with a retry of failed syncs that rewrites the unsynced data first.
 fn storage(store: &Path) -> Arc<dyn chunk_store::pack_io::PackIo> {
-    Arc::new(chunk_store::pack_io::FileIo::new(store.join("packs")))
+    let files = Arc::new(chunk_store::pack_io::FileIo::new(store.join("packs")));
+    Arc::new(chunk_store::retry::RetryingIo::new(files))
 }
-
 
 /// Open the content store of `store` for reading only: nothing on disk
 /// changes, also while a mount writes to it (for `scrub`).
