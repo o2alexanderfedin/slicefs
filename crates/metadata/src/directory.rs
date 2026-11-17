@@ -1,8 +1,8 @@
 //! Per-entry directory CAS subtrees for SliceFS.
 //!
-//! Each directory entry is recorded in a compact "entry list" stored as a CAS
-//! tree in the blockset Dictionary.  The list contains every entry's:
-//!   - `key`  — `Digest224` = `(dict).put_node(name.as_bytes())` (name hash)
+//! Each directory entry is recorded in a compact "entry list", stored as one
+//! node in the chunk store. The list contains every entry's:
+//!   - `key`  — `Digest224` = BLAKE3-224 of the name (see [`name_key`])
 //!   - `ino`  — `u64` inode number
 //!   - `name` — UTF-8 name bytes
 //!
@@ -70,7 +70,7 @@ fn serialize_entry_list(entries: &BTreeMap<Digest224, EntryRecord>) -> Vec<u8> {
 }
 
 fn deserialize_entry_list(bytes: &[u8]) -> Result<BTreeMap<Digest224, EntryRecord>, MetaError> {
-    // An empty slice means zero entries (can happen for empty push_all result).
+    // An empty slice means zero entries (can happen for empty node).
     if bytes.is_empty() {
         return Ok(BTreeMap::new());
     }

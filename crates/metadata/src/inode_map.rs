@@ -1,8 +1,8 @@
 //! InodeMap: monotonically-allocated inode numbers mapped to Digest224 values.
 //!
 //! Provides an in-memory mapping from inode number (u64) to the CAS key (Digest224)
-//! of its serialized inode data. Supports serialization and CAS-backed persistence
-//! so the full map can be stored in / loaded from a blockset Dictionary.
+//! of its serialized inode data. The full map is stored as one node in the
+//! chunk store, and loaded from it.
 
 use std::collections::BTreeMap;
 

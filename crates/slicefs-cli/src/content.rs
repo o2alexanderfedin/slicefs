@@ -124,8 +124,7 @@ pub fn parse_compression(s: &str) -> Result<i32, String> {
 
 pub use metadata::store_io::{to_digest, to_id};
 
-/// A content stream: the replacement of the blockset `State` for a file
-/// being written. `clone()` + `finish()` gives the content so far.
+/// A content stream of a file being written. `clone()` + `finish()` gives the content so far.
 #[derive(Clone, Default)]
 pub struct Stream(FileWriter);
 

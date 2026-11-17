@@ -1,7 +1,6 @@
 //! Online GC on a mounted store (#25): each test acts between the GC steps
 //! (start, mark, sweep) and reads the whole file back afterwards. A write
-//! that only succeeds proves nothing: blockset treats a missing node as
-//! inline data without an error.
+//! that only succeeds proves nothing: the data must read back.
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;

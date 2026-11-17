@@ -1,7 +1,7 @@
 //! `SliceFsFilesystem` — FUSE adapter for SliceFS.
 //!
 //! Implements `fuser::Filesystem` using `DictMetadataStore` for inode/directory/manifest
-//! lookups and blockset `GetBytes` for file content reads.
+//! lookups and the chunk store for file content reads.
 //!
 //! Write callbacks (create, write, release, setattr) are fully implemented in Phase 4.
 
@@ -62,8 +62,8 @@ enum WriteMode {
 /// Per-handle state for a writable file descriptor.
 ///
 /// Created on `open()` when `O_WRONLY` or `O_RDWR` flags are present.
-/// Removed on `release()`. Writes are streamed incrementally through the
-/// blockset `State` Merkle tree accumulator — O(log N) memory regardless
+/// Removed on `release()`. Writes are streamed incrementally into FastCDC
+/// chunks and a manifest tree (`content::Stream`) — O(log N) memory regardless
 /// of file size — unless a non-sequential write triggers fallback to
 /// Buffered mode (O(N) memory).
 ///
@@ -97,7 +97,7 @@ struct OpenFileState {
 ///
 /// `meta` provides all inode/directory/manifest metadata.
 /// `io` is the shared `StoreIo` used for file content reads/writes via
-/// `file_storage_get` / `FileStorageAdd`. It is the same `Arc<Mutex<StoreIo>>`
+/// `get_node` / `put_node`. It is the same `Arc<Mutex<StoreIo>>`
 /// held by `meta`, accessed via `meta.io().clone()`.
 ///
 /// `open_files` tracks per-handle write buffers; `next_fh` allocates unique handles.
@@ -913,7 +913,7 @@ impl SliceFsFilesystem {
     /// Read `size` bytes from inode `ino` starting at `offset`.
     ///
     /// Supports read-during-write (STRM-03): checks for open write handles on
-    /// the inode and materializes uncommitted content via clone+end+file_storage_get.
+    /// the inode and materializes uncommitted content via clone+end+get_node.
     /// Cross-handle reads work — a read-only handle sees uncommitted writes from
     /// a separate write handle on the same inode.
     ///

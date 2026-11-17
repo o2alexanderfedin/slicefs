@@ -10,7 +10,7 @@
 //! ## How integrity verification works
 //!
 //! With FileStorage, integrity is verified by attempting to resolve each live root
-//! through `file_storage_get`. If the root resolves successfully, the Merkle chain
+//! through `get_node`. If the root resolves successfully, the Merkle chain
 //! from that root is intact (the hash-chain guarantees all children are valid).
 //!
 //! File content: every object (manifest nodes and chunks) of every file
