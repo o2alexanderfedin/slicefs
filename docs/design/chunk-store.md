@@ -145,6 +145,30 @@ At open:
   read, and cut the pack there. The objects after that point were not
   synced, so no root refers to them. Write-log replay writes them again.
 
+A failed sync is final. On Linux, the kernel can mark the pages clean after
+a failed `fsync`, so a retry can succeed without the data. After any failed
+sync, the store refuses every write and sync until it is opened again. The
+open scan then finds the true durable state.
+
+## Storage strategies
+
+The store does every file operation through the `PackIo` trait
+(`pack_io.rs`): list, read, durable write, remove, create, open, and
+directory sync. The open handles are `PackFile` (the active pack) and
+`PackRead` (reads). `ChunkStore::open_with` takes the strategy.
+
+- `FileIo`: real files with `pread` and `pwrite`. `ChunkStore::open` uses it.
+- `MemIo` (`mem.rs`): an in-memory mock for tests. It can inject `ENOSPC`,
+  `EIO` on reads, and failed syncs, and `crash()` keeps only the durable
+  bytes.
+- Other read or write paths (for example `mmap` reads, see
+  `docs/research/arena-spikes.md`) can be added as new strategies.
+
+The strategies do not behave the same in every case. For example, with
+`mmap` a disk error is `SIGBUS`, not `EIO`. So the contract tests in
+`tests/io_tests.rs` run on each strategy. Known differences must be written
+down next to the strategy.
+
 ## GC
 
 Mark: the same as today, from the current root and each snapshot, through
