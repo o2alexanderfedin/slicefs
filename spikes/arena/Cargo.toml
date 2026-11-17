@@ -1,0 +1,21 @@
+[package]
+name = "arena-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Spike: fixed-size arena files for the chunk store (A), base for mmap reads (B) and free-space reuse (C)"
+
+# Not a member of the root workspace.
+[workspace]
+
+[dependencies]
+chunk-store = { path = "../../crates/chunk-store" }
+blake3 = "1"
+zstd = "0.13"
+crc32c = "0.6"
+libc = "0.2"
+fastcdc = "3.2"
+tempfile = "3"
+
+[profile.release]
+debug = 1
