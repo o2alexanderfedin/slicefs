@@ -1,14 +1,20 @@
 //! File manifest storage for SliceFS.
 //!
-//! A file manifest is an ordered list of `ObjectKey` block hashes that together
-//! compose a file's content.  The manifest is stored as a flat byte sequence
-//! (`KEY_BYTES` = 33 bytes per block hash: tag + digest) as one node in the chunk store, with
-//! a single `ObjectKey` key for the whole list.
+//! A manifest here is the list of `ObjectKey`s that the metadata keeps for an
+//! inode (`set_manifest` / `get_manifest`), serialized as `KEY_BYTES` (33:
+//! tag + digest) per key and stored as one metadata node.
+//!
+//! This is not the manifest of the file content: the content of a file is a
+//! tree of content-defined manifest nodes in the chunk store
+//! (`chunk_store::file`, cut by `is_cut`), and a file's metadata keeps only
+//! the key of that tree's root. Like every node, the bytes of this list are
+//! stored in FastCDC chunks (`store_io::put_value`), so a long list is not
+//! one large object.
 
 use slicefs_traits::key::{ObjectKey, KEY_BYTES};
 use slicefs_traits::metadata::MetaError;
 
-/// Serialize and store an ordered list of block hashes in any `StorageAdd` backend.
+/// Serialize an ordered list of keys and store it as a node (`NodeWrite`).
 ///
 /// Returns the `ObjectKey` key that can later be passed to `load_manifest`.
 /// An empty block list is valid and produces a deterministic key for the empty
@@ -21,12 +27,12 @@ pub fn intern_manifest(storage: &mut impl crate::store_io::NodeWrite, blocks: &[
     (storage).put_node(&bytes)
 }
 
-/// Retrieve and deserialize a file manifest from file-backed storage.
+/// Read and deserialize a manifest node (`NodeRead`).
 ///
 /// Returns `MetaError::Corrupted` if the stored byte length is not a multiple of `KEY_BYTES`.
 pub fn load_manifest(io: &mut impl crate::store_io::NodeRead, key: &ObjectKey) -> Result<Vec<ObjectKey>, MetaError> {
     let bytes = (io).get_node(key)
-        .ok_or_else(|| MetaError::Corrupted(format!("missing manifest node {:?}", key)))?;
+        .map_err(|e| crate::store_io::node_err("manifest node", key, e))?;
 
     if bytes.len() % KEY_BYTES != 0 {
         return Err(MetaError::Corrupted(format!(

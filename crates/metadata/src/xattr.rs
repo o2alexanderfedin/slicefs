@@ -75,7 +75,7 @@ fn deserialize_xattrs(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, MetaError>
 
 // ─── public CAS-backed functions ──────────────────────────────────────────────
 
-/// Serialize all xattr pairs and store them in any `StorageAdd` backend.
+/// Serialize all xattr pairs and store them as a node (`NodeWrite`).
 ///
 /// Returns the `ObjectKey` key that can later be passed to `load_xattrs`.
 /// An empty list serializes to an empty byte sequence which produces a
@@ -85,12 +85,12 @@ pub fn intern_xattrs(storage: &mut impl crate::store_io::NodeWrite, xattrs: &[(S
     (storage).put_node(&bytes)
 }
 
-/// Retrieve and deserialize all xattr pairs from file-backed storage.
+/// Read and deserialize an xattr node (`NodeRead`).
 ///
 /// Returns `MetaError::Corrupted` if the stored bytes cannot be parsed.
 pub fn load_xattrs(io: &mut impl crate::store_io::NodeRead, key: &ObjectKey) -> Result<Vec<(String, Vec<u8>)>, MetaError> {
     let bytes = (io).get_node(key)
-        .ok_or_else(|| MetaError::Corrupted(format!("missing xattr node {:?}", key)))?;
+        .map_err(|e| crate::store_io::node_err("xattr node", key, e))?;
     deserialize_xattrs(&bytes)
 }
 

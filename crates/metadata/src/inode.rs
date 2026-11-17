@@ -74,7 +74,7 @@ pub fn deserialize_inode(buf: &[u8]) -> Result<InodeMeta, MetaError> {
     })
 }
 
-/// Serialize an inode and store it in any `StorageAdd` backend.
+/// Serialize an inode and store it as a node (`NodeWrite`).
 ///
 /// Returns the `ObjectKey` key that can later be passed to `load_inode`.
 pub fn intern_inode(storage: &mut impl crate::store_io::NodeWrite, meta: &InodeMeta) -> ObjectKey {
@@ -82,12 +82,12 @@ pub fn intern_inode(storage: &mut impl crate::store_io::NodeWrite, meta: &InodeM
     (storage).put_node(&bytes)
 }
 
-/// Retrieve and deserialize an inode from file-backed storage.
+/// Read and deserialize an inode node (`NodeRead`).
 ///
 /// Returns `MetaError::Corrupted` if the key is not found or the data is wrong length.
 pub fn load_inode(io: &mut impl crate::store_io::NodeRead, key: &ObjectKey) -> Result<InodeMeta, MetaError> {
     let bytes = (io).get_node(key)
-        .ok_or_else(|| MetaError::Corrupted(format!("missing inode node {:?}", key)))?;
+        .map_err(|e| crate::store_io::node_err("inode node", key, e))?;
     deserialize_inode(&bytes)
 }
 

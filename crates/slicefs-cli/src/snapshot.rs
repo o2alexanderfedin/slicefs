@@ -60,7 +60,7 @@ pub fn run_snapshot_create(
         format!("no committed state found in segments at {}", segs_dir.display())
     })?;
 
-    // Reconstruct DictMetadataStore from file-backed StoreIo.
+    // Reconstruct DictMetadataStore from the node store (StoreIo).
     let io = Arc::new(Mutex::new(crate::content::store_io(store_path)?));
     let mut meta = DictMetadataStore::load_from_root(io, &root)
         .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;
@@ -157,7 +157,7 @@ pub fn run_snapshot_switch(
         format!("no committed state found in segments at {}", segs_dir.display())
     })?;
 
-    // Reconstruct DictMetadataStore from file-backed StoreIo.
+    // Reconstruct DictMetadataStore from the node store (StoreIo).
     let io = Arc::new(Mutex::new(crate::content::store_io(store_path)?));
     let mut meta = DictMetadataStore::load_from_root(io, &root)
         .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;

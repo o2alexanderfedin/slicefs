@@ -96,7 +96,7 @@ pub fn load_store(
         format!("no committed state found in segments at {}", segs_dir.display())
     })?;
 
-    // Step 4: Reconstruct metadata store using file-backed StoreIo, with the
+    // Step 4: Reconstruct the metadata store on the chunk store (StoreIo), with the
     // write hash of `--hash` (recorded now, under the lock).
     crate::content::select_hash(store_path, hash)?;
     let io = Arc::new(Mutex::new(crate::content::store_io(store_path)?));
