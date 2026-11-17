@@ -1052,6 +1052,15 @@ fn put_digest(buf: &mut Vec<u8>, d: &ObjectKey) {
 /// Serialize a `BTreeMap<u64, ObjectKey>` and store it as a node (`NodeWrite`).
 ///
 /// Format: `[count: u64 LE][for each entry: u64 LE ino + ObjectKey]`
+/// The entry count of a map node and the size it needs (`None` if the size
+/// overflows: the count is untrusted, see #64). The caller checks
+/// `bytes.len() >= 8` first.
+fn map_size(bytes: &[u8]) -> (u64, Option<usize>) {
+    let count = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+    let size = usize::try_from(count).ok().and_then(|n| n.checked_mul(MAP_ENTRY)).and_then(|s| s.checked_add(8));
+    (count, size)
+}
+
 /// Each entry is `MAP_ENTRY` bytes; total = 8 + count × `MAP_ENTRY`.
 fn intern_u64_digest_map(storage: &mut impl crate::store_io::NodeWrite, map: &BTreeMap<u64, ObjectKey>) -> ObjectKey {
     let mut bytes = Vec::with_capacity(8 + map.len() * MAP_ENTRY);
@@ -1077,17 +1086,16 @@ fn load_u64_digest_map(
             bytes.len()
         )));
     }
-    let count = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
-    let expected = 8 + count * MAP_ENTRY;
-    if bytes.len() != expected {
+    let (count, expected) = map_size(&bytes);
+    if Some(bytes.len()) != expected {
         return Err(MetaError::Corrupted(format!(
-            "u64-digest map: expected {} bytes for {} entries, got {}",
-            expected, count, bytes.len()
+            "u64-digest map: {} bytes cannot hold {} entries",
+            bytes.len(), count
         )));
     }
 
     let mut map = BTreeMap::new();
-    for i in 0..count {
+    for i in 0..count as usize { // checked by map_size
         let off = 8 + i * MAP_ENTRY;
         let ino = u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
         let digest = parse_key(&bytes[off + 8..off + MAP_ENTRY]);
@@ -1195,17 +1203,16 @@ fn load_key_u64_map(
             bytes.len()
         )));
     }
-    let count = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
-    let expected = 8 + count * MAP_ENTRY;
-    if bytes.len() != expected {
+    let (count, expected) = map_size(&bytes);
+    if Some(bytes.len()) != expected {
         return Err(MetaError::Corrupted(format!(
-            "key-u64 map: expected {} bytes for {} entries, got {}",
-            expected, count, bytes.len()
+            "key-u64 map: {} bytes cannot hold {} entries",
+            bytes.len(), count
         )));
     }
 
     let mut map = BTreeMap::new();
-    for i in 0..count {
+    for i in 0..count as usize { // checked by map_size
         let off = 8 + i * MAP_ENTRY;
         let digest = parse_key(&bytes[off..off + KEY_BYTES]);
         let count_val = u64::from_le_bytes(bytes[off + KEY_BYTES..off + MAP_ENTRY].try_into().unwrap());
@@ -1221,6 +1228,27 @@ fn parse_key(bytes: &[u8]) -> ObjectKey {
 
 
 // ─── tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod map_decode_tests {
+    use super::*;
+    use crate::store_io::{NodeWrite, StoreIo};
+
+    // A map node with an entry count whose size overflows is corrupt
+    // metadata: an error, never a panic or a wrapped length.
+    #[test]
+    fn a_map_with_an_overflowing_count_is_corrupt() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut io = StoreIo::open(dir.path()).unwrap();
+        for n in [u64::MAX, 1u64 << 63, u64::MAX / MAP_ENTRY as u64 + 1, 1] {
+            let key = io.put_node(&n.to_le_bytes());
+            let a = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load_u64_digest_map(&mut io, &key)));
+            assert!(matches!(a, Ok(Err(MetaError::Corrupted(_)))), "u64-key map, count {n}");
+            let b = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load_key_u64_map(&mut io, &key)));
+            assert!(matches!(b, Ok(Err(MetaError::Corrupted(_)))), "key-u64 map, count {n}");
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
