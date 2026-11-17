@@ -15,11 +15,14 @@
 //! `full_sync`ed, so no root refers to it).
 //!
 //! Only process crashes are tested: power loss cannot be tested here.
+//!
+//! Spike D: a variant with a trailing `D` (e.g. `V1D`, `V0D`) runs the GC
+//! in punch mode (holes over dead records instead of compaction).
 
 use arena_spike::bench::{spike_opts, Args};
 use arena_spike::measure::Rec;
 use arena_spike::workload::{self, Rng};
-use arena_spike::{sys, ObjectId, SpikeStore};
+use arena_spike::{sys, GcMode, ObjectId, Options, SpikeStore};
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -39,6 +42,17 @@ fn main() {
             eprintln!("usage: crashloop run --variant V1 [--kills 50] [--size_mib 4] [--seed 1]");
             std::process::exit(2);
         }
+    }
+}
+
+fn opts(variant: &str, size: u64) -> Options {
+    match variant.strip_suffix('D') {
+        Some(base) => {
+            let mut o = spike_opts(base, size);
+            o.gc = GcMode::Punch;
+            o
+        }
+        None => spike_opts(variant, size),
     }
 }
 
@@ -72,11 +86,12 @@ fn child(a: &Args) {
     let variant = a.str("variant", "V1");
     let size = a.u64("size_mib", 4) * MIB;
     let seed = a.u64("seed", 1);
-    let store = SpikeStore::open(&dir, spike_opts(&variant, size)).unwrap();
+    let store = SpikeStore::open(&dir, opts(&variant, size)).unwrap();
     let mut live: HashSet<ObjectId> = roots(&dir).into_iter().collect();
     let mut side = OpenOptions::new().create(true).append(true).open(dir.join("roots")).unwrap();
     let mut rng = Rng::new(seed);
     let mut round = 0u64;
+    let gcs = std::sync::atomic::AtomicU64::new(fs::read_to_string(dir.join("gcs")).ok().and_then(|s| s.parse().ok()).unwrap_or(0));
     loop {
         let objs = workload::mixed(8, rng.next());
         let mut ids = Vec::new();
@@ -96,7 +111,9 @@ fn child(a: &Args) {
         sys::full_sync(&side).unwrap();
         live.extend(ids);
         round += 1;
-        if round % 16 == 0 {
+        if round % a.u64("gc_every", 16) == 0 {
+            gcs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = fs::write(dir.join("gcs"), gcs.load(std::sync::atomic::Ordering::Relaxed).to_string());
             let t = store.gc_begin().unwrap();
             store.gc_finish(&live, t).unwrap();
         }
@@ -118,6 +135,7 @@ fn run(a: &Args) {
         let mut c = Command::new(&exe)
             .args(["child", "--dir", dir.to_str().unwrap(), "--variant", &variant])
             .args(["--size_mib", &size_mib.to_string(), "--seed", &(rng.next() >> 1).to_string()])
+            .args(["--gc_every", &a.u64("gc_every", 16).to_string()])
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
@@ -138,7 +156,7 @@ fn run(a: &Args) {
         let ids = roots(&dir);
         max_roots = max_roots.max(ids.len());
         let t = Instant::now();
-        let store = SpikeStore::open(&dir, spike_opts(&variant, size_mib * MIB)).unwrap();
+        let store = SpikeStore::open(&dir, opts(&variant, size_mib * MIB)).unwrap();
         open_ms_max = open_ms_max.max(t.elapsed().as_secs_f64() * 1e3);
         for id in &ids {
             checked += 1;
@@ -166,6 +184,8 @@ fn run(a: &Args) {
         .n("roots_final", max_roots as f64)
         .n("arenas_final", arenas as f64)
         .n("reopen_ms_max", open_ms_max)
+        .n("gcs_started", fs::read_to_string(dir.join("gcs")).ok().and_then(|s| s.parse().ok()).unwrap_or(0.0))
+        .n("punched_arenas_final", fs::read_dir(dir.join("packs")).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".punched")).count() as f64)
         .n("wall_s", t0.elapsed().as_secs_f64());
     r.emit();
     if bad > 0 || child_fail > 0 {

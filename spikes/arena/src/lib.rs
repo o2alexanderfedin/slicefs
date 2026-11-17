@@ -22,6 +22,13 @@
 //!   changes the length), `GcToken::Seq` and `Loc::seq` exist (the seq is
 //!   per process, from `Inner::loc`), `Options::reuse` is refused at open
 //!   until `reuse.rs` exists, and `sys::Fault` has the C fault points.
+//! - Spike D (`Options::gc = GcMode::Punch`): `gc_finish` punches holes over
+//!   the block-aligned gaps between live records of sealed arenas instead of
+//!   compacting (`SpikeStore::gc_finish_punch`). Order: drop dead ids from
+//!   the index, durable `NNNN.punched` mark (first time), durable sealed idx
+//!   without them, then `sys::punch_hole`. A marked arena is never taken as
+//!   the active one or cut, and without its idx it is read by
+//!   `Arena::resync` (SEEK_DATA + marker search + CRC + BLAKE3).
 //! - Extra options for spike A's measurements: `gc_seal` (always / size/8),
 //!   `close_seals` (today's close, or a resumable `open` idx), `walk` (the
 //!   recovery walk of A-B4).
