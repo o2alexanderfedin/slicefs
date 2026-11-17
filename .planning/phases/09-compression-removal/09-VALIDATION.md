@@ -1,7 +1,9 @@
 ---
 phase: 09
 slug: compression-removal
-status: draft
+status: superseded
+closed: 2026-11-17
+closed_reason: "Compression came back as zstd per object in the chunk store (PR #53). The DECOMP code is gone. The slicefs-compression crate was removed in PR #70."
 nyquist_compliant: false
 wave_0_complete: false
 created: 2026-03-30

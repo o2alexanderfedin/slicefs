@@ -1,7 +1,9 @@
 ---
 phase: 12
 slug: add-smb-fskit-backend-support-for-fuse-t
-status: draft
+status: closed
+closed: 2026-11-17
+closed_reason: "SMB/NFS were removed in PR #42 (FSKit only). FUSET-05 is fixed in PR #59 and checked live in verify-phases.sh (SIGTERM, SIGINT, SIGHUP). The FSKit mount is covered by the Boost round trip in macos-mounts.yml."
 nyquist_compliant: false
 wave_0_complete: false
 created: 2026-03-31
