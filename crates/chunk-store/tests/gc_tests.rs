@@ -99,3 +99,42 @@ fn a_gc_that_keeps_everything_changes_nothing() {
         assert_eq!(&s.get(id).unwrap(), d);
     }
 }
+
+#[test]
+fn compaction_into_an_empty_active_pack_from_open_keeps_every_live_object() {
+    // Spike A found this case in its arena code: the pack that is active at
+    // gc_begin is inside the GC boundary. If compaction fills it with live
+    // copies, the GC must not delete it.
+    let dir = TempDir::new().unwrap();
+    let s = ChunkStore::open(dir.path(), opts()).unwrap();
+    let objs = put_many(&s, 100, 300);
+    s.close().unwrap();
+    drop(s);
+    // A crash just after a new pack was made: an empty file is the newest pack.
+    let last = std::fs::read_dir(dir.path().join("packs")).unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".pack"))
+        .max().unwrap();
+    let next: u64 = last.trim_end_matches(".pack").parse::<u64>().unwrap() + 1;
+    std::fs::write(dir.path().join("packs").join(format!("{next:016}.pack")), b"").unwrap();
+
+    let s = ChunkStore::open(dir.path(), opts()).unwrap();
+    // Keep 2 of 5: every old pack is less than half live, so all are
+    // compacted. The copies (about 320 KB) overflow the empty active pack
+    // (limit 256 KiB), so compaction seals it and starts a new one.
+    let live: HashSet<ObjectId> = objs.iter().enumerate().filter(|(i, _)| i % 5 < 2).map(|(_, (id, _))| *id).collect();
+    let b = s.gc_begin().unwrap();
+    assert!(b >= next, "the empty active pack is inside the boundary");
+    let st = s.gc_finish(&live, b).unwrap();
+    assert_eq!(st.removed_objects, 60);
+    assert!(st.packs_compacted > 0);
+    for (id, d) in &objs {
+        assert_eq!(s.get(id).as_deref() == Some(d.as_slice()), live.contains(id));
+    }
+    drop(s);
+    let s = ChunkStore::open(dir.path(), opts()).unwrap();
+    assert_eq!(s.stats().objects, 40);
+    for id in &live {
+        assert!(s.get(id).is_some());
+    }
+}
