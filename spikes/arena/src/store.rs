@@ -109,6 +109,8 @@ impl SpikeStore {
             .find(|(_, i)| i.as_ref().is_none_or(|i| i.state != IdxState::Sealed))
             .map(|(n, _)| *n);
         let rec = Recovery::Append(opts.walk);
+        // (arena, logical length, has the full fixed length) for the read path.
+        let mut ready = Vec::new();
         for (num, idx) in nums.into_iter().zip(idxs) {
             let active = Some(num) == active_num;
             let Some(o) = Arena::open(&packs, num, &opts.arena, idx, rec, opts.read_only, active)? else {
@@ -116,6 +118,7 @@ impl SpikeStore {
             };
             inner.arenas.insert(num);
             inner.stats.packs += 1;
+            ready.push((num, o.arena.len(), o.arena.prealloc().fixed() && o.arena.len() == o.arena.size()));
             for (id, l) in &o.entries {
                 inner.add(*id, *l);
             }
@@ -124,8 +127,8 @@ impl SpikeStore {
             }
         }
         let read = read::make(&packs, &opts)?;
-        if let Some(a) = &inner.active {
-            read.arena_ready(a.arena.num, a.arena.len(), a.arena.prealloc().fixed());
+        for (num, len, fixed) in ready {
+            read.arena_ready(num, len, fixed);
         }
         Ok(SpikeStore { dir: packs, opts, inner: Mutex::new(inner), read })
     }
@@ -315,10 +318,20 @@ impl SpikeStore {
             }
             doomed.push(num);
         }
-        // Arenas that the index no longer uses at all.
-        let active = inner.active.as_ref().map(|a| a.arena.num);
+        // Arenas that the index no longer uses at all. Neither the arena that
+        // was active when the GC started (with `SealRule::Eighth` it may be
+        // <= boundary, and compaction may have filled and sealed it) nor the
+        // arena that is active now is a candidate.
+        let active_now = inner.active.as_ref().map(|a| a.arena.num);
+        let in_use: HashSet<u64> = inner.index.values().map(|l| l.arena).collect();
         for &num in &inner.arenas {
-            if num <= boundary && Some(num) != active && !by_arena.contains_key(&num) && !doomed.contains(&num) {
+            if num <= boundary
+                && Some(num) != active
+                && Some(num) != active_now
+                && !in_use.contains(&num)
+                && !by_arena.contains_key(&num)
+                && !doomed.contains(&num)
+            {
                 doomed.push(num);
             }
         }
