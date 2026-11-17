@@ -2,11 +2,11 @@
 use metadata::segment::{
     SegmentEntry, SegmentReader, SegmentWriter, SEGMENT_MAGIC, SEGMENT_VERSION,
 };
-use slicefs_traits::digest::Digest256;
+use slicefs_traits::key::ObjectKey;
 use tempfile::TempDir;
 
-fn make_key(v: u32) -> Digest256 {
-    [v, v + 1, v + 2, v + 3, v + 4, v + 5, v + 6, v + 7]
+fn make_key(v: u32) -> ObjectKey {
+    ObjectKey::example(v)
 }
 
 /// Write 3 RootUpdate records and read them back — all 3 must match.
@@ -113,7 +113,7 @@ fn test_unknown_record_type_skipped() {
         file.write_all(&42u64.to_le_bytes()).unwrap();
         file.write_all(&frame_record(0xFE, 0, &[0xAA, 0xBB, 0xCC, 0xDD])).unwrap();
         let root = make_key(7);
-        let payload: Vec<u8> = root.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let payload: Vec<u8> = root.0.to_vec();
         file.write_all(&frame_record(0x02, 1, &payload)).unwrap();
     }
 
@@ -163,8 +163,8 @@ fn test_segment_header_magic_and_version() {
     assert_eq!(&magic, &[0x53, 0x4C, 0x53, 0x47], "magic bytes must be SLSG");
     assert_eq!(
         u32::from_le_bytes(version_bytes),
-        2,
-        "version must be 2"
+        3,
+        "version must be 3 (tagged 33-byte keys)"
     );
     assert_eq!(&magic, &SEGMENT_MAGIC);
     assert_eq!(u32::from_le_bytes(version_bytes), SEGMENT_VERSION);

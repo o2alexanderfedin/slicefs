@@ -85,12 +85,7 @@ pub fn run_snapshot_create(
         .map_err(|e| format!("WAL shutdown failed: {}", e))?;
 
     // Format root as hex string.
-    let root_hex: String = entry
-        .root
-        .iter()
-        .flat_map(|word| word.to_le_bytes())
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let root_hex = entry.root.to_hex();
 
     println!("Snapshot {} created (root: {})", entry.version, root_hex);
 
@@ -117,12 +112,7 @@ pub fn run_snapshot_list(store_path: &Path) -> Result<(), Box<dyn std::error::Er
     for snap in &snapshots {
         let name_str = snap.name.as_deref().unwrap_or("-");
         let created_str = format_unix_timestamp(snap.created_at);
-        let root_hex: String = snap
-            .root
-            .iter()
-            .flat_map(|word| word.to_le_bytes())
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let root_hex = snap.root.to_hex();
         // Truncate root hex to 16 chars for readability.
         let root_short = &root_hex[..root_hex.len().min(16)];
         println!(
@@ -215,7 +205,7 @@ pub fn run_snapshot_switch(
 /// We write the new root entry directly to the WAL via the store's log mechanism.
 fn write_root_update(
     meta: &DictMetadataStore,
-    new_root: &slicefs_traits::digest::Digest256,
+    new_root: &slicefs_traits::key::ObjectKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Use the WAL's log_root_update method if available, or write through the store.
     // DictMetadataStore exposes `commit_root()` for this purpose.

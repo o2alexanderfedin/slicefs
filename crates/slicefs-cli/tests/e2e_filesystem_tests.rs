@@ -1414,7 +1414,7 @@ fn test_seed_empty_directory() {
     let store_dir = TempDir::new().unwrap();
 
     // Seed an empty directory
-    run_seed(store_dir.path(), source_dir.path()).expect("seed of empty dir should succeed");
+    run_seed(store_dir.path(), source_dir.path(), None).expect("seed of empty dir should succeed");
 
     let segs_dir = store_dir.path().join("segments");
     let (root_opt, _) = load_store_from_segments(&segs_dir).unwrap();
@@ -1438,7 +1438,7 @@ fn test_seed_with_symlink() {
     #[cfg(unix)]
     std::os::unix::fs::symlink("target.txt", source_dir.path().join("link.txt")).unwrap();
 
-    run_seed(store_dir.path(), source_dir.path()).expect("seed with symlink should succeed");
+    run_seed(store_dir.path(), source_dir.path(), None).expect("seed with symlink should succeed");
 
     let segs_dir = store_dir.path().join("segments");
     let (root_opt, _) = load_store_from_segments(&segs_dir).unwrap();

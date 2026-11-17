@@ -11,8 +11,8 @@ pub struct SnapshotEntry {
     pub version: u64,
     /// Optional human-readable name/tag.
     pub name: Option<String>,
-    /// Root `Digest256` captured at snapshot time.
-    pub root: slicefs_traits::digest::Digest256,
+    /// Root `ObjectKey` captured at snapshot time.
+    pub root: slicefs_traits::key::ObjectKey,
     /// Creation time as Unix seconds (UTC).
     pub created_at: u64,
 }
@@ -21,10 +21,10 @@ pub struct SnapshotEntry {
 mod tests {
     use super::*;
     use crate::segment::{SegmentEntry, SNAPSHOT_MIN, SNAPSHOT_NAME_LEN};
-    use slicefs_traits::digest::Digest256;
+    use slicefs_traits::key::ObjectKey;
 
-    fn make_root(v: u32) -> Digest256 {
-        [v; 8]
+    fn make_root(v: u32) -> ObjectKey {
+        ObjectKey::example(v)
     }
 
     #[test]
@@ -66,7 +66,7 @@ mod tests {
             name: None,
         };
         let payload = entry.payload_bytes();
-        // version(8) + root(32) + created_at(8) + name_len(4) = 52 bytes
+        // version(8) + root(33) + created_at(8) + name_len(4) = 53 bytes
         assert_eq!(payload.len(), SNAPSHOT_MIN, "no-name payload must be SNAPSHOT_MIN bytes");
 
         let parsed = SegmentEntry::parse_snapshot_record(&payload)

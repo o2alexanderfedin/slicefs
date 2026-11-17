@@ -79,7 +79,7 @@ fn test_load_store_valid_seeded_succeeds() {
     let store_dir = TempDir::new().unwrap();
     write_seeded_store_segments(&store_dir);
 
-    let (meta, _io, _lock) = load_store(store_dir.path(), WalConfig::NoWal)
+    let (meta, _io, _lock) = load_store(store_dir.path(), WalConfig::NoWal, None)
         .expect("load_store should succeed with valid seeded store");
 
     // Root inode must exist.
@@ -95,7 +95,7 @@ fn test_load_store_valid_seeded_succeeds() {
 fn test_load_store_missing_segments_dir_error() {
     let store_dir = TempDir::new().unwrap();
     // No segments/ directory, no dictionary.bin — should fail.
-    let result = load_store(store_dir.path(), WalConfig::NoWal);
+    let result = load_store(store_dir.path(), WalConfig::NoWal, None);
     let msg = match result {
         Err(e) => e.to_string(),
         Ok(_) => panic!("expected error for missing segments dir"),
@@ -112,7 +112,7 @@ fn test_load_store_legacy_dictionary_bin_error() {
     let store_dir = TempDir::new().unwrap();
     std::fs::write(store_dir.path().join("dictionary.bin"), b"legacy data").unwrap();
 
-    let result = load_store(store_dir.path(), WalConfig::NoWal);
+    let result = load_store(store_dir.path(), WalConfig::NoWal, None);
     let msg = match result {
         Err(e) => e.to_string(),
         Ok(_) => panic!("expected error for legacy dictionary.bin"),
@@ -132,7 +132,7 @@ fn test_load_store_dirty_mount_stale_lock_recovery() {
     // Create a stale mount.lock to simulate a crashed previous mount.
     std::fs::write(store_dir.path().join("mount.lock"), b"stale-pid").unwrap();
 
-    let result = load_store(store_dir.path(), WalConfig::NoWal);
+    let result = load_store(store_dir.path(), WalConfig::NoWal, None);
     assert!(result.is_ok(), "dirty mount recovery should succeed, got: {:?}", result.err());
 
     let (meta, _io, _lock) = result.unwrap();
@@ -151,7 +151,7 @@ fn test_load_store_empty_segment_file_skipped() {
     let segs_dir = store_dir.path().join("segments");
     std::fs::write(segs_dir.join("segment-000099.seg"), b"").unwrap();
 
-    let result = load_store(store_dir.path(), WalConfig::NoWal);
+    let result = load_store(store_dir.path(), WalConfig::NoWal, None);
     assert!(result.is_ok(), "empty segment file should be skipped, got: {:?}", result.err());
 
     let (meta, _io, _lock) = result.unwrap();
@@ -169,7 +169,7 @@ fn test_load_store_truncated_segment_skipped() {
     let segs_dir = store_dir.path().join("segments");
     std::fs::write(segs_dir.join("segment-000098.seg"), b"short").unwrap();
 
-    let result = load_store(store_dir.path(), WalConfig::NoWal);
+    let result = load_store(store_dir.path(), WalConfig::NoWal, None);
     assert!(result.is_ok(), "truncated segment should be skipped, got: {:?}", result.err());
 
     let (meta, _io, _lock) = result.unwrap();
@@ -189,7 +189,7 @@ fn test_load_store_only_empty_segments_fails() {
     std::fs::write(segs_dir.join("segment-000001.seg"), b"").unwrap();
     std::fs::write(segs_dir.join("segment-000002.seg"), b"tiny").unwrap();
 
-    let result = load_store(store_dir.path(), WalConfig::NoWal);
+    let result = load_store(store_dir.path(), WalConfig::NoWal, None);
     let msg = match result {
         Err(e) => e.to_string(),
         Ok(_) => panic!("expected error with only empty/truncated segments"),
@@ -467,7 +467,7 @@ fn test_non_mounted_path_passes_check() {
     // pipeline here by checking load_store doesn't fail for unrelated reasons.
     let store_dir = TempDir::new().unwrap();
     write_seeded_store_segments(&store_dir);
-    let result = load_store(store_dir.path(), WalConfig::NoWal);
+    let result = load_store(store_dir.path(), WalConfig::NoWal, None);
     assert!(result.is_ok());
 }
 
@@ -495,7 +495,7 @@ fn test_load_store_with_multiple_valid_segments() {
     meta.shutdown_wal().unwrap();
 
     // Load again — this exercises next_segment_id with existing segments.
-    let result = load_store(store_dir.path(), WalConfig::PerOp);
+    let result = load_store(store_dir.path(), WalConfig::PerOp, None);
     assert!(result.is_ok(), "loading store with existing segments should work");
 
     let (meta2, _io2, _lock2) = result.unwrap();
@@ -510,7 +510,7 @@ fn test_load_store_with_multiple_valid_segments() {
     meta2.shutdown_wal().unwrap();
 
     // Load a third time — both files should be present.
-    let result3 = load_store(store_dir.path(), WalConfig::NoWal);
+    let result3 = load_store(store_dir.path(), WalConfig::NoWal, None);
     assert!(result3.is_ok());
     let (meta3, _io3, _lock3) = result3.unwrap();
     assert!(meta3.lookup(1, "first.txt").is_ok());
@@ -529,7 +529,7 @@ fn test_load_store_ignores_non_segment_files() {
     std::fs::write(segs_dir.join(".DS_Store"), b"mac junk").unwrap();
     std::fs::write(segs_dir.join("segment-abc.seg"), b"malformed name").unwrap();
 
-    let result = load_store(store_dir.path(), WalConfig::NoWal);
+    let result = load_store(store_dir.path(), WalConfig::NoWal, None);
     assert!(result.is_ok(), "non-segment files should be ignored");
 }
 
@@ -542,7 +542,7 @@ fn test_load_store_with_flush_on_fsync_wal() {
     let store_dir = TempDir::new().unwrap();
     write_seeded_store_segments(&store_dir);
 
-    let result = load_store(store_dir.path(), WalConfig::FlushOnFsync);
+    let result = load_store(store_dir.path(), WalConfig::FlushOnFsync, None);
     assert!(result.is_ok(), "loading with FlushOnFsync WAL should succeed");
 }
 
@@ -551,7 +551,7 @@ fn test_load_store_with_periodic_wal() {
     let store_dir = TempDir::new().unwrap();
     write_seeded_store_segments(&store_dir);
 
-    let result = load_store(store_dir.path(), WalConfig::Periodic { interval_secs: 5 });
+    let result = load_store(store_dir.path(), WalConfig::Periodic { interval_secs: 5 }, None);
     assert!(result.is_ok(), "loading with Periodic WAL should succeed");
 }
 
@@ -560,7 +560,7 @@ fn test_load_store_with_no_wal() {
     let store_dir = TempDir::new().unwrap();
     write_seeded_store_segments(&store_dir);
 
-    let result = load_store(store_dir.path(), WalConfig::NoWal);
+    let result = load_store(store_dir.path(), WalConfig::NoWal, None);
     assert!(result.is_ok(), "loading with NoWal should succeed");
 }
 
@@ -577,7 +577,7 @@ fn test_load_store_dictionary_bin_takes_precedence() {
     // Also create a dictionary.bin — legacy detection fires first.
     std::fs::write(store_dir.path().join("dictionary.bin"), b"").unwrap();
 
-    let result = load_store(store_dir.path(), WalConfig::NoWal);
+    let result = load_store(store_dir.path(), WalConfig::NoWal, None);
     let msg = match result {
         Err(e) => e.to_string(),
         Ok(_) => panic!("expected error when dictionary.bin exists"),
@@ -602,7 +602,7 @@ fn test_load_store_creates_mount_lock() {
     let lock_path = store_dir.path().join("mount.lock");
     assert!(!lock_path.exists(), "mount.lock should not exist before load_store");
 
-    let result = load_store(store_dir.path(), WalConfig::NoWal);
+    let result = load_store(store_dir.path(), WalConfig::NoWal, None);
     assert!(result.is_ok());
     let (_meta, _io, _lock) = result.unwrap();
 
@@ -617,7 +617,7 @@ fn test_mount_lock_dropped_on_scope_exit() {
     let lock_path = store_dir.path().join("mount.lock");
 
     {
-        let result = load_store(store_dir.path(), WalConfig::NoWal);
+        let result = load_store(store_dir.path(), WalConfig::NoWal, None);
         assert!(result.is_ok());
         let (_meta, _io, _lock) = result.unwrap();
         assert!(lock_path.exists(), "lock should exist while held");

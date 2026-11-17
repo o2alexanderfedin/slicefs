@@ -99,7 +99,7 @@ fn test_dedup_ratio_with_identical_files() {
 
     // Use content large enough to demonstrate dedup effect.
     // Both files have the same content — logical = 2 * content_size,
-    // but CAS stores it once (dedup via Digest256 equality).
+    // but CAS stores it once (dedup via ObjectKey equality).
     let content = vec![0x42u8; 2048];
 
     let (ino1, fh1) = fs
@@ -124,7 +124,7 @@ fn test_dedup_ratio_with_identical_files() {
         2 * content.len()
     );
 
-    // Verify manifests are identical (same Digest256 → dedup confirmed)
+    // Verify manifests are identical (same ObjectKey → dedup confirmed)
     let manifest1 = fs.meta().get_manifest(ino1).unwrap();
     let manifest2 = fs.meta().get_manifest(ino2).unwrap();
     assert_eq!(

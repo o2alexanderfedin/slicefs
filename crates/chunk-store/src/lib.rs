@@ -17,30 +17,50 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub mod file;
+pub mod hash;
 pub mod pack_io;
 pub mod retry;
 pub mod mem;
 
 use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK};
+pub use crate::hash::{hasher_by_name, hasher_by_tag, hasher_names, hashers, Blake3_256, ObjectHasher, DEFAULT_HASHER};
 
 // ── Object IDs and chunking ───────────────────────────────────────────────────
 
-/// BLAKE3 of the uncompressed bytes of an object: the full 256-bit output
-/// (32 bytes), the size of the `Digest256` that the metadata uses for content
-/// keys. A global, decentralized store needs the full 2^128 collision bound.
+/// The ID of an object: a tag byte that names the hash (see
+/// [`ObjectHasher`]), then the 32-byte digest of the uncompressed bytes. The
+/// same size as the `ObjectKey` that the metadata uses for content keys. A
+/// global, decentralized store needs the full 2^128 collision bound, and the
+/// tag lets the hash change without a new ID format.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ObjectId(pub [u8; ID_LEN]);
 
-/// Length of an object ID in bytes.
-pub const ID_LEN: usize = 32;
+/// Length of a digest in bytes (every hash gives this many).
+pub const DIGEST_LEN: usize = 32;
+
+/// Length of an object ID in bytes: the tag, then the digest.
+pub const ID_LEN: usize = 1 + DIGEST_LEN;
 
 impl ObjectId {
-    /// The ID of `data`.
-    pub fn of(data: &[u8]) -> Self {
-        ObjectId(*blake3::hash(data).as_bytes())
+    /// The ID with this tag and digest.
+    pub fn new(tag: u8, digest: [u8; DIGEST_LEN]) -> Self {
+        let mut b = [0u8; ID_LEN];
+        b[0] = tag;
+        b[1..].copy_from_slice(&digest);
+        ObjectId(b)
     }
 
-    /// Lowercase hex.
+    /// The tag of the hash that made this ID.
+    pub fn tag(&self) -> u8 {
+        self.0[0]
+    }
+
+    /// The digest (without the tag).
+    pub fn digest(&self) -> &[u8; DIGEST_LEN] {
+        self.0[1..].try_into().unwrap()
+    }
+
+    /// Lowercase hex of all bytes (tag first).
     pub fn to_hex(&self) -> String {
         self.0.iter().map(|b| format!("{b:02x}")).collect()
     }
@@ -48,7 +68,7 @@ impl ObjectId {
 
 impl std::fmt::Debug for ObjectId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ObjectId({})", &self.to_hex()[..16])
+        write!(f, "ObjectId({:02x}:{})", self.tag(), &self.to_hex()[2..18])
     }
 }
 
@@ -80,11 +100,14 @@ pub struct Options {
     /// writes, and `put` fails. For tools that read a store that a mount may
     /// write at the same time.
     pub read_only: bool,
+    /// The hash of the IDs of new objects. Objects of other known hashes
+    /// stay readable: each is verified with the hasher of its own tag.
+    pub hasher: &'static dyn ObjectHasher,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { pack_limit: 64 << 20, zstd_level: 3, read_only: false }
+        Options { pack_limit: 64 << 20, zstd_level: 3, read_only: false, hasher: DEFAULT_HASHER }
     }
 }
 
@@ -112,6 +135,8 @@ pub enum Error {
     Missing(ObjectId),
     #[error("damaged data: {0}")]
     Corrupt(String),
+    #[error("object {0:?} uses a hash tag that this SliceFS does not know (a damaged or newer store)")]
+    UnknownHash(ObjectId),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -120,7 +145,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 const PACK_MAGIC: &[u8; 4] = b"SFPK";
 const IDX_MAGIC: &[u8; 4] = b"SFIX";
-const FORMAT_VERSION: u16 = 1;
+/// Version 2: 33-byte tagged object IDs.
+const FORMAT_VERSION: u16 = 2;
 /// Bit in the version field of a pack header: GC punched holes in the
 /// pack. Such a pack is never the active pack and never cut at open.
 const PACK_PUNCHED: u16 = 0x8000;
@@ -231,34 +257,58 @@ fn scan_pack(buf: &[u8], num: u64) -> (Vec<(ObjectId, Loc)>, u64) {
     (out, pos as u64)
 }
 
+/// Error unless a pack or index header (from byte 4) has this format version.
+fn check_version(b: &[u8], what: &str, num: u64) -> Result<()> {
+    if b.len() < 6 {
+        return Ok(()); // short: the scan treats it as damaged
+    }
+    let v = u16::from_le_bytes([b[4], b[5]]) & !PACK_PUNCHED;
+    if v != FORMAT_VERSION {
+        return Err(Error::Corrupt(format!(
+            "{what} {num} has format version {v}; this SliceFS reads version {FORMAT_VERSION}"
+        )));
+    }
+    Ok(())
+}
+
 fn is_punched(pack: &[u8]) -> bool {
     pack.len() >= PACK_HEADER && &pack[..4] == PACK_MAGIC && u16::from_le_bytes([pack[4], pack[5]]) & PACK_PUNCHED != 0
 }
 
-/// The record at `buf[0]` if it is valid and its bytes hash to its ID.
-fn verified_record(buf: &[u8]) -> Option<(ObjectId, u8, u32, u32, usize)> {
-    let (id, flags, raw, stored, total) = decode_record(buf)?;
+/// True if `data` hashes to `id` with the hasher of the ID's tag.
+fn verify(id: &ObjectId, data: &[u8]) -> Result<bool> {
+    let h = hasher_by_tag(id.tag()).ok_or(Error::UnknownHash(*id))?;
+    Ok(h.id(data) == *id)
+}
+
+/// The record at `buf[0]` if it is valid and its bytes hash to its ID. A
+/// record with a good CRC and an unknown hash tag is an error.
+fn verified_record(buf: &[u8]) -> Result<Option<(ObjectId, u8, u32, u32, usize)>> {
+    let Some((id, flags, raw, stored, total)) = decode_record(buf) else { return Ok(None) };
     let payload = &buf[REC_HEADER..REC_HEADER + stored as usize];
     let ok = if flags & FLAG_ZSTD != 0 {
-        zstd::bulk::decompress(payload, raw as usize).is_ok_and(|d| ObjectId::of(&d) == id)
+        match zstd::bulk::decompress(payload, raw as usize) {
+            Ok(d) => verify(&id, &d)?,
+            Err(_) => false,
+        }
     } else {
-        raw == stored && ObjectId::of(payload) == id
+        raw == stored && verify(&id, payload)?
     };
-    ok.then_some((id, flags, raw, stored, total))
+    Ok(ok.then_some((id, flags, raw, stored, total)))
 }
 
 /// Scan a sealed pack that may have holes or damage: at each position, take
 /// a record only if its CRC is good and its bytes hash to its ID; else move
 /// on by one byte (zero runs are skipped). A punched gap or a damaged record
 /// costs only itself, not the records after it.
-fn resync_scan(buf: &[u8], num: u64) -> Vec<(ObjectId, Loc)> {
+fn resync_scan(buf: &[u8], num: u64) -> Result<Vec<(ObjectId, Loc)>> {
     let mut out = Vec::new();
     if buf.len() < PACK_HEADER || &buf[..4] != PACK_MAGIC {
-        return out;
+        return Ok(out);
     }
     let mut pos = PACK_HEADER;
     while pos + REC_HEADER + REC_CRC <= buf.len() {
-        if let Some((id, flags, raw, stored, total)) = verified_record(&buf[pos..]) {
+        if let Some((id, flags, raw, stored, total)) = verified_record(&buf[pos..])? {
             out.push((id, Loc { pack: num, offset: pos as u64, stored, raw, flags }));
             pos += total;
             continue;
@@ -269,7 +319,7 @@ fn resync_scan(buf: &[u8], num: u64) -> Vec<(ObjectId, Loc)> {
             None => break,
         }
     }
-    out
+    Ok(out)
 }
 
 fn encode_index(entries: &[(ObjectId, Loc)]) -> Vec<u8> {
@@ -291,19 +341,22 @@ fn encode_index(entries: &[(ObjectId, Loc)]) -> Vec<u8> {
     b
 }
 
-fn decode_index(b: &[u8], num: u64) -> Option<Vec<(ObjectId, Loc)>> {
+/// The entries of an index, `None` if it is damaged (the pack is scanned
+/// instead), an error if it is intact but of another format version.
+fn decode_index(b: &[u8], num: u64) -> Result<Option<Vec<(ObjectId, Loc)>>> {
     if b.len() < 18 || &b[..4] != IDX_MAGIC {
-        return None;
+        return Ok(None);
     }
     let (body, crc) = b.split_at(b.len() - 4);
     if crc32c::crc32c(body) != u32::from_le_bytes(crc.try_into().unwrap()) {
-        return None;
+        return Ok(None);
     }
+    check_version(body, "index", num)?;
     let n = u64::from_le_bytes(body[6..14].try_into().unwrap()) as usize;
     if body.len() != 14 + n * IDX_ENTRY {
-        return None;
+        return Ok(None);
     }
-    Some(
+    Ok(Some(
         body[14..]
             .chunks_exact(IDX_ENTRY)
             .map(|e| {
@@ -315,7 +368,7 @@ fn decode_index(b: &[u8], num: u64) -> Option<Vec<(ObjectId, Loc)>> {
                 (id, Loc { pack: num, offset, stored, raw, flags: e[o + 16] })
             })
             .collect(),
-    )
+    ))
 }
 
 // ── Store ─────────────────────────────────────────────────────────────────────
@@ -406,16 +459,22 @@ impl ChunkStore {
         };
         let last = nums.last().copied();
         for num in nums {
-            let loaded = io.read(num, Kind::Idx).ok().and_then(|b| decode_index(&b, num));
+            let loaded = match io.read(num, Kind::Idx) {
+                Ok(b) => decode_index(&b, num)?,
+                Err(_) => None,
+            };
             let entries = match loaded {
                 Some(e) => e,
                 None => {
                     let buf = io.read(num, Kind::Pack)?;
+                    if buf.starts_with(PACK_MAGIC) {
+                        check_version(&buf, "pack", num)?;
+                    }
                     let active = Some(num) == last && !is_punched(&buf);
                     // The active pack is cut at its first bad record. A sealed
                     // pack (its index is lost) may have holes or damage in the
                     // middle, so it is resynced past them.
-                    let (entries, valid) = if active { scan_pack(&buf, num) } else { (resync_scan(&buf, num), 0) };
+                    let (entries, valid) = if active { scan_pack(&buf, num) } else { (resync_scan(&buf, num)?, 0) };
                     if opts.read_only {
                         for (id, l) in entries {
                             inner.add(id, l);
@@ -463,7 +522,7 @@ impl ChunkStore {
         if self.opts.read_only {
             return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
         }
-        let id = ObjectId::of(data);
+        let id = self.opts.hasher.id(data);
         {
             let mut inner = self.inner.lock().unwrap();
             if inner.index.contains_key(&id) {
@@ -714,29 +773,46 @@ impl ChunkStore {
         Ok(())
     }
 
-    /// The bytes of `id`, or `None` if the store does not have the object or
-    /// its record is damaged.
+    /// The bytes of `id`, or `None` if the store does not have the object,
+    /// its record is damaged, or its hash is unknown (see [`ChunkStore::read`]).
     pub fn get(&self, id: &ObjectId) -> Option<Vec<u8>> {
+        self.read(id).ok()
+    }
+
+    /// The bytes of `id`, verified with the hasher of the ID's tag.
+    /// Errors: `Missing`, `Corrupt` (a damaged record), `UnknownHash` (a tag
+    /// this build does not know: a damaged or newer store), `Io`.
+    pub fn read(&self, id: &ObjectId) -> Result<Vec<u8>> {
+        let hasher = hasher_by_tag(id.tag()).ok_or(Error::UnknownHash(*id))?;
         let (loc, file) = {
             let mut inner = self.inner.lock().unwrap();
-            let loc = *inner.index.get(id)?;
+            let loc = *inner.index.get(id).ok_or(Error::Missing(*id))?;
             inner.touch(*id);
-            let file = inner.reader(&*self.io, loc.pack).ok()?;
+            let file = inner.reader(&*self.io, loc.pack)?;
             (loc, file)
         };
+        let damaged = || Error::Corrupt(format!("object {id:?}"));
         let mut buf = vec![0u8; REC_HEADER + loc.stored as usize + REC_CRC];
-        file.read_at(&mut buf, loc.offset).ok()?;
-        let (rid, flags, raw, _, _) = decode_record(&buf)?;
+        file.read_at(&mut buf, loc.offset)?;
+        let (rid, flags, raw, _, _) = decode_record(&buf).ok_or_else(damaged)?;
         if rid != *id {
-            return None;
+            return Err(damaged());
         }
         let payload = &buf[REC_HEADER..REC_HEADER + loc.stored as usize];
         let data = if flags & FLAG_ZSTD != 0 {
-            zstd::bulk::decompress(payload, raw as usize).ok()?
+            zstd::bulk::decompress(payload, raw as usize).map_err(|_| damaged())?
         } else {
             payload.to_vec()
         };
-        (ObjectId::of(&data) == *id).then_some(data)
+        if hasher.id(&data) != *id {
+            return Err(damaged());
+        }
+        Ok(data)
+    }
+
+    /// The hasher of new objects.
+    pub fn hasher(&self) -> &'static dyn ObjectHasher {
+        self.opts.hasher
     }
 
     /// True if the store has `id`.

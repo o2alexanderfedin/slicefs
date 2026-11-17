@@ -15,7 +15,8 @@
 //!
 //! File content: every object (manifest nodes and chunks) of every file
 //! under each root is read from the chunk store; each read checks the record
-//! CRC and the BLAKE3 of the decoded bytes.
+//! CRC and the hash of the decoded bytes, with the hash that the tag of the
+//! object's ID names (objects of an older write hash are checked too).
 //!
 //! Additionally, the current committed root is verified by reloading the full
 //! `DictMetadataStore` from that root — exercising all inode/directory/manifest
@@ -110,10 +111,7 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
                 // Root resolves — Merkle chain is intact.
             }
             None => {
-                let hex: String = root.iter()
-                    .flat_map(|w| w.to_le_bytes())
-                    .map(|b| format!("{:02x}", b))
-                    .collect();
+                let hex = root.to_hex();
                 errors.push(format!("missing or corrupt root {}", &hex[..16]));
             }
         }
@@ -128,8 +126,11 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
                 match chunk_store::file::file_objects(&cs, crate::content::to_id(&k)) {
                     Ok(objs) => {
                         for id in objs {
-                            if seen.insert(id) && cs.get(&id).is_none() {
-                                errors.push(format!("missing or corrupt content object {}", &id.to_hex()[..16]));
+                            // Verified with the hasher of the object's own tag.
+                            if seen.insert(id) {
+                                if let Err(e) = cs.read(&id) {
+                                    errors.push(format!("content object {}: {e}", &id.to_hex()[..18]));
+                                }
                             }
                         }
                     }
@@ -392,5 +393,48 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("segments")).unwrap();
         let result = run_scrub(dir.path(), false);
         assert!(result.is_ok(), "empty segments dir should scrub clean: {:?}", result);
+    }
+
+    /// One commit of a file `name` with `bytes`, on the store's recorded
+    /// write hash. Returns the content key of the file.
+    fn commit_file(store: &Path, segment: u64, name: &str, bytes: &[u8]) -> slicefs_traits::key::ObjectKey {
+        use metadata::wal::create_wal;
+        let io = Arc::new(Mutex::new(crate::content::store_io(store).unwrap()));
+        let cs = Arc::clone(io.lock().unwrap().store());
+        let (root, _) = load_store_from_segments(&store.join("segments")).unwrap();
+        let mut meta = match root {
+            Some(r) => DictMetadataStore::load_from_root(io, &r).unwrap(),
+            None => DictMetadataStore::new(io),
+        };
+        meta.set_wal(create_wal(WalConfig::PerOp, store, segment).unwrap());
+        let ino = meta.create_inode(&InodeMeta::new_file(0, 0, 0, S_IFREG | 0o644)).unwrap();
+        meta.link(1, name, ino).unwrap();
+        let key = crate::content::put_all(&cs, bytes).unwrap();
+        meta.set_manifest(ino, &[key]).unwrap();
+        meta.commit().unwrap();
+        meta.shutdown_wal().unwrap();
+        cs.close().unwrap();
+        key
+    }
+
+    /// Scrub verifies the objects of both hashes after a change of the
+    /// write hash; a recorded hash it does not know is an error.
+    #[test]
+    fn test_scrub_verifies_objects_of_both_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path();
+        std::fs::create_dir_all(store.join("segments")).unwrap();
+        let big: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let old = commit_file(store, 1, "old.bin", &big);
+        crate::content::select_hash(store, Some("test-keyed-blake3")).unwrap();
+        let new = commit_file(store, 2, "new.bin", &big[1000..]);
+        assert_eq!((old.tag(), new.tag()), (0x1e, 0xf0));
+        let result = run_scrub(store, true);
+        assert!(result.is_ok(), "both tags verify: {result:?}");
+
+        let marker = std::fs::read_to_string(store.join(crate::content::FORMAT_FILE)).unwrap();
+        std::fs::write(store.join(crate::content::FORMAT_FILE), marker.replace("test-keyed-blake3", "no-such-hash")).unwrap();
+        let err = run_scrub(store, true).unwrap_err().to_string();
+        assert!(err.contains("no-such-hash"), "{err}");
     }
 }

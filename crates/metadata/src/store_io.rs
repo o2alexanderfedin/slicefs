@@ -4,7 +4,7 @@
 //! A node is stored like a file: FastCDC chunks under a manifest tree
 //! (`chunk_store::file`). So a big map that changes in a few places between
 //! commits stores only the changed chunks again. The node key is the
-//! `ObjectId` of the manifest root, as a `Digest256`.
+//! `ObjectId` of the manifest root, as a `ObjectKey`.
 //!
 //! The metadata and the file content share one `ChunkStore`: a commit syncs
 //! its active pack once, then logs the root.
@@ -15,63 +15,57 @@ use std::sync::Arc;
 
 use chunk_store::file::{FileReader, FileWriter};
 use chunk_store::{ChunkStore, ObjectId};
-use slicefs_traits::digest::Digest256;
+use slicefs_traits::key::ObjectKey;
 
 /// Read nodes by key.
 pub trait NodeRead {
     /// The bytes of the node `key`, or `None` if it is missing or damaged.
-    fn get_node(&mut self, key: &Digest256) -> Option<Vec<u8>>;
+    fn get_node(&mut self, key: &ObjectKey) -> Option<Vec<u8>>;
 }
 
 /// Store nodes.
 pub trait NodeWrite: NodeRead {
     /// Store `bytes` as one node and return its key. An error is kept and
     /// returned by the next sync (so a commit never logs a root over it).
-    fn put_node(&mut self, bytes: &[u8]) -> Digest256;
+    fn put_node(&mut self, bytes: &[u8]) -> ObjectKey;
 }
 
 impl<T: NodeRead + ?Sized> NodeRead for &mut T {
-    fn get_node(&mut self, key: &Digest256) -> Option<Vec<u8>> {
+    fn get_node(&mut self, key: &ObjectKey) -> Option<Vec<u8>> {
         (**self).get_node(key)
     }
 }
 
 impl<T: NodeWrite + ?Sized> NodeWrite for &mut T {
-    fn put_node(&mut self, bytes: &[u8]) -> Digest256 {
+    fn put_node(&mut self, bytes: &[u8]) -> ObjectKey {
         (**self).put_node(bytes)
     }
 }
 
-/// `ObjectId` as the `Digest256` that the metadata stores (8 words, LE).
-const _: () = assert!(chunk_store::ID_LEN == slicefs_traits::digest::DIGEST_BYTES);
+// An `ObjectKey` holds the bytes of an `ObjectId` (tag + digest).
+const _: () = assert!(chunk_store::ID_LEN == slicefs_traits::key::KEY_BYTES);
+const _: () = assert!(chunk_store::DIGEST_LEN == slicefs_traits::key::DIGEST_BYTES);
 
-pub fn to_digest(id: ObjectId) -> Digest256 {
-    let mut d = [0u32; 8];
-    for (w, c) in d.iter_mut().zip(id.0.chunks_exact(4)) {
-        *w = u32::from_le_bytes(c.try_into().unwrap());
-    }
-    d
+/// `ObjectId` as the `ObjectKey` that the metadata stores (the same bytes).
+pub fn to_key(id: ObjectId) -> ObjectKey {
+    ObjectKey(id.0)
 }
 
 /// The `ObjectId` of a key from the metadata.
-pub fn to_id(d: &Digest256) -> ObjectId {
-    let mut id = [0u8; chunk_store::ID_LEN];
-    for (c, w) in id.chunks_exact_mut(4).zip(d.iter()) {
-        c.copy_from_slice(&w.to_le_bytes());
-    }
-    ObjectId(id)
+pub fn to_id(k: &ObjectKey) -> ObjectId {
+    ObjectId(k.0)
 }
 
 /// Store `bytes` as one value (a file or a node) and return its key.
-pub fn put_value(cs: &ChunkStore, bytes: &[u8]) -> chunk_store::Result<Digest256> {
+pub fn put_value(cs: &ChunkStore, bytes: &[u8]) -> chunk_store::Result<ObjectKey> {
     let mut w = FileWriter::default();
     w.write(cs, bytes)?;
-    w.finish(cs).map(to_digest)
+    w.finish(cs).map(to_key)
 }
 
 /// All bytes of the value `key`, or `None` if an object is missing or
 /// damaged.
-pub fn get_value(cs: &ChunkStore, key: &Digest256) -> Option<Vec<u8>> {
+pub fn get_value(cs: &ChunkStore, key: &ObjectKey) -> Option<Vec<u8>> {
     let mut r = FileReader::open(cs, to_id(key)).ok()?;
     let n = r.len() as usize;
     r.read(cs, 0, n).ok()
@@ -83,7 +77,7 @@ pub fn get_value(cs: &ChunkStore, key: &Digest256) -> Option<Vec<u8>> {
 pub struct NodeReader(pub Arc<ChunkStore>);
 
 impl NodeRead for NodeReader {
-    fn get_node(&mut self, key: &Digest256) -> Option<Vec<u8>> {
+    fn get_node(&mut self, key: &ObjectKey) -> Option<Vec<u8>> {
         get_value(&self.0, key)
     }
 }
@@ -153,13 +147,13 @@ impl StoreIo {
 }
 
 impl NodeRead for StoreIo {
-    fn get_node(&mut self, key: &Digest256) -> Option<Vec<u8>> {
+    fn get_node(&mut self, key: &ObjectKey) -> Option<Vec<u8>> {
         get_value(&self.cs, key)
     }
 }
 
 impl NodeWrite for StoreIo {
-    fn put_node(&mut self, bytes: &[u8]) -> Digest256 {
+    fn put_node(&mut self, bytes: &[u8]) -> ObjectKey {
         self.unsynced += 1;
         match put_value(&self.cs, bytes) {
             Ok(k) => k,
@@ -167,7 +161,7 @@ impl NodeWrite for StoreIo {
                 if self.failed.is_none() {
                     self.failed = Some(io::Error::other(e));
                 }
-                [0; 8]
+                ObjectKey::ZERO
             }
         }
     }
@@ -194,7 +188,7 @@ mod tests {
     fn a_missing_node_is_none() {
         let dir = TempDir::new().unwrap();
         let mut io = StoreIo::open(dir.path()).unwrap();
-        assert!(io.get_node(&[1, 2, 3, 4, 5, 6, 7, 8]).is_none());
+        assert!(io.get_node(&ObjectKey::example(1)).is_none());
     }
 
     #[test]

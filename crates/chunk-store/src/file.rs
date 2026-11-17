@@ -2,7 +2,7 @@
 //! FastCDC, a manifest tree of nodes, and a reader for byte ranges.
 //!
 //! Node format: magic `SFM1`, level `u8`, entry count `u32 LE`, then entries
-//! of `ObjectId` (`ID_LEN` = 32 bytes) + byte length `u64 LE`. Level 0 entries are
+//! of `ObjectId` (`ID_LEN` = 33 bytes: tag + digest) + byte length `u64 LE`. Level 0 entries are
 //! chunks; a level `k > 0` entry is a level `k - 1` node and the bytes it
 //! covers.
 //!
@@ -14,7 +14,7 @@
 //! on the chunk sequence, so the key of a file does not depend on the sizes
 //! of the writes that made it.
 
-use crate::{chunk_ranges, ChunkStore, Error, ObjectId, Result, CHUNK_MAX, ID_LEN};
+use crate::{chunk_ranges, hashers, ChunkStore, Error, ObjectId, Result, CHUNK_MAX, DIGEST_LEN, ID_LEN};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -28,10 +28,10 @@ pub const NODE_MIN: usize = 64;
 /// A node ends after about one entry in this many (a power of two).
 pub const NODE_CUT_ONE_IN: u32 = 512;
 
-/// True if a node may end after an entry with this ID. The ID is a BLAKE3
-/// hash, so its bytes are uniform.
+/// True if a node may end after an entry with this ID. The digest bytes of
+/// an ID are uniform (the tag is not: it is the same for most IDs).
 fn is_cut(id: &ObjectId) -> bool {
-    let w = u32::from_le_bytes(id.0[ID_LEN - 4..].try_into().unwrap());
+    let w = u32::from_le_bytes(id.digest()[DIGEST_LEN - 4..].try_into().unwrap());
     w & (NODE_CUT_ONE_IN - 1) == 0
 }
 
@@ -87,7 +87,7 @@ fn decode_node(b: &[u8]) -> Option<Node> {
 }
 
 fn load_node(store: &ChunkStore, id: &ObjectId) -> Result<Node> {
-    let bytes = store.get(id).ok_or(Error::Missing(*id))?;
+    let bytes = store.read(id)?;
     decode_node(&bytes).ok_or_else(|| Error::Corrupt(format!("manifest node {id:?}")))
 }
 
@@ -214,13 +214,13 @@ pub struct FileReader {
 const NODE_CACHE: usize = 16;
 
 /// FastCDC cuts a run of zeros into chunks of `CHUNK_MAX` zero bytes, which
-/// all have this ID. A reader serves them from one shared zero buffer: no
-/// lookup, no I/O, no decompression (a flyweight for sparse files).
-fn zero_chunk() -> &'static (ObjectId, Vec<u8>) {
-    static ZERO: OnceLock<(ObjectId, Vec<u8>)> = OnceLock::new();
+/// all have one ID for each hash. A reader serves them from one shared zero
+/// buffer: no lookup, no I/O, no decompression (a flyweight for sparse files).
+fn zero_chunk() -> &'static (Vec<ObjectId>, Vec<u8>) {
+    static ZERO: OnceLock<(Vec<ObjectId>, Vec<u8>)> = OnceLock::new();
     ZERO.get_or_init(|| {
         let z = vec![0u8; CHUNK_MAX as usize];
-        (ObjectId::of(&z), z)
+        (hashers().iter().map(|h| h.id(&z)).collect(), z)
     })
 }
 
@@ -275,8 +275,8 @@ impl FileReader {
                 base += node.starts[i];
                 node = self.node(store, &e.id)?;
             };
-            let (zid, zeros) = zero_chunk();
-            if id == *zid && len == zeros.len() as u64 {
+            let (zids, zeros) = zero_chunk();
+            if len == zeros.len() as u64 && zids.contains(&id) {
                 let from = (pos - start) as usize;
                 let to = ((end - start).min(len)) as usize;
                 out.extend_from_slice(&zeros[from..to]);
@@ -284,7 +284,7 @@ impl FileReader {
                 continue;
             }
             if self.chunk.as_ref().map(|(c, _)| *c) != Some(id) {
-                let bytes = store.get(&id).ok_or(Error::Missing(id))?;
+                let bytes = store.read(&id)?;
                 if bytes.len() as u64 != len {
                     return Err(Error::Corrupt(format!("chunk {id:?}: {} bytes, manifest says {len}", bytes.len())));
                 }
@@ -320,7 +320,7 @@ pub fn file_objects(store: &ChunkStore, key: ObjectId) -> Result<Vec<ObjectId>> 
 mod tests {
     use super::*;
     use crate::mem::MemIo;
-    use crate::Options;
+    use crate::{Blake3_256, ObjectHasher, Options};
 
     /// A manifest of `entries` (fake chunks: only the nodes are stored).
     fn build(s: &ChunkStore, entries: &[Entry]) -> ObjectId {
@@ -332,7 +332,7 @@ mod tests {
     }
 
     fn fake(n: u32) -> Vec<Entry> {
-        (0..n).map(|i| Entry { id: ObjectId::of(&i.to_le_bytes()), len: 8192 }).collect()
+        (0..n).map(|i| Entry { id: Blake3_256.id(&i.to_le_bytes()), len: 8192 }).collect()
     }
 
     /// A chunk added or removed at the start changes only a few nodes, not
@@ -345,7 +345,7 @@ mod tests {
         let nodes = s.stats().objects;
         assert!(nodes > 300, "{nodes} nodes");
 
-        let mut ins = vec![Entry { id: ObjectId::of(b"new"), len: 100 }];
+        let mut ins = vec![Entry { id: Blake3_256.id(b"new"), len: 100 }];
         ins.extend_from_slice(&base);
         let before = s.stats().objects;
         build(&s, &ins);

@@ -109,7 +109,7 @@ fn test_seed_roundtrip_various_file_types() {
     std::fs::write(source_dir.path().join("subdir/inner.txt"), b"inner content").unwrap();
 
     // Seed
-    run_seed(store_dir.path(), source_dir.path()).expect("seed should succeed");
+    run_seed(store_dir.path(), source_dir.path(), None).expect("seed should succeed");
 
     // Load the store from segments
     let segs_dir = store_dir.path().join("segments");
@@ -183,7 +183,7 @@ fn test_seed_preserves_directory_structure() {
     std::fs::write(source_dir.path().join("a/b/file_b.txt"), b"in b").unwrap();
     std::fs::write(source_dir.path().join("a/b/c/file_c.txt"), b"in c").unwrap();
 
-    run_seed(store_dir.path(), source_dir.path()).expect("seed should succeed");
+    run_seed(store_dir.path(), source_dir.path(), None).expect("seed should succeed");
 
     let segs_dir = store_dir.path().join("segments");
     let (root_opt, _) = load_store_from_segments(&segs_dir).unwrap();
@@ -1336,7 +1336,7 @@ fn test_seed_then_mount_and_modify() {
     .unwrap();
 
     // Seed
-    run_seed(store_dir.path(), source_dir.path()).unwrap();
+    run_seed(store_dir.path(), source_dir.path(), None).unwrap();
 
     // Load store (simulating mount)
     let segs_dir = store_dir.path().join("segments");

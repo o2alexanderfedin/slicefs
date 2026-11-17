@@ -57,7 +57,7 @@ pub struct ContentStats {
 pub fn content_stats(meta: &DictMetadataStore) -> Result<ContentStats, MetaError> {
     use std::collections::{HashMap, HashSet};
     let mut seen: HashSet<u64> = HashSet::new();
-    let mut by_content: HashMap<Vec<[u32; 8]>, (u64, usize)> = HashMap::new();
+    let mut by_content: HashMap<Vec<slicefs_traits::key::ObjectKey>, (u64, usize)> = HashMap::new();
     let mut stack = vec![1u64];
     seen.insert(1);
     while let Some(dir) = stack.pop() {
@@ -338,9 +338,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
         let meta = DictMetadataStore::new(io);
-        let d1 = [1u32; 8];
-        let d2 = [2u32; 8];
-        let mk = |parent: u64, name: &str, size: u64, manifest: &[[u32; 8]]| {
+        let d1 = slicefs_traits::key::ObjectKey::example(1);
+        let d2 = slicefs_traits::key::ObjectKey::example(2);
+        let mk = |parent: u64, name: &str, size: u64, manifest: &[slicefs_traits::key::ObjectKey]| {
             let mut m = InodeMeta::new_file(0, 0, 0, S_IFREG | 0o644);
             m.size = size;
             let ino = meta.create_inode(&m).unwrap();
@@ -468,7 +468,7 @@ mod tests {
             version: 42,
             name: Some("release-1.0".to_string()),
             created_at: 1700000000,
-            root: [0u32; 8],
+            root: slicefs_traits::key::ObjectKey::ZERO,
         };
         let stats = build_snapshot_stats(&[snap]);
         assert_eq!(stats.len(), 1);
@@ -485,7 +485,7 @@ mod tests {
             version: 1,
             name: None,
             created_at: 0,
-            root: [0u32; 8],
+            root: slicefs_traits::key::ObjectKey::ZERO,
         };
         let stats = build_snapshot_stats(&[snap]);
         assert_eq!(stats.len(), 1);

@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use chunk_store::{ChunkStore, ObjectId};
-use slicefs_traits::digest::Digest256;
+use slicefs_traits::key::ObjectKey;
 use slicefs_traits::metadata::MetaError;
 
 use crate::store::referenced;
@@ -24,7 +24,7 @@ use crate::store_io::{to_id, NodeRead, NodeReader};
 use crate::segment::compaction::{compact_segment, SegmentError};
 
 /// The file content keys (chunk store) of `roots`.
-pub fn collect_content_keys(io: &mut impl NodeRead, roots: &[Digest256]) -> Result<Vec<Digest256>, MetaError> {
+pub fn collect_content_keys(io: &mut impl NodeRead, roots: &[ObjectKey]) -> Result<Vec<ObjectKey>, MetaError> {
     let mut keys = Vec::new();
     for root in roots {
         keys.extend(crate::store::content_keys(io, root)?);
@@ -41,12 +41,12 @@ pub fn collect_content_keys(io: &mut impl NodeRead, roots: &[Digest256]) -> Resu
 /// because the live set is not complete.
 pub fn live_objects(
     cs: &Arc<ChunkStore>,
-    meta_roots: &[Digest256],
-    file_roots: &[Digest256],
+    meta_roots: &[ObjectKey],
+    file_roots: &[ObjectKey],
     stop: &AtomicBool,
 ) -> Result<Option<HashSet<ObjectId>>, MetaError> {
     let mut io = NodeReader(Arc::clone(cs));
-    let mut values: Vec<Digest256> = file_roots.to_vec();
+    let mut values: Vec<ObjectKey> = file_roots.to_vec();
     for root in meta_roots {
         if stop.load(Ordering::Relaxed) {
             return Ok(None);
@@ -78,12 +78,12 @@ pub fn live_objects(
 /// `ChunkStore::gc_finish` (or `gc_abort`).
 pub struct OnlineGc {
     cs: Arc<ChunkStore>,
-    meta_roots: Vec<Digest256>,
-    file_roots: Vec<Digest256>,
+    meta_roots: Vec<ObjectKey>,
+    file_roots: Vec<ObjectKey>,
 }
 
 impl OnlineGc {
-    pub fn new(cs: Arc<ChunkStore>, meta_roots: Vec<Digest256>, file_roots: Vec<Digest256>) -> Self {
+    pub fn new(cs: Arc<ChunkStore>, meta_roots: Vec<ObjectKey>, file_roots: Vec<ObjectKey>) -> Self {
         OnlineGc { cs, meta_roots, file_roots }
     }
 
@@ -125,7 +125,7 @@ impl GarbageCollector {
     /// Used by the background GC thread after migration to file-backed storage.
     /// Segment compaction retains all `RootUpdate` and `SnapshotRecord` entries;
     /// live-set filtering from file storage will be added in a future plan.
-    pub fn run_gc_roots_only(&self, _roots: &[Digest256]) -> Result<GcStats, GcError> {
+    pub fn run_gc_roots_only(&self, _roots: &[ObjectKey]) -> Result<GcStats, GcError> {
         self.run_gc_inner()
     }
 
@@ -134,7 +134,7 @@ impl GarbageCollector {
     pub fn run_gc(
         &self,
         io: &mut impl crate::store_io::NodeRead,
-        roots: &[Digest256],
+        roots: &[ObjectKey],
     ) -> Result<GcStats, GcError> {
         let _ = (io, roots);
         self.run_gc_inner()

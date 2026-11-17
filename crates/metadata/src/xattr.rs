@@ -2,7 +2,7 @@
 //!
 //! Xattrs are stored as a flat list of (name, value) pairs serialized as a
 //! concatenated byte stream and stored as one node in the chunk store. Its
-//! `Digest256` acts as the identity key for the entire xattr set of a given
+//! `ObjectKey` acts as the identity key for the entire xattr set of a given
 //! inode.
 //!
 //! Entry wire format (little-endian):
@@ -14,9 +14,9 @@
 //!   [value:     value_len bytes]
 //! ```
 //! An empty attribute set is represented by an empty byte sequence and is stored
-//! in the Dictionary as the canonical empty-content `Digest256`.
+//! in the Dictionary as the canonical empty-content `ObjectKey`.
 
-use slicefs_traits::digest::Digest256;
+use slicefs_traits::key::ObjectKey;
 use slicefs_traits::metadata::MetaError;
 
 // ─── serialization helpers ────────────────────────────────────────────────────
@@ -77,10 +77,10 @@ fn deserialize_xattrs(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, MetaError>
 
 /// Serialize all xattr pairs and store them in any `StorageAdd` backend.
 ///
-/// Returns the `Digest256` key that can later be passed to `load_xattrs`.
+/// Returns the `ObjectKey` key that can later be passed to `load_xattrs`.
 /// An empty list serializes to an empty byte sequence which produces a
-/// canonical empty-content `Digest256`.
-pub fn intern_xattrs(storage: &mut impl crate::store_io::NodeWrite, xattrs: &[(String, Vec<u8>)]) -> Digest256 {
+/// canonical empty-content `ObjectKey`.
+pub fn intern_xattrs(storage: &mut impl crate::store_io::NodeWrite, xattrs: &[(String, Vec<u8>)]) -> ObjectKey {
     let bytes = serialize_xattrs(xattrs);
     (storage).put_node(&bytes)
 }
@@ -88,7 +88,7 @@ pub fn intern_xattrs(storage: &mut impl crate::store_io::NodeWrite, xattrs: &[(S
 /// Retrieve and deserialize all xattr pairs from file-backed storage.
 ///
 /// Returns `MetaError::Corrupted` if the stored bytes cannot be parsed.
-pub fn load_xattrs(io: &mut impl crate::store_io::NodeRead, key: &Digest256) -> Result<Vec<(String, Vec<u8>)>, MetaError> {
+pub fn load_xattrs(io: &mut impl crate::store_io::NodeRead, key: &ObjectKey) -> Result<Vec<(String, Vec<u8>)>, MetaError> {
     let bytes = (io).get_node(key)
         .ok_or_else(|| MetaError::Corrupted(format!("missing xattr node {:?}", key)))?;
     deserialize_xattrs(&bytes)

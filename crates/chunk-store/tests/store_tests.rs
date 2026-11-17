@@ -1,6 +1,6 @@
 //! Behaviour of the chunk store (docs/design/chunk-store.md).
 
-use chunk_store::{chunk_ranges, ChunkStore, ObjectId, Options};
+use chunk_store::{chunk_ranges, Blake3_256, ChunkStore, ObjectHasher, ObjectId, Options};
 use std::fs;
 use tempfile::TempDir;
 
@@ -37,10 +37,10 @@ fn put_then_get_returns_the_bytes() {
     let store = ChunkStore::open(dir.path(), Options::default()).unwrap();
     let data = b"hello chunk store".to_vec();
     let id = store.put(&data).unwrap();
-    assert_eq!(id, ObjectId::of(&data));
+    assert_eq!(id, Blake3_256.id(&data));
     assert_eq!(store.get(&id).unwrap(), data);
     assert!(store.contains(&id));
-    assert!(store.get(&ObjectId::of(b"other")).is_none());
+    assert!(store.get(&Blake3_256.id(b"other")).is_none());
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn one_inserted_byte_changes_only_the_chunks_near_it() {
     let mut shifted = data.clone();
     shifted.insert(100, 0x42);
     let ids = |d: &[u8]| -> std::collections::HashSet<ObjectId> {
-        chunk_ranges(d).into_iter().map(|r| ObjectId::of(&d[r])).collect()
+        chunk_ranges(d).into_iter().map(|r| Blake3_256.id(&d[r])).collect()
     };
     let (a, b) = (ids(&data), ids(&shifted));
     let common = a.intersection(&b).count();

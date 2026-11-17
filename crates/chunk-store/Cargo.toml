@@ -13,5 +13,10 @@ thiserror.workspace = true
 libc.workspace = true
 tracing.workspace = true
 
+[features]
+# A second, test-only hasher (`hash::TestKeyedBlake3`) in the registry, for
+# tests of hash changes in the crates that use the store.
+test-hasher = []
+
 [dev-dependencies]
 tempfile.workspace = true

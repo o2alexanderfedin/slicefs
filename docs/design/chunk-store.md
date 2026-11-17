@@ -25,10 +25,12 @@ Measured on the macOS CI round trip (Boost 1.85, 77,655 files, FSKit):
 - Chunking: FastCDC v2020, average 8 KiB (min 4 KiB, max 32 KiB). The minimum is one
   4 KiB disk block; min 2 KiB stored less than 1 % less data on source trees and
   tars, with 5-9 % more chunks.
-- Object ID: BLAKE3 of the uncompressed bytes, the full 256 bits (32 bytes,
-  the size of the `Digest256` that the metadata uses; collision strength
-  128 bits). The store is meant to be global and decentralized, so the IDs
-  keep all bits of the hash. Dedup does not depend on compression.
+- Object ID: a hash tag byte, then the hash of the uncompressed bytes, the
+  full 256 bits (33 bytes in all, the size of the `ObjectKey` that the
+  metadata uses; collision strength 128 bits). The default hash is BLAKE3.
+  The store is meant to be global and decentralized, so the IDs keep all
+  bits of the hash and name the hash they use (see "Object IDs and the
+  hash"). Dedup does not depend on compression.
 - Objects go into append-only pack files: one `fsync` for each pack and
   commit, not one for each object.
 - Compression: zstd, per object, only when it makes the object smaller.
@@ -47,13 +49,13 @@ them.
 | chunk | file data, one FastCDC chunk | file writes |
 | node | serialized metadata: manifest, directory, inode map, xattr, inode | commit |
 
-Both kinds are content-addressed by BLAKE3-256 (32 bytes, type `ObjectId`).
+Both kinds are content-addressed by a tagged hash (33 bytes, type `ObjectId`).
 A chunk and a node with the same bytes are the same object; the kind is not
 part of the ID.
 
 ### File manifest
 
-A file is an ordered list of `(ObjectId, length u64)` entries (40 bytes
+A file is an ordered list of `(ObjectId, length u64)` entries (41 bytes
 each). The file offset of an entry is the sum of the lengths before it.
 
 - The list is split into nodes by content, like the chunks: a node ends
@@ -77,13 +79,48 @@ a file: FastCDC chunks under a manifest. The maps (inode, directory,
 manifest, xattr, refcount) are written whole at each commit, so the chunks
 matter: after a change of one file in 5,000, the next commit stored 12 KB,
 against 1.36 MB for the first commit (`tests/node_crash_tests.rs`). Roots and
-snapshots are 32 bytes in the `RootUpdate` and `Snapshot` records.
+snapshots are 33-byte keys in the `RootUpdate` and `Snapshot` records.
 
 The metadata and the file content share one `ChunkStore` instance: a commit
 syncs the active pack once, then logs the root. A directory entry key is
 BLAKE3-256 of the name (no object is stored for it). The store format is 6;
 a store of format 5 (224-bit object IDs) or 4 (metadata in `vt0/`) is
 refused.
+
+## Object IDs and the hash
+
+```
+ObjectId = tag (1 byte) | digest (32 bytes)
+```
+
+- The tag names the hash: `0x1e` is BLAKE3-256 (the multihash code of
+  BLAKE3). Every hash gives 32 bytes; there are no variable-length digests.
+  The metadata key (`ObjectKey`) holds the same 33 bytes, so manifest
+  entries and roots name their hash too, and a peer can verify the content
+  that a key refers to.
+- A hash is an `ObjectHasher` (`chunk_store::hash`: name, tag, digest). The
+  build knows a fixed list of them (`hasher_by_name`, `hasher_by_tag`).
+- Write hash: the store makes the IDs of new objects with one hasher,
+  injected at open (`Options::hasher`, default BLAKE3-256), as the zstd
+  level is. The store records it in its format marker, as a second line
+  `hash blake3-256` (a marker without that line means blake3-256).
+  `slicefs mount --hash <name>` and `slicefs seed --hash <name>` change it:
+  the new name is recorded and new objects use it. Without `--hash`, the
+  recorded hash stays. An unknown name is refused with the list of the
+  known ones.
+- Verification: each object is verified with the hasher of its own tag
+  (reads, `scrub`, the GC mark, the open scan of a pack without its index).
+  So after a change of the write hash, the old objects stay readable and
+  verifiable. A tag that the build does not know is an error (a damaged or
+  newer store), never a panic.
+- The same bytes under two hashes are two objects: there is no dedup across
+  hashes. A conversion of a whole store to a new hash is future work
+  (#62, `slicefs rehash`).
+- Keys that are not content addresses do not change with the write hash: a
+  directory entry key is always BLAKE3-256 of the name, so lookups keep
+  working for the life of the store.
+- The cut of the manifest nodes (`is_cut`) looks at the last 4 digest bytes,
+  never at the tag.
 
 ## Pack files
 
@@ -96,13 +133,14 @@ store/
   segments/            metadata log (unchanged)
 ```
 
-Pack header: magic `SFPK`, format version u16, pack number u64.
+Pack header: magic `SFPK`, format version u16 (2: tagged 33-byte IDs; a
+pack or index of another version is refused at open), pack number u64.
 
 Record:
 
 | Field | Size |
 |---|---|
-| ObjectId | 32 |
+| ObjectId (tag + digest) | 33 |
 | flags (bit 0: zstd) | u8 |
 | raw length | u32 LE |
 | stored length | u32 LE |
@@ -120,7 +158,7 @@ Record:
 ### Index in memory
 
 A map `ObjectId → (pack, offset, stored length, raw length, flags)`: about
-56 bytes per object, so 56 MB for one million objects. At open, it is filled
+57 bytes per object, so 57 MB for one million objects. At open, it is filled
 from the `.idx` files of the sealed packs and from a scan of the active
 pack. A later change can use a memory-mapped sorted index if stores get very
 large.
@@ -135,8 +173,8 @@ needed for correctness).
 
 zstd level 3, per object. The compressed form is kept only if it is at least
 1/8 smaller; otherwise the raw bytes are stored (flag bit 0 = 0). Random
-data thus costs about one record header and CRC per chunk (45 bytes for
-8 KiB, 0.5 %).
+data thus costs about one record header and CRC per chunk (46 bytes for
+8 KiB, 0.6 %).
 
 ## Durability and crash safety
 
@@ -254,7 +292,7 @@ small LRU cache of decoded chunks serves reads that do not align with chunks.
 ## Write path
 
 The current streaming writer keeps its role; only the chunker and the object
-store change: bytes of a file → FastCDC → for each chunk, BLAKE3 → dedup
+store change: bytes of a file → FastCDC → for each chunk, the write hash → dedup
 check → append to the active pack → manifest entry. Out-of-order and sparse
 writes keep the current handling until #20 part 2.
 
@@ -264,7 +302,7 @@ writes keep the current handling until #20 part 2.
    scan, with unit and crash tests. No user of it yet.
 2. File data: FastCDC + BLAKE3 + packs for file content and manifests. New
    store format version; old stores are rejected.
-3. Metadata nodes into packs (done; roots are `Digest256`, the same 32
+3. Metadata nodes into packs (done; roots are `ObjectKey`, the same 33
    bytes as an `ObjectId`).
 4. GC: pack deletion and compaction, offline and online.
 5. Remove blockset and the `data-id` submodule (done).
