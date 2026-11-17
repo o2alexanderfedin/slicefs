@@ -181,7 +181,27 @@ pack. Sweep (`gc_finish`), for each sealed pack up to that point:
 - Less than half of its bytes live, or smaller than 1/8 of the pack limit:
   copy the live records (as they are, no re-compression) into the active
   pack, sync it, update the index, then delete the old pack.
-- Otherwise: keep it.
+- Otherwise, if it has dead records: punch holes (`F_PUNCHHOLE` on macOS,
+  `fallocate(PUNCH_HOLE)` on Linux) over the whole 4 KiB blocks of the gaps
+  between live records. Spike D measured GC write amplification 1.02 with
+  punching against about 1.6 with compaction only
+  (`docs/research/arena-spikes.md`).
+
+Punch order, so that a crash never leaves an index entry over zeros:
+
+1. Drop the dead records in the punched ranges from the index, and write
+   the pack's `.idx` durably without them. A dead record with no whole block
+   stays in the index; a later GC punches it when a neighbour dies.
+2. Set the "punched" bit in the pack header and sync the pack.
+3. Punch.
+
+A punched pack is never the active pack and is never cut at open. If its
+index is lost, the open resyncs it: it takes a record only where the CRC is
+good and the bytes hash to the ID, and skips holes and damage. Every sealed
+pack without a valid index is resynced this way; only the active pack is
+cut at its first bad record. On a file system without holes, the dead
+records only leave the index, and their bytes stay until the pack is
+compacted or deleted.
 
 The small-pack rule merges the packs that each `gc_begin` seals; it rewrites
 at most 1/8 of the pack limit per GC.

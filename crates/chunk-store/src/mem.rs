@@ -8,7 +8,7 @@
 //! Removals are durable at once (this is the order the store needs: it
 //! syncs copies before it removes originals).
 
-use crate::pack_io::{Kind, PackFile, PackIo, PackRead};
+use crate::pack_io::{Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK};
 use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -29,6 +29,8 @@ struct State {
     space_left: Option<u64>,
     fail_reads: bool,
     fail_syncs: bool,
+    fail_punch: bool,
+    no_punch: bool,
 }
 
 impl State {
@@ -69,6 +71,16 @@ impl MemIo {
     /// and makes nothing durable.
     pub fn set_fail_syncs(&self, on: bool) {
         self.s.lock().unwrap().fail_syncs = on;
+    }
+
+    /// Every punch fails with EIO (and punches nothing).
+    pub fn set_fail_punch(&self, on: bool) {
+        self.s.lock().unwrap().fail_punch = on;
+    }
+
+    /// Punch is not supported (like a file system without holes).
+    pub fn set_no_punch(&self, on: bool) {
+        self.s.lock().unwrap().no_punch = on;
     }
 
     /// A power loss: keep only what is durable.
@@ -238,5 +250,27 @@ impl PackIo for MemIo {
 
     fn open_read(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
         Ok(Arc::new(self.handle(num)?))
+    }
+
+    /// Zeros in the current bytes; like a real punch, it is durable only
+    /// after a sync of the pack (a crash before that brings the bytes back).
+    fn punch(&self, num: u64, ranges: &[(u64, u64)]) -> io::Result<()> {
+        let s = self.s.lock().unwrap();
+        if s.no_punch {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        if s.fail_punch {
+            return Err(eio());
+        }
+        let mut f = s.files.get(&(num, Kind::Pack)).ok_or_else(not_found)?.lock().unwrap();
+        for &(offset, len) in ranges {
+            if offset % PUNCH_BLOCK != 0 || len % PUNCH_BLOCK != 0 {
+                return Err(io::Error::from_raw_os_error(libc::EINVAL));
+            }
+            let end = ((offset + len) as usize).min(f.data.len());
+            let start = (offset as usize).min(end);
+            f.data[start..end].fill(0);
+        }
+        Ok(())
     }
 }

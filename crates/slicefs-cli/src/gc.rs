@@ -81,6 +81,10 @@ pub fn run_gc(store_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         swept.objects_removed as u64 + content.removed_objects,
         swept.bytes_removed + content.removed_bytes
     );
+    println!(
+        "GC packs: deleted {}, compacted {}, punched {} ({} bytes freed in holes)",
+        content.packs_deleted, content.packs_compacted, content.packs_punched, content.punched_bytes
+    );
 
     let gc = GarbageCollector::new(segs_dir);
     let stats = gc.run_gc(&mut io, &roots)
