@@ -1,13 +1,13 @@
 #!/bin/bash
 # Live-mount checks for the v1.0 human-verification items (phases 03, 04, 05, 06).
 # Runs inside the Docker container. Usage: verify-phases.sh <slicefs-binary>
-B=$1; R=/tmp/vp; rm -rf $R; mkdir -p $R; F=0
+B=$1; PRE=(); R=/tmp/vp; rm -rf $R; mkdir -p $R; F=0
 ok(){ echo "  $1: ok"; }; bad(){ echo "  $1: FAIL ${2:-}"; F=1; }
 step(){ local n=$1 t=$2; shift 2
   if timeout -s KILL $t "$@" >$R/step.out 2>&1; then ok "$n"; else bad "$n" "($(head -c 200 $R/step.out))"; fi; }
 mnt(){ # mnt <store> <mountpoint> [extra args...]
   local s=$1 m=$2; shift 2; mkdir -p $m
-  $B mount --store $s "$@" $m </dev/null >>$R/mount.log 2>&1 & MP=$!
+  "${PRE[@]}" $B mount --store $s "$@" $m </dev/null >>$R/mount.log 2>&1 & MP=$!
   for i in $(seq 1 20); do mountpoint -q $m && return 0; sleep 0.5; done
   echo "  NOT MOUNTED: $m"; tail -5 $R/mount.log; F=1; return 1; }
 umnt(){ # umnt <mountpoint>: unmount and require the daemon to exit
@@ -93,8 +93,11 @@ if mnt $R/s5b $R/m5b --commit-interval 0; then   # no commit: only the write log
   fi
 fi
 
-echo "== FUSET-05: SIGTERM and SIGHUP end the mount cleanly (final commit, no mount.lock)"
-for SIG in TERM HUP; do   # (a background job ignores SIGINT; ignored signals stay ignored)
+echo "== FUSET-05: SIGTERM, SIGINT (Ctrl+C) and SIGHUP end the mount cleanly (final commit, no mount.lock)"
+# A background job ignores SIGINT; env --default-signal gives the mount the
+# default action, as a terminal does for Ctrl+C.
+PRE=(env --default-signal=INT)
+for SIG in TERM INT HUP; do
   $B seed $R/ss$SIG $R/src >/dev/null 2>&1
   if mnt $R/ss$SIG $R/ms$SIG --commit-interval 0; then   # no timer: only the final commit keeps the file
     head -c 300000 /dev/urandom > $R/sig.bin; cp $R/sig.bin $R/ms$SIG/sig.bin
@@ -110,6 +113,7 @@ for SIG in TERM HUP; do   # (a background job ignores SIGINT; ignored signals st
     fi
   fi
 done
+PRE=()
 
 echo "== Phase 06: two snapshots of the same state do not double-count storage"
 $B seed $R/s6 $R/src >/dev/null 2>&1

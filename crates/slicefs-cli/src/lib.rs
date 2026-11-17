@@ -14,9 +14,10 @@ pub mod online_gc;
 #[cfg(target_os = "macos")]
 pub mod fuset_watch;
 pub mod mount;
+pub mod scrub;
 pub mod snapshot;
 pub mod seed;
 pub mod signals;
-mod store_io;
+pub mod stats;
 pub(crate) mod util;
-mod unmount;
+pub mod unmount;

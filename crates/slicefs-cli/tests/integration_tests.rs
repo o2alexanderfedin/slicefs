@@ -21,7 +21,7 @@ use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
 use slicefs_cli::filesystem::SliceFsFilesystem;
 use slicefs_cli::seed::run_seed;
-use slicefs_traits::metadata::{InodeMeta, MetadataStore};
+use slicefs_traits::metadata::MetadataStore;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 

@@ -21,7 +21,6 @@ use slicefs_traits::metadata::MetadataStore;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
-const S_IFREG: u32 = 0o100_000;
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
 
