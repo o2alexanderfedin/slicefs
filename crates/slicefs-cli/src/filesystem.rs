@@ -176,11 +176,6 @@ impl SliceFsFilesystem {
         }
     }
 
-    /// True while the write log is replayed.
-    pub(crate) fn is_replaying(&self) -> bool {
-        self.replaying.load(Ordering::Relaxed)
-    }
-
     /// Turn off logging until the returned guard is dropped (replay).
     pub(crate) fn replay_guard(&self) -> ReplayGuard<'_> {
         self.replaying.store(true, Ordering::Relaxed);
@@ -377,25 +372,6 @@ pub fn meta_error_to_errno(e: &MetaError) -> i32 {
 
 /// TTL for all fuser replies (1 second is appropriate for a write-capable snapshot).
 pub(crate) const TTL: Duration = Duration::from_secs(1);
-
-/// Recursively sum file sizes under `dir`.
-///
-/// Used by `statfs` to compute physical bytes from the `vt0/` CAS directory.
-fn dir_size(dir: &std::path::Path) -> u64 {
-    let mut total = 0u64;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            if let Ok(meta) = entry.metadata() {
-                if meta.is_file() {
-                    total += meta.len();
-                } else if meta.is_dir() {
-                    total += dir_size(&entry.path());
-                }
-            }
-        }
-    }
-    total
-}
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 //
@@ -2238,44 +2214,6 @@ mod tests {
         let (_blocks, _bfree, _bavail, files, _ffree, _bsize) = fs.test_statfs_values();
         assert_ne!(files, 1_000_000, "files must not be hardcoded 1_000_000");
         assert_eq!(files, 1, "fresh store files must equal inode_count (1)");
-    }
-
-    // ── dir_size internal unit tests ──────────────────────────────────────────
-
-    #[test]
-    fn test_dir_size_empty_dir() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let size = dir_size(dir.path());
-        assert_eq!(size, 0, "empty directory should have size 0");
-    }
-
-    #[test]
-    fn test_dir_size_with_files() {
-        let dir = tempfile::TempDir::new().unwrap();
-        // Create two files with known sizes
-        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
-        std::fs::write(dir.path().join("b.txt"), b"world!!!").unwrap();
-        let size = dir_size(dir.path());
-        assert!(size >= 5 + 8, "dir_size must sum file sizes (>=13)");
-    }
-
-    #[test]
-    fn test_dir_size_recursive() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let subdir = dir.path().join("subdir");
-        std::fs::create_dir(&subdir).unwrap();
-        std::fs::write(subdir.join("nested.txt"), b"nested content").unwrap();
-        std::fs::write(dir.path().join("top.txt"), b"top").unwrap();
-
-        let size = dir_size(dir.path());
-        assert!(size >= 14 + 3, "dir_size must recurse into subdirectories");
-    }
-
-    #[test]
-    fn test_dir_size_nonexistent_dir() {
-        let path = std::path::Path::new("/nonexistent/path/that/does/not/exist");
-        let size = dir_size(path);
-        assert_eq!(size, 0, "nonexistent dir should return 0");
     }
 
     // ── fresh_fs_with_store: helper that sets store_path ─────────────────────
