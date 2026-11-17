@@ -74,3 +74,38 @@ fn a_small_change_stores_little_at_the_next_commit() {
     eprintln!("first commit {full} bytes, next commit +{grew} bytes");
     assert!(grew * 10 < full, "first commit {full} bytes, next commit +{grew} bytes");
 }
+
+/// #65: a node that cannot be read says why. An I/O error stays an I/O
+/// error (MetaError::Io); a node that is not in the store is corrupt
+/// metadata, and the message carries the chunk-store error.
+#[test]
+fn a_node_read_error_keeps_its_kind() {
+    use slicefs_traits::metadata::MetaError;
+    let mem = MemIo::new();
+    let meta = DictMetadataStore::new(open(&mem));
+    let ino = meta.create_inode(&InodeMeta::new_file(0, 0, 0, 0o100644)).unwrap();
+    meta.link(1, "f", ino).unwrap();
+    let root = meta.commit().unwrap();
+    drop(meta);
+
+    mem.set_fail_reads(true);
+    let e = DictMetadataStore::load_from_root(open_after_reads(&mem), &root).err().expect("reads fail");
+    assert!(matches!(e, MetaError::Io(_)), "an I/O error, got {e:?}");
+    mem.set_fail_reads(false);
+
+    use chunk_store::ObjectHasher;
+    let absent = metadata::store_io::to_key(chunk_store::Blake3_256.id(b"no node has these bytes"));
+    let e = DictMetadataStore::load_from_root(open(&mem), &absent).err().expect("no such root");
+    match e {
+        MetaError::Corrupted(m) => assert!(m.contains("root node") && m.contains("not in the store"), "{m}"),
+        e => panic!("corrupt metadata expected, got {e:?}"),
+    }
+}
+
+/// Open the store first, then let reads fail (the open itself reads).
+fn open_after_reads(mem: &MemIo) -> Arc<Mutex<StoreIo>> {
+    mem.set_fail_reads(false);
+    let io = open(mem);
+    mem.set_fail_reads(true);
+    io
+}

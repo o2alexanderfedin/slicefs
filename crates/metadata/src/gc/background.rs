@@ -89,7 +89,7 @@ pub fn spawn_background_gc(
             };
 
             // Count approximate orphan entries.
-            // With file-backed storage we no longer maintain an in-memory Dictionary,
+            // The metadata nodes are in the chunk store (no in-memory dictionary),
             // so use 1 as a proxy: threshold=0 always triggers GC, usize::MAX never does.
             let orphan_count = 1usize;
 

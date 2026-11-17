@@ -128,7 +128,7 @@ pub fn deserialize_inode_map(bytes: &[u8]) -> Result<InodeMap, MetaError> {
     })
 }
 
-/// Serialize and store an `InodeMap` into any `StorageAdd` backend.
+/// Serialize an `InodeMap` and store it as a node (`NodeWrite`).
 ///
 /// Returns the `ObjectKey` key that can later be passed to `load_inode_map`.
 pub fn intern_inode_map(storage: &mut impl crate::store_io::NodeWrite, map: &InodeMap) -> ObjectKey {
@@ -136,10 +136,10 @@ pub fn intern_inode_map(storage: &mut impl crate::store_io::NodeWrite, map: &Ino
     (storage).put_node(&bytes)
 }
 
-/// Retrieve and deserialize an `InodeMap` from file-backed storage.
+/// Read and deserialize an `InodeMap` node (`NodeRead`).
 pub fn load_inode_map(io: &mut impl crate::store_io::NodeRead, key: &ObjectKey) -> Result<InodeMap, MetaError> {
     let bytes = (io).get_node(key)
-        .ok_or_else(|| MetaError::Corrupted(format!("missing inode_map node {:?}", key)))?;
+        .map_err(|e| crate::store_io::node_err("inode_map node", key, e))?;
     deserialize_inode_map(&bytes)
 }
 

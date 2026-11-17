@@ -1011,7 +1011,7 @@ pub(crate) fn referenced(
     root: &ObjectKey,
 ) -> Result<(Vec<ObjectKey>, Vec<ObjectKey>), MetaError> {
     let bytes = (io).get_node(root)
-        .ok_or_else(|| MetaError::Corrupted(format!("missing root node {:?}", root)))?;
+        .map_err(|e| crate::store_io::node_err("root node", root, e))?;
     check_root_len(bytes.len())?;
     let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
     let (inodes, dirs, manifests, xattrs) = (
@@ -1049,7 +1049,7 @@ fn put_digest(buf: &mut Vec<u8>, d: &ObjectKey) {
 
 // ─── helpers for BTreeMap<u64, ObjectKey> serialization ─────────────────────
 
-/// Serialize and store a `BTreeMap<u64, ObjectKey>` via a StorageAdd backend.
+/// Serialize a `BTreeMap<u64, ObjectKey>` and store it as a node (`NodeWrite`).
 ///
 /// Format: `[count: u64 LE][for each entry: u64 LE ino + ObjectKey]`
 /// Each entry is `MAP_ENTRY` bytes; total = 8 + count × `MAP_ENTRY`.
@@ -1063,13 +1063,13 @@ fn intern_u64_digest_map(storage: &mut impl crate::store_io::NodeWrite, map: &BT
     (storage).put_node(&bytes)
 }
 
-/// Retrieve and deserialize a `BTreeMap<u64, ObjectKey>` from file-backed storage.
+/// Read and deserialize a `BTreeMap<u64, ObjectKey>` node (`NodeRead`).
 fn load_u64_digest_map(
     io: &mut impl crate::store_io::NodeRead,
     key: &ObjectKey,
 ) -> Result<BTreeMap<u64, ObjectKey>, MetaError> {
     let bytes = (io).get_node(key)
-        .ok_or_else(|| MetaError::Corrupted(format!("missing u64-digest map node {:?}", key)))?;
+        .map_err(|e| crate::store_io::node_err("u64-digest map node", key, e))?;
 
     if bytes.len() < 8 {
         return Err(MetaError::Corrupted(format!(
@@ -1097,7 +1097,7 @@ fn load_u64_digest_map(
 }
 
 impl DictMetadataStore {
-    /// Reconstruct a `DictMetadataStore` from a file-backed Io and a root digest
+    /// Reconstruct a `DictMetadataStore` from the node store and a root key
     /// previously returned by `commit()`.
     ///
     /// Restores all in-memory maps (inode_data, dir_data, manifest_data, xattr_data)
@@ -1107,7 +1107,7 @@ impl DictMetadataStore {
 
         // Read root record bytes
         let bytes = (&mut *io_guard).get_node(root)
-            .ok_or_else(|| MetaError::Corrupted("missing root node".into()))?;
+            .map_err(|e| crate::store_io::node_err("root node", root, e))?;
 
         check_root_len(bytes.len())?;
         let digest_at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
@@ -1167,7 +1167,7 @@ impl DictMetadataStore {
     }
 }
 
-/// Serialize and store a `BTreeMap<ObjectKey, u64>` via a StorageAdd backend.
+/// Serialize a `BTreeMap<ObjectKey, u64>` and store it as a node (`NodeWrite`).
 ///
 /// Format: `[count: u64 LE][for each entry: ObjectKey + u64 LE]`
 /// Each entry is `MAP_ENTRY` bytes; total = 8 + count × `MAP_ENTRY`.
@@ -1181,13 +1181,13 @@ fn intern_key_u64_map(storage: &mut impl crate::store_io::NodeWrite, map: &BTree
     (storage).put_node(&bytes)
 }
 
-/// Retrieve and deserialize a `BTreeMap<ObjectKey, u64>` from file-backed storage.
+/// Read and deserialize a `BTreeMap<ObjectKey, u64>` node (`NodeRead`).
 fn load_key_u64_map(
     io: &mut impl crate::store_io::NodeRead,
     key: &ObjectKey,
 ) -> Result<BTreeMap<ObjectKey, u64>, MetaError> {
     let bytes = (io).get_node(key)
-        .ok_or_else(|| MetaError::Corrupted(format!("missing key-u64 map node {:?}", key)))?;
+        .map_err(|e| crate::store_io::node_err("key-u64 map node", key, e))?;
 
     if bytes.len() < 8 {
         return Err(MetaError::Corrupted(format!(

@@ -16,11 +16,12 @@ use std::sync::Arc;
 use chunk_store::file::{FileReader, FileWriter};
 use chunk_store::{ChunkStore, ObjectId};
 use slicefs_traits::key::ObjectKey;
+use slicefs_traits::metadata::MetaError;
 
 /// Read nodes by key.
 pub trait NodeRead {
     /// The bytes of the node `key`, or `None` if it is missing or damaged.
-    fn get_node(&mut self, key: &ObjectKey) -> Option<Vec<u8>>;
+    fn get_node(&mut self, key: &ObjectKey) -> chunk_store::Result<Vec<u8>>;
 }
 
 /// Store nodes.
@@ -31,7 +32,7 @@ pub trait NodeWrite: NodeRead {
 }
 
 impl<T: NodeRead + ?Sized> NodeRead for &mut T {
-    fn get_node(&mut self, key: &ObjectKey) -> Option<Vec<u8>> {
+    fn get_node(&mut self, key: &ObjectKey) -> chunk_store::Result<Vec<u8>> {
         (**self).get_node(key)
     }
 }
@@ -63,12 +64,22 @@ pub fn put_value(cs: &ChunkStore, bytes: &[u8]) -> chunk_store::Result<ObjectKey
     w.finish(cs).map(to_key)
 }
 
-/// All bytes of the value `key`, or `None` if an object is missing or
-/// damaged.
-pub fn get_value(cs: &ChunkStore, key: &ObjectKey) -> Option<Vec<u8>> {
-    let mut r = FileReader::open(cs, to_id(key)).ok()?;
+/// All bytes of the value `key`. The error says why not (#65): `Missing`,
+/// `Corrupt`, `UnknownHash` or `Io`.
+pub fn get_value(cs: &ChunkStore, key: &ObjectKey) -> chunk_store::Result<Vec<u8>> {
+    let mut r = FileReader::open(cs, to_id(key))?;
     let n = r.len() as usize;
-    r.read(cs, 0, n).ok()
+    r.read(cs, 0, n)
+}
+
+/// The metadata error for a node `what` that could not be read: an I/O error
+/// stays an I/O error; a missing, damaged or unknown-hash node is corrupt
+/// metadata (every node that a root refers to must be there).
+pub fn node_err(what: &str, key: &ObjectKey, e: chunk_store::Error) -> MetaError {
+    match e {
+        chunk_store::Error::Io(io) => MetaError::Io(io),
+        e => MetaError::Corrupted(format!("{what} {key:?}: {e}")),
+    }
 }
 
 /// Read-only node access on a shared chunk store, without the `StoreIo`
@@ -77,7 +88,7 @@ pub fn get_value(cs: &ChunkStore, key: &ObjectKey) -> Option<Vec<u8>> {
 pub struct NodeReader(pub Arc<ChunkStore>);
 
 impl NodeRead for NodeReader {
-    fn get_node(&mut self, key: &ObjectKey) -> Option<Vec<u8>> {
+    fn get_node(&mut self, key: &ObjectKey) -> chunk_store::Result<Vec<u8>> {
         get_value(&self.0, key)
     }
 }
@@ -147,7 +158,7 @@ impl StoreIo {
 }
 
 impl NodeRead for StoreIo {
-    fn get_node(&mut self, key: &ObjectKey) -> Option<Vec<u8>> {
+    fn get_node(&mut self, key: &ObjectKey) -> chunk_store::Result<Vec<u8>> {
         get_value(&self.cs, key)
     }
 }
@@ -185,10 +196,14 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_node_is_none() {
+    fn a_missing_node_says_missing() {
+        use chunk_store::ObjectHasher;
         let dir = TempDir::new().unwrap();
         let mut io = StoreIo::open(dir.path()).unwrap();
-        assert!(io.get_node(&ObjectKey::example(1)).is_none());
+        let absent = to_key(chunk_store::Blake3_256.id(b"never stored"));
+        assert!(matches!(io.get_node(&absent), Err(chunk_store::Error::Missing(_))));
+        // A key with a tag this build does not know says so (#65).
+        assert!(matches!(io.get_node(&ObjectKey::example(1)), Err(chunk_store::Error::UnknownHash(_))));
     }
 
     #[test]
