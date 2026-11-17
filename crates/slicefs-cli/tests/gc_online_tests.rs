@@ -7,7 +7,6 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-use blockset::file_storage_get;
 use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
@@ -59,7 +58,8 @@ fn check_after_remount(fs: SliceFsFilesystem, store: &Path, files: &[(&str, &[u8
     for (name, want) in files {
         let ino = meta.lookup(1, name).unwrap();
         let manifest = meta.get_manifest(ino).unwrap();
-        let got = file_storage_get(&mut StoreIo::new(store), &manifest[0]).unwrap();
+        let cs = slicefs_cli::content::open(store).unwrap();
+        let got = slicefs_cli::content::get_all(&cs, &manifest[0]).unwrap();
         assert!(got == *want, "{name}: {} bytes back, want {}", got.len(), want.len());
     }
 }
@@ -77,7 +77,7 @@ fn online_gc_frees_garbage_and_keeps_live_files() {
     make_garbage(&fs, "del.bin", &data(2, 300_000));
 
     let stats = fs.gc_online(&no_stop()).unwrap().expect("not stopped");
-    assert!(stats.objects_removed > 50, "{stats:?}");
+    assert!(stats.objects_removed > 30, "{stats:?}");
     let ino = fs.test_lookup(1, "keep.bin").unwrap().0;
     assert_eq!(fs.test_read(ino, 0, keep.len() as u32 + 1).unwrap(), keep);
     check_after_remount(fs, dir.path(), &[("keep.bin", &keep)]);
@@ -90,13 +90,15 @@ fn a_write_that_dedups_against_garbage_during_gc_keeps_its_objects() {
     let same = data(3, 300_000);
     make_garbage(&fs, "old.bin", &same);
 
-    let gc = fs.gc_start().unwrap();
+    let (gc, boundary) = fs.gc_start().unwrap();
     let live = gc.mark(&no_stop()).unwrap().unwrap();
-    // The same bytes again: blockset finds the existing (garbage) objects
-    // and does not write them; only the touch protects them.
+    // The same bytes again: the content store finds the existing (garbage)
+    // objects and does not write them; only the touch protects them.
     write_file(&fs, "new.bin", &same);
+    let content = fs.gc_content(&gc, boundary, &no_stop()).unwrap().unwrap();
     let stats = gc.sweep(&live, &no_stop()).unwrap();
     drop(gc);
+    assert!(content.kept_objects > 0, "{content:?}");
 
     let ino = fs.test_lookup(1, "new.bin").unwrap().0;
     assert_eq!(fs.test_read(ino, 0, same.len() as u32 + 1).unwrap(), same);
@@ -116,7 +118,7 @@ fn an_open_streaming_handle_keeps_its_partial_tree() {
     assert!(fs.test_is_streaming(fh));
 
     let stats = fs.gc_online(&no_stop()).unwrap().unwrap();
-    assert!(stats.objects_removed > 50, "garbage must go: {stats:?}");
+    assert!(stats.objects_removed > 30, "garbage must go: {stats:?}");
 
     fs.test_write(fh, 600_000, &content[600_000..]).unwrap();
     fs.test_release(ino, fh).unwrap();
@@ -148,7 +150,7 @@ fn a_stop_request_ends_the_gc_without_more_deletes() {
     let stop = AtomicBool::new(true);
     assert!(fs.gc_online(&stop).unwrap().is_none());
     // Tracking is off again: a later full run works and frees the garbage.
-    assert!(fs.gc_online(&no_stop()).unwrap().unwrap().objects_removed > 50);
+    assert!(fs.gc_online(&no_stop()).unwrap().unwrap().objects_removed > 30);
     check_after_remount(fs, dir.path(), &[("keep.bin", &keep)]);
 }
 
@@ -163,14 +165,20 @@ fn a_parallel_mark_finds_the_same_live_set_as_one_thread() {
     write_file(&fs, "dup", &data(100, 150_000));
     make_garbage(&fs, "junk.bin", &data(99, 300_000));
 
-    let one = fs.gc_start().unwrap().with_threads(1);
+    let (one, _) = fs.gc_start().unwrap();
+    let one = one.with_threads(1);
     let live_one = one.mark(&no_stop()).unwrap().unwrap();
+    fs.content().gc_abort();
     drop(one);
-    let many = fs.gc_start().unwrap().with_threads(8);
+    let (many, boundary) = fs.gc_start().unwrap();
+    let many = many.with_threads(8);
     let live_many = many.mark(&no_stop()).unwrap().unwrap();
+    let content = fs.gc_content(&many, boundary, &no_stop()).unwrap().unwrap();
+    // junk.bin (300,000 random bytes) is the garbage: all of it goes.
+    assert!(content.removed_bytes >= 300_000, "{content:?}");
     assert_eq!(live_one, live_many);
     let stats = many.sweep(&live_many, &no_stop()).unwrap();
-    assert!(stats.objects_removed > 50, "{stats:?}");
+    assert!(stats.objects_removed > 0, "{stats:?}");
     drop(many);
     let files: Vec<(String, Vec<u8>)> = (0..12).map(|i| (format!("f{i}"), data(100 + i, 150_000))).collect();
     let refs: Vec<(&str, &[u8])> = files.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
@@ -187,8 +195,9 @@ fn a_changed_object_file_during_gc_stops_the_sweep() {
     make_garbage(&fs, "junk.bin", &data(21, 300_000));
     let before = std::fs::read_dir(dir.path().join("vt0")).unwrap().count();
 
-    let gc = fs.gc_start().unwrap();
+    let (gc, _) = fs.gc_start().unwrap();
     let live = gc.mark(&no_stop()).unwrap().unwrap();
+    fs.content().gc_abort();
     // Write an existing object file again (as blockset does when a node of the
     // same name gets other bytes): the lock-free mark can not be trusted now.
     let name = live.iter().next().unwrap().clone();
@@ -199,6 +208,6 @@ fn a_changed_object_file_during_gc_stops_the_sweep() {
     drop(gc);
     assert_eq!(std::fs::read_dir(dir.path().join("vt0")).unwrap().count(), before, "nothing deleted");
     // The next run works.
-    assert!(fs.gc_online(&no_stop()).unwrap().unwrap().objects_removed > 50);
+    assert!(fs.gc_online(&no_stop()).unwrap().unwrap().objects_removed > 30);
     check_after_remount(fs, dir.path(), &[("keep.bin", &keep)]);
 }

@@ -6,7 +6,7 @@
 //! Uses `DictMetadataStore` and `SliceFsFilesystem` simulate_* methods directly —
 //! no FUSE mount required.
 
-use blockset::{State, Tree, FileStorageAdd, file_storage_get};
+
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use slicefs_cli::filesystem::SliceFsFilesystem;
@@ -41,8 +41,7 @@ fn read_content(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
     if manifest.is_empty() {
         return vec![];
     }
-    let mut io = fs.io().lock().unwrap();
-    file_storage_get(&mut *io, &manifest[0]).unwrap_or_default()
+    fs.read_content(&manifest[0]).unwrap_or_default()
 }
 
 // ── Task 1: mkdir ─────────────────────────────────────────────────────────────
@@ -204,13 +203,7 @@ fn test_unlink_with_nlinks_1_deletes_inode_and_decrements_refcount() {
 
     // Push content and set manifest with refcount
     let content = b"hello refcount";
-    let digest = {
-        let mut io = fs.io().lock().unwrap();
-        let mut fsa = FileStorageAdd::new(&mut *io);
-        let d = State::push_all(&mut fsa, content);
-        drop(fsa);
-        d
-    };
+    let digest = slicefs_cli::content::put_all(fs.content(), content).unwrap();
     fs.meta().set_manifest(ino, &[digest]).unwrap();
     fs.meta().increment_refcount(&digest);
 
@@ -324,13 +317,7 @@ fn test_link_accessible_from_both_paths() {
     fs.meta().link(1, "file_a.txt", ino).unwrap();
 
     let content = b"shared content";
-    let digest = {
-        let mut io = fs.io().lock().unwrap();
-        let mut fsa = FileStorageAdd::new(&mut *io);
-        let d = State::push_all(&mut fsa, content);
-        drop(fsa);
-        d
-    };
+    let digest = slicefs_cli::content::put_all(fs.content(), content).unwrap();
     fs.meta().set_manifest(ino, &[digest]).unwrap();
 
     fs.simulate_link(ino, 1, "file_b.txt")

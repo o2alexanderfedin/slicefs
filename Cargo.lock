@@ -871,6 +871,7 @@ name = "slicefs-cli"
 version = "0.1.0"
 dependencies = [
  "blockset",
+ "chunk-store",
  "clap",
  "fuser",
  "libc",

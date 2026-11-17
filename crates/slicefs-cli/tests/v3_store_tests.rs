@@ -6,7 +6,6 @@
 //!   DECOMP-03: test_read returns the exact raw bytes that were written
 //!   DECOMP-04: Identical raw content produces the same Digest224 (dedup)
 
-use blockset::file_storage_get;
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use slicefs_cli::filesystem::SliceFsFilesystem;
@@ -53,8 +52,7 @@ fn test_write_raw_no_compression() {
 
     // Read bytes back via file_storage_get — bypasses the filesystem read path
     let stored = {
-        let mut io = fs.io().lock().unwrap();
-        file_storage_get(&mut *io, &manifest[0])
+        fs.read_content(&manifest[0])
             .expect("file_storage_get must succeed for stored content")
     };
 

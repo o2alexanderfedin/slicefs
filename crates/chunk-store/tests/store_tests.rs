@@ -179,7 +179,7 @@ fn chunks_cover_the_input_and_have_the_configured_sizes() {
     assert_eq!(r.first().unwrap().start, 0);
     assert_eq!(r.last().unwrap().end, data.len());
     assert!(r.windows(2).all(|w| w[0].end == w[1].start));
-    assert!(r[..r.len() - 1].iter().all(|c| (2048..=32768).contains(&c.len())));
+    assert!(r[..r.len() - 1].iter().all(|c| (4096..=32768).contains(&c.len())));
     let avg = data.len() / r.len();
     assert!((4096..=16384).contains(&avg), "average {avg} near 8 KiB");
 }
