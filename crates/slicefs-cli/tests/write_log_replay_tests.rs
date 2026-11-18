@@ -21,8 +21,12 @@ const S_IFREG: u32 = 0o100_000;
 const S_IFDIR: u32 = 0o040_000;
 
 fn new_fs(store: &Path) -> SliceFsFilesystem {
+    new_fs_with(store, WalConfig::PerOp)
+}
+
+fn new_fs_with(store: &Path, config: WalConfig) -> SliceFsFilesystem {
     std::fs::create_dir_all(store.join("segments")).unwrap();
-    let wal = create_wal(WalConfig::PerOp, store, 1).unwrap();
+    let wal = create_wal(config, store, 1).unwrap();
     let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
     let mut meta = DictMetadataStore::new(io.clone());
     meta.set_wal(wal);
@@ -317,4 +321,82 @@ fn a_commit_keeps_the_times_of_a_buffered_file() {
     assert_eq!((m.size, m.mode), (50_000, S_IFREG | 0o600));
     assert_eq!((m.mtime_sec, m.mtime_nsec), (1_700_000_000, 0), "mtime is the time of the last write");
     assert_eq!((m.ctime_sec, m.ctime_nsec), (1_700_000_100, 0), "ctime is the time of the chmod");
+}
+
+// A commit deletes the old log segments and logs the RAM-only bytes again.
+// Those records must be on disk before the commit returns: an fsync before
+// the commit made them durable, and no later fsync may come before a crash.
+// Only a log that buffers records (--wal flush-on-fsync) can lose them.
+#[test]
+fn fsynced_buffered_bytes_survive_a_commit_and_a_crash() {
+    let dir = TempDir::new().unwrap();
+    let mut want = data(11, 2_000);
+    want[100..400].fill(0xEE);
+    {
+        let fs = new_fs_with(dir.path(), WalConfig::FlushOnFsync);
+        let (ino, fh) = create(&fs, 1, "buf.bin");
+        write(&fs, fh, 0, &data(11, 2_000));
+        write(&fs, fh, 100, &[0xEE; 300]); // not sequential: Buffered
+        assert!(!fs.test_is_streaming(fh));
+        fsync(&fs, ino, fh);
+        fs.commit_cut().unwrap();
+        std::mem::forget(fs); // a crash right after the commit, no sync
+    }
+    let fs = reload_and_replay(dir.path());
+    let ino = fs.meta().lookup(1, "buf.bin").unwrap();
+    assert_eq!(fs.test_read(ino, 0, want.len() as u32 + 1).unwrap(), want);
+}
+
+// utimens between a write and the close sets the mtime (cp -p, install -p):
+// the close does not stamp the time of the write over it.
+#[test]
+fn an_explicit_mtime_after_a_write_is_kept_at_close_and_replay() {
+    let dir = TempDir::new().unwrap();
+    {
+        let fs = new_fs(dir.path());
+        let (ino, fh) = {
+            let _t = oplog::Clock::freeze_at((1_700_000_000, 0));
+            let (ino, fh) = create(&fs, 1, "p.bin");
+            write(&fs, fh, 0, &data(12, 10_000));
+            (ino, fh)
+        };
+        {
+            let _t = oplog::Clock::freeze_at((1_700_000_100, 0));
+            assert!(matches!(h::handle_setattr(&fs, ino, None, None, None, None, Some(fh), None, Some((1_600_000_000, 7))),
+                h::AttrResult::Ok(_)));
+        }
+        {
+            let _t = oplog::Clock::freeze_at((1_700_000_200, 0));
+            release(&fs, ino, fh);
+        }
+        let m = fs.meta().get_inode(ino).unwrap();
+        assert_eq!((m.mtime_sec, m.mtime_nsec), (1_600_000_000, 7), "live mtime after close");
+        fs.meta().flush_wal().unwrap();
+        std::mem::forget(fs);
+    }
+    let fs = reload_and_replay(dir.path());
+    let ino = fs.meta().lookup(1, "p.bin").unwrap();
+    let m = fs.meta().get_inode(ino).unwrap();
+    assert_eq!((m.mtime_sec, m.mtime_nsec), (1_600_000_000, 7), "replayed mtime");
+}
+
+// stat of a file open for writing shows the time of the last write, as on
+// other file systems, before the first flush.
+#[test]
+fn stat_of_an_open_file_shows_the_time_of_the_last_write() {
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    let (ino, fh) = {
+        let _t = oplog::Clock::freeze_at((1_700_000_000, 0));
+        create(&fs, 1, "s.bin")
+    };
+    {
+        let _t = oplog::Clock::freeze_at((1_700_000_300, 0));
+        write(&fs, fh, 0, &data(13, 1_000));
+    }
+    let h::AttrResult::Ok(a) = h::handle_getattr(&fs, ino) else { panic!("getattr") };
+    let secs = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    assert_eq!(a.size, 1_000);
+    assert_eq!(secs(a.mtime), 1_700_000_300);
+    assert_eq!(secs(a.ctime), 1_700_000_300);
 }
