@@ -1,6 +1,9 @@
 //! Per-operation WAL strategy: syncs each root and snapshot record before it
-//! returns. Operation records stay in the write buffer until the next
-//! `flush_and_sync` (fsync, fsyncdir) or commit, as POSIX allows.
+//! returns. Each operation record is written into the segment file (one
+//! `write()` into the kernel, no disk sync) before it returns, so a completed
+//! request survives a crash of the daemon. The next `flush_and_sync` (fsync,
+//! fsyncdir) or commit syncs it, so that it also survives a power loss, as
+//! POSIX allows.
 
 use std::io;
 use std::path::Path;
@@ -11,8 +14,8 @@ use super::{WalEntry, WalError, WalStrategy};
 
 /// WAL that calls `sync_all` after each root and snapshot record.
 ///
-/// Operation records are made durable by `flush_and_sync` or a commit, not one
-/// by one (see `log_mutation`).
+/// Operation records go into the file at once with no sync; `flush_and_sync`
+/// or a commit syncs them (see `log_mutation`).
 pub struct PerOpWal {
     writer: Mutex<SegmentWriter>,
     /// Path and id of the current segment (for rotation).
@@ -43,8 +46,12 @@ impl WalStrategy for PerOpWal {
         let seg_entry = wal_entry_to_segment(entry);
         let mut writer = self.writer.lock().unwrap();
         writer.write_entry(&seg_entry)?;
-        // Operation records are made durable by fsync or commit, not one by one.
-        if !matches!(entry, WalEntry::Op { .. }) {
+        if matches!(entry, WalEntry::Op { .. }) {
+            // Into the kernel now, with no disk sync: a crash of the daemon
+            // does not lose a completed request. fsync, fsyncdir or a commit
+            // makes it survive a power loss.
+            writer.flush()?;
+        } else {
             writer.sync()?;
         }
         Ok(())
@@ -79,5 +86,33 @@ pub(crate) fn wal_entry_to_segment(entry: &WalEntry) -> SegmentEntry {
             created_at: *created_at,
             name: name.clone(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::segment::SegmentReader;
+
+    /// Option A (#98): an operation record is in the segment file right after
+    /// `log_mutation`, with no sync. A second reader of the file sees it while
+    /// the WAL is still open, as after a kill -9 of the daemon. The number of
+    /// disk syncs does not change.
+    #[test]
+    fn op_record_reaches_the_file_without_a_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.seg");
+        let wal = PerOpWal::new(&path, 1).unwrap();
+        let syncs = wal.writer.lock().unwrap().disk_syncs();
+        wal.log_mutation(&WalEntry::Op { bytes: vec![7u8; 40] }).unwrap();
+        let on_disk: Vec<SegmentEntry> = SegmentReader::open(&path)
+            .map(|r| r.collect())
+            .unwrap_or_default();
+        assert!(
+            matches!(on_disk.as_slice(), [SegmentEntry::Op { bytes }] if bytes == &vec![7u8; 40]),
+            "the Op record must be in the file before any sync, got {} records",
+            on_disk.len()
+        );
+        assert_eq!(wal.writer.lock().unwrap().disk_syncs(), syncs, "no disk sync for an Op record");
     }
 }
