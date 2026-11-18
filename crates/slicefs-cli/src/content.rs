@@ -259,6 +259,28 @@ pub fn put_all(cs: &ChunkStore, data: &[u8]) -> std::io::Result<ObjectKey> {
     s.finish(cs)
 }
 
+/// The read size of [`put_reader`].
+pub const READ_BUF: usize = 1 << 20;
+
+/// Store all bytes of `r` as one file content, in reads of [`READ_BUF`]
+/// bytes; return its key and length. The memory does not depend on the
+/// length of the content. The key is the same as of [`put_all`] for the
+/// same bytes.
+pub fn put_reader(cs: &ChunkStore, r: &mut impl std::io::Read) -> std::io::Result<(ObjectKey, u64)> {
+    let mut s = Stream::default();
+    let mut buf = vec![0u8; READ_BUF];
+    loop {
+        match r.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => s.push(cs, &buf[..n])?,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let len = s.len();
+    Ok((s.finish(cs)?, len))
+}
+
 /// All bytes of the content `key`, or `None` if an object is missing or
 /// damaged.
 pub fn get_all(cs: &ChunkStore, key: &ObjectKey) -> Option<Vec<u8>> {
@@ -293,7 +315,7 @@ impl Reader {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -335,6 +357,40 @@ mod tests {
         std::fs::write(d.path().join(FORMAT_FILE), "slicefs-store 5 (metadata and file content in packs)\n").unwrap();
         let err = check_format(d.path()).err().unwrap().to_string();
         assert!(err.contains("older SliceFS (224-bit object IDs)"), "{err}");
+    }
+
+    /// Pseudo-random bytes (xorshift64): no FastCDC cut is at a fixed place.
+    pub(crate) fn random_bytes(n: usize, mut seed: u64) -> Vec<u8> {
+        (0..n)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as u8
+            })
+            .collect()
+    }
+
+    /// A reader gives the same key as `put_all` for the same bytes, also
+    /// across chunk and read-buffer boundaries.
+    #[test]
+    fn put_reader_key_equals_put_all_key() {
+        let d = tempfile::TempDir::new().unwrap();
+        let cs = open(d.path()).unwrap();
+        let max = chunk_store::CHUNK_MAX as usize;
+        let cases: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            vec![7],
+            random_bytes(max, 1),
+            random_bytes(2 * max + 1, 2),
+            random_bytes(3 * READ_BUF + 12_345, 3),
+        ];
+        for data in cases {
+            let (key, len) = put_reader(&cs, &mut data.as_slice()).unwrap();
+            assert_eq!(len, data.len() as u64);
+            assert_eq!(key, put_all(&cs, &data).unwrap(), "key differs for {} bytes", data.len());
+            assert_eq!(get_all(&cs, &key).unwrap(), data);
+        }
     }
 
     #[test]
