@@ -17,11 +17,18 @@ High-ratio data deduplication that works transparently as a real, daily-driver f
 - Write log (#20) with replay after a crash and a clean cut at each commit; reachability GC, online at mount.
 - macOS: FUSE-T 1.2+ with FSKit only. Linux: libfuse.
 
-## Next Milestone Goals (candidates)
+## Current Milestone: v2.1 Store Index & Measurements
 
-- Several roots, commits and refs (branches, temporary branches, tags, pins as GC roots): #86, with #87-#91 and several mounts of one store (#92).
-- On-disk chunk index instead of the in-memory hash table: #85.
-- Cheaper commit with large open Buffered files: #93.
+**Goal:** Record the missing measurements, close the finished issues, and replace the in-memory chunk index with an on-disk index that does not need much RAM per object.
+
+**Target features:**
+- Close-out of the write log (#20): check its acceptance list against the tests and restate the FUSE-T NFS item for FSKit or Linux.
+- Pack-file measurements (#8): `slicefs seed` throughput and store size, before and after packs.
+- Index benchmark (#66): cold-open time, peak RSS and missing-index recovery at 1M/10M/100M objects.
+- On-disk chunk index (#85): sorted runs, a memtable and an in-memory filter, measured against the #66 baseline.
+- Commit cost of open Buffered files (#93): the write log gets only the bytes changed since the last commit.
+
+**Later candidates:** several roots, commits and refs (#86, with #87-#92; waits on the naming decision), prolly trees for metadata (#19), `slicefs rehash` (#62; needs a second hash algorithm first).
 
 <details>
 <summary>v2.0 milestone goal (archived)</summary>
@@ -57,8 +64,11 @@ High-ratio data deduplication that works transparently as a real, daily-driver f
 
 ### Active
 
-- [ ] Several roots, commits and refs (#86)
+- [ ] Write log close-out (#20)
+- [ ] Pack-file measurements (#8)
+- [ ] Chunk index benchmark (#66)
 - [ ] On-disk chunk index (#85)
+- [ ] Commit re-logs only changed Buffered bytes (#93)
 
 ### Out of Scope
 
@@ -95,5 +105,23 @@ High-ratio data deduplication that works transparently as a real, daily-driver f
 | Block-level CAS deduplication | Proven approach, works across file types and workloads | ✓ Good; content-defined chunks (FastCDC) with full BLAKE3-256 IDs |
 | Defer distributed/decentralized to future milestone | Focus on solid local foundation first | — Pending |
 
+## Evolution
+
+This document evolves at phase transitions and milestone boundaries.
+
+**After each phase transition** (via `/gsd-transition`):
+1. Requirements invalidated? → Move to Out of Scope with reason
+2. Requirements validated? → Move to Validated with phase reference
+3. New requirements emerged? → Add to Active
+4. Decisions to log? → Add to Key Decisions
+5. "What This Is" still accurate? → Update if drifted
+
+**After each milestone** (via `/gsd-complete-milestone`):
+1. Full review of all sections
+2. Core Value check — still the right priority?
+3. Audit Out of Scope — reasons still valid?
+4. Update Context with current state
+
 ---
-*Last updated: 2026-11-17 after v2.0 milestone close*
+
+*Last updated: 2026-11-17 after start of milestone v2.1*

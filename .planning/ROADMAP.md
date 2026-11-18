@@ -4,6 +4,7 @@
 
 - ✅ **v1.0 Foundation** - Phases 1-7 (shipped 2026-03-29)
 - ✅ **v2.0 Streaming Writes & Hardening** - Phases 7.1-12 (shipped 2026-11-17, tag `milestone-v2.0`)
+- 🚧 **v2.1 Store Index & Measurements** - Phases 13-17 (in progress)
 
 ## Phases
 
@@ -148,9 +149,71 @@ Full details: `.planning/milestones/v2.0-ROADMAP.md`. Audit: `.planning/mileston
 
 </details>
 
+### 🚧 v2.1 Store Index & Measurements (Phases 13-17)
+
+**Milestone goal:** Record the missing measurements, close the finished issues, and replace the in-memory chunk index with an on-disk index that does not need much RAM per object.
+
+- [ ] **Phase 13: Write log close-out** (#20) - check the acceptance list against tests, restate the NFS item, close #20
+- [ ] **Phase 14: Buffered delta re-log** (#93) - a commit logs only the bytes changed since the last commit
+- [ ] **Phase 15: Pack-file measurements** (#8) - seed throughput and store size, before and after packs
+- [ ] **Phase 16: Chunk index benchmark** (#66) - cold open, RSS, lookups and recovery at 1M/10M/100M objects
+- [ ] **Phase 17: On-disk chunk index** (#85) - sorted runs, memtable, filters, merge; measured against Phase 16
+
+### Phase 13: Write log close-out
+**Goal**: Issue #20 is closed with evidence: each acceptance item maps to a passing test or to a follow-up issue
+**Depends on**: Nothing
+**Requirements**: WLOG-01, WLOG-02, WLOG-03
+**Success Criteria** (what must be TRUE):
+  1. Tests show that a file survives `kill -9` after its `fsync` returns, a rename survives after `fsync` of the directory, and a torn last record does not stop the mount
+  2. A large-file copy check for the current backends (libfuse in Docker; FSKit by hand) passes with bounded daemon memory
+  3. #20 is closed with a comment that lists the tests and points the commit-cost item to #93
+**Plans**: TBD
+
+### Phase 14: Buffered delta re-log
+**Goal**: The write log cost of a commit with a large open Buffered file depends on the changed bytes, not on the file size
+**Depends on**: Nothing (Phase 13 recommended first)
+**Requirements**: BUFR-01, BUFR-02, BUFR-03
+**Success Criteria** (what must be TRUE):
+  1. A test with a large open Buffered file and a small change shows that the commit writes about the size of the change to the write log
+  2. Replay after a crash gives the same content, size and times, for PerOp and FlushOnFsync
+  3. The commit gate does not hash the whole Buffered file
+**Plans**: TBD
+
+### Phase 15: Pack-file measurements
+**Goal**: The #8 numbers are recorded in `docs/design/chunk-store.md` and #8 is closed
+**Depends on**: Nothing
+**Requirements**: PACK-01, PACK-02, PACK-03
+**Success Criteria** (what must be TRUE):
+  1. One script measures seed throughput and store size for the Boost tree, a tar file and random data
+  2. The numbers for a build from before #56 and for the current build are in the design note, with the machine and the commits
+  3. The store file count after a Boost copy is recorded
+**Plans**: TBD
+
+### Phase 16: Chunk index benchmark
+**Goal**: A baseline of the current in-memory index at 1M, 10M and 100M objects exists for #85
+**Depends on**: Nothing
+**Requirements**: BNCH-01, BNCH-02, BNCH-03
+**Success Criteria** (what must be TRUE):
+  1. The benchmark reports cold-open time and peak RSS at 1M, 10M and 100M objects
+  2. It reports hit and miss lookup throughput and the recovery time of a pack without an index file
+  3. The results and the RAM per object are documented
+**Plans**: TBD
+
+### Phase 17: On-disk chunk index
+**Goal**: The chunk store uses an on-disk index with a few bytes of RAM per object and a cold open that does not grow linearly with the object count
+**Depends on**: Phase 16
+**Requirements**: IDX-01, IDX-02, IDX-03, IDX-04, IDX-05
+**Success Criteria** (what must be TRUE):
+  1. A lookup does at most one disk read on a hit and usually none on a miss
+  2. Crash tests during a run flush and a merge lose no object and give no wrong `Loc`
+  3. GC tests show that no lookup returns an object that online GC removed
+  4. The Phase 16 benchmark with the new index shows the RAM per object, cold-open time, lookup and write throughput against the baseline
+**Plans**: TBD
+
 ## Progress
 
 | Milestone | Phases | Plans | Status | Shipped |
 |-----------|--------|-------|--------|---------|
 | v1.0 Foundation | 1-7 | 24 | Complete | 2026-03-29 |
 | v2.0 Streaming Writes & Hardening | 7.1-12 | 13 | Complete | 2026-11-17 |
+| v2.1 Store Index & Measurements | 13-17 | 0 | In progress | - |
