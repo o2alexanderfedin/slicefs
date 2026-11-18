@@ -184,7 +184,17 @@ Plans:
   3. Replay after a crash gives the same content, size and times, for PerOp and FlushOnFsync
   4. The commit gate is not held for the hash of a whole file; online GC during a rebase loses no chunk
   5. After a small change in a large file, the store grows by about the changed chunks only
-**Plans**: TBD
+**Plans**: 8 plans
+
+Plans:
+- [ ] 14-01-PLAN.md — tracer A: overlay.rs + property tests; switch (install_root), write, merged read; release/destroy rebase by whole-file re-stream; real overlay arm at every former full-buffer site; alias test (wave 1)
+- [ ] 14-02-PLAN.md — chunk-store splice: leaf cursor, canonical restart/resync, whole-node reuse, zero shortcut, full-write oracle tests (wave 1)
+- [ ] 14-03-PLAN.md — Docker bigwrite.sh + run.sh bigwrite mode (release, per-op, GC off), 1 GiB "before" run on the old code (wave 1)
+- [ ] 14-04-PLAN.md — tracer B: dirty limit + test hooks, relog in 1 MiB pieces after the commit, Streaming setattr case, switch text with the Phase 13 check, grep gates, counting-allocator test (wave 2)
+- [ ] 14-05-PLAN.md — rebase body and no-handle setattr use the splice; re-chunk bound, store growth and GC-during-rebase tests; BUFR-03 reading (wave 3)
+- [ ] 14-06-PLAN.md — relog-size test (BUFR-01), replay matrix for per-op and flush-on-fsync at 3 crash points, 64 MiB record regression, no rebase in fsync/commit (wave 3)
+- [ ] 14-07-PLAN.md — test pre-step on the merged tree, Docker 1 GiB and 4 GiB under one cap (rule fixed in advance), final DIRTY_LIMIT, verify run, design notes (wave 4)
+- [ ] 14-08-PLAN.md — evidence run, draft texts, user merge + approval checkpoint, follow-up issues, close #98 and #93 (wave 5, checkpoint)
 
 ### Phase 15: Pack-file measurements
 **Goal**: The #8 numbers are recorded in `docs/design/chunk-store.md` and #8 is closed
