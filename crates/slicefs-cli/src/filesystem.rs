@@ -1533,8 +1533,8 @@ impl SliceFsFilesystem {
             }
         }
 
-        // Case B: no open write handle — stream the committed content into a new
-        // tree, truncated or zero-extended. NotFound from get_manifest means the inode exists but has no content yet
+        // Case B: no open write handle — splice the committed content to the
+        // new size, truncated or zero-extended. NotFound from get_manifest means the inode exists but has no content yet
         // (brand-new file created by create() before any write/release). Treat as empty content.
         let old_manifest = match self.meta.get_manifest(ino) {
             Ok(m) => m,
@@ -1547,26 +1547,29 @@ impl SliceFsFilesystem {
             self.meta.decrement_refcount(&old_manifest[0]);
         }
 
-        // Rebuild as a stream: the first new_size bytes of the old content
-        // (read in 1 MiB chunks), then zeros. Memory stays O(1 MiB), not O(file).
+        // Splice the old content to the new size: only the chunks near the
+        // old end (a cut, or the last chunk of an extend) are cut again; the
+        // other chunks and whole nodes keep their IDs, and an extend pushes
+        // zero chunks without a hash. Same key as a full write.
         if new_size == 0 {
             self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
         } else {
-            let mut st = Stream::default();
-            let mut written = 0u64;
-            if let Some(root) = old_manifest.first() {
-                let mut reader = content::Reader::open(&self.content, root).map_err(|_| libc::EIO)?;
-                while written < new_size {
-                    let want = (new_size - written).min(1 << 20) as usize;
-                    let chunk = reader.read(&self.content, written, want).map_err(|_| libc::EIO)?;
-                    if chunk.is_empty() {
-                        break;
-                    }
-                    st.push(&self.content, &chunk).map_err(|_| libc::EIO)?;
-                    written += chunk.len() as u64;
-                }
-            }
-            let new_digest = self.end_padded(&st, written, new_size)?;
+            let cs = &*self.content;
+            let store_err = |e: std::io::Error| {
+                eprintln!("[{}][FUSE] setattr size: content store error: {e}", ts());
+                libc::EIO
+            };
+            let old_root = old_manifest.first().copied();
+            let old_len = match &old_root {
+                Some(k) => content::Reader::open(cs, k).map_err(store_err)?.len(),
+                None => 0,
+            };
+            let mut ov = Overlay::new(old_root, old_len, old_len);
+            ov.truncate(new_size);
+            let mut src = OverlaySource::new(cs, &ov).map_err(store_err)?;
+            let (new_digest, stats) = content::splice(cs, old_root.as_ref(), ov.visible, &[], new_size, &mut src)
+                .map_err(store_err)?;
+            self.last_rebase_bytes.store(stats.rechunked, Ordering::Relaxed);
             self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
             self.meta.increment_refcount(&new_digest);
         }
