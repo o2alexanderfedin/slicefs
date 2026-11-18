@@ -112,15 +112,15 @@ file into RAM.
   root is installed in the manifest, and a clean overlay starts on it. The
   test hook `test_last_rebase_bytes()` gives the bytes that the last splice
   cut again, not the file size.
-- Commit (D-05): the cut takes descriptors only under the gate. After the
+- Commit: the cut takes descriptors only under the gate. After the
   commit, for each overlay it logs a `Setattr` to `visible` if the base was
   cut off (shrunk), a `Setattr` to the size if the size changed, then the
   extents in `Write` records of at most 1 MiB each. Each piece is copied,
   logged and dropped before the next. So a commit logs again only the bytes
-  changed since the last rebase: at most the dirty limit plus one write
-  (BUFR-01). This also fixes #93: the old Buffered mode logged the full
+  changed since the last rebase: at most the dirty limit plus one write.
+  This also fixes #93: the old Buffered mode logged the full
   file again at each commit.
-- No rebase at fsync (D-09). An fsync syncs the log; the extents are
+- No rebase at fsync. An fsync syncs the log; the extents are
   durable through their `Write` records. A commit does not rebase either.
 - Replay needs no new record. A `Write` on a file with content switches the
   replay handle to an overlay on the root in the manifest. The `Setattr`
@@ -133,8 +133,8 @@ file into RAM.
 - BUFR-03 reading: the commit gate is never held exclusively (`commit_cut`,
   `gc_start`) for a hash of file content. A rebase holds the gate shared. On
   random data the splice cuts again only near the change, so the hold is
-  short. On long repeating non-zero data, canonical chunking (no forced cut,
-  D-08) can make the splice cut again up to the end of the file. Then a
+  short. On long repeating non-zero data, canonical chunking (no forced
+  cut) can make the splice cut again up to the end of the file. Then a
   timed commit or a GC start waits until that callback ends. Memory stays
   fixed in that case.
 

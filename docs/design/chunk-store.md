@@ -81,8 +81,10 @@ the new bytes. The overlay of an open file (see the write-log note) gives
 these inputs at a rebase.
 
 - Restart: FastCDC starts again at the largest old cut strictly below the
-  first changed byte. A cut at the change itself is not safe, because the
-  bytes before the change decide where the next cut is.
+  first changed byte. An old cut exactly at the first changed byte is not
+  safe: a cut at a byte depends on that byte, so a write that starts there
+  can move it. With "at or below", the oracle test gave a wrong key for
+  about half of the overwrites and for all appends.
 - Resync: after each new chunk end, the splice goes back to copy mode if the
   end is past the changed bytes and is a usable old cut (an old cut below
   `keep`, or the old end when the size and the tail stay). From there, the
@@ -94,8 +96,8 @@ these inputs at a rebase.
   `keep`, or old zero chunks) and has no change is pushed as the zero chunk
   without a read or a hash.
 - The output key is always the key of a full `FileWriter` write of the same
-  bytes (oracle tests). Chunking stays deterministic (D-08): there is no
-  forced cut. On long repeating non-zero data, FastCDC finds no old cut to
+  bytes (oracle tests). Chunking stays deterministic: the same bytes give
+  the same chunks whatever the write history, so there is no forced cut. On long repeating non-zero data, FastCDC finds no old cut to
   resync at, so a rebase can cut again up to the end of the file. The CPU
   then follows the file size, but the memory stays fixed: one piece of at
   most 2 x `CHUNK_MAX` and one decoded node per tree level.
@@ -129,11 +131,13 @@ log, GC off, dirty limit 32 MiB. VmHWM is the peak RSS of the daemon in MiB.
   each size switched to an overlay once.
 - The 4 GiB run uses 47 MiB more than the 1 GiB run. The copy step alone
   has 52 MiB more (82 against 30), so the difference comes before the
-  random writes (the copy path and the chunk index of the larger file).
+  random writes. The probable cause is the copy path and the chunk index of
+  the larger file. This is not checked.
 - The store holds more bytes than before: each rebase stores new chunks, and
   GC is off in this test, so the old chunks stay. This is not checked.
-- The slowest write is above 2 s in every run. A 16 MiB dirty limit did not
-  make it smaller, so the dirty limit stays 32 MiB. The cause is not
+- The slowest write is above 2 s in every run. With a 16 MiB dirty limit,
+  the slowest write of the run was 7,778 ms against 7,253 ms (it was smaller
+  at 4 GiB and larger at 1 GiB), so the dirty limit stays 32 MiB. The cause is not
   checked (the load of the machine changed from run to run).
 
 The other metadata (directories, inode map, xattrs) keeps its current

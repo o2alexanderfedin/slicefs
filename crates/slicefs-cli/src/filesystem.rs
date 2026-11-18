@@ -85,7 +85,8 @@ const RELOG_PIECE: u64 = 1 << 20;
 /// Measured (#98, Docker, release build): VmHWM 114 MiB (1 GiB) and 161 MiB (4 GiB), cap 256 MiB;
 /// slowest write 5870 ms (1 GiB) and 7253 ms (4 GiB). Both are above 2000 ms,
 /// so 16 MiB was also run: 7778 ms and 5726 ms (VmHWM 97 and 146 MiB). The
-/// slowest write did not get smaller, so the value stays 32 MiB.
+/// slowest write of the run was 7778 ms against 7253 ms, so the value stays
+/// 32 MiB.
 pub const DIRTY_LIMIT: usize = 32 << 20;
 
 /// A function the tests run inside a rebase (see `test_set_rebase_hook`).
@@ -3890,7 +3891,7 @@ mod tests {
             let off = i * 4096;
             fs.test_write(fh, off as u64, piece).unwrap();
             model[off..off + 4096].copy_from_slice(piece);
-            assert!(overlay_cost(&fs, fh) <= 2 * limit + 4096 + crate::overlay::EXTENT_OVERHEAD,
+            assert!(overlay_cost(&fs, fh) <= limit + 4096 + crate::overlay::EXTENT_OVERHEAD,
                 "in-order write {i}: overlay cost {} over the limit", overlay_cost(&fs, fh));
         }
         assert!(fs.test_rebase_count() >= random + 8, "in-order rewrite: {} rebase(s)", fs.test_rebase_count() - random);
