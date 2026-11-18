@@ -296,7 +296,7 @@ impl FileReader {
                 // The tree may come from a peer: a child must hold exactly
                 // the bytes its parent's entry says, one level lower. Else a
                 // read could slice out of range or stop making progress.
-                if child.len != e.len || child.level + 1 != node.level {
+                if child.len != e.len || child.level.checked_add(1) != Some(node.level) {
                     return Err(Error::Corrupt(format!(
                         "manifest node {:?}: level {} with {} bytes under a level-{} entry of {} bytes",
                         e.id, child.level, child.len, node.level, e.len
@@ -1100,6 +1100,20 @@ mod tests {
             let i = (offset - self.at) as usize;
             Ok(self.data[i..i + len].to_vec())
         }
+    }
+
+    // A crafted child at level 255 gives an error on read, never an
+    // overflow panic.
+    #[test]
+    fn a_read_of_a_level_255_child_is_an_error_not_a_panic() {
+        let s = fast_store();
+        let chunk = s.put(&[7u8; 50]).unwrap();
+        let top_level = s.put(&encode_node(255, &[Entry { id: chunk, len: 50 }])).unwrap();
+        let root = s.put(&encode_node(1, &[Entry { id: top_level, len: 50 }])).unwrap();
+        let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            FileReader::open(&s, root).and_then(|mut r| r.read(&s, 0, 10))
+        }));
+        assert!(matches!(got, Ok(Err(Error::Corrupt(_)))), "{got:?}");
     }
 
     // A crafted base tree gives an error, never a panic.
