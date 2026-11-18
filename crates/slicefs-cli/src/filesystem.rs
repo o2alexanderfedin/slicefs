@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -46,8 +46,20 @@ pub const REORDER_WINDOW: usize = 64 << 20;
 const REBASE_PIECE: u64 = 1 << 20;
 
 /// Largest data size of one `Write` record that a commit logs again (well
-/// below the segment payload limit of 64 MiB).
+/// below the segment payload limit of 64 MiB). Each piece is copied, logged
+/// and dropped before the next one is made.
 const RELOG_PIECE: u64 = 1 << 20;
+
+/// Dirty limit of one open file: when the RAM of its overlay (extent
+/// capacity plus `EXTENT_OVERHEAD` per extent) passes it, the write that
+/// passed it stores the overlay as a new root (a rebase) before it returns.
+/// Start value; plan 14-07 sets the final value from measured runs. The real
+/// peak of one handle is max(REORDER_WINDOW, DIRTY_LIMIT) + one write + the
+/// rebase work space (one piece and the stream state).
+pub const DIRTY_LIMIT: usize = 32 << 20;
+
+/// A function the tests run inside a rebase (see `test_set_rebase_hook`).
+pub type RebaseHook = Arc<dyn Fn() + Send + Sync>;
 
 /// Write mode for an open file handle.
 ///
@@ -144,6 +156,17 @@ pub struct SliceFsFilesystem {
     commit_gate: Arc<RwLock<()>>,
     /// True while the write log is replayed: requests are not logged again.
     replaying: std::sync::atomic::AtomicBool,
+    /// Dirty limit of one overlay (`DIRTY_LIMIT`; tests set it lower).
+    dirty_limit: AtomicUsize,
+    /// Rebases done so far (for tests).
+    rebase_count: AtomicU64,
+    /// Bytes the last rebase fed to the chunker (for tests).
+    last_rebase_bytes: AtomicU64,
+    /// `Write` payload bytes the last commit logged again (for tests).
+    last_relog_bytes: AtomicU64,
+    /// Run inside each rebase, after the new root is finished and before it
+    /// is installed (for tests: online GC during a rebase).
+    rebase_hook: Mutex<Option<RebaseHook>>,
 }
 
 impl SliceFsFilesystem {
@@ -178,7 +201,38 @@ impl SliceFsFilesystem {
             auto_snapshot: false,
             commit_gate: Arc::new(RwLock::new(())),
             replaying: std::sync::atomic::AtomicBool::new(false),
+            dirty_limit: AtomicUsize::new(DIRTY_LIMIT),
+            rebase_count: AtomicU64::new(0),
+            last_rebase_bytes: AtomicU64::new(0),
+            last_relog_bytes: AtomicU64::new(0),
+            rebase_hook: Mutex::new(None),
         }
+    }
+
+    /// Test hook: set the dirty limit of each overlay to `bytes`.
+    pub fn test_set_dirty_limit(&self, bytes: usize) {
+        self.dirty_limit.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Test hook: the number of rebases so far.
+    pub fn test_rebase_count(&self) -> u64 {
+        self.rebase_count.load(Ordering::Relaxed)
+    }
+
+    /// Test hook: the bytes the last rebase fed to the chunker.
+    pub fn test_last_rebase_bytes(&self) -> u64 {
+        self.last_rebase_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Test hook: the `Write` payload bytes the last commit logged again.
+    pub fn test_last_relog_bytes(&self) -> u64 {
+        self.last_relog_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Test hook: run `hook` inside each rebase, after the new root is
+    /// finished and before it is installed (`None`: no hook).
+    pub fn test_set_rebase_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self.rebase_hook.lock().unwrap() = hook;
     }
 
     /// Enable auto-snapshot on clean unmount.
@@ -589,21 +643,6 @@ impl SliceFsFilesystem {
             && self.meta.get_manifest(ino).map_or(false, |m| !m.is_empty())
     }
 
-    /// Current content of a streaming handle: what it streamed so far, or the
-    /// committed file content if it has not streamed anything yet.
-    fn handle_content(&self, ino: u64, state: &Stream, streamed: u64) -> Vec<u8> {
-        if streamed > 0 {
-            state.clone().finish(&self.content).ok()
-                .and_then(|k| content::get_all(&self.content, &k))
-                .unwrap_or_default()
-        } else {
-            match self.meta.get_manifest(ino) {
-                Ok(m) if !m.is_empty() => content::get_all(&self.content, &m[0]).unwrap_or_default(),
-                _ => Vec::new(),
-            }
-        }
-    }
-
     /// Make `new` the content root of `ino` (`None`: no content) and stamp
     /// the inode with `size` and `modified`. The refcount of the new root goes
     /// up and that of the root the manifest named before goes down. A root
@@ -697,6 +736,12 @@ impl SliceFsFilesystem {
             at += n;
         }
         let root = if size == 0 { None } else { Some(st.finish(cs).map_err(store_err)?) };
+        self.rebase_count.fetch_add(1, Ordering::Relaxed);
+        self.last_rebase_bytes.store(size, Ordering::Relaxed);
+        let hook = self.rebase_hook.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
         self.install_root(ino, root, size, s.modified)?;
         s.write_mode = WriteMode::Overlay(Overlay::new(root, size, size));
         s.last_committed_root = root;
@@ -897,7 +942,7 @@ impl SliceFsFilesystem {
                 } else {
                     // Random write: switch to an overlay on the stored content.
                     let ino = file_state.ino;
-                    eprintln!("[{}][FUSE] write: fh={} ino={} switches to Buffered (offset={} len={} expected={} pending={} fresh={} overlap={})",
+                    eprintln!("[{}][FUSE] write: fh={} ino={} switches to overlay (offset={} len={} expected={} pending={} fresh={} overlap={})",
                         ts(), fh, ino, offset, data.len(), *next_expected_offset, pending_bytes, fresh, overlaps_pending);
                     // Older pending writes go in first, then this (newest) write.
                     match self.to_overlay(&mut file_state) {
@@ -907,6 +952,19 @@ impl SliceFsFilesystem {
                 }
             }
             WriteMode::Overlay(_) => Self::overlay_write(&mut file_state, offset, data),
+        };
+
+        // An overlay past the dirty limit (also right after a switch that
+        // moved pending writes in) is stored as a new root now, in this
+        // callback. Never at fsync or at a commit.
+        let over = matches!(&file_state.write_mode,
+            WriteMode::Overlay(ov) if ov.cost() > self.dirty_limit.load(Ordering::Relaxed));
+        let result = match result {
+            Ok(n) if over => {
+                let ino = file_state.ino;
+                self.rebase_overlay(ino, &mut file_state).map(|_| n).map_err(|_| libc::EIO)
+            }
+            r => r,
         };
 
         // Re-insert the file state back into the map.
@@ -1175,63 +1233,90 @@ impl SliceFsFilesystem {
         // The records carry the time of the last write, not the commit time:
         // replay stamps it as the mtime. A last record puts back a later
         // ctime (the truncate in replay sets ctime to the write time).
-        let mut relog: Vec<Record> = Vec::new();
+        // Before the commit only descriptors are taken (no overlay bytes are
+        // copied); the exclusive gate keeps the states as they are until the
+        // records are logged.
+        enum Relog {
+            Pending(Vec<Record>),
+            Overlay { fh: u64, base_len: u64, visible: u64, size: u64, extents: Vec<std::ops::Range<u64>> },
+        }
+        struct Item { ino: u64, time: (i64, u32), ctime: Option<(i64, u32)>, what: Relog }
+        let mut items: Vec<Item> = Vec::new();
         {
             let open_files = self.open_files.lock().unwrap();
             for &(_, fh) in &handles {
                 let Some(s) = open_files.get(&fh) else { continue };
                 let ino = s.ino;
                 let time = s.modified.unwrap_or_else(now_pair);
-                let before = relog.len();
-                match &s.write_mode {
-                    WriteMode::Streaming { pending, .. } => {
-                        for (&off, data) in pending {
-                            relog.push(Record { time, op: Op::Write { ino, offset: off, data: data.clone() } });
-                        }
-                    }
-                    WriteMode::Overlay(ov) => {
-                        // The base is the manifest root. Shrink first (the
-                        // zeros past `visible` come back), then the size,
-                        // then the extents in pieces of at most RELOG_PIECE.
-                        let size_rec = |n: u64| Record { time, op: Op::Setattr {
-                            ino, mode: None, uid: None, gid: None, size: Some(n), atime: None, mtime: None,
-                        } };
-                        if ov.visible < ov.base_len {
-                            relog.push(size_rec(ov.visible));
-                        }
-                        if ov.size != ov.visible {
-                            relog.push(size_rec(ov.size));
-                        }
-                        for r in ov.extent_ranges() {
-                            let mut off = r.start;
-                            while off < r.end {
-                                let n = (r.end - off).min(RELOG_PIECE);
-                                relog.push(Record { time, op: Op::Write { ino, offset: off, data: ov.copy_out(off, n as usize) } });
-                                off += n;
-                            }
-                        }
-                    }
-                }
-                if relog.len() > before {
-                    if let Ok(inode) = self.meta.get_inode(ino) {
-                        let ctime = (inode.ctime_sec, inode.ctime_nsec);
-                        if ctime > time {
-                            relog.push(Record { time: ctime, op: Op::Setattr {
-                                ino, mode: None, uid: None, gid: None, size: None, atime: None, mtime: Some(time),
-                            } });
-                        }
-                    }
-                }
+                let what = match &s.write_mode {
+                    WriteMode::Streaming { pending, .. } if !pending.is_empty() => Relog::Pending(
+                        pending.iter().map(|(&off, data)| Record { time, op: Op::Write { ino, offset: off, data: data.clone() } }).collect(),
+                    ),
+                    WriteMode::Overlay(ov) if !ov.is_clean() => Relog::Overlay {
+                        fh, base_len: ov.base_len, visible: ov.visible, size: ov.size, extents: ov.extent_ranges(),
+                    },
+                    _ => continue,
+                };
+                let ctime = self.meta.get_inode(ino).ok()
+                    .map(|inode| (inode.ctime_sec, inode.ctime_nsec))
+                    .filter(|&c| c > time);
+                items.push(Item { ino, time, ctime, what });
             }
         }
         let root = self.meta.commit()?;
         // The commit deleted the old log segments, so these records are now
         // the only copy of bytes an fsync may already have made durable:
         // sync them before the commit returns (a buffered log keeps them in RAM).
-        let relogged = !relog.is_empty();
-        for rec in relog {
-            self.log_record(rec);
+        let mut relog_bytes = 0u64;
+        let relogged = !items.is_empty();
+        for Item { ino, time, ctime, what } in items {
+            match what {
+                Relog::Pending(recs) => {
+                    for rec in recs {
+                        if let Op::Write { data, .. } = &rec.op {
+                            relog_bytes += data.len() as u64;
+                        }
+                        self.log_record(rec);
+                    }
+                }
+                Relog::Overlay { fh, base_len, visible, size, extents } => {
+                    // The base is the manifest root. Shrink first (the zeros
+                    // past `visible` come back), then the size, then the
+                    // extents in pieces of at most RELOG_PIECE, one at a time.
+                    let size_rec = |n: u64| Record { time, op: Op::Setattr {
+                        ino, mode: None, uid: None, gid: None, size: Some(n), atime: None, mtime: None,
+                    } };
+                    if visible < base_len {
+                        self.log_record(size_rec(visible));
+                    }
+                    if size != visible {
+                        self.log_record(size_rec(size));
+                    }
+                    for r in extents {
+                        let mut off = r.start;
+                        while off < r.end {
+                            let n = (r.end - off).min(RELOG_PIECE);
+                            let data = match self.open_files.lock().unwrap().get(&fh).map(|s| &s.write_mode) {
+                                Some(WriteMode::Overlay(ov)) => ov.copy_out(off, n as usize),
+                                _ => Vec::new(),
+                            };
+                            if data.len() as u64 != n {
+                                return Err(MetaError::Corrupted(format!("cut: extent of open file {ino} changed during the cut")));
+                            }
+                            relog_bytes += n;
+                            self.log_record(Record { time, op: Op::Write { ino, offset: off, data } });
+                            off += n;
+                        }
+                    }
+                }
+            }
+            if let Some(ctime) = ctime {
+                self.log_record(Record { time: ctime, op: Op::Setattr {
+                    ino, mode: None, uid: None, gid: None, size: None, atime: None, mtime: Some(time),
+                } });
+            }
         }
+        self.last_relog_bytes.store(relog_bytes, Ordering::Relaxed);
         if relogged {
             self.meta.flush_wal()
                 .map_err(|e| MetaError::Corrupted(format!("cut: sync of the write log failed: {e}")))?;
@@ -1309,10 +1394,12 @@ impl SliceFsFilesystem {
 
 
     /// Truncate/extend a file to `new_size` bytes. If `fh` is Some and open,
-    /// operates on the in-flight write state; otherwise reads from CAS, adjusts, re-pushes.
+    /// operates on the in-flight write state; otherwise streams the committed
+    /// content into a new tree in 1 MiB pieces.
     ///
     /// Dual dispatch on WriteMode:
-    /// - Streaming: materialize via clone+end, resize, repush into fresh State.
+    /// - Streaming: an extension only records the size; 0 starts a fresh
+    ///   stream; any other size switches to an overlay (no content read).
     /// - Overlay: only the size and the extents change (no I/O, no allocation
     ///   by size); a resize to 0 goes back to a fresh stream.
     pub fn test_setattr_size(&self, ino: u64, fh: Option<u64>, new_size: u64) -> Result<(), i32> {
@@ -1378,7 +1465,7 @@ impl SliceFsFilesystem {
                             drop(open_files);
                         }
                     }
-                    WriteMode::Streaming { state, next_expected_offset, .. } => {
+                    WriteMode::Streaming { .. } => {
                         if new_size == 0 {
                             // Fast path: reset to empty Streaming State
                             let old_root = s.last_committed_root.take();
@@ -1393,44 +1480,21 @@ impl SliceFsFilesystem {
                             }
                             self.clear_manifest(ino, old_root)?;
                         } else {
-                            // Materialize current content (the file's existing
-                            // content if this handle has not streamed yet).
-                            let snapshot = state.clone();
-                            let streamed = *next_expected_offset;
-                            let old_root = s.last_committed_root.take();
-                            drop(open_files); // Release before io lock
-
-                            let mut content: Vec<u8> = self.handle_content(ino, &snapshot, streamed);
-
-                            // Truncate or zero-extend
-                            content.resize(new_size as usize, 0);
-
-                            // Push into fresh State
-                            let new_state_and_count = {
-                                let mut fresh = Stream::default();
-                                fresh.push(&self.content, &content).map_err(|_| libc::EIO)?;
-                                (fresh, content.len() as u64)
-                            };
-
-                            // Update OpenFileState
-                            let mut open_files = self.open_files.lock().unwrap();
-                            if let Some(s) = open_files.get_mut(&fh_val) {
-                                s.write_mode = WriteMode::Streaming {
-                                    state: new_state_and_count.0,
-                                    next_expected_offset: new_state_and_count.1,
-                                    pending: BTreeMap::new(),
-                                };
-                                s.byte_count = new_state_and_count.1;
-                                s.min_size = 0;
-                                s.cas_committed = false;                                s.modified = Some(now_pair());
-                                s.last_committed_root = None;
-                            }
-                            drop(open_files);
-
-                            // Decrement old committed root if any
-                            if let Some(old) = old_root {
-                                self.meta.decrement_refcount(&old);
-                            }
+                            // Not a pure extension: switch to an overlay on
+                            // the content so far and cut or extend it there.
+                            // No file content is read.
+                            let mut st = open_files.remove(&fh_val).expect("state is in the map");
+                            drop(open_files); // Release before io
+                            let switched = self.to_overlay(&mut st).map(|_| {
+                                if let WriteMode::Overlay(ov) = &mut st.write_mode {
+                                    ov.truncate(new_size);
+                                    st.byte_count = ov.size;
+                                }
+                                st.cas_committed = false;
+                                st.modified = Some(now_pair());
+                            });
+                            self.open_files.lock().unwrap().insert(fh_val, st);
+                            switched?;
                         }
                     }
                 }
@@ -3735,5 +3799,182 @@ mod tests {
         assert_eq!(bfree, 0);
         assert_eq!(bavail, 0);
         assert_eq!(bsize, 4096);
+    }
+
+    // ── dirty limit, rebase, relog in pieces (#98) ──────────────────────────
+
+    /// A file system on a disk store with a per-op write log (commit_cut logs).
+    fn fs_with_log() -> (SliceFsFilesystem, TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+        let wal = metadata::wal::create_wal(metadata::wal::WalConfig::PerOp, dir.path(), 1).unwrap();
+        let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
+        let mut meta = DictMetadataStore::new(io.clone());
+        meta.set_wal(wal);
+        let fs = SliceFsFilesystem::new(meta, io, Some(dir.path().to_path_buf()));
+        fs.meta().commit().unwrap();
+        (fs, dir)
+    }
+
+    /// Seeded bytes (xorshift), so each test gets the same data every run.
+    fn seeded(seed: u64, n: usize) -> Vec<u8> {
+        let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        (0..n).map(|_| { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x as u8 }).collect()
+    }
+
+    /// RAM charged to the overlay of `fh` (0 if it streams).
+    fn overlay_cost(fs: &SliceFsFilesystem, fh: u64) -> usize {
+        match fs.open_files.lock().unwrap().get(&fs.owner_fh(fh)).map(|s| &s.write_mode) {
+            Some(WriteMode::Overlay(ov)) => ov.cost(),
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn an_overlay_rebases_when_it_crosses_the_dirty_limit() {
+        let (fs, _dir) = fresh_fs();
+        let limit = 64 << 10;
+        fs.test_set_dirty_limit(limit);
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        let mut model = seeded(1, 1 << 20);
+        for (i, piece) in model.chunks(64 << 10).enumerate() {
+            fs.test_write(fh, (i << 16) as u64, piece).unwrap();
+        }
+        fs.test_release(ino, fh).unwrap();
+        assert_eq!(fs.test_rebase_count(), 0, "a streamed file needs no rebase");
+
+        let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+        let offsets = seeded(2, 200 * 8);
+        for i in 0..200 {
+            let w = u64::from_le_bytes(offsets[i * 8..i * 8 + 8].try_into().unwrap());
+            let off = (w % ((1 << 20) - 1024)) as usize;
+            let data = seeded(100 + i as u64, 1024);
+            fs.test_write(fh, off as u64, &data).unwrap();
+            model[off..off + 1024].copy_from_slice(&data);
+            assert!(overlay_cost(&fs, fh) <= limit + 1024 + crate::overlay::EXTENT_OVERHEAD,
+                "write {i}: overlay cost {} over the limit", overlay_cost(&fs, fh));
+        }
+        let random = fs.test_rebase_count();
+        assert!(random >= 2, "random writes: {random} rebase(s)");
+
+        // An in-order rewrite merges into one extent; it must not grow to the file size.
+        for (i, piece) in seeded(3, 1 << 20).chunks(4096).enumerate() {
+            let off = i * 4096;
+            fs.test_write(fh, off as u64, piece).unwrap();
+            model[off..off + 4096].copy_from_slice(piece);
+            assert!(overlay_cost(&fs, fh) <= 2 * limit + 4096 + crate::overlay::EXTENT_OVERHEAD,
+                "in-order write {i}: overlay cost {} over the limit", overlay_cost(&fs, fh));
+        }
+        assert!(fs.test_rebase_count() >= random + 8, "in-order rewrite: {} rebase(s)", fs.test_rebase_count() - random);
+        assert_eq!(fs.test_last_rebase_bytes(), 1 << 20);
+        fs.test_release(ino, fh).unwrap();
+        assert!(fs.test_read(ino, 0, (2 << 20) as u32).unwrap() == model, "content after release");
+    }
+
+    #[test]
+    fn a_switch_that_moves_pending_writes_over_the_limit_rebases_at_once() {
+        let (fs, _dir) = fresh_fs();
+        fs.test_set_dirty_limit(64 << 10);
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        let mut model = vec![0u8; (1 << 20) + (128 << 10)];
+        let a = seeded(1, 4096);
+        fs.test_write(fh, 0, &a).unwrap();
+        model[..4096].copy_from_slice(&a);
+        let far = seeded(2, 128 << 10);
+        fs.test_write(fh, 1 << 20, &far).unwrap();
+        model[1 << 20..].copy_from_slice(&far);
+        assert!(fs.test_is_streaming(fh), "the far write waits in the reorder window");
+        assert_eq!(fs.test_rebase_count(), 0);
+        // The hook runs once, after the new root is finished and before it is
+        // installed: it still sees the base of the switch in the manifest.
+        let seen: Arc<Mutex<Vec<Option<ObjectKey>>>> = Arc::new(Mutex::new(Vec::new()));
+        let (meta, log) = (Arc::clone(&fs.meta), Arc::clone(&seen));
+        fs.test_set_rebase_hook(Some(Arc::new(move || {
+            log.lock().unwrap().push(meta.get_manifest(ino).ok().and_then(|m| m.first().copied()));
+        })));
+        let b = seeded(3, 4096);
+        fs.test_write(fh, 0, &b).unwrap();
+        model[..4096].copy_from_slice(&b);
+        assert!(!fs.test_is_streaming(fh));
+        assert_eq!(fs.test_rebase_count(), 1, "the switch moved 128 KiB in: one rebase at once");
+        assert_eq!(fs.test_last_rebase_bytes(), (1 << 20) + (128 << 10));
+        fs.test_set_rebase_hook(None);
+        let seen = seen.lock().unwrap().clone();
+        let after = fs.meta.get_manifest(ino).unwrap().first().copied();
+        assert_eq!(seen.len(), 1, "one hook call");
+        assert!(seen[0].is_some() && seen[0] != after, "the hook ran before install_root");
+        assert_eq!(overlay_cost(&fs, fh), 0);
+        fs.test_release(ino, fh).unwrap();
+        assert!(fs.test_read(ino, 0, (2 << 20) as u32).unwrap() == model, "content after release");
+    }
+
+    #[test]
+    fn a_commit_relogs_an_overlay_in_pieces_of_at_most_1_mib() {
+        let (fs, dir) = fs_with_log();
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        fs.test_write(fh, 0, &seeded(1, 4096)).unwrap();
+        let big = seeded(2, 3 << 20);
+        fs.test_write(fh, 0, &big).unwrap(); // a switch: one 3 MiB extent
+        assert!(!fs.test_is_streaming(fh));
+        let before = fs.test_rebase_count();
+        fs.commit_cut().unwrap();
+        assert_eq!(fs.test_last_relog_bytes(), 3 << 20);
+        assert_eq!(fs.test_rebase_count(), before, "a commit never rebases");
+
+        // The log after the commit: Write records of at most 1 MiB that cover the extent.
+        let (_, _, ops) = metadata::segment::load_store_with_log(&dir.path().join("segments")).unwrap();
+        let mut covered = 0u64;
+        for raw in &ops {
+            if let Some(crate::oplog::Record { op: crate::oplog::Op::Write { ino: i, offset, data }, .. }) = crate::oplog::Record::decode(raw) {
+                assert_eq!(i, ino);
+                assert!(data.len() as u64 <= RELOG_PIECE, "a relog piece of {} bytes", data.len());
+                assert!(data[..] == big[offset as usize..offset as usize + data.len()]);
+                covered += data.len() as u64;
+            }
+        }
+        assert_eq!(covered, 3 << 20);
+        fs.test_release(ino, fh).unwrap();
+        assert!(fs.test_read(ino, 0, (4 << 20) as u32).unwrap() == big);
+    }
+
+    #[test]
+    fn a_streaming_shrink_to_a_nonzero_size_switches_to_an_overlay() {
+        let (fs, _dir) = fresh_fs();
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        let old = seeded(1, 300_000);
+        fs.test_write(fh, 0, &old).unwrap();
+        fs.test_release(ino, fh).unwrap();
+        let root = fs.meta.get_manifest(ino).unwrap()[0];
+        assert_eq!(fs.meta.get_refcount(&root), 1);
+
+        let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+        assert!(fs.test_is_streaming(fh));
+        let n = 100_000usize;
+        fs.test_setattr_size(ino, Some(fh), n as u64).unwrap();
+        assert!(!fs.test_is_streaming(fh), "a shrink of a stored file switches to an overlay");
+        // The base is the stored root: it stays in the manifest with its count.
+        assert_eq!(fs.meta.get_manifest(ino).unwrap(), vec![root]);
+        assert_eq!(fs.meta.get_refcount(&root), 1);
+        assert_eq!(fs.test_getattr(ino).unwrap().size, n as u64);
+        let tail = seeded(2, 5000);
+        fs.test_write(fh, 200_000, &tail).unwrap();
+        fs.test_release(ino, fh).unwrap();
+
+        let mut model = old[..n].to_vec();
+        model.resize(200_000, 0);
+        model.extend_from_slice(&tail);
+        assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "first n bytes, zeros, the write");
+        assert_eq!(fs.test_getattr(ino).unwrap().size, model.len() as u64);
+        let new_root = fs.meta.get_manifest(ino).unwrap()[0];
+        assert_eq!(fs.meta.get_refcount(&new_root), 1);
+        assert_eq!(fs.meta.get_refcount(&root), 0, "the replaced root is released once");
+
+        // A handle that streamed bytes: a shrink keeps the first n of them.
+        let (ino2, fh2) = fs.test_create(1, "g", 0o644, 0, 0, 0).unwrap();
+        fs.test_write(fh2, 0, &old).unwrap();
+        fs.test_setattr_size(ino2, Some(fh2), n as u64).unwrap();
+        assert!(!fs.test_is_streaming(fh2));
+        fs.test_release(ino2, fh2).unwrap();
+        assert!(fs.test_read(ino2, 0, 1 << 20).unwrap() == old[..n], "streamed bytes cut at n");
     }
 }
