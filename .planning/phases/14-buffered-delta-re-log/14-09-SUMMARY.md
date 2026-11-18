@@ -34,11 +34,10 @@ metrics:
   completed: 2026-11-18
   tasks: 4
 actuals:
-  tokens: 9000
   tasks: 4
-  commits: 6
+  commits: 9
 plan_head_before: 4a27c38
-plan_head_after: dd8b461
+plan_head_after: ee6fcd9 (this SUMMARY commit follows it)
 ---
 
 # Phase 14 Plan 09: Write-log RAM, option A Summary
@@ -58,6 +57,8 @@ syncs does not change.
 | 3 | 658779d | periodic timer thread (`with_interval`), stopped on drop and shutdown |
 | 4 | 33b0ebd | help text, wal module docs, verify-phases.sh 05c control |
 | 4 | dd8b461 | write-log.md subsection "Write-log RAM (#98)" |
+| summary | c748968 | first version of this SUMMARY |
+| 3 | ee6fcd9 | wider deadline of the timer test (test only) |
 
 ## Tests
 
@@ -66,8 +67,8 @@ New (in-crate, `cargo test -p metadata --lib wal::`):
 - `wal::flush_on_fsync::tests::ram_stays_at_most_the_cap_with_no_fsync`
 - `wal::periodic::tests::ram_stays_at_most_the_cap_with_no_fsync`
 - `wal::periodic::tests::timer_syncs_and_drop_stops_it` (interval 300 ms,
-  poll to 2 x interval + 300 ms; drop must release the last reference of the
-  log, so the thread has ended)
+  poll to 2 x interval + 1 s for a loaded CI machine, passes in about 300 ms;
+  drop must release the last reference of the log, so the thread has ended)
 
 The cap tests also check that the records that left RAM are in the file, in
 order (a second reader while the WAL is open), so a cap that drops records
@@ -125,11 +126,19 @@ OrbStack): `RESULT verify-phases: PASS`. 05c lines:
 - Per-op 05c main steps now pass also because per-op keeps every completed
   request; the flush-on-fsync control is what shows that a rename with no sync
   is lost.
-- If `write_entry` fails in the middle of a cap spill, the remaining held
-  records are dropped and the error goes to the caller. This is the same as
-  `flush_and_sync` before this plan.
+- Open point (write errors in the buffered modes): a failed write during a
+  cap spill drops the held records, but the error goes back through
+  `log_mutation`, and `DictMetadataStore` then sets `wal_failed`, so every
+  fsync fails until the next commit. A failed sync from the periodic timer
+  thread is only logged (`tracing::warn!`) and its held records are dropped;
+  the next fsync then finds nothing held and can return success. Periodic is
+  not the default mode. A fix (a sticky failed flag in `BufferedLog` that
+  `flush_and_sync` reports until `rotate`) needs a fault-injection seam to
+  test it, so it is left for a follow-up.
+- The timer test deadline was widened from 2 x interval + 300 ms to
+  2 x interval + 1 s after the commits of tasks 1-4 (test only).
 
 ## Self-Check: PASSED
 
 - FOUND: crates/metadata/src/wal/buffered.rs
-- FOUND: 50b75f7, 4269b6a, c31b63c, 658779d, 33b0ebd, dd8b461 (ancestors of HEAD)
+- FOUND: 50b75f7, 4269b6a, c31b63c, 658779d, 33b0ebd, dd8b461, c748968, ee6fcd9 (ancestors of HEAD)
