@@ -42,6 +42,21 @@ for mode in base a b; do
 done
 done
 
+echo "== per-op: a small write and a rename are the last requests, no fsync, kill -9"
+for rep in $(seq $REPS); do for mode in base a b; do
+  S=$R/sr-$mode; M=$R/mr-$mode
+  $B seed $S $R/src >/dev/null 2>&1
+  mnt $mode $S $M --commit-interval 0 || continue
+  cp $R/small.bin $M/a.bin && mv $M/a.bin $M/b.bin
+  sleep 1; crash $M; : > $R/mount.log
+  if mnt base $S $M; then
+    echo "  option=$mode rep=$rep: a.bin=$(has $M/a.bin $R/small.bin) b.bin=$(has $M/b.bin $R/small.bin) a.bin-exists=$([ -e $M/a.bin ] && echo yes || echo no) | $(grep -h Replayed $R/mount.log | tail -1 || true)"
+    umnt $M
+  fi
+  rm -rf $S $M
+done; done
+
+[ "${SPIKE_SKIP_CAPCUT:-0}" = 1 ] || {
 echo "== cap cuts a file: flush-on-fsync, one 6 MiB file, no fsync, kill -9"
 head -c 6291456 /dev/urandom > $R/six.bin
 for mode in base b; do
@@ -60,6 +75,9 @@ for mode in base b; do
   rm -rf $S $M
 done
 
+}
+
+[ "$CP_REPS" -gt 0 ] && {
 echo "== 1 GiB cp time, per-op (release build), load: $(cat /proc/loadavg)"
 head -c 1073741824 /dev/urandom > $R/big.bin
 for rep in $(seq $CP_REPS); do
@@ -76,4 +94,5 @@ for rep in $(seq $CP_REPS); do
     umnt $M; rm -rf $S $M
   done
 done
+}
 echo "== done"

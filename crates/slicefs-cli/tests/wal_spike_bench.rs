@@ -83,6 +83,7 @@ fn wal_spike() {
     let config = match case.as_str() {
         "mem" => WalConfig::FlushOnFsync,
         "memp" => WalConfig::Periodic { interval_secs: 5 },
+        "fsyncbig" => WalConfig::FlushOnFsync,
         _ => WalConfig::PerOp,
     };
     let fs = new_fs(dir.path(), config);
@@ -149,6 +150,21 @@ fn wal_spike() {
                 release(&fs, ino, fh);
             }
             (n, n * 4096)
+        }
+        "fsyncbig" => {
+            // fsync count check for the cap: 4 files of 16 MiB, one fsync each.
+            let mut buf = vec![0u8; 128 << 10];
+            let per = (16u64 << 20) / (128 << 10);
+            for f in 0..4u64 {
+                let (ino, fh) = create(&fs, &format!("g{f}"));
+                for i in 0..per {
+                    fill(&mut buf, f * per + i + 1);
+                    write(&fs, fh, i * (128 << 10), &buf);
+                }
+                assert!(matches!(h::handle_fsync(&fs, ino, fh), EmptyResult::Ok));
+                release(&fs, ino, fh);
+            }
+            (4 * per, 64 << 20)
         }
         other => panic!("unknown SPIKE_CASE {other}"),
     };

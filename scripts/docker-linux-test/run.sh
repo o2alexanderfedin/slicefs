@@ -13,7 +13,7 @@ HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 docker build -q -t slicefs-fusetest "$HERE" >/dev/null
 RUN=(docker run --rm --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined
   -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry
-  -v "$HERE":/dk:ro -e CARGO_TARGET_DIR=/target -e SPIKE_REPS -e SPIKE_CP_REPS -e SPIKE_SKIP_KILL slicefs-fusetest unshare -m --propagation private)
+  -v "$HERE":/dk:ro -e CARGO_TARGET_DIR=/target -e SPIKE_REPS -e SPIKE_CP_REPS -e SPIKE_SKIP_KILL -e SPIKE_SKIP_CAPCUT slicefs-fusetest unshare -m --propagation private)
 case "${1:-all}" in
   smoke) "${RUN[@]}" bash -c 'cargo build -q -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/mt-linux.sh /target/debug/slicefs && /dk/dedup-probe.sh /target/debug/slicefs' ;;
   test)  "${RUN[@]}" bash -c 'cargo test -q --workspace && rm -rf /tmp/fuser && cp -r vendor/fuser /tmp/fuser && cd /tmp/fuser && cargo test -q --lib' ;;

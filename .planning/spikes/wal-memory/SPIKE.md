@@ -1,7 +1,8 @@
 # Spike: write log (WAL) memory
 
 Date: 2026-11-18. Branch: `spike/wal-memory` (local only, not for merge).
-Base: `origin/develop` at 6296eb6. Spike code: commit 7f68048.
+Base: `origin/develop` at 6296eb6. Spike code and this file: the commits
+on this branch after 6296eb6.
 
 ## Question
 
@@ -30,12 +31,14 @@ The number of fsync calls must not change in any option.
   **Periodic has no timer**: `interval_secs` is not used, and nothing calls
   `flush_and_sync` on a schedule. Thus periodic is the same as
   flush-on-fsync. The RAM limit of both is "all bytes written since the last
-  fsync or commit". With the default commit interval of 30 s, a writer at
-  1 GB/s can put about 30 GB into daemon RAM.
+  fsync or commit". With the default commit interval of 30 s and the
+  rate that we measured here (50 to 65 MB/s in-process), that is about 1.5
+  to 2 GB of daemon RAM. A faster writer, or a longer or disabled commit
+  interval, gives more.
 
 ## Method
 
-Spike code (commit 7f68048):
+Spike code (on this branch):
 
 - The env var `SLICEFS_WAL_SPIKE` (`a`, `b`, or not set) selects the option
   at run time. Thus one binary runs all options.
@@ -52,7 +55,21 @@ Spike code (commit 7f68048):
   this spike used the volume `slicefs-target-walspike`.
 
 Run order: the modes were interleaved (base, A, B, base, A, B, ...),
-5 rounds for each throughput case, 3 rounds for each memory case. We give
+5 rounds for each throughput case, 3 rounds for each memory case:
+
+```
+BIN=<target>/release/deps/wal_spike_bench-<hash>
+for c in tiny files small big; do for r in 1 2 3 4 5; do for m in base a b; do
+  SLICEFS_WAL_SPIKE=$m SPIKE_CASE=$c $BIN --ignored --nocapture | grep '^SPIKE'
+done; done; done
+for r in 1 2 3; do for c in mem memp; do for m in base b; do
+  SLICEFS_WAL_SPIKE=$m SPIKE_CASE=$c $BIN --ignored --nocapture | grep '^SPIKE'
+done; done; done
+```
+
+Docker: `SLICEFS_TARGET_VOL=slicefs-target-walspike SPIKE_REPS=3
+scripts/docker-linux-test/run.sh walspike` (`SPIKE_CP_REPS`,
+`SPIKE_SKIP_KILL` and `SPIKE_SKIP_CAPCUT` select parts). We give
 the median and the minimum. CPU time is user + system time of the process
 (getrusage). The `write()` counts do not depend on load.
 
@@ -102,13 +119,18 @@ in-process path). Note: this path has no FUSE. In a real mount, each
 request also pays a FUSE round trip and the kernel calls of the FUSE
 channel, so the relative cost is smaller.
 
-**fsync count check** (1000 files, one fsync each, per-op):
+**fsync count check.** Per-op: 1000 files of 4 KiB, one fsync each.
+Flush-on-fsync: 4 files of 16 MiB (128 KiB writes), one fsync each, so
+the 4 MiB cap fires 4 times between two fsyncs.
 
-| Option | `sync_all` calls | `write()` calls |
-|---|---|---|
-| base | 1000 | 1000 |
-| A | 1000 | 4000 |
-| B | 1000 | 1000 |
+| Mode | Option | `sync_all` calls | `write()` calls | Peak log buffer |
+|---|---|---|---|---|
+| per-op | base | 1000 | 1000 | 0 |
+| per-op | A | 1000 | 4000 | 0 |
+| per-op | B | 1000 | 1000 | 0 |
+| flush-on-fsync | base | 4 | 520 | 16.01 MiB |
+| flush-on-fsync | A | 4 | 520 | 4.00 MiB |
+| flush-on-fsync | B | 4 | 520 | 4.00 MiB |
 
 Also, with `SLICEFS_WAL_SPIKE=a` and `=b`, these tests pass with no
 change: `fsync_tests`, `wal_durability_tests`, `wal_strategy_tests`,
@@ -141,7 +163,9 @@ small file in it. No fsync. Wait 1 s, kill -9 the daemon, remount (the
 mount replays the log), and compare with the source files.
 
 4 runs for each line (3 in the first Docker run, 1 in the second). All
-runs of a line gave the same result.
+runs of a line gave the same result. (The replay count of the first run
+was read from a shared log; the counts below are from the second run,
+which has one log for each remount.)
 
 | Write log mode | Option | small | 1 MiB | renamed | 10 MiB | last mkdir + small file | Requests replayed |
 |---|---|---|---|---|---|---|---|
@@ -153,14 +177,30 @@ runs of a line gave the same result.
 | flush-on-fsync | B | kept | kept | kept | kept | lost | 118 |
 
 - Per-op baseline and option B lose the last records (less than 8 KiB),
-  here the last `mkdir` and the small file after the 10 MiB write. They
-  keep all records before them only because the large write records
-  pushed the buffer out. With only small requests (for example an untar
-  of small files), a kill -9 loses up to 8 KiB of the most recent
-  requests.
+  here the last `mkdir` and the small file after the 10 MiB write. In
+  this test they keep the rename only because the 10 MiB write after it
+  pushed the buffer out.
 - Per-op option A keeps all completed requests.
-- Flush-on-fsync with the cap keeps all records up to the last time the
-  buffer passed 4 MiB.
+- Flush-on-fsync with the cap keeps the records up to the last time the
+  buffer passed 4 MiB. Up to 4 MiB of the most recent records can be lost
+  (per-op: up to 8 KiB). `10 MiB = kept` in this table is a coincidence
+  of sizes: about 12 MiB of records were written, so the third cap point
+  came at the last block of the 10 MiB file. The replay count (118) is the
+  same as for per-op baseline, which agrees.
+
+**Write and rename as the last requests** (per-op, the task scenario):
+`cp` a 3000-byte file to `a.bin`, `mv a.bin b.bin`, no fsync, wait 1 s,
+kill -9, remount. 3 runs for each option, all the same:
+
+| Option | `b.bin` (new name) | `a.bin` (old name) | Requests replayed |
+|---|---|---|---|
+| base | **does not exist** | does not exist | none (no replay line) |
+| A | **kept, correct content** | does not exist | 5 |
+| B | **does not exist** | does not exist | none (no replay line) |
+
+With the baseline and option B, the whole file is lost (create, write,
+release and rename), not only the rename: all five records were still in
+the 8 KiB buffer of the daemon.
 
 **The cap can cut a file.** Flush-on-fsync, one 6 MiB file, no fsync,
 kill -9:
@@ -201,27 +241,32 @@ commit; periodic has no timer, so it is not better. For per-op, A takes
 daemon RAM from at most 8 KiB to at most one record. This difference is
 small.
 
-**Read and write performance.** Reads do not change in any option. For
+**Read and write performance.** Reads do not change in any option (by
+reasoning: the write log is not on the read path; we did not measure
+reads). For
 data writes of 4 KiB or more, A costs nothing that we can measure
 (cases a and b, and the 1 GiB `cp` in Docker), because those records
 already go past the 8 KiB buffer. For small-file work A costs +8 % CPU
 in-process (case c, three `write()` calls per file instead of one). The
 worst case, very small writes, costs about 6 µs per request on APFS
 (case d). In a real mount, each request also pays a FUSE round trip, so
-the relative cost is smaller. The number of fsync calls does not change.
+the relative cost is smaller. The number of fsync calls does not change (measured for per-op and for
+capped flush-on-fsync).
 
 **Safety.** A is the only option where a kill -9 of the daemon (a crash,
 the OOM killer, a panic) loses no completed request in the default mode.
 With the baseline and with B, a kill -9 loses the most recent requests
-that fit in 8 KiB, and with only small requests these are the most
-recent creates, renames and mkdirs. Power loss is the same in all
+that fit in 8 KiB. In the test, a small file that was written and renamed
+was lost completely, in 3 of 3 runs. Power loss is the same in all
 options.
 
 Reasons to select A, not B:
 
 1. The cost is small and it is only on small-record work. The cost is zero
    for large writes.
-2. The safety gain is real and we saw it on Linux FUSE in 4 of 4 runs.
+2. The safety gain is real and we saw it on Linux FUSE in every run
+   (7 of 7: 4 runs of the mixed test, 3 runs of the write-and-rename
+   test).
 3. The rule is simple to document: "a completed request survives a crash
    of the daemon; fsync makes it survive power loss".
 
