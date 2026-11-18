@@ -15,13 +15,13 @@ Evidence:
 - Docker, Linux libfuse, release build, per-op log, online GC off: 512 MiB of random writes (1 MiB and 4 KiB blocks) on a file copied in with cp. Daemon peak RSS (VmHWM): before this change 6224 MiB for a 1 GiB file. With this change 114 MiB for 1 GiB and 161 MiB for 4 GiB. Cap: 256 MiB for both sizes. cmp passes after the writes and after a remount. Run: `scripts/docker-linux-test/run.sh bigwrite` (sizes 1024 and 4096 MiB).
 - Peak heap in the process above the start value, dirty limit 1 MiB: 8353 KiB (random, 16 MiB file), 9272 KiB (random, 48 MiB), 7279 KiB (repeating, 16 MiB), 7779 KiB (repeating, 48 MiB). Bound: 12 MiB. A version that holds the whole file in RAM fails all four cases. Test: `an_open_file_uses_memory_bounded_by_the_dirty_limit_not_the_file_size`.
 - A 4 KiB change in a 32 MiB file adds 5 objects and chunks 38,355 bytes again. Tests: `a_small_change_adds_only_the_changed_chunks`, `a_rebase_rechunks_only_near_the_change`.
-- A size change from 1 MiB to 4 GiB with no open handle chunks 35,628 bytes again, in 0.14 s (before: 39 s). Test: `an_extend_without_a_handle_rechunks_little`.
+- A size change from 1 MiB to 4 GiB with no open handle chunks 35,628 bytes again, in 0.14 s in the test. Test: `an_extend_without_a_handle_rechunks_little`.
 - Replay after a crash gives the same content, size and times with the per-op and the flush-on-fsync log: `an_overlay_replays_after_a_crash_with_each_log_mode`.
 - Online GC during a rebase loses no chunk: `online_gc_during_a_rebase_keeps_every_chunk`, `gc_start_waits_for_a_rebase_in_a_callback`.
 - The splice gives the same key as a full write of the same bytes: `a_splice_gives_the_same_key_as_a_full_write`.
 - Write log RAM: `op_record_reaches_the_file_without_a_sync` (per-op), `ram_stays_at_most_the_cap_with_no_fsync` (flush-on-fsync and periodic), `timer_syncs_and_drop_stops_it` (periodic), `failed_cap_write_out_fails_fsync_until_rotate` and `failed_timer_sync_fails_fsync_until_rotate` (a failure stays until the next commit).
 
-Open point: in the Docker random-write run, the slowest single write takes 5 to 8 s (before this change: 17 s). We do not know the cause yet. We are looking into it, and it will get a separate fix.
+Open point: in the Docker random-write run, the slowest single write takes 5 to 8 s (before this change: 17 s). The cause is under investigation. It will get a separate fix.
 
 Limits, in new issues:
 - #{{ISSUE_A}}: one memory limit for all open files. Today each open file has its own limit.
