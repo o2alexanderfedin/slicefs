@@ -191,3 +191,40 @@ fn destroy_keeps_data_of_a_handle_that_is_still_open() {
     assert_eq!(fs2.test_read(ino, 100, 11).unwrap(), b"after-fsync");
     assert_eq!(fs2.test_read(ino, 200, 8).unwrap(), b"unsynced");
 }
+
+// BUFR-03 (#98): the commit gate is held exclusively by commit_cut, so
+// commit_cut must not hash file content: it logs the overlay extents again
+// and runs no rebase. fsync runs no rebase either: the extents are durable
+// through the write log (D-09). Only the dirty limit and the close rebase.
+#[test]
+fn commit_and_fsync_do_not_rebase_an_open_overlay() {
+    let store_dir = TempDir::new().unwrap();
+    let fs = make_fs(&store_dir, WalConfig::PerOp);
+    let (ino, fh) = buffered_file(&fs, "overlay", 8);
+    let mut model = vec![0xA5u8; 8 << 20];
+    model[..7].copy_from_slice(b"rewrite");
+    let mut put = |fs: &SliceFsFilesystem, off: usize, bytes: &[u8]| {
+        fs.test_write(fh, off as u64, bytes).unwrap();
+        model[off..off + bytes.len()].copy_from_slice(bytes);
+    };
+    let rebases = fs.test_rebase_count();
+
+    put(&fs, 1 << 20, &[0x11; 4096]);
+    put(&fs, 5 << 20, &[0x22; 4096]);
+    fs.test_fsync(ino, fh).unwrap();
+    assert_eq!(fs.test_rebase_count(), rebases, "no rebase at fsync");
+    fs.commit_cut().unwrap();
+    assert_eq!(fs.test_rebase_count(), rebases, "no rebase at a commit");
+    assert!(fs.test_last_relog_bytes() > 0, "the commit logs the extents again");
+
+    put(&fs, 3 << 20, &[0x33; 8192]);
+    put(&fs, (8 << 20) - 100, &[0x44; 100]);
+    fs.test_fsync(ino, fh).unwrap();
+    fs.commit_cut().unwrap();
+    assert_eq!(fs.test_rebase_count(), rebases, "no rebase at the second fsync and commit");
+    assert!(fs.test_last_relog_bytes() > 0, "the second commit logs the extents again");
+
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_rebase_count(), rebases + 1, "release rebases once");
+    assert_eq!(fs.test_read(ino, 0, (8 << 20) + 1).unwrap(), model);
+}

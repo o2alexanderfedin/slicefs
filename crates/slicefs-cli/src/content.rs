@@ -235,6 +235,23 @@ impl Stream {
     }
 }
 
+/// A new content from the content `base`: the bytes of `src` in the
+/// `changed` ranges, the base bytes below `keep`, zeros up to `new_len`
+/// (`chunk_store::file::splice`). Only the chunks near the changed bytes are
+/// cut and hashed again; the key is the key of a full write of the same bytes.
+pub fn splice(
+    cs: &ChunkStore,
+    base: Option<&ObjectKey>,
+    keep: u64,
+    changed: &[std::ops::Range<u64>],
+    new_len: u64,
+    src: &mut dyn chunk_store::file::SpliceSource,
+) -> std::io::Result<(ObjectKey, chunk_store::file::SpliceStats)> {
+    chunk_store::file::splice(cs, base.map(to_id), keep, changed, new_len, src)
+        .map(|(id, stats)| (to_key(id), stats))
+        .map_err(std::io::Error::other)
+}
+
 /// Store `data` as one file content and return its key.
 pub fn put_all(cs: &ChunkStore, data: &[u8]) -> std::io::Result<ObjectKey> {
     let mut s = Stream::default();

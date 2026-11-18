@@ -98,26 +98,37 @@ $B seed $R/s5c $R/src >/dev/null 2>&1
 if mnt $R/s5c $R/m5c --commit-interval 0; then   # no commit: only the write log can keep these
   mkdir $R/m5c/dir; head -c 2000000 /dev/urandom > $R/d.bin
   dd if=$R/d.bin of=$R/m5c/dir/d.bin bs=64k conv=fsync status=none   # file and mkdir now durable
-  echo p > $R/m5c/dir/p.txt   # not synced yet
   mv $R/m5c/dir/d.bin $R/m5c/dir/renamed.bin
   # The only sync after the rename: fsync of the directory (coreutils 9
   # `sync FILE` fsyncs the path; the kernel sends FUSE FSYNCDIR). No file
   # fsync comes after the rename.
   timeout -s KILL 10 sync $R/m5c/dir || bad dir-fsync
-  mv $R/m5c/dir/p.txt $R/m5c/dir/q.txt   # control: no sync after this rename
   kill -9 $MP; sleep 0.5
   fusermount -uz $R/m5c 2>/dev/null || umount -l $R/m5c 2>/dev/null
   if mnt $R/s5c $R/m5c; then
     grep -h "Replayed" $R/mount.log | tail -1 | sed 's/^/    /'
     step rename-survives-dir-fsync 30 cmp $R/d.bin $R/m5c/dir/renamed.bin
     step old-name-gone-after-dir-fsync 5 bash -c "[ ! -e $R/m5c/dir/d.bin ]"
-    # "lost" shows that the fsync of the directory, and nothing else, kept the
-    # first rename. The p.txt create is durable through that sync, so "lost"
-    # means only the second rename was lost.
-    if [ -e $R/m5c/dir/q.txt ]; then echo "    rename with no sync after it: kept"
-    elif [ -e $R/m5c/dir/p.txt ]; then echo "    rename with no sync after it: lost"
-    else echo "    rename with no sync after it: neither p.txt nor q.txt exists"; fi
     umnt $R/m5c
+  fi
+fi
+# Control (#98): per-op writes each request into the log file at once, so a
+# kill -9 of the daemon also keeps a rename with no sync after it. In
+# flush-on-fsync mode, records below 4 MiB stay in RAM until a sync, so there
+# a rename with no sync after it is lost. The p.txt create is durable through
+# the fsync of the directory, so "lost" means only the rename was lost.
+$B seed $R/s5c2 $R/src >/dev/null 2>&1
+if mnt $R/s5c2 $R/m5c2 --commit-interval 0 --wal-strategy flush-on-fsync; then
+  mkdir $R/m5c2/dir; echo p > $R/m5c2/dir/p.txt
+  timeout -s KILL 10 sync $R/m5c2/dir || bad dir-fsync-control
+  mv $R/m5c2/dir/p.txt $R/m5c2/dir/q.txt   # no sync after this rename
+  kill -9 $MP; sleep 0.5
+  fusermount -uz $R/m5c2 2>/dev/null || umount -l $R/m5c2 2>/dev/null
+  if mnt $R/s5c2 $R/m5c2 --wal-strategy flush-on-fsync; then
+    if [ -e $R/m5c2/dir/q.txt ]; then echo "    rename with no sync after it (flush-on-fsync): kept"
+    elif [ -e $R/m5c2/dir/p.txt ]; then echo "    rename with no sync after it (flush-on-fsync): lost"
+    else echo "    rename with no sync after it (flush-on-fsync): neither p.txt nor q.txt exists"; fi
+    umnt $R/m5c2
   fi
 fi
 
@@ -181,7 +192,8 @@ T0=$SECONDS
 # window and far below the 1 GiB file.
 CAP_MIB=512
 hwm(){ awk '/^VmHWM:/{print int($2/1024)}' /proc/$MP/status 2>/dev/null; }   # daemon peak RSS, MiB
-nbuf(){ grep -c "switches to Buffered" $R/mount.log; }
+# The old Buffered mode is the overlay since #98.
+nbuf(){ grep -c "switches to overlay" $R/mount.log; }
 head -c 1073741824 /dev/urandom > $R/big.bin
 # Out-of-order writer: one handle for the whole pass, because a new open of a
 # file that has content makes the next write go to Buffered mode. 1 MiB blocks
@@ -216,7 +228,7 @@ if mnt $R/sL $R/mL; then   # default commit interval (30 s)
   if [ -n "$H3" ] && [ "$H3" -le $CAP_MIB ]; then ok daemon-rss-bounded
   else bad daemon-rss-bounded "(VmHWM $H3 MiB > cap $CAP_MIB MiB)"; fi
   B1=$(nbuf)
-  if [ "$B1" = "$B0" ]; then ok no-switch-to-buffered; else bad no-switch-to-buffered "($((B1 - B0)) switch(es))"; fi
+  if [ "$B1" = "$B0" ]; then ok no-switch-to-overlay; else bad no-switch-to-overlay "($((B1 - B0)) switch(es))"; fi
   echo "    timing: cp $TC s, out-of-order write $TW s, cmp $TM s"
   echo "    daemon VmHWM: after cp $H1 MiB, after out-of-order write $H2 MiB, after cmp $H3 MiB (cap $CAP_MIB MiB)"
   umnt $R/mL

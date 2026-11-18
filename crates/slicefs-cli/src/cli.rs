@@ -46,11 +46,17 @@ pub enum Cmd {
         allow_other: bool,
         /// WAL durability strategy: per-op, periodic, flush-on-fsync, or no-wal.
         ///
-        /// - per-op (default): sync a root or snapshot record at once; an operation
-        ///   record is durable at the next fsync, fsyncdir or commit (POSIX rules)
-        /// - flush-on-fsync: buffer mutations; flush on explicit fsync
-        /// - periodic: buffer mutations; flush on background timer or shutdown
+        /// - per-op (default): each completed request is written to the log file
+        ///   at once, so it survives a crash of the daemon; fsync, fsyncdir or a
+        ///   commit makes it survive a power loss (POSIX rules)
+        /// - flush-on-fsync: keep up to 4 MiB of records in RAM; write them to
+        ///   the log at fsync, at a commit, or when they pass 4 MiB
+        /// - periodic: as flush-on-fsync, and also sync the log every 5 s
         /// - no-wal: no write-ahead log (testing only; data loss on crash)
+        ///
+        /// After a crash with no fsync, flush-on-fsync and periodic can lose up
+        /// to the last 4 MiB of records, and a file can come back shorter: a
+        /// correct first part of the data that was written.
         #[arg(long, value_name = "STRATEGY")]
         wal_strategy: Option<String>,
         /// Mount a specific snapshot read-only (by version number or name).
