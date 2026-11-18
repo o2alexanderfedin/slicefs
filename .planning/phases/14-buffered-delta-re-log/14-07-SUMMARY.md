@@ -46,9 +46,9 @@ completed: 2026-11-18
 actuals:
   tokens: 3283      # chars/4 over the added diff lines cef0bb0..5fc3d26 (13131 chars)
   tasks: 2          # plus the extra extent-growth fix the launcher asked for
-  commits: 3        # git rev-list --count cef0bb0..HEAD before this SUMMARY commit
+  commits: 4        # git rev-list --count cef0bb0..37de6ad = 5, minus the first SUMMARY commit 86f3330
 plan_head_before: cef0bb0faf739ce52ce903a237ee4b555a6b581d
-plan_head_after: 5fc3d26df9306401995ea7c2e2dae101742c8bbc
+plan_head_after: 37de6adf98fdbe14e07067e8b212d5668a1ad2c7
 ---
 
 # Phase 14 Plan 07: Docker 1 GiB and 4 GiB under one VmHWM cap Summary
@@ -62,6 +62,7 @@ On Linux libfuse (OrbStack, release build), a 1 GiB and a 4 GiB random-write run
 | Extra | Extent grows by at most 1/8, not by doubling (with a test) | e8d32bd | overlay.rs, filesystem.rs (doc), write_log_replay_tests.rs |
 | Task 1 | CAP_MIB from the rule, the dirty-limit rule, Measured line | 2f5180b | bigwrite.sh, filesystem.rs |
 | Task 2 | write-log.md part 2 and chunk-store.md splice with the numbers | 5fc3d26 | docs/design/write-log.md, docs/design/chunk-store.md |
+| Review fix | Restart reason, slowest-write wording, plain words; tighter in-order cost bound in a lib test | 37de6ad | chunk-store.md, write-log.md, filesystem.rs (doc comment and one test assert) |
 
 ## Extra fix: extent capacity (from 14-06)
 
@@ -69,6 +70,9 @@ On Linux libfuse (OrbStack, release build), a 1 GiB and a 4 GiB random-write run
 - Now: when an extent must grow, it reserves exactly `max(need, cap + cap / GROW_DIV)` with `GROW_DIV = 8`. The spare capacity is at most 1/8 of the length. Growth stays geometric, so in-order writes stay amortized O(1). The other paths already allocated exactly.
 - RED first: `a_growing_extent_does_not_double_its_capacity` failed on the old code at 3 MiB (`cost 4194368`), then passed. It grows one extent in 1 MiB steps to 65 MiB and in 4 KiB steps to 16 MiB and asserts `cost <= len + len/8 + EXTENT_OVERHEAD` after each write.
 - The 14-06 test `an_overlay_with_more_than_64_mib_of_relog_replays` runs again with the plan's 96 MiB limit, not 256 MiB, and passes (no rebase during the 65 MiB extent). Its comment is updated.
+- Bound in numbers: the capacity of an extent is at most 9/8 of its length. At the 32 MiB limit, the overlay holds at most about 36 MiB plus one write before the rebase runs (it was up to about 64 MiB plus one write with doubling).
+- What is not shown: the new test checks the capacity, not the allocator peak. One grow step can still hold the old and the new buffer during the realloc (the 14-04 note). The bigwrite workload does not grow one large extent, so the Docker numbers do not test this fix.
+- `an_overlay_rebases_when_it_crosses_the_dirty_limit` had an in-order cost bound of 2 x limit + one write. The cost is read after each write, when a rebase has already run, so the bound is now limit + one write (commit 37de6ad; the test passes). This bound held before the fix too, so it does not test the fix.
 
 ## Step 0: tests on the final tree (macOS host, debug build)
 
@@ -161,7 +165,7 @@ The slowest write was 5870 ms (1 GiB) and 7253 ms (4 GiB), above 2000 ms. So I s
 
 Both pass the cap. The slowest write of the run is smaller with 32 MiB, so **DIRTY_LIMIT stays 32 MiB**. Per size the result is mixed (32 MiB is better at 1 GiB, 16 MiB is better at 4 GiB). The load changed from run to run, so the slowest write is noisy. Its cause is not checked: rw.py does not record which write was the slowest. A wait for the exclusive commit gate or a rebase can be the cause.
 
-The final check log is the 32 MiB run. The final code is the code of that run plus the Measured doc line.
+The final check log is the 32 MiB run. The final code is the code of that run plus the Measured doc line: `git diff e8d32bd HEAD -- crates/` shows only `///` lines and one test assert.
 
 ### DIRTY_LIMIT doc comment
 
@@ -229,5 +233,5 @@ None.
 - FOUND: `CAP_MIB=256` in scripts/docker-linux-test/bigwrite.sh (`bash -n` ok)
 - FOUND: the `/// Measured (#98, Docker, release build):` line (grep count 1); `pub const DIRTY_LIMIT: usize = 32 << 20;`
 - FOUND: `GROW_DIV` and `a_growing_extent_does_not_double_its_capacity` in overlay.rs
-- FOUND commits (ancestors of HEAD): e8d32bd, 2f5180b, 5fc3d26; `git rev-list --count cef0bb0..5fc3d26` = 3
+- FOUND commits (ancestors of HEAD): e8d32bd, 2f5180b, 5fc3d26, 86f3330 (first SUMMARY), 37de6ad
 - Volume `slicefs-target-1407` removed; no other volume touched
