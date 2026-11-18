@@ -24,6 +24,14 @@ RE-SCOPED 2026-11-18 by the user ("it never should keep files in memory - 1 GiB 
 - GC: a rebase outside the commit gate is protected from online GC (GC root or rebase/GC lock), with a test that runs GC during a rebase.
 - Open questions: can the manifest replace a range of chunk references without a full rewrite of the chunk list; is a global limit over all open handles also needed.
 
+### Decisions on the research open questions (2026-11-18, orchestrator; see 14-RESEARCH.md)
+- Chunking stays deterministic: the same bytes give the same chunks and the same file key, whatever the write history. No forced cut to bound rebase CPU. A rebase over long repeating non-zero data may be slow, but memory stays fixed. Zero runs may use the exact shortcut that keeps chunk IDs. — **Reversibility:** costly — dedup and content-addressed keys depend on it (global/decentralized goal)
+- No rebase at fsync. Fsync stays durable through the write log. A rebase runs when the dirty limit is crossed (inside that FUSE callback) and at close.
+- Dirty limit is per open file in this phase; start at 32 MiB, set the final value from measured runs. A global limit over all open files is a follow-up issue.
+- RAM that grows with written bytes in the flush-on-fsync and periodic log modes, and pending records loaded at replay, are follow-up issues. The Docker memory test uses the default per-op log.
+- Phase 13 is executed (PR #100). Phase 14 execution starts after #100 is merged into develop. Keep the "switches to Buffered" log text or update the Phase 13 Docker check in the same change.
+- The chunk-list splice API in chunk-store/src/file.rs is IN scope now (the old deferral is void).
+
 ### SUPERSEDED (pre-2026-11-18 scope: delta re-log while the full buffer stays in RAM)
 The "Decided autonomously" items below were written for the old scope. Keep only what still applies (replay rules, shrink-then-extend zeros, write aliases on the owner state, test_write taking the state out of open_files, GC race). Ignore anything that keeps a full-file buffer.
 
