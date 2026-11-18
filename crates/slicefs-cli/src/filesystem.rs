@@ -82,6 +82,10 @@ const RELOG_PIECE: u64 = 1 << 20;
 /// doubling, so the capacity stays near the dirty bytes. The real
 /// peak of one handle is max(REORDER_WINDOW, DIRTY_LIMIT) + one write + the
 /// rebase work space (one piece and the stream state).
+/// Measured (#98, Docker, release build): VmHWM 114 MiB (1 GiB) and 161 MiB (4 GiB), cap 256 MiB;
+/// slowest write 5870 ms (1 GiB) and 7253 ms (4 GiB). Both are above 2000 ms,
+/// so 16 MiB was also run: 7778 ms and 5726 ms (VmHWM 97 and 146 MiB). The
+/// slowest write did not get smaller, so the value stays 32 MiB.
 pub const DIRTY_LIMIT: usize = 32 << 20;
 
 /// A function the tests run inside a rebase (see `test_set_rebase_hook`).

@@ -6,7 +6,12 @@
 # Runs inside the Docker container (run.sh bigwrite). By hand only, not in CI.
 # Usage: bigwrite.sh <slicefs-binary> [size-MiB ...]   (default: 1024 4096)
 B=$1; shift; SIZES=("$@"); [ ${#SIZES[@]} -gt 0 ] || SIZES=(1024 4096)
-CAP_MIB=            # empty: measure only. Set: fail a size above the cap or with no overlay switch.
+# Cap rule (plan 14-07): P1 = VmHWM after cmp of a measure-only 1024 MiB run;
+# P1 <= 170 MiB gives 256 MiB. Measured 2026-11-18, release build, DIRTY_LIMIT
+# 32 MiB: P1 117 MiB (after cp 30, after random write 82). The same cap holds
+# for 1 GiB and 4 GiB (#98). Empty: measure only. Set: fail a size above the
+# cap or with no overlay switch.
+CAP_MIB=256
 VOL_MIB=512         # random-write volume per size
 SEED=98
 SWITCH_TEXT="switches to overlay"
