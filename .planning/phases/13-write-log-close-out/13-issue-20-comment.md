@@ -21,7 +21,7 @@ All acceptance items of this issue now map to a test that passes, or to a follow
 **4. A large copy keeps the daemon memory bounded (was: 786 MB over FUSE-T NFS). Restated. Done.**
 SliceFS does not have the NFS backend now. On macOS it uses only the FSKit backend. On the old NFS backend, the copy of the 786 MB Boost tar took 228 s with a daemon peak RSS of 43 MB (see #2). The check is now:
 - Linux (libfuse, Docker, debug build): the section "Large copy" in `verify-phases.sh`. It makes a 1 GiB random file and copies it with `cp` (in order). Then one process writes the file again on one handle, in 1 MiB blocks, in reverse order inside each 16 MiB group. These are out-of-order writes inside the 64 MiB reorder window, as an NFS client can send them. The process calls `fsync` after each 64 MiB, as the NFS COMMIT calls did. The mount uses the default commit interval (30 s). `cmp` passes after the copy and after a remount. No handle switches to Buffered mode. Daemon peak RSS (`VmHWM`): 84 MiB after `cp`, 112 MiB after the `cmp` steps (before the unmount). An earlier run of the same check measured 130 MiB. The check fails above 512 MiB. `docker stats` for the container: 114.8 MiB at the peak.
-- macOS (FSKit, by hand; the steps are in `scripts/macos-mount-test/README.md`): a {{FSKIT_SIZE}} file, daemon peak RSS {{FSKIT_PEAK_RSS_MIB}} MiB (from `ps -o rss=` each second), `cmp` {{FSKIT_CMP}} after the copy and after a remount, commit {{FSKIT_COMMIT}}.
+- macOS (FSKit, by hand): the steps are in `scripts/macos-mount-test/README.md` (section "Large copy on FSKit (by hand, #20)"). The run by hand is not done yet; its result (file size, peak RSS, both `cmp` results, commit) will come in a later comment.
 - Many small files on FSKit: the Boost round trip in `.github/workflows/macos-mounts.yml`.
 
 Limit of the bound: it holds for writes in order, and for out-of-order writes inside the 64 MiB reorder window. A write before the stream position, an overlap, or a gap larger than the window still puts the handle in Buffered mode, which keeps the whole file in RAM. Part 2 of the design (see the last section) removes Buffered mode.
@@ -35,4 +35,4 @@ The open part: a commit writes the full buffer of each open Buffered file to the
 **Not in the acceptance list**
 Part 2 of the design (overlays, re-chunk at commit, no Buffered mode) is not done. It continues in #98; see also #21 and #22.
 
-Evidence: merge commit {{MERGE_SHA}}, CI run {{CI_RUN_URL}}.
+Evidence: merge commit 25df966 (#100), CI run https://github.com/o2alexanderfedin/slicefs/actions/runs/44276820085.
