@@ -24,7 +24,7 @@
 //! a hash (FastCDC cuts zeros at `CHUNK_MAX`). The key is the key of a full
 //! write of the same bytes.
 
-use crate::{chunk_ranges, hashers, ChunkStore, Error, ObjectId, Result, CHUNK_MAX, DIGEST_LEN, ID_LEN};
+use crate::{chunk_ranges, hashers, ChunkStore, Error, ObjectId, Result, CHUNK_AVG, CHUNK_MAX, DIGEST_LEN, ID_LEN};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
@@ -650,7 +650,12 @@ pub fn splice(
             }
             let at = start + buf.len() as u64;
             if at < new_len {
-                let n = ((2 * max - buf.len()) as u64).min(new_len - at) as usize;
+                // Every byte up to the end of the region is cut again, so
+                // read it in big pieces. Past it, the re-chunk can stop at
+                // any old cut, so read only CHUNK_AVG at a time: a read-ahead
+                // of 2 * CHUNK_MAX read about three times the bytes it cut.
+                let want = end.saturating_sub(at) + CHUNK_AVG as u64;
+                let n = want.min((2 * max - buf.len()) as u64).min(new_len - at) as usize;
                 let t = std::time::Instant::now();
                 let piece = src.read(at, n)?;
                 crate::probe::add(&crate::probe::SRC_NS, t);
@@ -1093,6 +1098,52 @@ mod tests {
         w.write(&s, &last).unwrap();
         assert_eq!(got, w.finish(&s).unwrap(), "shrink: {st:?}");
         assert!(st.reused_entries < 5000, "shrink: {st:?}");
+    }
+
+    /// A `VecSource` that counts the bytes the splice asks for.
+    struct CountingSource<'a> {
+        data: &'a [u8],
+        asked: u64,
+    }
+
+    impl SpliceSource for CountingSource<'_> {
+        fn read(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
+            self.asked += len as u64;
+            Ok(self.data[offset as usize..offset as usize + len].to_vec())
+        }
+    }
+
+    /// Many small scattered writes (a rebase of random 4 KiB writes): the
+    /// splice reads about the bytes it cuts again, not a full read-ahead of
+    /// 2 * CHUNK_MAX past each change (that read three times the re-chunked
+    /// bytes, and a mount reads and verifies each of them from the store).
+    #[test]
+    fn scattered_small_edits_read_little_more_than_they_rechunk() {
+        let s = fast_store();
+        let mut rng = Rng(0x5eed_1234_abcd_0005);
+        let base = rng.bytes(16 << 20);
+        let n = base.len() as u64;
+        let key = full_write(&s, &base);
+        // 1000 writes of 4 KiB at 4 KiB-aligned offsets, and two of 256 KiB.
+        let mut starts: Vec<u64> = (0..1000).map(|_| rng.below(n / 4096) * 4096).collect();
+        starts.push(n / 3 / 4096 * 4096);
+        starts.push(2 * n / 3 / 4096 * 4096);
+        starts.sort_unstable();
+        starts.dedup();
+        let mut changed: Vec<Range<u64>> = Vec::new();
+        for (i, &a) in starts.iter().enumerate() {
+            let len = if a == n / 3 / 4096 * 4096 || a == 2 * n / 3 / 4096 * 4096 { 256 << 10 } else { 4096 };
+            let b = (a + len).min(starts.get(i + 1).copied().unwrap_or(n));
+            changed.push(a..b);
+        }
+        let ed = Edit { keep: n, changed, new_len: n };
+        let data = new_content(&base, &ed, &mut rng);
+        let mut src = CountingSource { data: &data, asked: 0 };
+        let (got, st) = splice(&s, Some(key), ed.keep, &ed.changed, ed.new_len, &mut src).unwrap();
+        assert_eq!(got, full_write(&s, &data), "the key of a full write");
+        let ratio = src.asked as f64 / st.rechunked as f64;
+        eprintln!("scattered edits: rechunked {} B, asked {} B ({ratio:.2}x)", st.rechunked, src.asked);
+        assert!(src.asked <= st.rechunked + st.rechunked / 2, "asked {} B to re-chunk {} B ({ratio:.2}x)", src.asked, st.rechunked);
     }
 
     /// New bytes that start at `at` (the splice reads nothing before).
