@@ -55,7 +55,9 @@ Spike code (on this branch):
   this spike used the volume `slicefs-target-walspike`.
 
 Run order: the modes were interleaved (base, A, B, base, A, B, ...),
-5 rounds for each throughput case, 3 rounds for each memory case:
+5 rounds for each throughput case, 3 rounds for each memory case. We give
+the median and the minimum. CPU time is user + system time of the process
+(getrusage). The `write()` counts do not depend on load.
 
 ```
 BIN=<target>/release/deps/wal_spike_bench-<hash>
@@ -69,9 +71,7 @@ done; done; done
 
 Docker: `SLICEFS_TARGET_VOL=slicefs-target-walspike SPIKE_REPS=3
 scripts/docker-linux-test/run.sh walspike` (`SPIKE_CP_REPS`,
-`SPIKE_SKIP_KILL` and `SPIKE_SKIP_CAPCUT` select parts). We give
-the median and the minimum. CPU time is user + system time of the process
-(getrusage). The `write()` counts do not depend on load.
+`SPIKE_SKIP_KILL` and `SPIKE_SKIP_CAPCUT` select parts).
 
 ### Machine and load
 
@@ -243,15 +243,14 @@ small.
 
 **Read and write performance.** Reads do not change in any option (by
 reasoning: the write log is not on the read path; we did not measure
-reads). For
-data writes of 4 KiB or more, A costs nothing that we can measure
-(cases a and b, and the 1 GiB `cp` in Docker), because those records
-already go past the 8 KiB buffer. For small-file work A costs +8 % CPU
-in-process (case c, three `write()` calls per file instead of one). The
-worst case, very small writes, costs about 6 µs per request on APFS
-(case d). In a real mount, each request also pays a FUSE round trip, so
-the relative cost is smaller. The number of fsync calls does not change (measured for per-op and for
-capped flush-on-fsync).
+reads). For data writes of 4 KiB or more, A costs nothing that we can
+measure (cases a and b, and the 1 GiB `cp` in Docker), because those
+records already go past the 8 KiB buffer. For small-file work A costs
++8 % CPU in-process (case c, three `write()` calls per file instead of
+one). The worst case, very small writes, costs about 6 µs per request on
+APFS (case d). In a real mount, each request also pays a FUSE round trip,
+so the relative cost is smaller. The number of fsync calls does not
+change (measured for per-op and for capped flush-on-fsync).
 
 **Safety.** A is the only option where a kill -9 of the daemon (a crash,
 the OOM killer, a panic) loses no completed request in the default mode.
