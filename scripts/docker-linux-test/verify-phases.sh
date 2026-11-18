@@ -93,6 +93,56 @@ if mnt $R/s5b $R/m5b --commit-interval 0; then   # no commit: only the write log
   fi
 fi
 
+echo "== Phase 05c: a rename is durable after an fsync of the directory only (write log, #20)"
+$B seed $R/s5c $R/src >/dev/null 2>&1
+if mnt $R/s5c $R/m5c --commit-interval 0; then   # no commit: only the write log can keep these
+  mkdir $R/m5c/dir; head -c 2000000 /dev/urandom > $R/d.bin
+  dd if=$R/d.bin of=$R/m5c/dir/d.bin bs=64k conv=fsync status=none   # file and mkdir now durable
+  echo p > $R/m5c/dir/p.txt   # not synced yet
+  mv $R/m5c/dir/d.bin $R/m5c/dir/renamed.bin
+  # The only sync after the rename: fsync of the directory (coreutils 9
+  # `sync FILE` fsyncs the path; the kernel sends FUSE FSYNCDIR). No file
+  # fsync comes after the rename.
+  timeout -s KILL 10 sync $R/m5c/dir || bad dir-fsync
+  mv $R/m5c/dir/p.txt $R/m5c/dir/q.txt   # control: no sync after this rename
+  kill -9 $MP; sleep 0.5
+  fusermount -uz $R/m5c 2>/dev/null || umount -l $R/m5c 2>/dev/null
+  if mnt $R/s5c $R/m5c; then
+    grep -h "Replayed" $R/mount.log | tail -1 | sed 's/^/    /'
+    step rename-survives-dir-fsync 30 cmp $R/d.bin $R/m5c/dir/renamed.bin
+    step old-name-gone-after-dir-fsync 5 bash -c "[ ! -e $R/m5c/dir/d.bin ]"
+    # "lost" shows that the fsync of the directory, and nothing else, kept the
+    # first rename. The p.txt create is durable through that sync, so "lost"
+    # means only the second rename was lost.
+    if [ -e $R/m5c/dir/q.txt ]; then echo "    rename with no sync after it: kept"
+    elif [ -e $R/m5c/dir/p.txt ]; then echo "    rename with no sync after it: lost"
+    else echo "    rename with no sync after it: neither p.txt nor q.txt exists"; fi
+    umnt $R/m5c
+  fi
+fi
+
+echo "== Phase 05d: a torn last record does not stop the mount (write log, #20)"
+$B seed $R/s5d $R/src >/dev/null 2>&1
+if mnt $R/s5d $R/m5d --commit-interval 0; then
+  head -c 1000000 /dev/urandom > $R/e.bin
+  dd if=$R/e.bin of=$R/m5d/e.bin bs=64k conv=fsync status=none
+  # The sacrificial last record: after this sync the mkdir is the last record on disk.
+  mkdir $R/m5d/last; timeout -s KILL 10 sync $R/m5d
+  kill -9 $MP; sleep 0.5
+  fusermount -uz $R/m5d 2>/dev/null || umount -l $R/m5d 2>/dev/null
+  # Cut the last record as a power loss can.
+  SEG=$(ls $R/s5d/segments/segment-*.seg | sort -V | tail -1)
+  truncate -s -3 "$SEG"; echo "    cut 3 bytes of $(basename "$SEG")"
+  if mnt $R/s5d $R/m5d; then ok mount-with-torn-last-record
+    grep -h "Replayed" $R/mount.log | tail -1 | sed 's/^/    /'
+    step records-before-the-tear-kept 30 cmp $R/e.bin $R/m5d/e.bin
+    step torn-record-not-applied 5 bash -c "[ ! -e $R/m5d/last ]"
+    step write-after-torn-tail 10 bash -c "echo again > $R/m5d/new.txt && [ \"\$(cat $R/m5d/new.txt)\" = again ]"
+    umnt $R/m5d
+    step scrub-after-torn-tail 120 $B scrub $R/s5d
+  fi
+fi
+
 echo "== FUSET-05: SIGTERM, SIGINT (Ctrl+C) and SIGHUP end the mount cleanly (final commit, no mount.lock)"
 # A background job ignores SIGINT; env --default-signal gives the mount the
 # default action, as a terminal does for Ctrl+C.
