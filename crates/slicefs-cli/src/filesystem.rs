@@ -3926,7 +3926,7 @@ mod tests {
         // The splice cuts the two written ranges again; the zero gap between
         // them takes the zero shortcut (no read, no hash).
         let last = fs.test_last_rebase_bytes();
-        assert!(last >= 128 << 10 && last < 256 << 10, "rebase re-chunked {last} bytes");
+        assert!((128 << 10..256 << 10).contains(&last), "rebase re-chunked {last} bytes");
         fs.test_set_rebase_hook(None);
         let seen = seen.lock().unwrap().clone();
         let after = fs.meta.get_manifest(ino).unwrap().first().copied();
