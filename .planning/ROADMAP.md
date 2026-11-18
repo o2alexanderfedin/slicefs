@@ -184,7 +184,17 @@ Plans:
   3. Replay after a crash gives the same content, size and times, for PerOp and FlushOnFsync
   4. The commit gate is not held for the hash of a whole file; online GC during a rebase loses no chunk
   5. After a small change in a large file, the store grows by about the changed chunks only
-**Plans**: TBD
+**Plans**: 8 plans
+
+Plans:
+- [ ] 14-01-PLAN.md — tracer A: overlay.rs + property tests; switch (install_root), write, merged read; release/destroy rebase by whole-file re-stream; real overlay arm at every former full-buffer site; alias test (wave 1)
+- [ ] 14-02-PLAN.md — chunk-store splice: leaf cursor, canonical restart/resync, whole-node reuse, zero shortcut, full-write oracle tests (wave 1)
+- [ ] 14-03-PLAN.md — Docker bigwrite.sh + run.sh bigwrite mode (release, per-op, GC off), 1 GiB "before" run on the old code (wave 1)
+- [ ] 14-04-PLAN.md — tracer B: dirty limit + test hooks, relog in 1 MiB pieces after the commit, Streaming setattr case, switch text with the Phase 13 check, grep gates, counting-allocator test (wave 2)
+- [ ] 14-05-PLAN.md — rebase body and no-handle setattr use the splice; re-chunk bound, store growth and GC-during-rebase tests; BUFR-03 reading (wave 3)
+- [ ] 14-06-PLAN.md — relog-size test (BUFR-01), replay matrix for per-op and flush-on-fsync at 3 crash points, 64 MiB record regression, no rebase in fsync/commit (wave 3)
+- [ ] 14-07-PLAN.md — test pre-step on the merged tree, Docker 1 GiB and 4 GiB under one cap (rule fixed in advance), final DIRTY_LIMIT, verify run, design notes (wave 4)
+- [ ] 14-08-PLAN.md — evidence run, draft texts, user merge + approval checkpoint, follow-up issues, close #98 and #93 (wave 5, checkpoint)
 
 ### Phase 15: Pack-file measurements
 **Goal**: The #8 numbers are recorded in `docs/design/chunk-store.md` and #8 is closed
@@ -225,7 +235,18 @@ Plans:
   2. Crash tests during a run flush and a merge lose no object and give no wrong `Loc`
   3. GC tests show that no lookup returns an object that online GC removed
   4. The Phase 16 benchmark with the new index shows the RAM per object, cold-open time, lookup and write throughput against the baseline
-**Plans**: TBD
+**Plans**: 9 plans
+
+Plans:
+- [ ] 17-01-PLAN.md — spike: custom sorted runs vs fjall on index-bench at 1M/10M, fjall legitimacy gate, decision checkpoint (wave 1, checkpoint)
+- [ ] 17-02-PLAN.md — run file format (pages, fences, tag table, footer) and PackIo run/MANIFEST kinds on FileIo, MemIo and RetryingIo; tracer of the run I/O path (wave 2)
+- [ ] 17-03-PLAN.md — tracer of the store: memtable, MANIFEST, replay above the high-water mark, exact stats, GC that changes nothing after an index read error, the in-RAM map removed (wave 3)
+- [ ] 17-04-PLAN.md — open-time cleanup, rebuild of a damaged index, the rebuild flag, layered damage test, read-only open, MemIo fault knobs, run-flush crash tests (wave 4)
+- [ ] 17-05-PLAN.md — blocked Bloom filter, sharded memtable, lookups outside the store lock with gen revalidation, race tests with hook flags, IDX-01/IDX-02 read-count tests (wave 5)
+- [ ] 17-06-PLAN.md — size-tiered background merges, crash-safe install, damage leads to a rebuild, shutdown, merge crash tests (wave 6)
+- [ ] 17-07-PLAN.md — GC from a run snapshot outside the store lock, pending GC runs and one install, no change after a read error, visibility, fault and lock tests (wave 7)
+- [ ] 17-08-PLAN.md — index-bench store-wide disk bytes, index keys and gc step; 1M/10M/100M runs and GC lock hold at 10M/100M; "Index on disk" and "Index results (#85)" in docs/design/chunk-store.md (wave 8)
+- [ ] 17-09-PLAN.md — #85 comment and close, follow-up issues, after merge and green CI (wave 9, checkpoint)
 
 ## Progress
 
