@@ -181,7 +181,8 @@ T0=$SECONDS
 # window and far below the 1 GiB file.
 CAP_MIB=512
 hwm(){ awk '/^VmHWM:/{print int($2/1024)}' /proc/$MP/status 2>/dev/null; }   # daemon peak RSS, MiB
-nbuf(){ grep -c "switches to Buffered" $R/mount.log; }
+# The old Buffered mode is the overlay since #98.
+nbuf(){ grep -c "switches to overlay" $R/mount.log; }
 head -c 1073741824 /dev/urandom > $R/big.bin
 # Out-of-order writer: one handle for the whole pass, because a new open of a
 # file that has content makes the next write go to Buffered mode. 1 MiB blocks
@@ -216,7 +217,7 @@ if mnt $R/sL $R/mL; then   # default commit interval (30 s)
   if [ -n "$H3" ] && [ "$H3" -le $CAP_MIB ]; then ok daemon-rss-bounded
   else bad daemon-rss-bounded "(VmHWM $H3 MiB > cap $CAP_MIB MiB)"; fi
   B1=$(nbuf)
-  if [ "$B1" = "$B0" ]; then ok no-switch-to-buffered; else bad no-switch-to-buffered "($((B1 - B0)) switch(es))"; fi
+  if [ "$B1" = "$B0" ]; then ok no-switch-to-overlay; else bad no-switch-to-overlay "($((B1 - B0)) switch(es))"; fi
   echo "    timing: cp $TC s, out-of-order write $TW s, cmp $TM s"
   echo "    daemon VmHWM: after cp $H1 MiB, after out-of-order write $H2 MiB, after cmp $H3 MiB (cap $CAP_MIB MiB)"
   umnt $R/mL

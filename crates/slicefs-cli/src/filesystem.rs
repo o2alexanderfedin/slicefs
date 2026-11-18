@@ -643,21 +643,6 @@ impl SliceFsFilesystem {
             && self.meta.get_manifest(ino).map_or(false, |m| !m.is_empty())
     }
 
-    /// Current content of a streaming handle: what it streamed so far, or the
-    /// committed file content if it has not streamed anything yet.
-    fn handle_content(&self, ino: u64, state: &Stream, streamed: u64) -> Vec<u8> {
-        if streamed > 0 {
-            state.clone().finish(&self.content).ok()
-                .and_then(|k| content::get_all(&self.content, &k))
-                .unwrap_or_default()
-        } else {
-            match self.meta.get_manifest(ino) {
-                Ok(m) if !m.is_empty() => content::get_all(&self.content, &m[0]).unwrap_or_default(),
-                _ => Vec::new(),
-            }
-        }
-    }
-
     /// Make `new` the content root of `ino` (`None`: no content) and stamp
     /// the inode with `size` and `modified`. The refcount of the new root goes
     /// up and that of the root the manifest named before goes down. A root
@@ -957,7 +942,7 @@ impl SliceFsFilesystem {
                 } else {
                     // Random write: switch to an overlay on the stored content.
                     let ino = file_state.ino;
-                    eprintln!("[{}][FUSE] write: fh={} ino={} switches to Buffered (offset={} len={} expected={} pending={} fresh={} overlap={})",
+                    eprintln!("[{}][FUSE] write: fh={} ino={} switches to overlay (offset={} len={} expected={} pending={} fresh={} overlap={})",
                         ts(), fh, ino, offset, data.len(), *next_expected_offset, pending_bytes, fresh, overlaps_pending);
                     // Older pending writes go in first, then this (newest) write.
                     match self.to_overlay(&mut file_state) {
@@ -1409,10 +1394,12 @@ impl SliceFsFilesystem {
 
 
     /// Truncate/extend a file to `new_size` bytes. If `fh` is Some and open,
-    /// operates on the in-flight write state; otherwise reads from CAS, adjusts, re-pushes.
+    /// operates on the in-flight write state; otherwise streams the committed
+    /// content into a new tree in 1 MiB pieces.
     ///
     /// Dual dispatch on WriteMode:
-    /// - Streaming: materialize via clone+end, resize, repush into fresh State.
+    /// - Streaming: an extension only records the size; 0 starts a fresh
+    ///   stream; any other size switches to an overlay (no content read).
     /// - Overlay: only the size and the extents change (no I/O, no allocation
     ///   by size); a resize to 0 goes back to a fresh stream.
     pub fn test_setattr_size(&self, ino: u64, fh: Option<u64>, new_size: u64) -> Result<(), i32> {
@@ -1478,7 +1465,7 @@ impl SliceFsFilesystem {
                             drop(open_files);
                         }
                     }
-                    WriteMode::Streaming { state, next_expected_offset, .. } => {
+                    WriteMode::Streaming { .. } => {
                         if new_size == 0 {
                             // Fast path: reset to empty Streaming State
                             let old_root = s.last_committed_root.take();
@@ -1493,44 +1480,21 @@ impl SliceFsFilesystem {
                             }
                             self.clear_manifest(ino, old_root)?;
                         } else {
-                            // Materialize current content (the file's existing
-                            // content if this handle has not streamed yet).
-                            let snapshot = state.clone();
-                            let streamed = *next_expected_offset;
-                            let old_root = s.last_committed_root.take();
-                            drop(open_files); // Release before io lock
-
-                            let mut content: Vec<u8> = self.handle_content(ino, &snapshot, streamed);
-
-                            // Truncate or zero-extend
-                            content.resize(new_size as usize, 0);
-
-                            // Push into fresh State
-                            let new_state_and_count = {
-                                let mut fresh = Stream::default();
-                                fresh.push(&self.content, &content).map_err(|_| libc::EIO)?;
-                                (fresh, content.len() as u64)
-                            };
-
-                            // Update OpenFileState
-                            let mut open_files = self.open_files.lock().unwrap();
-                            if let Some(s) = open_files.get_mut(&fh_val) {
-                                s.write_mode = WriteMode::Streaming {
-                                    state: new_state_and_count.0,
-                                    next_expected_offset: new_state_and_count.1,
-                                    pending: BTreeMap::new(),
-                                };
-                                s.byte_count = new_state_and_count.1;
-                                s.min_size = 0;
-                                s.cas_committed = false;                                s.modified = Some(now_pair());
-                                s.last_committed_root = None;
-                            }
-                            drop(open_files);
-
-                            // Decrement old committed root if any
-                            if let Some(old) = old_root {
-                                self.meta.decrement_refcount(&old);
-                            }
+                            // Not a pure extension: switch to an overlay on
+                            // the content so far and cut or extend it there.
+                            // No file content is read.
+                            let mut st = open_files.remove(&fh_val).expect("state is in the map");
+                            drop(open_files); // Release before io
+                            let switched = self.to_overlay(&mut st).map(|_| {
+                                if let WriteMode::Overlay(ov) = &mut st.write_mode {
+                                    ov.truncate(new_size);
+                                    st.byte_count = ov.size;
+                                }
+                                st.cas_committed = false;
+                                st.modified = Some(now_pair());
+                            });
+                            self.open_files.lock().unwrap().insert(fh_val, st);
+                            switched?;
                         }
                     }
                 }
@@ -3958,5 +3922,46 @@ mod tests {
         assert_eq!(covered, 3 << 20);
         fs.test_release(ino, fh).unwrap();
         assert!(fs.test_read(ino, 0, (4 << 20) as u32).unwrap() == big);
+    }
+
+    #[test]
+    fn a_streaming_shrink_to_a_nonzero_size_switches_to_an_overlay() {
+        let (fs, _dir) = fresh_fs();
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        let old = seeded(1, 300_000);
+        fs.test_write(fh, 0, &old).unwrap();
+        fs.test_release(ino, fh).unwrap();
+        let root = fs.meta.get_manifest(ino).unwrap()[0];
+        assert_eq!(fs.meta.get_refcount(&root), 1);
+
+        let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+        assert!(fs.test_is_streaming(fh));
+        let n = 100_000usize;
+        fs.test_setattr_size(ino, Some(fh), n as u64).unwrap();
+        assert!(!fs.test_is_streaming(fh), "a shrink of a stored file switches to an overlay");
+        // The base is the stored root: it stays in the manifest with its count.
+        assert_eq!(fs.meta.get_manifest(ino).unwrap(), vec![root]);
+        assert_eq!(fs.meta.get_refcount(&root), 1);
+        assert_eq!(fs.test_getattr(ino).unwrap().size, n as u64);
+        let tail = seeded(2, 5000);
+        fs.test_write(fh, 200_000, &tail).unwrap();
+        fs.test_release(ino, fh).unwrap();
+
+        let mut model = old[..n].to_vec();
+        model.resize(200_000, 0);
+        model.extend_from_slice(&tail);
+        assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "first n bytes, zeros, the write");
+        assert_eq!(fs.test_getattr(ino).unwrap().size, model.len() as u64);
+        let new_root = fs.meta.get_manifest(ino).unwrap()[0];
+        assert_eq!(fs.meta.get_refcount(&new_root), 1);
+        assert_eq!(fs.meta.get_refcount(&root), 0, "the replaced root is released once");
+
+        // A handle that streamed bytes: a shrink keeps the first n of them.
+        let (ino2, fh2) = fs.test_create(1, "g", 0o644, 0, 0, 0).unwrap();
+        fs.test_write(fh2, 0, &old).unwrap();
+        fs.test_setattr_size(ino2, Some(fh2), n as u64).unwrap();
+        assert!(!fs.test_is_streaming(fh2));
+        fs.test_release(ino2, fh2).unwrap();
+        assert!(fs.test_read(ino2, 0, 1 << 20).unwrap() == old[..n], "streamed bytes cut at n");
     }
 }
