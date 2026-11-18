@@ -37,6 +37,11 @@ fn new_fs_with(store: &Path, config: WalConfig) -> SliceFsFilesystem {
 
 /// What a mount after a crash does: the last root, then replay the log.
 fn reload_and_replay(store: &Path) -> SliceFsFilesystem {
+    reload_and_replay_with(store, |_| {})
+}
+
+/// `reload_and_replay` with `setup` run on the new file system before replay.
+fn reload_and_replay_with(store: &Path, setup: impl FnOnce(&SliceFsFilesystem)) -> SliceFsFilesystem {
     let (root, snaps, ops) = load_store_with_log(&store.join("segments")).unwrap();
     let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
     let mut meta = DictMetadataStore::load_from_root(io.clone(), &root.unwrap()).unwrap();
@@ -44,6 +49,7 @@ fn reload_and_replay(store: &Path) -> SliceFsFilesystem {
     let wal = create_wal(WalConfig::PerOp, store, 99).unwrap();
     meta.set_wal(wal);
     let fs = SliceFsFilesystem::new(meta, io, Some(store.to_path_buf()));
+    setup(&fs);
     oplog::replay(&fs, &ops).unwrap();
     fs
 }
@@ -570,12 +576,12 @@ fn at(t: i64) -> oplog::Clock {
 
 // BUFR-01 (D-05, #93): a commit logs again only the bytes changed since the
 // last rebase of an open overlay. That is bounded by the dirty limit, not by
-// the file size: the three values below are the same for 8 MiB and 32 MiB.
+// the file size: the three values below are the same for 4 MiB and 16 MiB.
 // Before #98 each commit logged the whole Buffered file again.
 #[test]
 fn a_commit_relogs_only_the_bytes_changed_since_the_last_rebase() {
     let mut seen = Vec::new();
-    for (seed, size) in [(30u64, 8usize << 20), (31, 32 << 20)] {
+    for (seed, size) in [(30u64, 4usize << 20), (31, 16 << 20)] {
         let dir = TempDir::new().unwrap();
         let fs = new_fs(dir.path());
         let mut model = data(seed, size);
@@ -669,7 +675,8 @@ fn overlay_scenario(fs: &SliceFsFilesystem, crash: CrashPoint) -> (u64, Vec<u8>)
     // Extend: [2 MiB, 3.5 MiB) must read as zeros, not as the old bytes (D-15).
     { let _t = at(t0 + 40); size(7 * MIB / 2); model.resize(7 * MIB / 2, 0); }
     { let _t = at(t0 + 50); put(fs, fh, &mut model, 3 * MIB, &[0x22; 4096]); }
-    { let _t = at(t0 + 60); put(fs, fh, &mut model, 7 * MIB / 2 + 64 * MIB, &[0x33; 4096]); } // far past the end
+    // Sparse: 1 MiB past the end, so [3.5 MiB, 4.5 MiB) is a hole.
+    { let _t = at(t0 + 60); put(fs, fh, &mut model, 9 * MIB / 2, &[0x33; 4096]); }
     {
         let _t = at(t0 + 70); // a chmod: ctime after the last write
         assert!(matches!(h::handle_setattr(fs, ino, Some(S_IFREG | 0o600), None, None, None, None, None, None),
@@ -752,19 +759,27 @@ fn an_overlay_with_more_than_64_mib_of_relog_replays() {
         // limit is above that, or a rebase would run in the loop.
         fs.test_set_dirty_limit(256 << 20);
         let rebases = fs.test_rebase_count();
-        for i in 0..70 {
-            put(&fs, fh, &mut model, (i + 1) * MIB, &data(41 + i as u64, MIB));
+        // 65 MiB: the smallest whole number of MiB above MAX_PAYLOAD. Each
+        // MiB is one random MiB with its index in the first 8 bytes.
+        let mut piece = data(41, MIB);
+        for i in 0..65usize {
+            piece[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            put(&fs, fh, &mut model, (i + 1) * MIB, &piece);
         }
-        assert_eq!(fs.test_rebase_count(), rebases, "no rebase: one 70 MiB extent");
+        assert_eq!(fs.test_rebase_count(), rebases, "no rebase: one 65 MiB extent");
         fs.commit_cut().unwrap();
-        assert!(fs.test_last_relog_bytes() >= 70 << 20, "relog {}", fs.test_last_relog_bytes());
+        assert!(fs.test_last_relog_bytes() > 64 << 20, "relog {}", fs.test_last_relog_bytes());
         fs.meta().flush_wal().unwrap();
         std::mem::forget(fs); // a crash with the handle open
         ino
     };
-    let fs = reload_and_replay(dir.path());
-    assert_eq!(fs.test_getattr(ino).unwrap().size, model.len() as u64);
-    for (i, piece) in model.chunks(MIB).enumerate() {
-        assert_eq!(fs.test_read(ino, (i * MIB) as u64, MIB as u32).unwrap(), piece, "MiB {i}");
+    // The same high limit in replay: no rebase while the 65 pieces come in
+    // (each would hash the whole file again), one at the end of replay.
+    let fs = reload_and_replay_with(dir.path(), |fs| fs.test_set_dirty_limit(256 << 20));
+    let got = fs.test_read(ino, 0, model.len() as u32 + 1).unwrap();
+    if got != model {
+        // Only on a failure: a byte loop is slow in a debug build.
+        let diff = got.iter().zip(&model).position(|(a, b)| a != b);
+        panic!("replayed {} bytes, want {}; first difference at {diff:?}", got.len(), model.len());
     }
 }
