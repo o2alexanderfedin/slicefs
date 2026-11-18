@@ -9,27 +9,37 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-/// The two kinds of file of one pack.
+/// The kinds of file of the store: the two files of one pack, and the
+/// files of the store index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
     /// The records.
     Pack,
     /// The index of a sealed pack.
     Idx,
+    /// A sorted run of the store index (see `run.rs`).
+    Run,
+    /// The list of live runs of the store index. There is one; callers
+    /// pass the number 0.
+    Manifest,
 }
 
 impl Kind {
-    fn ext(self) -> &'static str {
-        match self {
-            Kind::Pack => "pack",
-            Kind::Idx => "idx",
-        }
+    /// True for the files of the store index. They live in their own
+    /// directory, next to the pack directory.
+    pub fn is_index(self) -> bool {
+        matches!(self, Kind::Run | Kind::Manifest)
     }
 }
 
-/// File name of a pack file.
+/// File name of a store file.
 pub fn pack_name(num: u64, kind: Kind) -> String {
-    format!("{num:016x}.{}", kind.ext())
+    match kind {
+        Kind::Pack => format!("{num:016x}.pack"),
+        Kind::Idx => format!("{num:016x}.idx"),
+        Kind::Run => format!("{num:016x}.run"),
+        Kind::Manifest => "MANIFEST".to_string(),
+    }
 }
 
 /// Punched ranges must start and end on a multiple of this.
@@ -49,10 +59,10 @@ pub trait PackFile: PackRead {
     fn sync(&mut self) -> io::Result<()>;
 }
 
-/// The directory of pack files.
+/// The directory of pack files, and the files of the store index.
 pub trait PackIo: Send + Sync {
-    /// Make the directory if needed. With `read_only`, make nothing and
-    /// return whether the directory exists.
+    /// Make the directories if needed. With `read_only`, make nothing and
+    /// return whether the pack directory exists.
     fn prepare(&self, read_only: bool) -> io::Result<bool>;
     /// Numbers of every `.pack` file.
     fn list(&self) -> io::Result<Vec<u64>>;
@@ -62,7 +72,7 @@ pub trait PackIo: Send + Sync {
     /// Replace the file atomically and durably (also syncs the directory).
     fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> io::Result<()>;
     fn remove(&self, num: u64, kind: Kind) -> io::Result<()>;
-    /// Make creations and removals durable.
+    /// Make creations and removals durable (of packs and of index files).
     fn sync_dir(&self) -> io::Result<()>;
     /// Make a new, empty pack; it must not exist.
     fn create(&self, num: u64) -> io::Result<Box<dyn PackFile>>;
@@ -79,20 +89,32 @@ pub trait PackIo: Send + Sync {
     /// Each range is aligned to [`PUNCH_BLOCK`]. An error of kind
     /// `Unsupported` means the file system cannot punch holes.
     fn punch(&self, num: u64, ranges: &[(u64, u64)]) -> io::Result<()>;
+    /// Numbers of every `.run` file (empty if there is no index directory).
+    fn list_runs(&self) -> io::Result<Vec<u64>>;
+    /// Make a new, empty run file; it must not exist. It is written like a
+    /// pack: `write_at`, then `sync`, then `sync_dir` for its name.
+    fn create_run(&self, num: u64) -> io::Result<Box<dyn PackFile>>;
+    /// Open a run file for reads.
+    fn open_run(&self, num: u64) -> io::Result<Arc<dyn PackRead>>;
 }
 
 // ── Files ─────────────────────────────────────────────────────────────────────
 
-/// Packs as files in a directory, with pread and pwrite.
+/// Packs as files in a directory, with pread and pwrite. The files of the
+/// store index go in the directory `index` next to it (`STORE/packs` and
+/// `STORE/index`).
 pub struct FileIo {
     dir: PathBuf,
+    index: PathBuf,
     /// Result of the hole probe (see `can_punch`).
     punches: OnceLock<bool>,
 }
 
 impl FileIo {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        FileIo { dir: dir.into(), punches: OnceLock::new() }
+        let dir = dir.into();
+        let index = dir.with_file_name("index");
+        FileIo { dir, index, punches: OnceLock::new() }
     }
 
     /// Punch a hole in a small probe file in the pack directory.
@@ -109,7 +131,8 @@ impl FileIo {
     }
 
     fn path(&self, num: u64, kind: Kind) -> PathBuf {
-        self.dir.join(pack_name(num, kind))
+        let dir = if kind.is_index() { &self.index } else { &self.dir };
+        dir.join(pack_name(num, kind))
     }
 }
 
@@ -139,6 +162,7 @@ impl PackIo for FileIo {
             return Ok(self.dir.is_dir());
         }
         fs::create_dir_all(&self.dir)?;
+        fs::create_dir_all(&self.index)?;
         Ok(true)
     }
 
@@ -170,7 +194,11 @@ impl PackIo for FileIo {
     }
 
     fn sync_dir(&self) -> io::Result<()> {
-        sync_dir(&self.dir)
+        sync_dir(&self.dir)?;
+        if self.index.is_dir() {
+            sync_dir(&self.index)?;
+        }
+        Ok(())
     }
 
     fn create(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
@@ -197,6 +225,31 @@ impl PackIo for FileIo {
             punch_hole(&f, offset, len)?;
         }
         Ok(())
+    }
+
+    fn list_runs(&self) -> io::Result<Vec<u64>> {
+        let dir = match fs::read_dir(&self.index) {
+            Ok(d) => d,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        Ok(dir
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                let hex = n.strip_suffix(".run")?;
+                u64::from_str_radix(hex, 16).ok()
+            })
+            .collect())
+    }
+
+    fn create_run(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
+        let f = OpenOptions::new().read(true).write(true).create_new(true).open(self.path(num, Kind::Run))?;
+        Ok(Box::new(FilePack(f)))
+    }
+
+    fn open_run(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
+        Ok(Arc::new(FilePack(File::open(self.path(num, Kind::Run))?)))
     }
 }
 

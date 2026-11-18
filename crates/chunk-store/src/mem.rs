@@ -165,10 +165,22 @@ impl MemIo {
 
     /// A handle holds the file itself, so (as with unlink on Unix) it stays
     /// usable after the name is removed.
-    fn handle(&self, num: u64) -> io::Result<MemPack> {
-        let f = self.s.lock().unwrap().files.get(&(num, Kind::Pack)).cloned().ok_or_else(not_found)?;
+    fn handle(&self, num: u64, kind: Kind) -> io::Result<MemPack> {
+        let f = self.s.lock().unwrap().files.get(&(num, kind)).cloned().ok_or_else(not_found)?;
         self.open.fetch_add(1, Ordering::SeqCst);
         Ok(MemPack { s: Arc::clone(&self.s), f, open: Arc::clone(&self.open) })
+    }
+
+    /// A new, empty file that must not exist, and a handle to it. Its name
+    /// is durable only after `sync_dir`.
+    fn create_new(&self, num: u64, kind: Kind) -> io::Result<MemPack> {
+        let mut s = self.s.lock().unwrap();
+        if s.files.contains_key(&(num, kind)) {
+            return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+        }
+        s.files.insert((num, kind), Arc::new(Mutex::new(MemFile::default())));
+        drop(s);
+        self.handle(num, kind)
     }
 }
 
@@ -308,21 +320,15 @@ impl PackIo for MemIo {
     }
 
     fn create(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
-        let mut s = self.s.lock().unwrap();
-        if s.files.contains_key(&(num, Kind::Pack)) {
-            return Err(io::Error::from(io::ErrorKind::AlreadyExists));
-        }
-        s.files.insert((num, Kind::Pack), Arc::new(Mutex::new(MemFile::default())));
-        drop(s);
-        Ok(Box::new(self.handle(num)?))
+        Ok(Box::new(self.create_new(num, Kind::Pack)?))
     }
 
     fn open_rw(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
-        Ok(Box::new(self.handle(num)?))
+        Ok(Box::new(self.handle(num, Kind::Pack)?))
     }
 
     fn open_read(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
-        Ok(Arc::new(self.handle(num)?))
+        Ok(Arc::new(self.handle(num, Kind::Pack)?))
     }
 
     fn can_punch(&self) -> bool {
@@ -350,5 +356,20 @@ impl PackIo for MemIo {
             f.dirty.push((start, end));
         }
         Ok(())
+    }
+
+    fn list_runs(&self) -> io::Result<Vec<u64>> {
+        let s = self.s.lock().unwrap();
+        Ok(s.files.keys().filter(|(_, k)| *k == Kind::Run).map(|(n, _)| *n).collect())
+    }
+
+    /// Like `create`: the bytes are durable after `sync`, the name after
+    /// `sync_dir`.
+    fn create_run(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
+        Ok(Box::new(self.create_new(num, Kind::Run)?))
+    }
+
+    fn open_run(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
+        Ok(Arc::new(self.handle(num, Kind::Run)?))
     }
 }

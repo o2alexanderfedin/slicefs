@@ -176,4 +176,15 @@ impl PackIo for RetryingIo {
     fn punch(&self, num: u64, ranges: &[(u64, u64)]) -> io::Result<()> {
         self.inner.punch(num, ranges)
     }
+    fn list_runs(&self) -> io::Result<Vec<u64>> {
+        self.inner.list_runs()
+    }
+    /// Wrapped like a pack: a failed sync of a run is retried with the copy
+    /// of its unsynced bytes (at most `KEEP_LIMIT` of them).
+    fn create_run(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
+        Ok(self.wrap(self.inner.create_run(num)?))
+    }
+    fn open_run(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
+        self.inner.open_run(num)
+    }
 }

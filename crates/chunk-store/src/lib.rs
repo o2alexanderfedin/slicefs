@@ -20,6 +20,8 @@ pub mod file;
 pub mod hash;
 pub mod pack_io;
 pub mod retry;
+#[allow(dead_code)] // The store uses the runs from plan 17-03 on.
+mod run;
 pub mod mem;
 
 use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK};
@@ -165,7 +167,7 @@ pub const MAX_OPEN_PACKS: usize = 64;
 /// Objects smaller than this are not compressed.
 const MIN_COMPRESS: usize = 64;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Loc {
     pack: u64,
     offset: u64,
