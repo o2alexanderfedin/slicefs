@@ -5,6 +5,7 @@
 //! index-bench create --dir D --objects N [--pack-limit BYTES]
 //! index-bench open   --dir D [--cache warm|cold]
 //! index-bench lookup --dir D [--hits K] [--misses K] [--seed S]
+//! index-bench recover --dir D [--packs 1|all] [--read-only]
 //! index-bench run    --dir D --objects N [--reps R] [--pack-limit BYTES] [--hits K] [--misses K] [--drop-caches]
 //!   every step also takes --backend NAME (default chunk-store)
 //! ```
@@ -30,10 +31,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use backend::{backend_by_name, Backend};
+use backend::{backend_by_name, Backend, Scope, SAVED_DIR};
 use chunk_store::{ObjectId, DEFAULT_HASHER};
 
-const USAGE: &str = "usage: index-bench create|open|lookup|run --dir D [--backend NAME] [step flags] (see the doc comment of src/main.rs)";
+const USAGE: &str = "usage: index-bench create|open|lookup|recover|run --dir D [--backend NAME] [step flags] (see the doc comment of src/main.rs)";
 
 /// The marker file of a store made by this tool: the output of `create`.
 const MARKER: &str = "index-bench.txt";
@@ -71,6 +72,7 @@ fn spec(cmd: &str) -> Option<(&'static [&'static str], &'static [&'static str])>
         "create" => (&["dir", "backend", "objects", "pack-limit"], &[]),
         "open" => (&["dir", "backend", "cache"], &[]),
         "lookup" => (&["dir", "backend", "hits", "misses", "seed"], &[]),
+        "recover" => (&["dir", "backend", "packs"], &["read-only"]),
         "run" => (&["dir", "backend", "objects", "reps", "pack-limit", "hits", "misses"], &["drop-caches"]),
         _ => return None,
     })
@@ -451,6 +453,61 @@ fn step_lookup(f: &Flags) -> Result<(), Fail> {
     ]));
 }
 
+fn step_recover(f: &Flags) -> Result<(), Fail> {
+    let dir = f.dir()?;
+    let backend = f.backend()?;
+    let (scope, scope_name) = match f.get("packs").unwrap_or("1") {
+        "1" => (Scope::One, "one"),
+        "all" => (Scope::All, "all"),
+        other => return Err(Fail::Usage(format!("--packs is 1 or all, not {other}"))),
+    };
+    let read_only = f.has("read-only");
+    let n = marker_objects(&read_marker(&dir, &*backend)?)?;
+
+    let dropped = backend.drop_index(&dir, scope)?;
+    let t0 = Instant::now();
+    let c0 = cpu_secs();
+    let opened = backend.open(&dir, read_only);
+    let wall = t0.elapsed().as_secs_f64();
+    let cpu = cpu_secs() - c0;
+    let checked = opened.and_then(|store| match store.objects() {
+        o if o == n => Ok(store),
+        o => Err(format!("the store has {o} objects after the recovery open, the marker says {n}")),
+    });
+    // Restore also when the open failed, so the store keeps its index files.
+    // A store that was opened stays alive: it keeps no index file open.
+    let restored = backend.restore_index(&dir, &dropped);
+    let (store, restored) = match (checked, restored) {
+        (Ok(store), Ok(r)) => (store, r),
+        (checked, Err(e)) => {
+            eprintln!("index-bench: the saved index files are in {}", dir.join(SAVED_DIR).display());
+            return Err(match checked {
+                Ok(_) => e.into(),
+                Err(open_err) => format!("{open_err}; restore: {e}").into(),
+            });
+        }
+        (Err(e), Ok(_)) => return Err(e.into()),
+    };
+
+    let t = &dropped.targets;
+    let active = t.iter().filter(|t| t.active).count();
+    finish(&kv_text(&[
+        ("step", "recover".into()),
+        ("backend", backend.name().into()),
+        ("scope", scope_name.into()),
+        ("mode", if read_only { "ro" } else { "rw" }.into()),
+        ("packs_dropped", t.len().to_string()),
+        ("sealed_packs", (t.len() - active).to_string()),
+        ("active_packs", active.to_string()),
+        ("scanned_bytes", t.iter().map(|t| t.pack_bytes).sum::<u64>().to_string()),
+        ("scanned_objects", t.iter().map(|t| t.entries).sum::<u64>().to_string()),
+        ("wall_s", fmt_f(wall)),
+        ("cpu_s", fmt_f(cpu)),
+        ("objects", store.objects().to_string()),
+        ("idx_identical", if restored.rebuilt > 0 { "yes" } else { "n/a" }.into()),
+    ]));
+}
+
 // ── run driver ───────────────────────────────────────────────────────────────
 
 /// Start this binary for one step and return its stdout. Its stderr goes
@@ -579,6 +636,37 @@ fn step_run(f: &Flags) -> Result<(), Fail> {
     print!("{out}");
     let lookup = parse_kv(&out);
 
+    // Recovery: R runs of each scope and mode.
+    let mut recovers = Vec::new();
+    for (packs, scope) in [("1", "one"), ("all", "all")] {
+        for read_only in [false, true] {
+            let mode = if read_only { "ro" } else { "rw" };
+            let mut runs = Vec::new();
+            for rep in 1..=reps {
+                let mut args = common("recover");
+                args.extend(["--packs".into(), packs.into()]);
+                if read_only {
+                    args.push("--read-only".into());
+                }
+                if cold {
+                    drop_caches()?;
+                }
+                let out = child(&args)?;
+                println!("# recover {scope} {mode} rep {rep}");
+                print!("{out}");
+                runs.push(parse_kv(&out));
+            }
+            recovers.push((scope, mode, runs));
+        }
+    }
+    let out = child(&common("open"))?;
+    println!("# open check (not in the summary)");
+    print!("{out}");
+    let have = parse_kv(&out).get("objects").cloned().unwrap_or_default();
+    if have != n.to_string() {
+        return Err(format!("the open check after the recovery runs found {have} objects, not {n}").into());
+    }
+
     let os = os_label().to_string();
     let label = objects_label(n);
     let get = |k: &str| marker.get(k).cloned().unwrap_or_else(|| "n/a".into());
@@ -656,6 +744,48 @@ fn step_run(f: &Flags) -> Result<(), Fail> {
             ]],
         )
     );
+    let mut rows = Vec::new();
+    for (scope, mode, runs) in &recovers {
+        let first = |k: &str| runs[0].get(k).cloned().unwrap_or_else(|| "n/a".into());
+        let num = |k: &str| runs[0].get(k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(f64::NAN);
+        let rec = median(column(runs, "wall_s"));
+        let extra = rec - open_median;
+        let rate = |amount: f64| if extra > 0.0 { fmt_f(amount / extra) } else { "n/a".into() };
+        rows.push(vec![
+            os.clone(),
+            label.clone(),
+            scope.to_string(),
+            mode.to_string(),
+            format!("{}/{}", first("sealed_packs"), first("active_packs")),
+            fmt_f(num("scanned_bytes") / 1e6),
+            first("scanned_objects"),
+            fmt_f(rec),
+            fmt_f(extra),
+            rate(num("scanned_bytes") / 1e6),
+            rate(num("scanned_objects")),
+        ]);
+    }
+    println!();
+    println!("## Recovery");
+    print!(
+        "{}",
+        table(
+            &[
+                "OS",
+                "Objects",
+                "Scope",
+                "Mode",
+                "Sealed/active packs",
+                "Scanned MB",
+                "Scanned objects",
+                "Recovery open s (median)",
+                "Extra s",
+                "Scan MB/s",
+                "Scan objects/s",
+            ],
+            &rows,
+        )
+    );
     let _ = std::io::stdout().flush();
     Ok(())
 }
@@ -666,6 +796,7 @@ fn real_main(args: &[String]) -> Result<(), Fail> {
         "create" => step_create(&flags),
         "open" => step_open(&flags),
         "lookup" => step_lookup(&flags),
+        "recover" => step_recover(&flags),
         "run" => step_run(&flags),
         _ => Err(Fail::Usage(format!("unknown subcommand {cmd}"))),
     }

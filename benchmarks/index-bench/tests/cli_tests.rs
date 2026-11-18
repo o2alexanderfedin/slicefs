@@ -50,6 +50,11 @@ fn run_creates_and_opens_a_small_store() {
     assert!(out.lines().any(|l| l == "step=lookup"), "{out}");
     assert!(out.lines().any(|l| l == "## Lookups"), "{out}");
     assert!(out.lines().any(|l| l.starts_with("| OS | Objects | contains hit ns |")), "{out}");
+    assert_eq!(out.lines().filter(|l| *l == "step=recover").count(), 4, "{out}");
+    assert!(out.lines().any(|l| l == "# open check (not in the summary)"), "{out}");
+    assert!(out.lines().any(|l| l == "## Recovery"), "{out}");
+    assert!(out.lines().any(|l| l.starts_with("| OS | Objects | Scope | Mode |")), "{out}");
+    assert!(!d.join("bench-saved").exists());
     assert!(!out.contains(p(&d)), "run must not print the store path:\n{out}");
     assert!(d.join("index-bench.txt").is_file());
 }
@@ -109,6 +114,112 @@ fn lookup_refuses_a_dir_without_the_marker() {
     let out = bench(&["lookup", "--dir", p(t.path())]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("not an index-bench store"));
+}
+
+/// The store is as before a recover: the same pack and idx files with the
+/// same sizes, one idx per pack, no saved-files directory, all objects.
+fn assert_unchanged(d: &Path, before: &[(String, u64)], objects: &str) {
+    let now = pack_files(d);
+    let packs = now.iter().filter(|(n, _)| n.ends_with(".pack")).count();
+    let idxs = now.iter().filter(|(n, _)| n.ends_with(".idx")).count();
+    assert_eq!(idxs, packs, "every pack needs its idx: {now:?}");
+    assert_eq!(now, before, "the pack directory changed");
+    assert!(!d.join("bench-saved").exists(), "bench-saved left behind");
+    let open = ok(&["open", "--dir", p(d)]);
+    assert_eq!(value(&open, "objects"), Some(objects), "{open}");
+}
+
+fn recover(d: &Path, packs: &str, read_only: bool) -> String {
+    let mut args = vec!["recover", "--dir", p(d), "--packs", packs];
+    if read_only {
+        args.push("--read-only");
+    }
+    ok(&args)
+}
+
+#[test]
+fn recover_on_a_multi_pack_store_restores_every_idx() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path().join("s");
+    let created = create(&d, "5000", &["--pack-limit", "65536"]);
+    let packs: u64 = value(&created, "packs").unwrap().parse().unwrap();
+    assert!(packs > 2, "the test needs several packs:\n{created}");
+    let before = pack_files(&d);
+    let others = (packs - 1).to_string();
+
+    let out = recover(&d, "1", false);
+    assert_eq!(value(&out, "step"), Some("recover"), "{out}");
+    assert_eq!(value(&out, "scope"), Some("one"), "{out}");
+    assert_eq!(value(&out, "mode"), Some("rw"), "{out}");
+    assert_eq!(value(&out, "packs_dropped"), Some("1"), "{out}");
+    assert_eq!(value(&out, "sealed_packs"), Some("1"), "{out}");
+    assert_eq!(value(&out, "active_packs"), Some("0"), "{out}");
+    assert_eq!(value(&out, "objects"), Some("5000"), "{out}");
+    assert_eq!(value(&out, "idx_identical"), Some("yes"), "{out}");
+    positive(&out, "scanned_bytes");
+    positive(&out, "scanned_objects");
+    assert_unchanged(&d, &before, "5000");
+
+    let out = recover(&d, "1", true);
+    assert_eq!(value(&out, "mode"), Some("ro"), "{out}");
+    assert_eq!(value(&out, "sealed_packs"), Some("1"), "{out}");
+    assert_eq!(value(&out, "idx_identical"), Some("n/a"), "{out}");
+    assert_eq!(value(&out, "objects"), Some("5000"), "{out}");
+    assert_unchanged(&d, &before, "5000");
+
+    let out = recover(&d, "all", false);
+    assert_eq!(value(&out, "scope"), Some("all"), "{out}");
+    assert_eq!(value(&out, "active_packs"), Some("1"), "{out}");
+    assert_eq!(value(&out, "sealed_packs"), Some(others.as_str()), "{out}");
+    assert_eq!(value(&out, "scanned_objects"), Some("5000"), "{out}");
+    assert_eq!(value(&out, "idx_identical"), Some("yes"), "{out}");
+    assert_eq!(value(&out, "objects"), Some("5000"), "{out}");
+    assert_unchanged(&d, &before, "5000");
+
+    let out = recover(&d, "all", true);
+    assert_eq!(value(&out, "mode"), Some("ro"), "{out}");
+    assert_eq!(value(&out, "active_packs"), Some("1"), "{out}");
+    assert_eq!(value(&out, "sealed_packs"), Some(others.as_str()), "{out}");
+    assert_eq!(value(&out, "objects"), Some("5000"), "{out}");
+    assert_unchanged(&d, &before, "5000");
+}
+
+#[test]
+fn recover_on_a_one_pack_store_takes_the_active_pack_path() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path().join("s");
+    create(&d, "1000", &[]);
+    let before = pack_files(&d);
+    for read_only in [false, true] {
+        let out = recover(&d, "1", read_only);
+        assert_eq!(value(&out, "active_packs"), Some("1"), "{out}");
+        assert_eq!(value(&out, "sealed_packs"), Some("0"), "{out}");
+        assert_eq!(value(&out, "scanned_objects"), Some("1000"), "{out}");
+        assert_eq!(value(&out, "objects"), Some("1000"), "{out}");
+        assert_unchanged(&d, &before, "1000");
+    }
+}
+
+#[test]
+fn recover_refuses_a_dir_without_the_marker() {
+    let t = tempfile::tempdir().unwrap();
+    let out = bench(&["recover", "--dir", p(t.path()), "--packs", "all"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not an index-bench store"));
+}
+
+#[test]
+fn recover_refuses_a_store_with_saved_files_left() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path().join("s");
+    create(&d, "1000", &[]);
+    let before = pack_files(&d);
+    std::fs::create_dir(d.join("bench-saved")).unwrap();
+    std::fs::write(d.join("bench-saved").join("0000000000000001.idx"), b"x").unwrap();
+    let out = bench(&["recover", "--dir", p(&d), "--packs", "1"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("bench-saved"));
+    assert_eq!(pack_files(&d), before, "a refused recover must not move files");
 }
 
 #[test]
