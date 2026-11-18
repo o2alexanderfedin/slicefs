@@ -1,78 +1,12 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v2.0 — Streaming Writes & Hardening",
-  "phases": [
-    {
-      "number": "1",
-      "name": "CAS Foundation",
-      "status": "complete"
-    },
-    {
-      "number": "2",
-      "name": "Metadata Engine",
-      "status": "complete"
-    },
-    {
-      "number": "3",
-      "name": "Read-Only FUSE",
-      "status": "complete"
-    },
-    {
-      "number": "4",
-      "name": "Full POSIX Write Path",
-      "status": "complete"
-    },
-    {
-      "number": "5",
-      "name": "Crash Safety and GC",
-      "status": "complete"
-    },
-    {
-      "number": "6",
-      "name": "Compression and Snapshots",
-      "status": "complete"
-    },
-    {
-      "number": "7",
-      "name": "Cross-Platform and Production Hardening",
-      "status": "complete"
-    },
-    {
-      "number": "7.1",
-      "name": "FileStorage Migration (INSERTED)",
-      "status": "pending"
-    },
-    {
-      "number": "8",
-      "name": "Correctness Fixes",
-      "status": "pending"
-    },
-    {
-      "number": "9",
-      "name": "Compression Removal",
-      "status": "pending"
-    },
-    {
-      "number": "10",
-      "name": "Streaming Writes Core",
-      "status": "pending"
-    },
-    {
-      "number": "11",
-      "name": "Non-Sequential Write Handling",
-      "status": "pending"
-    },
-    {
-      "number": "12",
-      "name": "SMB/FSKit Backend Support",
-      "status": "pending"
-    }
-  ],
+  "milestone": "v2.1",
+  "phases": [],
   "next": {
-    "command": "/gsd-progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd-discuss-phase",
+    "label": "Discuss the first phase",
+    "reason": "Project initialized — plan your first phase"
   },
-  "updated_at": "2026-11-18T05:40:44.991Z"
+  "updated_at": "2026-11-18T06:50:03.001Z"
 }
