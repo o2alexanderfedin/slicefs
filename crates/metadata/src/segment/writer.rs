@@ -69,6 +69,14 @@ impl SegmentWriter {
         Ok(())
     }
 
+    /// Write the records in the user-space buffer into the file (one
+    /// `write()` into the kernel), with no disk sync. After this, a crash of
+    /// the process does not lose them; a power loss can. A later `sync` still
+    /// syncs them.
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+
     /// Number of real disk syncs so far.
     pub fn disk_syncs(&self) -> u64 {
         self.disk_syncs
