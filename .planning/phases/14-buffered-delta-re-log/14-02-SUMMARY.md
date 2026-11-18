@@ -31,9 +31,9 @@ estimate:
 actuals:
   tokens: 7700   # chars/4 over the realized diff of file.rs (30,904 chars)
   tasks: 2
-  commits: 2     # code commits; this SUMMARY is one more docs commit
+  commits: 4     # git rev-list --count 5fce243..54d44eb (3 code, 1 docs); this update is one more docs commit
 plan_head_before: 5fce24319860899851a66716622e7e41bc40e817
-plan_head_after: 1a2e70d
+plan_head_after: 54d44eb7d8b088076823e33eccf5e5b1550cbf04
 ---
 
 # Phase 14 Plan 02: Chunk-list splice Summary
@@ -83,12 +83,13 @@ pub fn splice(
 |------|------|--------|-------|
 | 1 | Leaf cursor, entry push, canonical splice, full-write oracle | c035209 | crates/chunk-store/src/file.rs |
 | 2 | Whole-node reuse, zero-run shortcut, cost and safety tests | 1a2e70d | crates/chunk-store/src/file.rs |
+| 2 (fix) | Level-255 child gives Corrupt, not an overflow panic; precondition asserts; deep-tree level-1 reuse assert | 54d44eb | crates/chunk-store/src/file.rs |
 
 ## Test results
 
 - `cargo test -p chunk-store`: all pass (lib 16, and 10, 4, 5, 10, 9, 5, 11 in the integration test binaries).
 - `file::tests`: 9 tests pass (3 old, 6 new): `a_splice_gives_the_same_key_as_a_full_write`, `a_splice_across_many_leaves_gives_the_same_key`, `zero_runs_cut_at_chunk_max`, `a_splice_over_zeros_and_repeating_data_gives_the_same_key`, `a_small_splice_reuses_old_nodes`, `a_splice_of_a_malformed_tree_is_an_error_not_a_panic`.
-- Run time of `file::tests` in a debug build: 6.1-8.1 s for the test binary (about 16-21 s wall time with the incremental build), on x86_64.
+- Run time of `file::tests` in a debug build: 6.1-12.1 s for the test binary (about 16-21 s wall time with the incremental build), on x86_64.
 - `cargo clippy -p chunk-store --tests`: no new warnings. The 2 warnings that stay (`lib.rs:286`, `tests/file_tests.rs:69`) were there before this plan.
 
 ### Small-splice numbers (`a_small_splice_reuses_old_nodes`)
@@ -124,15 +125,32 @@ Limits in the test: rechunked <= 256 KiB, reused nodes >= 1, new objects <= 12. 
 **2. [Rule 2 - Test coverage] Deep-tree check in `a_small_splice_reuses_old_nodes`**
 - **Found during:** Task 2
 - **Issue:** The 32 MiB base has a level-1 root, so only leaves can be reused. Reuse of level-1 nodes was not tested.
-- **Fix:** The test also builds a tree of 1,000,000 fake entries (root level 2 or more). It checks that a splice with no change gives the base key, and that a shrink to an old cut gives the key of a `FileWriter` that pushes the same entries.
+- **Fix:** The test also builds a tree of 1,000,000 fake entries (root level 2 or more). It checks that a splice with no change gives the base key and reuses at least 60 fewer nodes than there are leaves, so whole level-1 nodes are reused. It also checks that a shrink to an old cut gives the key of a `FileWriter` that pushes the same entries.
 - **Files modified:** crates/chunk-store/src/file.rs
 - **Commit:** 1a2e70d
 
-**3. [Rule 3 - Tooling] Branch name outside the agent allow-list**
+**3. [Rule 1 - Bug] Overflow panic on a child at level 255**
+- **Found during:** review after Task 2
+- **Issue:** The cursor checked `child.level + 1 != node.level` on a `u8`. A crafted child at level 255 with the correct length made a debug build panic. This broke the rule that a malformed tree gives an error and never a panic (T-14-04).
+- **Fix:** `child.level.checked_add(1) != Some(node.level)`. A level-255 case and three precondition-error asserts were added to `a_splice_of_a_malformed_tree_is_an_error_not_a_panic`. The test failed first with "attempt to add with overflow".
+- **Files modified:** crates/chunk-store/src/file.rs
+- **Commit:** 54d44eb
+- **Out of scope, not fixed:** `FileReader::read` has the same `child.level + 1` check from before this plan (file.rs, in `read`). It can panic in a debug build in the same way.
+
+**4. [Rule 3 - Tooling] Branch name outside the agent allow-list**
 - The orchestrator named the branch `feature/14-02-splice`. The generic pre-commit allow-list of the executor accepts only `agent-*` branches. The branch is not protected and HEAD was not detached, so the commits were made on it.
 
-**4. Lint allow in tests**
+**5. Lint allow in tests**
 - `#[allow(clippy::single_range_in_vec_init)]` is on `file::tests`. In the tests, a list of one changed range is on purpose.
+
+**6. Cursor shape**
+- The cursor always starts at offset 0 and walks forward. It skips whole nodes where it can. The plan describes a `partition_point` seek to an offset, but the splice never needs one, because copy mode starts at 0.
+
+**7. TDD commit shape (Task 2, `tdd="true"`)**
+- Each task has one commit, gated on the test exit status. There is no separate `test(14-02)` RED commit. RED was seen before the implementation: 2 of the 4 new tests failed. `a_splice_over_zeros_and_repeating_data_gives_the_same_key` failed on the re-chunk bound, and `a_small_splice_reuses_old_nodes` failed with `reused_nodes == 0`. The plan is `type: execute`, not `type: tdd`.
+
+**8. Process**
+- The plan ledger file (`gsd-plan-head-before-14-02`) was not written. The base is `5fce243`, as the orchestrator named it. No state updates were made (STATE.md, ROADMAP.md, REQUIREMENTS.md), on orchestrator instruction.
 
 ## Known Stubs
 
@@ -145,5 +163,5 @@ None. The cursor runs the `FileReader` checks (T-14-04). The oracle tests cover 
 ## Self-Check: PASSED
 
 - FOUND: crates/chunk-store/src/file.rs (`pub fn splice`, `pub trait SpliceSource`, `pub struct SpliceStats`)
-- FOUND: c035209, 1a2e70d (ancestors of HEAD)
+- FOUND: c035209, 1a2e70d, 54d44eb (ancestors of HEAD)
 - Only crates/chunk-store/src/file.rs changed in the code commits.
