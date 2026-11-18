@@ -76,22 +76,32 @@ The rebase count does not change at any of the three commits. After the steps, t
 
 The checks are: the full dump as stat sees it (names, modes, sizes, mtime, ctime, atime, xattrs, content hash), the content against a Vec model, zeros in [2 MiB, 3 MiB), and size and mode.
 
-**Mutation check (not committed):** I removed the `Setattr(visible)` relog line in `commit_cut` and ran the matrix. It failed at the dump compare in `check_with`. Then I restored the file with `git checkout`, and `git status` showed only the test file. So crash point RelogRecords detects a missing shrink record (D-15).
+**Mutation check (not committed):** I removed the `Setattr(visible)` relog line in `commit_cut` (filesystem.rs) and ran the matrix. It failed at the dump compare in `check_with`. The panic line showed only the log mode, not the crash point. The failing case is inferred to be RelogRecords: RawRecords has no commit with an open overlay, so the mutation cannot change it. Then I restored filesystem.rs with `git checkout`, and `git status` showed no production change. So the matrix detects a missing shrink record (D-15).
 
-## Test results
+## Test results (final run at HEAD 90dbeeb, the code of this SUMMARY)
 
 ```
-fsync_tests:            test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.83s
-write_log_replay_tests: test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 35.20s
+fsync_tests:            test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+write_log_replay_tests: test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.73s
 ```
 
-The 15 old tests of write_log_replay_tests and the 6 old tests of fsync_tests pass, and none of them changed. The replay file now takes about 35 s, up from about 8 s. Most of the new time is the matrix: 6 cases, each with a 67.5 MiB sparse file that is dumped twice, and one rebase of 67.5 MiB in AfterRebase.
+The 15 old tests of write_log_replay_tests and the 6 old tests of fsync_tests pass, and none of them changed.
+
+**Time (debug build, macOS).** The replay binary took 2.08 s before this plan (the 14-04 crate run). It takes about 42 s now. Measured alone (`--exact`):
+
+| Test | Time |
+|------|------|
+| `an_overlay_replays_after_a_crash_with_each_log_mode` | 40.4 s |
+| `an_overlay_with_more_than_64_mib_of_relog_replays` | 20.4 s |
+| `a_commit_relogs_only_the_bytes_changed_since_the_last_rebase` | 10.8 s |
+
+The matrix cost comes from its 6 cases. In each case, the 67.5 MiB sparse file is read 4 times (the live and replayed dumps, the live content check, and the replayed content check), and the release at the end of replay rebases it. AfterRebase adds one more rebase of 67.5 MiB. The orchestrator decides if this fits the time budget. To make the test shorter, move the sparse write closer to the end of the file. The plan asked for 3.5 MiB + 64 MiB, so this plan keeps that offset.
 
 ## Deviations from Plan
 
 **1. [Rule 3 - Blocking] `dump_open` and `check_with` compare what stat sees.** The plan said to compare `dump`. `dump` reads the raw inode. For a handle that is open at the crash, the overlay size and mtime are only in the handle until release (`overlay_open_size`). Replay releases every handle at its end. So a raw dump of the live side shows the wrong values by design, not because of a bug. Both sides now use `test_getattr`, which is the stat view that `stat_of_an_open_file_shows_the_time_of_the_last_write` already tests. `dump` keeps its old output, because it calls `dump_by` with `get_inode`. Commit 36b39e3.
 
-**2. [Rule 1 - Plan parameter] Dirty limit 256 MiB in the 70 MiB test, not 96 MiB.** `Overlay::cost` counts the extent capacity. `Vec::resize` doubles the capacity, so it is 128 MiB at 65 MiB of length. With 96 MiB, a rebase would run inside the loop, and the relog would be much less than 70 MiB. The test now asserts that the rebase count stays the same across the 70 writes. Commit 90dbeeb.
+**2. [Rule 1 - Plan parameter] Dirty limit 256 MiB in the 70 MiB test, not 96 MiB.** `Overlay::cost` counts the extent capacity. `Vec::resize` doubles the capacity, so it is 128 MiB at 65 MiB of length. The test now asserts that the rebase count stays the same across the 70 writes. I ran the test once with `96 << 20` (not committed). It failed at that assert (`left: 1, right: 0`): one rebase ran inside the loop. Then I restored the file. Commit 90dbeeb.
 
 **3. [Rule 2 - Stronger proof] Exact relog values in the matrix.** RelogRecords asserts `3 * 4096 + 300`, and AfterRebase asserts 4096 after the rebase, not only `> 0`. This mitigates T-14-12.
 
@@ -100,7 +110,8 @@ The 15 old tests of write_log_replay_tests and the 6 old tests of fsync_tests pa
 ## Open items
 
 - The 14-04 open item ("no test reaches the relog `Setattr(visible)` record through a replay") is closed by crash point RelogRecords and the mutation check.
-- The matrix adds about 27 s to the replay test binary. If the time budget needs it, the sparse write can move closer to the end. But the plan asked for 3.5 MiB + 64 MiB.
+- The replay test binary went from about 2 s to about 42 s (see Time above). The orchestrator decides.
+- Two temporary edits were made for the probes and reverted before any commit: filesystem.rs (the mutation check) and the 96 MiB limit in the test file. Neither is in a commit.
 
 ## Threat Flags
 
