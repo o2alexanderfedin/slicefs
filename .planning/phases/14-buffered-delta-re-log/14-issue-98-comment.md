@@ -24,7 +24,7 @@ Evidence:
 Open point: in the Docker random-write run, the slowest single write takes 5 to 8 s (before this change: 17 s). The cause is under investigation. It will get a separate fix.
 
 Limits, in new issues:
-- #{{ISSUE_A}}: one memory limit for all open files. Today each open file has its own limit.
-- #{{ISSUE_B}}: replay at mount loads all write-log records after the last commit into RAM before it applies them.
+- #105: one memory limit for all open files. Today each open file has its own limit.
+- #106: replay at mount loads all write-log records after the last commit into RAM before it applies them.
 
 Note: chunking stays canonical (the same bytes give the same chunks on every node). On long repeating data that is not zeros, a rebase can chunk to the end of the file. CPU grows with that run; memory does not.
