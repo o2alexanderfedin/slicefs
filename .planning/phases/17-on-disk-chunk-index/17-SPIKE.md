@@ -277,3 +277,15 @@ to 1.45 B per object (target: a few bytes), open in 1 to 9 ms (the
 chunk-store needs 1 to 13 s today), a miss at the cost of the HashMap,
 but a hit 8 to 11 times slower than the HashMap in the same session (one
 page read per hit).
+
+## Decision
+
+Decision: custom
+
+Date: 2026-11-18. Reason given by the user: fjall cannot be opened
+read-only by a second process while a writer holds it, which breaks
+`slicefs stats`, `scrub` and the format check during a mount; the custom
+runs met the RAM and open-time targets.
+
+Plans 17-02 to 17-09 run as written. fjall stays only on the local spike
+branch `spike/17-index`, which is not merged and not pushed.
