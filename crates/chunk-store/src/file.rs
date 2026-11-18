@@ -13,6 +13,16 @@
 //! cut (and their parents), not every node after it. The tree depends only
 //! on the chunk sequence, so the key of a file does not depend on the sizes
 //! of the writes that made it.
+//!
+//! `splice` makes the key of an edited content without a full re-chunk. It
+//! copies the old chunk entries up to the largest old cut strictly below the
+//! first changed byte (a cut depends on the byte at it), cuts again from
+//! there, and stops at a new cut at or past the change that is also a usable
+//! old cut (not the old end if the size or the tail changes). Where the
+//! writer and an old complete node start together, it copies the whole node
+//! as one entry. Known zeros are pushed as the zero chunk without a read or
+//! a hash (FastCDC cuts zeros at `CHUNK_MAX`). The key is the key of a full
+//! write of the same bytes.
 
 use crate::{chunk_ranges, hashers, ChunkStore, Error, ObjectId, Result, CHUNK_MAX, DIGEST_LEN, ID_LEN};
 use std::collections::HashMap;
@@ -430,6 +440,31 @@ impl Cursor {
         self.step(store, self.path.len() - 1)
     }
 
+    /// The highest old node that starts at the cursor, is complete, and ends
+    /// before `limit`, while the writer has no pending entries at its level
+    /// or below: `(frame, entry of the node in its parent)`. A complete node
+    /// ends where the node cut rule cuts (a partial node of the right spine
+    /// does not), so pushing its entries one by one would make this node.
+    fn reusable_node(&self, w: &FileWriter, limit: u64) -> Option<(usize, Entry)> {
+        let d = self.path.len().checked_sub(1)?;
+        let mut first = d + 1;
+        while first > 0 && self.path[first - 1].1 == 0 {
+            first -= 1;
+        }
+        for f in first.max(1)..=d {
+            let node = &self.path[f].0;
+            let (parent, i) = &self.path[f - 1];
+            let pe = parent.entries[*i];
+            let k = node.level as usize;
+            let n = node.entries.len();
+            let complete = n == LEAF_ENTRIES || (n >= NODE_MIN && is_cut(&node.entries[n - 1].id));
+            if complete && self.off + pe.len < limit && w.levels.iter().take(k + 1).all(|l| l.is_empty()) {
+                return Some((f, pe));
+            }
+        }
+        None
+    }
+
     /// Move to the entry that holds offset `x` (forward only; at the end if
     /// `x` is past the content).
     fn advance_to(&mut self, store: &ChunkStore, x: u64) -> Result<()> {
@@ -440,13 +475,70 @@ impl Cursor {
     }
 }
 
+/// After a new cut at `e`: take in every region that starts at or before
+/// `e`, then true if the re-chunk can stop at `e` (past the regions, at a
+/// usable old cut).
+fn resync_at(
+    store: &ChunkStore,
+    cur: &mut Cursor,
+    regions: &[Range<u64>],
+    ri: &mut usize,
+    end: &mut u64,
+    e: u64,
+    usable: &dyn Fn(u64) -> bool,
+) -> Result<bool> {
+    cur.advance_to(store, e)?;
+    while *ri < regions.len() && regions[*ri].start <= e {
+        *end = (*end).max(regions[*ri].end);
+        *ri += 1;
+    }
+    Ok(e >= *end && usable(e) && cur.off == e)
+}
+
+/// True if the new bytes `[s, s + CHUNK_MAX)` are known zeros: outside every
+/// changed range, and below `keep` covered by old zero chunks (the cursor
+/// holds `s`). An old zero chunk may start before `s`.
+fn known_zero(store: &ChunkStore, cur: &Cursor, ext: &[Range<u64>], ci: &mut usize, keep: u64, s: u64) -> Result<bool> {
+    let e = s + CHUNK_MAX as u64;
+    while *ci < ext.len() && ext[*ci].end <= s {
+        *ci += 1;
+    }
+    if ext.get(*ci).is_some_and(|c| c.start < e) {
+        return Ok(false);
+    }
+    let old_end = e.min(keep);
+    if s < old_end {
+        let (zids, _) = zero_chunk();
+        let mut c = cur.clone();
+        while c.off < old_end {
+            if c.at_end() {
+                return Ok(false);
+            }
+            let x = c.entry();
+            if x.len != CHUNK_MAX as u64 || !zids.contains(&x.id) {
+                return Ok(false);
+            }
+            c.next(store)?;
+        }
+    }
+    Ok(true)
+}
+
 fn invalid(what: String) -> Error {
     Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, what))
 }
 
-/// Copy old entries from the cursor while they end before `limit`.
+/// Copy old entries from the cursor while they end before `limit`: whole
+/// old nodes where it can, else one chunk entry at a time.
 fn copy_old(store: &ChunkStore, cur: &mut Cursor, w: &mut FileWriter, limit: u64, st: &mut SpliceStats) -> Result<()> {
     while !cur.at_end() {
+        if let Some((f, pe)) = cur.reusable_node(w, limit) {
+            let level = cur.path[f].0.level as usize + 1;
+            w.push_entry(store, level, pe)?;
+            st.reused_nodes += 1;
+            cur.step(store, f - 1)?;
+            continue;
+        }
         let e = cur.entry();
         if cur.off + e.len >= limit {
             break;
@@ -520,6 +612,10 @@ pub fn splice(
     let mut st = SpliceStats::default();
     let mut ri = 0;
     let max = CHUNK_MAX as usize;
+    let zeros = &zero_chunk().1;
+    let mut zero_id = None;
+    // First changed range that ends after the current chunk start.
+    let mut ci = 0;
     loop {
         let limit = regions.get(ri).map_or(u64::MAX, |r| r.start);
         copy_old(store, &mut cur, &mut w, limit, &mut st)?;
@@ -533,6 +629,24 @@ pub fn splice(
         let mut buf: Vec<u8> = Vec::new();
         let mut resynced = false;
         while start < new_len {
+            // Zero shortcut: FastCDC cuts CHUNK_MAX zeros into one chunk, so
+            // known zeros need no read and no hash.
+            if start + max as u64 <= new_len && known_zero(store, &cur, &ext, &mut ci, keep, start)? {
+                let id = match zero_id {
+                    Some(id) => id,
+                    // A full write puts the zero chunk: put it once.
+                    None => *zero_id.insert(store.put(zeros)?),
+                };
+                w.push_entry(store, 0, Entry { id, len: max as u64 })?;
+                st.zero_runs += 1;
+                buf.drain(..buf.len().min(max));
+                start += max as u64;
+                if resync_at(store, &mut cur, &regions, &mut ri, &mut end, start, &usable)? {
+                    resynced = true;
+                    break;
+                }
+                continue;
+            }
             let at = start + buf.len() as u64;
             if at < new_len {
                 let n = ((2 * max - buf.len()) as u64).min(new_len - at) as usize;
@@ -554,15 +668,7 @@ pub fn splice(
                 w.push_entry(store, 0, Entry { id, len: r.len() as u64 })?;
                 st.rechunked += r.len() as u64;
                 used = r.end;
-                let e = start + r.end as u64;
-                // Resync at a usable old cut past every region that starts
-                // at or before it.
-                cur.advance_to(store, e)?;
-                while ri < regions.len() && regions[ri].start <= e {
-                    end = end.max(regions[ri].end);
-                    ri += 1;
-                }
-                if e >= end && usable(e) && cur.off == e {
+                if resync_at(store, &mut cur, &regions, &mut ri, &mut end, start + r.end as u64, &usable)? {
                     resynced = true;
                     break;
                 }
@@ -581,6 +687,7 @@ pub fn splice(
 }
 
 #[cfg(test)]
+#[allow(clippy::single_range_in_vec_init)] // one changed range is a list of one
 mod tests {
     use super::*;
     use crate::mem::MemIo;
@@ -857,12 +964,19 @@ mod tests {
         let leaves = leaf_starts(&s, key);
         assert!(leaves.len() >= 3, "{} leaves", leaves.len());
         let lb = leaves[leaves.len() / 2];
+        // The start of the last chunk of the leaf before `lb`. A change in
+        // its first CHUNK_MIN bytes (not hashed by FastCDC) keeps the cut at
+        // `lb` but changes the chunk ID: the re-chunk resyncs at `lb` while
+        // the writer still holds entries of the new leaf.
+        let old = cuts(&base);
+        let c = old[old.partition_point(|&x| x < lb) - 1];
         let b = Some((key, &base[..]));
         let edits = [
             ("near the start", Edit { keep: n, changed: vec![100..4196], new_len: n }),
             ("in the middle", Edit { keep: n, changed: vec![n / 2..n / 2 + 4096], new_len: n }),
             ("at a leaf boundary", Edit { keep: n, changed: vec![lb..lb + 4096], new_len: n }),
             ("before a leaf boundary", Edit { keep: n, changed: vec![lb - 10..lb], new_len: n }),
+            ("in the last chunk of a leaf", Edit { keep: n, changed: vec![c + 10..c + 11], new_len: n }),
             ("near the end", Edit { keep: n, changed: vec![n - 5000..n - 1000], new_len: n }),
             ("append", Edit { keep: n, changed: vec![n..n + 50_000], new_len: n + 50_000 }),
             ("shrink", Edit { keep: n - 100_000, changed: vec![], new_len: n - 100_000 }),
@@ -872,6 +986,135 @@ mod tests {
         ];
         for (what, ed) in &edits {
             check_splice(&s, b, ed, &mut rng, what);
+        }
+    }
+
+    /// The premise of the zero shortcut: FastCDC cuts zeros at CHUNK_MAX.
+    #[test]
+    fn zero_runs_cut_at_chunk_max() {
+        let max = CHUNK_MAX as usize;
+        let lens: Vec<usize> = chunk_ranges(&vec![0u8; 4 * max + 100]).iter().map(|r| r.len()).collect();
+        assert_eq!(lens, vec![max, max, max, max, 100]);
+    }
+
+    #[test]
+    fn a_splice_over_zeros_and_repeating_data_gives_the_same_key() {
+        let s = fast_store();
+        let mut rng = Rng(0x5eed_1234_abcd_0003);
+        let n = 8u64 << 20;
+        let zeros = vec![0u8; n as usize];
+        let pattern = rng.bytes(4096);
+        let periodic: Vec<u8> = pattern.iter().copied().cycle().take(n as usize).collect();
+        for (what, base) in [("zeros", &zeros), ("periodic", &periodic)] {
+            let key = full_write(&s, base);
+            let b = Some((key, &base[..]));
+            let mut zero_runs = 0;
+            for i in 0..20 {
+                let ed = match i % 4 {
+                    // Small overwrites in the middle of the run.
+                    0 | 1 => Edit { keep: n, changed: extents(&mut rng, n, 1 + i % 3, 8192), new_len: n },
+                    // A write past the end.
+                    2 => {
+                        let a = n + rng.below(1 << 20);
+                        Edit { keep: n, changed: vec![a..a + 4096], new_len: a + 4096 }
+                    }
+                    // A shrink and a write.
+                    _ => {
+                        let keep = n / 2 + rng.below(n / 4);
+                        Edit { keep, changed: extents(&mut rng, keep, 1, 4096), new_len: keep }
+                    }
+                };
+                let st = check_splice(&s, b, &ed, &mut rng, &format!("{what} edit {i}"));
+                zero_runs += st.zero_runs;
+                if what == "zeros" && i % 4 < 2 {
+                    // The zero shortcut ends the re-chunk of a small write
+                    // soon, also off the old 32 KiB grid.
+                    assert!(st.rechunked <= 256 << 10, "{what} edit {i}: {st:?}");
+                }
+            }
+            if what == "zeros" {
+                assert!(zero_runs > 0, "{what}: no zero runs");
+            }
+        }
+        // Extend the zero base by 64 MiB of zeros.
+        let key = full_write(&s, &zeros);
+        let ed = Edit { keep: n, changed: vec![], new_len: n + (64 << 20) };
+        let st = check_splice(&s, Some((key, &zeros[..])), &ed, &mut rng, "extend by 64 MiB");
+        assert!(st.zero_runs >= 2000 && st.rechunked <= 256 << 10, "extend: {st:?}");
+    }
+
+    #[test]
+    fn a_small_splice_reuses_old_nodes() {
+        let s = fast_store();
+        let mut rng = Rng(0x5eed_1234_abcd_0004);
+        let base = rng.bytes(32 << 20);
+        let n = base.len() as u64;
+        let key = full_write(&s, &base);
+        let ed = Edit { keep: n, changed: vec![n / 2..n / 2 + 4096], new_len: n };
+        let data = new_content(&base, &ed, &mut rng);
+        let before = s.stats().objects;
+        let (got, st) = splice(&s, Some(key), ed.keep, &ed.changed, ed.new_len, &mut VecSource(&data)).unwrap();
+        let added = s.stats().objects - before;
+        eprintln!(
+            "small splice: rechunked {} B, reused entries {}, reused nodes {}, new objects {added}",
+            st.rechunked, st.reused_entries, st.reused_nodes
+        );
+        assert_eq!(got, full_write(&s, &data));
+        assert!(st.rechunked <= 256 << 10, "{st:?}");
+        assert!(st.reused_nodes >= 1, "{st:?}");
+        assert!(added <= 12, "{added} new objects");
+
+        // A deep tree (fake chunks, 8 GB): whole level-1 nodes are reused
+        // and the key is still the writer's key.
+        let fk = fake(1_000_000);
+        let root = build(&s, &fk);
+        assert!(load_node(&s, &root).unwrap().level >= 2);
+        let len = fk.len() as u64 * 8192;
+        let (same, st) = splice(&s, Some(root), len, &[], len, &mut VecSource(&[])).unwrap();
+        assert_eq!(same, root, "no change: {st:?}");
+        // Shrink to an old cut: the chunk before it is cut again.
+        let j = 900_000;
+        let last = rng.bytes(8192);
+        let mut src = TailSource { at: (j as u64 - 1) * 8192, data: &last };
+        let (got, st) = splice(&s, Some(root), j as u64 * 8192, &[], j as u64 * 8192, &mut src).unwrap();
+        let mut w = FileWriter::new();
+        for e in &fk[..j - 1] {
+            w.push_entry(&s, 0, *e).unwrap();
+        }
+        w.write(&s, &last).unwrap();
+        assert_eq!(got, w.finish(&s).unwrap(), "shrink: {st:?}");
+        assert!(st.reused_entries < 5000, "shrink: {st:?}");
+    }
+
+    /// New bytes that start at `at` (the splice reads nothing before).
+    struct TailSource<'a> {
+        at: u64,
+        data: &'a [u8],
+    }
+
+    impl SpliceSource for TailSource<'_> {
+        fn read(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
+            let i = (offset - self.at) as usize;
+            Ok(self.data[i..i + len].to_vec())
+        }
+    }
+
+    // A crafted base tree gives an error, never a panic.
+    #[test]
+    fn a_splice_of_a_malformed_tree_is_an_error_not_a_panic() {
+        let s = fast_store();
+        let chunk = s.put(&[7u8; 50]).unwrap();
+        let e = |id, len| Entry { id, len };
+        let leaf = s.put(&encode_node(0, &[e(chunk, 50)])).unwrap();
+        let empty = s.put(&encode_node(0, &[])).unwrap();
+        let wrong_level = s.put(&encode_node(2, &[e(chunk, 50)])).unwrap();
+        for (what, child, claim) in [("longer claim", leaf, 100), ("empty child", empty, 10), ("wrong level", wrong_level, 50)] {
+            let root = s.put(&encode_node(1, &[e(child, claim)])).unwrap();
+            let data = vec![0u8; claim as usize];
+            let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                splice(&s, Some(root), claim, &[0..1], claim, &mut VecSource(&data))
+            }));
+            assert!(matches!(got, Ok(Err(Error::Corrupt(_)))), "{what}: {got:?}");
         }
     }
 }
