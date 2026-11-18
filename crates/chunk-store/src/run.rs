@@ -645,9 +645,9 @@ impl Iterator for RunIter<'_> {
 mod tests {
     use super::*;
     use crate::mem::MemIo;
-    use crate::pack_io::FileIo;
-    use crate::DIGEST_LEN;
+    use crate::pack_io::{FileIo, Kind};
     use crate::retry::RetryingIo;
+    use crate::DIGEST_LEN;
     use std::sync::Mutex;
 
     /// A read handle that records the offset and length of every read.
@@ -734,5 +734,225 @@ mod tests {
         assert!(dir.path().join("index").join("0000000000000001.run").is_file());
         assert!(!dir.path().join("packs").join("0000000000000001.run").exists());
         assert_eq!(files.list().unwrap(), Vec::<u64>::new(), "a run is not a pack");
+    }
+
+    fn is_corrupt<T>(r: &Result<T>) -> bool {
+        matches!(r, Err(Error::Corrupt(_)))
+    }
+
+    /// Check a whole run: `iter` gives `entries` in order, `get` finds each.
+    fn check_run(run: &Run, entries: &[(ObjectId, Entry)]) {
+        let read: Vec<(ObjectId, Entry)> = run.iter().map(|r| r.unwrap()).collect();
+        assert_eq!(read, entries);
+        for (id, e) in entries {
+            assert_eq!(run.get(id).unwrap(), Some(*e), "{id:?}");
+        }
+    }
+
+    fn mem_run(entries: &[(ObjectId, Entry)]) -> (MemIo, Run, RunInfo) {
+        let io = MemIo::new();
+        let info = write_run(&io, 1, entries);
+        let run = Run::open(io.open_run(1).unwrap(), 1, info.len).unwrap();
+        (io, run, info)
+    }
+
+    /// Bytes of the file length a run of `pages` pages and `tags` tags has.
+    fn run_len(pages: u64, tags: u64) -> u64 {
+        pages * PAGE as u64 + tags * TAG_ROW as u64 + pages * FENCE as u64 + FOOTER as u64
+    }
+
+    #[test]
+    fn runs_of_each_size_round_trip() {
+        for n in [0u64, 1, 70, 71, 10_000] {
+            let entries: Vec<(ObjectId, Entry)> = (0..n).map(|i| (key(0x1e, i), put(i))).collect();
+            let (_io, run, info) = mem_run(&entries);
+            let pages = n.div_ceil(PER_PAGE as u64);
+            assert_eq!(info.len, run_len(pages, (n > 0) as u64), "n {n}");
+            assert_eq!(run.entries(), n);
+            check_run(&run, &entries);
+        }
+    }
+
+    #[test]
+    fn each_tag_starts_a_new_page() {
+        let mut entries: Vec<(ObjectId, Entry)> = (0..100).map(|i| (key(0x1e, i), put(i))).collect();
+        entries.extend((0..50).map(|i| (key(0xf0, i), put(i))));
+        let io = MemIo::new();
+        let info = write_run(&io, 1, &entries);
+        // 70 + 30 entries of tag 0x1e, then a page of 50 of tag 0xf0.
+        assert_eq!(info.len, run_len(3, 2));
+        let (run, c) = open_counting(&io, 1, info.len);
+        c.take();
+        check_run(&run, &entries);
+        c.take();
+        assert_eq!(run.get(&key(0xf0, 7)).unwrap(), Some(put(7)));
+        assert_eq!(c.take(), vec![(2 * PAGE as u64, PAGE)], "the 0xf0 key is on page 2");
+        assert_eq!(run.get(&key(0x1e, 99)).unwrap(), Some(put(99)));
+        assert_eq!(c.take(), vec![(PAGE as u64, PAGE)], "the last 0x1e key is on page 1");
+    }
+
+    #[test]
+    fn keys_with_the_prefix_of_a_page_fence_are_found() {
+        // Keys 60..80 share one 8-byte prefix, across the boundary of pages
+        // 0 and 1, so page 1 starts with that prefix.
+        let mut entries: Vec<(ObjectId, Entry)> = (0..140)
+            .map(|i| {
+                let mut id = key(0x1e, if (60..80).contains(&i) { 60 } else { i });
+                id.0[9] = i as u8; // digest byte 8: keeps them apart and sorted
+                (id, put(i))
+            })
+            .collect();
+        entries.sort_by_key(|(id, _)| *id);
+        let (_io, run, _) = mem_run(&entries);
+        check_run(&run, &entries);
+        assert_eq!(run.fences[1], prefix(&entries[70].0));
+        assert_eq!(run.fences[1], prefix(&entries[69].0));
+        let mut absent = entries[65].0;
+        absent.0[10] = 0xff;
+        assert_eq!(run.get(&absent).unwrap(), None);
+
+        // All keys with one prefix: every fence is equal.
+        let entries: Vec<(ObjectId, Entry)> = (0..200u64)
+            .map(|i| {
+                let mut id = key(0x1e, 5);
+                id.0[9..17].copy_from_slice(&i.to_be_bytes());
+                (id, put(i))
+            })
+            .collect();
+        let (_io, run, _) = mem_run(&entries);
+        check_run(&run, &entries);
+    }
+
+    #[test]
+    fn tombstones_round_trip_and_are_counted() {
+        let entries: Vec<(ObjectId, Entry)> =
+            (0..300).map(|i| (key(0x1e, i), if i % 3 == 0 { Entry::Tomb(7 + i) } else { put(i) })).collect();
+        let (_io, run, info) = mem_run(&entries);
+        assert_eq!((info.entries, info.tombstones), (300, 100));
+        assert_eq!((run.entries(), run.tombstones()), (300, 100));
+        check_run(&run, &entries);
+        assert_eq!(run.get(&key(0x1e, 3)).unwrap(), Some(Entry::Tomb(10)));
+
+        let only: Vec<(ObjectId, Entry)> = (0..10).map(|i| (key(0x1e, i), Entry::Tomb(i))).collect();
+        let (_io, run, _) = mem_run(&only);
+        assert_eq!(run.pack_range(), None);
+        check_run(&run, &only);
+    }
+
+    #[test]
+    fn the_writer_refuses_keys_out_of_order() {
+        let io = MemIo::new();
+        let mut w = RunWriter::create(&io, 1, 3).unwrap();
+        w.push(&key(0x1e, 2), &put(2)).unwrap();
+        assert!(w.push(&key(0x1e, 2), &put(2)).is_err(), "a duplicate");
+        assert!(w.push(&key(0x1e, 1), &put(1)).is_err(), "a smaller key");
+        let tomb_flag = Entry::Put(Loc { pack: 1, offset: 0, stored: 0, raw: 0, flags: TOMB });
+        assert!(w.push(&key(0x1e, 3), &tomb_flag).is_err(), "a put with the tombstone flag");
+    }
+
+    /// Open a run made of `bytes`.
+    fn open_bytes(bytes: &[u8]) -> Result<Run> {
+        let io = MemIo::new();
+        io.write_durable(1, Kind::Run, bytes).unwrap();
+        Run::open(io.open_run(1).unwrap(), 1, bytes.len() as u64)
+    }
+
+    /// `bytes` with the footer changed by `f`, and its CRC made right again.
+    fn refooter(bytes: &[u8], f: impl FnOnce(&mut [u8])) -> Vec<u8> {
+        let mut b = bytes.to_vec();
+        let start = b.len() - FOOTER;
+        let foot = &mut b[start..];
+        f(foot);
+        let crc = crc32c::crc32c(&foot[..FOOTER - 4]);
+        foot[FOOTER - 4..].copy_from_slice(&crc.to_le_bytes());
+        b
+    }
+
+    fn set_u64(b: &mut [u8], at: usize, v: u64) {
+        b[at..at + 8].copy_from_slice(&v.to_le_bytes());
+    }
+
+    // Footer fields: entries 8, tombstones 16, pages 24; sections at 32
+    // (tags), 52 (fences), 72 (filter): offset, length, CRC.
+    #[test]
+    fn a_damaged_footer_or_table_is_refused() {
+        let entries: Vec<(ObjectId, Entry)> = (0..200).map(|i| (key(0x1e, i), put(i))).collect();
+        let io = MemIo::new();
+        write_run(&io, 1, &entries);
+        let good = io.read(1, Kind::Run).unwrap();
+        assert!(open_bytes(&good).is_ok());
+        assert!(open_bytes(&refooter(&good, |_| {})).is_ok(), "refooter alone changes nothing");
+
+        let max_entries = u64::MAX / ENTRY as u64 + 1;
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("entry count u64::MAX", refooter(&good, |f| set_u64(f, 8, u64::MAX))),
+            ("entry count past the pages", refooter(&good, |f| set_u64(f, 8, 3 * PER_PAGE as u64 + 1))),
+            ("entry count that overflows bytes", refooter(&good, |f| set_u64(f, 8, max_entries))),
+            ("tombstones above entries", refooter(&good, |f| set_u64(f, 16, 201))),
+            ("page count 1 << 63", refooter(&good, |f| set_u64(f, 24, 1 << 63))),
+            ("page count u64::MAX", refooter(&good, |f| set_u64(f, 24, u64::MAX))),
+            ("page count one more", refooter(&good, |f| set_u64(f, 24, 4))),
+            ("tag table length past the end", refooter(&good, |f| set_u64(f, 40, good.len() as u64))),
+            ("tag table length u64::MAX", refooter(&good, |f| set_u64(f, 40, u64::MAX))),
+            ("fence table length past the end", refooter(&good, |f| set_u64(f, 60, u64::MAX - 7))),
+            ("fence table offset past the end", refooter(&good, |f| set_u64(f, 52, u64::MAX))),
+            ("filter length past the end", refooter(&good, |f| set_u64(f, 80, 64))),
+            ("unknown filter type", refooter(&good, |f| f[6] = 9)),
+            ("wrong magic", refooter(&good, |f| f[0] = b'X')),
+            ("unknown version", refooter(&good, |f| f[4..6].copy_from_slice(&2u16.to_le_bytes()))),
+            ("bad pack range", refooter(&good, |f| set_u64(f, 92, u64::MAX))),
+            ("bad footer CRC", {
+                let mut b = good.clone();
+                let at = b.len() - FOOTER + 9;
+                b[at] ^= 1;
+                b
+            }),
+            ("bad tag table CRC", {
+                let mut b = good.clone();
+                b[3 * PAGE] ^= 1;
+                b
+            }),
+            ("bad fence table CRC", {
+                let mut b = good.clone();
+                b[3 * PAGE + TAG_ROW] ^= 1;
+                b
+            }),
+            ("shorter than a footer", good[..FOOTER - 1].to_vec()),
+            ("cut at the front", good[PAGE..].to_vec()),
+        ];
+        for (what, bytes) in cases {
+            assert!(is_corrupt(&open_bytes(&bytes)), "{what}");
+        }
+
+        // A length past the end of the file: a short read is damage too.
+        let io = MemIo::new();
+        io.write_durable(1, Kind::Run, &good).unwrap();
+        assert!(is_corrupt(&Run::open(io.open_run(1).unwrap(), 1, good.len() as u64 + PAGE as u64)));
+    }
+
+    #[test]
+    fn a_damaged_page_is_corrupt_for_get_and_iter() {
+        let entries: Vec<(ObjectId, Entry)> = (0..200).map(|i| (key(0x1e, i), put(i))).collect();
+        let (io, run, _) = mem_run(&entries);
+        // An entry byte of page 1 (entries 70..140).
+        io.flip(1, Kind::Run, PAGE + PAGE_HEADER + 5 * ENTRY + 20);
+        assert!(is_corrupt(&run.get(&key(0x1e, 100))), "a key on the damaged page");
+        assert!(is_corrupt(&run.get(&key(0x1e, 75))), "the damaged key itself");
+        assert_eq!(run.get(&key(0x1e, 10)).unwrap(), Some(put(10)), "other pages still read");
+        assert_eq!(run.get(&key(0x1e, 150)).unwrap(), Some(put(150)));
+        let mut it = run.iter();
+        for i in 0..PER_PAGE as u64 {
+            assert_eq!(it.next().unwrap().unwrap(), (key(0x1e, i), put(i)));
+        }
+        assert!(is_corrupt(&it.next().unwrap()), "the damaged page");
+        assert!(it.next().is_none(), "iter stops after damage");
+
+        // Damage in the page header and in the zero padding.
+        for at in [2 * PAGE, 2 * PAGE + 2, 2 * PAGE + 5, 3 * PAGE - 1] {
+            let (io, run, _) = mem_run(&entries);
+            io.flip(1, Kind::Run, at);
+            assert!(is_corrupt(&run.get(&key(0x1e, 150))), "byte {at}");
+            assert!(run.iter().any(|r| is_corrupt(&r)), "byte {at}");
+        }
     }
 }
