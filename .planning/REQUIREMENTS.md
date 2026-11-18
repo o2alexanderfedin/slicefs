@@ -55,10 +55,28 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
+| WLOG-01 | Phase 13 | Pending |
+| WLOG-02 | Phase 13 | Pending |
+| WLOG-03 | Phase 13 | Pending |
+| PACK-01 | Phase 15 | Pending |
+| PACK-02 | Phase 15 | Pending |
+| PACK-03 | Phase 15 | Pending |
+| BNCH-01 | Phase 16 | Pending |
+| BNCH-02 | Phase 16 | Pending |
+| BNCH-03 | Phase 16 | Pending |
+| IDX-01 | Phase 17 | Pending |
+| IDX-02 | Phase 17 | Pending |
+| IDX-03 | Phase 17 | Pending |
+| IDX-04 | Phase 17 | Pending |
+| IDX-05 | Phase 17 | Pending |
+| BUFR-01 | Phase 14 | Pending |
+| BUFR-02 | Phase 14 | Pending |
+| BUFR-03 | Phase 14 | Pending |
 
 **Coverage:**
 - v2.1 requirements: 17 total
-- Mapped to phases: 0 (set by the roadmap)
+- Mapped to phases: 17
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-11-17*
