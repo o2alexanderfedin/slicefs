@@ -1156,17 +1156,18 @@ fn test_write_fallback_with_prior_committed_root_decrements_refcount() {
     let rc_before = fs.meta().get_refcount(&committed_digest);
     assert_eq!(rc_before, 1, "refcount must be 1 after fsync");
 
-    // Non-sequential write triggers fallback from streaming to buffered,
-    // and ALSO decrements the old committed root refcount
-    // (write at offset 0 again while next_expected_offset is 5)
+    // Non-sequential write triggers the switch from streaming to an overlay
+    // (write at offset 0 again while next_expected_offset is 5). The
+    // committed root is the overlay base and the manifest still names it,
+    // so its refcount stays (#98, Phase 14 pitfall 5).
     fs.test_write(fh, 0, b"world").unwrap();
-
-    // The refcount should have been decremented during the fallback
-    // (old committed root was decremented when switching to buffered mode)
     let rc_after_fallback = fs.meta().get_refcount(&committed_digest);
-    assert_eq!(rc_after_fallback, 0, "refcount must be decremented when fallback occurs with prior committed root");
+    assert_eq!(rc_after_fallback, 1, "the manifest still names the old root: refcount stays");
 
+    // Release stores the new content and releases the old root.
     fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.meta().get_refcount(&committed_digest), 0, "refcount must be decremented when a new root replaces it");
+    assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"world");
 }
 
 // ── test_write: fallback loading from committed manifest (not streaming state) ─

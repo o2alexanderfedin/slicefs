@@ -3,7 +3,7 @@
 
 use chunk_store::mem::MemIo;
 use chunk_store::pack_io::{Kind, PackIo};
-use chunk_store::retry::RetryingIo;
+use chunk_store::retry::{RetryingIo, KEEP_LIMIT};
 use chunk_store::{ChunkStore, ObjectId, Options};
 use std::sync::Arc;
 
@@ -108,4 +108,26 @@ fn a_cut_before_the_retry_is_kept() {
     io.sync_dir().unwrap();
     mem.crash();
     assert_eq!(mem.read(1, Kind::Pack).unwrap(), vec![7u8; 40]);
+}
+
+#[test]
+fn the_copy_of_unsynced_writes_stays_below_the_keep_limit() {
+    // #98: the RAM copy must not grow with the data. Past KEEP_LIMIT the
+    // pack is synced at once, so those bytes survive a crash with no sync.
+    let mem = MemIo::new();
+    let io = retrying(&mem);
+    let mut f = io.create(1).unwrap();
+    mem.sync_dir().unwrap();
+    let piece = random(1 << 20, 7);
+    let n = KEEP_LIMIT / piece.len() + 1;
+    for i in 0..n {
+        f.write_at(&piece, (i * piece.len()) as u64).unwrap();
+    }
+    drop(f);
+    mem.crash();
+    let saved = mem.read(1, Kind::Pack).unwrap();
+    assert!(saved.len() > KEEP_LIMIT, "only {} bytes were synced", saved.len());
+    for i in 0..n {
+        assert_eq!(&saved[i * piece.len()..(i + 1) * piece.len()], &piece[..], "piece {i}");
+    }
 }

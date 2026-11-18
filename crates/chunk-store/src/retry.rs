@@ -6,7 +6,9 @@
 //! last good sync. When a sync fails, it writes the copy again (the pages
 //! are dirty again) and then syncs again. A success after that is real.
 //!
-//! The copy is the data of one commit, at most one pack. After the last
+//! The copy is bounded: when it passes `KEEP_LIMIT` bytes, the pack is
+//! synced at once and the copy is dropped. So the RAM this layer uses does
+//! not depend on the size of a file or a commit (#98). After the last
 //! attempt the error goes to the store, which then stops all writes.
 //!
 //! `write_durable` is retried as a whole (it writes the full file again).
@@ -19,6 +21,11 @@ use std::time::Duration;
 
 /// Waits before each new attempt; the number of entries is the number of
 /// retries.
+/// Most bytes of unsynced writes one pack keeps in RAM. Beyond it the pack
+/// is synced at once (an early sync is safe: objects that are durable
+/// before their root are only garbage until the next GC).
+pub const KEEP_LIMIT: usize = 8 << 20;
+
 const BACKOFF: [Duration; 3] = [Duration::from_millis(10), Duration::from_millis(100), Duration::from_millis(500)];
 
 pub struct RetryingIo {
@@ -37,7 +44,7 @@ impl RetryingIo {
     }
 
     fn wrap(&self, file: Box<dyn PackFile>) -> Box<dyn PackFile> {
-        Box::new(RetryingPack { file, unsynced: Vec::new(), len: None, backoff: self.backoff.clone() })
+        Box::new(RetryingPack { file, unsynced: Vec::new(), kept: 0, len: None, backoff: self.backoff.clone() })
     }
 }
 
@@ -45,6 +52,8 @@ struct RetryingPack {
     file: Box<dyn PackFile>,
     /// Writes since the last good sync, in order.
     unsynced: Vec<(u64, Vec<u8>)>,
+    /// Sum of the bytes in `unsynced`.
+    kept: usize,
     /// The last `set_len` since the last good sync.
     len: Option<u64>,
     backoff: Vec<Duration>,
@@ -72,6 +81,10 @@ impl PackFile for RetryingPack {
     fn write_at(&mut self, data: &[u8], offset: u64) -> io::Result<()> {
         self.file.write_at(data, offset)?;
         self.unsynced.push((offset, data.to_vec()));
+        self.kept += data.len();
+        if self.kept > KEEP_LIMIT {
+            self.sync()?;
+        }
         Ok(())
     }
 
@@ -82,6 +95,7 @@ impl PackFile for RetryingPack {
         for (o, d) in &mut self.unsynced {
             d.truncate((len - *o) as usize);
         }
+        self.kept = self.unsynced.iter().map(|(_, d)| d.len()).sum();
         self.len = Some(len);
         Ok(())
     }
@@ -90,6 +104,7 @@ impl PackFile for RetryingPack {
         let mut err = match self.file.sync() {
             Ok(()) => {
                 self.unsynced.clear();
+                self.kept = 0;
                 self.len = None;
                 return Ok(());
             }
@@ -102,6 +117,7 @@ impl PackFile for RetryingPack {
                 Ok(()) => {
                     tracing::warn!("chunk store: a sync failed ({err}); the data was written again and synced");
                     self.unsynced.clear();
+                    self.kept = 0;
                     self.len = None;
                     return Ok(());
                 }

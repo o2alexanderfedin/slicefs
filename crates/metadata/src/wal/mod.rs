@@ -3,17 +3,24 @@
 //! The `WalStrategy` trait is the abstraction through which all Dictionary mutations flow.
 //! Four implementations cover the full durability/throughput trade-off spectrum:
 //!
-//! | Strategy        | Durability          | Throughput |
-//! |-----------------|---------------------|------------|
-//! | PerOp           | Per mutation        | Lowest     |
-//! | FlushOnFsync    | On explicit fsync   | Medium     |
-//! | Periodic        | On timer/shutdown   | Highest    |
-//! | NoWal           | None (testing only) | N/A        |
+//! | Strategy     | Survives a crash of the daemon         | Survives a power loss      |
+//! |--------------|----------------------------------------|----------------------------|
+//! | PerOp        | Each completed request                 | After fsync or commit      |
+//! | FlushOnFsync | All but at most the last 4 MiB of records | After fsync or commit   |
+//! | Periodic     | As FlushOnFsync                        | After fsync, commit, timer |
+//! | NoWal        | None (testing only)                    | None                       |
+//!
+//! PerOp writes each operation record into the segment file at once (one
+//! `write()`, no disk sync). FlushOnFsync and Periodic hold records in RAM,
+//! at most `BUFFER_CAP_BYTES`; past it they write them with no sync. After a
+//! crash with no fsync, these two modes can bring back a file as a correct
+//! first part of its data (#98).
 
 pub mod no_wal;
 pub mod per_op;
 pub mod flush_on_fsync;
 pub mod periodic;
+mod buffered;
 
 pub use no_wal::NoWal;
 pub use per_op::PerOpWal;
@@ -24,6 +31,11 @@ use std::path::Path;
 use slicefs_traits::key::ObjectKey;
 use thiserror::Error;
 
+/// Flush-on-fsync and periodic write their held records to the segment (no
+/// fsync) when the records pass this size, so the RAM of the write log stays
+/// at most this size (#98).
+pub const BUFFER_CAP_BYTES: usize = 4 * 1024 * 1024;
+
 /// A logical WAL entry representing a metadata state change.
 #[derive(Debug, Clone)]
 pub enum WalEntry {
@@ -33,7 +45,8 @@ pub enum WalEntry {
     Snapshot { version: u64, root: ObjectKey, created_at: u64, name: Option<String> },
     /// A file system request since the last root (#20 write log). The bytes
     /// are encoded by the file system; the store only keeps them in order.
-    /// Not synced on its own: `flush_and_sync` (fsync, commit) makes it durable.
+    /// Not synced on its own: `flush_and_sync` (fsync, commit) makes it
+    /// survive a power loss. PerOp writes it into the file at once.
     Op { bytes: Vec<u8> },
 }
 
@@ -47,11 +60,14 @@ pub enum WalError {
 /// Selects which WAL strategy to use.
 #[derive(Debug, Clone)]
 pub enum WalConfig {
-    /// Durably write each mutation before returning.
+    /// Sync each root and snapshot record; write each operation record into
+    /// the file at once with no sync.
     PerOp,
-    /// Buffer mutations; flush on explicit `flush_and_sync`.
+    /// Hold up to `BUFFER_CAP_BYTES` of records in RAM; write and sync them
+    /// on an explicit `flush_and_sync`.
     FlushOnFsync,
-    /// Buffer mutations; flush on a background timer (or at shutdown).
+    /// As `FlushOnFsync`, and a timer also syncs every `interval_secs`
+    /// (0: no timer).
     Periodic { interval_secs: u64 },
     /// No-op WAL (testing / in-memory only).
     NoWal,
@@ -127,8 +143,9 @@ pub fn create_wal(
             let wal = FlushOnFsyncWal::new(&seg_path, segment_id)?;
             Ok(Box::new(wal))
         }
-        WalConfig::Periodic { .. } => {
-            let wal = PeriodicWal::new(&seg_path, segment_id)?;
+        WalConfig::Periodic { interval_secs } => {
+            let interval = std::time::Duration::from_secs(interval_secs);
+            let wal = PeriodicWal::with_interval(&seg_path, segment_id, interval)?;
             Ok(Box::new(wal))
         }
         WalConfig::NoWal => Ok(Box::new(NoWal)),

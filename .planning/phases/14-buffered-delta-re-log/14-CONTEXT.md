@@ -32,6 +32,12 @@ RE-SCOPED 2026-11-18 by the user ("it never should keep files in memory - 1 GiB 
 - Phase 13 is executed (PR #100). Phase 14 execution starts after #100 is merged into develop. Keep the "switches to Buffered" log text or update the Phase 13 Docker check in the same change.
 - The chunk-list splice API in chunk-store/src/file.rs is IN scope now (the old deferral is void).
 
+### Write-log RAM (decided 2026-11-18 after the spike on local branch spike/wal-memory; user: "do spikes to test both scenarios, then choose")
+- Option A: per-op calls flush() (one write() into the kernel, no fsync) after each operation record; flush-on-fsync and periodic write their buffer to the segment (no fsync) when it passes 4 MiB. fsync counts do not change. Spike: kill -9 lost a written+renamed small file in 3/3 runs with the old code and with option B, and kept it in 3/3 with A; flush-on-fsync peak RSS for 1 GiB with no fsync went from 1276 MiB to 284 MiB; no measurable cost for writes of 4 KiB or more, +8 % CPU for small files, about 6 us per request for 64-byte writes (in-process, no FUSE). — **Reversibility:** reversible
+- Periodic gets its timer: `interval_secs` is used to flush and sync on a schedule (today it is never used, so periodic acts as flush-on-fsync).
+- Document the new crash behaviour of the capped modes: after a crash with no fsync, a file can come back as a correct prefix (for example 4 MiB of 6 MiB).
+- Phase 13 Docker check 05c: its control rename (no sync) now survives kill -9 in per-op mode; the control must use flush-on-fsync (where a small record below the cap is still lost).
+
 ### SUPERSEDED (pre-2026-11-18 scope: delta re-log while the full buffer stays in RAM)
 The "Decided autonomously" items below were written for the old scope. Keep only what still applies (replay rules, shrink-then-extend zeros, write aliases on the owner state, test_write taking the state out of open_files, GC race). Ignore anything that keeps a full-file buffer.
 

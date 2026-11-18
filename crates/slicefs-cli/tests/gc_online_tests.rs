@@ -177,3 +177,140 @@ fn the_nodes_of_deleted_files_are_freed() {
     assert!(fs.content().stats().objects <= before + 8, "{before} -> {}", fs.content().stats().objects);
     check_after_remount(fs, dir.path(), &[("keep", &keep)]);
 }
+
+// ── Online GC and the overlay rebase (phase 14, D-06, D-19) ─────────────────
+
+/// Stream `n` MiB into a new file (no fsync, no close), then write 4 KiB
+/// back in the middle: the switch installs the ended stream as the base.
+fn open_overlay(fs: &SliceFsFilesystem, name: &str, n: usize, seed: u64) -> (u64, u64, Vec<u8>) {
+    let (ino, fh) = fs.test_create(1, name, 0o644, 0, 0, 0).unwrap();
+    let mut model = Vec::with_capacity(n << 20);
+    for i in 0..n {
+        let piece = data(seed + i as u64, 1 << 20);
+        fs.test_write(fh, (i as u64) << 20, &piece).unwrap();
+        model.extend_from_slice(&piece);
+    }
+    let at = (n << 19) + 1234;
+    let patch = data(seed + 1000, 4096);
+    fs.test_write(fh, at as u64, &patch).unwrap();
+    model[at..at + 4096].copy_from_slice(&patch);
+    assert!(!fs.test_is_streaming(fh), "the write back switched to an overlay");
+    (ino, fh, model)
+}
+
+/// Mark and sweep run inside the rebase of the release: after the splice
+/// finished the new root and before `install_root`. The base exists only
+/// because the switch installed the ended stream (it was never committed,
+/// fsynced or closed). The splice reuses most of its chunks by ID, without
+/// a read, so only the marks protect them: the base is in the manifest of
+/// the `gc_start` commit and in its file roots. Without the base install at
+/// the switch and the overlay file root in `gc_start`, the sweep deletes
+/// those chunks and the read after remount (or the offline GC mark) fails.
+#[test]
+fn online_gc_during_a_rebase_keeps_every_chunk() {
+    let dir = TempDir::new().unwrap();
+    let fs = make_fs(dir.path());
+    let (ino, fh, model) = open_overlay(&fs, "big.bin", 32, 100);
+    make_garbage(&fs, "junk.bin", &data(99, 300_000));
+
+    let (gc, boundary) = fs.gc_start().unwrap();
+    let pending = Arc::new(Mutex::new(Some((gc, boundary))));
+    let swept: Arc<Mutex<Option<chunk_store::GcStats>>> = Arc::new(Mutex::new(None));
+    let (cs, slot, out) = (Arc::clone(fs.content()), Arc::clone(&pending), Arc::clone(&swept));
+    fs.test_set_rebase_hook(Some(Arc::new(move || {
+        if let Some((gc, boundary)) = slot.lock().unwrap().take() {
+            let ids = gc.live(&no_stop()).unwrap().expect("not stopped");
+            *out.lock().unwrap() = Some(cs.gc_finish(&ids, boundary).unwrap());
+        }
+    })));
+    let before = fs.test_rebase_count();
+    {
+        // As the release callback does: the rebase runs under the shared gate.
+        let gate = fs.commit_gate();
+        let _shared = gate.read().unwrap();
+        fs.test_release(ino, fh).unwrap();
+    }
+    fs.test_set_rebase_hook(None);
+    assert_eq!(fs.test_rebase_count(), before + 1, "one rebase, at release");
+    let stats = swept.lock().unwrap().take().expect("the GC ran inside the rebase");
+    // Every byte of the (incompressible) garbage file is freed. The object
+    // count also holds metadata nodes and differs from run to run.
+    assert!(stats.removed_bytes >= 300_000, "the garbage must go: {stats:?}");
+    assert!(fs.test_read(ino, 0, (33 << 20) as u32).unwrap() == model, "content before remount");
+    check_after_remount(fs, dir.path(), &[("big.bin", &model)]);
+}
+
+/// `gc_start` takes the commit gate exclusively before `gc_begin`, so it
+/// waits while a callback (holding the gate shared) is inside a rebase.
+/// Without the gate, `gc_begin` would run during the rebase: the chunks the
+/// splice put before `gc_begin` are in no root and not touched, so the
+/// sweep would delete them.
+#[test]
+fn gc_start_waits_for_a_rebase_in_a_callback() {
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    let dir = TempDir::new().unwrap();
+    let fs = make_fs(dir.path());
+    let (ino, fh, model) = open_overlay(&fs, "f.bin", 4, 500);
+    make_garbage(&fs, "junk.bin", &data(499, 300_000));
+
+    let (inside_tx, inside_rx) = channel::<()>();
+    let (go_tx, go_rx) = channel::<()>();
+    let (inside_tx, go_rx) = (Mutex::new(inside_tx), Mutex::new(go_rx));
+    fs.test_set_rebase_hook(Some(Arc::new(move || {
+        inside_tx.lock().unwrap().send(()).unwrap();
+        go_rx.lock().unwrap().recv_timeout(Duration::from_secs(30)).expect("go");
+    })));
+    let returned = AtomicBool::new(false);
+    let (waited, started) = std::thread::scope(|sc| {
+        let callback = sc.spawn(|| {
+            let gate = fs.commit_gate();
+            let _shared = gate.read().unwrap();
+            fs.test_release(ino, fh).unwrap();
+        });
+        inside_rx.recv_timeout(Duration::from_secs(30)).expect("the release reached the rebase");
+        let gc = sc.spawn(|| {
+            let r = fs.gc_start();
+            returned.store(true, Ordering::SeqCst);
+            r
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let waited = !returned.load(Ordering::SeqCst);
+        go_tx.send(()).unwrap();
+        callback.join().unwrap();
+        (waited, gc.join().unwrap())
+    });
+    fs.test_set_rebase_hook(None);
+    assert!(waited, "gc_start returned while a callback was inside a rebase");
+    let (gc, boundary) = started.unwrap();
+    let stats = fs.gc_content(&gc, boundary, &no_stop()).unwrap().expect("not stopped");
+    assert!(stats.removed_bytes >= 300_000, "the garbage must go: {stats:?}");
+    check_after_remount(fs, dir.path(), &[("f.bin", &model)]);
+}
+
+/// A full online GC while an overlay handle is open (switch done, not
+/// rebased): the base is only in the manifest the switch set and in the
+/// overlay file root of `gc_start`. Without them the sweep deletes the
+/// chunks of the ended stream, and the rebase at release reuses them by ID.
+#[test]
+fn an_open_overlay_keeps_its_base_through_online_gc() {
+    let dir = TempDir::new().unwrap();
+    let fs = make_fs(dir.path());
+    make_garbage(&fs, "junk.bin", &data(799, 300_000));
+    let (ino, fh, mut model) = open_overlay(&fs, "open.bin", 4, 800);
+
+    let stats = fs.gc_online(&no_stop()).unwrap().expect("not stopped");
+    assert!(stats.removed_bytes >= 300_000, "the garbage must go: {stats:?}");
+
+    let more = data(900, 4096);
+    fs.test_write(fh, 3 << 20, &more).unwrap();
+    model[3 << 20..(3 << 20) + 4096].copy_from_slice(&more);
+    let tail = data(901, 4096);
+    fs.test_write(fh, model.len() as u64, &tail).unwrap();
+    model.extend_from_slice(&tail);
+    fs.test_release(ino, fh).unwrap();
+    assert!(fs.test_read(ino, 0, (5 << 20) as u32).unwrap() == model, "content before remount");
+    check_after_remount(fs, dir.path(), &[("open.bin", &model)]);
+}
