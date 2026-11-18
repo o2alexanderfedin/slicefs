@@ -137,7 +137,7 @@ After the run, `cargo clippy -p slicefs-cli --tests` found one new lint on a lin
 
 **1. [Rule 1 - Test fix] Two lib tests asserted the old meaning of `test_last_rebase_bytes`.** `an_overlay_rebases_when_it_crosses_the_dirty_limit` asserted `== 1 MiB`, and `a_switch_that_moves_pending_writes_over_the_limit_rebases_at_once` asserted `== 1 MiB + 128 KiB`. Both values were the whole size of the re-stream. Both tests now assert the bounds listed under "What changed". The bounds are tighter than the old values, so they also check the splice. The doc comment of the hook was updated. Commit 4bc338a.
 
-**2. [Rule 1 - Flaky assert] The GC tests assert on freed bytes, not on the object count.** At first the new tests used `removed_objects > 30`, as the older tests do. In some runs the sweep removed 26 objects, with `removed_bytes` exactly 300,000. The garbage file is about 26 chunks, and the number of metadata nodes changes from run to run. The three new tests now assert `removed_bytes >= 300_000`, which means every byte of the incompressible garbage file is freed. Five runs in a row passed, and the discrimination check was run again against this version. Commit fd62c97.
+**2. [Rule 1 - Flaky assert] The GC tests assert on freed bytes, not on the object count.** At first the new tests used `removed_objects > 30`, as the older tests do. In some runs the sweep removed 26 objects, with `removed_bytes` exactly 300,000; in other runs it removed more than 30. I did not find the cause of the variation (see Open items). The three new tests now assert `removed_bytes >= 300_000`, which means every byte of the incompressible garbage file is freed. Five runs in a row passed, and the discrimination check was run again against this version. Commit fd62c97.
 
 **3. [Rule 2] Extra checks in the Task 1 and Task 2 tests.** The chunk-offset mapping proves itself: each canonical chunk ID of the old content must be in `file_objects(O)` before the "kept" check uses it. The 4 KiB change is the bitwise NOT of the old bytes, so it always differs from them. Task 2 asserts `rechunked > 0`, so a value of 0 that was never stored cannot pass. That assert was the RED failure. The 4 GiB file is read only in ranges with `test_read`, never as a whole.
 
@@ -153,11 +153,12 @@ None.
 
 ## Threat Flags
 
-None. There is no new endpoint, auth path or file access. T-14-09 is mitigated and tested by the three GC tests and the recorded mutant. T-14-10 is mitigated: a 4 GiB extend cuts again less than 36 KB, with and without a handle.
+None. There is no new endpoint, auth path or file access. T-14-09 is mitigated and tested by the three GC tests and the recorded mutant. T-14-10 is mitigated: a 4 GiB extend cuts again 35,628 bytes with no handle and 81,441 bytes through an open overlay. Both are below the 1 MiB bound.
 
 ## Open items for later plans
 
 - The rebase still runs with the state out of `open_files`, as in 14-04 (one FUSE thread, RESEARCH Q6). It is now short on random data. On repeating non-zero data it can still run to EOF (see the BUFR-03 reading).
+- Not investigated: the online GC object count changes from run to run (26 or more than 30) for the same 300,000-byte garbage file in `online_gc_during_a_rebase_keeps_every_chunk`. The freed bytes are the same each time.
 - Case B opens the old root twice: once to get its length and once in `OverlaySource`. That is one extra root-node load per no-handle size change, and it does not depend on the file size.
 
 ## Self-Check: PASSED
