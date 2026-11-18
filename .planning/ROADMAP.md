@@ -235,7 +235,18 @@ Plans:
   2. Crash tests during a run flush and a merge lose no object and give no wrong `Loc`
   3. GC tests show that no lookup returns an object that online GC removed
   4. The Phase 16 benchmark with the new index shows the RAM per object, cold-open time, lookup and write throughput against the baseline
-**Plans**: TBD
+**Plans**: 9 plans
+
+Plans:
+- [ ] 17-01-PLAN.md — spike: custom sorted runs vs fjall on index-bench at 1M/10M, fjall legitimacy gate, decision checkpoint (wave 1, checkpoint)
+- [ ] 17-02-PLAN.md — run file format (pages, fences, tag table, footer) and PackIo run/MANIFEST kinds on FileIo, MemIo and RetryingIo; tracer of the run I/O path (wave 2)
+- [ ] 17-03-PLAN.md — tracer of the store: memtable, MANIFEST, replay above the high-water mark, exact stats, GC that changes nothing after an index read error, the in-RAM map removed (wave 3)
+- [ ] 17-04-PLAN.md — open-time cleanup, rebuild of a damaged index, the rebuild flag, layered damage test, read-only open, MemIo fault knobs, run-flush crash tests (wave 4)
+- [ ] 17-05-PLAN.md — blocked Bloom filter, sharded memtable, lookups outside the store lock with gen revalidation, race tests with hook flags, IDX-01/IDX-02 read-count tests (wave 5)
+- [ ] 17-06-PLAN.md — size-tiered background merges, crash-safe install, damage leads to a rebuild, shutdown, merge crash tests (wave 6)
+- [ ] 17-07-PLAN.md — GC from a run snapshot outside the store lock, pending GC runs and one install, no change after a read error, visibility, fault and lock tests (wave 7)
+- [ ] 17-08-PLAN.md — index-bench store-wide disk bytes, index keys and gc step; 1M/10M/100M runs and GC lock hold at 10M/100M; "Index on disk" and "Index results (#85)" in docs/design/chunk-store.md (wave 8)
+- [ ] 17-09-PLAN.md — #85 comment and close, follow-up issues, after merge and green CI (wave 9, checkpoint)
 
 ## Progress
 
