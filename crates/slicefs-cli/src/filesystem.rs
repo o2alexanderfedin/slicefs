@@ -78,7 +78,8 @@ const RELOG_PIECE: u64 = 1 << 20;
 /// Dirty limit of one open file: when the RAM of its overlay (extent
 /// capacity plus `EXTENT_OVERHEAD` per extent) passes it, the write that
 /// passed it stores the overlay as a new root (a rebase) before it returns.
-/// Start value; plan 14-07 sets the final value from measured runs. The real
+/// An extent grows by at most 1/8 of its length (`overlay::GROW_DIV`), not by
+/// doubling, so the capacity stays near the dirty bytes. The real
 /// peak of one handle is max(REORDER_WINDOW, DIRTY_LIMIT) + one write + the
 /// rebase work space (one piece and the stream state).
 pub const DIRTY_LIMIT: usize = 32 << 20;

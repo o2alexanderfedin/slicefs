@@ -19,6 +19,10 @@ use slicefs_traits::key::ObjectKey;
 /// so that many one-byte writes cannot grow the map without a cost.
 pub const EXTENT_OVERHEAD: usize = 64;
 
+/// A growing extent gets at most 1/GROW_DIV of its length as spare capacity
+/// (not the 2x of `Vec` doubling), so its cost stays near its length.
+pub const GROW_DIV: usize = 8;
+
 /// Base content plus the extents written since that base.
 ///
 /// Invariants: `visible <= base_len`; extents do not overlap and do not touch
@@ -74,7 +78,16 @@ impl Overlay {
         let stop = last_end.max(end);
         // Grow the lowest extent if it starts at `start`, else a new Vec.
         let mut merged = if lo == start { self.remove(lo) } else { Vec::new() };
-        merged.resize((stop - start) as usize, 0);
+        // Grow by at most 1/GROW_DIV, not by doubling: the cost counts the
+        // capacity, so doubling could hold 2x the dirty limit before the
+        // rebase. Geometric growth keeps in-order writes amortized O(1).
+        let need = (stop - start) as usize;
+        if need > merged.capacity() {
+            let cap = merged.capacity();
+            let target = need.max(cap + cap / GROW_DIV);
+            merged.reserve_exact(target - merged.len());
+        }
+        merged.resize(need, 0);
         for s in hits {
             if s == lo && lo == start {
                 continue;
@@ -322,6 +335,29 @@ mod tests {
         let want: Vec<u8> = (0..1000u64).map(|i| i as u8).collect();
         assert_eq!(read(&run, &[], 0, 1000), want);
         assert_eq!(run.copy_out(10, 5), want[10..15].to_vec());
+    }
+
+    #[test]
+    fn a_growing_extent_does_not_double_its_capacity() {
+        // One extent that grows in order. Its cost (capacity) must follow its
+        // length, so the dirty limit bounds the RAM and not 2x the limit.
+        const MIB: usize = 1 << 20;
+        let mut ov = Overlay::new(None, 0, 0);
+        let piece = vec![7u8; MIB];
+        for i in 0..65 {
+            ov.write((i * MIB) as u64, &piece);
+            let len = (i + 1) * MIB;
+            assert_eq!(ov.extent_count(), 1);
+            assert!(ov.cost() <= len + len / GROW_DIV + EXTENT_OVERHEAD, "{} MiB: cost {}", i + 1, ov.cost());
+        }
+        // Small in-order writes: the same bound.
+        let mut small = Overlay::new(None, 0, 0);
+        for i in 0..4096u64 {
+            small.write(i * 4096, &[1; 4096]);
+            let len = (i as usize + 1) * 4096;
+            assert!(small.cost() <= len + len / GROW_DIV + EXTENT_OVERHEAD, "{len}: cost {}", small.cost());
+        }
+        assert_eq!(read(&small, &[], 0, 16 * MIB as u64), vec![1u8; 16 * MIB]);
     }
 
     #[test]

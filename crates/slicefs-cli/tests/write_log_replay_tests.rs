@@ -755,9 +755,10 @@ fn an_overlay_with_more_than_64_mib_of_relog_replays() {
         write(&fs, fh, 0, &model.clone());
         put(&fs, fh, &mut model, 0, &[0x77; 4096]); // the switch
         // One extent that grows by 1 MiB per write. An extent costs its
-        // capacity, and Vec doubles it: 128 MiB at 65 MiB of length. So the
-        // limit is above that, or a rebase would run in the loop.
-        fs.test_set_dirty_limit(256 << 20);
+        // capacity, which grows by at most 1/8 (overlay::GROW_DIV): at most
+        // about 73 MiB at 65 MiB of length. So the limit is above that, or a
+        // rebase would run in the loop.
+        fs.test_set_dirty_limit(96 << 20);
         let rebases = fs.test_rebase_count();
         // 65 MiB: the smallest whole number of MiB above MAX_PAYLOAD. Each
         // MiB is one random MiB with its index in the first 8 bytes.
@@ -775,7 +776,7 @@ fn an_overlay_with_more_than_64_mib_of_relog_replays() {
     };
     // The same high limit in replay: no rebase while the 65 pieces come in
     // (each would hash the whole file again), one at the end of replay.
-    let fs = reload_and_replay_with(dir.path(), |fs| fs.test_set_dirty_limit(256 << 20));
+    let fs = reload_and_replay_with(dir.path(), |fs| fs.test_set_dirty_limit(96 << 20));
     let got = fs.test_read(ino, 0, model.len() as u32 + 1).unwrap();
     if got != model {
         // Only on a failure: a byte loop is slow in a debug build.
