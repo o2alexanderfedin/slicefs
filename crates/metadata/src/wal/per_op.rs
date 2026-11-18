@@ -1,4 +1,6 @@
-//! Per-operation WAL strategy — durably writes each mutation before returning.
+//! Per-operation WAL strategy: syncs each root and snapshot record before it
+//! returns. Operation records stay in the write buffer until the next
+//! `flush_and_sync` (fsync, fsyncdir) or commit, as POSIX allows.
 
 use std::io;
 use std::path::Path;
@@ -7,9 +9,10 @@ use std::sync::Mutex;
 use crate::segment::{SegmentEntry, SegmentWriter};
 use super::{WalEntry, WalError, WalStrategy};
 
-/// WAL that calls `sync_all` after every mutation.
+/// WAL that calls `sync_all` after each root and snapshot record.
 ///
-/// Provides the strongest durability guarantee at the cost of throughput.
+/// Operation records are made durable by `flush_and_sync` or a commit, not one
+/// by one (see `log_mutation`).
 pub struct PerOpWal {
     writer: Mutex<SegmentWriter>,
     /// Path and id of the current segment (for rotation).
