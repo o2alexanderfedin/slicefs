@@ -124,4 +124,53 @@ echo "    CAS bytes: before=$C0 snapA=$C1 snapB=$C2"
 if [ -n "$C0" ] && [ "$C0" = "$C1" ] && [ "$C1" = "$C2" ]; then ok no-double-count; else bad no-double-count; fi
 step snapshot-list 10 bash -c "$B snapshot list $R/s6 | grep -q ' a' && $B snapshot list $R/s6 | grep -q ' b'"
 
+echo "== Large copy (#20): 1 GiB in order and out of order, bounded daemon memory"
+T0=$SECONDS
+hwm(){ awk '/^VmHWM:/{print int($2/1024)}' /proc/$MP/status 2>/dev/null; }   # daemon peak RSS, MiB
+nbuf(){ grep -c "switches to Buffered" $R/mount.log; }
+head -c 1073741824 /dev/urandom > $R/big.bin
+# Out-of-order writer: one handle for the whole pass, because a new open of a
+# file that has content makes the next write go to Buffered mode. 1 MiB blocks
+# are written last to first inside each 16 MiB group, so each jump stays far
+# inside the 64 MiB reorder window. An fsync every 64 MiB stands for the NFS
+# COMMITs of the original #20 report.
+cat > $R/ooo.py <<'PY'
+import os, sys
+MB = 1 << 20
+src = os.open(sys.argv[1], os.O_RDONLY)
+dst = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+nblk = (os.fstat(src).st_size + MB - 1) // MB
+for g, first in enumerate(range(0, nblk, 16)):
+    for b in reversed(range(first, min(first + 16, nblk))):
+        data = os.pread(src, MB, b * MB)
+        done = 0
+        while done < len(data):
+            done += os.pwrite(dst, data[done:], b * MB + done)
+    if g % 4 == 3:
+        os.fsync(dst)
+os.close(dst)
+PY
+$B seed $R/sL $R/src >/dev/null 2>&1
+if mnt $R/sL $R/mL; then   # default commit interval (30 s)
+  B0=$(nbuf)
+  t=$SECONDS; step big-copy-in-order 1800 cp $R/big.bin $R/mL/inorder.bin; TC=$((SECONDS - t)); H1=$(hwm)
+  t=$SECONDS; step big-write-out-of-order 1800 python3 $R/ooo.py $R/big.bin $R/mL/ooo.bin; TW=$((SECONDS - t)); H2=$(hwm)
+  t=$SECONDS
+  step big-in-order-cmp 900 cmp $R/big.bin $R/mL/inorder.bin
+  step big-out-of-order-cmp 900 cmp $R/big.bin $R/mL/ooo.bin
+  TM=$((SECONDS - t)); H3=$(hwm)
+  B1=$(nbuf)
+  if [ "$B1" = "$B0" ]; then ok no-switch-to-buffered; else bad no-switch-to-buffered "($((B1 - B0)) switch(es))"; fi
+  echo "    timing: cp $TC s, out-of-order write $TW s, cmp $TM s"
+  echo "    daemon VmHWM: after cp $H1 MiB, after out-of-order write $H2 MiB, after cmp $H3 MiB"
+  umnt $R/mL
+  if mnt $R/sL $R/mL; then
+    step big-in-order-cmp-after-remount 900 cmp $R/big.bin $R/mL/inorder.bin
+    step big-out-of-order-cmp-after-remount 900 cmp $R/big.bin $R/mL/ooo.bin
+    umnt $R/mL
+  fi
+fi
+rm -rf $R/sL $R/mL $R/big.bin $R/ooo.py
+echo "    section time: $((SECONDS - T0)) s"
+
 echo "RESULT verify-phases: $([ $F -eq 0 ] && echo PASS || echo FAIL)"; exit $F
