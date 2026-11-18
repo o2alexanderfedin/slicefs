@@ -15,6 +15,7 @@ use crate::util::ts;
 
 use slicefs_traits::key::ObjectKey;
 use crate::content::{self, Content, Stream};
+use crate::overlay::Overlay;
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
@@ -31,20 +32,30 @@ const S_IFCHR: u32 = 0o020_000;
 const S_IFBLK: u32 = 0o060_000;
 
 /// Largest file size SliceFS accepts (1 TiB). Larger truncate/write requests
-/// fail with EFBIG. Out-of-order writes and truncates still hold the whole file
-/// in memory, so without this cap a user-controlled size (for example
-/// `truncate -s 1P f`) aborts the daemon on allocation failure.
+/// fail with EFBIG. This is the size limit of a file; no write or truncate
+/// allocates memory by file size or offset (an out-of-order write goes to an
+/// overlay, see `crate::overlay`).
 pub const MAX_FILE_SIZE: u64 = 1 << 40;
 
 /// Most bytes of out-of-order writes a streaming handle holds while it waits
-/// for a gap to close. Beyond it the handle switches to Buffered mode.
+/// for a gap to close. Beyond it the handle switches to an overlay.
 pub const REORDER_WINDOW: usize = 64 << 20;
+
+/// Piece size of a rebase: the overlay content is read and streamed in pieces
+/// of at most this many bytes.
+const REBASE_PIECE: u64 = 1 << 20;
+
+/// Largest data size of one `Write` record that a commit logs again (well
+/// below the segment payload limit of 64 MiB).
+const RELOG_PIECE: u64 = 1 << 20;
 
 /// Write mode for an open file handle.
 ///
 /// Streaming mode is the default for sequential writes (O(log N) memory).
-/// Buffered mode is a one-way fallback for non-sequential writes (O(N) memory).
-/// Once a handle transitions to Buffered, it never reverts to Streaming.
+/// Overlay mode is a one-way fallback for non-sequential writes: the stored
+/// content (a root that the manifest names) plus the extents written since
+/// then. Its memory follows the written bytes, not the file size. A handle in
+/// Overlay mode goes back to Streaming only through a truncate to 0.
 enum WriteMode {
     Streaming {
         state: Stream,
@@ -54,9 +65,7 @@ enum WriteMode {
         /// the gap closes. Bounded by `REORDER_WINDOW` bytes.
         pending: BTreeMap<u64, Vec<u8>>,
     },
-    Buffered {
-        buf: Vec<u8>,
-    },
+    Overlay(Overlay),
 }
 
 /// Per-handle state for a writable file descriptor.
@@ -65,21 +74,21 @@ enum WriteMode {
 /// Removed on `release()`. Writes are streamed incrementally into FastCDC
 /// chunks and a manifest tree (`content::Stream`) — O(log N) memory regardless
 /// of file size — unless a non-sequential write triggers fallback to
-/// Buffered mode (O(N) memory).
+/// Overlay mode (memory follows the written bytes, not the file size).
 ///
 /// Lifecycle:
 /// - Created with `WriteMode::Streaming` and `byte_count = 0`.
 /// - Sequential writes: `state.push_bytes()` called on each write, `byte_count` incremented.
-/// - Non-sequential write: one-way transition to `WriteMode::Buffered`.
+/// - Non-sequential write: one-way transition to `WriteMode::Overlay`.
 /// - `cas_committed` set to `true` after fsync/flush commits to CAS.
 /// - `cas_committed` set to `false` when new writes arrive (dirty again).
 /// - `last_committed_root` tracks the most recently committed ObjectKey
 ///   for refcount decrement-on-overwrite.
 struct OpenFileState {
     ino: u64,
-    /// Write mode — Streaming (sequential, O(log N)) or Buffered (non-sequential, O(N)).
+    /// Write mode — Streaming (sequential, O(log N)) or Overlay (non-sequential).
     write_mode: WriteMode,
-    /// Total bytes written. Tracks inode size.
+    /// Total bytes written. Tracks inode size (for an overlay: its `size`).
     byte_count: u64,
     /// True if the manifest was committed to CAS by a prior flush/fsync and the
     /// state has not been dirtied by subsequent writes.
@@ -258,16 +267,6 @@ fn fill_stream(
         *next += v.len() as u64;
     }
     push_zeros(state, cs, next, upto)
-}
-
-/// pwrite semantics on a buffer: zero-fill any gap, then copy `data` at `offset`.
-fn pwrite_into(buf: &mut Vec<u8>, offset: u64, data: &[u8]) {
-    let start = offset as usize;
-    let end = start + data.len();
-    if end > buf.len() {
-        buf.resize(end, 0);
-    }
-    buf[start..end].copy_from_slice(data);
 }
 
 /// Convert a `SystemTime` to `(seconds, nanoseconds)` since the epoch.
@@ -481,13 +480,16 @@ impl SliceFsFilesystem {
 
     /// Start an online GC (#25). Turns on object tracking in the store, then
     /// takes the GC roots under the commit gate: a root for each open
-    /// streaming handle, and a commit that is made durable before the sweep
-    /// can delete anything. The gate is held only for that.
+    /// streaming handle, the base of each overlay, and a commit that is made
+    /// durable before the sweep can delete anything. The gate is held only
+    /// for that.
     ///
     /// A streaming handle holds subtrees that are on disk but that no commit
     /// refers to yet; a clone of its state, ended, gives a root that covers
-    /// them. Pending (out-of-order) writes and Buffered handles are only in
-    /// RAM, so they need no root.
+    /// them. Pending (out-of-order) writes and overlay extents are only in
+    /// RAM, so they need no root. An overlay base is in the manifest and is
+    /// also a file root here. A rebase runs inside a callback that holds
+    /// `commit_gate.read()`, so it never straddles `gc_begin`.
     pub fn gc_start(&self) -> Result<(metadata::gc::OnlineGc, u64), String> {
         if !Arc::ptr_eq(&self.io, self.meta.io()) {
             return Err("file system and metadata do not share one StoreIo".into());
@@ -499,13 +501,14 @@ impl SliceFsFilesystem {
         // From here the chunk store keeps each object put or read (nodes and
         // file content), and the GC changes only packs up to `boundary`.
         let boundary = self.content.gc_begin().map_err(|e| format!("GC start: chunk store error: {e}"))?;
-        let states: Vec<Stream> = self.open_files.lock().unwrap().values()
-            .filter_map(|s| match &s.write_mode {
-                WriteMode::Streaming { state, .. } => Some(state.clone()),
-                WriteMode::Buffered { .. } => None,
-            })
-            .collect();
-        let mut file_roots = Vec::with_capacity(states.len());
+        let mut file_roots = Vec::new();
+        let mut states: Vec<Stream> = Vec::new();
+        for s in self.open_files.lock().unwrap().values() {
+            match &s.write_mode {
+                WriteMode::Streaming { state, .. } => states.push(state.clone()),
+                WriteMode::Overlay(ov) => file_roots.extend(ov.base),
+            }
+        }
         for state in states {
             match state.finish(&self.content) {
                 Ok(k) => file_roots.push(k),
@@ -601,8 +604,121 @@ impl SliceFsFilesystem {
         }
     }
 
-    /// If handle `fh` streams with out-of-order writes still pending, switch
-    /// it to Buffered mode so its content is complete (read, fsync, truncate,
+    /// Make `new` the content root of `ino` (`None`: no content) and stamp
+    /// the inode with `size` and `modified`. The refcount of the new root goes
+    /// up and that of the root the manifest named before goes down. A root
+    /// that the manifest still names is never released. The inode size is
+    /// stamped too, so that a replayed write takes the overlay path on this
+    /// root (not a fresh stream that drops it).
+    fn install_root(&self, ino: u64, new: Option<ObjectKey>, size: u64, modified: Option<(i64, u32)>) -> Result<(), i32> {
+        let old = self.meta.get_manifest(ino).ok().and_then(|m| m.first().copied());
+        match new {
+            None => self.clear_manifest(ino, None)?,
+            Some(k) if Some(k) != old => {
+                self.meta.set_manifest(ino, &[k]).map_err(|_| libc::EIO)?;
+                self.meta.increment_refcount(&k);
+                if let Some(o) = old {
+                    self.meta.decrement_refcount(&o);
+                }
+            }
+            Some(_) => {}
+        }
+        self.stamp_content(ino, size, modified)
+    }
+
+    /// Switch a streaming state to an overlay (the caller took it out of
+    /// `open_files`). The base is the stream so far (ended, no zero padding),
+    /// or the committed content if nothing was streamed. The base goes into
+    /// the manifest at once (online GC keeps it, and replay starts from it).
+    /// Pending writes move into the extents; the caller then applies the
+    /// write that caused the switch. No file content is read.
+    fn to_overlay(&self, s: &mut OpenFileState) -> Result<(), i32> {
+        let ino = s.ino;
+        let WriteMode::Streaming { state, next_expected_offset, pending } = &mut s.write_mode else {
+            return Ok(());
+        };
+        let cs = &*self.content;
+        let store_err = |e: std::io::Error| {
+            eprintln!("[{}][FUSE] overlay: content store error: {e}", ts());
+            libc::EIO
+        };
+        let (base, base_len) = if *next_expected_offset > 0 {
+            (Some(state.clone().finish(cs).map_err(store_err)?), *next_expected_offset)
+        } else if self.has_content(ino) {
+            let k = self.meta.get_manifest(ino).map_err(|_| libc::EIO)?[0];
+            (Some(k), content::Reader::open(cs, &k).map_err(store_err)?.len())
+        } else {
+            (None, 0)
+        };
+        let size = base_len.max(s.byte_count).max(s.min_size);
+        self.install_root(ino, base, size, s.modified)?;
+        let mut ov = Overlay::new(base, base_len, size);
+        for (o, v) in std::mem::take(pending) {
+            ov.put(o, v);
+        }
+        s.byte_count = ov.size;
+        s.write_mode = WriteMode::Overlay(ov);
+        s.last_committed_root = base;
+        s.min_size = 0;
+        s.cas_committed = false;
+        Ok(())
+    }
+
+    /// Store the content of an overlay as a new root and start a clean
+    /// overlay on it. The whole file is streamed again in pieces of
+    /// `REBASE_PIECE` bytes: fixed memory, canonical chunks (unchanged
+    /// chunks dedup by ID), CPU in the file size. A clean overlay is kept.
+    fn rebase_overlay(&self, ino: u64, s: &mut OpenFileState) -> Result<(), i32> {
+        let WriteMode::Overlay(ov) = &s.write_mode else {
+            return Ok(());
+        };
+        if ov.is_clean() {
+            return Ok(());
+        }
+        let cs = &*self.content;
+        let store_err = |e: std::io::Error| {
+            eprintln!("[{}][FUSE] rebase: content store error: {e}", ts());
+            libc::EIO
+        };
+        let size = ov.size;
+        let mut reader = match &ov.base {
+            Some(k) => Some(content::Reader::open(cs, k).map_err(store_err)?),
+            None => None,
+        };
+        let mut st = Stream::default();
+        let mut at = 0u64;
+        while at < size {
+            let n = (size - at).min(REBASE_PIECE);
+            let piece = ov.view(at, n).read(|o, len| match reader.as_mut() {
+                Some(r) => r.read(cs, o, len),
+                None => Ok(Vec::new()),
+            }).map_err(store_err)?;
+            st.push(cs, &piece).map_err(store_err)?;
+            at += n;
+        }
+        let root = if size == 0 { None } else { Some(st.finish(cs).map_err(store_err)?) };
+        self.install_root(ino, root, size, s.modified)?;
+        s.write_mode = WriteMode::Overlay(Overlay::new(root, size, size));
+        s.last_committed_root = root;
+        s.byte_count = size;
+        Ok(())
+    }
+
+    /// Read `size` bytes at `offset` of the content `root` of `ino` through
+    /// the per-inode reader cache (it keeps its node and chunk caches).
+    fn read_root(&self, ino: u64, root: &ObjectKey, offset: u64, size: usize) -> std::io::Result<Vec<u8>> {
+        let mut readers = self.readers.lock().unwrap();
+        if readers.len() >= 64 && !readers.contains_key(&ino) {
+            readers.clear();
+        }
+        if readers.get(&ino).map_or(true, |r| r.key() != *root) {
+            readers.insert(ino, content::Reader::open(&self.content, root)?);
+        }
+        readers.get_mut(&ino).expect("reader just inserted").read(&self.content, offset, size)
+    }
+
+    /// If handle `fh` streams with out-of-order writes still pending, stream
+    /// them in order so its content is complete (read, fsync, truncate,
     /// release need the whole picture; gaps become zero bytes).
     fn settle_pending(&self, fh: u64) {
         let fh = self.owner_fh(fh);
@@ -705,15 +821,16 @@ impl SliceFsFilesystem {
     ///
     /// Dual dispatch on WriteMode:
     /// - Streaming: sequential writes via push_bytes (O(log N) memory).
-    ///   If offset != next_expected_offset, triggers one-way fallback to Buffered.
-    /// - Buffered: standard pwrite semantics into Vec<u8> (O(N) memory).
+    ///   If offset != next_expected_offset (and not inside the reorder window),
+    ///   triggers a one-way switch to an overlay (`to_overlay`).
+    /// - Overlay: pwrite semantics into the extents (memory follows the
+    ///   written bytes; nothing is allocated by offset or file size).
     ///
     /// Lock ordering: open_files is released before io to prevent contention.
-    /// Sequential writes: temporarily remove OpenFileState from the map, push bytes
-    /// under io lock only, then re-insert. This prevents holding open_files during
-    /// potentially slow CAS I/O (which would block concurrent reads on other fh's).
-    /// Fallback transition: release open_files before io for materialization,
-    /// re-acquire open_files to swap WriteMode. FUSE serializes per-fh writes.
+    /// Every write takes OpenFileState out of the map, works without the lock
+    /// (stream pushes, the switch), then re-inserts it. This prevents holding
+    /// open_files during potentially slow CAS I/O (which would block concurrent
+    /// reads on other fh's). FUSE serializes per-fh writes.
     pub fn test_write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, i32> {
         let fh = self.owner_fh(fh);
         if offset.checked_add(data.len() as u64).map_or(true, |end| end > MAX_FILE_SIZE) {
@@ -778,41 +895,35 @@ impl SliceFsFilesystem {
                     file_state.cas_committed = false;                    file_state.modified = Some(now_pair());
                     Ok(data.len() as u32)
                 } else {
-                    // Random write: switch to Buffered mode.
+                    // Random write: switch to an overlay on the stored content.
                     let ino = file_state.ino;
                     eprintln!("[{}][FUSE] write: fh={} ino={} switches to Buffered (offset={} len={} expected={} pending={} fresh={} overlap={})",
                         ts(), fh, ino, offset, data.len(), *next_expected_offset, pending_bytes, fresh, overlaps_pending);
-                    let mut buf = self.handle_content(ino, state, *next_expected_offset);
-                    if (buf.len() as u64) < file_state.min_size {
-                        buf.resize(file_state.min_size as usize, 0);
+                    // Older pending writes go in first, then this (newest) write.
+                    match self.to_overlay(&mut file_state) {
+                        Ok(()) => Self::overlay_write(&mut file_state, offset, data),
+                        Err(e) => Err(e),
                     }
-                    // Older pending writes first, then this (newest) write.
-                    for (o, v) in std::mem::take(pending) {
-                        pwrite_into(&mut buf, o, &v);
-                    }
-                    pwrite_into(&mut buf, offset, data);
-                    let old_root = file_state.last_committed_root.take();
-                    file_state.byte_count = buf.len() as u64;
-                    file_state.write_mode = WriteMode::Buffered { buf };
-                    file_state.cas_committed = false;                    file_state.modified = Some(now_pair());
-                    if let Some(old) = old_root {
-                        self.meta.decrement_refcount(&old);
-                    }
-                    Ok(data.len() as u32)
                 }
             }
-            WriteMode::Buffered { buf } => {
-                // Standard pwrite into buffer -- no io lock needed
-                pwrite_into(buf, offset, data);
-                file_state.byte_count = buf.len() as u64;
-                file_state.cas_committed = false;                file_state.modified = Some(now_pair());
-                Ok(data.len() as u32)
-            }
+            WriteMode::Overlay(_) => Self::overlay_write(&mut file_state, offset, data),
         };
 
         // Re-insert the file state back into the map.
         self.open_files.lock().unwrap().insert(fh, file_state);
         result
+    }
+
+    /// pwrite into the overlay of `s` (no I/O, no allocation by offset).
+    fn overlay_write(s: &mut OpenFileState, offset: u64, data: &[u8]) -> Result<u32, i32> {
+        let WriteMode::Overlay(ov) = &mut s.write_mode else {
+            return Err(libc::EIO);
+        };
+        ov.write(offset, data);
+        s.byte_count = ov.size;
+        s.cas_committed = false;
+        s.modified = Some(now_pair());
+        Ok(data.len() as u32)
     }
 
     /// Release file handle `fh`, finalizing streaming state to CAS and updating the inode.
@@ -862,10 +973,16 @@ impl SliceFsFilesystem {
     /// Commit the write state of `fh` (if any) to the inode's manifest.
     fn finalize_write(&self, ino: u64, fh: u64) -> Result<(), i32> {
         self.settle_pending(fh);
-        let (write_mode, byte_count, cas_committed, last_committed_root, min_size, modified) = match self.open_files.lock().unwrap().remove(&fh) {
-            Some(s) => (s.write_mode, s.byte_count, s.cas_committed, s.last_committed_root, s.min_size, s.modified),
+        let mut s = match self.open_files.lock().unwrap().remove(&fh) {
+            Some(s) => s,
             None => return Ok(()), // Already closed
         };
+        // An overlay: store its content as a new root (its base is already
+        // in the manifest, so a clean overlay needs nothing).
+        if matches!(s.write_mode, WriteMode::Overlay(_)) {
+            return self.rebase_overlay(ino, &mut s);
+        }
+        let OpenFileState { write_mode, byte_count, cas_committed, last_committed_root, min_size, modified, .. } = s;
 
         // No bytes written through this handle.
         // Only set empty manifest if this is a genuinely new file (no existing manifest).
@@ -889,7 +1006,7 @@ impl SliceFsFilesystem {
             WriteMode::Streaming { state, next_expected_offset, .. } => {
                 self.end_padded(&state, next_expected_offset, min_size)?
             }
-            WriteMode::Buffered { buf } => content::put_all(&self.content, &buf).map_err(|_| libc::EIO)?,
+            WriteMode::Overlay(_) => unreachable!("an overlay is rebased above"),
         };
 
         // If the digest matches last committed root (fsync already committed this exact state),
@@ -942,10 +1059,11 @@ impl SliceFsFilesystem {
     /// Used by integration tests to bypass the FUSE request/reply layer.
     pub fn test_read(&self, ino: u64, offset: u64, size: u32) -> Result<Vec<u8>, i32> {
         // Check for open write handles on this inode (cross-handle read support).
-        // In Buffered mode, clone buf directly (no CAS roundtrip needed).
+        // In Overlay mode, copy only the extent parts of the range under the lock.
         // In Streaming mode, clone State for materialization.
         enum WriterSnapshot {
             Streaming(Stream),
+            Overlay(crate::overlay::RangeView),
         }
 
         let pending_fh = self.open_files.lock().unwrap().iter()
@@ -958,11 +1076,9 @@ impl SliceFsFilesystem {
         let writer_snapshot: Option<WriterSnapshot> = {
             let open_files = self.open_files.lock().unwrap();
             match open_files.values().find(|s| s.ino == ino && s.byte_count > 0) {
-                // Buffered: copy only the requested range, not the whole buffer.
-                Some(OpenFileState { write_mode: WriteMode::Buffered { buf }, .. }) => {
-                    let start = (offset as usize).min(buf.len());
-                    let end = start.saturating_add(size as usize).min(buf.len());
-                    return Ok(buf[start..end].to_vec());
+                // Overlay: copy only the extent parts inside the range.
+                Some(OpenFileState { write_mode: WriteMode::Overlay(ov), .. }) => {
+                    Some(WriterSnapshot::Overlay(ov.view(offset, size as u64)))
                 }
                 Some(OpenFileState { write_mode: WriteMode::Streaming { state, .. }, byte_count, .. }) => {
                     logical_size = Some(*byte_count);
@@ -978,6 +1094,14 @@ impl SliceFsFilesystem {
                 // Uncommitted content: finish a clone of the writer to get a root.
                 snapshot.finish(&self.content).map_err(|_| libc::EIO)?
             }
+            Some(WriterSnapshot::Overlay(view)) => {
+                // Base bytes, zeros and the extent parts: memory O(request).
+                let base = view.base;
+                return view.read(|o, n| match &base {
+                    Some(k) => self.read_root(ino, k, o, n),
+                    None => Ok(Vec::new()),
+                }).map_err(|_| libc::EIO);
+            }
             None => {
                 // Fall back to committed manifest
                 let manifest = self.meta.get_manifest(ino).map_err(|_| libc::EIO)?;
@@ -986,17 +1110,7 @@ impl SliceFsFilesystem {
             }
         };
 
-        // A reader per inode keeps its node and chunk caches between reads.
-        let mut readers = self.readers.lock().unwrap();
-        if readers.len() >= 64 && !readers.contains_key(&ino) {
-            readers.clear();
-        }
-        if readers.get(&ino).map_or(true, |r| r.key() != root) {
-            let r = content::Reader::open(&self.content, &root).map_err(|_| libc::EIO)?;
-            readers.insert(ino, r);
-        }
-        let reader = readers.get_mut(&ino).unwrap();
-        let mut out = reader.read(&self.content, offset, size as usize).map_err(|_| libc::EIO)?;
+        let mut out = self.read_root(ino, &root, offset, size as usize).map_err(|_| libc::EIO)?;
         // Past the streamed bytes but inside a setattr extension: zeros.
         if let Some(logical) = logical_size {
             let want = logical.saturating_sub(offset).min(size as u64) as usize;
@@ -1036,25 +1150,27 @@ impl SliceFsFilesystem {
     }
 
     fn flush_buffer_for_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        self.flush_handle(ino, fh, false)
+        self.flush_handle(ino, fh)
     }
 
-    /// Commit with a clean cut of the write log (#20): first write the content
-    /// of each open write handle into its manifest (Buffered handles too), so
-    /// that the root holds every request logged before the commit. The caller
-    /// holds the commit gate exclusively (no request is in flight).
+    /// Commit with a clean cut of the write log (#20): first write the
+    /// streamed prefix of each open write handle into its manifest (an
+    /// overlay's base is there already), so that the root holds every request
+    /// logged before the commit, apart from the bytes logged again after it.
+    /// No content is hashed in full here. The caller holds the commit gate
+    /// exclusively (no request is in flight).
     pub fn commit_cut(&self) -> Result<ObjectKey, MetaError> {
         use crate::oplog::{Op, Record};
         let handles: Vec<(u64, u64)> = self.open_files.lock().unwrap()
             .iter().map(|(&fh, s)| (s.ino, fh)).collect();
         // Streamed prefixes go into the manifests (cheap: an ended clone).
         for &(ino, fh) in &handles {
-            if let Err(e) = self.flush_handle(ino, fh, false) {
+            if let Err(e) = self.flush_handle(ino, fh) {
                 return Err(MetaError::Corrupted(format!("cut: flush of open file {ino} failed: errno {e}")));
             }
         }
-        // Bytes that are only in RAM (pending out-of-order writes, Buffered
-        // buffers) are not hashed under the gate: they are logged again after
+        // Bytes that are only in RAM (pending out-of-order writes, overlay
+        // extents) are not hashed under the gate: they are logged again after
         // the cut, so replay puts them on top of the root.
         // The records carry the time of the last write, not the commit time:
         // replay stamps it as the mtime. A last record puts back a later
@@ -1073,9 +1189,27 @@ impl SliceFsFilesystem {
                             relog.push(Record { time, op: Op::Write { ino, offset: off, data: data.clone() } });
                         }
                     }
-                    WriteMode::Buffered { buf } => {
-                        relog.push(Record { time, op: Op::Truncate { ino } });
-                        relog.push(Record { time, op: Op::Write { ino, offset: 0, data: buf.clone() } });
+                    WriteMode::Overlay(ov) => {
+                        // The base is the manifest root. Shrink first (the
+                        // zeros past `visible` come back), then the size,
+                        // then the extents in pieces of at most RELOG_PIECE.
+                        let size_rec = |n: u64| Record { time, op: Op::Setattr {
+                            ino, mode: None, uid: None, gid: None, size: Some(n), atime: None, mtime: None,
+                        } };
+                        if ov.visible < ov.base_len {
+                            relog.push(size_rec(ov.visible));
+                        }
+                        if ov.size != ov.visible {
+                            relog.push(size_rec(ov.size));
+                        }
+                        for r in ov.extent_ranges() {
+                            let mut off = r.start;
+                            while off < r.end {
+                                let n = (r.end - off).min(RELOG_PIECE);
+                                relog.push(Record { time, op: Op::Write { ino, offset: off, data: ov.copy_out(off, n as usize) } });
+                                off += n;
+                            }
+                        }
                     }
                 }
                 if relog.len() > before {
@@ -1105,21 +1239,17 @@ impl SliceFsFilesystem {
         Ok(root)
     }
 
-    /// Write the content of handle `fh` into the manifest of `ino`. Buffered
-    /// handles are hashed in full only when `include_buffered` (a commit cut,
-    /// not each fsync: #3).
-    fn flush_handle(&self, ino: u64, fh: u64, include_buffered: bool) -> Result<(), i32> {
+    /// Write the streamed content of handle `fh` into the manifest of `ino`.
+    /// An overlay needs nothing: its base is in the manifest, and its extents
+    /// are durable through the write log (#20). A rebase at each fsync would
+    /// cost a write of the changed chunks and nodes per fsync (#3).
+    fn flush_handle(&self, ino: u64, fh: u64) -> Result<(), i32> {
         let fh = self.owner_fh(fh);
         // Pending (out-of-order) bytes stay pending: settling them here would
         // stream zeros for the gaps, and the late writes that fill the gaps
-        // would then force the handle into Buffered mode. The write log keeps
+        // would then force the handle into an overlay. The write log keeps
         // pending bytes durable (#20), so the manifest takes the streamed prefix.
-        // 1. Clone state/buf snapshot under open_files lock
-        enum FsyncSnapshot {
-            Streaming(Stream, u64, u64),
-            Buffered(Vec<u8>),
-        }
-
+        // 1. Clone the stream under the open_files lock
         let (snapshot, byte_count, old_root, modified) = {
             let mut open_files = self.open_files.lock().unwrap();
             match open_files.get_mut(&fh) {
@@ -1133,20 +1263,12 @@ impl SliceFsFilesystem {
                         // (NFS sends a COMMIT per group of writes; skip the re-hash.)
                         return Ok(());
                     }
-                    if !include_buffered && matches!(s.write_mode, WriteMode::Buffered { .. }) {
-                        // Hashing a Buffered file means hashing all of it again
-                        // (O(n) per fsync, #3). The manifest it would give is not
-                        // durable either: metadata reaches disk only at commit
-                        // (#18), and commit happens at unmount, after release or
-                        // destroy has written this handle's content. Skip it.
-                        return Ok(());
-                    }
-                    s.cas_committed = true;
                     let snap = match &s.write_mode {
                         WriteMode::Streaming { state, next_expected_offset, .. } =>
-                            FsyncSnapshot::Streaming(state.clone(), *next_expected_offset, s.min_size),
-                        WriteMode::Buffered { buf } => FsyncSnapshot::Buffered(buf.clone()),
+                            (state.clone(), *next_expected_offset, s.min_size),
+                        WriteMode::Overlay(_) => return Ok(()),
                     };
+                    s.cas_committed = true;
                     (snap, s.byte_count, s.last_committed_root, s.modified)
                 }
                 None => return Ok(()), // No write handle -- fsync is a no-op
@@ -1154,13 +1276,9 @@ impl SliceFsFilesystem {
         };
         // open_files lock released here
 
-        // 2. Materialize under io lock
-        let new_digest: ObjectKey = match snapshot {
-            FsyncSnapshot::Streaming(state_snapshot, streamed, min_size) => {
-                self.end_padded(&state_snapshot, streamed, min_size)?
-            }
-            FsyncSnapshot::Buffered(buf_clone) => content::put_all(&self.content, &buf_clone).map_err(|_| libc::EIO)?,
-        };
+        // 2. End the clone (an O(log N) tree finish)
+        let (state_snapshot, streamed, min_size) = snapshot;
+        let new_digest: ObjectKey = self.end_padded(&state_snapshot, streamed, min_size)?;
 
         // 3. Decrement old committed root if any
         if let Some(old) = old_root {
@@ -1195,7 +1313,8 @@ impl SliceFsFilesystem {
     ///
     /// Dual dispatch on WriteMode:
     /// - Streaming: materialize via clone+end, resize, repush into fresh State.
-    /// - Buffered: simple buf.resize() (no CAS operations needed for non-zero truncate).
+    /// - Overlay: only the size and the extents change (no I/O, no allocation
+    ///   by size); a resize to 0 goes back to a fresh stream.
     pub fn test_setattr_size(&self, ino: u64, fh: Option<u64>, new_size: u64) -> Result<(), i32> {
         if new_size > MAX_FILE_SIZE {
             return Err(libc::EFBIG);
@@ -1238,10 +1357,10 @@ impl SliceFsFilesystem {
             let mut open_files = self.open_files.lock().unwrap();
             if let Some(s) = open_files.get_mut(&fh_val) {
                 match &mut s.write_mode {
-                    WriteMode::Buffered { buf } => {
+                    WriteMode::Overlay(ov) => {
                         if new_size == 0 {
                             let old_root = s.last_committed_root.take();
-                            *buf = Vec::new();
+                            s.write_mode = WriteMode::Streaming { state: Stream::default(), next_expected_offset: 0, pending: BTreeMap::new() };
                             s.byte_count = 0;
                             s.min_size = 0;
                             s.cas_committed = false;                            s.modified = Some(now_pair());
@@ -1252,8 +1371,8 @@ impl SliceFsFilesystem {
                             }
                             self.clear_manifest(ino, old_root)?;
                         } else {
-                            buf.resize(new_size as usize, 0);
-                            s.byte_count = buf.len() as u64;
+                            ov.truncate(new_size);
+                            s.byte_count = ov.size;
                             s.min_size = 0;
                             s.cas_committed = false;                            s.modified = Some(now_pair());
                             drop(open_files);
