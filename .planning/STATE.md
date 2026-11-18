@@ -2,14 +2,12 @@
 gsd_state_version: "1.0"
 milestone: v2.0
 milestone_name: Streaming Writes & Hardening
-current_phase: 11
-current_phase_name: Non-Sequential Write Handling
-status: completed
+status: Awaiting next milestone
 stopped_at: context exhaustion at 75% (2026-11-15)
-last_updated: "2026-11-16T05:00:40.883Z"
-last_activity: 2026-03-30
-last_activity_desc: "Plan 02 complete: 10 STRM-02 integration tests covering fallback, gap zero-fill, overlapping writes, buffered fsync/truncate/read, out-of-order delivery"
-state_head: 6f43f22461e967d49b68a0b9918e182bd054520a
+last_updated: "2026-11-18T05:40:44.928Z"
+last_activity: 2026-11-17
+last_activity_desc: Milestone v2.0 completed and archived
+state_head: e8dd57b5a9e83c8b1c1930d4d821709a045f5888
 progress:
   total_phases: 6
   completed_phases: 13
@@ -22,19 +20,17 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-03-29)
+See: .planning/PROJECT.md (updated 2026-11-17)
 
 **Core value:** High-ratio data deduplication that works transparently as a real, daily-driver POSIX filesystem
-**Current focus:** v2.0 — Streaming Writes & Hardening (Phase 7.1: FileStorage Migration)
+**Current focus:** Planning next milestone (candidates: #86 roots/refs, #85 on-disk chunk index)
 
 ## Current Position
 
-Phase: 11 (Non-Sequential Write Handling)
-Plan: 02 of 2 complete
-Status: Complete
-Last activity: 2026-03-30 — Plan 02 complete: 10 STRM-02 integration tests covering fallback, gap zero-fill, overlapping writes, buffered fsync/truncate/read, out-of-order delivery
-
-Progress: [██████████] 100%
+Phase: Milestone v2.0 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-11-17 — Milestone v2.0 completed and archived
 
 ## Performance Metrics
 
@@ -136,3 +132,7 @@ None yet.
 Last session: 2026-11-16T05:00:40.033Z
 Stopped at: context exhaustion at 75% (2026-11-15)
 Resume file: None
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone
