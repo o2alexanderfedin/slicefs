@@ -176,6 +176,10 @@ step snapshot-list 10 bash -c "$B snapshot list $R/s6 | grep -q ' a' && $B snaps
 
 echo "== Large copy (#20): 1 GiB in order and out of order, bounded daemon memory"
 T0=$SECONDS
+# Measured peak 130 MiB (debug build, as run.sh verify builds it, 2026-11-18).
+# The peak is below 2/3 of 512 MiB, so the cap is 512 MiB: about 8x the reorder
+# window and far below the 1 GiB file.
+CAP_MIB=512
 hwm(){ awk '/^VmHWM:/{print int($2/1024)}' /proc/$MP/status 2>/dev/null; }   # daemon peak RSS, MiB
 nbuf(){ grep -c "switches to Buffered" $R/mount.log; }
 head -c 1073741824 /dev/urandom > $R/big.bin
@@ -203,20 +207,22 @@ PY
 $B seed $R/sL $R/src >/dev/null 2>&1
 if mnt $R/sL $R/mL; then   # default commit interval (30 s)
   B0=$(nbuf)
-  t=$SECONDS; step big-copy-in-order 1800 cp $R/big.bin $R/mL/inorder.bin; TC=$((SECONDS - t)); H1=$(hwm)
-  t=$SECONDS; step big-write-out-of-order 1800 python3 $R/ooo.py $R/big.bin $R/mL/ooo.bin; TW=$((SECONDS - t)); H2=$(hwm)
+  t=$SECONDS; step big-copy-in-order 180 cp $R/big.bin $R/mL/inorder.bin; TC=$((SECONDS - t)); H1=$(hwm)
+  t=$SECONDS; step big-write-out-of-order 120 python3 $R/ooo.py $R/big.bin $R/mL/ooo.bin; TW=$((SECONDS - t)); H2=$(hwm)
   t=$SECONDS
-  step big-in-order-cmp 900 cmp $R/big.bin $R/mL/inorder.bin
-  step big-out-of-order-cmp 900 cmp $R/big.bin $R/mL/ooo.bin
+  step big-in-order-cmp 120 cmp $R/big.bin $R/mL/inorder.bin
+  step big-out-of-order-cmp 120 cmp $R/big.bin $R/mL/ooo.bin
   TM=$((SECONDS - t)); H3=$(hwm)
+  if [ -n "$H3" ] && [ "$H3" -le $CAP_MIB ]; then ok daemon-rss-bounded
+  else bad daemon-rss-bounded "(VmHWM $H3 MiB > cap $CAP_MIB MiB)"; fi
   B1=$(nbuf)
   if [ "$B1" = "$B0" ]; then ok no-switch-to-buffered; else bad no-switch-to-buffered "($((B1 - B0)) switch(es))"; fi
   echo "    timing: cp $TC s, out-of-order write $TW s, cmp $TM s"
-  echo "    daemon VmHWM: after cp $H1 MiB, after out-of-order write $H2 MiB, after cmp $H3 MiB"
+  echo "    daemon VmHWM: after cp $H1 MiB, after out-of-order write $H2 MiB, after cmp $H3 MiB (cap $CAP_MIB MiB)"
   umnt $R/mL
   if mnt $R/sL $R/mL; then
-    step big-in-order-cmp-after-remount 900 cmp $R/big.bin $R/mL/inorder.bin
-    step big-out-of-order-cmp-after-remount 900 cmp $R/big.bin $R/mL/ooo.bin
+    step big-in-order-cmp-after-remount 120 cmp $R/big.bin $R/mL/inorder.bin
+    step big-out-of-order-cmp-after-remount 120 cmp $R/big.bin $R/mL/ooo.bin
     umnt $R/mL
   fi
 fi
