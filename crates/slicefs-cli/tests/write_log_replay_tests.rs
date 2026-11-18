@@ -14,7 +14,7 @@ use metadata::wal::{create_wal, WalConfig};
 use slicefs_cli::filesystem::SliceFsFilesystem;
 use slicefs_cli::handlers::{self as h, CreateResult, EmptyResult, EntryResult, OpenResult, WriteResult};
 use slicefs_cli::oplog;
-use slicefs_traits::metadata::MetadataStore;
+use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 use tempfile::TempDir;
 
 const S_IFREG: u32 = 0o100_000;
@@ -50,6 +50,16 @@ fn reload_and_replay(store: &Path) -> SliceFsFilesystem {
 
 /// Path -> description of every entry under the root.
 fn dump(fs: &SliceFsFilesystem) -> BTreeMap<String, String> {
+    dump_by(fs, |ino| fs.meta().get_inode(ino).unwrap())
+}
+
+/// `dump` as stat sees it: a file with an open write handle shows the size
+/// and times of that handle (its overlay is not in the inode until release).
+fn dump_open(fs: &SliceFsFilesystem) -> BTreeMap<String, String> {
+    dump_by(fs, |ino| fs.test_getattr(ino).unwrap())
+}
+
+fn dump_by(fs: &SliceFsFilesystem, inode: impl Fn(u64) -> InodeMeta) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let mut todo = vec![(1u64, String::new())];
     while let Some((dir, path)) = todo.pop() {
@@ -58,7 +68,7 @@ fn dump(fs: &SliceFsFilesystem) -> BTreeMap<String, String> {
                 continue;
             }
             let p = format!("{path}/{}", e.name);
-            let m = fs.meta().get_inode(e.ino).unwrap();
+            let m = inode(e.ino);
             let mut xattrs: Vec<(String, Vec<u8>)> = fs.meta().list_xattrs(e.ino).unwrap_or_default()
                 .into_iter().map(|n| { let v = fs.meta().get_xattr(e.ino, &n).unwrap(); (n, v) }).collect();
             xattrs.sort();
@@ -516,4 +526,90 @@ fn stat_of_an_open_file_shows_the_time_of_the_last_write() {
     assert_eq!(a.size, 1_000);
     assert_eq!(secs(a.mtime), 1_700_000_300);
     assert_eq!(secs(a.ctime), 1_700_000_300);
+}
+
+/// Open `ino` for writing through the handler (O_RDWR, no truncate).
+fn open_rw(fs: &SliceFsFilesystem, ino: u64) -> u64 {
+    match h::handle_open(fs, ino, libc::O_RDWR) {
+        OpenResult::Ok(fh, true) => fh,
+        _ => panic!("open {ino}"),
+    }
+}
+
+/// Write through the handler and into the model of the file.
+fn put(fs: &SliceFsFilesystem, fh: u64, model: &mut Vec<u8>, off: usize, bytes: &[u8]) {
+    write(fs, fh, off as u64, bytes);
+    if model.len() < off + bytes.len() {
+        model.resize(off + bytes.len(), 0);
+    }
+    model[off..off + bytes.len()].copy_from_slice(bytes);
+}
+
+/// Freeze the clock at `t` seconds (one distinct time per step).
+fn at(t: i64) -> oplog::Clock {
+    oplog::Clock::freeze_at((t, 0))
+}
+
+// BUFR-01 (D-05, #93): a commit logs again only the bytes changed since the
+// last rebase of an open overlay. That is bounded by the dirty limit, not by
+// the file size: the three values below are the same for 8 MiB and 32 MiB.
+// Before #98 each commit logged the whole Buffered file again.
+#[test]
+fn a_commit_relogs_only_the_bytes_changed_since_the_last_rebase() {
+    let mut seen = Vec::new();
+    for (seed, size) in [(30u64, 8usize << 20), (31, 32 << 20)] {
+        let dir = TempDir::new().unwrap();
+        let fs = new_fs(dir.path());
+        let mut model = data(seed, size);
+        let t0 = 1_700_000_000i64;
+        let ino = {
+            let _t = at(t0);
+            let (ino, fh) = create(&fs, 1, "big.bin");
+            for (i, piece) in model.chunks(1 << 20).enumerate() {
+                write(&fs, fh, (i << 20) as u64, piece);
+            }
+            release(&fs, ino, fh);
+            ino
+        };
+        let fh = open_rw(&fs, ino);
+        let rebases = fs.test_rebase_count();
+
+        // One 4 KiB write (the switch to an overlay), then a commit.
+        { let _t = at(t0 + 10); put(&fs, fh, &mut model, 1 << 20, &[0x11; 4096]); }
+        { let _t = at(t0 + 20); fs.commit_cut().unwrap(); }
+        let one = fs.test_last_relog_bytes();
+
+        // A second 4 KiB write far from the first, no rebase between: both
+        // extents are still dirty against the same base.
+        { let _t = at(t0 + 30); put(&fs, fh, &mut model, size / 2 + 12_345, &[0x22; 4096]); }
+        { let _t = at(t0 + 40); fs.commit_cut().unwrap(); }
+        let two = fs.test_last_relog_bytes();
+        assert_eq!(fs.test_rebase_count(), rebases, "no rebase at a commit");
+
+        // One forced rebase: a low limit for one 8 KiB write only (an extent
+        // costs its capacity + 64 B, so a 4 KiB write alone passes 4096),
+        // then the default limit back before the last write.
+        fs.test_set_dirty_limit(4096);
+        { let _t = at(t0 + 50); put(&fs, fh, &mut model, size - (64 << 10), &[0x33; 8192]); }
+        assert_eq!(fs.test_rebase_count(), rebases + 1, "the 8 KiB write rebases once");
+        fs.test_set_dirty_limit(slicefs_cli::filesystem::DIRTY_LIMIT);
+        { let _t = at(t0 + 60); put(&fs, fh, &mut model, (3 << 20) + 7, &[0x44; 4096]); }
+        { let _t = at(t0 + 70); fs.commit_cut().unwrap(); }
+        let three = fs.test_last_relog_bytes();
+        assert_eq!(fs.test_rebase_count(), rebases + 1, "no rebase at a commit");
+
+        eprintln!("relog bytes, {} MiB file: {one}, {two}, {three}", size >> 20);
+        assert_eq!((one, two, three), (4096, 8192, 4096), "{} MiB file", size >> 20);
+        assert_eq!(fs.test_read(ino, 0, size as u32 + 1).unwrap(), model, "live content");
+        seen.push((one, two, three));
+
+        // A crash with the handle open: replay gives the same file.
+        fs.meta().flush_wal().unwrap();
+        let live = dump_open(&fs);
+        std::mem::forget(fs);
+        let fs = reload_and_replay(dir.path());
+        assert_eq!(dump_open(&fs), live, "{} MiB file after replay", size >> 20);
+        assert_eq!(fs.test_read(ino, 0, size as u32 + 1).unwrap(), model, "replayed content");
+    }
+    assert_eq!(seen[0], seen[1], "the relog does not depend on the file size");
 }
