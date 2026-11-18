@@ -117,6 +117,12 @@ Notes:
   4 KiB page), the fences and the filter. spike-fjall at 10M is 65.9 B per
   object in its tables plus a journal file of 10.4 MB (1.04 B per object)
   that was still there after close.
+- The spike-fjall open CPU time grows from 0.004 s at 1M to 0.473 s at
+  10M (about 118 times for 10 times the objects). The cause was not
+  isolated. The likely cause is the 10.4 MB journal that stays after close
+  at 10M (at 1M the journal is empty), so the 10M open may include a
+  journal replay. Condition (3) of the recommendation fails at both sizes
+  (at 1M: 0.026 s against 0.001 s wall, 4 times in CPU time).
 - The lookup step peak RSS includes the sample of the step itself: 1M hit
   IDs, 1M miss IDs and 1M numbers, about 74 MB, the same for every
   backend. So spike-runs needs about 3 to 15 MB above the sample; fjall
@@ -145,6 +151,7 @@ Chunk-store reference (the in-RAM HashMap of today):
 
 The chunk-store disk use is 104 B per object (packs and `.idx`), and its
 create rate (with the pack writes) was 64k to 68k puts/s on macOS.
+
 ## fjall questions
 
 ### a. Read-only open by a second process
@@ -160,8 +167,10 @@ index-bench: FjallError: Locked
 
 fjall takes an exclusive lock on the file `lock` in its directory at open
 (three tries, 100 ms apart, then `Error::Locked`). fjall 3.1.13 and
-lsm-tree 3.1.10 have no read-only open mode (no `read_only` option in the
-builder or in the source). After the writer closes, the same open works.
+lsm-tree 3.1.10 have no read-only open mode: the database builder has no
+such option, and a search of both sources for "read_only", "readonly" and
+"read-only" finds only the read-only transactions (snapshots) inside one
+open database. After the writer closes, the same open works.
 
 Effect: `slicefs stats`, `scrub` and the format check (`open_read_only` in
 `crates/slicefs-cli/src/content.rs`) could not open the index while a mount
