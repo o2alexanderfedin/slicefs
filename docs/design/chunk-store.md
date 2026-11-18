@@ -183,7 +183,8 @@ Method: the tool `benchmarks/index-bench` (see
 zstd does not run. The store uses the default `Options` (64 MiB packs). Each
 store is made one time and closed, so every pack has an `.idx`. Each open
 runs in a new process. The page cache is warm: one warm-up open runs
-before the measured opens. Each value is the median of 3 runs.
+before the measured opens. The Open and Recovery values are the median of
+3 runs. The create and lookup steps run one time for each size.
 
 macOS: Intel Xeon W-3245 (16 cores, 32 threads), 192 GiB RAM, macOS 26.2
 (x86_64), APFS on an internal PCIe SSD, commit `321a443`, warm cache.
@@ -300,8 +301,8 @@ Notes:
   for each CPU second, not for each second of wall time.
 - In the Linux VM, the CPU time is almost the same as the wall time, and
   it changes from run to run (the open CPU time at 10M is 8.4 to 12.1 s in
-  3 runs). Thus the Linux CPU columns are noisy too. Only the "all" rows
-  at 10M are clearly above the noise.
+  3 runs). Thus the Linux CPU columns are noisy too. Only the "all rw" row
+  at 10M (27.7 s) is clearly above this spread.
 - The 1M store has one pack, so its "one" and "all" rows are the
   active-pack path (CRC check only, no hash check, no `.idx` write). Its
   extra CPU time is less than 0.07 s of a 0.6 s open, which is in the
@@ -310,10 +311,21 @@ Notes:
   rows give 235 to 283 MB/s of CPU (4.3M to 5.2M objects for each CPU
   second). The "rw" rows also write a new `.idx` for each sealed pack. This
   adds about 1.2 s of CPU time for each sealed pack, so the "rw" rows give
-  only 30 to 48 MB/s. The "one ro" rows at 10M and 100M are in the range
-  of the noise (0.18 s and -0.74 s).
+  only 46 to 48 MB/s. The "one ro" rows at 10M and 100M (0.18 s and
+  -0.74 s) and the "one rw" row at 100M (2.2 s; its 3 runs are 63.0 to
+  66.7 s of CPU) are in the range of the noise.
 - The recovery open does not load the `.idx` files of the packs that it
   scans. Thus the scan rate is a little too high, most in the "all" rows.
+- "Create puts/s" is the wall time of one create run under load. The CPU
+  time of create gives 117k, 125k and 122k puts for each CPU second on
+  macOS (8.51 s, 80.1 s and 822.6 s at 1M, 10M and 100M), and 137k and
+  152k on Linux (7.32 s and 65.9 s at 1M and 10M). Phase 17 compares its
+  write speed with these values.
+- The lookup values come from one run. Three more lookup runs on the macOS
+  1M store, at a lower load (load average about 50), gave 430 to 756 ns
+  for a `contains` hit, 219 to 413 ns for a miss, and 776 to 929 ns for a
+  dedup-hit `put`. Thus the macOS 1M row in the table is slow because of
+  the load.
 - All numbers are for a warm page cache. No cold-cache number was taken:
   on macOS that needs `sudo purge` by hand, and on Linux a privileged
   container.
