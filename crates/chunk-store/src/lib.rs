@@ -549,7 +549,8 @@ impl ChunkStore {
             probe::add(&probe::LOCK_NS, t);
             if inner.index.contains_key(&id) {
                 inner.touch(id);
-                probe::add(&probe::PUT_NS, t_put);
+                let ns = probe::add(&probe::PUT_NS, t_put);
+            probe::max(&probe::PUT_MAX_NS, ns);
                 return Ok(id);
             }
         }
@@ -938,7 +939,8 @@ struct ReadProbe(std::time::Instant);
 impl Drop for ReadProbe {
     fn drop(&mut self) {
         probe::inc(&probe::READ_N, 1);
-        probe::add(&probe::READ_NS, self.0);
+        let ns = probe::add(&probe::READ_NS, self.0);
+        probe::max(&probe::READ_MAX_NS, ns);
     }
 }
 

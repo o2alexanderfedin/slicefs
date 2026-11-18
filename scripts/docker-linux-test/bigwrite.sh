@@ -15,7 +15,7 @@ CAP_MIB=256
 VOL_MIB=512         # random-write volume per size
 SEED=98
 SWITCH_TEXT="switches to overlay"
-PRE=(); R=/tmp/bw; rm -rf $R; mkdir -p $R/empty; F=0
+PRE=(env SLICEFS_PROBE_DIRTY_MIB=${PROBE_DIRTY_MIB:-32}); R=/tmp/bw; rm -rf $R; mkdir -p $R/empty; F=0
 ok(){ echo "  $1: ok"; }; bad(){ echo "  $1: FAIL ${2:-}"; F=1; }
 step(){ local n=$1 t=$2; shift 2
   if timeout -s KILL $t "$@" >$R/step.out 2>&1; then ok "$n"; else bad "$n" "($(head -c 200 $R/step.out))"; fi; }
@@ -95,6 +95,7 @@ with open(os.environ.get("RW_DETAIL", "/tmp/bw/rw-detail.txt"), "w") as f:
 print(f"writes {writes}, max write {max_w * 1000:.0f} ms, max fsync {max_s * 1000:.0f} ms")
 PY
 
+PROBE_DIRTY_MIB=${PROBE_DIRTY_MIB:-32}; echo "PROBE dirty limit $PROBE_DIRTY_MIB MiB; nproc $(nproc); $(grep MemTotal /proc/meminfo); $(df -T /tmp | tail -1)"
 T0=$SECONDS
 for S in "${SIZES[@]}"; do
   echo "== bigwrite $S MiB: cp, $VOL_MIB MiB of random 1 MiB and 4 KiB writes, cmp, remount, cmp"
@@ -104,7 +105,7 @@ for S in "${SIZES[@]}"; do
   if mnt $ST $M; then   # default commit interval
     N0=$(nsw)
     t=$SECONDS; step bw-cp-$S 900 cp $R/ref.bin $M/big.bin; T1=$((SECONDS - t)); H1=$(hwm)
-    ( while :; do echo "$(date -u +%H:%M:%S.%3N) $(awk '/^(Dirty|Writeback):/{printf "%s=%dMiB ", $1, $2/1024}' /proc/meminfo) $(tr '\n' ' ' </proc/pressure/io 2>/dev/null | cut -c1-60)"; sleep 0.5; done ) > $R/mem.log 2>&1 & SAMP=$!
+    ( while :; do echo "$(date -u +%H:%M:%S.%3N) $(awk '/^(Dirty|Writeback|MemFree|Cached):/{printf "%s=%dMiB ", $1, $2/1024}' /proc/meminfo) $(head -1 /proc/stat) $(cut -d' ' -f1 /proc/loadavg) $(tr '\n' ' ' </proc/pressure/io 2>/dev/null | cut -c1-60)"; sleep 0.5; done ) > $R/mem.log 2>&1 & SAMP=$!
     t=$SECONDS; step bw-random-write-$S 1800 python3 $R/rw.py $M/big.bin $R/ref.bin $SEED $VOL_MIB
     T2=$((SECONDS - t)); H2=$(hwm); RW=$(tail -1 $R/step.out)
     kill $SAMP 2>/dev/null

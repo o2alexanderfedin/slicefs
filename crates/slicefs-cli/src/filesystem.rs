@@ -232,7 +232,7 @@ impl SliceFsFilesystem {
             auto_snapshot: false,
             commit_gate: Arc::new(RwLock::new(())),
             replaying: std::sync::atomic::AtomicBool::new(false),
-            dirty_limit: AtomicUsize::new(DIRTY_LIMIT),
+            dirty_limit: AtomicUsize::new(std::env::var("SLICEFS_PROBE_DIRTY_MIB").ok().and_then(|v| v.parse::<usize>().ok()).map_or(DIRTY_LIMIT, |m| m << 20)),
             rebase_count: AtomicU64::new(0),
             last_rebase_bytes: AtomicU64::new(0),
             last_relog_bytes: AtomicU64::new(0),
@@ -756,6 +756,7 @@ impl SliceFsFilesystem {
         let size = ov.size;
         let p0 = chunk_store::probe::snap();
         chunk_store::probe::reset_max();
+        let s0 = chunk_store::probe::sched();
         let t = std::time::Instant::now();
         let n_ext = ov.extent_ranges().len();
         let ext_bytes: u64 = ov.extent_ranges().iter().map(|r| r.end - r.start).sum();
@@ -768,7 +769,8 @@ impl SliceFsFilesystem {
                 .map_err(store_err)?;
             eprintln!("[{}][PROBE] splice {:.1} ms: size={} extents={} ext_mib={:.1} cost_mib={:.1} rechunked_mib={:.1} reused_entries={} reused_nodes={} zero_runs={} |{}",
                 ts(), t.elapsed().as_secs_f64() * 1e3, size, n_ext, ext_bytes as f64 / 1048576.0, cost as f64 / 1048576.0,
-                stats.rechunked as f64 / 1048576.0, stats.reused_entries, stats.reused_nodes, stats.zero_runs, chunk_store::probe::diff(&p0));
+                stats.rechunked as f64 / 1048576.0, stats.reused_entries, stats.reused_nodes, stats.zero_runs,
+                chunk_store::probe::diff(&p0) + &chunk_store::probe::sched_diff(s0));
             (Some(k), stats.rechunked)
         };
         let t_install = std::time::Instant::now();
