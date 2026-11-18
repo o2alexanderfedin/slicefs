@@ -461,7 +461,7 @@ impl Filesystem for MountedFs {
             }
             WriteResult::Error(e) => {
                 eprintln!("[{}][FUSE] write: EXIT ino={}, fh={} -> error {}", ts(), ino.0, fh.0, e);
-                reply.error(Errno::EBADF);
+                reply.error(Errno::from_i32(e));
             }
         }
     }

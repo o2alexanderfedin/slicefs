@@ -1091,8 +1091,16 @@ impl SliceFsFilesystem {
             }
         }
         let root = self.meta.commit()?;
+        // The commit deleted the old log segments, so these records are now
+        // the only copy of bytes an fsync may already have made durable:
+        // sync them before the commit returns (a buffered log keeps them in RAM).
+        let relogged = !relog.is_empty();
         for rec in relog {
             self.log_record(rec);
+        }
+        if relogged {
+            self.meta.flush_wal()
+                .map_err(|e| MetaError::Corrupted(format!("cut: sync of the write log failed: {e}")))?;
         }
         Ok(root)
     }
@@ -1856,6 +1864,15 @@ impl SliceFsFilesystem {
         if let Some(s) = open_files.values().find(|s| s.ino == meta.ino && s.byte_count > 0) {
             meta.size = s.byte_count;
         }
+        // Unflushed writes: show the mtime (and ctime) the close will stamp.
+        if let Some((sec, nsec)) = open_files.values().find(|s| s.ino == meta.ino).and_then(|s| s.modified) {
+            meta.mtime_sec = sec;
+            meta.mtime_nsec = nsec;
+            if (sec, nsec) > (meta.ctime_sec, meta.ctime_nsec) {
+                meta.ctime_sec = sec;
+                meta.ctime_nsec = nsec;
+            }
+        }
     }
 
     /// Lookup a name in a directory. Returns `(child_ino, InodeMeta)` on success.
@@ -2011,6 +2028,13 @@ impl SliceFsFilesystem {
         if let Some((sec, nsec)) = mtime {
             inode.mtime_sec = sec;
             inode.mtime_nsec = nsec;
+            // An explicit mtime (utimens) on a file with unflushed writes
+            // wins over the time of those writes: the close stamps this one.
+            for s in self.open_files.lock().unwrap().values_mut() {
+                if s.ino == ino && s.modified.is_some() {
+                    s.modified = Some((sec, nsec));
+                }
+            }
         }
 
         // Always update ctime
