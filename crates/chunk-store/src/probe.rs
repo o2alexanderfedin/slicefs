@@ -25,6 +25,9 @@ pub static SRC_NS: AtomicU64 = AtomicU64::new(0);
 pub static NODE_LOADS: AtomicU64 = AtomicU64::new(0);
 pub static READ_MAX_NS: AtomicU64 = AtomicU64::new(0);
 pub static PUT_MAX_NS: AtomicU64 = AtomicU64::new(0);
+pub static PREAD_NS: AtomicU64 = AtomicU64::new(0);
+pub static VERIFY_NS: AtomicU64 = AtomicU64::new(0);
+pub static SRC_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// (on-CPU ns, run-queue wait ns) of this thread (Linux; zeros elsewhere).
 pub fn sched() -> (u64, u64) {
@@ -52,17 +55,18 @@ pub fn inc(c: &AtomicU64, n: u64) {
     c.fetch_add(n, Relaxed);
 }
 
-const ALL: [(&str, &AtomicU64); 23] = [
+const ALL: [(&str, &AtomicU64); 26] = [
     ("put_n", &PUT_N), ("put_new", &PUT_NEW), ("put_new_mib", &PUT_NEW_BYTES), ("put_ms", &PUT_NS),
     ("hash_ms", &HASH_NS), ("zstd_ms", &ZSTD_NS), ("lock_ms", &LOCK_NS), ("append_ms", &APPEND_NS),
     ("write_ms", &WRITE_NS), ("write_max_ms", &WRITE_MAX_NS), ("sync_n", &SYNC_N), ("sync_ms", &SYNC_NS),
     ("sync_max_ms", &SYNC_MAX_NS), ("seal_n", &SEAL_N), ("seal_ms", &SEAL_NS), ("read_n", &READ_N),
     ("read_mib", &READ_BYTES), ("read_ms", &READ_NS), ("cdc_ms", &CDC_NS), ("src_ms", &SRC_NS),
     ("node_loads", &NODE_LOADS), ("read_max_ms", &READ_MAX_NS), ("put_max_ms", &PUT_MAX_NS),
+    ("pread_ms", &PREAD_NS), ("verify_ms", &VERIFY_NS), ("src_mib", &SRC_BYTES),
 ];
 
-pub fn snap() -> [u64; 23] {
-    let mut out = [0; 23];
+pub fn snap() -> [u64; 26] {
+    let mut out = [0; 26];
     for (i, (_, c)) in ALL.iter().enumerate() {
         out[i] = c.load(Relaxed);
     }
@@ -70,7 +74,7 @@ pub fn snap() -> [u64; 23] {
 }
 
 /// The difference since `before` as text (ms for *_ms, MiB for *_mib; max fields absolute).
-pub fn diff(before: &[u64; 23]) -> String {
+pub fn diff(before: &[u64; 26]) -> String {
     let now = snap();
     let mut s = String::new();
     for (i, (name, _)) in ALL.iter().enumerate() {

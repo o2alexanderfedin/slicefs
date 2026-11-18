@@ -654,6 +654,7 @@ pub fn splice(
                 let t = std::time::Instant::now();
                 let piece = src.read(at, n)?;
                 crate::probe::add(&crate::probe::SRC_NS, t);
+                crate::probe::inc(&crate::probe::SRC_BYTES, n as u64);
                 if piece.len() != n {
                     return Err(Error::Io(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,

@@ -101,19 +101,20 @@ for S in "${SIZES[@]}"; do
   echo "== bigwrite $S MiB: cp, $VOL_MIB MiB of random 1 MiB and 4 KiB writes, cmp, remount, cmp"
   ST=$R/s$S; M=$R/m$S
   if ! $B seed $ST $R/empty >$R/step.out 2>&1; then bad "bw-seed-$S" "($(head -c 200 $R/step.out))"; continue; fi
-  head -c $((S * 1048576)) /dev/urandom > $R/ref.bin
+  if [ "${PROBE_REF_TMPFS:-0}" = 1 ]; then mkdir -p $R/reft; mount -t tmpfs -o size=$((S + 64))m tmpfs $R/reft && echo "PROBE ref.bin on tmpfs"; REF=$R/reft/ref.bin; else REF=$R/ref.bin; fi
+  head -c $((S * 1048576)) /dev/urandom > $REF
   if mnt $ST $M; then   # default commit interval
     N0=$(nsw)
-    t=$SECONDS; step bw-cp-$S 900 cp $R/ref.bin $M/big.bin; T1=$((SECONDS - t)); H1=$(hwm)
+    t=$SECONDS; step bw-cp-$S 900 cp $REF $M/big.bin; T1=$((SECONDS - t)); H1=$(hwm)
     ( while :; do echo "$(date -u +%H:%M:%S.%3N) $(awk '/^(Dirty|Writeback|MemFree|Cached):/{printf "%s=%dMiB ", $1, $2/1024}' /proc/meminfo) $(head -1 /proc/stat) $(cut -d' ' -f1 /proc/loadavg) $(tr '\n' ' ' </proc/pressure/io 2>/dev/null | cut -c1-60)"; sleep 0.5; done ) > $R/mem.log 2>&1 & SAMP=$!
-    t=$SECONDS; step bw-random-write-$S 1800 python3 $R/rw.py $M/big.bin $R/ref.bin $SEED $VOL_MIB
+    t=$SECONDS; step bw-random-write-$S 1800 python3 $R/rw.py $M/big.bin $REF $SEED $VOL_MIB
     T2=$((SECONDS - t)); H2=$(hwm); RW=$(tail -1 $R/step.out)
     kill $SAMP 2>/dev/null
     echo "---- PROBE rw-detail $S"; cat $R/rw-detail.txt; grep PROBE $R/step.out
     echo "---- PROBE daemon $S"; grep -E 'PROBE|commit-timer|switches to overlay' $R/mount.log
     echo "---- PROBE meminfo $S"; cat $R/mem.log
     echo "---- PROBE end $S"
-    t=$SECONDS; step bw-cmp-$S 600 cmp $R/ref.bin $M/big.bin; T3=$((SECONDS - t)); H3=$(hwm)
+    t=$SECONDS; step bw-cmp-$S 600 cmp $REF $M/big.bin; T3=$((SECONDS - t)); H3=$(hwm)
     N=$(( $(nsw) - N0 ))
     if [ -n "$CAP_MIB" ]; then
       if [ -n "$H3" ] && [ "$H3" -le "$CAP_MIB" ]; then ok bw-rss-bounded-$S
@@ -123,11 +124,11 @@ for S in "${SIZES[@]}"; do
     umnt $M
     echo "    bigwrite $S MiB: VmHWM after cp $H1, after random write $H2, after cmp $H3 MiB ($([ -n "$CAP_MIB" ] && echo "cap $CAP_MIB MiB" || echo "measure only")); $RW; overlay switches $N; CAS bytes $(cas $ST); times cp/rw/cmp $T1/$T2/$T3 s"
     if mnt $ST $M; then
-      step bw-cmp-after-remount-$S 600 cmp $R/ref.bin $M/big.bin
+      step bw-cmp-after-remount-$S 600 cmp $REF $M/big.bin
       umnt $M
     fi
   fi
-  rm -rf $ST $M $R/ref.bin
+  rm -rf $ST $M $REF; umount $R/reft 2>/dev/null
 done
 echo "    run time: $((SECONDS - T0)) s"
 

@@ -842,7 +842,10 @@ impl ChunkStore {
         let damaged = || Error::Corrupt(format!("object {id:?}"));
         probe::inc(&probe::READ_BYTES, loc.raw as u64);
         let mut buf = vec![0u8; REC_HEADER + loc.stored as usize + REC_CRC];
+        let t = std::time::Instant::now();
         file.read_at(&mut buf, loc.offset)?;
+        probe::add(&probe::PREAD_NS, t);
+        let t_verify = std::time::Instant::now();
         let (rid, flags, raw, _, _) = decode_record(&buf).ok_or_else(damaged)?;
         if rid != *id {
             return Err(damaged());
@@ -856,6 +859,7 @@ impl ChunkStore {
         if hasher.id(&data) != *id {
             return Err(damaged());
         }
+        probe::add(&probe::VERIFY_NS, t_verify);
         Ok(data)
     }
 
