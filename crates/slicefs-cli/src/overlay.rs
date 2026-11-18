@@ -211,3 +211,131 @@ impl RangeView {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// xorshift64: a seeded generator without a new crate.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n.max(1)
+        }
+
+        fn bytes(&mut self, n: usize) -> Vec<u8> {
+            (0..n).map(|_| self.next() as u8).collect()
+        }
+    }
+
+    /// Read `[off, off + len)` of `ov`, with the base served from `base`.
+    fn read(ov: &Overlay, base: &[u8], off: u64, len: u64) -> Vec<u8> {
+        ov.view(off, len).read(|o, n| {
+            let o = o as usize;
+            assert!(o + n <= base.len(), "base read past the base: {o}+{n} > {}", base.len());
+            Ok(base[o..o + n].to_vec())
+        }).unwrap()
+    }
+
+    fn model_range(model: &[u8], off: u64, len: u64) -> &[u8] {
+        let a = (off as usize).min(model.len());
+        let b = (off.saturating_add(len) as usize).min(model.len());
+        &model[a..b]
+    }
+
+    #[test]
+    fn overlay_reads_match_a_vec_model() {
+        for seed in 1..=4u64 {
+            let mut r = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let base_len = r.below(256 * 1024 + 1) as usize;
+            let base = r.bytes(base_len);
+            let mut model = base.clone();
+            let mut ov = Overlay::new(None, base_len as u64, base_len as u64);
+            for _ in 0..500 {
+                let len = model.len() as u64;
+                match r.below(10) {
+                    0..=4 => {
+                        let off = r.below(len + 64 * 1024);
+                        let n = 1 + r.below(8 * 1024) as usize;
+                        let data = r.bytes(n);
+                        let end = off as usize + data.len();
+                        if end > model.len() {
+                            model.resize(end, 0);
+                        }
+                        model[off as usize..end].copy_from_slice(&data);
+                        ov.write(off, &data);
+                    }
+                    5 => {
+                        let n = r.below(len + 1);
+                        model.truncate(n as usize);
+                        ov.truncate(n);
+                    }
+                    6 => {
+                        let n = len + r.below(64 * 1024);
+                        model.resize(n as usize, 0);
+                        ov.truncate(n);
+                    }
+                    _ => {
+                        let off = r.below(len + 100);
+                        let n = r.below(16 * 1024);
+                        assert_eq!(read(&ov, &base, off, n), model_range(&model, off, n), "seed {seed} read {off}+{n}");
+                    }
+                }
+                assert_eq!(ov.size, model.len() as u64);
+                assert!(ov.visible <= ov.base_len);
+            }
+            assert_eq!(read(&ov, &base, 0, ov.size + 1), model, "seed {seed}: whole content");
+        }
+    }
+
+    #[test]
+    fn touching_writes_merge_and_cost_counts_each_extent() {
+        let mut ov = Overlay::new(None, 0, 0);
+        for i in 0..1000u64 {
+            ov.write(i * 2, &[1]);
+        }
+        assert_eq!(ov.extent_count(), 1000);
+        assert!(ov.cost() >= 1000 * EXTENT_OVERHEAD, "cost {}", ov.cost());
+        // A write between two extents joins them into one.
+        ov.write(1, &[2]);
+        assert_eq!(ov.extent_count(), 999);
+        assert_eq!(ov.extent_ranges()[0], 0..3);
+        let before = ov.cost();
+        ov.truncate(1000);
+        assert!(ov.cost() < before, "truncate lowers the cost: {} -> {}", before, ov.cost());
+        assert_eq!(ov.extent_count(), 499);
+
+        let mut run = Overlay::new(None, 0, 0);
+        for i in 0..1000u64 {
+            run.write(i, &[i as u8]);
+        }
+        assert_eq!(run.extent_count(), 1);
+        assert_eq!(run.extent_ranges(), vec![0..1000]);
+        let want: Vec<u8> = (0..1000u64).map(|i| i as u8).collect();
+        assert_eq!(read(&run, &[], 0, 1000), want);
+        assert_eq!(run.copy_out(10, 5), want[10..15].to_vec());
+    }
+
+    #[test]
+    fn a_far_write_and_a_huge_extend_allocate_nothing_by_offset() {
+        const TIB: u64 = 1 << 40;
+        let mut ov = Overlay::new(None, 0, 0);
+        ov.write(TIB - 4, &[1, 2, 3, 4]);
+        assert_eq!(ov.size, TIB);
+        assert!(ov.cost() < 1024, "cost {}", ov.cost());
+        ov.truncate(TIB);
+        let mut ext = Overlay::new(None, 0, 0);
+        ext.truncate(TIB);
+        assert!(ov.cost() < 1024 && ext.cost() < 1024, "costs {} {}", ov.cost(), ext.cost());
+        assert_eq!(read(&ov, &[], TIB - 8, 100), vec![0, 0, 0, 0, 1, 2, 3, 4]);
+        assert_eq!(read(&ext, &[], TIB / 2, 4), vec![0; 4]);
+    }
+}

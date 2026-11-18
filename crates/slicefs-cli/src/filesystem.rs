@@ -3316,6 +3316,34 @@ mod tests {
         assert_eq!(&data[10..12], b"YZ");
     }
 
+    // Two write handles share one overlay (the owner state). Writes through
+    // both, in any order, and a release of the owner first, keep every byte.
+    #[test]
+    fn two_aliased_handles_on_an_overlay_keep_every_write() {
+        let (fs, _dir) = fresh_fs();
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        let mut model: Vec<u8> = (0..1u32 << 20).map(|i| (i * 7 + 3) as u8).collect();
+        fs.test_write(fh, 0, &model).unwrap();
+        fs.test_release(ino, fh).unwrap();
+
+        let (h1, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+        let (h2, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+        let mut write = |h: u64, off: usize, data: &[u8]| {
+            fs.test_write(h, off as u64, data).unwrap();
+            model[off..off + data.len()].copy_from_slice(data);
+        };
+        write(h1, 1000, &[0xA1; 100]); // the file has content: switch
+        assert!(!fs.test_is_streaming(h1));
+        write(h2, 500_000, &[0xB2; 300]);
+        write(h1, 2000, &[0xC3; 50]);
+        fs.test_release(ino, h1).unwrap(); // h2 takes the state over
+        write(h2, 3000, &[0xD4; 10]);
+        fs.test_release(ino, h2).unwrap();
+
+        assert_eq!(fs.meta.get_inode(ino).unwrap().size, model.len() as u64);
+        assert!(fs.test_read(ino, 0, model.len() as u32 + 1).unwrap() == model, "content after both releases");
+    }
+
     // ── test_setattr_size with buffered mode ────────────────────────────────
 
     #[test]
