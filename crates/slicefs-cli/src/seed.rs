@@ -115,11 +115,10 @@ fn seed_file(
     meta_store: &DictMetadataStore,
     cs: &Content,
 ) -> Result<(InodeId, ObjectKey), Box<dyn std::error::Error>> {
-    let bytes = std::fs::read(path)?;
-    let size = bytes.len() as u64;
-
-    // Write the content into the chunk store (FastCDC chunks).
-    let content_digest: ObjectKey = content::put_all(cs, &bytes)?;
+    // Stream the content into the chunk store (FastCDC chunks): the memory
+    // does not depend on the file size.
+    let mut file = std::fs::File::open(path)?;
+    let (content_digest, size) = content::put_reader(cs, &mut file)?;
 
     let inode_meta = file_inode_meta(fs_meta, size);
     let ino = meta_store.create_inode(&inode_meta)?;
@@ -286,6 +285,32 @@ mod tests {
 
         // deep.txt in b
         assert!(reloaded.lookup(b_ino, "deep.txt").is_ok(), "deep.txt not found in b");
+    }
+
+    /// A file larger than the read buffer is stored in parts and reads back
+    /// byte-exact, with the correct size.
+    #[test]
+    fn test_seed_file_larger_than_read_buffer() {
+        let store_dir = make_tempdir();
+        let source_dir = make_tempdir();
+
+        let data = content::tests::random_bytes(2 * content::READ_BUF + 4321, 9);
+        std::fs::write(source_dir.path().join("big.bin"), &data).unwrap();
+
+        run_seed(store_dir.path(), source_dir.path(), None).expect("seed failed");
+
+        let segs_dir = store_dir.path().join("segments");
+        let (root_opt, _) = load_store_from_segments(&segs_dir).expect("load failed");
+        let root = root_opt.expect("no root");
+        let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
+        let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
+
+        let ino = reloaded.lookup(1, "big.bin").unwrap();
+        assert_eq!(reloaded.get_inode(ino).unwrap().size, data.len() as u64);
+        let manifest = reloaded.get_manifest(ino).unwrap();
+        let cs = content::open(store_dir.path()).unwrap();
+        assert_eq!(manifest[0], content::put_all(&cs, &data).unwrap(), "key differs from put_all");
+        assert!(content::get_all(&cs, &manifest[0]).unwrap() == data, "content mismatch");
     }
 
     /// Seed preserves file metadata — size matches original file size in InodeMeta.
