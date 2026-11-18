@@ -409,7 +409,7 @@ impl Cursor {
                 return Ok(());
             }
             let child = load_node(store, &e.id)?;
-            if child.len != e.len || child.level + 1 != node.level {
+            if child.len != e.len || child.level.checked_add(1) != Some(node.level) {
                 return Err(Error::Corrupt(format!(
                     "manifest node {:?}: level {} with {} bytes under a level-{} entry of {} bytes",
                     e.id, child.level, child.len, node.level, e.len
@@ -1072,6 +1072,9 @@ mod tests {
         let len = fk.len() as u64 * 8192;
         let (same, st) = splice(&s, Some(root), len, &[], len, &mut VecSource(&[])).unwrap();
         assert_eq!(same, root, "no change: {st:?}");
+        // Leaf-only reuse would take about one node per leaf.
+        let leaves = leaf_starts(&s, root).len() as u64;
+        assert!(st.reused_nodes + 60 < leaves, "no change: {st:?}, {leaves} leaves");
         // Shrink to an old cut: the chunk before it is cut again.
         let j = 900_000;
         let last = rng.bytes(8192);
@@ -1108,7 +1111,13 @@ mod tests {
         let leaf = s.put(&encode_node(0, &[e(chunk, 50)])).unwrap();
         let empty = s.put(&encode_node(0, &[])).unwrap();
         let wrong_level = s.put(&encode_node(2, &[e(chunk, 50)])).unwrap();
-        for (what, child, claim) in [("longer claim", leaf, 100), ("empty child", empty, 10), ("wrong level", wrong_level, 50)] {
+        let top_level = s.put(&encode_node(255, &[e(chunk, 50)])).unwrap();
+        for (what, child, claim) in [
+            ("longer claim", leaf, 100),
+            ("empty child", empty, 10),
+            ("wrong level", wrong_level, 50),
+            ("level 255", top_level, 50),
+        ] {
             let root = s.put(&encode_node(1, &[e(child, claim)])).unwrap();
             let data = vec![0u8; claim as usize];
             let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1116,5 +1125,14 @@ mod tests {
             }));
             assert!(matches!(got, Ok(Err(Error::Corrupt(_)))), "{what}: {got:?}");
         }
+        // A broken precondition is an error too.
+        let root = s.put(&encode_node(1, &[e(leaf, 50)])).unwrap();
+        let data = vec![0u8; 60];
+        let bad = |keep, changed: &[Range<u64>], new_len| {
+            matches!(splice(&s, Some(root), keep, changed, new_len, &mut VecSource(&data)), Err(Error::Io(_)))
+        };
+        assert!(bad(51, &[], 60), "keep past the base");
+        assert!(bad(50, &[5..10, 0..2], 60), "unsorted ranges");
+        assert!(bad(50, &[5..61], 60), "range past the new length");
     }
 }
