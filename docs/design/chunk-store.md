@@ -318,3 +318,67 @@ trip.
   time per call.
 - Number of files in the store after a Boost copy (target: tens, not
   hundreds of thousands).
+
+### Results (2026-11-18)
+
+Machine: Intel(R) Xeon(R) W-3245 CPU @ 3.20GHz, 16 physical cores, 192 GiB
+RAM, macOS 26.2, APFS on an SSD.
+
+Builds, all with rustc 1.95.0-nightly (9e79395f9 2026-02-10) and no local
+patch:
+
+- c2f82fa: before packs. Each object is one file in `vt0/`, written by
+  blockset. This is the merge of #44.
+- 7016bb6: file content in packs, metadata nodes still in `vt0/`. This is the
+  first parent of the #56 merge e038e9f.
+- c447551: develop. All objects are in packs.
+
+Method: `slicefs seed` of each input into a new store, with a warm page cache.
+Each number is the median of 3 runs. Seconds are wall time from
+`/usr/bin/time -l`. Peak RSS is its maximum resident set size. Sizes come from
+`find`, `stat` and `du` on the store dir. MB = 10^6 bytes. Other work ran on
+the machine during this run: the 1-minute load average was 52 to 137 on 32
+logical cores. Thus the times are only an indication, and the 3 runs of one
+input differ by up to 32 %. Load does not change the sizes and the file
+counts.
+
+Boost 1_85_0 tree: 77,655 files, 757.5 MB.
+
+| build | seconds | MB/s | apparent MB | allocated MB | files | peak RSS MB |
+|---|---|---|---|---|---|---|
+| c2f82fa | 634.64 | 1.2 | 910.9 | 2,194.2 | 426,739 (vt0/ 426,738, segments/ 1) | 257.3 |
+| 7016bb6 | 189.32 | 4.0 | 255.3 | 936.3 | 170,376 (vt0/ 170,366, packs/ 8, segments/ 1, other 1) | 365.8 |
+| c447551 | 26.74 | 28.3 | 288.6 | 290.0 | 10 (packs/ 8, segments/ 1, other 1) | 533.2 |
+
+Boost 1_85_0 tar: 1 file, 823.6 MB.
+
+| build | seconds | MB/s | apparent MB | allocated MB | files | peak RSS MB |
+|---|---|---|---|---|---|---|
+| c2f82fa | 617.04 | 1.3 | 925.5 | 1,381.1 | 217,099 (vt0/ 217,098, segments/ 1) | 889.1 |
+| 7016bb6 | 12.28 | 67.1 | 199.2 | 200.7 | 21 (vt0/ 13, packs/ 6, segments/ 1, other 1) | 1,818.0 |
+| c447551 | 9.22 | 89.3 | 200.1 | 218.2 | 8 (packs/ 6, segments/ 1, other 1) | 1,810.8 |
+
+Random data: 1 file, 1,073.7 MB.
+
+| build | seconds | MB/s | apparent MB | allocated MB | files | peak RSS MB |
+|---|---|---|---|---|---|---|
+| c2f82fa | 854.61 | 1.3 | 1,670.5 | 2,514.3 | 318,112 (vt0/ 318,111, segments/ 1) | 1,150.1 |
+| 7016bb6 | 14.17 | 75.8 | 1,085.2 | 1,085.3 | 49 (vt0/ 13, packs/ 34, segments/ 1, other 1) | 2,409.5 |
+| c447551 | 10.49 | 102.4 | 1,086.6 | 1,086.7 | 36 (packs/ 34, segments/ 1, other 1) | 2,411.5 |
+
+Store files after a seed of the Boost tree: c2f82fa 426,739, 7016bb6 170,376,
+c447551 10. The current build meets the target "tens, not hundreds of
+thousands": its store has 10 files.
+
+Allocation cost (#8): for the Boost tree, the c2f82fa store allocates 2.41
+bytes on disk for each byte of store data (2,194.2 MB for 910.9 MB). The
+c447551 store allocates 1.00 bytes for each byte (290.0 MB for 288.6 MB).
+
+The FSKit Boost round trip (`scripts/macos-mount-test/boost-test.sh`) is a
+manual run, and nothing was mounted for these numbers. Add its numbers here
+when that run is done: time per step, `fsync` and `write` time per call, and
+the store file count after that copy.
+
+To repeat: run `scripts/macos-mount-test/fetch-boost.sh <DIR> 1_85_0`, then
+`scripts/pack-measure/seed-measure.sh <BINARY> <DIR> 3` for each build (see
+`scripts/pack-measure/README.md`).
