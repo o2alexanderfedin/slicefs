@@ -33,7 +33,7 @@ plan_head_after: b06127913a8adec50ae2ad1b52af927e26cd310d
 
 # Phase 13 Plan 02: Docker checks for the write log close-out Summary
 
-verify-phases.sh now has three new real-mount checks on Linux libfuse in Docker. Phase 05c: a rename whose only sync is `sync <dir>` survives `kill -9`, and an unsynced control rename is lost. Phase 05d: a cut of 3 bytes in the newest segment does not stop the mount. Large copy: 1 GiB in order and out of order, with cmp after the copy and after a remount. The daemon VmHWM peaked at 130 MiB against a 512 MiB cap.
+verify-phases.sh now has three new real-mount checks on Linux libfuse in Docker. Phase 05c: a rename whose only sync is `sync <dir>` survives `kill -9`, and an unsynced control rename is lost. Phase 05d: a cut of 3 bytes in the newest segment does not stop the mount. Large copy: 1 GiB in order and out of order, with cmp after the copy and after a remount. The daemon VmHWM was at most 130 MiB (read after the cmp steps, before unmount) against a 512 MiB cap.
 
 ## Sections and step names (exact, for the #20 comment)
 
@@ -65,7 +65,7 @@ verify-phases.sh now has three new real-mount checks on Linux libfuse in Docker.
 - `rename with no sync after it: lost`
 - `cut 3 bytes of segment-000002.seg`
 - Replay lines: 05c `Replayed 43 request(s) from the write log (0 skipped).`, 05d `Replayed 21 request(s) from the write log (0 skipped).`
-- Section time: 126 s. Whole run: 199 s. `docker stats` peak: 167.6 MiB (one sample near the end of the section; the other samples were at most 136.4 MiB).
+- Section time: 126 s. Whole run: 199 s. `docker stats` peak: 167.6 MiB. This was one sample at the first unmount/remount of the section, and its cause is not known. The samples after it were about 25 MiB. The other samples were at most 136.4 MiB. 167.6 MiB is far below the 512 MiB cap, so the cap stands.
 
 ## Cap rule result
 
@@ -85,7 +85,7 @@ verify-phases.sh now has three new real-mount checks on Linux libfuse in Docker.
 - `rename with no sync after it: lost`
 - `cut 3 bytes of segment-000002.seg`, all 05d steps ok
 - Section time: **126 s**. Whole verify run: 200 s.
-- `docker stats` MemUsage peak of the final run: **114.8 MiB** (out of 15.68 GiB). On OrbStack this number does not include the page cache of the 1 GiB files. It is close to the daemon VmHWM.
+- `docker stats` MemUsage peak of the final run: **114.8 MiB** (out of 15.68 GiB). Observation, not measured separately: the samples follow the daemon VmHWM, and they do not show 1 GiB of page cache.
 - All 15 new results are `ok`: big-copy-in-order, big-write-out-of-order, big-in-order-cmp, big-out-of-order-cmp, no-switch-to-buffered, daemon-rss-bounded, big-in-order-cmp-after-remount, big-out-of-order-cmp-after-remount, rename-survives-dir-fsync, old-name-gone-after-dir-fsync, mount-with-torn-last-record, records-before-the-tear-kept, torn-record-not-applied, write-after-torn-tail, scrub-after-torn-tail.
 
 Build: debug (`cargo build -q -p slicefs-cli`, as `run.sh verify` builds it). Host: OrbStack on macOS.
@@ -94,7 +94,13 @@ Build: debug (`cargo build -q -p slicefs-cli`, as `run.sh verify` builds it). Ho
 
 D-04 said "reverse 1 MiB blocks with `dd seek=N conv=notrunc`". That pattern cannot meet any cap below the file size. One `dd` per block opens the file again, and an open of a file that has content goes to Buffered mode at once. A full reverse on one handle jumps past REORDER_WINDOW (64 MiB) and then writes behind the stream, which also switches to Buffered (crates/slicefs-cli/src/filesystem.rs, Streaming branch of `test_write`). The check uses one python3 process with one handle. It writes 1 MiB blocks last to first inside each 16 MiB group, with an fsync every 64 MiB (as the NFS COMMITs did). Every jump stays inside the reorder window. `no-switch-to-buffered` fails the run if any handle leaves Streaming mode. **Scope of the bound for the #20 comment:** daemon memory is bounded for in-order writes and for out-of-order writes that stay inside the 64 MiB reorder window. A random write pattern outside the window still holds the whole file in RAM (Buffered mode). This check does not cover that case.
 
-Also checked before the runs: the daemon does not turn on the FUSE writeback cache (no `writeback` flag in crates/slicefs-cli/src or vendor/fuser/src). So the kernel sends the reversed blocks in the order that the writer uses, and `no-switch-to-buffered` is real evidence. `fsyncdir` goes to `handle_fsyncdir` (fuse_callbacks.rs l.282), which calls `flush_wal`. Segment files are not preallocated, so `truncate -s -3` cuts the last record.
+Also checked before the runs: the daemon does not turn on the FUSE writeback cache. vendor/fuser/src/lib.rs INIT_FLAGS is FUSE_ASYNC_READ | FUSE_BIG_WRITES, slicefs adds only FUSE_ATOMIC_O_TRUNC and FUSE_BIG_WRITES (fuse_callbacks.rs l.55-58), and FUSE_WRITEBACK_CACHE is only defined (init_flags.rs l.42). So the kernel sends the reversed blocks in the order that the writer uses, and `no-switch-to-buffered` is real evidence. `fsyncdir` goes to `handle_fsyncdir` (fuse_callbacks.rs l.282), which calls `flush_wal`. Segment files are not preallocated, so `truncate -s -3` cuts the last record.
+
+**Scope of the VmHWM value:** H3 is read after the cmp steps and before `umnt`. The final commit at unmount is not in the measured value.
+
+## 05d control run (not committed)
+
+A scratchpad copy of Phase 05d without the `truncate -s -3` line was run once in the same Docker image (debug build). Result: `Replayed 22 request(s) from the write log (0 skipped).` and `torn-record-not-applied: FAIL`, so the `mkdir last` record reaches disk and replays when it is not cut. With the cut, the real runs replay 21 requests and `last` is absent. The cut, and not a missing record, makes `torn-record-not-applied` pass. Log: /private/tmp/claude-501/-Users-alexanderfedin-projects-slicefs/d764d3d1-c5db-45fa-99e9-83e307688877/scratchpad/13-02-ctl05d.log
 
 ## Deviations from Plan
 
