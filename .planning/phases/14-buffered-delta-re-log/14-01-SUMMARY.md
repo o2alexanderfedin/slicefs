@@ -19,7 +19,7 @@ actuals:
   tasks: 2
   commits: 2
 plan_head_before: 5fce24319860899851a66716622e7e41bc40e817
-plan_head_after: 72b429a  # task commits only; the SUMMARY commit follows
+plan_head_after: 72b429aa78fe7a7558ea7be5e5ae91cdd3c2e9f6  # task commits only (git rev-list --count 5fce243..72b429a = 2); the SUMMARY commits follow
 
 tech-stack:
   added: []
@@ -147,6 +147,7 @@ TDD note (Task 2): the tests passed on the first run, because Task 1 already hol
 - **Issue:** the test checked the old switch bug: the refcount of the fsynced root went to 0 at the switch, but the manifest still named that root (RESEARCH Pitfall 5, CONTEXT Risks). The plan says both "every existing test unchanged" and "never decrement a root that the manifest still names". These two rules conflict on this test.
 - **Fix:** the test now checks that the refcount stays 1 across the switch, goes to 0 when release installs the new root, and that the content reads "world". The test name stays the same.
 - **Commit:** 72b429a
+- **Must-have 6 ("every existing test unchanged") is not met as written. The orchestrator must sign off on this.** A gate that diffs `crates/slicefs-cli/tests` against 5fce243 will see this one change. At 88db125 alone, this test is red (Task 1's verify does not run `coverage_boost_tests`). From 72b429a on, it is green.
 
 **2. [Process] Branch name**: commits are on `feature/14-01-overlay`, as the orchestrator asked. The stock pre-commit allow-list (`agent-*`) does not accept that name. The detached-HEAD check and the protected-branch check passed.
 
@@ -159,6 +160,7 @@ TDD note (Task 2): the tests passed on the first run, because Task 1 already hol
 - No dirty limit yet. A sequential in-place rewrite of an existing file merges into one extent, and that extent grows to the file size until release.
 - `handle_content` still loads the whole file, in the Streaming non-extension setattr arm.
 - `commit_cut` copies all extents (1 MiB pieces) into `Vec<Record>` before `meta.commit()`. It does not use descriptors yet.
+- No test in this plan reaches the relog `Setattr(visible)` and `Setattr(size)` records or the 1 MiB split of a large extent. The two existing relog tests reach only a 300-byte extent. The replay matrix in 14-06 covers these.
 - Refcount note: the legacy Streaming setattr arm decrements `last_committed_root`, but the manifest still names that root. A later switch then decrements M again. `decrement_refcount` does nothing at 0 and GC is mark-and-sweep, so this is bookkeeping only. 14-04 removes that arm.
 
 ## Known Stubs
