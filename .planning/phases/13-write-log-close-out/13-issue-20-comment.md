@@ -33,6 +33,6 @@ The open part: a commit writes the full buffer of each open Buffered file to the
 `crates/metadata/tests/write_log_tests.rs`: `a_commit_makes_its_objects_durable_before_the_root`. `node_crash_tests.rs`: `a_failed_node_sync_fails_the_commit`.
 
 **Not in the acceptance list**
-Part 2 of the design (overlays, re-chunk at commit, no Buffered mode) is not done. {{PART2_TRACKING}}
+Part 2 of the design (overlays, re-chunk at commit, no Buffered mode) is not done. It continues in #98; see also #21 and #22.
 
 Evidence: merge commit {{MERGE_SHA}}, CI run {{CI_RUN_URL}}.
