@@ -1,0 +1,13 @@
+[package]
+name = "index-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Measure the chunk store index: open time, RSS, lookups, recovery (#66)"
+
+[dependencies]
+chunk-store = { path = "../../crates/chunk-store" }
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
