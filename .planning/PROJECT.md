@@ -8,16 +8,27 @@ A general-purpose deduplicating filesystem built in Rust that uses content-addre
 
 High-ratio data deduplication that works transparently as a real, daily-driver filesystem — not a backup tool or archive format, but a mountable POSIX filesystem you can use for actual work.
 
-## Current Milestone: v2.0 — Streaming Writes & Hardening
+## Current State
+
+**Shipped:** v2.0 Streaming Writes & Hardening (2026-11-17, tag `milestone-v2.0`). Public releases so far: v2.0.0, v2.0.1, v2.1.0.
+
+- Chunk store: FastCDC v2020 (4/8/32 KiB) and BLAKE3-256, append-only packs, zstd per object, in-memory index.
+- Streaming writes for sequential writes; Buffered fallback for out-of-order writes.
+- Write log (#20) with replay after a crash and a clean cut at each commit; reachability GC, online at mount.
+- macOS: FUSE-T 1.2+ with FSKit only. Linux: libfuse.
+
+## Next Milestone Goals (candidates)
+
+- Several roots, commits and refs (branches, temporary branches, tags, pins as GC roots): #86, with #87-#91 and several mounts of one store (#92).
+- On-disk chunk index instead of the in-memory hash table: #85.
+- Cheaper commit with large open Buffered files: #93.
+
+<details>
+<summary>v2.0 milestone goal (archived)</summary>
 
 **Goal:** Remove the file size limitation by streaming writes through data-id's incremental push API, remove write-path compression (dedup on raw content), and fix known v1.0 bugs.
 
-**Target features:**
-- Streaming writes via State::push_bytes() — O(log N) memory regardless of file size
-- Remove compression from write/read path — raw bytes to Merkle tree, cross-compressor dedup works
-- Fix refcount overflow (silent wrap to 0 = data loss risk)
-- Fix statfs reporting (hardcoded f_files=1M, unrealistic bfree)
-- Improve snapshot lookup (O(n) → indexed)
+</details>
 
 ## Requirements
 
@@ -35,13 +46,19 @@ High-ratio data deduplication that works transparently as a real, daily-driver f
 - ✓ CLI completeness (mount/unmount/seed/gc/snapshot/stats/scrub/--json) — v1.0
 - ✓ CI pipeline (Linux: cargo test + pjdfstest; no macOS job) — v1.0
 
+### Validated (v2.0)
+
+- ✓ Streaming writes, no file size = RAM limit for sequential writes — v2.0
+- ✓ Dedup on raw content (compression is per stored object, after dedup) — v2.0
+- ✓ Realistic statfs reporting — v2.0
+- ✓ O(1) snapshot lookup by version and by name — v2.0
+- ✓ Clean shutdown on SIGTERM/SIGINT/SIGHUP (final commit) — v2.0
+- ✓ Refcount overflow — superseded: refcounts replaced by reachability GC — v2.0
+
 ### Active
 
-- [ ] Streaming writes — no file size = RAM limitation
-- [ ] Remove write-path compression — raw bytes to tree, dedup on original content
-- [ ] Refcount overflow protection — saturating_add or checked_add
-- [ ] Realistic statfs reporting — track actual inode count, physical usage
-- [ ] Snapshot indexed lookup — O(1) by version, O(1) by name
+- [ ] Several roots, commits and refs (#86)
+- [ ] On-disk chunk index (#85)
 
 ### Out of Scope
 
@@ -71,12 +88,12 @@ High-ratio data deduplication that works transparently as a real, daily-driver f
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Rust as implementation language | Memory safety, perf, fuser crate ecosystem | — Pending |
-| FUSE-T + fuser for filesystem frontend | Cross-platform FUSE support, kext-free on macOS | — Pending |
+| Rust as implementation language | Memory safety, perf, fuser crate ecosystem | ✓ Good |
+| FUSE-T + fuser for filesystem frontend | Cross-platform FUSE support, kext-free on macOS | ✓ Good, with a vendored patched fuser; FSKit is the only macOS backend |
 | Pluggable hash functions | Future flexibility, no premature lock-in | — Pending |
 | Pluggable storage backend | Enables future distributed backends without core changes | — Pending |
-| Block-level CAS deduplication | Proven approach, works across file types and workloads | — Pending |
+| Block-level CAS deduplication | Proven approach, works across file types and workloads | ✓ Good; content-defined chunks (FastCDC) with full BLAKE3-256 IDs |
 | Defer distributed/decentralized to future milestone | Focus on solid local foundation first | — Pending |
 
 ---
-*Last updated: 2026-03-29 after v2.0 milestone start*
+*Last updated: 2026-11-17 after v2.0 milestone close*
