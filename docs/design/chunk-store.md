@@ -72,6 +72,70 @@ each). The file offset of an entry is the sum of the lengths before it.
   the root.
 - The size of the file is in the inode. An empty file has no manifest.
 
+### Splice (#98)
+
+`chunk_store::file::splice` stores a changed file as a new root without a
+read of the whole file. The inputs are the old root, the length `keep` of
+the old bytes that stay, the changed ranges, the new length and a source of
+the new bytes. The overlay of an open file (see the write-log note) gives
+these inputs at a rebase.
+
+- Restart: FastCDC starts again at the largest old cut strictly below the
+  first changed byte. A cut at the change itself is not safe, because the
+  bytes before the change decide where the next cut is.
+- Resync: after each new chunk end, the splice goes back to copy mode if the
+  end is past the changed bytes and is a usable old cut (an old cut below
+  `keep`, or the old end when the size and the tail stay). From there, the
+  old entries are copied by ID.
+- Whole-node reuse: in copy mode, a whole old manifest node that ends before
+  the next change is pushed as one entry one level up, so its entries are
+  not read one by one.
+- Exact zero shortcut: a 32 KiB range that is known to be zeros (past
+  `keep`, or old zero chunks) and has no change is pushed as the zero chunk
+  without a read or a hash.
+- The output key is always the key of a full `FileWriter` write of the same
+  bytes (oracle tests). Chunking stays deterministic (D-08): there is no
+  forced cut. On long repeating non-zero data, FastCDC finds no old cut to
+  resync at, so a rebase can cut again up to the end of the file. The CPU
+  then follows the file size, but the memory stays fixed: one piece of at
+  most 2 x `CHUNK_MAX` and one decoded node per tree level.
+
+Small splices (debug build, tests in `file.rs` and `write_path_tests.rs`):
+
+| Change | Bytes cut again | Other |
+|---|---|---|
+| 4 KiB overwrite in the middle of a 32 MiB random file (splice only) | 35,343 | 1,602 entries and 3 nodes reused, 5 new objects |
+| 4 KiB write at 16 MiB + 1234 in a 32 MiB random file (rebase of an open file) | 38,355 | 5 new objects, 124,310 more store bytes |
+| Extend 1 MiB to 4 GiB with no open handle | 35,628 | 0.14 s (39 s before the splice) |
+| Shrink 4 GiB back to 1 MiB | 2,860 | the same key as before |
+
+Docker, Linux libfuse (OrbStack on macOS, release build, the machine was
+shared, load average 55 to 93). `scripts/docker-linux-test/run.sh bigwrite`
+copies a random file in, then writes 512 MiB of seeded random 1 MiB and
+4 KiB blocks into it, then compares it, and again after a remount. Per-op
+log, GC off, dirty limit 32 MiB. VmHWM is the peak RSS of the daemon in MiB.
+
+| Run | File | VmHWM after cp | after random write | after cmp | Slowest write | Store bytes |
+|---|---|---|---|---|---|---|
+| Before (full-file buffer) | 1 GiB | 81 | 6224 | 6224 | 17,295 ms | 1,912,157,485 |
+| Overlay, measure only | 1 GiB | 30 | 82 | 117 | 5,418 ms | 2,666,083,776 |
+| Overlay, cap 256 MiB | 1 GiB | 30 | 79 | 114 | 5,870 ms | 2,672,373,748 |
+| Overlay, cap 256 MiB | 4 GiB | 82 | 161 | 161 | 7,253 ms | 6,168,209,263 |
+| Overlay, dirty limit 16 MiB | 1 GiB | 31 | 97 | 97 | 7,778 ms | 2,755,445,492 |
+| Overlay, dirty limit 16 MiB | 4 GiB | 84 | 146 | 146 | 5,726 ms | 6,364,447,131 |
+
+- The cap is 256 MiB for both sizes, from a fixed rule on the 1 GiB
+  measure-only run (117 MiB is below 170 MiB). All cmp steps passed, and
+  each size switched to an overlay once.
+- The 4 GiB run uses 47 MiB more than the 1 GiB run. The copy step alone
+  has 52 MiB more (82 against 30), so the difference comes before the
+  random writes (the copy path and the chunk index of the larger file).
+- The store holds more bytes than before: each rebase stores new chunks, and
+  GC is off in this test, so the old chunks stay. This is not checked.
+- The slowest write is above 2 s in every run. A 16 MiB dirty limit did not
+  make it smaller, so the dirty limit stays 32 MiB. The cause is not
+  checked (the load of the machine changed from run to run).
+
 The other metadata (directories, inode map, xattrs) keeps its current
 logical layout. Only the storage of its nodes moved from `State::push_all`
 into the chunk store (`metadata::store_io`, step 3). A node is stored like
@@ -294,7 +358,8 @@ small LRU cache of decoded chunks serves reads that do not align with chunks.
 The current streaming writer keeps its role; only the chunker and the object
 store change: bytes of a file → FastCDC → for each chunk, the write hash → dedup
 check → append to the active pack → manifest entry. Out-of-order and sparse
-writes keep the current handling until #20 part 2.
+writes switch the handle to an overlay (#98): the base is a root in the
+manifest, and a rebase stores base plus extents through the splice.
 
 ## Plan (one PR each)
 
