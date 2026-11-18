@@ -29,15 +29,16 @@ decisions:
   - "Cap check is 'held bytes > BUFFER_CAP_BYTES' after the push, with the frame size (17 bytes + payload) as the record size, so the RAM after log_mutation is at most 4 MiB"
   - "PeriodicWal::new keeps no timer (existing tests unchanged); PeriodicWal::with_interval(path, id, Duration) starts it; create_wal uses with_interval(interval_secs)"
   - "05c control runs in its own flush-on-fsync mount (fresh store, --commit-interval 0); the per-op mount has only the main steps"
+  - "A failed write-out in the buffered modes is sticky until rotate; records logged while failed are not kept"
   - "Design note subsection appended at the end of write-log.md to keep away from the sections that plan 14-07 edits"
 metrics:
   completed: 2026-11-18
   tasks: 4
 actuals:
   tasks: 4
-  commits: 9
+  commits: 11
 plan_head_before: 4a27c38
-plan_head_after: ee6fcd9 (this SUMMARY commit follows it)
+plan_head_after: e5db785 (this SUMMARY commit follows it)
 ---
 
 # Phase 14 Plan 09: Write-log RAM, option A Summary
@@ -59,6 +60,8 @@ syncs does not change.
 | 4 | dd8b461 | write-log.md subsection "Write-log RAM (#98)" |
 | summary | c748968 | first version of this SUMMARY |
 | 3 | ee6fcd9 | wider deadline of the timer test (test only) |
+| summary | 0ce9af5 | summary update |
+| fix | e5db785 | sticky failure of a buffered write-out; test fault hook; design note line |
 
 ## Tests
 
@@ -89,8 +92,20 @@ test wal::periodic::tests::timer_syncs_and_drop_stops_it ... FAILED
 test result: FAILED. 0 passed; 4 failed
 ```
 
+Fault tests (added with e5db785), RED before the sticky flag:
+
+```
+wal::flush_on_fsync::tests::failed_cap_write_out_fails_fsync_until_rotate
+  panicked: fsync after a failed write-out must fail
+wal::periodic::tests::failed_timer_sync_fails_fsync_until_rotate
+  panicked: fsync after a failed timer sync must fail
+```
+
+Both pass now: fsync fails (twice in a row for the cap case) until rotate,
+and works again after it.
+
 GREEN, with no change to existing tests:
-- `cargo test -p metadata`: all pass (134 lib tests, all integration tests).
+- `cargo test -p metadata`: all pass (136 lib tests, all integration tests).
 - slicefs-cli: crash_recovery_tests 6, fsync_tests 7, mount_lifecycle_tests 41,
   wal_durability_tests 2, wal_strategy_tests 5, write_log_replay_tests 18: all pass.
 
@@ -105,7 +120,9 @@ OrbStack): `RESULT verify-phases: PASS`. 05c lines:
 ```
 
 05d (torn last record) and the 1 GiB large copy also pass (VmHWM 72 MiB, cap
-512 MiB). The volume `slicefs-target-14-09` was deleted after the run.
+512 MiB). The volume `slicefs-target-14-09` was deleted after the run. The run
+was at dd8b461; the later fix e5db785 changes only error paths of the
+buffered modes (and a test-only hook), and Docker was not run again.
 
 ## Deviations from Plan
 
@@ -126,19 +143,21 @@ OrbStack): `RESULT verify-phases: PASS`. 05c lines:
 - Per-op 05c main steps now pass also because per-op keeps every completed
   request; the flush-on-fsync control is what shows that a rename with no sync
   is lost.
-- Open point (write errors in the buffered modes): a failed write during a
-  cap spill drops the held records, but the error goes back through
-  `log_mutation`, and `DictMetadataStore` then sets `wal_failed`, so every
-  fsync fails until the next commit. A failed sync from the periodic timer
-  thread is only logged (`tracing::warn!`) and its held records are dropped;
-  the next fsync then finds nothing held and can return success. Periodic is
-  not the default mode. A fix (a sticky failed flag in `BufferedLog` that
-  `flush_and_sync` reports until `rotate`) needs a fault-injection seam to
-  test it, so it is left for a follow-up.
+- Write errors in the buffered modes (fixed in e5db785, on request of the
+  coordinator): before the fix, a failed sync from the periodic timer thread
+  dropped the held records and only logged a warning, so the next fsync found
+  nothing held and returned success for lost records. Now `BufferedLog` has a
+  sticky `failed` flag. Any failed write or sync (at the cap, at fsync, in the
+  timer thread) sets it. While it is set, `flush_and_sync` returns an error
+  and new records are not kept, because nothing after a failure can become
+  durable in that segment. `rotate` (commit) clears it with a new segment.
+  This matches the store-level `wal_failed` rule of the cap path.
+  `SegmentWriter` has a test-only fault hook `fail_next_io`: the next
+  `write_entry`, `flush` or `sync` fails. Outside tests it is a no-op.
 - The timer test deadline was widened from 2 x interval + 300 ms to
   2 x interval + 1 s after the commits of tasks 1-4 (test only).
 
 ## Self-Check: PASSED
 
 - FOUND: crates/metadata/src/wal/buffered.rs
-- FOUND: 50b75f7, 4269b6a, c31b63c, 658779d, 33b0ebd, dd8b461, c748968, ee6fcd9 (ancestors of HEAD)
+- FOUND: 50b75f7, 4269b6a, c31b63c, 658779d, 33b0ebd, dd8b461, c748968, ee6fcd9, 0ce9af5, e5db785 (ancestors of HEAD)
