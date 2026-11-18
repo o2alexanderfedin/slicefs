@@ -41,9 +41,34 @@ pub const MAX_FILE_SIZE: u64 = 1 << 40;
 /// for a gap to close. Beyond it the handle switches to an overlay.
 pub const REORDER_WINDOW: usize = 64 << 20;
 
-/// Piece size of a rebase: the overlay content is read and streamed in pieces
-/// of at most this many bytes.
-const REBASE_PIECE: u64 = 1 << 20;
+/// The new content of a splice over an overlay: reads go through
+/// `Overlay::view` (base bytes below `visible`, zeros, extents on top), so a
+/// read holds only the requested range.
+struct OverlaySource<'a> {
+    cs: &'a chunk_store::ChunkStore,
+    ov: &'a Overlay,
+    reader: Option<content::Reader>,
+}
+
+impl<'a> OverlaySource<'a> {
+    fn new(cs: &'a chunk_store::ChunkStore, ov: &'a Overlay) -> std::io::Result<Self> {
+        let reader = match &ov.base {
+            Some(k) => Some(content::Reader::open(cs, k)?),
+            None => None,
+        };
+        Ok(OverlaySource { cs, ov, reader })
+    }
+}
+
+impl chunk_store::file::SpliceSource for OverlaySource<'_> {
+    fn read(&mut self, offset: u64, len: usize) -> chunk_store::Result<Vec<u8>> {
+        let (cs, reader) = (self.cs, &mut self.reader);
+        self.ov.view(offset, len as u64).read(|o, n| match reader.as_mut() {
+            Some(r) => r.read(cs, o, n),
+            None => Ok(Vec::new()),
+        }).map_err(chunk_store::Error::Io)
+    }
+}
 
 /// Largest data size of one `Write` record that a commit logs again (well
 /// below the segment payload limit of 64 MiB). Each piece is copied, logged
@@ -219,7 +244,8 @@ impl SliceFsFilesystem {
         self.rebase_count.load(Ordering::Relaxed)
     }
 
-    /// Test hook: the bytes the last rebase fed to the chunker.
+    /// Test hook: the bytes the last splice cut again with FastCDC (a rebase,
+    /// or a size change with no open handle): `SpliceStats::rechunked`.
     pub fn test_last_rebase_bytes(&self) -> u64 {
         self.last_rebase_bytes.load(Ordering::Relaxed)
     }
@@ -704,9 +730,11 @@ impl SliceFsFilesystem {
     }
 
     /// Store the content of an overlay as a new root and start a clean
-    /// overlay on it. The whole file is streamed again in pieces of
-    /// `REBASE_PIECE` bytes: fixed memory, canonical chunks (unchanged
-    /// chunks dedup by ID), CPU in the file size. A clean overlay is kept.
+    /// overlay on it. The splice cuts again only the chunks near the extents
+    /// (and near a cut or an extended tail); every other chunk and whole old
+    /// node is reused by ID. Fixed memory, canonical key, CPU in the change
+    /// (on long repeating non-zero data the re-chunk can run to the end of
+    /// the file). A clean overlay is kept.
     fn rebase_overlay(&self, ino: u64, s: &mut OpenFileState) -> Result<(), i32> {
         let WriteMode::Overlay(ov) = &s.write_mode else {
             return Ok(());
@@ -720,24 +748,16 @@ impl SliceFsFilesystem {
             libc::EIO
         };
         let size = ov.size;
-        let mut reader = match &ov.base {
-            Some(k) => Some(content::Reader::open(cs, k).map_err(store_err)?),
-            None => None,
+        let (root, rechunked) = if size == 0 {
+            (None, 0)
+        } else {
+            let mut src = OverlaySource::new(cs, ov).map_err(store_err)?;
+            let (k, stats) = content::splice(cs, ov.base.as_ref(), ov.visible, &ov.extent_ranges(), size, &mut src)
+                .map_err(store_err)?;
+            (Some(k), stats.rechunked)
         };
-        let mut st = Stream::default();
-        let mut at = 0u64;
-        while at < size {
-            let n = (size - at).min(REBASE_PIECE);
-            let piece = ov.view(at, n).read(|o, len| match reader.as_mut() {
-                Some(r) => r.read(cs, o, len),
-                None => Ok(Vec::new()),
-            }).map_err(store_err)?;
-            st.push(cs, &piece).map_err(store_err)?;
-            at += n;
-        }
-        let root = if size == 0 { None } else { Some(st.finish(cs).map_err(store_err)?) };
         self.rebase_count.fetch_add(1, Ordering::Relaxed);
-        self.last_rebase_bytes.store(size, Ordering::Relaxed);
+        self.last_rebase_bytes.store(rechunked, Ordering::Relaxed);
         let hook = self.rebase_hook.lock().unwrap().clone();
         if let Some(hook) = hook {
             hook();
@@ -1513,8 +1533,8 @@ impl SliceFsFilesystem {
             }
         }
 
-        // Case B: no open write handle — stream the committed content into a new
-        // tree, truncated or zero-extended. NotFound from get_manifest means the inode exists but has no content yet
+        // Case B: no open write handle — splice the committed content to the
+        // new size, truncated or zero-extended. NotFound from get_manifest means the inode exists but has no content yet
         // (brand-new file created by create() before any write/release). Treat as empty content.
         let old_manifest = match self.meta.get_manifest(ino) {
             Ok(m) => m,
@@ -1527,26 +1547,29 @@ impl SliceFsFilesystem {
             self.meta.decrement_refcount(&old_manifest[0]);
         }
 
-        // Rebuild as a stream: the first new_size bytes of the old content
-        // (read in 1 MiB chunks), then zeros. Memory stays O(1 MiB), not O(file).
+        // Splice the old content to the new size: only the chunks near the
+        // old end (a cut, or the last chunk of an extend) are cut again; the
+        // other chunks and whole nodes keep their IDs, and an extend pushes
+        // zero chunks without a hash. Same key as a full write.
         if new_size == 0 {
             self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
         } else {
-            let mut st = Stream::default();
-            let mut written = 0u64;
-            if let Some(root) = old_manifest.first() {
-                let mut reader = content::Reader::open(&self.content, root).map_err(|_| libc::EIO)?;
-                while written < new_size {
-                    let want = (new_size - written).min(1 << 20) as usize;
-                    let chunk = reader.read(&self.content, written, want).map_err(|_| libc::EIO)?;
-                    if chunk.is_empty() {
-                        break;
-                    }
-                    st.push(&self.content, &chunk).map_err(|_| libc::EIO)?;
-                    written += chunk.len() as u64;
-                }
-            }
-            let new_digest = self.end_padded(&st, written, new_size)?;
+            let cs = &*self.content;
+            let store_err = |e: std::io::Error| {
+                eprintln!("[{}][FUSE] setattr size: content store error: {e}", ts());
+                libc::EIO
+            };
+            let old_root = old_manifest.first().copied();
+            let old_len = match &old_root {
+                Some(k) => content::Reader::open(cs, k).map_err(store_err)?.len(),
+                None => 0,
+            };
+            let mut ov = Overlay::new(old_root, old_len, old_len);
+            ov.truncate(new_size);
+            let mut src = OverlaySource::new(cs, &ov).map_err(store_err)?;
+            let (new_digest, stats) = content::splice(cs, old_root.as_ref(), ov.visible, &[], new_size, &mut src)
+                .map_err(store_err)?;
+            self.last_rebase_bytes.store(stats.rechunked, Ordering::Relaxed);
             self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
             self.meta.increment_refcount(&new_digest);
         }
@@ -3866,7 +3889,10 @@ mod tests {
                 "in-order write {i}: overlay cost {} over the limit", overlay_cost(&fs, fh));
         }
         assert!(fs.test_rebase_count() >= random + 8, "in-order rewrite: {} rebase(s)", fs.test_rebase_count() - random);
-        assert_eq!(fs.test_last_rebase_bytes(), 1 << 20);
+        // The splice cuts again only near the last extent (at most 2 x limit
+        // plus one write), not the whole 1 MiB file.
+        let last = fs.test_last_rebase_bytes();
+        assert!(last > 0 && last <= 2 * limit as u64 + 4096 + 8 * 32768, "last rebase re-chunked {last} bytes");
         fs.test_release(ino, fh).unwrap();
         assert!(fs.test_read(ino, 0, (2 << 20) as u32).unwrap() == model, "content after release");
     }
@@ -3897,7 +3923,10 @@ mod tests {
         model[..4096].copy_from_slice(&b);
         assert!(!fs.test_is_streaming(fh));
         assert_eq!(fs.test_rebase_count(), 1, "the switch moved 128 KiB in: one rebase at once");
-        assert_eq!(fs.test_last_rebase_bytes(), (1 << 20) + (128 << 10));
+        // The splice cuts the two written ranges again; the zero gap between
+        // them takes the zero shortcut (no read, no hash).
+        let last = fs.test_last_rebase_bytes();
+        assert!((128 << 10..256 << 10).contains(&last), "rebase re-chunked {last} bytes");
         fs.test_set_rebase_hook(None);
         let seen = seen.lock().unwrap().clone();
         let after = fs.meta.get_manifest(ino).unwrap().first().copied();

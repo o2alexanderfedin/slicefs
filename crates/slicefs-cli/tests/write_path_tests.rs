@@ -412,3 +412,163 @@ fn test_flush_write_read_roundtrip() {
     let meta = fs.meta().get_inode(ino).unwrap();
     assert_eq!(meta.size, 5, "inode size must equal written byte count");
 }
+
+// ── Splice rebase (phase 14, plan 05) ────────────────────────────────────────
+
+const MIB: u64 = 1 << 20;
+/// Offset of the small change in the 32 MiB file.
+const CHANGE_AT: u64 = 16 * MIB + 1234;
+
+fn seeded(seed: u64, n: usize) -> Vec<u8> {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..n).map(|_| { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x as u8 }).collect()
+}
+
+fn root_of(fs: &SliceFsFilesystem, ino: u64) -> slicefs_traits::key::ObjectKey {
+    fs.meta().get_manifest(ino).unwrap()[0]
+}
+
+fn objects_of(fs: &SliceFsFilesystem, root: &slicefs_traits::key::ObjectKey) -> std::collections::HashSet<chunk_store::ObjectId> {
+    chunk_store::file::file_objects(fs.content(), slicefs_cli::content::to_id(root)).unwrap().into_iter().collect()
+}
+
+/// A random file of `n` MiB, streamed in 1 MiB writes and released.
+fn random_file(fs: &SliceFsFilesystem, name: &str, n: usize) -> (u64, Vec<u8>) {
+    let (ino, fh) = fs.test_create(1, name, S_IFREG | 0o644, 0o022, 0, 0).unwrap();
+    let mut model = Vec::with_capacity(n << 20);
+    for i in 0..n {
+        let piece = seeded(1000 + i as u64, 1 << 20);
+        fs.test_write(fh, (i as u64) << 20, &piece).unwrap();
+        model.extend_from_slice(&piece);
+    }
+    fs.test_release(ino, fh).unwrap();
+    (ino, model)
+}
+
+/// Reopen the file O_RDWR, write 4 KiB at `CHANGE_AT` (bytes that differ
+/// from the old ones) and release: the overlay rebases once, by a splice.
+fn small_change(fs: &SliceFsFilesystem, ino: u64, model: &mut [u8]) {
+    let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    let at = CHANGE_AT as usize;
+    let new: Vec<u8> = model[at..at + 4096].iter().map(|b| !b).collect();
+    fs.test_write(fh, CHANGE_AT, &new).unwrap();
+    model[at..at + 4096].copy_from_slice(&new);
+    assert!(!fs.test_is_streaming(fh), "a write in the middle switches to an overlay");
+    fs.test_release(ino, fh).unwrap();
+}
+
+/// BUFR-03: the rebase at release re-chunks only near the change, not the
+/// whole 32 MiB file.
+#[test]
+fn a_rebase_rechunks_only_near_the_change() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, mut model) = random_file(&fs, "big.bin", 32);
+    let before = fs.test_rebase_count();
+    small_change(&fs, ino, &mut model);
+    let rebased = fs.test_last_rebase_bytes();
+    eprintln!("a_rebase_rechunks_only_near_the_change: re-chunked {rebased} bytes");
+    assert_eq!(fs.test_rebase_count(), before + 1, "one rebase, at release");
+    assert!(rebased > 0 && rebased <= 256 << 10, "re-chunked {rebased} bytes");
+    assert!(read_content(&fs, ino) == model, "content after the rebase");
+}
+
+/// BUFR-05: a small change adds only the changed chunks and a few nodes;
+/// every chunk away from the change keeps its ID.
+#[test]
+fn a_small_change_adds_only_the_changed_chunks() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, mut model) = random_file(&fs, "big.bin", 32);
+    let old_root = root_of(&fs, ino);
+    let old = objects_of(&fs, &old_root);
+    let old_model = model.clone();
+    let cas_before = fs.content().stats().raw_bytes;
+
+    small_change(&fs, ino, &mut model);
+    let new_root = root_of(&fs, ino);
+    assert_ne!(new_root, old_root);
+    let new = objects_of(&fs, &new_root);
+    let added = new.difference(&old).count();
+    let growth = fs.content().stats().raw_bytes - cas_before;
+    eprintln!("a_small_change_adds_only_the_changed_chunks: {added} new objects, CAS +{growth} bytes");
+    assert!(added <= 12, "{added} objects that the old root does not have");
+    assert!(growth < MIB, "CAS grew by {growth} bytes");
+
+    // The canonical chunks of the old content: each ID must be an object of
+    // the old root (so the offsets below are the real ones), and each chunk
+    // away from the change must still be in the new root.
+    let hasher = fs.content().hasher();
+    let window = CHANGE_AT - 1234 - (64 << 10)..CHANGE_AT - 1234 + (64 << 10);
+    let mut kept = 0;
+    for r in chunk_store::chunk_ranges(&old_model) {
+        let id = hasher.id(&old_model[r.clone()]);
+        assert!(old.contains(&id), "chunk at {} is not in the old root", r.start);
+        let (s, e) = (r.start as u64, r.end as u64);
+        if e <= window.start || s >= window.end {
+            assert!(new.contains(&id), "chunk at {s}..{e} lost its ID");
+            kept += 1;
+        }
+    }
+    assert!(kept > 3000, "{kept} chunks checked");
+    assert!(read_content(&fs, ino) == model, "content after the rebase");
+}
+
+const GIB: u64 = 1 << 30;
+
+/// A size change with no open handle is a splice: an extend of a 1 MiB file
+/// to 4 GiB cuts again only the last chunk(s) and pushes zero chunks with no
+/// hash; a shrink back gives the old key (canonical chunking).
+#[test]
+fn an_extend_without_a_handle_rechunks_little() {
+    let t = std::time::Instant::now();
+    let (fs, _dir) = fresh_fs();
+    let (ino, model) = random_file(&fs, "small.bin", 1);
+    let old_root = root_of(&fs, ino);
+
+    fs.test_setattr_size(ino, None, 4 * GIB).unwrap();
+    let rechunked = fs.test_last_rebase_bytes();
+    eprintln!("an_extend_without_a_handle_rechunks_little: extend re-chunked {rechunked} bytes");
+    assert!(rechunked > 0 && rechunked < MIB, "the extend re-chunked {rechunked} bytes");
+    assert_eq!(fs.meta().get_inode(ino).unwrap().size, 4 * GIB);
+    assert!(fs.test_read(ino, 0, MIB as u32).unwrap() == model, "the old bytes");
+    assert_eq!(fs.test_read(ino, 4 * GIB - 4096, 4096).unwrap(), vec![0u8; 4096], "zeros at the end");
+
+    fs.test_setattr_size(ino, None, MIB).unwrap();
+    let rechunked = fs.test_last_rebase_bytes();
+    eprintln!("an_extend_without_a_handle_rechunks_little: shrink re-chunked {rechunked} bytes");
+    assert!(rechunked < MIB, "the shrink re-chunked {rechunked} bytes");
+    assert_eq!(root_of(&fs, ino), old_root, "a shrink back gives the old key");
+    assert!(read_content(&fs, ino) == model);
+    eprintln!("an_extend_without_a_handle_rechunks_little: {:?}", t.elapsed());
+}
+
+/// A sparse extend through an open overlay: the rebase at release splices
+/// the two written ranges and pushes zero chunks for the gap (no hash of
+/// 4 GiB of zeros).
+#[test]
+fn a_sparse_extend_on_an_open_overlay_rebases_without_hashing_the_zeros() {
+    let t = std::time::Instant::now();
+    let (fs, _dir) = fresh_fs();
+    let (ino, model) = random_file(&fs, "sparse.bin", 1);
+    let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    let head = seeded(7, 4096);
+    fs.test_write(fh, 0, &head).unwrap();
+    fs.test_setattr_size(ino, Some(fh), 4 * GIB).unwrap();
+    assert!(!fs.test_is_streaming(fh), "the handle is an overlay");
+    let tail = seeded(8, 4096);
+    fs.test_write(fh, 4 * GIB - 4096, &tail).unwrap();
+    let before = fs.test_rebase_count();
+    fs.test_release(ino, fh).unwrap();
+    let rechunked = fs.test_last_rebase_bytes();
+    eprintln!("a_sparse_extend_on_an_open_overlay_rebases_without_hashing_the_zeros: re-chunked {rechunked} bytes");
+    assert_eq!(fs.test_rebase_count(), before + 1, "one rebase, at release");
+    assert!(rechunked > 0 && rechunked < MIB, "the rebase re-chunked {rechunked} bytes");
+
+    assert_eq!(fs.meta().get_inode(ino).unwrap().size, 4 * GIB);
+    let mut want = model.clone();
+    want[..4096].copy_from_slice(&head);
+    assert!(fs.test_read(ino, 0, MIB as u32).unwrap() == want, "the first MiB");
+    let mut end = vec![0u8; 4096];
+    end.extend_from_slice(&tail);
+    assert_eq!(fs.test_read(ino, 4 * GIB - 8192, 8192).unwrap(), end, "zeros, then the tail");
+    eprintln!("a_sparse_extend_on_an_open_overlay_rebases_without_hashing_the_zeros: {:?}", t.elapsed());
+}
