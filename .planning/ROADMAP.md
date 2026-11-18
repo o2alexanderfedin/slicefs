@@ -167,7 +167,12 @@ Full details: `.planning/milestones/v2.0-ROADMAP.md`. Audit: `.planning/mileston
   1. Tests show that a file survives `kill -9` after its `fsync` returns, a rename survives after `fsync` of the directory, and a torn last record does not stop the mount
   2. A large-file copy check for the current backends (libfuse in Docker; FSKit by hand) passes with bounded daemon memory
   3. #20 is closed with a comment that lists the tests and points the commit-cost item to #93
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 13-01-PLAN.md — in-process tests: rename durable by fsync of the directory (with control), end-to-end torn last record (wave 1)
+- [ ] 13-02-PLAN.md — Docker verify-phases.sh: 1 GiB copy with measured VmHWM cap, Phase 05c rename + dir fsync, Phase 05d torn tail after kill -9 (wave 1)
+- [ ] 13-03-PLAN.md — FSKit by-hand README section, evidence run, #20 close-out comment, gated close after merge and green CI (wave 2, checkpoint)
 
 ### Phase 14: Buffered delta re-log
 **Goal**: The write log cost of a commit with a large open Buffered file depends on the changed bytes, not on the file size
