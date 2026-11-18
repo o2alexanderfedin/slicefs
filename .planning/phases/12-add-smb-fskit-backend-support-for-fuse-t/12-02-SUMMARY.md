@@ -1,4 +1,5 @@
 ---
+requirements-completed: [FUSET-05, FUSET-07, FUSET-08]
 phase: 12-add-smb-fskit-backend-support-for-fuse-t
 plan: "02"
 subsystem: slicefs-cli

@@ -3,6 +3,7 @@ phase: 12-add-smb-fskit-backend-support-for-fuse-t
 verified: 2026-03-31T00:00:00Z
 status: passed
 score: 13/13 must-haves verified
+rechecked: 2026-11-17 (later SUMMARY change only adds requirements-completed frontmatter; this verification still holds)
 ---
 
 # Phase 12: FUSE-T Backend Selection Verification Report
