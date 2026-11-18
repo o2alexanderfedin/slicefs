@@ -347,6 +347,54 @@ fn fsynced_buffered_bytes_survive_a_commit_and_a_crash() {
     assert_eq!(fs.test_read(ino, 0, want.len() as u32 + 1).unwrap(), want);
 }
 
+// #20: the safe-save pattern. Write a temp file, fsync it, rename it over the
+// old file, then fsync the directory. With a log that buffers records
+// (--wal flush-on-fsync), only the fsync of the directory makes the rename
+// durable. `fsync_dir` selects whether that last step runs.
+fn safe_save_then_crash(store: &Path, fsync_dir: bool) {
+    let fs = new_fs_with(store, WalConfig::FlushOnFsync);
+    let (old, fo) = create(&fs, 1, "doc.txt");
+    write(&fs, fo, 0, b"old");
+    release(&fs, old, fo);
+    fs.commit_cut().unwrap(); // doc.txt is in the root
+    let (tmp, ft) = create(&fs, 1, "doc.txt.tmp");
+    write(&fs, ft, 0, &data(14, 30_000));
+    fsync(&fs, tmp, ft); // the temp file is durable
+    release(&fs, tmp, ft);
+    assert!(matches!(h::handle_rename(&fs, 1, "doc.txt.tmp", 1, "doc.txt", 0), EmptyResult::Ok));
+    if fsync_dir {
+        assert!(matches!(h::handle_fsyncdir(&fs), EmptyResult::Ok));
+    }
+    // A crash. drop (not mem::forget) runs every Drop implementation: if one
+    // flushed the log, the control test below would fail.
+    drop(fs);
+}
+
+#[test]
+fn a_rename_survives_a_crash_after_fsync_of_the_directory() {
+    let dir = TempDir::new().unwrap();
+    safe_save_then_crash(dir.path(), true);
+    let fs = reload_and_replay(dir.path());
+    let ino = fs.meta().lookup(1, "doc.txt").unwrap();
+    let want = data(14, 30_000);
+    assert_eq!(fs.test_read(ino, 0, want.len() as u32 + 1).unwrap(), want);
+    assert!(fs.meta().lookup(1, "doc.txt.tmp").is_err());
+}
+
+// The control for the test above: with a buffered log and no sync after the
+// rename, the rename is lost. So only the fsync of the directory keeps it.
+#[test]
+fn a_rename_with_no_sync_after_it_is_lost_with_a_buffered_log() {
+    let dir = TempDir::new().unwrap();
+    safe_save_then_crash(dir.path(), false);
+    let fs = reload_and_replay(dir.path());
+    let old = fs.meta().lookup(1, "doc.txt").unwrap();
+    assert_eq!(fs.test_read(old, 0, 4).unwrap(), b"old");
+    let tmp = fs.meta().lookup(1, "doc.txt.tmp").unwrap();
+    let want = data(14, 30_000);
+    assert_eq!(fs.test_read(tmp, 0, want.len() as u32 + 1).unwrap(), want);
+}
+
 // utimens between a write and the close sets the mtime (cp -p, install -p):
 // the close does not stamp the time of the write over it.
 #[test]
