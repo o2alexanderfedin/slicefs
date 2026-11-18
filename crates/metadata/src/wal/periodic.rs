@@ -137,4 +137,26 @@ mod tests {
         drop(wal);
         assert!(log.upgrade().is_none(), "drop must stop the timer thread");
     }
+
+    /// A failed sync of the timer thread makes the next fsync of a caller
+    /// fail, until the next rotate (commit).
+    #[test]
+    fn failed_timer_sync_fails_fsync_until_rotate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("segment-000001.seg");
+        let interval = Duration::from_millis(100);
+        let wal = PeriodicWal::with_interval(&path, 1, interval).unwrap();
+        wal.log.fail_next_io();
+        wal.log_mutation(&WalEntry::Op { bytes: vec![9u8; 100] }).unwrap();
+        // The timer takes the records and its write fails: nothing is held.
+        let deadline = Instant::now() + 2 * interval + Duration::from_secs(1);
+        while wal.log.buffered_bytes() != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(wal.log.buffered_bytes(), 0, "the timer did not run");
+        assert!(wal.flush_and_sync().is_err(), "fsync after a failed timer sync must fail");
+        let root = slicefs_traits::key::ObjectKey::example(1);
+        wal.rotate(&[WalEntry::RootUpdate { root }]).unwrap();
+        assert!(wal.flush_and_sync().is_ok(), "after rotate (commit), fsync works again");
+    }
 }

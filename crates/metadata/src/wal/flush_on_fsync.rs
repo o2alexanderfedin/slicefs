@@ -57,4 +57,26 @@ mod tests {
         let wal = FlushOnFsyncWal::new(&path, 1).unwrap();
         super::super::buffered::assert_cap_holds(&wal, &wal.log, &path);
     }
+
+    /// A failed write-out at the cap makes every later fsync fail until the
+    /// next rotate (commit), even though no record is held any more.
+    #[test]
+    fn failed_cap_write_out_fails_fsync_until_rotate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("segment-000001.seg");
+        let wal = FlushOnFsyncWal::new(&path, 1).unwrap();
+        wal.log.fail_next_io();
+        let record = 64 * 1024;
+        let mut failed = false;
+        for i in 0..(super::super::BUFFER_CAP_BYTES / record + 2) {
+            failed |= wal.log_mutation(&WalEntry::Op { bytes: vec![i as u8; record] }).is_err();
+        }
+        assert!(failed, "the injected fault must fail the write-out at the cap");
+        assert!(wal.flush_and_sync().is_err(), "fsync after a failed write-out must fail");
+        assert!(wal.flush_and_sync().is_err(), "the failure must stay until rotate");
+        let root = slicefs_traits::key::ObjectKey::example(1);
+        wal.rotate(&[WalEntry::RootUpdate { root }]).unwrap();
+        wal.log_mutation(&WalEntry::Op { bytes: vec![1; 10] }).unwrap();
+        assert!(wal.flush_and_sync().is_ok(), "after rotate (commit), fsync works again");
+    }
 }

@@ -173,6 +173,9 @@ number of disk syncs is the same in all modes as before.
   written: a correct first part of the data (for example 4 MiB of a 6 MiB
   file). Before #98, such a file did not come back at all.
 - A power loss loses the records after the last sync in every mode.
+- If a write or sync of the log fails in flush-on-fsync or periodic mode (at
+  the cap, at fsync, or in the timer thread), the failure stays: every later
+  fsync fails until the next commit starts a new segment.
 
 Cost (measured in the spike, in-process, no FUSE): no change for writes of
 4 KiB or more, because such records already went past the 8 KiB write

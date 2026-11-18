@@ -18,6 +18,17 @@ use super::{BUFFER_CAP_BYTES, WalEntry, WalError, per_op::wal_entry_to_segment};
 struct Pending {
     entries: Vec<WalEntry>,
     bytes: usize,
+    /// A write or sync of the segment failed. The records of that write-out
+    /// are lost and the segment can end in a torn record. Until the next
+    /// `rotate` (commit), `flush_and_sync` fails and new records are not kept:
+    /// nothing after the failure can become durable in this segment.
+    failed: bool,
+}
+
+fn write_failed() -> WalError {
+    WalError::Io(io::Error::other(
+        "an earlier write-log write or sync failed; nothing is durable until the next commit",
+    ))
 }
 
 /// Size of a record frame on disk: type, length, sequence, payload, CRC.
@@ -27,6 +38,16 @@ fn record_len(entry: &WalEntry) -> usize {
         other => wal_entry_to_segment(other).payload_bytes().len(),
     };
     1 + 4 + 8 + payload + 4
+}
+
+/// Write the held records into the segment (no flush, no sync) and empty
+/// the RAM. On an error the records are dropped; the caller sets `failed`.
+fn write_out(pending: &mut Pending, writer: &mut SegmentWriter) -> io::Result<()> {
+    pending.bytes = 0;
+    for entry in pending.entries.drain(..) {
+        writer.write_entry(&wal_entry_to_segment(&entry))?;
+    }
+    Ok(())
 }
 
 /// Records are held in RAM and written to the segment by `flush_and_sync`.
@@ -48,31 +69,40 @@ impl BufferedLog {
 
     /// Hold the record in RAM. When the held records pass `BUFFER_CAP_BYTES`,
     /// write them into the segment file (no disk sync) and empty the RAM.
+    ///
+    /// After a failed write-out, the record is not kept (see `Pending::failed`):
+    /// every fsync fails until the next commit puts the state into a root.
     pub(crate) fn log(&self, entry: &WalEntry) -> Result<(), WalError> {
         let mut pending = self.pending.lock().unwrap();
+        if pending.failed {
+            return Ok(());
+        }
         pending.bytes += record_len(entry);
         pending.entries.push(entry.clone());
         if pending.bytes > BUFFER_CAP_BYTES {
             let mut writer = self.writer.lock().unwrap();
-            pending.bytes = 0;
-            for entry in pending.entries.drain(..) {
-                writer.write_entry(&wal_entry_to_segment(&entry))?;
+            let result = write_out(&mut pending, &mut writer).and_then(|()| writer.flush());
+            if let Err(e) = result {
+                pending.failed = true;
+                return Err(e.into());
             }
-            writer.flush()?;
         }
         Ok(())
     }
 
-    /// Write the held records to the segment and sync it.
+    /// Write the held records to the segment and sync it. Fails after a
+    /// failed write or sync, until the next `rotate`.
     pub(crate) fn flush_and_sync(&self) -> Result<(), WalError> {
         // Lock order everywhere: pending, then writer.
         let mut pending = self.pending.lock().unwrap();
-        let mut writer = self.writer.lock().unwrap();
-        pending.bytes = 0;
-        for entry in pending.entries.drain(..) {
-            writer.write_entry(&wal_entry_to_segment(&entry))?;
+        if pending.failed {
+            return Err(write_failed());
         }
-        writer.sync()?;
+        let mut writer = self.writer.lock().unwrap();
+        if let Err(e) = write_out(&mut pending, &mut writer).and_then(|()| writer.sync()) {
+            pending.failed = true;
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -85,9 +115,10 @@ impl BufferedLog {
         let (new_writer, new_path, new_id) = super::rotate_segment(&loc.0, loc.1, seed)?;
         *writer = new_writer;
         *loc = (new_path, new_id);
-        // Records before the cut are dead.
+        // Records before the cut are dead; the new segment is whole.
         pending.entries.clear();
         pending.bytes = 0;
+        pending.failed = false;
         Ok(())
     }
 
@@ -101,6 +132,12 @@ impl BufferedLog {
     #[cfg(test)]
     pub(crate) fn disk_syncs(&self) -> u64 {
         self.writer.lock().unwrap().disk_syncs()
+    }
+
+    /// Make the next write or sync of the segment fail (test fault hook).
+    #[cfg(test)]
+    pub(crate) fn fail_next_io(&self) {
+        self.writer.lock().unwrap().fail_next_io();
     }
 }
 
