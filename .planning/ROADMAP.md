@@ -187,7 +187,12 @@ Full details: `.planning/milestones/v2.0-ROADMAP.md`. Audit: `.planning/mileston
   1. One script measures seed throughput and store size for the Boost tree, a tar file and random data
   2. The numbers for a build from before #56 and for the current build are in the design note, with the machine and the commits
   3. The store file count after a Boost copy is recorded
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 15-01-PLAN.md — seed-measure.sh script + README; c2f82fa, 7016bb6 and develop builds in worktrees; Boost data (wave 1)
+- [ ] 15-02-PLAN.md — measure the three builds one after the other; Results subsection in docs/design/chunk-store.md (wave 2)
+- [ ] 15-03-PLAN.md — close #8 after merge and green CI (checkpoint, wave 3)
 
 ### Phase 16: Chunk index benchmark
 **Goal**: A baseline of the current in-memory index at 1M, 10M and 100M objects exists for #85
@@ -197,7 +202,12 @@ Full details: `.planning/milestones/v2.0-ROADMAP.md`. Audit: `.planning/mileston
   1. The benchmark reports cold-open time and peak RSS at 1M, 10M and 100M objects
   2. It reports hit and miss lookup throughput and the recovery time of a pack without an index file
   3. The results and the RAM per object are documented
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 16-01-PLAN.md — benchmarks/index-bench crate: tracer run/create/open, then lookup and recover steps, Backend trait for Phase 17, CI-size tests (wave 1)
+- [ ] 16-02-PLAN.md — README, run.sh index-bench mode, 1M/10M/100M runs on macOS and Linux, "Index baseline (#66)" section in docs/design/chunk-store.md (wave 2)
+- [ ] 16-03-PLAN.md — comment and close #66, link from #85, after merge and green CI (checkpoint, wave 3)
 
 ### Phase 17: On-disk chunk index
 **Goal**: The chunk store uses an on-disk index with a few bytes of RAM per object and a cold open that does not grow linearly with the object count
