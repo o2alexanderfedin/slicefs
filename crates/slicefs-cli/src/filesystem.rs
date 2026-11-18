@@ -3885,11 +3885,24 @@ mod tests {
         model[1 << 20..].copy_from_slice(&far);
         assert!(fs.test_is_streaming(fh), "the far write waits in the reorder window");
         assert_eq!(fs.test_rebase_count(), 0);
+        // The hook runs once, after the new root is finished and before it is
+        // installed: it still sees the base of the switch in the manifest.
+        let seen: Arc<Mutex<Vec<Option<ObjectKey>>>> = Arc::new(Mutex::new(Vec::new()));
+        let (meta, log) = (Arc::clone(&fs.meta), Arc::clone(&seen));
+        fs.test_set_rebase_hook(Some(Arc::new(move || {
+            log.lock().unwrap().push(meta.get_manifest(ino).ok().and_then(|m| m.first().copied()));
+        })));
         let b = seeded(3, 4096);
         fs.test_write(fh, 0, &b).unwrap();
         model[..4096].copy_from_slice(&b);
         assert!(!fs.test_is_streaming(fh));
         assert_eq!(fs.test_rebase_count(), 1, "the switch moved 128 KiB in: one rebase at once");
+        assert_eq!(fs.test_last_rebase_bytes(), (1 << 20) + (128 << 10));
+        fs.test_set_rebase_hook(None);
+        let seen = seen.lock().unwrap().clone();
+        let after = fs.meta.get_manifest(ino).unwrap().first().copied();
+        assert_eq!(seen.len(), 1, "one hook call");
+        assert!(seen[0].is_some() && seen[0] != after, "the hook ran before install_root");
         assert_eq!(overlay_cost(&fs, fh), 0);
         fs.test_release(ino, fh).unwrap();
         assert!(fs.test_read(ino, 0, (2 << 20) as u32).unwrap() == model, "content after release");
