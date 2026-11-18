@@ -25,11 +25,11 @@ metrics:
   duration: "about 15 min"
   completed: 2026-11-18
 actuals:
-  tokens: 2600
+  tokens: 2015    # chars/4 of the diff 5fce243..b9d9d33 (8059 chars)
   tasks: 2
-  commits: 2
-plan_head_before: 5fce243
-plan_head_after: see the git log; the SUMMARY commit follows b9d9d33
+  commits: 1      # git rev-list --count 5fce243..b9d9d33; the SUMMARY commits are not counted
+plan_head_before: 5fce24319860899851a66716622e7e41bc40e817
+plan_head_after: b9d9d3347a946c8e535918285ba4caeacfddc3e8
 ---
 
 # Phase 14 Plan 03: bigwrite Docker memory check (#98) Summary
@@ -59,13 +59,14 @@ Tree: this worktree at b9d9d33 (base 5fce243). `grep -c "WriteMode::Overlay" cra
 RESULT bigwrite: PASS
 ```
 
-- VmHWM: after cp **81 MiB**, after random write **6224 MiB**, after cmp **6224 MiB**. 6224 MiB is about 6x the file, so the old code holds the whole file and more copies of it (Buffered mode, then commits).
-- Slowest write: **17295 ms**. This is the first write after the O_RDWR open, which loads the whole file into Buffered mode. Slowest fsync: **331 ms**.
+- VmHWM: after cp **81 MiB**, after random write **6224 MiB**, after cmp **6224 MiB**. 6224 MiB is about 6x the file. The probable cause is that Buffered mode holds the whole file and the commits make more copies of it. This is not checked.
+- Slowest write: **17295 ms**. It is probably the first write after the O_RDWR open, which loads the whole file. This is not checked, because rw.py does not record which write was the slowest. Slowest fsync: **331 ms**.
 - Step times: cp 28 s, random write 37 s, cmp 33 s. Script run time 114 s. Whole run time (image check, cached release build, wait until the container is 45 s old, script): **163 s**.
-- Overlay switches: 0 (expected; the old code logs `switches to Buffered`, not the new text).
-- CAS bytes after the first unmount: 1912157485 (about 1.78 GiB: the 1 GiB copy plus the chunks that the random writes made).
-- Release build time: not measured on its own. The first (cold) build of the private target volume was in the 64 MiB smoke run: that whole run took 86 s, with 23 s of script time, so the build plus the 45 s wait took about 60 s (the cargo registry volume was warm). The "before" run used the build that was already in the volume.
-- Another agent can use Docker at the same time, so the times can change from run to run. VmHWM does not depend on that load.
+- Overlay switches: 0. This is expected, because the old code has no overlay switch line. mount.log stays inside the container, so the count of `switches to Buffered` lines was not read.
+- CAS bytes after the first unmount: 1912157485 (about 1.78 GiB). The probable cause is the 1 GiB copy plus the chunks that the random writes made. This is not checked.
+- Release build time: **about 59 s**, derived and not timed. The 45 s wait counts the build time. In the "before" run, the fixed overhead (image check, container start) is 163 - 114 - 45 = about 4 s. The first (cold) build of the private target volume was in the 64 MiB smoke run, which took 86 s with 23 s of script time, so the build took about 86 - 23 - 4 = 59 s (the cargo registry volume was warm). The "before" run used the build that was already in the volume.
+- Another agent can use Docker at the same time, so the times can change from run to run.
+- Scope: the third VmHWM is read after cmp and before the unmount, so the final commit at unmount is not in it. The 4096 MiB size was not run in this plan (plan 14-07 runs it on the new code).
 
 ## Smoke run before the Task 1 commit (64 MiB)
 
@@ -88,6 +89,6 @@ RESULT bigwrite: PASS
 
 - FOUND: scripts/docker-linux-test/bigwrite.sh (executable, `bash -n` ok)
 - FOUND: scripts/docker-linux-test/run.sh bigwrite mode (`bash -n` ok, `/dk/bigwrite.sh /target/release/slicefs` present)
-- FOUND: b9d9d33 (ancestor of HEAD)
+- FOUND: b9d9d33 (ancestor of HEAD); `git rev-list --count 5fce243..b9d9d33` = 1
 - Task 2 verify command: exit 0 (`bw-cmp-after-remount-1024: ok`, after random write 6224 >= 1024)
 - verify-phases.sh and .github are unchanged
