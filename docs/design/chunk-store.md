@@ -161,9 +161,11 @@ A `HashMap` from `ObjectId` (33 bytes) to `Loc` (pack, offset, stored
 length, raw length, flags: 25 bytes, padded to 32). One slot of the table
 is 72 bytes plus one control byte. The table size goes up in powers of two
 (slots = the next power of two above 8/7 of the object count), so the RAM
-for each object changes with the object count. The live table is 153 bytes
-for each object at 1M objects, 122 at 10M and 98 at 100M. During
-the last resize, the old and the new table are in memory together: the
+for each object changes with the object count. By this rule, the live table
+is 153 bytes for each object at 1M objects, 122 at 10M and 98 at 100M. On
+Linux, the measured RSS after open is 153 and 123 bytes for each object at
+1M and 10M. During the last resize, the old and the new table are in
+memory together: the
 measured peak at 100M is 154 bytes for each object (15.4 GB, macOS). On
 macOS, the RSS after open is higher than the live table (390, 196 and 106
 bytes for each object at 1M, 10M and 100M), because memory that the open
@@ -186,16 +188,29 @@ before the measured opens. Each value is the median of 3 runs.
 macOS: Intel Xeon W-3245 (16 cores, 32 threads), 192 GiB RAM, macOS 26.2
 (x86_64), APFS on an internal PCIe SSD, commit `321a443`, warm cache.
 
-All timings were measured under load: other work on the same host kept the
-load average between about 80 and 140 during the runs, and the swap use of
-the host went from 7.5 GB to 9.2 GB during the 100M run. The wall times
-are thus noisy. The CPU times are more stable.
+Linux: Docker in the OrbStack VM on the same host, kernel
+7.2.12-orbstack-00394-gbecdd6130068, btrfs on the Docker volume, same
+commit, warm cache (the container is not privileged, so the page cache
+cannot be dropped). The VM had 12.6 GB of memory available (`MemAvailable`
+12342996 kB).
+
+100M was not run on Linux: the Docker VM had 12.6 GB of memory available,
+and the run needs about 25 GB.
+
+All timings were measured under load. On macOS, other work on the same
+host kept the load average between about 80 and 140 during the runs, and
+the swap use of the host went from 7.5 GB to 9.2 GB during the 100M run.
+The wall times are thus noisy. The CPU times are more stable. The Linux
+load values in the table are the load of the VM. The load of the host was
+57.09 36.47 34.13 before the Linux run and 68.70 57.27 45.00 after it.
 
 | OS | Objects | Load before (1, 5, 15 min) | Load after (1, 5, 15 min) |
 |---|---|---|---|
 | macOS | 1M | 138.96 106.46 99.40 | 129.94 109.14 100.78 |
 | macOS | 10M | 122.01 112.08 103.35 | 125.97 125.58 113.82 |
 | macOS | 100M | 125.97 125.58 113.82 | 79.14 80.73 92.59 |
+| Linux | 1M | 2.52 1.99 1.53 | 2.78 2.09 1.57 |
+| Linux | 10M | 2.78 2.09 1.57 | 3.75 3.13 2.21 |
 
 Store:
 
@@ -204,6 +219,8 @@ Store:
 | macOS | 1M | 1 | 104 | 68240.129 | 497.734 |
 | macOS | 10M | 9 | 104 | 64026.099 | 2803.016 |
 | macOS | 100M | 81 | 104 | 72219.59 | 16323.326 |
+| Linux | 1M | 1 | 104 | 132072.399 | 386.064 |
+| Linux | 10M | 9 | 104 | 144879.559 | 2027.95 |
 
 Open:
 
@@ -212,6 +229,8 @@ Open:
 | macOS | 1M | 0.964 | 0.953-1.007 | 0.591 | 390.185 | 390.185 | warm |
 | macOS | 10M | 12.844 | 10.981-16.072 | 5.881 | 256.312 | 195.792 | warm |
 | macOS | 100M | 141.241 | 134.217-151.394 | 62.239 | 154.232 | 105.533 | warm |
+| Linux | 1M | 0.595 | 0.559-0.619 | 0.593 | 301.974 | 153.371 | warm |
+| Linux | 10M | 10.364 | 8.465-12.179 | 10.198 | 192.716 | 123.204 | warm |
 
 Lookups (one thread):
 
@@ -220,6 +239,8 @@ Lookups (one thread):
 | macOS | 1M | 1304.791 | 727.474 | 1284.086 | 766405.984 | 1374619.105 |
 | macOS | 10M | 700.501 | 323.994 | 945.17 | 1427549.444 | 3086474.614 |
 | macOS | 100M | 819.545 | 419.842 | 974.533 | 1220188.607 | 2381846.106 |
+| Linux | 1M | 695.432 | 266.265 | 796.291 | 1437955.483 | 3755661.853 |
+| Linux | 10M | 886.801 | 305.328 | 931.746 | 1127648.216 | 3275162.098 |
 
 Recovery (the columns up to "Scan objects/s" are the output of the tool;
 the last two columns are added, see the notes):
@@ -238,20 +259,31 @@ the last two columns are added, see the notes):
 | macOS | 100M | one | ro | 1/0 | 67.109 | 1242757 | 96.013 | -45.228 | n/a | n/a | -0.739 | n/a |
 | macOS | 100M | all | rw | 80/1 | 5400.001 | 100000000 | 292.017 | 150.776 | 35.815 | 663235.528 | 116.469 | 46 |
 | macOS | 100M | all | ro | 80/1 | 5400.001 | 100000000 | 120.477 | -20.764 | n/a | n/a | 23.017 | 235 |
+| Linux | 1M | one | rw | 0/1 | 54 | 1000000 | 0.653 | 0.058 | 931.035 | 17241379.31 | -0.031 | n/a |
+| Linux | 1M | one | ro | 0/1 | 54 | 1000000 | 0.569 | -0.026 | n/a | n/a | -0.026 | n/a |
+| Linux | 1M | all | rw | 0/1 | 54 | 1000000 | 0.567 | -0.028 | n/a | n/a | -0.057 | n/a |
+| Linux | 1M | all | ro | 0/1 | 54 | 1000000 | 0.64 | 0.045 | 1200 | 22222222.222 | 0.046 | 1174 |
+| Linux | 10M | one | rw | 1/0 | 67.109 | 1242757 | 11.806 | 1.442 | 46.539 | 861828.71 | 1.512 | 44 |
+| Linux | 10M | one | ro | 1/0 | 67.109 | 1242757 | 8.888 | -1.476 | n/a | n/a | -1.334 | n/a |
+| Linux | 10M | all | rw | 8/1 | 540 | 10000000 | 39.569 | 29.205 | 18.49 | 342407.122 | 27.715 | 19 |
+| Linux | 10M | all | ro | 8/1 | 540 | 10000000 | 11.688 | 1.324 | 407.855 | 7552870.091 | 1.458 | 370 |
 
 Notes:
 
-- Open time grows linearly with the object count: about 0.6 µs of CPU time
-  for each object (0.59 s, 5.9 s and 62 s of CPU at 1M, 10M and 100M). The
-  wall time is about two times the CPU time because of the load.
+- Open time grows linearly with the object count: on macOS, about 0.6 µs
+  of CPU time for each object (0.59 s, 5.9 s and 62 s of CPU at 1M, 10M
+  and 100M). The wall time is about two times the CPU time because of the
+  load.
 - Peak RSS is higher than steady RSS, because the old and the new table are
   in memory together during the last resize. #85 must compare both values.
 - On macOS, the RSS after open includes memory that the open freed: the
   smaller tables of the earlier resizes, the `.idx` buffers and the decoded
   entry lists. Thus at 1M the peak and the steady value are the same
   (390 B/object), and the steady values are more than the live table
-  (153, 122 and 98 B/object). A test program that fills the same map on
-  macOS shows this: 153 B/object at 1M when the map is sized before the
+  (153, 122 and 98 B/object). On Linux, the steady values (153 and
+  123 B/object) are the same as the live table. A test program that fills
+  the same map on macOS shows this: 153 B/object at 1M when the map is
+  sized before the
   fill, 306 B/object without that, and 390 B/object with the same
   temporary buffers as the open. With the sizing before the fill, it shows
   122 B/object at 10M.
@@ -266,11 +298,15 @@ Notes:
   the normal opens, and "Scan MB/s (CPU)" = Scanned MB / "Extra CPU s". CPU
   time does not include the wait for I/O and `fsync`, so these rates are
   for each CPU second, not for each second of wall time.
+- In the Linux VM, the CPU time is almost the same as the wall time, and
+  it changes from run to run (the open CPU time at 10M is 8.4 to 12.1 s in
+  3 runs). Thus the Linux CPU columns are noisy too. Only the "all" rows
+  at 10M are clearly above the noise.
 - The 1M store has one pack, so its "one" and "all" rows are the
   active-pack path (CRC check only, no hash check, no `.idx` write). Its
   extra CPU time is less than 0.07 s of a 0.6 s open, which is in the
   range of the noise. Thus the 1M scan rates are not useful.
-- The "ro" rows show the cost of the scan: at 10M and 100M, the "all ro"
+- The "ro" rows show the cost of the scan: on macOS at 10M and 100M, the "all ro"
   rows give 235 to 283 MB/s of CPU (4.3M to 5.2M objects for each CPU
   second). The "rw" rows also write a new `.idx` for each sealed pack. This
   adds about 1.2 s of CPU time for each sealed pack, so the "rw" rows give
@@ -279,7 +315,8 @@ Notes:
 - The recovery open does not load the `.idx` files of the packs that it
   scans. Thus the scan rate is a little too high, most in the "all" rows.
 - All numbers are for a warm page cache. No cold-cache number was taken:
-  on macOS that needs `sudo purge` by hand.
+  on macOS that needs `sudo purge` by hand, and on Linux a privileged
+  container.
 
 ### Dedup
 
