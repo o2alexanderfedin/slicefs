@@ -24,6 +24,8 @@
 //! its tables can go into public docs as they are.
 
 mod backend;
+mod spike_fjall;
+mod spike_runs;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;

@@ -267,6 +267,8 @@ impl Backend for ChunkStoreBackend {
 pub fn backend_by_name(name: &str) -> Option<Box<dyn Backend>> {
     match name {
         "chunk-store" => Some(Box::new(ChunkStoreBackend)),
+        "spike-runs" => Some(Box::new(crate::spike_runs::SpikeRunsBackend)),
+        "spike-fjall" => Some(Box::new(crate::spike_fjall::SpikeFjallBackend)),
         _ => None,
     }
 }
