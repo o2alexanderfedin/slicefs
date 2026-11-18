@@ -628,6 +628,10 @@ pub fn splice(
         let mut start = cur.off;
         let mut buf: Vec<u8> = Vec::new();
         let mut resynced = false;
+        // Read-ahead past the region: CHUNK_AVG, doubled after each step
+        // past the region that does not resync (a long run, for example on
+        // repeating data, then reads big pieces again).
+        let mut step = CHUNK_AVG as u64;
         while start < new_len {
             // Zero shortcut: FastCDC cuts CHUNK_MAX zeros into one chunk, so
             // known zeros need no read and no hash.
@@ -651,9 +655,9 @@ pub fn splice(
             if at < new_len {
                 // Every byte up to the end of the region is cut again, so
                 // read it in big pieces. Past it, the re-chunk can stop at
-                // any old cut, so read only CHUNK_AVG at a time: a read-ahead
+                // any old cut, so read only `step` more: a fixed read-ahead
                 // of 2 * CHUNK_MAX read about three times the bytes it cut.
-                let want = end.saturating_sub(at) + CHUNK_AVG as u64;
+                let want = end.saturating_sub(at) + step;
                 let n = want.min((2 * max - buf.len()) as u64).min(new_len - at) as usize;
                 let piece = src.read(at, n)?;
                 if piece.len() != n {
@@ -683,6 +687,9 @@ pub fn splice(
             }
             buf.drain(..used);
             start += used as u64;
+            if start >= end {
+                step = (step * 2).min(2 * max as u64);
+            }
         }
         if !resynced {
             break;
@@ -1094,15 +1101,17 @@ mod tests {
         assert!(st.reused_entries < 5000, "shrink: {st:?}");
     }
 
-    /// A `VecSource` that counts the bytes the splice asks for.
+    /// A `VecSource` that counts the reads and bytes the splice asks for.
     struct CountingSource<'a> {
         data: &'a [u8],
         asked: u64,
+        calls: u64,
     }
 
     impl SpliceSource for CountingSource<'_> {
         fn read(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
             self.asked += len as u64;
+            self.calls += 1;
             Ok(self.data[offset as usize..offset as usize + len].to_vec())
         }
     }
@@ -1132,12 +1141,45 @@ mod tests {
         }
         let ed = Edit { keep: n, changed, new_len: n };
         let data = new_content(&base, &ed, &mut rng);
-        let mut src = CountingSource { data: &data, asked: 0 };
+        let mut src = CountingSource { data: &data, asked: 0, calls: 0 };
         let (got, st) = splice(&s, Some(key), ed.keep, &ed.changed, ed.new_len, &mut src).unwrap();
         assert_eq!(got, full_write(&s, &data), "the key of a full write");
         let ratio = src.asked as f64 / st.rechunked as f64;
         eprintln!("scattered edits: rechunked {} B, asked {} B ({ratio:.2}x)", st.rechunked, src.asked);
-        assert!(src.asked <= st.rechunked + st.rechunked / 2, "asked {} B to re-chunk {} B ({ratio:.2}x)", src.asked, st.rechunked);
+        assert!(src.asked <= st.rechunked + st.rechunked / 3, "asked {} B to re-chunk {} B ({ratio:.2}x)", src.asked, st.rechunked);
+    }
+
+    /// A re-chunk that does not resync (a small write into repeating data
+    /// shifts every later cut) runs to the end of the content. The small
+    /// read steps past a change grow, so such a run reads big pieces (each
+    /// read is re-chunked again with the bytes kept from the last one).
+    #[test]
+    fn a_long_rechunk_run_reads_big_pieces() {
+        let s = fast_store();
+        let mut rng = Rng(0x5eed_1234_abcd_0006);
+        let n = 8usize << 20;
+        let pattern = rng.bytes(4096);
+        let base: Vec<u8> = pattern.iter().copied().cycle().take(n).collect();
+        let key = full_write(&s, &base);
+        // Whether a write shifts the cuts for good depends on where it ends:
+        // take the first of these writes whose re-chunk runs to the end.
+        let mut long_runs = 0;
+        for len in [4096u64, 5000, 8192, 10_000, 100_000, 262_144] {
+            let a = (1u64 << 20) + 100;
+            let ed = Edit { keep: n as u64, changed: vec![a..a + len], new_len: n as u64 };
+            let data = new_content(&base, &ed, &mut rng);
+            let mut src = CountingSource { data: &data, asked: 0, calls: 0 };
+            let (got, st) = splice(&s, Some(key), ed.keep, &ed.changed, ed.new_len, &mut src).unwrap();
+            assert_eq!(got, full_write(&s, &data), "write of {len}: the key of a full write");
+            eprintln!("write of {len}: rechunked {} B, asked {} B in {} reads", st.rechunked, src.asked, src.calls);
+            if st.rechunked > 4 << 20 {
+                long_runs += 1;
+                // About CHUNK_MAX per read (the buffer holds 2 * CHUNK_MAX);
+                // CHUNK_AVG steps would give a quarter of that.
+                assert!(src.asked >= src.calls * CHUNK_MAX as u64 / 2, "write of {len}: {} B in {} reads", src.asked, src.calls);
+            }
+        }
+        assert!(long_runs > 0, "no write made a long re-chunk run");
     }
 
     /// New bytes that start at `at` (the splice reads nothing before).
