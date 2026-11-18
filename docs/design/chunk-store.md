@@ -157,11 +157,129 @@ Record:
 
 ### Index in memory
 
-A map `ObjectId → (pack, offset, stored length, raw length, flags)`: about
-57 bytes per object, so 57 MB for one million objects. At open, it is filled
-from the `.idx` files of the sealed packs and from a scan of the active
-pack. A later change can use a memory-mapped sorted index if stores get very
-large.
+A `HashMap` from `ObjectId` (33 bytes) to `Loc` (pack, offset, stored
+length, raw length, flags: 25 bytes, padded to 32). One slot of the table
+is 72 bytes plus one control byte. The table size goes up in powers of two
+(slots = the next power of two above 8/7 of the object count), so the RAM
+for each object changes with the object count. The live table is 153 bytes
+for each object at 1M objects, 122 at 10M and 98 at 100M. During
+the last resize, the old and the new table are in memory together: the
+measured peak at 100M is 154 bytes for each object (15.4 GB, macOS). On
+macOS, the RSS after open is higher than the live table (390, 196 and 106
+bytes for each object at 1M, 10M and 100M), because memory that the open
+frees stays in the RSS of the process. See "Index baseline (#66)".
+
+At open, the map is filled from the `.idx` files of the sealed packs and
+from a scan of the active pack. The map is not sized before the fill, so it
+grows by resizes. Issue #85 replaces this map with an on-disk index. The
+baseline for that change is in "Index baseline (#66)".
+
+### Index baseline (#66)
+
+Method: the tool `benchmarks/index-bench` (see
+`benchmarks/index-bench/README.md`). Object `i` is the 8 bytes of `i`, so
+zstd does not run. The store uses the default `Options` (64 MiB packs). Each
+store is made one time and closed, so every pack has an `.idx`. Each open
+runs in a new process. The page cache is warm: one warm-up open runs
+before the measured opens. Each value is the median of 3 runs.
+
+macOS: Intel Xeon W-3245 (16 cores, 32 threads), 192 GiB RAM, macOS 26.2
+(x86_64), APFS on an internal PCIe SSD, commit `321a443`, warm cache.
+
+All timings were measured under load: other work on the same host kept the
+load average between about 80 and 140 during the runs, and the swap use of
+the host went from 7.5 GB to 9.2 GB during the 100M run. The wall times
+are thus noisy. The CPU times are more stable.
+
+| OS | Objects | Load before (1, 5, 15 min) | Load after (1, 5, 15 min) |
+|---|---|---|---|
+| macOS | 1M | 138.96 106.46 99.40 | 129.94 109.14 100.78 |
+| macOS | 10M | 122.01 112.08 103.35 | 125.97 125.58 113.82 |
+| macOS | 100M | 125.97 125.58 113.82 | 79.14 80.73 92.59 |
+
+Store:
+
+| OS | Objects | Packs | Disk B/object | Create puts/s | Creator peak RSS MB |
+|---|---|---|---|---|---|
+| macOS | 1M | 1 | 104 | 68240.129 | 497.734 |
+| macOS | 10M | 9 | 104 | 64026.099 | 2803.016 |
+| macOS | 100M | 81 | 104 | 72219.59 | 16323.326 |
+
+Open:
+
+| OS | Objects | Open s (median) | Open s (min-max) | Open CPU s (median) | Peak RSS B/object (median) | Steady RSS B/object (median) | Cache |
+|---|---|---|---|---|---|---|---|
+| macOS | 1M | 0.964 | 0.953-1.007 | 0.591 | 390.185 | 390.185 | warm |
+| macOS | 10M | 12.844 | 10.981-16.072 | 5.881 | 256.312 | 195.792 | warm |
+| macOS | 100M | 141.241 | 134.217-151.394 | 62.239 | 154.232 | 105.533 | warm |
+
+Lookups (one thread):
+
+| OS | Objects | contains hit ns | contains miss ns | put dedup-hit ns | contains hit/s | contains miss/s |
+|---|---|---|---|---|---|---|
+| macOS | 1M | 1304.791 | 727.474 | 1284.086 | 766405.984 | 1374619.105 |
+| macOS | 10M | 700.501 | 323.994 | 945.17 | 1427549.444 | 3086474.614 |
+| macOS | 100M | 819.545 | 419.842 | 974.533 | 1220188.607 | 2381846.106 |
+
+Recovery (the columns up to "Scan objects/s" are the output of the tool;
+the last two columns are added, see the notes):
+
+| OS | Objects | Scope | Mode | Sealed/active packs | Scanned MB | Scanned objects | Recovery open s (median) | Extra s | Scan MB/s | Scan objects/s | Extra CPU s | Scan MB/s (CPU) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| macOS | 1M | one | rw | 0/1 | 54 | 1000000 | 1.154 | 0.19 | 284.211 | 5263157.895 | 0.064 | 844 |
+| macOS | 1M | one | ro | 0/1 | 54 | 1000000 | 1.296 | 0.332 | 162.651 | 3012048.193 | 0.066 | 818 |
+| macOS | 1M | all | rw | 0/1 | 54 | 1000000 | 0.985 | 0.021 | 2571.429 | 47619047.619 | 0.032 | 1688 |
+| macOS | 1M | all | ro | 0/1 | 54 | 1000000 | 1.317 | 0.353 | 152.975 | 2832861.19 | 0.045 | 1200 |
+| macOS | 10M | one | rw | 1/0 | 67.109 | 1242757 | 13.683 | 0.839 | 79.987 | 1481235.995 | 1.387 | 48 |
+| macOS | 10M | one | ro | 1/0 | 67.109 | 1242757 | 10.082 | -2.762 | n/a | n/a | 0.177 | 379 |
+| macOS | 10M | all | rw | 8/1 | 540 | 10000000 | 31.755 | 18.911 | 28.555 | 528792.766 | 11.169 | 48 |
+| macOS | 10M | all | ro | 8/1 | 540 | 10000000 | 11.468 | -1.376 | n/a | n/a | 1.911 | 283 |
+| macOS | 100M | one | rw | 1/0 | 67.109 | 1242757 | 109.971 | -31.27 | n/a | n/a | 2.232 | 30 |
+| macOS | 100M | one | ro | 1/0 | 67.109 | 1242757 | 96.013 | -45.228 | n/a | n/a | -0.739 | n/a |
+| macOS | 100M | all | rw | 80/1 | 5400.001 | 100000000 | 292.017 | 150.776 | 35.815 | 663235.528 | 116.469 | 46 |
+| macOS | 100M | all | ro | 80/1 | 5400.001 | 100000000 | 120.477 | -20.764 | n/a | n/a | 23.017 | 235 |
+
+Notes:
+
+- Open time grows linearly with the object count: about 0.6 µs of CPU time
+  for each object (0.59 s, 5.9 s and 62 s of CPU at 1M, 10M and 100M). The
+  wall time is about two times the CPU time because of the load.
+- Peak RSS is higher than steady RSS, because the old and the new table are
+  in memory together during the last resize. #85 must compare both values.
+- On macOS, the RSS after open includes memory that the open freed: the
+  smaller tables of the earlier resizes, the `.idx` buffers and the decoded
+  entry lists. Thus at 1M the peak and the steady value are the same
+  (390 B/object), and the steady values are more than the live table
+  (153, 122 and 98 B/object). A test program that fills the same map on
+  macOS shows this: 153 B/object at 1M when the map is sized before the
+  fill, 306 B/object without that, and 390 B/object with the same
+  temporary buffers as the open. With the sizing before the fill, it shows
+  122 B/object at 10M.
+- The RSS method was checked: at 10M, the maximum resident set size of
+  `/usr/bin/time -l` and `max_rss_after_bytes` of the same run are the same
+  (2564218880 bytes).
+- "Extra s" is the median recovery open time minus the median normal open
+  time. Under this load it is negative in many rows, because the load
+  changed between the normal opens and the recovery opens, so the tool
+  prints `n/a` for the scan rate. The two added columns use CPU time:
+  "Extra CPU s" = median `cpu_s` of the recovery opens - median `cpu_s` of
+  the normal opens, and "Scan MB/s (CPU)" = Scanned MB / "Extra CPU s". CPU
+  time does not include the wait for I/O and `fsync`, so these rates are
+  for each CPU second, not for each second of wall time.
+- The 1M store has one pack, so its "one" and "all" rows are the
+  active-pack path (CRC check only, no hash check, no `.idx` write). Its
+  extra CPU time is less than 0.07 s of a 0.6 s open, which is in the
+  range of the noise. Thus the 1M scan rates are not useful.
+- The "ro" rows show the cost of the scan: at 10M and 100M, the "all ro"
+  rows give 235 to 283 MB/s of CPU (4.3M to 5.2M objects for each CPU
+  second). The "rw" rows also write a new `.idx` for each sealed pack. This
+  adds about 1.2 s of CPU time for each sealed pack, so the "rw" rows give
+  only 30 to 48 MB/s. The "one ro" rows at 10M and 100M are in the range
+  of the noise (0.18 s and -0.74 s).
+- The recovery open does not load the `.idx` files of the packs that it
+  scans. Thus the scan rate is a little too high, most in the "all" rows.
+- All numbers are for a warm page cache. No cold-cache number was taken:
+  on macOS that needs `sudo purge` by hand.
 
 ### Dedup
 
