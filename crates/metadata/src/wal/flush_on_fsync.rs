@@ -5,13 +5,13 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::segment::SegmentWriter;
-use super::{WalEntry, WalError, WalStrategy, per_op::wal_entry_to_segment};
+use super::{WalEntry, WalError, WalStrategy};
 
 /// WAL that buffers all mutations in memory until `flush_and_sync` is called.
 ///
 /// Suitable when the caller guarantees periodic explicit flushes (e.g., on fsync).
 pub struct FlushOnFsyncWal {
-    buffer: Mutex<Vec<WalEntry>>,
+    buffer: Mutex<(Vec<WalEntry>, usize)>,
     writer: Mutex<SegmentWriter>,
     /// Path and id of the current segment (for rotation).
     loc: Mutex<(std::path::PathBuf, u64)>,
@@ -22,7 +22,7 @@ impl FlushOnFsyncWal {
     pub fn new(path: &Path, segment_id: u64) -> io::Result<Self> {
         let writer = SegmentWriter::new(path, segment_id)?;
         Ok(FlushOnFsyncWal {
-            buffer: Mutex::new(Vec::new()),
+            buffer: Mutex::new((Vec::new(), 0)),
             writer: Mutex::new(writer),
             loc: Mutex::new((path.to_path_buf(), segment_id)),
         })
@@ -46,23 +46,16 @@ impl WalStrategy for FlushOnFsyncWal {
         let (new_writer, new_path, new_id) = super::rotate_segment(&loc.0, loc.1, seed)?;
         *writer = new_writer;
         *loc = (new_path, new_id);
-        buffer.clear(); // records before the cut are dead
+        buffer.0.clear(); // records before the cut are dead
+        buffer.1 = 0;
         Ok(())
     }
     fn log_mutation(&self, entry: &WalEntry) -> Result<(), WalError> {
-        self.buffer.lock().unwrap().push(entry.clone());
-        Ok(())
+        super::buffered_push(&self.buffer, &self.writer, entry)
     }
 
     fn flush_and_sync(&self) -> Result<(), WalError> {
-        let mut buffer = self.buffer.lock().unwrap();
-        let mut writer = self.writer.lock().unwrap();
-        for entry in buffer.drain(..) {
-            let seg_entry = wal_entry_to_segment(&entry);
-            writer.write_entry(&seg_entry)?;
-        }
-        writer.sync()?;
-        Ok(())
+        super::buffered_flush(&self.buffer, &self.writer)
     }
 
     fn shutdown(&self) -> Result<(), WalError> {

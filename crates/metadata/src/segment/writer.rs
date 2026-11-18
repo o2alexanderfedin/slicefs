@@ -3,8 +3,27 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{SegmentEntry, SegmentHeader, RecordType};
+
+/// SPIKE (wal-memory): number of write() calls into segment files, process wide.
+pub static SEGMENT_WRITE_CALLS: AtomicU64 = AtomicU64::new(0);
+/// SPIKE (wal-memory): number of sync_all calls on segment files, process wide.
+pub static SEGMENT_SYNC_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// SPIKE: a File that counts its write() calls.
+pub struct CountingFile(pub File);
+
+impl Write for CountingFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        SEGMENT_WRITE_CALLS.fetch_add(1, Ordering::Relaxed);
+        self.0.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
 
 /// Writes records to a segment file in append-only fashion.
 ///
@@ -13,7 +32,7 @@ use super::{SegmentEntry, SegmentHeader, RecordType};
 /// `seq` counts the records of this segment from 0. The file starts with a
 /// 16-byte `SegmentHeader`.
 pub struct SegmentWriter {
-    inner: BufWriter<File>,
+    inner: BufWriter<CountingFile>,
     /// Sequence number of the next record.
     seq: u64,
     /// True when bytes were written since the last successful `sync`.
@@ -32,7 +51,7 @@ impl SegmentWriter {
             .write(true)
             .open(path)?;
         let mut writer = SegmentWriter {
-            inner: BufWriter::new(file),
+            inner: BufWriter::new(CountingFile(file)),
             seq: 0,
             unsynced: true,
             disk_syncs: 0,
@@ -63,10 +82,16 @@ impl SegmentWriter {
             return Ok(());
         }
         self.inner.flush()?;
-        self.inner.get_mut().sync_all()?;
+        self.inner.get_mut().0.sync_all()?;
+        SEGMENT_SYNC_CALLS.fetch_add(1, Ordering::Relaxed);
         self.disk_syncs += 1;
         self.unsynced = false;
         Ok(())
+    }
+
+    /// SPIKE: write the user-space buffer into the kernel (no fsync).
+    pub fn flush_to_kernel(&mut self) -> io::Result<()> {
+        self.inner.flush()
     }
 
     /// Number of real disk syncs so far.

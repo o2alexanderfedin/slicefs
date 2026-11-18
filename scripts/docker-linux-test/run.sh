@@ -12,13 +12,14 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 docker build -q -t slicefs-fusetest "$HERE" >/dev/null
 RUN=(docker run --rm --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined
-  -v "$REPO":/src:ro -v slicefs-target:/target -v slicefs-cargo:/usr/local/cargo/registry
-  -v "$HERE":/dk:ro -e CARGO_TARGET_DIR=/target slicefs-fusetest unshare -m --propagation private)
+  -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry
+  -v "$HERE":/dk:ro -e CARGO_TARGET_DIR=/target -e SPIKE_REPS slicefs-fusetest unshare -m --propagation private)
 case "${1:-all}" in
   smoke) "${RUN[@]}" bash -c 'cargo build -q -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/mt-linux.sh /target/debug/slicefs && /dk/dedup-probe.sh /target/debug/slicefs' ;;
   test)  "${RUN[@]}" bash -c 'cargo test -q --workspace && rm -rf /tmp/fuser && cp -r vendor/fuser /tmp/fuser && cd /tmp/fuser && cargo test -q --lib' ;;
   all)   "${RUN[@]}" bash -c 'cargo test -q --workspace && (rm -rf /tmp/fuser && cp -r vendor/fuser /tmp/fuser && cd /tmp/fuser && cargo test -q --lib) && cargo build -q -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/mt-linux.sh /target/debug/slicefs && /dk/dedup-probe.sh /target/debug/slicefs' ;;
   verify) "${RUN[@]}" bash -c 'cargo build -q -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/verify-phases.sh /target/debug/slicefs' ;;
+  walspike) "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/wal-spike.sh /target/release/slicefs' ;;   # SPIKE (wal-memory)
   pjdfstest) "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/pjdfstest.sh /target/release/slicefs' ;;
   index-bench)
     # The chunk index benchmark (#66). This mode does not mount anything: it needs

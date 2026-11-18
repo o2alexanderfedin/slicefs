@@ -24,6 +24,72 @@ use std::path::Path;
 use slicefs_traits::key::ObjectKey;
 use thiserror::Error;
 
+/// SPIKE (wal-memory): which option runs, from the env var `SLICEFS_WAL_SPIKE`
+/// (`a`, `b`; anything else is the baseline). Read once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpikeMode { Baseline, A, B }
+
+pub fn spike_mode() -> SpikeMode {
+    static MODE: std::sync::OnceLock<SpikeMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("SLICEFS_WAL_SPIKE").as_deref() {
+        Ok("a") | Ok("A") => SpikeMode::A,
+        Ok("b") | Ok("B") => SpikeMode::B,
+        _ => SpikeMode::Baseline,
+    })
+}
+
+/// SPIKE: buffered-mode cap (bytes of record payload held in RAM).
+pub const SPIKE_BUFFER_CAP: usize = 4 << 20;
+
+/// SPIKE: the largest number of payload bytes held in a buffered WAL, process wide.
+pub static SPIKE_BUF_PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Approximate payload size of an entry (for the cap).
+pub(crate) fn entry_size(e: &WalEntry) -> usize {
+    match e {
+        WalEntry::Op { bytes } => bytes.len() + 17,
+        _ => 64,
+    }
+}
+
+/// SPIKE: shared buffered log for flush-on-fsync and periodic. Pushes the
+/// entry; when options A or B run and the buffer passes the cap, writes the
+/// buffer into the segment (write(), no fsync).
+pub(crate) fn buffered_push(
+    buffer: &std::sync::Mutex<(Vec<WalEntry>, usize)>,
+    writer: &std::sync::Mutex<crate::segment::SegmentWriter>,
+    entry: &WalEntry,
+) -> Result<(), WalError> {
+    let mut b = buffer.lock().unwrap();
+    b.0.push(entry.clone());
+    b.1 += entry_size(entry);
+    SPIKE_BUF_PEAK.fetch_max(b.1, std::sync::atomic::Ordering::Relaxed);
+    if spike_mode() != SpikeMode::Baseline && b.1 >= SPIKE_BUFFER_CAP {
+        let mut w = writer.lock().unwrap();
+        for e in b.0.drain(..) {
+            w.write_entry(&per_op::wal_entry_to_segment(&e))?;
+        }
+        w.flush_to_kernel()?;
+        b.1 = 0;
+    }
+    Ok(())
+}
+
+/// SPIKE: shared flush for the buffered strategies.
+pub(crate) fn buffered_flush(
+    buffer: &std::sync::Mutex<(Vec<WalEntry>, usize)>,
+    writer: &std::sync::Mutex<crate::segment::SegmentWriter>,
+) -> Result<(), WalError> {
+    let mut b = buffer.lock().unwrap();
+    let mut w = writer.lock().unwrap();
+    for e in b.0.drain(..) {
+        w.write_entry(&per_op::wal_entry_to_segment(&e))?;
+    }
+    b.1 = 0;
+    w.sync()?;
+    Ok(())
+}
+
 /// A logical WAL entry representing a metadata state change.
 #[derive(Debug, Clone)]
 pub enum WalEntry {

@@ -46,6 +46,10 @@ impl WalStrategy for PerOpWal {
         // Operation records are made durable by fsync or commit, not one by one.
         if !matches!(entry, WalEntry::Op { .. }) {
             writer.sync()?;
+        } else if super::spike_mode() == super::SpikeMode::A {
+            // SPIKE option A: push the record into the kernel now (no fsync),
+            // so a kill -9 of the daemon loses nothing.
+            writer.flush_to_kernel()?;
         }
         Ok(())
     }
