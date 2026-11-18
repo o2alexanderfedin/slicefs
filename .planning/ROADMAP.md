@@ -154,7 +154,7 @@ Full details: `.planning/milestones/v2.0-ROADMAP.md`. Audit: `.planning/mileston
 **Milestone goal:** Record the missing measurements, close the finished issues, and replace the in-memory chunk index with an on-disk index that does not need much RAM per object.
 
 - [ ] **Phase 13: Write log close-out** (#20) - check the acceptance list against tests, restate the NFS item, close #20
-- [ ] **Phase 14: Buffered delta re-log** (#93) - a commit logs only the bytes changed since the last commit
+- [ ] **Phase 14: Bounded-memory random writes** (#98, #93) - no full-file buffer; memory per open file does not depend on file size; a commit logs only changed bytes
 - [ ] **Phase 15: Pack-file measurements** (#8) - seed throughput and store size, before and after packs
 - [ ] **Phase 16: Chunk index benchmark** (#66) - cold open, RSS, lookups and recovery at 1M/10M/100M objects
 - [ ] **Phase 17: On-disk chunk index** (#85) - sorted runs, memtable, filters, merge; measured against Phase 16
@@ -167,16 +167,23 @@ Full details: `.planning/milestones/v2.0-ROADMAP.md`. Audit: `.planning/mileston
   1. Tests show that a file survives `kill -9` after its `fsync` returns, a rename survives after `fsync` of the directory, and a torn last record does not stop the mount
   2. A large-file copy check for the current backends (libfuse in Docker; FSKit by hand) passes with bounded daemon memory
   3. #20 is closed with a comment that lists the tests and points the commit-cost item to #93
-**Plans**: TBD
+**Plans**: 3 plans
 
-### Phase 14: Buffered delta re-log
-**Goal**: The write log cost of a commit with a large open Buffered file depends on the changed bytes, not on the file size
-**Depends on**: Nothing (Phase 13 recommended first)
-**Requirements**: BUFR-01, BUFR-02, BUFR-03
+Plans:
+- [ ] 13-01-PLAN.md — in-process tests: rename durable by fsync of the directory (with control), end-to-end torn last record (wave 1)
+- [ ] 13-02-PLAN.md — Docker verify-phases.sh: 1 GiB copy with measured VmHWM cap, Phase 05c rename + dir fsync, Phase 05d torn tail after kill -9 (wave 1)
+- [ ] 13-03-PLAN.md — FSKit by-hand README section, evidence run, #20 close-out comment, gated close after merge and green CI (wave 2, checkpoint)
+
+### Phase 14: Bounded-memory random writes
+**Goal**: A random write never loads the whole file into RAM. The memory of an open file is bounded by a fixed limit, and the write-log cost of a commit depends on the changed bytes, not on the file size (#98, which also fixes #93)
+**Depends on**: Phase 13 (same test files)
+**Requirements**: BUFR-01, BUFR-02, BUFR-03, BUFR-04, BUFR-05
 **Success Criteria** (what must be TRUE):
-  1. A test with a large open Buffered file and a small change shows that the commit writes about the size of the change to the write log
-  2. Replay after a crash gives the same content, size and times, for PerOp and FlushOnFsync
-  3. The commit gate does not hash the whole Buffered file
+  1. A 1 GiB and a 4 GiB random-write test in Docker keep the daemon peak RSS (VmHWM) below the same fixed cap
+  2. A commit with a large open file and a small change writes about the size of the change to the write log
+  3. Replay after a crash gives the same content, size and times, for PerOp and FlushOnFsync
+  4. The commit gate is not held for the hash of a whole file; online GC during a rebase loses no chunk
+  5. After a small change in a large file, the store grows by about the changed chunks only
 **Plans**: TBD
 
 ### Phase 15: Pack-file measurements
@@ -187,7 +194,12 @@ Full details: `.planning/milestones/v2.0-ROADMAP.md`. Audit: `.planning/mileston
   1. One script measures seed throughput and store size for the Boost tree, a tar file and random data
   2. The numbers for a build from before #56 and for the current build are in the design note, with the machine and the commits
   3. The store file count after a Boost copy is recorded
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 15-01-PLAN.md — seed-measure.sh script + README; c2f82fa, 7016bb6 and develop builds in worktrees; Boost data (wave 1)
+- [ ] 15-02-PLAN.md — measure the three builds one after the other; Results subsection in docs/design/chunk-store.md (wave 2)
+- [ ] 15-03-PLAN.md — close #8 after merge and green CI (checkpoint, wave 3)
 
 ### Phase 16: Chunk index benchmark
 **Goal**: A baseline of the current in-memory index at 1M, 10M and 100M objects exists for #85
@@ -197,7 +209,12 @@ Full details: `.planning/milestones/v2.0-ROADMAP.md`. Audit: `.planning/mileston
   1. The benchmark reports cold-open time and peak RSS at 1M, 10M and 100M objects
   2. It reports hit and miss lookup throughput and the recovery time of a pack without an index file
   3. The results and the RAM per object are documented
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 16-01-PLAN.md — benchmarks/index-bench crate: tracer run/create/open, then lookup and recover steps, Backend trait for Phase 17, CI-size tests (wave 1)
+- [ ] 16-02-PLAN.md — README, run.sh index-bench mode, 1M/10M/100M runs on macOS and Linux, "Index baseline (#66)" section in docs/design/chunk-store.md (wave 2)
+- [ ] 16-03-PLAN.md — comment and close #66, link from #85, after merge and green CI (checkpoint, wave 3)
 
 ### Phase 17: On-disk chunk index
 **Goal**: The chunk store uses an on-disk index with a few bytes of RAM per object and a cold open that does not grow linearly with the object count

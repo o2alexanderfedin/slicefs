@@ -31,11 +31,13 @@
 - [ ] **IDX-04**: Runs merge in the background, so their number stays small. No lookup returns an object that online GC removed (GC tests with `gc_begin` / mark / `gc_finish`).
 - [ ] **IDX-05**: The #66 benchmark runs with the new index and shows RAM per object (target: a few bytes), cold-open time, hit and miss lookup throughput, and write throughput, compared with the baseline.
 
-### Commit cost of open Buffered files (#93)
+### Bounded-memory random writes (#98, #93)
 
-- [ ] **BUFR-01**: A commit with a large open Buffered file writes to the write log an amount that depends on the bytes changed since the last commit, not on the file size.
+- [ ] **BUFR-01**: A commit with a large open file that is written at random writes to the write log an amount that depends on the bytes changed since the last commit, not on the file size.
 - [ ] **BUFR-02**: Replay after a crash still gives the same content, size and times (tests in `write_log_replay_tests`, for PerOp and FlushOnFsync).
-- [ ] **BUFR-03**: The commit gate is not held for the hash of the whole Buffered file.
+- [ ] **BUFR-03**: The commit gate is not held for the hash of a whole file. Online GC that runs during a rebase loses no chunk (test).
+- [ ] **BUFR-04**: A random write never loads the whole file into RAM. The memory of an open file is bounded by a fixed limit: a 1 GiB and a 4 GiB random-write test in Docker stay below the same VmHWM cap.
+- [ ] **BUFR-05**: After a small change in a large file, the store grows by about the changed chunks only (unchanged chunks keep their IDs).
 
 ## Future Requirements
 
@@ -72,12 +74,14 @@
 | BUFR-01 | Phase 14 | Pending |
 | BUFR-02 | Phase 14 | Pending |
 | BUFR-03 | Phase 14 | Pending |
+| BUFR-04 | Phase 14 | Pending |
+| BUFR-05 | Phase 14 | Pending |
 
 **Coverage:**
-- v2.1 requirements: 17 total
-- Mapped to phases: 17
+- v2.1 requirements: 19 total
+- Mapped to phases: 19
 - Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-11-17*
-*Last updated: 2026-11-17 after initial definition*
+*Last updated: 2026-11-18: Phase 14 re-scoped to #98 (no full-file buffer)*
