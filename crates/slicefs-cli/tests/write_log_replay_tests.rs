@@ -4,7 +4,7 @@
 //! names, types, modes, owners, sizes, times, link counts, xattrs, content.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use metadata::segment::load_store_with_log;
@@ -393,6 +393,75 @@ fn a_rename_with_no_sync_after_it_is_lost_with_a_buffered_log() {
     let tmp = fs.meta().lookup(1, "doc.txt.tmp").unwrap();
     let want = data(14, 30_000);
     assert_eq!(fs.test_read(tmp, 0, want.len() as u32 + 1).unwrap(), want);
+}
+
+/// The log segment with the largest number (by number, not by name).
+fn newest_segment(store: &Path) -> PathBuf {
+    std::fs::read_dir(store.join("segments")).unwrap()
+        .filter_map(|e| {
+            let p = e.unwrap().path();
+            let n: u64 = p.file_name()?.to_str()?.strip_prefix("segment-")?.strip_suffix(".seg")?.parse().ok()?;
+            Some((n, p))
+        })
+        .max_by_key(|(n, _)| *n)
+        .unwrap()
+        .1
+}
+
+// #20: a power loss can leave the last record of the log half written. The
+// mount must still work: the reader stops at the torn record, replay keeps
+// every record before it, and new writes work after the commit a mount does.
+#[test]
+fn a_torn_last_record_does_not_stop_the_mount() {
+    let dir = TempDir::new().unwrap();
+    let kept = data(15, 200_000);
+    let before = {
+        let fs = new_fs(dir.path());
+        let (k, fk) = create(&fs, 1, "kept.bin");
+        write(&fs, fk, 0, &kept);
+        fsync(&fs, k, fk);
+        release(&fs, k, fk);
+        let d = match h::handle_mkdir(&fs, 1, "d", S_IFDIR | 0o755, 0o022, 501, 20) { EntryResult::Ok(i, _) => i, _ => panic!() };
+        let (s, fsm) = create(&fs, d, "small");
+        write(&fs, fsm, 0, b"x");
+        release(&fs, s, fsm);
+        assert!(matches!(h::handle_rename(&fs, d, "small", d, "renamed", 0), EmptyResult::Ok));
+        fs.meta().flush_wal().unwrap();
+        let before = dump(&fs);
+        // The sacrificial last record: one mkdir logs one record.
+        assert!(matches!(h::handle_mkdir(&fs, 1, "last", S_IFDIR | 0o755, 0o022, 501, 20), EntryResult::Ok(..)));
+        fs.meta().flush_wal().unwrap();
+        std::mem::forget(fs); // a crash
+        before
+    };
+    // Cut before the reload: reload_and_replay makes a new segment.
+    let seg = newest_segment(dir.path());
+    let f = std::fs::OpenOptions::new().write(true).open(&seg).unwrap();
+    let len = f.metadata().unwrap().len();
+    f.set_len(len - 3).unwrap();
+    drop(f);
+
+    let after = data(16, 50_000);
+    {
+        let fs = reload_and_replay(dir.path());
+        assert_eq!(dump(&fs), before);
+        assert!(fs.meta().lookup(1, "last").is_err(), "the torn record must not be applied");
+        // What a mount does after replay, then new writes.
+        fs.meta().commit().unwrap();
+        let (a, fa) = create(&fs, 1, "after.bin");
+        write(&fs, fa, 0, &after);
+        fsync(&fs, a, fa);
+        release(&fs, a, fa);
+        assert_eq!(fs.test_read(a, 0, after.len() as u32 + 1).unwrap(), after);
+        std::mem::forget(fs); // a second crash
+    }
+    let fs = reload_and_replay(dir.path());
+    let a = fs.meta().lookup(1, "after.bin").unwrap();
+    assert_eq!(fs.test_read(a, 0, after.len() as u32 + 1).unwrap(), after);
+    let k = fs.meta().lookup(1, "kept.bin").unwrap();
+    assert_eq!(fs.test_read(k, 0, kept.len() as u32 + 1).unwrap(), kept);
+    let d = fs.meta().lookup(1, "d").unwrap();
+    assert!(fs.meta().lookup(d, "renamed").is_ok());
 }
 
 // utimens between a write and the close sets the mtime (cp -p, install -p):
