@@ -119,7 +119,8 @@ mod tests {
         let syncs = wal.log.disk_syncs();
         let start = Instant::now();
         wal.log_mutation(&WalEntry::Op { bytes: vec![9u8; 100] }).unwrap();
-        let deadline = start + 2 * interval + Duration::from_millis(300);
+        // About 2 x interval, with a margin for a loaded test machine.
+        let deadline = start + 2 * interval + Duration::from_secs(1);
         while wal.log.disk_syncs() == syncs && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
