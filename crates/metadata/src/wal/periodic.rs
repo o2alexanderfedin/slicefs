@@ -6,62 +6,49 @@
 
 use std::io;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::Arc;
 
-use crate::segment::SegmentWriter;
-use super::{WalEntry, WalError, WalStrategy, per_op::wal_entry_to_segment};
+use super::buffered::BufferedLog;
+use super::{WalEntry, WalError, WalStrategy};
 
 /// WAL that buffers mutations; flushes are triggered externally (timer) or at shutdown.
 pub struct PeriodicWal {
-    buffer: Mutex<Vec<WalEntry>>,
-    writer: Mutex<SegmentWriter>,
-    /// Path and id of the current segment (for rotation).
-    loc: Mutex<(std::path::PathBuf, u64)>,
+    log: Arc<BufferedLog>,
 }
 
 impl PeriodicWal {
     /// Create a new `PeriodicWal` writing to `path` with the given `segment_id`.
     pub fn new(path: &Path, segment_id: u64) -> io::Result<Self> {
-        let writer = SegmentWriter::new(path, segment_id)?;
-        Ok(PeriodicWal {
-            buffer: Mutex::new(Vec::new()),
-            writer: Mutex::new(writer),
-            loc: Mutex::new((path.to_path_buf(), segment_id)),
-        })
+        Ok(PeriodicWal { log: Arc::new(BufferedLog::new(path, segment_id)?) })
     }
 }
 
 impl WalStrategy for PeriodicWal {
     fn rotate(&self, seed: &[WalEntry]) -> Result<(), WalError> {
-        // Lock order as in flush_and_sync: buffer, then writer.
-        let mut buffer = self.buffer.lock().unwrap();
-        let mut writer = self.writer.lock().unwrap();
-        let mut loc = self.loc.lock().unwrap();
-        // If the new segment cannot be made, keep the buffer: it holds the new
-        // root's record, and the next flush writes it to the current segment.
-        let (new_writer, new_path, new_id) = super::rotate_segment(&loc.0, loc.1, seed)?;
-        *writer = new_writer;
-        *loc = (new_path, new_id);
-        buffer.clear(); // records before the cut are dead
-        Ok(())
+        self.log.rotate(seed)
     }
     fn log_mutation(&self, entry: &WalEntry) -> Result<(), WalError> {
-        self.buffer.lock().unwrap().push(entry.clone());
-        Ok(())
+        self.log.log(entry)
     }
 
     fn flush_and_sync(&self) -> Result<(), WalError> {
-        let mut buffer = self.buffer.lock().unwrap();
-        let mut writer = self.writer.lock().unwrap();
-        for entry in buffer.drain(..) {
-            let seg_entry = wal_entry_to_segment(&entry);
-            writer.write_entry(&seg_entry)?;
-        }
-        writer.sync()?;
-        Ok(())
+        self.log.flush_and_sync()
     }
 
     fn shutdown(&self) -> Result<(), WalError> {
         self.flush_and_sync()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ram_stays_at_most_the_cap_with_no_fsync() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.seg");
+        let wal = PeriodicWal::new(&path, 1).unwrap();
+        super::super::buffered::assert_cap_holds(&wal, &wal.log, &path);
     }
 }

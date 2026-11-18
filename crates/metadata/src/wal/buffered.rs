@@ -1,0 +1,138 @@
+//! The buffered write log shared by `FlushOnFsyncWal` and `PeriodicWal`.
+//!
+//! Records are held in RAM up to `BUFFER_CAP_BYTES` (#98). `flush_and_sync`
+//! writes them to the segment and syncs it. When the held records pass the
+//! cap, they are written to the segment with no sync. Thus a crash with no
+//! fsync can lose up to the last `BUFFER_CAP_BYTES` of records, and the file
+//! of a large write can come back as a correct first part of its data.
+
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use crate::segment::SegmentWriter;
+use super::{BUFFER_CAP_BYTES, WalEntry, WalError, per_op::wal_entry_to_segment};
+
+/// Records held in RAM, and their size in bytes.
+#[derive(Default)]
+struct Pending {
+    entries: Vec<WalEntry>,
+    bytes: usize,
+}
+
+/// Size of a record frame on disk: type, length, sequence, payload, CRC.
+fn record_len(entry: &WalEntry) -> usize {
+    let payload = match entry {
+        WalEntry::Op { bytes } => bytes.len(),
+        other => wal_entry_to_segment(other).payload_bytes().len(),
+    };
+    1 + 4 + 8 + payload + 4
+}
+
+/// Records are held in RAM and written to the segment by `flush_and_sync`.
+pub(crate) struct BufferedLog {
+    pending: Mutex<Pending>,
+    writer: Mutex<SegmentWriter>,
+    /// Path and id of the current segment (for rotation).
+    loc: Mutex<(PathBuf, u64)>,
+}
+
+impl BufferedLog {
+    pub(crate) fn new(path: &Path, segment_id: u64) -> io::Result<Self> {
+        Ok(BufferedLog {
+            pending: Mutex::new(Pending::default()),
+            writer: Mutex::new(SegmentWriter::new(path, segment_id)?),
+            loc: Mutex::new((path.to_path_buf(), segment_id)),
+        })
+    }
+
+    /// Hold the record in RAM. When the held records pass `BUFFER_CAP_BYTES`,
+    /// write them into the segment file (no disk sync) and empty the RAM.
+    pub(crate) fn log(&self, entry: &WalEntry) -> Result<(), WalError> {
+        let mut pending = self.pending.lock().unwrap();
+        pending.bytes += record_len(entry);
+        pending.entries.push(entry.clone());
+        if pending.bytes > BUFFER_CAP_BYTES {
+            let mut writer = self.writer.lock().unwrap();
+            pending.bytes = 0;
+            for entry in pending.entries.drain(..) {
+                writer.write_entry(&wal_entry_to_segment(&entry))?;
+            }
+            writer.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Write the held records to the segment and sync it.
+    pub(crate) fn flush_and_sync(&self) -> Result<(), WalError> {
+        // Lock order everywhere: pending, then writer.
+        let mut pending = self.pending.lock().unwrap();
+        let mut writer = self.writer.lock().unwrap();
+        pending.bytes = 0;
+        for entry in pending.entries.drain(..) {
+            writer.write_entry(&wal_entry_to_segment(&entry))?;
+        }
+        writer.sync()?;
+        Ok(())
+    }
+
+    pub(crate) fn rotate(&self, seed: &[WalEntry]) -> Result<(), WalError> {
+        let mut pending = self.pending.lock().unwrap();
+        let mut writer = self.writer.lock().unwrap();
+        let mut loc = self.loc.lock().unwrap();
+        // If the new segment cannot be made, keep the records: they hold the
+        // new root's record, and the next flush writes it to the current segment.
+        let (new_writer, new_path, new_id) = super::rotate_segment(&loc.0, loc.1, seed)?;
+        *writer = new_writer;
+        *loc = (new_path, new_id);
+        // Records before the cut are dead.
+        pending.entries.clear();
+        pending.bytes = 0;
+        Ok(())
+    }
+
+    /// Bytes of the records held in RAM (for tests).
+    #[cfg(test)]
+    pub(crate) fn buffered_bytes(&self) -> usize {
+        self.pending.lock().unwrap().bytes
+    }
+
+    /// Number of disk syncs of the current segment (for tests).
+    #[cfg(test)]
+    pub(crate) fn disk_syncs(&self) -> u64 {
+        self.writer.lock().unwrap().disk_syncs()
+    }
+}
+
+/// Test helper: log more than `BUFFER_CAP_BYTES` of operation records with
+/// no fsync. The RAM held stays at most the cap, no disk sync is made, and
+/// the records that left RAM are in the segment file, in order (a second
+/// reader sees them while the WAL is open, as after a kill -9).
+#[cfg(test)]
+pub(crate) fn assert_cap_holds(wal: &dyn super::WalStrategy, log: &BufferedLog, path: &Path) {
+    use crate::segment::{SegmentEntry, SegmentReader};
+    let syncs = log.disk_syncs();
+    let record = 64 * 1024;
+    let count = (super::BUFFER_CAP_BYTES / record) * 5 / 4; // about 5 MiB
+    for i in 0..count {
+        wal.log_mutation(&WalEntry::Op { bytes: vec![i as u8; record] }).unwrap();
+        assert!(
+            log.buffered_bytes() <= super::BUFFER_CAP_BYTES,
+            "after record {i}: {} bytes held in RAM, cap {}",
+            log.buffered_bytes(),
+            super::BUFFER_CAP_BYTES
+        );
+    }
+    assert_eq!(log.disk_syncs(), syncs, "the cap must not sync");
+    let on_disk: Vec<SegmentEntry> =
+        SegmentReader::open(path).map(|r| r.collect()).unwrap_or_default();
+    assert!(!on_disk.is_empty(), "the records over the cap must be in the file");
+    for (i, e) in on_disk.iter().enumerate() {
+        assert!(
+            matches!(e, SegmentEntry::Op { bytes } if bytes.len() == record && bytes[0] == i as u8),
+            "record {i} in the file is not the record logged in place {i}"
+        );
+    }
+    let held = log.buffered_bytes();
+    assert_eq!(held, (count - on_disk.len()) * record_len(&WalEntry::Op { bytes: vec![0; record] }));
+}

@@ -14,6 +14,7 @@ pub mod no_wal;
 pub mod per_op;
 pub mod flush_on_fsync;
 pub mod periodic;
+mod buffered;
 
 pub use no_wal::NoWal;
 pub use per_op::PerOpWal;
@@ -23,6 +24,11 @@ pub use periodic::PeriodicWal;
 use std::path::Path;
 use slicefs_traits::key::ObjectKey;
 use thiserror::Error;
+
+/// Flush-on-fsync and periodic write their held records to the segment (no
+/// fsync) when the records pass this size, so the RAM of the write log stays
+/// at most this size (#98).
+pub const BUFFER_CAP_BYTES: usize = 4 * 1024 * 1024;
 
 /// A logical WAL entry representing a metadata state change.
 #[derive(Debug, Clone)]
