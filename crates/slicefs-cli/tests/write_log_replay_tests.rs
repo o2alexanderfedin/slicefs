@@ -133,6 +133,24 @@ fn check(scenario: impl FnOnce(&SliceFsFilesystem)) {
     assert_eq!(replayed, live);
 }
 
+/// `check` with a log mode, for scenarios that crash with write handles
+/// open: both sides are dumped as stat sees them (`dump_open`). Returns the
+/// replayed file system (and its store) for more checks.
+fn check_with(config: WalConfig, scenario: impl FnOnce(&SliceFsFilesystem)) -> (TempDir, SliceFsFilesystem) {
+    let dir = TempDir::new().unwrap();
+    let live = {
+        let fs = new_fs_with(dir.path(), config.clone());
+        scenario(&fs);
+        fs.meta().flush_wal().unwrap();
+        let d = dump_open(&fs);
+        std::mem::forget(fs); // a crash: no commit, no destroy
+        d
+    };
+    let fs = reload_and_replay(dir.path());
+    assert_eq!(dump_open(&fs), live, "{config:?}");
+    (dir, fs)
+}
+
 #[test]
 fn files_written_and_fsynced_survive_a_crash() {
     check(|fs| {
@@ -612,4 +630,141 @@ fn a_commit_relogs_only_the_bytes_changed_since_the_last_rebase() {
         assert_eq!(fs.test_read(ino, 0, size as u32 + 1).unwrap(), model, "replayed content");
     }
     assert_eq!(seen[0], seen[1], "the relog does not depend on the file size");
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CrashPoint {
+    /// Only the logged requests after the last commit.
+    RawRecords,
+    /// Right after a commit that relogged a shrunk, extended, dirty overlay.
+    RelogRecords,
+    /// After a rebase, a commit and more writes.
+    AfterRebase,
+}
+
+const MIB: usize = 1 << 20;
+
+/// The overlay work of `an_overlay_replays_after_a_crash_with_each_log_mode`,
+/// then the steps of `crash`. Returns the ino and the model of a.bin.
+fn overlay_scenario(fs: &SliceFsFilesystem, crash: CrashPoint) -> (u64, Vec<u8>) {
+    let t0 = 1_700_000_000i64;
+    let mut model = data(20, 3 * MIB);
+    let ino = {
+        let _t = at(t0);
+        let (ino, fh) = create(fs, 1, "a.bin");
+        for (i, piece) in model.chunks(64 << 10).enumerate() {
+            write(fs, fh, (i << 16) as u64, piece);
+        }
+        release(fs, ino, fh);
+        ino
+    };
+    { let _t = at(t0 + 10); fs.commit_cut().unwrap(); }
+    let fh = open_rw(fs, ino);
+    let size = |n: usize| {
+        assert!(matches!(h::handle_setattr(fs, ino, None, None, None, Some(n as u64), Some(fh), None, None),
+            h::AttrResult::Ok(_)));
+    };
+    { let _t = at(t0 + 20); put(fs, fh, &mut model, MIB, &[0x11; 4096]); } // the switch
+    { let _t = at(t0 + 30); size(2 * MIB); model.truncate(2 * MIB); } // shrink below the base
+    // Extend: [2 MiB, 3.5 MiB) must read as zeros, not as the old bytes (D-15).
+    { let _t = at(t0 + 40); size(7 * MIB / 2); model.resize(7 * MIB / 2, 0); }
+    { let _t = at(t0 + 50); put(fs, fh, &mut model, 3 * MIB, &[0x22; 4096]); }
+    { let _t = at(t0 + 60); put(fs, fh, &mut model, 7 * MIB / 2 + 64 * MIB, &[0x33; 4096]); } // far past the end
+    {
+        let _t = at(t0 + 70); // a chmod: ctime after the last write
+        assert!(matches!(h::handle_setattr(fs, ino, Some(S_IFREG | 0o600), None, None, None, None, None, None),
+            h::AttrResult::Ok(_)));
+    }
+    assert!(!fs.test_is_streaming(fh));
+    match crash {
+        CrashPoint::RawRecords => {}
+        CrashPoint::RelogRecords => {
+            // b.bin switches to an overlay before its first flush (D-18).
+            {
+                let _t = at(t0 + 80);
+                let (_, fb) = create(fs, 1, "b.bin");
+                for (i, piece) in data(21, 50_000).chunks(10_000).enumerate() {
+                    write(fs, fb, (i * 10_000) as u64, piece);
+                }
+                write(fs, fb, 100, &[0xBB; 300]);
+                assert!(!fs.test_is_streaming(fb));
+            }
+            // The overlay is still shrunk, extended and dirty: the relog has
+            // Setattr(visible), Setattr(size), the Write pieces and the ctime.
+            { let _t = at(t0 + 90); fs.commit_cut().unwrap(); }
+            // a.bin: 3 extents of 4 KiB; b.bin: 300 bytes.
+            assert_eq!(fs.test_last_relog_bytes(), 3 * 4096 + 300);
+        }
+        CrashPoint::AfterRebase => {
+            let rebases = fs.test_rebase_count();
+            fs.test_set_dirty_limit(64 << 10);
+            { let _t = at(t0 + 80); put(fs, fh, &mut model, 512 << 10, &[0x44; 128 << 10]); }
+            assert_eq!(fs.test_rebase_count(), rebases + 1, "the 128 KiB write rebases");
+            fs.test_set_dirty_limit(slicefs_cli::filesystem::DIRTY_LIMIT);
+            { let _t = at(t0 + 90); put(fs, fh, &mut model, 200, &[0x55; 4096]); }
+            { let _t = at(t0 + 100); fs.commit_cut().unwrap(); }
+            assert_eq!(fs.test_last_relog_bytes(), 4096, "only the write after the rebase");
+            { let _t = at(t0 + 110); put(fs, fh, &mut model, 100, &[0x66; 4096]); }
+            { let _t = at(t0 + 120); fsync(fs, ino, fh); }
+        }
+    }
+    assert_eq!(fs.test_read(ino, 0, model.len() as u32 + 1).unwrap(), model, "live content");
+    (ino, model)
+}
+
+// BUFR-02 (D-14, D-15, D-18): replay after a crash gives the same names,
+// sizes, content, mtime and ctime as before it, for both log modes and three
+// crash points. Crash point RelogRecords tells the order of the relog: if
+// Setattr(size) came before Setattr(visible), or one was left out, the old
+// bytes of [2 MiB, 3.5 MiB) would come back and the dumps would differ.
+#[test]
+fn an_overlay_replays_after_a_crash_with_each_log_mode() {
+    for config in [WalConfig::PerOp, WalConfig::FlushOnFsync] {
+        for crash in [CrashPoint::RawRecords, CrashPoint::RelogRecords, CrashPoint::AfterRebase] {
+            let mut want = None;
+            let (_dir, fs) = check_with(config.clone(), |fs| want = Some(overlay_scenario(fs, crash)));
+            let (ino, model) = want.unwrap();
+            let what = format!("{config:?} {crash:?}");
+            assert_eq!(fs.test_read(ino, 0, model.len() as u32 + 1).unwrap(), model, "{what}: content");
+            // Old base bytes there, before the write at 3 MiB.
+            assert!(fs.test_read(ino, 2 * MIB as u64, MIB as u32).unwrap().iter().all(|&b| b == 0),
+                "{what}: [2 MiB, 3 MiB) is zeros");
+            let m = fs.test_getattr(ino).unwrap();
+            assert_eq!((m.size, m.mode), (model.len() as u64, S_IFREG | 0o600), "{what}");
+        }
+    }
+}
+
+// D-20: a commit relogs an overlay in pieces of at most 1 MiB. Before #98 one
+// record held the whole buffer, and a record over MAX_PAYLOAD (64 MiB)
+// stopped the segment reader, so this record and every later one were lost.
+#[test]
+fn an_overlay_with_more_than_64_mib_of_relog_replays() {
+    let dir = TempDir::new().unwrap();
+    let mut model = data(40, MIB);
+    let ino = {
+        let fs = new_fs(dir.path());
+        let (ino, fh) = create(&fs, 1, "huge.bin");
+        write(&fs, fh, 0, &model.clone());
+        put(&fs, fh, &mut model, 0, &[0x77; 4096]); // the switch
+        // One extent that grows by 1 MiB per write. An extent costs its
+        // capacity, and Vec doubles it: 128 MiB at 65 MiB of length. So the
+        // limit is above that, or a rebase would run in the loop.
+        fs.test_set_dirty_limit(256 << 20);
+        let rebases = fs.test_rebase_count();
+        for i in 0..70 {
+            put(&fs, fh, &mut model, (i + 1) * MIB, &data(41 + i as u64, MIB));
+        }
+        assert_eq!(fs.test_rebase_count(), rebases, "no rebase: one 70 MiB extent");
+        fs.commit_cut().unwrap();
+        assert!(fs.test_last_relog_bytes() >= 70 << 20, "relog {}", fs.test_last_relog_bytes());
+        fs.meta().flush_wal().unwrap();
+        std::mem::forget(fs); // a crash with the handle open
+        ino
+    };
+    let fs = reload_and_replay(dir.path());
+    assert_eq!(fs.test_getattr(ino).unwrap().size, model.len() as u64);
+    for (i, piece) in model.chunks(MIB).enumerate() {
+        assert_eq!(fs.test_read(ino, (i * MIB) as u64, MIB as u32).unwrap(), piece, "MiB {i}");
+    }
 }
