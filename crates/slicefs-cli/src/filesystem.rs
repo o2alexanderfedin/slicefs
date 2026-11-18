@@ -754,14 +754,24 @@ impl SliceFsFilesystem {
             libc::EIO
         };
         let size = ov.size;
+        let p0 = chunk_store::probe::snap();
+        chunk_store::probe::reset_max();
+        let t = std::time::Instant::now();
+        let n_ext = ov.extent_ranges().len();
+        let ext_bytes: u64 = ov.extent_ranges().iter().map(|r| r.end - r.start).sum();
+        let cost = ov.cost();
         let (root, rechunked) = if size == 0 {
             (None, 0)
         } else {
             let mut src = OverlaySource::new(cs, ov).map_err(store_err)?;
             let (k, stats) = content::splice(cs, ov.base.as_ref(), ov.visible, &ov.extent_ranges(), size, &mut src)
                 .map_err(store_err)?;
+            eprintln!("[{}][PROBE] splice {:.1} ms: size={} extents={} ext_mib={:.1} cost_mib={:.1} rechunked_mib={:.1} reused_entries={} reused_nodes={} zero_runs={} |{}",
+                ts(), t.elapsed().as_secs_f64() * 1e3, size, n_ext, ext_bytes as f64 / 1048576.0, cost as f64 / 1048576.0,
+                stats.rechunked as f64 / 1048576.0, stats.reused_entries, stats.reused_nodes, stats.zero_runs, chunk_store::probe::diff(&p0));
             (Some(k), stats.rechunked)
         };
+        let t_install = std::time::Instant::now();
         self.rebase_count.fetch_add(1, Ordering::Relaxed);
         self.last_rebase_bytes.store(rechunked, Ordering::Relaxed);
         let hook = self.rebase_hook.lock().unwrap().clone();
@@ -769,7 +779,10 @@ impl SliceFsFilesystem {
             hook();
         }
         self.install_root(ino, root, size, s.modified)?;
+        let t_drop = std::time::Instant::now();
         s.write_mode = WriteMode::Overlay(Overlay::new(root, size, size));
+        eprintln!("[{}][PROBE] rebase tail: install_root={:.1} ms drop_old_overlay={:.1} ms", ts(),
+            (t_drop - t_install).as_secs_f64() * 1e3, t_drop.elapsed().as_secs_f64() * 1e3);
         s.last_committed_root = root;
         s.byte_count = size;
         Ok(())
@@ -988,7 +1001,10 @@ impl SliceFsFilesystem {
         let result = match result {
             Ok(n) if over => {
                 let ino = file_state.ino;
-                self.rebase_overlay(ino, &mut file_state).map(|_| n).map_err(|_| libc::EIO)
+                let t = std::time::Instant::now();
+                let r = self.rebase_overlay(ino, &mut file_state).map(|_| n).map_err(|_| libc::EIO);
+                eprintln!("[{}][PROBE] rebase in write offset={} len={} total={:.1} ms", ts(), offset, data.len(), t.elapsed().as_secs_f64() * 1e3);
+                r
             }
             r => r,
         };
@@ -1245,6 +1261,8 @@ impl SliceFsFilesystem {
     /// exclusively (no request is in flight).
     pub fn commit_cut(&self) -> Result<ObjectKey, MetaError> {
         use crate::oplog::{Op, Record};
+        let t_cut = std::time::Instant::now();
+        let p0 = chunk_store::probe::snap();
         let handles: Vec<(u64, u64)> = self.open_files.lock().unwrap()
             .iter().map(|(&fh, s)| (s.ino, fh)).collect();
         // Streamed prefixes go into the manifests (cheap: an ended clone).
@@ -1289,7 +1307,11 @@ impl SliceFsFilesystem {
                 items.push(Item { ino, time, ctime, what });
             }
         }
+        let t_commit = std::time::Instant::now();
+        let flush_ms = (t_commit - t_cut).as_secs_f64() * 1e3;
         let root = self.meta.commit()?;
+        let commit_ms = t_commit.elapsed().as_secs_f64() * 1e3;
+        let t_relog = std::time::Instant::now();
         // The commit deleted the old log segments, so these records are now
         // the only copy of bytes an fsync may already have made durable:
         // sync them before the commit returns (a buffered log keeps them in RAM).
@@ -1343,10 +1365,15 @@ impl SliceFsFilesystem {
             }
         }
         self.last_relog_bytes.store(relog_bytes, Ordering::Relaxed);
+        let t_fw = std::time::Instant::now();
+        let relog_ms = (t_fw - t_relog).as_secs_f64() * 1e3;
         if relogged {
             self.meta.flush_wal()
                 .map_err(|e| MetaError::Corrupted(format!("cut: sync of the write log failed: {e}")))?;
         }
+        eprintln!("[{}][PROBE] commit_cut total={:.1} ms: flush_handles={:.1} meta.commit={:.1} relog={:.1} ms ({:.1} MiB) flush_wal={:.1} ms |{}",
+            ts(), t_cut.elapsed().as_secs_f64() * 1e3, flush_ms, commit_ms, relog_ms, relog_bytes as f64 / 1048576.0,
+            t_fw.elapsed().as_secs_f64() * 1e3, chunk_store::probe::diff(&p0));
         Ok(root)
     }
 

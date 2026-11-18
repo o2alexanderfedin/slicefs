@@ -214,10 +214,15 @@ pub fn handle_flush(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> EmptyResult {
 pub fn handle_fsync(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> EmptyResult {
     // Write the manifest (logged as a flush), then make the log durable: the
     // sync covers this file's records and the flush record itself (#20).
+    let t = std::time::Instant::now();
     if let EmptyResult::Error(e) = handle_flush(fs, ino, fh) {
         return EmptyResult::Error(e);
     }
-    match fs.meta().flush_wal() {
+    let f_ms = t.elapsed().as_secs_f64() * 1e3;
+    let t = std::time::Instant::now();
+    let r = fs.meta().flush_wal();
+    eprintln!("[{}][PROBE] fsync flush={:.1} ms flush_wal={:.1} ms", crate::util::ts(), f_ms, t.elapsed().as_secs_f64() * 1e3);
+    match r {
         Ok(()) => EmptyResult::Ok,
         Err(_) => EmptyResult::Error(libc::EIO),
     }
@@ -321,10 +326,18 @@ pub fn handle_write(
     data: &[u8],
 ) -> WriteResult {
     let l = logged();
-    match fs.test_write(fh, offset, data) {
+    let t = std::time::Instant::now();
+    let r = fs.test_write(fh, offset, data);
+    let w_ms = t.elapsed().as_secs_f64() * 1e3;
+    match r {
         Ok(n) => {
+            let t = std::time::Instant::now();
             if let Some(ino) = fs.ino_of_fh(fh) {
                 l.log(fs, crate::oplog::Op::Write { ino, offset, data: data[..n as usize].to_vec() });
+            }
+            let l_ms = t.elapsed().as_secs_f64() * 1e3;
+            if w_ms + l_ms > 50.0 {
+                eprintln!("[{}][PROBE] handle_write offset={} len={} test_write={:.1} ms wal_append={:.1} ms", crate::util::ts(), offset, data.len(), w_ms, l_ms);
             }
             WriteResult::Ok(n)
         }

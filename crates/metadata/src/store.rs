@@ -942,6 +942,7 @@ impl MetadataStore for DictMetadataStore {
         //   and inode_count (u64).
         // Changes made after this point are left for the next commit.
         let changes = self.changes.load(Ordering::Relaxed);
+        let t0 = std::time::Instant::now();
         // Write changed directories and inodes first, so the digest maps are current.
         self.flush_dirs();
         self.flush_inodes();
@@ -993,13 +994,16 @@ impl MetadataStore for DictMetadataStore {
         // Make every object written since the last commit durable before the
         // root that refers to them is logged: after that, log rotation deletes
         // the segments whose records hold the same data (#20).
+        let t1 = std::time::Instant::now();
         io_guard.sync_written().map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
         // Drop io_guard to release the lock before WAL logging
         drop(io_guard);
+        let t2 = std::time::Instant::now();
         // The file content that the root refers to must be durable too.
         if let Some(f) = self.pre_root_sync.lock().unwrap().as_ref() {
             f().map_err(|e| MetaError::Corrupted(format!("commit: content sync failed: {e}")))?;
         }
+        let t3 = std::time::Instant::now();
 
         // Update last_root so background GC can use it
         *self.last_root.lock().unwrap() = Some(root_digest);
@@ -1007,7 +1011,12 @@ impl MetadataStore for DictMetadataStore {
         // Log RootUpdate to WAL AFTER all nodes are flushed to disk (crash-safe ordering).
         // If we crash between flush and WAL write, the next mount will just re-commit.
         self.log_wal_entry(&WalEntry::RootUpdate { root: root_digest });
+        let t4 = std::time::Instant::now();
         self.rotate_wal(root_digest);
+        let t5 = std::time::Instant::now();
+        eprintln!("[PROBE] meta.commit: build={:.1} sync_written={:.1} pre_root_sync={:.1} root_log_sync={:.1} rotate={:.1} ms",
+            (t1 - t0).as_secs_f64() * 1e3, (t2 - t1).as_secs_f64() * 1e3, (t3 - t2).as_secs_f64() * 1e3,
+            (t4 - t3).as_secs_f64() * 1e3, (t5 - t4).as_secs_f64() * 1e3);
 
         self.committed_changes.store(changes, Ordering::Relaxed);
         Ok(root_digest)

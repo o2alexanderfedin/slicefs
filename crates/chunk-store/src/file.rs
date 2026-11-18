@@ -98,6 +98,7 @@ fn decode_node(b: &[u8]) -> Option<Node> {
 }
 
 fn load_node(store: &ChunkStore, id: &ObjectId) -> Result<Node> {
+    crate::probe::inc(&crate::probe::NODE_LOADS, 1);
     let bytes = store.read(id)?;
     decode_node(&bytes).ok_or_else(|| Error::Corrupt(format!("manifest node {id:?}")))
 }
@@ -650,7 +651,9 @@ pub fn splice(
             let at = start + buf.len() as u64;
             if at < new_len {
                 let n = ((2 * max - buf.len()) as u64).min(new_len - at) as usize;
+                let t = std::time::Instant::now();
                 let piece = src.read(at, n)?;
+                crate::probe::add(&crate::probe::SRC_NS, t);
                 if piece.len() != n {
                     return Err(Error::Io(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
@@ -660,7 +663,9 @@ pub fn splice(
                 buf.extend_from_slice(&piece);
             }
             let all = start + buf.len() as u64 == new_len;
+            let t = std::time::Instant::now();
             let ranges = chunk_ranges(&buf);
+            crate::probe::add(&crate::probe::CDC_NS, t);
             let n = if all { ranges.len() } else { ranges.len().saturating_sub(1) };
             let mut used = 0;
             for r in &ranges[..n] {

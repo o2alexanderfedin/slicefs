@@ -52,16 +52,29 @@ def put(fd, data, off):
         done += os.pwrite(fd, data[done:], off + done)
 written = writes = since_sync = 0
 max_w = max_s = 0.0
+T0 = time.perf_counter()
+slow = []  # PROBE: (dur, idx, wall, off, n, written_before)
+fsyncs = []
+def wall():
+    t = time.time(); s = int(t)
+    return "%02d:%02d:%02d.%03d" % ((s // 3600) % 24, (s // 60) % 60, s % 60, int((t - s) * 1000))
 def one(n):
     global written, writes, since_sync, max_w
     off = rnd.randrange((size - n) // KB + 1) * KB
     data = rnd.randbytes(n)
-    t = time.perf_counter(); put(tgt, data, off); max_w = max(max_w, time.perf_counter() - t)
-    put(ref, data, off)
+    w0 = wall()
+    t = time.perf_counter(); put(tgt, data, off); d = time.perf_counter() - t; max_w = max(max_w, d)
+    if d > 0.05:
+        slow.append((d, writes, w0, off, n, written))
+    t = time.perf_counter(); put(ref, data, off); dr = time.perf_counter() - t
+    if dr > 0.05:
+        print(f"PROBE ref write slow {dr*1000:.0f} ms at {w0}", file=sys.stderr)
     written += n; writes += 1; since_sync += n
 def sync():
     global since_sync, max_s
-    t = time.perf_counter(); os.fsync(tgt); max_s = max(max_s, time.perf_counter() - t)
+    w0 = wall()
+    t = time.perf_counter(); os.fsync(tgt); d = time.perf_counter() - t; max_s = max(max_s, d)
+    fsyncs.append((d, w0, written))
     since_sync = 0
 while written < vol:
     one(MB)
@@ -71,6 +84,14 @@ while written < vol:
         sync()
 sync()
 os.close(tgt); os.close(ref)
+with open(os.environ.get("RW_DETAIL", "/tmp/bw/rw-detail.txt"), "w") as f:
+    f.write(f"total {time.perf_counter() - T0:.1f} s; writes > 50 ms: {len(slow)}, sum {sum(x[0] for x in slow):.1f} s\n")
+    for d, i, w0, off, n, wb in sorted(slow, reverse=True)[:40]:
+        f.write(f"  slow write {d*1000:.0f} ms idx={i} start={w0} off={off} len={n} written_before={wb >> 20} MiB\n")
+    for d, i, w0, off, n, wb in sorted(slow, key=lambda x: x[1]):
+        f.write(f"  chrono write {d*1000:.0f} ms idx={i} start={w0} len={n} written_before={wb >> 20} MiB\n")
+    for d, w0, wb in fsyncs:
+        f.write(f"  fsync {d*1000:.0f} ms start={w0} written={wb >> 20} MiB\n")
 print(f"writes {writes}, max write {max_w * 1000:.0f} ms, max fsync {max_s * 1000:.0f} ms")
 PY
 
@@ -83,8 +104,14 @@ for S in "${SIZES[@]}"; do
   if mnt $ST $M; then   # default commit interval
     N0=$(nsw)
     t=$SECONDS; step bw-cp-$S 900 cp $R/ref.bin $M/big.bin; T1=$((SECONDS - t)); H1=$(hwm)
+    ( while :; do echo "$(date -u +%H:%M:%S.%3N) $(awk '/^(Dirty|Writeback):/{printf "%s=%dMiB ", $1, $2/1024}' /proc/meminfo) $(tr '\n' ' ' </proc/pressure/io 2>/dev/null | cut -c1-60)"; sleep 0.5; done ) > $R/mem.log 2>&1 & SAMP=$!
     t=$SECONDS; step bw-random-write-$S 1800 python3 $R/rw.py $M/big.bin $R/ref.bin $SEED $VOL_MIB
     T2=$((SECONDS - t)); H2=$(hwm); RW=$(tail -1 $R/step.out)
+    kill $SAMP 2>/dev/null
+    echo "---- PROBE rw-detail $S"; cat $R/rw-detail.txt; grep PROBE $R/step.out
+    echo "---- PROBE daemon $S"; grep -E 'PROBE|commit-timer|switches to overlay' $R/mount.log
+    echo "---- PROBE meminfo $S"; cat $R/mem.log
+    echo "---- PROBE end $S"
     t=$SECONDS; step bw-cmp-$S 600 cmp $R/ref.bin $M/big.bin; T3=$((SECONDS - t)); H3=$(hwm)
     N=$(( $(nsw) - N0 ))
     if [ -n "$CAP_MIB" ]; then

@@ -79,7 +79,13 @@ impl PackRead for RetryingPack {
 
 impl PackFile for RetryingPack {
     fn write_at(&mut self, data: &[u8], offset: u64) -> io::Result<()> {
+        let t = std::time::Instant::now();
         self.file.write_at(data, offset)?;
+        let ns = crate::probe::add(&crate::probe::WRITE_NS, t);
+        crate::probe::max(&crate::probe::WRITE_MAX_NS, ns);
+        if ns > 100_000_000 {
+            eprintln!("[PROBE] pack write_at {} bytes took {:.1} ms", data.len(), ns as f64 / 1e6);
+        }
         self.unsynced.push((offset, data.to_vec()));
         self.kept += data.len();
         if self.kept > KEEP_LIMIT {
@@ -101,7 +107,15 @@ impl PackFile for RetryingPack {
     }
 
     fn sync(&mut self) -> io::Result<()> {
-        let mut err = match self.file.sync() {
+        let t = std::time::Instant::now();
+        let r0 = self.file.sync();
+        let ns = crate::probe::add(&crate::probe::SYNC_NS, t);
+        crate::probe::inc(&crate::probe::SYNC_N, 1);
+        crate::probe::max(&crate::probe::SYNC_MAX_NS, ns);
+        if ns > 100_000_000 {
+            eprintln!("[PROBE] pack sync of {} kept bytes took {:.1} ms (thread {:?})", self.kept, ns as f64 / 1e6, std::thread::current().name());
+        }
+        let mut err = match r0 {
             Ok(()) => {
                 self.unsynced.clear();
                 self.kept = 0;

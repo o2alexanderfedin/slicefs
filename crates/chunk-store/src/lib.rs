@@ -21,6 +21,7 @@ pub mod hash;
 pub mod pack_io;
 pub mod retry;
 pub mod mem;
+pub mod probe;
 
 use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK};
 pub use crate::hash::{hasher_by_name, hasher_by_tag, hasher_names, hashers, Blake3_256, ObjectHasher, DEFAULT_HASHER};
@@ -537,11 +538,18 @@ impl ChunkStore {
         if self.opts.read_only {
             return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
         }
+        let t_put = std::time::Instant::now();
+        probe::inc(&probe::PUT_N, 1);
+        let t = std::time::Instant::now();
         let id = self.opts.hasher.id(data);
+        probe::add(&probe::HASH_NS, t);
         {
+            let t = std::time::Instant::now();
             let mut inner = self.inner.lock().unwrap();
+            probe::add(&probe::LOCK_NS, t);
             if inner.index.contains_key(&id) {
                 inner.touch(id);
+                probe::add(&probe::PUT_NS, t_put);
                 return Ok(id);
             }
         }
@@ -552,22 +560,31 @@ impl ChunkStore {
             let s = &mut *s.borrow_mut();
             // Compress outside the lock.
             let level = self.zstd_level.load(Ordering::Relaxed);
+            let t = std::time::Instant::now();
             let zstd = level > 0 && data.len() >= MIN_COMPRESS && s.compress(data, level);
+            probe::add(&probe::ZSTD_NS, t);
             let (flags, payload) = if zstd { (FLAG_ZSTD, s.compressed.as_slice()) } else { (0, data) };
             encode_record_into(&mut s.record, &id, flags, data.len() as u32, payload);
             let stored = payload.len() as u32;
 
             let r = (|| {
+                let t = std::time::Instant::now();
                 let mut inner = self.inner.lock().unwrap();
+                probe::add(&probe::LOCK_NS, t);
                 inner.touch(id);
                 if inner.index.contains_key(&id) {
                     return Ok(id);
                 }
                 inner.check()?;
+                let t = std::time::Instant::now();
                 let loc = self.append(&mut inner, &id, &s.record, stored, data.len() as u32, flags)?;
+                probe::add(&probe::APPEND_NS, t);
+                probe::inc(&probe::PUT_NEW, 1);
+                probe::inc(&probe::PUT_NEW_BYTES, s.record.len() as u64);
                 inner.add(id, loc);
                 Ok(id)
             })();
+            probe::add(&probe::PUT_NS, t_put);
             // Chunks and nodes are small; do not keep the buffers of a big object.
             for b in [&mut s.compressed, &mut s.record] {
                 if b.capacity() > SCRATCH_KEEP {
@@ -597,7 +614,11 @@ impl ChunkStore {
         a.entries.push((*id, loc));
         a.dirty = true;
         if a.len >= self.opts.pack_limit {
+            let t = std::time::Instant::now();
             self.seal(inner)?;
+            let ns = probe::add(&probe::SEAL_NS, t);
+            probe::inc(&probe::SEAL_N, 1);
+            eprintln!("[PROBE] pack seal (rollover) {:.1} ms", ns as f64 / 1e6);
         }
         Ok(loc)
     }
@@ -805,15 +826,20 @@ impl ChunkStore {
     /// Errors: `Missing`, `Corrupt` (a damaged record), `UnknownHash` (a tag
     /// this build does not know: a damaged or newer store), `Io`.
     pub fn read(&self, id: &ObjectId) -> Result<Vec<u8>> {
+        let t_read = std::time::Instant::now();
+        let _g = ReadProbe(t_read);
         let hasher = hasher_by_tag(id.tag()).ok_or(Error::UnknownHash(*id))?;
         let (loc, file) = {
+            let t = std::time::Instant::now();
             let mut inner = self.inner.lock().unwrap();
+            probe::add(&probe::LOCK_NS, t);
             let loc = *inner.index.get(id).ok_or(Error::Missing(*id))?;
             inner.touch(*id);
             let file = inner.reader(&*self.io, loc.pack)?;
             (loc, file)
         };
         let damaged = || Error::Corrupt(format!("object {id:?}"));
+        probe::inc(&probe::READ_BYTES, loc.raw as u64);
         let mut buf = vec![0u8; REC_HEADER + loc.stored as usize + REC_CRC];
         file.read_at(&mut buf, loc.offset)?;
         let (rid, flags, raw, _, _) = decode_record(&buf).ok_or_else(damaged)?;
@@ -905,6 +931,14 @@ impl ChunkStore {
         }
         inner.dir_dirty = false; // write_durable synced the directory
         Ok(())
+    }
+}
+
+struct ReadProbe(std::time::Instant);
+impl Drop for ReadProbe {
+    fn drop(&mut self) {
+        probe::inc(&probe::READ_N, 1);
+        probe::add(&probe::READ_NS, self.0);
     }
 }
 
