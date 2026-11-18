@@ -150,3 +150,35 @@ Next:
    ops). Then `compact_segment` never sees dead op records.
 5. Tests: differential (live state against replayed state), kill -9 with
    `--commit-interval 0` in the Linux harness, sync order, torn tail.
+
+## Write-log RAM (#98)
+
+Rules for the RAM that the write log uses, and for what a crash keeps. The
+number of disk syncs is the same in all modes as before.
+
+- **per-op** (default): after each operation record, the writer flushes its
+  buffer into the segment file (one `write()` into the kernel, no disk
+  sync). Root and snapshot records are synced at once. Thus a completed
+  request survives a crash of the daemon (kill -9, panic, OOM kill). fsync,
+  fsyncdir or a commit makes it survive a power loss.
+- **flush-on-fsync** and **periodic**: the records stay in RAM until fsync,
+  fsyncdir or a commit writes and syncs them. When the held records pass
+  4 MiB (`BUFFER_CAP_BYTES`), they are written to the segment file with no
+  disk sync, and the RAM is emptied. Thus these modes use at most about
+  4 MiB of RAM for the log, not all bytes written since the last fsync.
+- **periodic**: a timer thread also writes and syncs the held records every
+  `interval_secs` (5 s from the CLI). Drop and shutdown stop the thread.
+- After a crash with no fsync, flush-on-fsync and periodic can lose up to
+  the last 4 MiB of records. A file can then come back shorter than it was
+  written: a correct first part of the data (for example 4 MiB of a 6 MiB
+  file). Before #98, such a file did not come back at all.
+- A power loss loses the records after the last sync in every mode.
+
+Cost (measured in the spike, in-process, no FUSE): no change for writes of
+4 KiB or more, because such records already went past the 8 KiB write
+buffer. For many small files, about 8 % more CPU; for 64-byte writes, about
+6 µs per request.
+
+Docker check (`verify-phases.sh`, Phase 05c): the main steps run in per-op
+mode. The control (a rename with no sync after it, then kill -9) runs in
+flush-on-fsync mode, where the rename is still lost; per-op now keeps it.
