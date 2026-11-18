@@ -133,8 +133,9 @@ pub fn create_wal(
             let wal = FlushOnFsyncWal::new(&seg_path, segment_id)?;
             Ok(Box::new(wal))
         }
-        WalConfig::Periodic { .. } => {
-            let wal = PeriodicWal::new(&seg_path, segment_id)?;
+        WalConfig::Periodic { interval_secs } => {
+            let interval = std::time::Duration::from_secs(interval_secs);
+            let wal = PeriodicWal::with_interval(&seg_path, segment_id, interval)?;
             Ok(Box::new(wal))
         }
         WalConfig::NoWal => Ok(Box::new(NoWal)),
