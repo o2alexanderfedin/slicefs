@@ -24,11 +24,11 @@ metrics:
   duration: ~2 h 40 min (measure job 8,948 s)
   completed: 2026-11-18
 actuals:
-  tokens: 2600
+  tokens: 814
   tasks: 2
   commits: 1
 plan_head_before: 0b3bd4697962490c9eadd82337d2434822dd5db8
-plan_head_after: 68b4277
+plan_head_after: 68b4277244635ab2dc6727eb480a14ab77eb8780
 ---
 
 # Phase 15 Plan 02: seed measurements in the chunk-store design note Summary
