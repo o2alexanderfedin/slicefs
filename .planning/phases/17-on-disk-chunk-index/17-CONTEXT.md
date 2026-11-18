@@ -93,6 +93,7 @@ Replace `Inner::index: HashMap<ObjectId, Loc>` in crates/chunk-store/src/lib.rs 
 - docs/design/chunk-store.md
 
 ### Risks
+- From 16-01 (2026-11-18): index-bench `create` counts only files in `<store>/packs` for disk_bytes. The new index lives in `<store>/index/`, so extend the bench to count the whole store (or packs + index) before the IDX-05 comparison, or disk bytes per object will read too low.
 - Phase 16 (benchmark, #66) has no artifacts yet: .planning/phases/16-chunk-index-benchmark is empty and crates/chunk-store has no benches. IDX-05 depends on it, and the baseline must be recorded before the HashMap is removed.
 - A stale index positive in put (lib.rs:543/563) makes put skip the write, so a GC-removed or punched object is lost silently. Tombstone durability and visibility must come before the pack delete or punch, and the tests must cover put after GC (not only get).
 - gc_finish builds by_pack from every index entry (lib.rs:641-646), which costs O(N) RAM. If it is not changed, GC brings back the RAM problem.

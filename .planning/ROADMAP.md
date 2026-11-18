@@ -154,7 +154,7 @@ Full details: `.planning/milestones/v2.0-ROADMAP.md`. Audit: `.planning/mileston
 **Milestone goal:** Record the missing measurements, close the finished issues, and replace the in-memory chunk index with an on-disk index that does not need much RAM per object.
 
 - [ ] **Phase 13: Write log close-out** (#20) - check the acceptance list against tests, restate the NFS item, close #20
-- [ ] **Phase 14: Buffered delta re-log** (#93) - a commit logs only the bytes changed since the last commit
+- [ ] **Phase 14: Bounded-memory random writes** (#98, #93) - no full-file buffer; memory per open file does not depend on file size; a commit logs only changed bytes
 - [ ] **Phase 15: Pack-file measurements** (#8) - seed throughput and store size, before and after packs
 - [ ] **Phase 16: Chunk index benchmark** (#66) - cold open, RSS, lookups and recovery at 1M/10M/100M objects
 - [ ] **Phase 17: On-disk chunk index** (#85) - sorted runs, memtable, filters, merge; measured against Phase 16
@@ -174,14 +174,16 @@ Plans:
 - [ ] 13-02-PLAN.md — Docker verify-phases.sh: 1 GiB copy with measured VmHWM cap, Phase 05c rename + dir fsync, Phase 05d torn tail after kill -9 (wave 1)
 - [ ] 13-03-PLAN.md — FSKit by-hand README section, evidence run, #20 close-out comment, gated close after merge and green CI (wave 2, checkpoint)
 
-### Phase 14: Buffered delta re-log
-**Goal**: The write log cost of a commit with a large open Buffered file depends on the changed bytes, not on the file size
-**Depends on**: Nothing (Phase 13 recommended first)
-**Requirements**: BUFR-01, BUFR-02, BUFR-03
+### Phase 14: Bounded-memory random writes
+**Goal**: A random write never loads the whole file into RAM. The memory of an open file is bounded by a fixed limit, and the write-log cost of a commit depends on the changed bytes, not on the file size (#98, which also fixes #93)
+**Depends on**: Phase 13 (same test files)
+**Requirements**: BUFR-01, BUFR-02, BUFR-03, BUFR-04, BUFR-05
 **Success Criteria** (what must be TRUE):
-  1. A test with a large open Buffered file and a small change shows that the commit writes about the size of the change to the write log
-  2. Replay after a crash gives the same content, size and times, for PerOp and FlushOnFsync
-  3. The commit gate does not hash the whole Buffered file
+  1. A 1 GiB and a 4 GiB random-write test in Docker keep the daemon peak RSS (VmHWM) below the same fixed cap
+  2. A commit with a large open file and a small change writes about the size of the change to the write log
+  3. Replay after a crash gives the same content, size and times, for PerOp and FlushOnFsync
+  4. The commit gate is not held for the hash of a whole file; online GC during a rebase loses no chunk
+  5. After a small change in a large file, the store grows by about the changed chunks only
 **Plans**: TBD
 
 ### Phase 15: Pack-file measurements
