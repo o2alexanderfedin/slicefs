@@ -13,7 +13,6 @@ pub trait Store {
     /// Store `data` (a new object, or a dedup hit).
     fn put(&self, data: &[u8]) -> Result<(), String>;
     /// True if the store has `id`.
-    #[allow(dead_code)] // TEMP: the lookup step uses it
     fn contains(&self, id: &ObjectId) -> bool;
     /// Distinct objects in the store.
     fn objects(&self) -> u64;

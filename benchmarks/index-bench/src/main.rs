@@ -4,7 +4,8 @@
 //! ```text
 //! index-bench create --dir D --objects N [--pack-limit BYTES]
 //! index-bench open   --dir D [--cache warm|cold]
-//! index-bench run    --dir D --objects N [--reps R] [--pack-limit BYTES] [--drop-caches]
+//! index-bench lookup --dir D [--hits K] [--misses K] [--seed S]
+//! index-bench run    --dir D --objects N [--reps R] [--pack-limit BYTES] [--hits K] [--misses K] [--drop-caches]
 //!   every step also takes --backend NAME (default chunk-store)
 //! ```
 //!
@@ -30,8 +31,9 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use backend::{backend_by_name, Backend};
+use chunk_store::{ObjectId, DEFAULT_HASHER};
 
-const USAGE: &str = "usage: index-bench create|open|run --dir D [--backend NAME] [step flags] (see the doc comment of src/main.rs)";
+const USAGE: &str = "usage: index-bench create|open|lookup|run --dir D [--backend NAME] [step flags] (see the doc comment of src/main.rs)";
 
 /// The marker file of a store made by this tool: the output of `create`.
 const MARKER: &str = "index-bench.txt";
@@ -68,7 +70,8 @@ fn spec(cmd: &str) -> Option<(&'static [&'static str], &'static [&'static str])>
     Some(match cmd {
         "create" => (&["dir", "backend", "objects", "pack-limit"], &[]),
         "open" => (&["dir", "backend", "cache"], &[]),
-        "run" => (&["dir", "backend", "objects", "reps", "pack-limit"], &["drop-caches"]),
+        "lookup" => (&["dir", "backend", "hits", "misses", "seed"], &[]),
+        "run" => (&["dir", "backend", "objects", "reps", "pack-limit", "hits", "misses"], &["drop-caches"]),
         _ => return None,
     })
 }
@@ -196,6 +199,21 @@ fn drop_caches_unsupported() -> String {
 /// The bytes of synthetic object `i`.
 fn object(i: u64) -> [u8; 8] {
     i.to_le_bytes()
+}
+
+/// The ID of synthetic object `i`. A content ID, so it is the same for every
+/// backend.
+fn object_id(i: u64) -> ObjectId {
+    DEFAULT_HASHER.id(&object(i))
+}
+
+/// The next value of a splitmix64 sequence (a small PRNG; std only).
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 // ── Output ───────────────────────────────────────────────────────────────────
@@ -366,6 +384,73 @@ fn step_open(f: &Flags) -> Result<(), Fail> {
     ]));
 }
 
+/// The default seed of the lookup sample, so runs repeat.
+const LOOKUP_SEED: u64 = 66;
+
+fn step_lookup(f: &Flags) -> Result<(), Fail> {
+    let dir = f.dir()?;
+    let backend = f.backend()?;
+    let n = marker_objects(&read_marker(&dir, &*backend)?)?;
+    let default_k = n.min(1_000_000);
+    let hits = f.u64("hits")?.unwrap_or(default_k);
+    let misses = f.u64("misses")?.unwrap_or(default_k);
+    let mut seed = f.u64("seed")?.unwrap_or(LOOKUP_SEED);
+    if n == 0 && hits > 0 {
+        return Err("the store has no objects, so there are no hits to look up".into());
+    }
+
+    // The sample, before any timing: hits are objects below N (with
+    // replacement), misses are objects at N or above. The IDs are made here,
+    // so hashing is not in the contains timing.
+    let hit_vals: Vec<u64> = (0..hits).map(|_| splitmix64(&mut seed) % n).collect();
+    let hit_ids: Vec<ObjectId> = hit_vals.iter().map(|&i| object_id(i)).collect();
+    let miss_ids: Vec<ObjectId> = (0..misses).map(|_| object_id(n + (splitmix64(&mut seed) % (1 << 62)))).collect();
+
+    let store = backend.open(&dir, false)?;
+    let objects = store.objects();
+    if objects != n {
+        return Err(format!("the store has {objects} objects, the marker says {n}").into());
+    }
+
+    let t0 = Instant::now();
+    let found = hit_ids.iter().filter(|id| store.contains(id)).count() as u64;
+    let hit_s = t0.elapsed().as_secs_f64();
+    if found != hits {
+        return Err(format!("contains found {found} of {hits} objects that are in the store").into());
+    }
+    let t0 = Instant::now();
+    let found = miss_ids.iter().filter(|id| store.contains(id)).count() as u64;
+    let miss_s = t0.elapsed().as_secs_f64();
+    if found != 0 {
+        return Err(format!("contains found {found} of {misses} objects that are not in the store").into());
+    }
+    // The dedup-hit path of put: its time includes the hash of the data.
+    let t0 = Instant::now();
+    for &i in &hit_vals {
+        store.put(&object(i))?;
+    }
+    let put_s = t0.elapsed().as_secs_f64();
+    if store.objects() != n {
+        return Err(format!("put of objects in the store changed the count from {n} to {}", store.objects()).into());
+    }
+
+    let ns = |s: f64, k: u64| if k > 0 { fmt_f(s * 1e9 / k as f64) } else { "n/a".into() };
+    let per_s = |s: f64, k: u64| if k > 0 && s > 0.0 { fmt_f(k as f64 / s) } else { "n/a".into() };
+    finish(&kv_text(&[
+        ("step", "lookup".into()),
+        ("backend", backend.name().into()),
+        ("objects", objects.to_string()),
+        ("hits", hits.to_string()),
+        ("misses", misses.to_string()),
+        ("contains_hit_ns", ns(hit_s, hits)),
+        ("contains_hit_per_s", per_s(hit_s, hits)),
+        ("contains_miss_ns", ns(miss_s, misses)),
+        ("contains_miss_per_s", per_s(miss_s, misses)),
+        ("put_hit_ns", ns(put_s, hits)),
+        ("put_hit_per_s", per_s(put_s, hits)),
+    ]));
+}
+
 // ── run driver ───────────────────────────────────────────────────────────────
 
 /// Start this binary for one step and return its stdout. Its stderr goes
@@ -483,6 +568,17 @@ fn step_run(f: &Flags) -> Result<(), Fail> {
         opens.push(parse_kv(&out));
     }
 
+    let mut args = common("lookup");
+    for k in ["hits", "misses"] {
+        if let Some(v) = f.get(k) {
+            args.extend([format!("--{k}"), v.into()]);
+        }
+    }
+    let out = child(&args)?;
+    println!("# lookup");
+    print!("{out}");
+    let lookup = parse_kv(&out);
+
     let os = os_label().to_string();
     let label = objects_label(n);
     let get = |k: &str| marker.get(k).cloned().unwrap_or_else(|| "n/a".into());
@@ -534,6 +630,32 @@ fn step_run(f: &Flags) -> Result<(), Fail> {
             ]],
         )
     );
+    let lk = |k: &str| lookup.get(k).cloned().unwrap_or_else(|| "n/a".into());
+    println!();
+    println!("## Lookups");
+    print!(
+        "{}",
+        table(
+            &[
+                "OS",
+                "Objects",
+                "contains hit ns",
+                "contains miss ns",
+                "put dedup-hit ns",
+                "contains hit/s",
+                "contains miss/s",
+            ],
+            &[vec![
+                os.clone(),
+                label.clone(),
+                lk("contains_hit_ns"),
+                lk("contains_miss_ns"),
+                lk("put_hit_ns"),
+                lk("contains_hit_per_s"),
+                lk("contains_miss_per_s"),
+            ]],
+        )
+    );
     let _ = std::io::stdout().flush();
     Ok(())
 }
@@ -543,6 +665,7 @@ fn real_main(args: &[String]) -> Result<(), Fail> {
     match cmd.as_str() {
         "create" => step_create(&flags),
         "open" => step_open(&flags),
+        "lookup" => step_lookup(&flags),
         "run" => step_run(&flags),
         _ => Err(Fail::Usage(format!("unknown subcommand {cmd}"))),
     }

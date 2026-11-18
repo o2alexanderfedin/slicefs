@@ -47,6 +47,9 @@ fn run_creates_and_opens_a_small_store() {
     assert!(out.lines().filter(|l| *l == "step=open").count() >= 2, "{out}");
     assert!(out.lines().any(|l| l == "objects=20000"), "{out}");
     assert!(out.lines().any(|l| l.starts_with("| OS | Objects |")), "{out}");
+    assert!(out.lines().any(|l| l == "step=lookup"), "{out}");
+    assert!(out.lines().any(|l| l == "## Lookups"), "{out}");
+    assert!(out.lines().any(|l| l.starts_with("| OS | Objects | contains hit ns |")), "{out}");
     assert!(!out.contains(p(&d)), "run must not print the store path:\n{out}");
     assert!(d.join("index-bench.txt").is_file());
 }
@@ -61,6 +64,51 @@ fn open_reports_rss_per_object() {
     assert_eq!(value(&out, "objects"), Some("20000"), "{out}");
     let peak: f64 = value(&out, "peak_bytes_per_object").unwrap().parse().expect("a number");
     assert!(peak >= 0.0, "{out}");
+}
+
+/// Name and size of every file in the store's packs directory.
+fn pack_files(d: &Path) -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = std::fs::read_dir(d.join("packs"))
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            (e.file_name().to_string_lossy().into_owned(), e.metadata().unwrap().len())
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+fn positive(out: &str, key: &str) {
+    let v: f64 = value(out, key).unwrap_or_else(|| panic!("no {key}:\n{out}")).parse().expect("a number");
+    assert!(v > 0.0, "{key} is not positive:\n{out}");
+}
+
+#[test]
+fn lookup_finds_hits_not_misses_and_does_not_change_the_store() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path().join("s");
+    create(&d, "5000", &[]);
+    let before = pack_files(&d);
+    let out = ok(&["lookup", "--dir", p(&d), "--hits", "2000", "--misses", "2000"]);
+    assert_eq!(value(&out, "step"), Some("lookup"), "{out}");
+    assert_eq!(value(&out, "objects"), Some("5000"), "{out}");
+    assert_eq!(value(&out, "hits"), Some("2000"), "{out}");
+    assert_eq!(value(&out, "misses"), Some("2000"), "{out}");
+    for key in ["contains_hit_per_s", "contains_miss_per_s", "put_hit_per_s", "contains_hit_ns", "put_hit_ns"] {
+        positive(&out, key);
+    }
+    assert_eq!(pack_files(&d), before, "lookup changed the pack files");
+    let open = ok(&["open", "--dir", p(&d)]);
+    assert_eq!(value(&open, "objects"), Some("5000"), "{open}");
+}
+
+#[test]
+fn lookup_refuses_a_dir_without_the_marker() {
+    let t = tempfile::tempdir().unwrap();
+    let out = bench(&["lookup", "--dir", p(t.path())]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not an index-bench store"));
 }
 
 #[test]
