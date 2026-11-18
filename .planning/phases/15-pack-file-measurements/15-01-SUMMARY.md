@@ -18,7 +18,8 @@ key-files:
     - scripts/pack-measure/seed-measure.sh
     - scripts/pack-measure/README.md
   modified: []
-decisions:
+requirements-completed: [PACK-01]
+key-decisions:
   - "CUR = c447551 (origin/develop head on 2026-11-18)"
   - "All three builds on the default toolchain rustc 1.95.0-nightly (9e79395f9 2026-02-10), no patches"
   - "The three release builds ran in parallel in one batch (Task 2's 7016bb6 build started together with Task 1's builds)"
