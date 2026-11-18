@@ -47,9 +47,7 @@ pub fn spawn_commit_timer(
             if !fs.meta().has_uncommitted_changes() {
                 continue;
             }
-            let t_gate = Instant::now();
             let _all = gate.write().unwrap_or_else(|e| e.into_inner());
-            eprintln!("[{}][PROBE] commit-timer gate wait {:.1} ms", ts(), t_gate.elapsed().as_secs_f64() * 1e3);
             let t = Instant::now();
             // A clean cut: open files' content goes into the root (#20).
             match fs.commit_cut() {

@@ -15,7 +15,7 @@ CAP_MIB=256
 VOL_MIB=512         # random-write volume per size
 SEED=98
 SWITCH_TEXT="switches to overlay"
-PRE=(env SLICEFS_PROBE_DIRTY_MIB=${PROBE_DIRTY_MIB:-32}); R=/tmp/bw; rm -rf $R; mkdir -p $R/empty; F=0
+PRE=(); R=/tmp/bw; rm -rf $R; mkdir -p $R/empty; F=0
 ok(){ echo "  $1: ok"; }; bad(){ echo "  $1: FAIL ${2:-}"; F=1; }
 step(){ local n=$1 t=$2; shift 2
   if timeout -s KILL $t "$@" >$R/step.out 2>&1; then ok "$n"; else bad "$n" "($(head -c 200 $R/step.out))"; fi; }
@@ -52,29 +52,16 @@ def put(fd, data, off):
         done += os.pwrite(fd, data[done:], off + done)
 written = writes = since_sync = 0
 max_w = max_s = 0.0
-T0 = time.perf_counter()
-slow = []  # PROBE: (dur, idx, wall, off, n, written_before)
-fsyncs = []
-def wall():
-    t = time.time(); s = int(t)
-    return "%02d:%02d:%02d.%03d" % ((s // 3600) % 24, (s // 60) % 60, s % 60, int((t - s) * 1000))
 def one(n):
     global written, writes, since_sync, max_w
     off = rnd.randrange((size - n) // KB + 1) * KB
     data = rnd.randbytes(n)
-    w0 = wall()
-    t = time.perf_counter(); put(tgt, data, off); d = time.perf_counter() - t; max_w = max(max_w, d)
-    if d > 0.05:
-        slow.append((d, writes, w0, off, n, written))
-    t = time.perf_counter(); put(ref, data, off); dr = time.perf_counter() - t
-    if dr > 0.05:
-        print(f"PROBE ref write slow {dr*1000:.0f} ms at {w0}", file=sys.stderr)
+    t = time.perf_counter(); put(tgt, data, off); max_w = max(max_w, time.perf_counter() - t)
+    put(ref, data, off)
     written += n; writes += 1; since_sync += n
 def sync():
     global since_sync, max_s
-    w0 = wall()
-    t = time.perf_counter(); os.fsync(tgt); d = time.perf_counter() - t; max_s = max(max_s, d)
-    fsyncs.append((d, w0, written))
+    t = time.perf_counter(); os.fsync(tgt); max_s = max(max_s, time.perf_counter() - t)
     since_sync = 0
 while written < vol:
     one(MB)
@@ -84,37 +71,21 @@ while written < vol:
         sync()
 sync()
 os.close(tgt); os.close(ref)
-with open(os.environ.get("RW_DETAIL", "/tmp/bw/rw-detail.txt"), "w") as f:
-    f.write(f"total {time.perf_counter() - T0:.1f} s; writes > 50 ms: {len(slow)}, sum {sum(x[0] for x in slow):.1f} s\n")
-    for d, i, w0, off, n, wb in sorted(slow, reverse=True)[:40]:
-        f.write(f"  slow write {d*1000:.0f} ms idx={i} start={w0} off={off} len={n} written_before={wb >> 20} MiB\n")
-    for d, i, w0, off, n, wb in sorted(slow, key=lambda x: x[1]):
-        f.write(f"  chrono write {d*1000:.0f} ms idx={i} start={w0} len={n} written_before={wb >> 20} MiB\n")
-    for d, w0, wb in fsyncs:
-        f.write(f"  fsync {d*1000:.0f} ms start={w0} written={wb >> 20} MiB\n")
 print(f"writes {writes}, max write {max_w * 1000:.0f} ms, max fsync {max_s * 1000:.0f} ms")
 PY
 
-PROBE_DIRTY_MIB=${PROBE_DIRTY_MIB:-32}; echo "PROBE dirty limit $PROBE_DIRTY_MIB MiB; nproc $(nproc); $(grep MemTotal /proc/meminfo); $(df -T /tmp | tail -1)"
 T0=$SECONDS
 for S in "${SIZES[@]}"; do
   echo "== bigwrite $S MiB: cp, $VOL_MIB MiB of random 1 MiB and 4 KiB writes, cmp, remount, cmp"
   ST=$R/s$S; M=$R/m$S
   if ! $B seed $ST $R/empty >$R/step.out 2>&1; then bad "bw-seed-$S" "($(head -c 200 $R/step.out))"; continue; fi
-  if [ "${PROBE_REF_TMPFS:-0}" = 1 ]; then mkdir -p $R/reft; mount -t tmpfs -o size=$((S + 64))m tmpfs $R/reft && echo "PROBE ref.bin on tmpfs"; REF=$R/reft/ref.bin; else REF=$R/ref.bin; fi
-  head -c $((S * 1048576)) /dev/urandom > $REF
+  head -c $((S * 1048576)) /dev/urandom > $R/ref.bin
   if mnt $ST $M; then   # default commit interval
     N0=$(nsw)
-    t=$SECONDS; step bw-cp-$S 900 cp $REF $M/big.bin; T1=$((SECONDS - t)); H1=$(hwm)
-    ( while :; do echo "$(date -u +%H:%M:%S.%3N) $(awk '/^(Dirty|Writeback|MemFree|Cached):/{printf "%s=%dMiB ", $1, $2/1024}' /proc/meminfo) $(head -1 /proc/stat) $(cut -d' ' -f1 /proc/loadavg) $(tr '\n' ' ' </proc/pressure/io 2>/dev/null | cut -c1-60)"; sleep 0.5; done ) > $R/mem.log 2>&1 & SAMP=$!
-    t=$SECONDS; step bw-random-write-$S 1800 python3 $R/rw.py $M/big.bin $REF $SEED $VOL_MIB
+    t=$SECONDS; step bw-cp-$S 900 cp $R/ref.bin $M/big.bin; T1=$((SECONDS - t)); H1=$(hwm)
+    t=$SECONDS; step bw-random-write-$S 1800 python3 $R/rw.py $M/big.bin $R/ref.bin $SEED $VOL_MIB
     T2=$((SECONDS - t)); H2=$(hwm); RW=$(tail -1 $R/step.out)
-    kill $SAMP 2>/dev/null
-    echo "---- PROBE rw-detail $S"; cat $R/rw-detail.txt; grep PROBE $R/step.out
-    echo "---- PROBE daemon $S"; grep -E 'PROBE|commit-timer|switches to overlay' $R/mount.log
-    echo "---- PROBE meminfo $S"; cat $R/mem.log
-    echo "---- PROBE end $S"
-    t=$SECONDS; step bw-cmp-$S 600 cmp $REF $M/big.bin; T3=$((SECONDS - t)); H3=$(hwm)
+    t=$SECONDS; step bw-cmp-$S 600 cmp $R/ref.bin $M/big.bin; T3=$((SECONDS - t)); H3=$(hwm)
     N=$(( $(nsw) - N0 ))
     if [ -n "$CAP_MIB" ]; then
       if [ -n "$H3" ] && [ "$H3" -le "$CAP_MIB" ]; then ok bw-rss-bounded-$S
@@ -124,11 +95,11 @@ for S in "${SIZES[@]}"; do
     umnt $M
     echo "    bigwrite $S MiB: VmHWM after cp $H1, after random write $H2, after cmp $H3 MiB ($([ -n "$CAP_MIB" ] && echo "cap $CAP_MIB MiB" || echo "measure only")); $RW; overlay switches $N; CAS bytes $(cas $ST); times cp/rw/cmp $T1/$T2/$T3 s"
     if mnt $ST $M; then
-      step bw-cmp-after-remount-$S 600 cmp $REF $M/big.bin
+      step bw-cmp-after-remount-$S 600 cmp $R/ref.bin $M/big.bin
       umnt $M
     fi
   fi
-  rm -rf $ST $M $REF; umount $R/reft 2>/dev/null
+  rm -rf $ST $M $R/ref.bin
 done
 echo "    run time: $((SECONDS - T0)) s"
 
