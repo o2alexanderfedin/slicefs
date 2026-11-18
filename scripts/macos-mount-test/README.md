@@ -44,7 +44,8 @@ echo s > $W/seed/s.txt
 $B seed $W/store $W/seed
 head -c 1073741824 /dev/urandom > $W/big.bin
 
-waitmnt() { for i in $(seq 1 60); do mount | grep -q "${W#/private}/mnt " && return 0; sleep 1; done; echo "MOUNT FAILED"; return 1; }
+mounted() { mount | grep -q "${W#/private}/mnt "; }
+waitmnt() { for i in $(seq 1 60); do mounted && return 0; sleep 1; done; echo "MOUNT FAILED"; return 1; }
 waitexit() { while kill -0 $1 2>/dev/null; do sleep 0.5; done; }
 
 $B mount --store $W/store --backend fskit $W/mnt </dev/null >$W/mount.log 2>&1 &
@@ -58,8 +59,8 @@ echo 0 > $W/peak.kib
   done ) &
 S=$!
 
-cp $W/big.bin $W/mnt/big.bin
-cmp $W/big.bin $W/mnt/big.bin && echo "cmp after copy: ok" || echo "cmp after copy: FAIL"
+mounted && cp $W/big.bin $W/mnt/big.bin
+mounted && cmp $W/big.bin $W/mnt/big.bin && echo "cmp after copy: ok" || echo "cmp after copy: FAIL"
 $B unmount $W/mnt
 waitexit $MP
 wait $S
@@ -67,7 +68,7 @@ wait $S
 $B mount --store $W/store --backend fskit $W/mnt </dev/null >>$W/mount.log 2>&1 &
 MP=$!
 waitmnt
-cmp $W/big.bin $W/mnt/big.bin && echo "cmp after remount: ok" || echo "cmp after remount: FAIL"
+mounted && cmp $W/big.bin $W/mnt/big.bin && echo "cmp after remount: ok" || echo "cmp after remount: FAIL"
 $B unmount $W/mnt
 waitexit $MP
 
