@@ -19,9 +19,9 @@ affects: [14-05, 14-06, 14-07, 14-08]
 actuals:
   tokens: 7335      # chars/4 over the added diff lines ab6bdb3..669a9a3 (29341 chars)
   tasks: 3
-  commits: 3        # git rev-list --count ab6bdb3..669a9a3; the SUMMARY commit follows
+  commits: 4        # task commits: git rev-list --count ab6bdb3..1545be2 = 5, minus the first SUMMARY commit 86fc035
 plan_head_before: ab6bdb371ada7edceff43b9aef24046e375517f5
-plan_head_after: 669a9a3  # last task commit
+plan_head_after: 1545be29001ecf081f4e874abdbd32dfb83f14ff  # last task commit
 
 tech-stack:
   added: []
@@ -44,7 +44,7 @@ key-decisions:
   - "commit_cut returns an error if an extent changed between the descriptor and the copy (not possible under the exclusive gate)"
   - "The memory test syncs the store after setup, so the commit in the workload cannot hide a whole-file buffer below the baseline"
 
-requirements-completed: [BUFR-01, BUFR-03, BUFR-04]
+requirements-completed: [BUFR-01, BUFR-03]  # BUFR-04 partly: the 11 sites are bounded, but the chunk store retry buffer (Deferred Issues) holds a streamed file below 64 MiB until the next sync; the Docker part is 14-07
 
 duration: ~75 min
 completed: 2026-11-18
@@ -69,6 +69,8 @@ impl SliceFsFilesystem {
 }
 ```
 
+The position is tested: `a_switch_that_moves_pending_writes_over_the_limit_rebases_at_once` sets a hook that records the manifest root. The hook runs once, and the root it sees is the switch base, not the rebased root (commit 1545be2).
+
 `rebase_overlay` returns at once for a clean overlay. Otherwise it streams the file, finishes the root, then adds 1 to `rebase_count`, stores `last_rebase_bytes`, and calls the hook. After that it runs `install_root`. Plan 14-05 can run online GC mark and sweep inside the hook.
 
 ## Tasks
@@ -78,10 +80,11 @@ impl SliceFsFilesystem {
 | 1 | Dirty limit, counters and hook, relog in 1 MiB pieces after the commit (tracer) | 1a7e9f2 |
 | 2 | Streaming setattr through to_overlay, helper deleted, switch text + Phase 13 check | cfe369a |
 | 3 | Counting-allocator proof (memory_bound_tests.rs) and the crate run | 669a9a3 |
+| - | Hook position test (after the advisor review) | 1545be2 |
 
 Tracer gate: the Task 1 verify passed before Task 2 started. The 3 named tests are ok. write_log_replay is 15 ok and fsync is 6 ok. coverage_boost (107), streaming (25), write_path (20), posix_compliance (40) and gc_online (6) also passed.
 
-## Memory test: the four peaks (memory_bound_tests, debug build)
+## Memory test: the four peaks (memory_bound_tests, macOS, debug build)
 
 Limit 1 MiB. Baseline = heap after setup, after a store sync, with the handle open O_RDWR.
 
@@ -92,6 +95,7 @@ Limit 1 MiB. Baseline = heap after setup, after a store sync, with the handle op
 | Repeating | 16 MiB | 10216 KiB | 2.8 s |
 | Repeating | 48 MiB | 10712 KiB | 6.1 s |
 
+- Linux (Docker, `slicefs-fusetest` image, debug build, private target volume, no mount): the same four numbers, 11296 / 12220 / 10216 / 10712 KiB, test 18.8 s. The allocator counts requested sizes, so glibc and macOS malloc give the same result. CI runs `cargo test --workspace` on both (ci.yml: Linux in Docker, macOS native).
 - Bound 12288 KiB: all four pass. The difference per base kind is 924 KiB (Random) and 496 KiB (Repeating), against a limit of 2048 KiB. The test takes about 21 s.
 - **The margin is small: 68 KiB for Random 48 MiB.** Two runs gave the same number, because the seeds are fixed and the test runs on one thread. A diagnostic run that reset the peak at each step found where the peak is. It is the second 1 MiB write (write 200), which runs a limit rebase. About half of that peak is store bytes that two rebases retained with no sync between them (see Deferred Issues). The other part is the rebase work space for a 1 MiB write: the request copy, the merged extent, one 1 MiB piece through view, base read and output, and the FileWriter buffer. All of these have a fixed size.
 - **Negative check:** for one run (not committed), I held `fs.read_content(manifest root)` from the start of step 2 to the end of the window. All four cases failed: 20830, 53382, 20939 and 53942 KiB. The test sees a whole-file buffer at the sites after the commit.
@@ -122,7 +126,7 @@ Test diff against ab6bdb3: `crates/slicefs-cli/tests` changed only by the new `m
 
 ## Crate run (`cargo test -p slicefs-cli`, exit 0, 3 min 55 s wall)
 
-25 result lines, no FAILED. The 13th line is memory_bound_tests (1 passed, 21.46 s).
+25 result lines, no FAILED. The 13th line is memory_bound_tests (1 passed, 21.46 s). This run was at 669a9a3. After the hook test commit 1545be2, only the lib tests ran again (313 passed).
 
 ```
 test result: ok. 313 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.08s
@@ -174,7 +178,11 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 ## Deferred Issues
 
+- **BLOCKER FOR A DECISION (hard rule):** the 11 inventory sites are bounded and proven. But the rule "the daemon never holds a whole file in RAM" is not met as written for a file below 64 MiB, because of the chunk store retry buffer below.
+
 - **The chunk store retains unsynced pack bytes in RAM, up to one pack (64 MiB).** `RetryingPack::write_at` (chunk-store/src/retry.rs) copies each write into `unsynced` until a sync: a commit, or the seal of the pack at `pack_limit` = 64 MiB. `ChunkStore::open` wraps every pack in this layer (lib.rs:452). A streamed file below 64 MiB stays fully in RAM until the next commit, and each rebase adds its new chunk bytes. The buffer is not one of the 11 sites. It existed before phase 14 and is outside this plan's files. It does not grow with the file size, but it touches the hard rule for files below 64 MiB, and it sets a floor for the VmHWM cap of 14-07. The orchestrator decides. The details are in `deferred-items.md`.
+- From 14-01, still open: no test reaches the relog `Setattr(visible)` record (a shrink below the base, open at a commit) through a replay. The 1 MiB split is now tested (deviation 2). The replay matrix of 14-06 owns this.
+- While a limit rebase runs, the state is out of `open_files`. The rebase takes longer for a larger file. During it, a read through another handle would see the base without the extents, and a write through an aliased handle would get EBADF. RESEARCH Q6 accepts this: there is one FUSE thread (`n_threads` defaults to 1), so no other callback runs at the same time. Plans 14-05 and 14-06 must keep it in mind if they add threads.
 - With the production limit of 32 MiB, one merged extent that grows by Vec doubling can briefly hold its old and new buffer during a realloc (about 1.5 x the limit). `cost()` counts capacity, so the rebase still runs at the limit. This is a note for the 14-07 cap and needs no change now.
 
 ## Threat Flags
@@ -189,4 +197,4 @@ None.
 
 - FOUND: crates/slicefs-cli/tests/memory_bound_tests.rs (`#[global_allocator]`, one `#[test]`)
 - FOUND: `pub const DIRTY_LIMIT`, the 5 test hooks and `RELOG_PIECE` in filesystem.rs; `switches to overlay` in filesystem.rs and verify-phases.sh (`bash -n` ok)
-- FOUND commits (ancestors of HEAD): 1a7e9f2, cfe369a, 669a9a3; `git rev-list --count ab6bdb3..669a9a3` = 3
+- FOUND commits (ancestors of HEAD): 1a7e9f2, cfe369a, 669a9a3, 1545be2
