@@ -46,7 +46,8 @@ pub enum Cmd {
         allow_other: bool,
         /// WAL durability strategy: per-op, periodic, flush-on-fsync, or no-wal.
         ///
-        /// - per-op (default): sync to disk after every mutation (strongest durability)
+        /// - per-op (default): sync a root or snapshot record at once; an operation
+        ///   record is durable at the next fsync, fsyncdir or commit (POSIX rules)
         /// - flush-on-fsync: buffer mutations; flush on explicit fsync
         /// - periodic: buffer mutations; flush on background timer or shutdown
         /// - no-wal: no write-ahead log (testing only; data loss on crash)

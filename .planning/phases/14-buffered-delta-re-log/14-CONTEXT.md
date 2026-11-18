@@ -1,4 +1,4 @@
-# Phase 14: Buffered delta re-log - Context
+# Phase 14: Bounded-memory random writes - Context
 
 **Gathered:** 2026-11-18
 **Status:** Ready for planning
@@ -6,12 +6,34 @@
 <domain>
 ## Phase Boundary
 
-At each commit cut, the write log gets only the bytes of an open Buffered handle that changed since the content that the committed root holds for that inode (the 'base'). The base moves forward through a full hash of the buffer that runs outside the commit gate. Replay after a crash uses the existing Write/Setattr records on top of the base manifest and gives the same content, size, mtime and ctime for PerOp and FlushOnFsync. No new record type and no store format change are needed. Spill to disk and a splice/patch API in chunk-store are out of scope.
+RE-SCOPED 2026-11-18 by the user ("it never should keep files in memory - 1 GiB is huuuge!!"). The phase implements #98: remove the full-file buffer of Buffered mode. A random write never loads the whole file into RAM. The memory of one open file is bounded by a fixed limit that does not depend on the file size. The same design makes a commit log only the changed bytes, so it also fixes #93. Requirements: BUFR-01..05.
 
 </domain>
 
 <decisions>
 ## Implementation Decisions
+
+### Direction set by the user (2026-11-18)
+- No full-file buffer anywhere. `WriteMode::Buffered { buf: Vec<u8> }` and every `handle_content` call that reads a whole file into RAM go away. — **Reversibility:** costly — core write path of the filesystem
+- Memory of an open file is bounded by a fixed limit (dirty bytes plus about one chunk of work space), independent of the file size. Tested in Docker with a 1 GiB and a 4 GiB random-write workload under the same VmHWM cap. — **Reversibility:** costly
+
+### Proposed design from #98 (the planner confirms or improves it after research)
+- Patch overlay: base = manifest (chunk list) of the last committed version, kept in the chunk store; dirty extents = sparse map offset -> bytes; reads merge both; truncate/extend change only size and extents.
+- Rebase at a dirty-bytes limit (for example 64 MiB), at fsync and at close: re-chunk only near the dirty extents (start at the chunk boundary before an extent, feed base + dirty bytes through FastCDC until a new boundary meets an old boundary after the extent), then replace that range of chunk references in the manifest. Unchanged chunks keep their IDs.
+- Write log: dirty extents are already `Write` records; a commit re-logs only the dirty extents since the last rebase (fixes #93).
+- GC: a rebase outside the commit gate is protected from online GC (GC root or rebase/GC lock), with a test that runs GC during a rebase.
+- Open questions: can the manifest replace a range of chunk references without a full rewrite of the chunk list; is a global limit over all open handles also needed.
+
+### Decisions on the research open questions (2026-11-18, orchestrator; see 14-RESEARCH.md)
+- Chunking stays deterministic: the same bytes give the same chunks and the same file key, whatever the write history. No forced cut to bound rebase CPU. A rebase over long repeating non-zero data may be slow, but memory stays fixed. Zero runs may use the exact shortcut that keeps chunk IDs. — **Reversibility:** costly — dedup and content-addressed keys depend on it (global/decentralized goal)
+- No rebase at fsync. Fsync stays durable through the write log. A rebase runs when the dirty limit is crossed (inside that FUSE callback) and at close.
+- Dirty limit is per open file in this phase; start at 32 MiB, set the final value from measured runs. A global limit over all open files is a follow-up issue.
+- RAM that grows with written bytes in the flush-on-fsync and periodic log modes, and pending records loaded at replay, are follow-up issues. The Docker memory test uses the default per-op log.
+- Phase 13 is executed (PR #100). Phase 14 execution starts after #100 is merged into develop. Keep the "switches to Buffered" log text or update the Phase 13 Docker check in the same change.
+- The chunk-list splice API in chunk-store/src/file.rs is IN scope now (the old deferral is void).
+
+### SUPERSEDED (pre-2026-11-18 scope: delta re-log while the full buffer stays in RAM)
+The "Decided autonomously" items below were written for the old scope. Keep only what still applies (replay rules, shrink-then-extend zeros, write aliases on the owner state, test_write taking the state out of open_files, GC race). Ignore anything that keeps a full-file buffer.
 
 
 ### Decided autonomously
