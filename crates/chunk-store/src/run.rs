@@ -363,6 +363,7 @@ struct TagRange {
 
 /// An open run: the footer values, the tag table and the fences in RAM; the
 /// pages stay on disk.
+#[allow(dead_code)] // `tombstones` and the pack range: for the merges (17-06).
 pub(crate) struct Run {
     file: Arc<dyn PackRead>,
     num: u64,
@@ -497,6 +498,7 @@ impl Run {
         })
     }
 
+    #[allow(dead_code)] // For the merges (17-06).
     pub fn num(&self) -> u64 {
         self.num
     }
@@ -510,12 +512,14 @@ impl Run {
         self.entries
     }
 
+    #[allow(dead_code)] // For the merges (17-06).
     pub fn tombstones(&self) -> u64 {
         self.tombstones
     }
 
     /// The smallest and largest pack of the put entries; `None` if the run
     /// has only tombstones.
+    #[allow(dead_code)] // For the merges (17-06).
     pub fn pack_range(&self) -> Option<(u64, u64)> {
         (self.min_pack <= self.max_pack).then_some((self.min_pack, self.max_pack))
     }

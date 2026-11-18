@@ -8,6 +8,11 @@
 //! Crash safety: `sync` makes every object put before it durable. At open, a
 //! pack without a valid index is scanned; the scan stops at the first record
 //! with a bad CRC or a short read, and the pack is cut there.
+//!
+//! Index: a memtable of recent entries and sorted run files in
+//! `<dir>/index`, with a MANIFEST (see `index.rs`). The store keeps no map of
+//! every object in RAM. Open replays only the pack records above the
+//! high-water mark of the MANIFEST.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -18,12 +23,13 @@ use std::sync::{Arc, Mutex};
 
 pub mod file;
 pub mod hash;
+mod index;
 pub mod pack_io;
 pub mod retry;
-#[allow(dead_code)] // The store uses the runs from plan 17-03 on.
 mod run;
 pub mod mem;
 
+use crate::index::{Counts, Hwm, Index};
 use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK};
 pub use crate::hash::{hasher_by_name, hasher_by_tag, hasher_names, hashers, Blake3_256, ObjectHasher, DEFAULT_HASHER};
 
@@ -105,12 +111,36 @@ pub struct Options {
     /// The hash of the IDs of new objects. Objects of other known hashes
     /// stay readable: each is verified with the hasher of its own tag.
     pub hasher: &'static dyn ObjectHasher,
+    /// The index writes its memtable to a new run file when it holds this
+    /// many entries (a tuning and test knob; at least 1).
+    pub index_memtable_limit: usize,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { pack_limit: 64 << 20, zstd_level: 3, read_only: false, hasher: DEFAULT_HASHER }
+        Options {
+            pack_limit: 64 << 20,
+            zstd_level: 3,
+            read_only: false,
+            hasher: DEFAULT_HASHER,
+            index_memtable_limit: 1 << 18,
+        }
     }
+}
+
+/// The shape of the index, for tests and tools.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IndexInfo {
+    /// Live run files.
+    pub runs: u64,
+    /// Entries in the runs (tombstones included).
+    pub run_entries: u64,
+    /// Entries in the memtable (not in a run yet).
+    pub memtable_entries: u64,
+    /// The high-water mark: every pack record below (pack, offset) is in a
+    /// durable run.
+    pub hwm_pack: u64,
+    pub hwm_offset: u64,
 }
 
 /// Counts for `slicefs stats` and tests.
@@ -400,7 +430,9 @@ struct Active {
 }
 
 struct Inner {
-    index: HashMap<ObjectId, Loc>,
+    /// The memtable and the run files. Every access is under the store lock
+    /// in this version.
+    index: Index,
     /// Open packs for reads, with the tick of their last use (LRU, at most
     /// `MAX_OPEN_PACKS`).
     readers: HashMap<u64, (Arc<dyn PackRead>, u64)>,
@@ -455,6 +487,13 @@ impl ChunkStore {
     }
 
     /// Open the store on a storage strategy (files, a mock, ...).
+    ///
+    /// Reads the index MANIFEST and the run footers and tables, then replays
+    /// only the packs at or above the high-water mark (hwm): packs below it
+    /// are not opened. A writable open writes the memtable to a run when it
+    /// reaches the limit, only between two packs, with the hwm at the start
+    /// of the next pack (the entries of an `.idx` are in ID order, so a mark
+    /// inside a pack would be wrong). A read-only open writes nothing.
     pub fn open_with(io: Arc<dyn PackIo>, opts: Options) -> Result<Self> {
         if !io.prepare(opts.read_only)? {
             let zstd_level = AtomicI32::new(opts.zstd_level);
@@ -462,20 +501,30 @@ impl ChunkStore {
         }
         let mut nums = io.list()?;
         nums.sort_unstable();
+        let index = Index::open(&*io, opts.read_only)?;
+        let hwm = index.hwm();
+        let c = index.counts();
 
         let mut inner = Inner {
-            index: HashMap::new(),
+            index,
             readers: HashMap::new(),
             tick: 0,
             active: None,
-            next_pack: nums.last().map_or(1, |n| n + 1),
-            stats: Stats::default(),
+            // A new pack must never get a number that the hwm covers.
+            next_pack: nums.last().map_or(1, |n| n + 1).max(hwm.pack).max(1),
+            stats: Stats {
+                objects: c.objects,
+                raw_bytes: c.raw_bytes,
+                stored_bytes: c.stored_bytes,
+                packs: nums.len() as u64,
+            },
             dir_dirty: false,
             touched: None,
             failed: false,
         };
+        let limit = opts.index_memtable_limit.max(1);
         let last = nums.last().copied();
-        for num in nums {
+        for num in nums.into_iter().filter(|&n| n >= hwm.pack) {
             let loaded = match io.read(num, Kind::Idx) {
                 Ok(b) => decode_index(&b, num)?,
                 Err(_) => None,
@@ -493,10 +542,7 @@ impl ChunkStore {
                     // middle, so it is resynced past them.
                     let (entries, valid) = if active { scan_pack(&buf, num) } else { (resync_scan(&buf, num)?, 0) };
                     if opts.read_only {
-                        for (id, l) in entries {
-                            inner.add(id, l);
-                        }
-                        inner.stats.packs += 1;
+                        inner.replay(&entries, hwm)?;
                         continue;
                     }
                     if active {
@@ -511,22 +557,25 @@ impl ChunkStore {
                             valid
                         };
                         file.sync()?;
-                        inner.next_pack = num + 1;
-                        for (id, l) in &entries {
-                            inner.add(*id, *l);
-                        }
-                        inner.stats.packs += 1;
+                        // The pack keeps all its entries (for its `.idx` at
+                        // seal); only the memtable skips those below the hwm.
+                        inner.replay(&entries, hwm)?;
                         inner.active = Some(Active { num, file, len: valid, entries, dirty: false });
                         continue;
                     }
+                    // A run may point into this pack after the next flush:
+                    // its bytes must be durable first.
+                    io.open_rw(num)?.sync()?;
                     io.write_durable(num, Kind::Idx, &encode_index(&entries))?;
                     entries
                 }
             };
-            for (id, l) in entries {
-                inner.add(id, l);
+            inner.replay(&entries, hwm)?;
+            if !opts.read_only && inner.index.mem_len() >= limit {
+                // Between two packs: every record of the packs up to `num`
+                // is in the memtable or in a run.
+                inner.flush_at(&*io, Hwm { pack: num + 1, offset: 0 })?;
             }
-            inner.stats.packs += 1;
         }
         let punches = !opts.read_only && io.can_punch();
         let zstd_level = AtomicI32::new(opts.zstd_level);
@@ -540,9 +589,12 @@ impl ChunkStore {
             return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
         }
         let id = self.opts.hasher.id(data);
+        // A failed index read counts as "not found" in both checks: the
+        // object is written again, and its new memtable entry hides the run
+        // that could not be read. Its stats then count it as new.
         {
             let mut inner = self.inner.lock().unwrap();
-            if inner.index.contains_key(&id) {
+            if matches!(inner.index.get(&id), Ok(Some(_))) {
                 inner.touch(id);
                 return Ok(id);
             }
@@ -562,12 +614,13 @@ impl ChunkStore {
             let r = (|| {
                 let mut inner = self.inner.lock().unwrap();
                 inner.touch(id);
-                if inner.index.contains_key(&id) {
+                if matches!(inner.index.get(&id), Ok(Some(_))) {
                     return Ok(id);
                 }
                 inner.check()?;
                 let loc = self.append(&mut inner, &id, &s.record, stored, data.len() as u32, flags)?;
-                inner.add(id, loc);
+                inner.add_new(id, loc);
+                self.flush_if_full(&mut inner)?;
                 Ok(id)
             })();
             // Chunks and nodes are small; do not keep the buffers of a big object.
@@ -627,6 +680,14 @@ impl ChunkStore {
     /// live object is deleted; a pack with less than half of its bytes live,
     /// or a small pack, is compacted (its live records are copied to the
     /// active pack, which is synced before the old pack is deleted).
+    ///
+    /// Five phases: (A) read the whole index; (B) copy the live records of
+    /// the packs to compact; (C) tombstones for the removed entries (no
+    /// I/O); (D) sync the copies and flush the memtable, so the tombstones
+    /// and the new places are durable in a run; (E) punch and delete packs.
+    /// No pack changes and no tombstone becomes durable unless every index
+    /// read of (A) succeeded: an index read error is never taken as "not
+    /// current", which could delete a pack that holds live objects.
     pub fn gc_finish(&self, live: &HashSet<ObjectId>, boundary: u64) -> Result<GcStats> {
         let mut inner = self.inner.lock().unwrap();
         // The touched set ends with this GC, also when it fails (#63). This
@@ -640,14 +701,24 @@ impl ChunkStore {
         inner.check()?;
         let keep = |id: &ObjectId| live.contains(id) || touched.contains(id);
         let active = inner.active.as_ref().map(|a| a.num);
+
+        // (A) The current entries of each pack, from one complete pass. An
+        // error returns before any change (the store is not failed).
         let mut by_pack: HashMap<u64, Vec<(ObjectId, Loc)>> = HashMap::new();
-        for (id, l) in &inner.index {
+        for item in inner.index.iter_all() {
+            let (id, l) = item?;
             if l.pack <= boundary && Some(l.pack) != active {
-                by_pack.entry(l.pack).or_default().push((*id, *l));
+                by_pack.entry(l.pack).or_default().push((id, l));
             }
         }
+
+        // (B) Choose what to do with each pack, and copy the live records of
+        // the packs to compact. A read error returns: the copies made so far
+        // are duplicates with newer, valid places.
         let mut st = GcStats::default();
         let mut doomed = Vec::new();
+        let mut removed: Vec<(ObjectId, Loc)> = Vec::new();
+        let mut punches: Vec<Punch> = Vec::new();
         let mut nums: Vec<u64> = by_pack.keys().copied().collect();
         nums.sort_unstable();
         for num in nums {
@@ -661,7 +732,10 @@ impl ChunkStore {
                 continue;
             }
             if live_bytes > 0 && live_bytes * 2 >= total && !small {
-                self.punch_pack(&mut inner, num, entries, &keep, &mut st)?;
+                if let Some((p, victims)) = self.plan_punch(num, entries, &keep, &mut st) {
+                    removed.extend(victims);
+                    punches.push(p);
+                }
                 continue;
             }
             // Delete, or compact: copy the live records first.
@@ -674,12 +748,7 @@ impl ChunkStore {
                     inner.index.insert(*id, nl);
                     st.kept_objects += 1;
                 } else {
-                    inner.index.remove(id);
-                    inner.stats.objects -= 1;
-                    inner.stats.raw_bytes -= l.raw as u64;
-                    inner.stats.stored_bytes -= l.stored as u64;
-                    st.removed_objects += 1;
-                    st.removed_bytes += l.stored as u64;
+                    removed.push((*id, *l));
                 }
             }
             if live_bytes > 0 {
@@ -689,18 +758,38 @@ impl ChunkStore {
             }
             doomed.push(num);
         }
-        // Packs that the index no longer uses at all (older copies).
+        // Packs that the index no longer uses at all (older copies). This
+        // needs the complete pass of (A).
         for num in 1..=boundary {
             if Some(num) != active && !by_pack.contains_key(&num) && self.io.exists(num, Kind::Pack) {
                 doomed.push(num);
             }
         }
-        if doomed.is_empty() {
+        if doomed.is_empty() && punches.is_empty() {
             return Ok(st);
         }
-        // The copies must be durable before the originals go.
+
+        // (C) Tombstones, in RAM only: nothing here can fail.
+        for (id, l) in &removed {
+            inner.index.tombstone(*id, l.pack);
+            inner.stats.objects -= 1;
+            inner.stats.raw_bytes -= l.raw as u64;
+            inner.stats.stored_bytes -= l.stored as u64;
+            st.removed_objects += 1;
+            st.removed_bytes += l.stored as u64;
+        }
+
+        // (D) The durable point: the copies, then a run with the tombstones
+        // and the new places. A failure fails the store, so the tombstones
+        // in RAM are never flushed, and no pack changes.
         inner.sync_active()?;
         inner.sync_dir(&*self.io)?;
+        inner.flush_index(&*self.io)?;
+
+        // (E) Only now change the packs.
+        for p in punches {
+            self.punch_pack(&mut inner, p, &mut st)?;
+        }
         for num in doomed {
             let _ = self.io.remove(num, Kind::Idx);
             self.io.remove(num, Kind::Pack)?;
@@ -711,27 +800,24 @@ impl ChunkStore {
         Ok(st)
     }
 
-    /// GC of a mostly live pack: free the disk blocks of the dead gaps.
-    ///
-    /// Order: (1) drop the dead records in the punched ranges from the index
-    /// and write the pack's index durably without them; (2) mark the pack as
-    /// punched in its header and sync; (3) punch. A crash at any point leaves
-    /// an index that lists only bytes that are still there, and a punched pack
-    /// is resynced at open, never cut.
-    fn punch_pack(
+    /// GC of a mostly live pack, the plan: the dead records in the gaps
+    /// between live records (cut to whole blocks) to remove, the ranges to
+    /// punch, and the entries the pack keeps. `None` if nothing is punched
+    /// (the store cannot punch, or no gap holds a dead record); then every
+    /// entry stays in the index.
+    fn plan_punch(
         &self,
-        inner: &mut Inner,
         num: u64,
         entries: &[(ObjectId, Loc)],
         keep: &dyn Fn(&ObjectId) -> bool,
         st: &mut GcStats,
-    ) -> Result<()> {
+    ) -> Option<(Punch, Vec<(ObjectId, Loc)>)> {
         if !self.punches {
             // No holes here: keep the dead records in the index, so a later
             // GC still sees their bytes and compacts the pack when it is
             // mostly dead.
             st.kept_objects += entries.len() as u64;
-            return Ok(());
+            return None;
         }
         let rec_end = |l: &Loc| l.offset + (REC_HEADER + l.stored as usize + REC_CRC) as u64;
         let mut sorted: Vec<&(ObjectId, Loc)> = entries.iter().collect();
@@ -750,28 +836,33 @@ impl ChunkStore {
             from = from.max(e);
         }
         let hits = |l: &Loc, a: u64, n: u64| l.offset < a + n && rec_end(l) > a;
-        let victims: Vec<&(ObjectId, Loc)> = sorted
+        let victims: Vec<(ObjectId, Loc)> = sorted
             .iter()
             .copied()
             .filter(|(id, l)| !keep(id) && ranges.iter().any(|&(a, n)| hits(l, a, n)))
+            .copied()
             .collect();
-        let gone: HashSet<ObjectId> = victims.iter().map(|(id, _)| *id).collect();
         // Keep only the ranges with a dead record (skip holes of earlier GCs).
         ranges.retain(|&(a, n)| victims.iter().any(|(_, l)| hits(l, a, n)));
         if victims.is_empty() {
             st.kept_objects += entries.len() as u64;
-            return Ok(());
+            return None;
         }
-        for (id, l) in &victims {
-            inner.index.remove(id);
-            inner.stats.objects -= 1;
-            inner.stats.raw_bytes -= l.raw as u64;
-            inner.stats.stored_bytes -= l.stored as u64;
-            st.removed_objects += 1;
-            st.removed_bytes += l.stored as u64;
-        }
+        let gone: HashSet<ObjectId> = victims.iter().map(|(id, _)| *id).collect();
         let rest: Vec<(ObjectId, Loc)> = entries.iter().filter(|(id, _)| !gone.contains(id)).copied().collect();
         st.kept_objects += rest.len() as u64;
+        Some((Punch { num, ranges, rest }, victims))
+    }
+
+    /// GC of a mostly live pack, the change on disk, after the tombstones of
+    /// the victims are durable in a run.
+    ///
+    /// Order: (1) write the pack's `.idx` durably without the victims; (2)
+    /// mark the pack as punched in its header and sync; (3) punch. A crash at
+    /// any point leaves an `.idx` that lists only bytes that are still
+    /// there, and a punched pack is resynced at open, never cut.
+    fn punch_pack(&self, inner: &mut Inner, p: Punch, st: &mut GcStats) -> Result<()> {
+        let Punch { num, ranges, rest } = p;
         let marked = (|| -> io::Result<()> {
             self.io.write_durable(num, Kind::Idx, &encode_index(&rest))?;
             let mut f = self.io.open_rw(num)?;
@@ -810,7 +901,8 @@ impl ChunkStore {
         let hasher = hasher_by_tag(id.tag()).ok_or(Error::UnknownHash(*id))?;
         let (loc, file) = {
             let mut inner = self.inner.lock().unwrap();
-            let loc = *inner.index.get(id).ok_or(Error::Missing(*id))?;
+            // An index read error is returned, never taken as "missing".
+            let loc = inner.index.get(id)?.ok_or(Error::Missing(*id))?;
             inner.touch(*id);
             let file = inner.reader(&*self.io, loc.pack)?;
             (loc, file)
@@ -839,14 +931,37 @@ impl ChunkStore {
         self.opts.hasher
     }
 
-    /// True if the store has `id`.
+    /// True if the store has `id` (false also if the index cannot be read).
     pub fn contains(&self, id: &ObjectId) -> bool {
-        self.inner.lock().unwrap().index.contains_key(id)
+        matches!(self.inner.lock().unwrap().index.get(id), Ok(Some(_)))
     }
 
-    /// Stored (possibly compressed) payload length of `id`.
+    /// Stored (possibly compressed) payload length of `id` (`None` also if
+    /// the index cannot be read).
     pub fn stored_len(&self, id: &ObjectId) -> Option<u32> {
-        self.inner.lock().unwrap().index.get(id).map(|l| l.stored)
+        self.inner.lock().unwrap().index.get(id).ok().flatten().map(|l| l.stored)
+    }
+
+    /// The shape of the index now.
+    pub fn index_info(&self) -> IndexInfo {
+        let inner = self.inner.lock().unwrap();
+        let ix = &inner.index;
+        let hwm = ix.hwm();
+        IndexInfo {
+            runs: ix.runs().len() as u64,
+            run_entries: ix.runs().iter().map(|r| r.entries()).sum(),
+            memtable_entries: ix.mem_len() as u64,
+            hwm_pack: hwm.pack,
+            hwm_offset: hwm.offset,
+        }
+    }
+
+    /// Write the memtable to a run when it has reached the limit.
+    fn flush_if_full(&self, inner: &mut Inner) -> Result<()> {
+        if inner.index.mem_len() < self.opts.index_memtable_limit.max(1) {
+            return Ok(());
+        }
+        inner.flush_index(&*self.io)
     }
 
     /// Make every object put so far durable. Without new objects this does
@@ -910,6 +1025,14 @@ impl ChunkStore {
     }
 }
 
+/// The disk part of the GC of a mostly live pack (see `plan_punch`).
+struct Punch {
+    num: u64,
+    ranges: Vec<(u64, u64)>,
+    /// The entries that the pack's new `.idx` lists.
+    rest: Vec<(ObjectId, Loc)>,
+}
+
 fn pack_header(num: u64) -> Vec<u8> {
     pack_header_with(num, 0)
 }
@@ -925,7 +1048,7 @@ fn pack_header_with(num: u64, flags: u16) -> Vec<u8> {
 impl Inner {
     fn empty() -> Self {
         Inner {
-            index: HashMap::new(),
+            index: Index::empty(),
             readers: HashMap::new(),
             tick: 0,
             active: None,
@@ -976,12 +1099,61 @@ impl Inner {
         }
     }
 
-    fn add(&mut self, id: ObjectId, l: Loc) {
-        if self.index.insert(id, l).is_none() {
-            self.stats.objects += 1;
-            self.stats.raw_bytes += l.raw as u64;
-            self.stats.stored_bytes += l.stored as u64;
+    /// Index a new object (the caller found no current entry of `id`).
+    fn add_new(&mut self, id: ObjectId, l: Loc) {
+        self.index.insert(id, l);
+        self.stats.objects += 1;
+        self.stats.raw_bytes += l.raw as u64;
+        self.stats.stored_bytes += l.stored as u64;
+    }
+
+    /// Put the entries of a pack, read at open, in the memtable: only those
+    /// at or above `hwm` (the runs have the others). An entry counts in the
+    /// stats only if the index has no current entry of its ID (a GC copy,
+    /// or an entry that a run has, is not counted twice). A lookup error
+    /// fails the open.
+    fn replay(&mut self, entries: &[(ObjectId, Loc)], hwm: Hwm) -> Result<()> {
+        for (id, l) in entries {
+            if (Hwm { pack: l.pack, offset: l.offset }) < hwm {
+                continue;
+            }
+            if self.index.get(id)?.is_some() {
+                self.index.insert(*id, *l);
+            } else {
+                self.add_new(*id, *l);
+            }
         }
+        Ok(())
+    }
+
+    /// Sync the active pack and the directory, then write the memtable to a
+    /// run with the hwm at the end of the active pack (or at the start of
+    /// the next pack if none is active). A failure is final.
+    fn flush_index(&mut self, io: &dyn PackIo) -> Result<()> {
+        if self.index.mem_len() == 0 {
+            return Ok(());
+        }
+        self.sync_active()?;
+        if self.dir_dirty {
+            self.sync_dir(io)?;
+        }
+        let hwm = match self.active.as_ref() {
+            Some(a) => Hwm { pack: a.num, offset: a.len },
+            None => Hwm { pack: self.next_pack, offset: 0 },
+        };
+        self.flush_at(io, hwm)
+    }
+
+    /// Write the memtable to a run with this hwm and the current counts. The
+    /// caller has made every record below `hwm` durable. A failure is final.
+    fn flush_at(&mut self, io: &dyn PackIo, hwm: Hwm) -> Result<()> {
+        let s = self.stats;
+        let counts = Counts { objects: s.objects, raw_bytes: s.raw_bytes, stored_bytes: s.stored_bytes };
+        if let Err(e) = self.index.flush(io, hwm, counts) {
+            self.failed = true;
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn reader(&mut self, io: &dyn PackIo, num: u64) -> io::Result<Arc<dyn PackRead>> {
