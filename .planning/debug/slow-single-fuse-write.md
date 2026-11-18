@@ -2,7 +2,7 @@
 status: awaiting_human_verify
 trigger: "slowest single FUSE write in bigwrite is 5-8 s (1 GiB and 4 GiB, DIRTY_LIMIT 32 or 16 MiB); find the root cause"
 created: 2026-11-18T21:53:57Z
-updated: 2026-11-18T22:45:00Z
+updated: 2026-11-18T23:15:00Z
 ---
 
 ## Current Focus
@@ -19,7 +19,7 @@ reasoning_checkpoint:
     - "per-rebase time is linear in DIRTY_LIMIT (16 MiB median 1.0 s, 32 MiB 2.2-2.7 s)"
     - "splice components add up to the splice time (put + src + cdc within ~60 ms)"
   falsification_test: "a slow write with no rebase line at the same offset, or a large residual outside the daemon"
-  fix_rationale: "the read-ahead read 3x the bytes it needed; reading to the region end + CHUNK_AVG halves reads and read count with the same cuts"
+  fix_rationale: "the read-ahead read 3x the bytes it needed; reading to the region end + a doubling CHUNK_AVG step halves reads and read count with the same cuts; it does not touch the floor or the stalls"
   blind_spots: "the host stalls (cache drops, VM disk) are not controlled; before/after maxima are single runs"
   candidate_causes:
     - "code: synchronous splice cost (re-cut amplification, read-ahead, per-object costs)"
@@ -188,7 +188,54 @@ before the fix, cold after a VM cache drop), zstd tries (~0.4 s), ~8300 pack pwr
     Pack sync per rebase: max 421 / 546 ms (run 5a/5b with ref on disk: 668 / 2654; runs 1/2 before: 1622 / 3319).
     rw.py fsync max 173 / 170 ms (ref on disk: 1205 / 343 after, 1293 in 14-07). No pack sync > 550 ms per rebase.
     The cache drops still happen (Cached -1 to -3 GiB) and the slowest rebases are the cold-read ones (read_ms 2088 / 1796).
-  implication: the 1-3 s pack fsync stalls come mostly from the harness: rw.py writes the 1 GiB reference file to the same VM disk without fsync, so its dirty pages are flushed while the daemon syncs a pack. The cold reads after a cache drop remain.
+  implication: the 1-3 s pack fsync stalls at 1 GiB come mostly from the harness: rw.py writes the 1 GiB reference file to the same VM disk without fsync, so its dirty pages are flushed while the daemon syncs a pack. The cold reads after a cache drop remain. Tested only at 1 GiB.
+
+- timestamp: 2026-11-18T23:00:00Z
+  checked: pread vs decode+verify split of ChunkStore::read per rebase (runs 4-6, probe ef6738e)
+  found: |
+    Normal rebases: pread 47-130 ms, verify 108-195 ms for ~12.5k reads (4-10 us pread per read).
+    Slow-read rebases: pread 1027-2575 ms, verify 163-342 ms (run 5: 1685 / 1718 / 2318; run 6: 1837 / 1563; run 4:
+    3421 / 3983). The increase is all in pread (130-200 us per read), and it decays over the next 5-7 rebases.
+    The slow reads are on-CPU in the guest and iowait does not rise.
+  implication: "cold base reads" holds: the page-cache misses of the pack files make pread slow; BLAKE3 verify does not change.
+
+- timestamp: 2026-11-18T23:00:00Z
+  checked: source of the page-cache drops: repo scripts, other containers, Dirty at each drop
+  found: |
+    No script in the repo writes drop_caches. `docker ps` showed only my container at check time (other agents' containers
+    earlier in the session cannot be ruled out; the VM is shared). At some drops Dirty falls to 0 in the same sample
+    (run 2 22:07:36, run 3 22:11:23, run 4 22:20:29), at others it does not (run 4 22:21:16 370 -> 311 MiB; run 5 22:26:39 8 -> 21).
+  implication: source not identified. It evicts the daemon's own pack pages (pread x20-30), so it is a VM-wide drop, not another container deleting its files. OrbStack dynamic memory is one candidate, not confirmed.
+
+- timestamp: 2026-11-18T23:10:00Z
+  checked: the slow side of a small read step (advisor review) - local release bench, 64 MiB base, best of 3
+  found: |
+    Periodic base (4096-byte pattern) where the re-chunk runs to the end (67 MB re-cut): fixed CHUNK_AVG step 213 ms,
+    8182 source reads; old 2 * CHUNK_MAX read-ahead 134-142 ms, 1769 reads. Random base, 1000 x 4 KiB + 1 x 256 KiB:
+    CHUNK_AVG step 38.7 ms, old 54.6-56.2 ms. With a step that doubles after each miss past the region (18f22ee):
+    periodic 149 ms / 1776 reads, random 33.9 ms (asked 22.3 MB against 54.4 MB old).
+  implication: the fixed small step was 1.6x slower on a long non-resyncing run; the doubling step keeps the old cost there and the gain on scattered writes.
+
+- timestamp: 2026-11-18T23:15:00Z
+  checked: fix-acceptance guardrail for 18f22ee (revert-and-reconfirm and manual mutants; no Stryker for Rust, cargo-mutants not installed)
+  found: |
+    Driving tests: scattered_small_edits_read_little_more_than_they_rechunk (bound 4/3x) and a_long_rechunk_run_reads_big_pieces.
+    HEAD: 1.26x, both pass. Revert to the 2 * CHUNK_MAX read-ahead: 2.76x, scattered test FAILS (bug returns); reapply: pass.
+    Mutants: first step CHUNK_MAX -> 1.95x FAIL (killed); no doubling -> long-run test FAIL (killed); double also inside the
+    region -> 1.41x FAIL (killed); region read in steps (want = step) -> 1.24x pass (survives: same bytes, it only adds
+    source calls inside a long region).
+    cargo test -p slicefs-cli -p chunk-store: 855 passed, 0 failed. clippy: no warning in file.rs.
+  implication: guardrail accepted; one byte-equivalent mutant survives (call count inside a region is not under test).
+
+- timestamp: 2026-11-18T23:12:00Z
+  checked: stock bigwrite (no probes) `run.sh bigwrite 1024 4096`, same session, 32 MiB, ref on disk
+  found: |
+    | run | commit | 1 GiB max write / rw time | 4 GiB max write / rw time | host load (1 min) |
+    | 8 | 1e2a8bd (base) | 7435 ms / 56 s | 7435 ms / 82 s | 52 -> 38 |
+    | 7 | 1fe93b9 (fixed CHUNK_AVG step) | 2393 ms / 42 s | 5977 ms / 74 s | 36 -> 48 |
+    | 9 | 18f22ee (doubling step, HEAD) | 3733 ms / 50 s | 4611 ms / 64 s | 38 -> 34 |
+    All PASS (cmp, cmp after remount, VmHWM <= 167 MiB, cap 256). The base run gave 7435 ms at both sizes (as printed).
+  implication: the random-write time goes down 11-25% (1 GiB) and 10-22% (4 GiB) in stock runs too; the max write is lower in each after-run, but one run per commit cannot separate the fix from the host stalls.
 
 ## Resolution
 
@@ -199,23 +246,35 @@ root_cause: |
   is not tens of ms: it cuts ~92 MiB again (a 4 KiB write re-cuts ~23 KiB of 8 KiB-average chunks), stores ~8300 new
   objects (~95 MiB: zstd try, ~8300 pwrites, 11-14 early 8 MiB pack fsyncs, 1-2 pack seals), and reads + BLAKE3-verifies
   ~287 MiB of base chunks (~26700 store reads; 3.1x the re-cut bytes because each re-chunk step read 2 * CHUNK_MAX = 64 KiB
-  ahead). That is ~1.5-2.5 s on-CPU on this host (median splice 2.2-2.7 s at 1 GiB, 3.9 s at 4 GiB). The 5-8 s maxima
-  (17 s at 4 GiB) are this floor plus a host effect inside one rebase: cold base reads after the VM page cache drops by
-  ~3 GiB (read 0.5 -> 2.4-3.9 s), or pack fsync stalls (one 8 MiB fsync 1.2-9.4 s) that come mostly from the harness's
-  unsynced reference-file writes on the same disk. DIRTY_LIMIT: rebase time is linear in it (16 MiB: median 1.0 s), but
-  the max is set by the stalls, so one run per limit cannot rank limits; 14-07's 7778 ms at 16 MiB was not reproduced (2964 ms).
+  ahead). That is ~1.5-2.5 s on-CPU on this host (median splice 2.2-2.7 s at 1 GiB, 3.9 s at 4 GiB).
+  The 5-8 s maxima (17 s at 4 GiB) are this floor plus a stall inside one rebase:
+  - cold base reads after a VM-wide page-cache drop of 1-3 GiB (pread 0.05-0.13 s -> 1.0-4.0 s per rebase, verify unchanged;
+    source of the drops not identified);
+  - pack fsync stalls: at 1 GiB mostly from the harness (the unsynced 1 GiB reference file on the same VM disk; with it on
+    tmpfs no pack sync > 0.55 s per rebase); the single 9.4 s fsync at 4 GiB is not explained (no guest writeback at the time).
+  DIRTY_LIMIT: rebase time is linear in it (16 MiB: median 1.0 s), but the max is set by the stalls, so one run per limit
+  cannot rank limits; 14-07's 7778 ms at 16 MiB was not reproduced (2964 ms in one run).
 fix: |
-  chunk-store splice: read to the end of the changed region in big pieces and past it only CHUNK_AVG at a time (was a
-  fixed 2 * CHUNK_MAX read-ahead). Same cut points, same keys. Source bytes 2.76x -> 1.18x of the re-chunked bytes (test).
-  In the mount: read 287 -> 140 MiB and 26.7k -> 12.5k store reads per rebase; random-write time 62.1 / 68.6 s -> 54.4 / 53.4 s
-  (1 GiB) and 95.4 -> 87.5 s (4 GiB); median rebase 2197 / 2742 -> 2010 / 1916 ms (1 GiB). Max write 5568 / 6091 -> 3837 / 4731 ms
-  (1 GiB) and 17056 -> 6547 ms (4 GiB), single runs dominated by host stalls (not attributable to the fix alone).
+  chunk-store splice (e43a607 + 18f22ee): read to the end of the changed region in big pieces; past it read CHUNK_AVG, and
+  double the step after each miss up to 2 * CHUNK_MAX (was a fixed 2 * CHUNK_MAX read-ahead). Same cut points, same keys.
+  What it changes: source bytes 2.76x -> 1.26x of the re-cut bytes (test); in the mount (probed runs, constant-step version)
+  read 287 -> 140 MiB and 26.7k -> 12.5k store reads per rebase, cdc ~200 -> ~110 ms; random-write time 62 / 69 s -> 47-54 s
+  (1 GiB, four runs) and 95 -> 88 s (4 GiB); stock runs 56 -> 42 / 50 s (1 GiB) and 82 -> 74 / 64 s (4 GiB).
+  What it does not change: the slow-read outliers after a cache drop (2.0-3.4 s for 287 MiB before, 1.8-2.6 s for
+  140 MiB after; the 4 GiB median read time stayed ~1.6 s, cold reads are latency-bound), the fsync stalls, and the floor
+  (~1.5 s on-CPU per 32 MiB rebase). The median rebase gain is 0-30% (run 6a 2211 ms is above run 1's 2197 ms).
+  Max write: before 5568 / 6091 / 7435 ms (1 GiB), 17056 / 7435 ms (4 GiB); after 2393-4731 ms (1 GiB, 6 runs),
+  4611-6547 ms (4 GiB, 3 runs). These are single runs per setting with host stalls; they are not evidence for the fix.
   Not done (design trade-offs, for the owner): rebase off the FUSE thread; a lower DIRTY_LIMIT; fewer early pack fsyncs
   per rebase (KEEP_LIMIT vs RAM) or batched pack appends; no base read under extents in RangeView::read (~32 MiB of the
-  140 MiB); reference file on tmpfs in bigwrite.sh.
-oracle_type: derived (the splice key must equal a full write of the same bytes; the read bound is a counter, not wall time)
-verification: |
-  RED: scattered_small_edits_read_little_more_than_they_rechunk failed at 2.76x before the change; GREEN at 1.18x after.
-  Same-key splice tests (11 in file::) pass; cargo test -p slicefs-cli -p chunk-store on the clean tree (probes reverted).
-  Docker bigwrite after the fix: 1 GiB x 4 (2 with ref on tmpfs) and 4 GiB x 1, all PASS (cmp, remount cmp, VmHWM <= 161 MiB).
+  140 MiB); reference file on tmpfs in bigwrite.sh (the harness's own fsync noise); a per-write log in rw.py.
+oracle_type: derived (the splice key must equal a full write of the same bytes; the read bounds are counters, not wall time)
+verification:
+  target_test: { result: pass, tests: [scattered_small_edits_read_little_more_than_they_rechunk, a_long_rechunk_run_reads_big_pieces] }
+  mutation_check: { result: pass, method: manual mutants (Stryker is JS-only; cargo-mutants not installed), killed: 3 of 4 (first step CHUNK_MAX, no doubling, double inside the region), survived: [want = step (byte-equivalent; only source calls inside a long region)] }
+  no_op_deletion: { result: pass, deletion_justified_by_rca: n/a (the change adds a computed read size; no branch removed) }
+  adjacent_tests: { result: pass, suites_run: [cargo test -p slicefs-cli -p chunk-store (855 passed, 0 failed), cargo clippy -p chunk-store --all-targets] }
+  revert_and_reconfirm: { result: pass, bug_returned_on_revert: true (2.76x, scattered test fails), fixed_on_reapply: true (1.26x) }
+  docker: bigwrite 1024/4096 PASS at e43a607 (probed, 3 runs), 1fe93b9 and 18f22ee (stock)
+  guardrail_verdict: accepted
 files_changed: [crates/chunk-store/src/file.rs]
