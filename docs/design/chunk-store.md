@@ -783,6 +783,53 @@ Before an object is written, its ID is looked up in the index. If the
 object is there, it is not written again (writes are idempotent; no lock is
 needed for correctness).
 
+#### Locality cache (#112)
+
+The runs are sorted by digest, so the chunks of one file are spread over
+all run pages, and each dedup hit reads one page. A file written again
+usually has its chunks in one pack, in the same order, and the `.idx` of
+that pack holds them together. So `put` checks a small cache first
+(`crates/chunk-store/src/locality.rs`, `Options::locality_cache`, on by
+default): after 4 index hits in a row in one pack, it reads that pack's
+`.idx` and keeps its entries. One random dedup hit never reads an `.idx`.
+
+- Bound: at most 16 packs and 65,536 entries (a pack with more entries is
+  never cached). The table is at most about 9.1 MiB.
+- GC safety: a `.idx` is not the index. A GC writes its tombstones first
+  and can leave an `.idx` stale (a skipped punch, a failed removal, a
+  crash). So the cache takes only packs that this process sealed (their
+  `.idx` is exact) and that no GC has selected since. Under the store
+  lock, before its install, the GC removes the packs it changes or deletes
+  from the trusted set and from the cache, and moves an epoch so that a
+  fill running at that time is dropped. A cache hit takes the same path as
+  an index hit: it is touched for a running GC and checked again under the
+  lock (`Index::gen`). A failed index lookup in `put` writes the object
+  again, so an older copy can stay in a trusted pack that a later GC does
+  not select; after such a failure no pack sealed so far is trusted.
+- Limit: packs of an earlier process are never cached, because nothing on
+  disk shows whether a GC left their `.idx` stale. A re-write of data from
+  an earlier mount gets no gain until a durable marker (for example a pack
+  header flag set before the GC install) exists.
+
+Results (2026-11-19, macOS, warm cache, `index-bench rewrite`, 8-byte
+objects, `--pack-limit 442368` so a pack has about 8K entries as with
+8 KiB chunks; the store is made in the same process; median of the runs,
+ns per `put`):
+
+| Objects | Packs | in-order re-write, cache off | cache on | random dedup hits, off | on |
+|---|---|---|---|---|---|
+| 1M (3 runs) | 123 | 1,293 | 833 | 1,497 | 1,264 |
+| 10M (2 runs) | 1,221 | 1,350 / 1,377 | 558 / 568 | 1,555 / 1,496 | 1,574 / 1,523 |
+
+In order, 99.95 % of the dedup checks hit the cache (0.0005 index lookups
+for each put; 1 `.idx` read per 8K puts). Random hits never fill and cost
+the same within the noise (the machine had other load; the 1M random
+numbers vary by 30 %). The bench hashes 8-byte objects; with 8 KiB chunks
+the hash is a larger part of each put, so read the gain as about 0.8 µs
+saved for each put at 10M, not as a percentage. The bench is one thread,
+so it does not show the cost of the cache mutex under many writers. With the default 64 MiB packs and 8-byte objects a
+pack has 1.2M entries and is never cached.
+
 ## Compression
 
 zstd level 3, per object. The compressed form is kept only if it is at least
