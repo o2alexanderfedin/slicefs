@@ -11,7 +11,7 @@
 //! Removals are durable at once (this is the order the store needs: it
 //! syncs copies before it removes originals).
 
-use crate::pack_io::{Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK};
+use crate::pack_io::{Kind, PackFile, PackIo, PackRead, RunMap, PUNCH_BLOCK};
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -431,5 +431,11 @@ impl PackIo for MemIo {
 
     fn open_run(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
         Ok(Arc::new(self.handle(num, Kind::Run)?))
+    }
+
+    /// No mapping: lookups read the run pages with `read_at` on the bytes
+    /// in RAM, so the read counters and the read faults reach them.
+    fn map_run(&self, _num: u64) -> io::Result<Option<RunMap>> {
+        Ok(None)
     }
 }

@@ -3,10 +3,12 @@
 //! index changes nothing. In-process on MemIo; no mounts.
 
 use chunk_store::mem::MemIo;
-use chunk_store::pack_io::{Kind, PackIo};
+use chunk_store::hash::{Blake3_256, ObjectHasher};
+use chunk_store::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, RunMap};
 use chunk_store::retry::RetryingIo;
 use chunk_store::{ChunkStore, ObjectId, Options};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 fn random(n: usize, seed: u64) -> Vec<u8> {
@@ -679,34 +681,88 @@ fn a_read_error_at_open_is_not_damage() {
     all_read_back(&open(&mem, &o), &objs, "after the error");
 }
 
+/// Run page layout (see run.rs): an 8-byte page header, then 58-byte
+/// entries: the 33-byte ID, pack u64, offset u64, stored u32, raw u32,
+/// flags u8.
+const RUN_PAGE_HEADER: usize = 8;
+const RUN_ENTRY: usize = 58;
+const RUN_ID: usize = 33;
+
+// Lookups do not check the CRC of a run page on a hit (17-05): a damaged
+// ID is never a miss (the CRC is checked before a miss is returned), so it
+// costs only the objects whose search crosses it, and a put writes them
+// again.
 #[test]
 fn a_damaged_run_page_gives_no_wrong_data() {
     let mem = MemIo::new();
     let (o, objs) = closed_store(&mem);
     let s = open(&mem, &o);
-    // Run 1 holds the first 32 objects, all in its page 0.
+    // A digest byte of entry 1 of page 0 of run 1 (the first 32 objects).
     let r = run_list(&mem)[0];
-    mem.flip(r, Kind::Run, 100);
-    for (i, (id, _)) in objs[..32].iter().enumerate() {
-        assert!(s.get(id).is_none(), "object {i}");
-        assert!(!s.contains(id), "object {i}");
-        assert!(matches!(s.read(id), Err(chunk_store::Error::Corrupt(_))), "object {i}");
+    mem.flip(r, Kind::Run, RUN_PAGE_HEADER + RUN_ENTRY + 20);
+    let mut bad = Vec::new();
+    for (i, (id, d)) in objs.iter().enumerate() {
+        match s.read(id) {
+            Ok(got) => assert_eq!(&got, d, "object {i}: never wrong bytes"),
+            Err(e) => {
+                assert!(matches!(e, chunk_store::Error::Corrupt(_)), "object {i}: {e}");
+                assert!(s.get(id).is_none(), "object {i}");
+                assert!(!s.contains(id), "object {i}");
+                bad.push(i);
+            }
+        }
     }
-    for (i, (id, d)) in objs.iter().enumerate().skip(32) {
-        assert_eq!(s.get(id).as_ref(), Some(d), "object {i}");
-    }
+    assert!(!bad.is_empty() && bad.len() <= 3 && bad.iter().all(|&i| i < 32), "{bad:?}");
     // A put writes the object again; its new entry hides the damaged page.
-    let (id0, d0) = &objs[0];
-    assert_eq!(s.put(d0).unwrap(), *id0);
-    assert_eq!(s.get(id0).as_ref(), Some(d0));
+    for &i in &bad {
+        let (id, d) = &objs[i];
+        assert_eq!(s.put(d).unwrap(), *id);
+        assert_eq!(s.get(id).as_ref(), Some(d));
+    }
     s.sync().unwrap();
     drop(s);
 
-    // The replay of the new record looks up its ID, finds the damaged page,
-    // and the open rebuilds the index from the packs.
+    // The replay of the new records looks up their IDs, finds the damaged
+    // page, and the open rebuilds the index from the packs.
     let s = open(&mem, &o);
-    assert_eq!(s.get(id0).as_ref(), Some(d0));
     all_read_back(&s, &objs, "after the reopen");
+}
+
+// A damaged place (pack, offset, length) in a run entry: the lookup gives
+// the wrong place, and the read rejects the record there (CRC, ID, hash),
+// checks the entry through the verified page read, and asks for a rebuild.
+// The bytes of the object are still in its pack: the rebuild finds them.
+#[test]
+fn a_damaged_run_entry_place_is_never_read_and_asks_for_a_rebuild() {
+    for field in [0, 8, 16] {
+        let mem = MemIo::new();
+        let (o, objs) = closed_store(&mem);
+        let s = open(&mem, &o);
+        let r = run_list(&mem)[0];
+        mem.flip(r, Kind::Run, RUN_PAGE_HEADER + RUN_ENTRY + RUN_ID + field);
+        let mut bad = Vec::new();
+        for (i, (id, d)) in objs.iter().enumerate() {
+            match s.read(id) {
+                Ok(got) => assert_eq!(&got, d, "field {field}, object {i}: never wrong bytes"),
+                Err(e) => {
+                    assert!(matches!(e, chunk_store::Error::Corrupt(_)), "field {field}, object {i}: {e}");
+                    bad.push(i);
+                }
+            }
+        }
+        assert_eq!(bad.len(), 1, "field {field}: {bad:?}");
+        let (x, dx) = &objs[bad[0]];
+        // Accepted (see run.rs): contains is true, and a put is a dedup hit.
+        assert!(s.contains(x));
+        assert_eq!(s.put(dx).unwrap(), *x);
+        drop(s);
+        let before = run_list(&mem);
+
+        let s = open(&mem, &o);
+        all_read_back(&s, &objs, &format!("field {field}: after the rebuild"));
+        drop(s);
+        assert!(run_list(&mem).iter().all(|r| !before.contains(r)), "field {field}: the index was rebuilt");
+    }
 }
 
 #[test]
@@ -729,7 +785,7 @@ fn a_damaged_newer_page_never_shows_an_older_entry() {
     }
     assert!(!s.contains(&x), "a fall-through to R1 would find the removed object");
     let r = s.read(&x);
-    assert!(matches!(r, Err(chunk_store::Error::Corrupt(_))), "{r:?}");
+    assert!(matches!(r, Err(chunk_store::Error::Missing(_) | chunk_store::Error::Corrupt(_))), "{r:?}");
 
     s.request_index_rebuild().unwrap();
     drop(s);
@@ -739,6 +795,35 @@ fn a_damaged_newer_page_never_shows_an_older_entry() {
     }
     assert!(!s.contains(&x));
     assert_eq!(s.stats().objects, 9);
+}
+
+// The tombstone itself damaged (a digest byte of its ID, or its flags): the
+// lookup must not go on to the older run, whose put entry points to a pack
+// that GC deleted. A put then writes the object again (no silent loss).
+#[test]
+fn a_damaged_tombstone_never_shows_the_older_entry() {
+    for at in [20, RUN_ID + 24] {
+        let mem = MemIo::new();
+        let o = opts(10, 64 << 20);
+        let s = open(&mem, &o);
+        let objs = put_random(&s, 10, 777);
+        let r1 = run_list(&mem);
+        let (x, dx) = objs[3].clone();
+        let live: HashSet<ObjectId> = objs.iter().map(|(id, _)| *id).filter(|id| *id != x).collect();
+        let b = s.gc_begin().unwrap();
+        assert_eq!(s.gc_finish(&live, b).unwrap().removed_objects, 1);
+        let (r, pos) = run_list(&mem)
+            .into_iter()
+            .filter(|r| !r1.contains(r))
+            .find_map(|r| mem.read(r, Kind::Run).unwrap().windows(RUN_ID).position(|w| w == &x.0[..]).map(|p| (r, p)))
+            .expect("the tombstone of x is in a newer run");
+        mem.flip(r, Kind::Run, pos + at);
+        assert!(!s.contains(&x), "byte {at}");
+        let got = s.read(&x);
+        assert!(matches!(got, Err(chunk_store::Error::Corrupt(_))), "byte {at}: {got:?}");
+        assert_eq!(s.put(&dx).unwrap(), x, "byte {at}");
+        assert_eq!(s.get(&x).as_ref(), Some(&dx), "byte {at}: the put wrote the object again");
+    }
 }
 
 #[test]
@@ -775,4 +860,137 @@ fn a_rebuild_request_rebuilds_the_index_at_the_next_writable_open() {
     all_read_back(&s, &objs, "one more reopen");
     drop(s);
     assert_eq!(run_list(&mem), runs);
+}
+
+/// A `PackIo` that counts the `read_at` calls on run handles and the whole
+/// file reads of runs, and passes everything else on.
+struct CountRunReads {
+    inner: Arc<dyn PackIo>,
+    reads: Arc<AtomicU64>,
+}
+
+struct CountedRun {
+    inner: Arc<dyn PackRead>,
+    reads: Arc<AtomicU64>,
+}
+
+impl PackRead for CountedRun {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        self.reads.fetch_add(1, AtomicOrdering::SeqCst);
+        self.inner.read_at(buf, offset)
+    }
+}
+
+impl PackIo for CountRunReads {
+    fn prepare(&self, read_only: bool) -> std::io::Result<bool> {
+        self.inner.prepare(read_only)
+    }
+    fn list(&self) -> std::io::Result<Vec<u64>> {
+        self.inner.list()
+    }
+    fn exists(&self, num: u64, kind: Kind) -> bool {
+        self.inner.exists(num, kind)
+    }
+    fn read(&self, num: u64, kind: Kind) -> std::io::Result<Vec<u8>> {
+        if kind == Kind::Run {
+            self.reads.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+        self.inner.read(num, kind)
+    }
+    fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> std::io::Result<()> {
+        self.inner.write_durable(num, kind, data)
+    }
+    fn remove(&self, num: u64, kind: Kind) -> std::io::Result<()> {
+        self.inner.remove(num, kind)
+    }
+    fn sync_dir(&self) -> std::io::Result<()> {
+        self.inner.sync_dir()
+    }
+    fn create(&self, num: u64) -> std::io::Result<Box<dyn PackFile>> {
+        self.inner.create(num)
+    }
+    fn open_rw(&self, num: u64) -> std::io::Result<Box<dyn PackFile>> {
+        self.inner.open_rw(num)
+    }
+    fn open_read(&self, num: u64) -> std::io::Result<Arc<dyn PackRead>> {
+        self.inner.open_read(num)
+    }
+    fn can_punch(&self) -> bool {
+        self.inner.can_punch()
+    }
+    fn punch(&self, num: u64, ranges: &[(u64, u64)]) -> std::io::Result<()> {
+        self.inner.punch(num, ranges)
+    }
+    fn list_runs(&self) -> std::io::Result<Vec<u64>> {
+        self.inner.list_runs()
+    }
+    fn create_run(&self, num: u64) -> std::io::Result<Box<dyn PackFile>> {
+        self.inner.create_run(num)
+    }
+    fn open_run(&self, num: u64) -> std::io::Result<Arc<dyn PackRead>> {
+        Ok(Arc::new(CountedRun { inner: self.inner.open_run(num)?, reads: Arc::clone(&self.reads) }))
+    }
+    fn map_run(&self, num: u64) -> std::io::Result<Option<RunMap>> {
+        self.inner.map_run(num)
+    }
+}
+
+// The lookup path on real files (the stack of `ChunkStore::open`: RetryingIo
+// over FileIo) reads run pages in place from the mapping: a hit or a miss
+// makes no `read_at` call on a run. A return to pread on the hot path fails
+// this test. MemIo (no mapping) reads one page per hit, as a control.
+#[test]
+fn a_hit_on_files_reads_the_run_page_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = opts(500, 64 << 20);
+    {
+        let s = ChunkStore::open(dir.path(), o.clone()).unwrap();
+        for i in 0..3000 {
+            s.put(&small(i)).unwrap();
+        }
+        s.close().unwrap();
+    }
+    let files = || Arc::new(RetryingIo::new(Arc::new(FileIo::new(dir.path().join("packs"))))) as Arc<dyn PackIo>;
+    let runs = files().list_runs().unwrap();
+    assert_eq!(runs.len(), 6);
+    assert!(files().map_run(runs[0]).unwrap().is_some(), "ChunkStore::open maps the runs");
+
+    let reads = Arc::new(AtomicU64::new(0));
+    let io = Arc::new(CountRunReads { inner: files(), reads: Arc::clone(&reads) });
+    let s = ChunkStore::open_with(io, o.clone()).unwrap();
+    assert_eq!(s.index_info().memtable_entries, 0, "every lookup goes to a run");
+    let opened = reads.swap(0, AtomicOrdering::SeqCst);
+    assert!(opened > 0, "the open reads the footers and tables with read_at");
+    let t = std::time::Instant::now();
+    for i in 0..3000 {
+        assert!(s.contains(&Blake3_256.id(&small(i))), "object {i}");
+    }
+    let hit_ns = t.elapsed().as_nanos() / 3000;
+    let t = std::time::Instant::now();
+    for i in 3000..6000 {
+        assert!(!s.contains(&Blake3_256.id(&small(i))), "object {i}");
+    }
+    let miss_ns = t.elapsed().as_nanos() / 3000;
+    assert_eq!(s.get(&Blake3_256.id(&small(7))), Some(small(7)));
+    assert_eq!(reads.load(AtomicOrdering::SeqCst), 0, "a lookup on files made a run read_at call");
+    eprintln!("files, 6 runs of 500: contains hit {hit_ns} ns, miss {miss_ns} ns (debug build)");
+    drop(s);
+
+    // The same store on MemIo: each hit reads one page with read_at.
+    let mem = MemIo::new();
+    let s = open(&mem, &o);
+    for i in 0..3000 {
+        s.put(&small(i)).unwrap();
+    }
+    s.close().unwrap();
+    drop(s);
+    let reads = Arc::new(AtomicU64::new(0));
+    let s = ChunkStore::open_with(Arc::new(CountRunReads { inner: Arc::new(mem.clone()), reads: Arc::clone(&reads) }), o).unwrap();
+    reads.store(0, AtomicOrdering::SeqCst);
+    for i in 0..100 {
+        assert!(s.contains(&Blake3_256.id(&small(i))));
+    }
+    // One page for each hit, plus the filter false positives of newer runs.
+    let n = reads.load(AtomicOrdering::SeqCst);
+    assert!((100..=100 + 100 * 6 * 3 / 100).contains(&n), "MemIo: {n} page reads for 100 hits");
 }

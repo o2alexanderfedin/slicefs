@@ -14,7 +14,7 @@
 //! `write_durable` is retried as a whole (it writes the full file again).
 //! Directory syncs and punches are not retried.
 
-use crate::pack_io::{Kind, PackFile, PackIo, PackRead};
+use crate::pack_io::{Kind, PackFile, PackIo, PackRead, RunMap};
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -186,5 +186,8 @@ impl PackIo for RetryingIo {
     }
     fn open_run(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
         self.inner.open_run(num)
+    }
+    fn map_run(&self, num: u64) -> io::Result<Option<RunMap>> {
+        self.inner.map_run(num)
     }
 }

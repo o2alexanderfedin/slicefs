@@ -276,7 +276,14 @@ impl Index {
                 }
                 Err(e) => return Err(e.into()),
             };
-            let run = match Run::open(file, r.num, r.len) {
+            let map = match io.map_run(r.num) {
+                Ok(m) => m,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    return Ok(Err(Damage::MissingRun(format!("the MANIFEST lists run {:016x}, which is missing", r.num))))
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let run = match Run::open(file, map, r.num, r.len) {
                 Ok(run) => run,
                 Err(Error::Corrupt(m)) => return Ok(Err(Damage::Other(m))),
                 Err(e) => return Err(e),
@@ -406,6 +413,25 @@ impl Index {
         Ok(None)
     }
 
+    /// [`Index::get`] through the verified page reads of the runs (every
+    /// page CRC checked): damage is always `Corrupt`.
+    pub fn get_verified(&self, id: &ObjectId) -> Result<Option<Loc>> {
+        if let Some(e) = self.mem.get(id) {
+            return Ok(put_loc(*e));
+        }
+        for r in &self.runs {
+            if let Some(e) = r.get_verified(id)? {
+                return Ok(put_loc(e));
+            }
+        }
+        Ok(None)
+    }
+
+    /// True if the MANIFEST asks for a rebuild at the next writable open.
+    pub fn rebuild_requested(&self) -> bool {
+        self.man.flags & FLAG_REBUILD != 0
+    }
+
     /// Put `id` at `loc` in the memtable (no I/O).
     pub fn insert(&mut self, id: ObjectId, loc: Loc) {
         self.mem.insert(id, Entry::Put(loc));
@@ -470,7 +496,7 @@ impl Index {
         }
         let info = w.finish()?;
         io.sync_dir()?;
-        Run::open(io.open_run(num)?, num, info.len)
+        Run::open(io.open_run(num)?, io.map_run(num)?, num, info.len)
     }
 
     /// Every current put entry in ID order: the memtable and the runs merged,

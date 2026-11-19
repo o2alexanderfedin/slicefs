@@ -28,11 +28,26 @@
 //!
 //! Every count, offset and length that a run file gives is untrusted: it is
 //! checked with checked arithmetic against the file length before any use or
-//! allocation. Damage is [`Error::Corrupt`], never a panic, a skipped page or
-//! a wrong answer.
+//! allocation. Damage is never a panic.
+//!
+//! Two read paths:
+//!
+//! - Lookups ([`Run::get`]): the filter in RAM, then the fence table in RAM
+//!   (interpolation search: the digests are uniform), then one page, read
+//!   in place from the read-only mapping of the file (FileIo; see
+//!   `pack_io::RunMap`) or with `read_at` where the strategy has no mapping
+//!   (the test mock). An interpolation search inside the page finds the
+//!   entry. A hit does not check the page CRC: on a 4 KiB page that costs
+//!   300 to 490 ns, more than half of a mapped hit (17-05 mmap spike). A
+//!   damaged page can then give a wrong entry; see [`Run::get`] for why
+//!   that loses no data.
+//! - Verified reads ([`Run::get_verified`], [`Run::iter`]): `read_at` and a
+//!   check of the page CRC and of the zero bytes, so damage is always
+//!   [`Error::Corrupt`]. Merge, GC and the check of an entry whose record a
+//!   read rejected use these.
 
 use crate::bloom::{self, Bloom};
-use crate::pack_io::{PackFile, PackIo, PackRead};
+use crate::pack_io::{PackFile, PackIo, PackRead, RunMap};
 use crate::{Error, Loc, ObjectId, Result, ID_LEN};
 use std::io;
 use std::sync::Arc;
@@ -47,6 +62,8 @@ pub(crate) const ENTRY: usize = ID_LEN + 8 + 8 + 4 + 4 + 1;
 pub(crate) const PER_PAGE: usize = (PAGE - PAGE_HEADER) / ENTRY;
 /// Flag bit of a tombstone (a `Loc` uses bit 0 only).
 const TOMB: u8 = 0x80;
+/// The flag bits that a put entry can have.
+const PUT_FLAGS: u8 = 0x01;
 /// Tag u8, first page u64, page count u64.
 const TAG_ROW: usize = 1 + 8 + 8;
 /// Bytes of one fence: digest bytes 0..8 of the first entry of a page.
@@ -382,10 +399,15 @@ struct TagRange {
 }
 
 /// An open run: the footer values, the tag table, the fences and the filter
-/// in RAM; the pages stay on disk.
+/// in RAM; the pages stay on disk (mapped read-only where the strategy maps
+/// runs). The run owns its mapping: it is unmapped when the last `Arc` of
+/// the run drops, so a reader keeps valid bytes after a merge or GC removes
+/// the file.
 #[allow(dead_code)] // `tombstones` and the pack range: for the merges (17-06).
 pub(crate) struct Run {
     file: Arc<dyn PackRead>,
+    /// The whole file, mapped; `None`: lookups read pages with `read_at`.
+    map: Option<RunMap>,
     num: u64,
     len: u64,
     entries: u64,
@@ -417,12 +439,17 @@ impl Run {
     }
 
     /// Open run `num` of length `len` (the caller knows the length from the
-    /// writer or from the file). Reads the footer, the tag table and the
-    /// fence table; reads no page.
-    pub fn open(file: Arc<dyn PackRead>, num: u64, len: u64) -> Result<Run> {
+    /// writer or from the file), with the mapping of the file if the
+    /// strategy has one. Reads the footer, the tag table, the fence table
+    /// and the filter; reads no page.
+    pub fn open(file: Arc<dyn PackRead>, map: Option<RunMap>, num: u64, len: u64) -> Result<Run> {
         let bad = |what: &str| Self::corrupt(num, what);
         if len < FOOTER as u64 {
             return Err(bad("shorter than a footer"));
+        }
+        // A page past the end of a mapped file is SIGBUS, not a short read.
+        if map.as_ref().is_some_and(|m| (m.len() as u64) < len) {
+            return Err(bad("the file is shorter than its length in the MANIFEST"));
         }
         let mut fb = [0u8; FOOTER];
         Self::read(&*file, num, &mut fb, len - FOOTER as u64)?;
@@ -529,6 +556,7 @@ impl Run {
 
         Ok(Run {
             file,
+            map,
             num,
             len,
             entries: f.entries,
@@ -596,39 +624,68 @@ impl Run {
         Ok(count)
     }
 
-    /// The entry of `id`, if the run has one. No page read when the filter
-    /// says the digest is not in the run. Else one page read when the run
-    /// has pages of the ID's tag and the ID is not below the first of them;
-    /// a key whose 8-byte prefix equals a page fence can need the page before
-    /// it too. A damaged page is `Corrupt`, never `None`.
+    /// The tag range of `id` and the page whose fence is the last one at
+    /// or below its prefix; `None` if the run has no page that can hold it.
+    #[inline]
+    fn locate(&self, id: &ObjectId) -> Option<(TagRange, usize)> {
+        let t = self.tags[self.tags.binary_search_by_key(&id.tag(), |t| t.tag).ok()?];
+        let after = upper_bound(&self.fences[t.first..t.first + t.count], prefix(id));
+        (after > 0).then(|| (t, t.first + after - 1))
+    }
+
+    /// The entry of `id`, if the run has one. The filter answers most
+    /// misses with no page access. Else one page, read in place from the
+    /// mapping (no `read_at`, no copy) or with one `read_at`; a key whose
+    /// 8-byte prefix equals a page fence can need the page before it too.
+    ///
+    /// No page CRC on a hit (see the module comment). What a damaged page
+    /// can do, and why no data is lost:
+    /// - A wrong entry for `id` (a damaged pack, offset or length): `read`
+    ///   checks the record CRC, the ID and the hash, so it never returns
+    ///   wrong bytes; it then checks the entry with [`Run::get_verified`]
+    ///   and asks for a rebuild of the index. A `put` takes the wrong entry
+    ///   as a dedup hit; the object's bytes are still in their pack, and the
+    ///   rebuild finds them.
+    /// - A miss of an ID that the filter let through: the page CRC is
+    ///   checked before `None` is returned (about 1 % of the misses per
+    ///   run), and damage is `Corrupt`. So a damaged tombstone never lets
+    ///   the search go on to an older run whose put entry it hides, and a
+    ///   damaged ID is not taken as "not in this run".
+    /// - A damaged flag byte or entry count: `Corrupt` (the flags must be
+    ///   those of a put or a tombstone, and a put cannot point to offset 0,
+    ///   which is what a tombstone with its flag bit lost looks like).
     pub fn get(&self, id: &ObjectId) -> Result<Option<Entry>> {
         if self.filter.as_ref().is_some_and(|f| !f.may_contain(id.digest())) {
             return Ok(None);
         }
-        let Ok(t) = self.tags.binary_search_by_key(&id.tag(), |t| t.tag) else {
-            return Ok(None);
-        };
-        let t = self.tags[t];
-        let fences = &self.fences[t.first..t.first + t.count];
-        let p = prefix(id);
-        let after = fences.partition_point(|&f| f <= p);
-        if after == 0 {
-            return Ok(None);
+        let Some((t, page)) = self.locate(id) else { return Ok(None) };
+        match &self.map {
+            Some(m) => self.search(id, t, page, &mut Mapped(m.bytes())),
+            None => self.search(id, t, page, &mut Buffered { run: self, buf: [0; PAGE] }),
         }
-        let mut page = t.first + after - 1;
-        let mut buf = vec![0u8; PAGE];
+    }
+
+    /// The search of [`Run::get`] from `page`, over pages from `pages`.
+    #[inline]
+    fn search<P: Pages>(&self, id: &ObjectId, t: TagRange, mut page: usize, pages: &mut P) -> Result<Option<Entry>> {
+        let p = prefix(id);
+        let end = t.first + t.count;
         loop {
-            let count = self.read_page(page, &mut buf)?;
-            let entries = &buf[PAGE_HEADER..PAGE_HEADER + count * ENTRY];
-            let (mut lo, mut hi) = (0, count);
-            while lo < hi {
-                let mid = (lo + hi) / 2;
-                let e = &entries[mid * ENTRY..(mid + 1) * ENTRY];
-                match e[..ID_LEN].cmp(&id.0[..]) {
-                    std::cmp::Ordering::Less => lo = mid + 1,
-                    std::cmp::Ordering::Greater => hi = mid,
-                    std::cmp::Ordering::Equal => return Ok(Some(decode_entry(e).1)),
-                }
+            let at = |what: &str| Self::corrupt(self.num, format_args!("page {page}: {what}"));
+            let b = pages.page(page)?;
+            let count = le_u16(b, 0) as usize;
+            if count == 0 || count > PER_PAGE {
+                return Err(at("bad entry count"));
+            }
+            let entries = &b[PAGE_HEADER..PAGE_HEADER + count * ENTRY];
+            let hi = if page + 1 < end { self.fences[page + 1] } else { u64::MAX };
+            if let Some(i) = search_page(entries, count, id, self.fences[page], hi) {
+                return decode_checked(&entries[i * ENTRY..(i + 1) * ENTRY]).map(Some).ok_or_else(|| at("bad entry flags"));
+            }
+            // A miss after the filter said "maybe": check the page, so that
+            // damage is never taken as "not in this run".
+            if crc32c::crc32c(entries) != le_u32(b, 4) {
+                return Err(at("bad CRC"));
             }
             // Keys with the same 8-byte prefix can sit on both sides of a
             // page boundary: look in the page before.
@@ -640,10 +697,141 @@ impl Run {
         }
     }
 
+    /// The entry of `id` like [`Run::get`], but every page is read with
+    /// `read_at` and fully checked (CRC and zero bytes): damage is always
+    /// `Corrupt`. For the check of an entry whose record a read rejected.
+    pub fn get_verified(&self, id: &ObjectId) -> Result<Option<Entry>> {
+        let Some((t, mut page)) = self.locate(id) else { return Ok(None) };
+        let mut buf = vec![0u8; PAGE];
+        loop {
+            let count = self.read_page(page, &mut buf)?;
+            let entries = &buf[PAGE_HEADER..PAGE_HEADER + count * ENTRY];
+            let found = entries.chunks_exact(ENTRY).position(|e| e[..ID_LEN] == id.0[..]);
+            if let Some(i) = found {
+                let at = || Self::corrupt(self.num, format_args!("page {page}: bad entry flags"));
+                return decode_checked(&entries[i * ENTRY..(i + 1) * ENTRY]).map(Some).ok_or_else(at);
+            }
+            if page > t.first && self.fences[page] == prefix(id) {
+                page -= 1;
+            } else {
+                return Ok(None);
+            }
+        }
+    }
+
     /// Every entry in ID order, read one page at a time. A damaged page
     /// yields `Corrupt` and ends the iteration.
     pub fn iter(&self) -> RunIter<'_> {
         RunIter { run: self, page: 0, buf: vec![0u8; PAGE], count: 0, next: 0, seen: 0, last: None, done: false }
+    }
+}
+
+/// The decoded entry, or `None` if its flags are not those of a put or a
+/// tombstone, or a put points to offset 0 (no record starts there): a
+/// cheap check of a page whose CRC is not checked.
+fn decode_checked(b: &[u8]) -> Option<Entry> {
+    let flags = b[ID_LEN + 24];
+    if flags != TOMB && flags & !PUT_FLAGS != 0 {
+        return None;
+    }
+    match decode_entry(b).1 {
+        Entry::Put(l) if l.offset == 0 => None,
+        e => Some(e),
+    }
+}
+
+/// The number of values in sorted `f` that are at or below `p` (the same
+/// as `f.partition_point(|&x| x <= p)`). Interpolation search, because the
+/// fences are prefixes of uniform digests: about 3 to 4 probes in place of
+/// 14 to 17 for a binary search (17-05 mmap spike). The guess uses f64
+/// arithmetic: a 128-bit division is a slow library call that costs more
+/// than the probes it saves. After a few steps (keys that are not uniform)
+/// a binary search ends the work, so the cost stays near that of a binary
+/// search.
+#[inline]
+fn upper_bound(f: &[u64], p: u64) -> usize {
+    // f[..lo] <= p < f[hi..]; vlo <= p < vhi bound the values in between.
+    let (mut lo, mut hi) = (0usize, f.len());
+    let (mut vlo, mut vhi) = (0u64, u64::MAX);
+    let mut steps = 0;
+    while hi - lo > 8 && steps < 6 {
+        steps += 1;
+        let frac = (p - vlo) as f64 / ((vhi - vlo) as f64 + 1.0);
+        let g = (lo + (frac * (hi - lo) as f64) as usize).min(hi - 1);
+        if f[g] <= p {
+            lo = g + 1;
+            vlo = f[g];
+        } else {
+            hi = g;
+            vhi = f[g];
+        }
+    }
+    lo + f[lo..hi].partition_point(|&x| x <= p)
+}
+
+/// The index of `id` among the `count` entries of a page, whose prefixes
+/// lie in `lo..=hi` (the fence of the page and the fence of the next one).
+/// An interpolation guess from the prefix, then a walk to the entry: the
+/// walk is at most `count` steps, also on keys that are not uniform.
+#[inline]
+fn search_page(entries: &[u8], count: usize, id: &ObjectId, lo: u64, hi: u64) -> Option<usize> {
+    use std::cmp::Ordering::*;
+    let key = |i: usize| &entries[i * ENTRY..i * ENTRY + ID_LEN];
+    let frac = prefix(id).saturating_sub(lo) as f64 / (hi.saturating_sub(lo) as f64 + 1.0);
+    let mut i = ((frac * count as f64) as usize).min(count - 1);
+    match key(i).cmp(&id.0[..]) {
+        Equal => Some(i),
+        Less => {
+            i += 1;
+            while i < count {
+                match key(i).cmp(&id.0[..]) {
+                    Equal => return Some(i),
+                    Greater => return None,
+                    Less => i += 1,
+                }
+            }
+            None
+        }
+        Greater => {
+            while i > 0 {
+                i -= 1;
+                match key(i).cmp(&id.0[..]) {
+                    Equal => return Some(i),
+                    Less => return None,
+                    Greater => {}
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Where [`Run::get`] takes its pages from.
+trait Pages {
+    /// The `PAGE` bytes of page `page` (an index below the page count).
+    fn page(&mut self, page: usize) -> Result<&[u8]>;
+}
+
+/// Pages in place in the mapping of the run file.
+struct Mapped<'a>(&'a [u8]);
+
+impl Pages for Mapped<'_> {
+    #[inline]
+    fn page(&mut self, page: usize) -> Result<&[u8]> {
+        Ok(&self.0[page * PAGE..(page + 1) * PAGE])
+    }
+}
+
+/// Pages read with `read_at` into a buffer (a strategy without a mapping).
+struct Buffered<'a> {
+    run: &'a Run,
+    buf: [u8; PAGE],
+}
+
+impl Pages for Buffered<'_> {
+    fn page(&mut self, page: usize) -> Result<&[u8]> {
+        Run::read(&*self.run.file, self.run.num, &mut self.buf, (page * PAGE) as u64)?;
+        Ok(&self.buf)
     }
 }
 
@@ -740,7 +928,7 @@ mod tests {
     }
 
     fn put(i: u64) -> Entry {
-        Entry::Put(Loc { pack: 1 + i % 5, offset: i * 100, stored: i as u32, raw: 2 * i as u32, flags: (i % 2) as u8 })
+        Entry::Put(Loc { pack: 1 + i % 5, offset: 14 + i * 100, stored: i as u32, raw: 2 * i as u32, flags: (i % 2) as u8 })
     }
 
     fn write_run(io: &dyn PackIo, num: u64, entries: &[(ObjectId, Entry)]) -> RunInfo {
@@ -757,12 +945,13 @@ mod tests {
 
     fn open_counting(io: &dyn PackIo, num: u64, len: u64) -> (Run, Arc<Counting>) {
         let c = Arc::new(Counting { inner: io.open_run(num).unwrap(), reads: Mutex::new(Vec::new()) });
-        let run = Run::open(Arc::clone(&c) as Arc<dyn PackRead>, num, len).unwrap();
+        let run = Run::open(Arc::clone(&c) as Arc<dyn PackRead>, io.map_run(num).unwrap(), num, len).unwrap();
         (run, c)
     }
 
     // Tracer: a run written through create_run is found again through
-    // open_run with one page read, on each I/O strategy.
+    // open_run, on each I/O strategy: FileIo maps the run, and a hit reads
+    // its page in place (no `read_at`); the others read one page per hit.
     #[test]
     fn a_run_round_trips_through_each_io() {
         let dir = tempfile::tempdir().unwrap();
@@ -773,7 +962,9 @@ mod tests {
 
         let entries: Vec<(ObjectId, Entry)> = (0..1000).map(|i| (key(0x1e, i), put(i))).collect();
         for (name, io) in ios {
+            let mapped = name == "files";
             let info = write_run(io, 1, &entries);
+            assert_eq!(io.map_run(1).unwrap().is_some(), mapped, "{name}");
             assert_eq!((info.entries, info.tombstones), (1000, 0), "{name}");
             let (run, c) = open_counting(io, 1, info.len);
             let pages = 1000u64.div_ceil(PER_PAGE as u64);
@@ -784,17 +975,20 @@ mod tests {
             assert_eq!(run.pack_range(), Some((1, 5)), "{name}");
             for (id, e) in &entries {
                 assert_eq!(run.get(id).unwrap(), Some(*e), "{name}");
-                assert_eq!(c.take().len(), 1, "{name}: one read for each hit");
+                assert_eq!(c.take().len(), usize::from(!mapped), "{name}: reads for one hit");
             }
             for i in [0, 1, 500, 999, 5000] {
                 let mut absent = key(0x1e, i);
                 absent.0[8] |= 1; // between i and i + 1
                 assert_eq!(run.get(&absent).unwrap(), None, "{name}");
-                assert!(c.take().len() <= 1, "{name}: at most one read for a miss");
+                assert!(c.take().len() <= usize::from(!mapped), "{name}: reads for one miss");
             }
             assert_eq!(run.get(&key(0x2f, 3)).unwrap(), None, "{name}: another tag");
             assert_eq!(c.take().len(), 0, "{name}: no read for a tag that is not in the run");
             assert_eq!(io.list_runs().unwrap(), vec![1], "{name}");
+            // The verified path reads (and checks) one page with `read_at`.
+            assert_eq!(run.get_verified(&entries[500].0).unwrap(), Some(entries[500].1), "{name}");
+            assert_eq!(c.take().len(), 1, "{name}: get_verified reads its page");
         }
         assert!(dir.path().join("index").join("0000000000000001.run").is_file());
         assert!(!dir.path().join("packs").join("0000000000000001.run").exists());
@@ -817,7 +1011,7 @@ mod tests {
     fn mem_run(entries: &[(ObjectId, Entry)]) -> (MemIo, Run, RunInfo) {
         let io = MemIo::new();
         let info = write_run(&io, 1, entries);
-        let run = Run::open(io.open_run(1).unwrap(), 1, info.len).unwrap();
+        let run = Run::open(io.open_run(1).unwrap(), io.map_run(1).unwrap(), 1, info.len).unwrap();
         (io, run, info)
     }
 
@@ -921,7 +1115,7 @@ mod tests {
     fn open_bytes(bytes: &[u8]) -> Result<Run> {
         let io = MemIo::new();
         io.write_durable(1, Kind::Run, bytes).unwrap();
-        Run::open(io.open_run(1).unwrap(), 1, bytes.len() as u64)
+        Run::open(io.open_run(1).unwrap(), io.map_run(1).unwrap(), 1, bytes.len() as u64)
     }
 
     /// `bytes` with the footer changed by `f`, and its CRC made right again.
@@ -1013,17 +1207,30 @@ mod tests {
         // A length past the end of the file: a short read is damage too.
         let io = MemIo::new();
         io.write_durable(1, Kind::Run, &good).unwrap();
-        assert!(is_corrupt(&Run::open(io.open_run(1).unwrap(), 1, good.len() as u64 + PAGE as u64)));
+        assert!(is_corrupt(&Run::open(io.open_run(1).unwrap(), io.map_run(1).unwrap(), 1, good.len() as u64 + PAGE as u64)));
     }
 
+    /// The contract of a damaged page (the lookups check no page CRC on a
+    /// hit; see `Run::get`): `get` never gives the entry of another ID and
+    /// never a false miss; it gives the right entry, `Corrupt`, or (only for
+    /// the damaged entry itself) that entry with damaged place fields. The
+    /// verified reads (`get_verified`, `iter`) are always `Corrupt`.
     #[test]
-    fn a_damaged_page_is_corrupt_for_get_and_iter() {
+    fn a_damaged_page_gives_no_false_miss_and_the_verified_reads_are_corrupt() {
         let entries: Vec<(ObjectId, Entry)> = (0..200).map(|i| (key(0x1e, i), put(i))).collect();
         let (io, run, _) = mem_run(&entries);
-        // An entry byte of page 1 (entries 70..140).
+        // A digest byte of entry 75 (page 1 holds entries 70..140).
         io.flip(1, Kind::Run, PAGE + PAGE_HEADER + 5 * ENTRY + 20);
-        assert!(is_corrupt(&run.get(&key(0x1e, 100))), "a key on the damaged page");
-        assert!(is_corrupt(&run.get(&key(0x1e, 75))), "the damaged key itself");
+        assert!(is_corrupt(&run.get(&key(0x1e, 75))), "the damaged key is not a miss");
+        assert!(is_corrupt(&run.get_verified(&key(0x1e, 75))));
+        assert!(is_corrupt(&run.get_verified(&key(0x1e, 100))), "a key on the damaged page");
+        for i in 70..140 {
+            match run.get(&key(0x1e, i)) {
+                Ok(e) => assert_eq!(e, Some(put(i)), "key {i}"),
+                Err(e) => assert!(matches!(e, Error::Corrupt(_)), "key {i}"),
+            }
+        }
+        assert_eq!(run.get(&key(0x1e, 100)).unwrap(), Some(put(100)), "an intact entry on the page: a hit");
         assert_eq!(run.get(&key(0x1e, 10)).unwrap(), Some(put(10)), "other pages still read");
         assert_eq!(run.get(&key(0x1e, 150)).unwrap(), Some(put(150)));
         let mut it = run.iter();
@@ -1033,12 +1240,79 @@ mod tests {
         assert!(is_corrupt(&it.next().unwrap()), "the damaged page");
         assert!(it.next().is_none(), "iter stops after damage");
 
-        // Damage in the page header and in the zero padding.
+        // Damage in the page header, the CRC and the zero padding: a hit
+        // still gives the right entry (or Corrupt).
         for at in [2 * PAGE, 2 * PAGE + 2, 2 * PAGE + 5, 3 * PAGE - 1] {
             let (io, run, _) = mem_run(&entries);
             io.flip(1, Kind::Run, at);
-            assert!(is_corrupt(&run.get(&key(0x1e, 150))), "byte {at}");
+            match run.get(&key(0x1e, 150)) {
+                Ok(e) => assert_eq!(e, Some(put(150)), "byte {at}"),
+                Err(e) => assert!(matches!(e, Error::Corrupt(_)), "byte {at}"),
+            }
+            assert!(is_corrupt(&run.get_verified(&key(0x1e, 150))), "byte {at}");
             assert!(run.iter().any(|r| is_corrupt(&r)), "byte {at}");
+        }
+        // A miss on a page with a bad CRC is Corrupt.
+        let (io, run, _) = mem_run(&entries);
+        io.flip(1, Kind::Run, 2 * PAGE + 5);
+        let mut absent = key(0x1e, 150);
+        absent.0[8] |= 1;
+        assert!(is_corrupt(&run.get(&absent)));
+
+        // A damaged place field of an entry: that entry, with the damage
+        // (the pack read rejects it; see `ChunkStore::read`).
+        let (io, run, _) = mem_run(&entries);
+        io.flip(1, Kind::Run, PAGE_HEADER + 3 * ENTRY + ID_LEN + 8);
+        assert_ne!(run.get(&key(0x1e, 3)).unwrap(), Some(put(3)));
+        assert!(is_corrupt(&run.get_verified(&key(0x1e, 3))));
+    }
+
+    #[test]
+    fn a_damaged_tombstone_never_reads_as_a_miss_or_a_put() {
+        let entries: Vec<(ObjectId, Entry)> = hashed_entries(100).into_iter().map(|(id, _)| (id, Entry::Tomb(3))).collect();
+        let at = |i: usize| PAGE_HEADER + i * ENTRY;
+        // A digest byte, all flag bits, and only the tombstone bit.
+        let cases: [(usize, u8); 3] = [(at(40) + 20, 0x04), (at(40) + ID_LEN + 24, 0xff), (at(40) + ID_LEN + 24, TOMB)];
+        for (byte, mask) in cases {
+            let io = MemIo::new();
+            write_run(&io, 1, &entries);
+            let mut b = io.read(1, Kind::Run).unwrap();
+            b[byte] ^= mask;
+            let run = open_bytes(&b).unwrap();
+            let got = run.get(&entries[40].0);
+            assert!(is_corrupt(&got), "byte {byte} mask {mask:#x}: {got:?}");
+            assert_eq!(run.get(&entries[41].0).unwrap(), Some(Entry::Tomb(3)));
+        }
+    }
+
+    #[test]
+    fn the_interpolation_search_finds_what_a_binary_search_finds() {
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut sets: Vec<Vec<u64>> = vec![
+            vec![],
+            vec![5],
+            vec![7; 40],
+            (0..1000).map(|i| i << 20).collect(),
+            (0..1000).map(|i| i * i * i).collect(),
+            (0..500).map(|i| if i < 499 { i } else { u64::MAX }).collect(),
+            vec![0, 0, 0, u64::MAX, u64::MAX],
+        ];
+        let mut uniform: Vec<u64> = (0..5000).map(|_| next()).collect();
+        uniform.sort_unstable();
+        sets.push(uniform);
+        for f in &sets {
+            let mut probes: Vec<u64> = vec![0, 1, u64::MAX, u64::MAX - 1];
+            probes.extend(f.iter().flat_map(|&v| [v, v.wrapping_sub(1), v.wrapping_add(1)]));
+            probes.extend((0..200).map(|_| next()));
+            for p in probes {
+                assert_eq!(upper_bound(f, p), f.partition_point(|&v| v <= p), "{p} in {} values", f.len());
+            }
         }
     }
 

@@ -972,8 +972,9 @@ impl ChunkStore {
     }
 
     /// The bytes of `id`, verified with the hasher of the ID's tag.
-    /// Errors: `Missing`, `Corrupt` (a damaged record), `UnknownHash` (a tag
-    /// this build does not know: a damaged or newer store), `Io`.
+    /// Errors: `Missing`, `Corrupt` (a damaged record, or a damaged index
+    /// entry), `UnknownHash` (a tag this build does not know: a damaged or
+    /// newer store), `Io`.
     pub fn read(&self, id: &ObjectId) -> Result<Vec<u8>> {
         let hasher = hasher_by_tag(id.tag()).ok_or(Error::UnknownHash(*id))?;
         let (loc, file) = {
@@ -981,9 +982,20 @@ impl ChunkStore {
             // An index read error is returned, never taken as "missing".
             let loc = inner.index.get(id)?.ok_or(Error::Missing(*id))?;
             inner.touch(*id);
-            let file = inner.reader(&*self.io, loc.pack)?;
-            (loc, file)
+            match inner.reader(&*self.io, loc.pack) {
+                Ok(file) => (loc, file),
+                Err(e) => {
+                    drop(inner);
+                    return Err(self.check_entry(id, e.into()));
+                }
+            }
         };
+        Self::read_record(id, hasher, loc, &*file).map_err(|e| self.check_entry(id, e))
+    }
+
+    /// The record of `id` at `loc` in `file`, checked: its CRC, its ID and
+    /// the hash of its bytes.
+    fn read_record(id: &ObjectId, hasher: &dyn ObjectHasher, loc: Loc, file: &dyn PackRead) -> Result<Vec<u8>> {
         let damaged = || Error::Corrupt(format!("object {id:?}"));
         let mut buf = vec![0u8; REC_HEADER + loc.stored as usize + REC_CRC];
         file.read_at(&mut buf, loc.offset)?;
@@ -1001,6 +1013,36 @@ impl ChunkStore {
             return Err(damaged());
         }
         Ok(data)
+    }
+
+    /// `err` came from the record that the index points to (no record
+    /// there, a short read, a missing pack, a wrong ID or hash). Lookups do
+    /// not check the CRC of the run page (see `run.rs`), so the entry
+    /// itself may be damaged: look it up again through the verified page
+    /// reads. If the run page is damaged, ask for a rebuild of the index
+    /// (the next writable open rebuilds it from the packs, where the bytes
+    /// of the object still are) and return that damage.
+    fn check_entry(&self, id: &ObjectId, err: Error) -> Error {
+        let suspect = match &err {
+            Error::Corrupt(_) => true,
+            Error::Io(e) => matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::UnexpectedEof),
+            _ => false,
+        };
+        if !suspect {
+            return err;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        match inner.index.get_verified(id) {
+            Err(Error::Corrupt(m)) => {
+                if !self.opts.read_only && !inner.index.rebuild_requested() {
+                    if let Err(e) = inner.index.request_rebuild(&*self.io, &m) {
+                        tracing::warn!("chunk store: cannot ask for a rebuild of the index: {e}");
+                    }
+                }
+                Error::Corrupt(m)
+            }
+            _ => err,
+        }
     }
 
     /// The hasher of new objects.

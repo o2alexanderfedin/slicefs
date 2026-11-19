@@ -94,7 +94,7 @@ impl Bloom {
     /// The filter in `b` with `bits_per_key`. A length that is zero or not
     /// a whole number of blocks is refused.
     pub fn from_bytes(b: &[u8], bits_per_key: u8) -> Result<Bloom, String> {
-        if b.is_empty() || b.len() % BLOCK_BYTES != 0 {
+        if b.is_empty() || !b.len().is_multiple_of(BLOCK_BYTES) {
             return Err(format!("filter length {} is not a whole, non-zero number of blocks", b.len()));
         }
         if bits_per_key == 0 {

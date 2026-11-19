@@ -1,7 +1,12 @@
 //! Storage strategies: every file operation of the store goes through
 //! [`PackIo`], so the store can run on real files ([`FileIo`]), on an
 //! in-memory mock with faults ([`crate::mem::MemIo`]), or later on other
-//! read and write paths (for example mmap) without changes in the store.
+//! read and write paths without changes in the store.
+//!
+//! Index lookups read sealed run files through a read-only mapping
+//! ([`PackIo::map_run`], [`RunMap`]) where the strategy has one (files);
+//! other strategies give no mapping, and the lookups read the run pages
+//! with `read_at`, so the mock still counts them and can fail them.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -96,6 +101,90 @@ pub trait PackIo: Send + Sync {
     fn create_run(&self, num: u64) -> io::Result<Box<dyn PackFile>>;
     /// Open a run file for reads.
     fn open_run(&self, num: u64) -> io::Result<Arc<dyn PackRead>>;
+    /// Map a sealed run file read-only for lookups, or `None` if this
+    /// strategy has no mapping (then lookups use `open_run` and `read_at`).
+    /// Required, with no default: a wrapper that forgot to pass it on would
+    /// silently put lookups back on `read_at`.
+    fn map_run(&self, num: u64) -> io::Result<Option<RunMap>>;
+}
+
+/// Runs of at least this many bytes are mapped with `MADV_RANDOM`: a lookup
+/// touches one random page, and readahead around a cold page fault of a
+/// large run reads far more than that page (the 17-05 mmap spike, Linux,
+/// cold page cache: 7.6 times less data read and 1.7 times faster per hit
+/// at 585 MB; at 58 MB the default readahead was 2.1 times faster). The
+/// limit lies between those two sizes; it is a first value that needs its
+/// own measurement.
+pub const MADV_RANDOM_MIN: u64 = 256 << 20;
+
+/// A read-only shared mapping (`PROT_READ`, `MAP_SHARED`) of a whole run
+/// file. It is unmapped when it is dropped. A run owns its mapping, and
+/// readers hold the run through an `Arc`, so a merge or GC that removes the
+/// run file never takes the bytes away from a reader: the file system keeps
+/// a removed file while a mapping of it exists.
+///
+/// Accepted risk: a read error of the disk inside the mapping raises
+/// SIGBUS, which stops the process, instead of an error value. Run files
+/// are sealed (never written or cut after their sync), so only a disk error
+/// or a change from outside SliceFS can cause it; scrub, merge and rebuild
+/// read runs with `read_at`, where a read error is a normal error.
+pub struct RunMap {
+    ptr: *const u8,
+    len: usize,
+}
+
+// SAFETY: the mapping is read-only and is never changed through this
+// pointer; reads of shared read-only memory are safe from any thread.
+unsafe impl Send for RunMap {}
+unsafe impl Sync for RunMap {}
+
+impl RunMap {
+    /// The bytes of the file as they were mapped.
+    pub fn bytes(&self) -> &[u8] {
+        if self.len == 0 {
+            return &[];
+        }
+        // SAFETY: `ptr` is a live mapping of `len` readable bytes until drop.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Map all of `file` read-only.
+    fn new(file: &File) -> io::Result<RunMap> {
+        use std::os::fd::AsRawFd;
+        let len = usize::try_from(file.metadata()?.len()).map_err(|_| io::Error::other("run file too large to map"))?;
+        if len == 0 {
+            return Ok(RunMap { ptr: std::ptr::null(), len: 0 });
+        }
+        // SAFETY: a new read-only shared mapping of a valid fd; the result
+        // is checked before use.
+        let p = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, file.as_raw_fd(), 0) };
+        if p == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        if len as u64 >= MADV_RANDOM_MIN {
+            // Only advice: a failure changes nothing that is correct.
+            // SAFETY: `p` is the mapping of `len` bytes made above.
+            unsafe { libc::madvise(p, len, libc::MADV_RANDOM) };
+        }
+        Ok(RunMap { ptr: p as *const u8, len })
+    }
+}
+
+impl Drop for RunMap {
+    fn drop(&mut self) {
+        if self.len != 0 {
+            // SAFETY: the mapping made in `new`, unmapped once.
+            unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.len) };
+        }
+    }
 }
 
 // ── Files ─────────────────────────────────────────────────────────────────────
@@ -250,6 +339,10 @@ impl PackIo for FileIo {
 
     fn open_run(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
         Ok(Arc::new(FilePack(File::open(self.path(num, Kind::Run))?)))
+    }
+
+    fn map_run(&self, num: u64) -> io::Result<Option<RunMap>> {
+        RunMap::new(&File::open(self.path(num, Kind::Run))?).map(Some)
     }
 }
 
