@@ -195,28 +195,41 @@ pub struct RangeView {
 
 impl RangeView {
     /// The bytes of the range: base bytes from `base_read(offset, len)`, then
-    /// zeros, then the extent parts on top. A base read of the wrong length
-    /// is an error (a damaged base must not turn into zeros).
+    /// zeros, then the extent parts on top. The base is asked only for the
+    /// bytes below `visible` that no part covers (#108: a rebase does not read
+    /// the base under its extents). A base read of the wrong length is an
+    /// error (a damaged base must not turn into zeros).
     pub fn read(
         self,
         mut base_read: impl FnMut(u64, usize) -> std::io::Result<Vec<u8>>,
     ) -> std::io::Result<Vec<u8>> {
         let n = (self.end - self.off) as usize;
         let base_end = self.end.min(self.visible);
-        let mut out = if self.off < base_end {
-            let want = (base_end - self.off) as usize;
-            let got = base_read(self.off, want)?;
+        let mut out = vec![0u8; n];
+        let mut fill = |a: u64, b: u64, out: &mut [u8]| -> std::io::Result<()> {
+            let b = b.min(base_end);
+            if a >= b {
+                return Ok(());
+            }
+            let want = (b - a) as usize;
+            let got = base_read(a, want)?;
             if got.len() != want {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
-                    format!("overlay base read: {} of {} bytes at {}", got.len(), want, self.off),
+                    format!("overlay base read: {} of {} bytes at {}", got.len(), want, a),
                 ));
             }
-            got
-        } else {
-            Vec::new()
+            let at = (a - self.off) as usize;
+            out[at..at + want].copy_from_slice(&got);
+            Ok(())
         };
-        out.resize(n, 0);
+        // The parts are sorted and do not overlap: read the gaps between them.
+        let mut pos = self.off;
+        for (a, bytes) in &self.parts {
+            fill(pos, *a, &mut out)?;
+            pos = a + bytes.len() as u64;
+        }
+        fill(pos, self.end, &mut out)?;
         for (a, bytes) in self.parts {
             let at = (a - self.off) as usize;
             out[at..at + bytes.len()].copy_from_slice(&bytes);
@@ -358,6 +371,34 @@ mod tests {
             assert!(small.cost() <= len + len / GROW_DIV + EXTENT_OVERHEAD, "{len}: cost {}", small.cost());
         }
         assert_eq!(read(&small, &[], 0, 16 * MIB as u64), vec![1u8; 16 * MIB]);
+    }
+
+    /// A read asks the base only for the bytes that no extent covers (#108):
+    /// a range under one extent reads no base, a range across two extents
+    /// reads only the gaps, each of the right length.
+    #[test]
+    fn a_read_asks_the_base_only_for_the_gaps_between_extents() {
+        let base: Vec<u8> = (0..64 * 1024u32).map(|i| (i * 7) as u8).collect();
+        let mut ov = Overlay::new(None, base.len() as u64, base.len() as u64);
+        ov.write(1000, &[1; 3000]);
+        ov.write(10_000, &[2; 5000]);
+        let mut model = base.clone();
+        model[1000..4000].fill(1);
+        model[10_000..15_000].fill(2);
+        let mut asked: Vec<(u64, usize)> = Vec::new();
+        let mut read_counted = |off: u64, len: u64, asked: &mut Vec<(u64, usize)>| {
+            ov.view(off, len).read(|o, n| {
+                asked.push((o, n));
+                Ok(base[o as usize..o as usize + n].to_vec())
+            }).unwrap()
+        };
+        assert_eq!(read_counted(1500, 2000, &mut asked), model[1500..3500]);
+        assert!(asked.is_empty(), "a range under one extent reads no base: {asked:?}");
+        assert_eq!(read_counted(0, 20_000, &mut asked), model[..20_000]);
+        assert_eq!(asked, vec![(0, 1000), (4000, 6000), (15_000, 5000)]);
+        asked.clear();
+        assert_eq!(read_counted(12_000, 10_000, &mut asked), model[12_000..22_000]);
+        assert_eq!(asked, vec![(15_000, 7000)]);
     }
 
     #[test]
