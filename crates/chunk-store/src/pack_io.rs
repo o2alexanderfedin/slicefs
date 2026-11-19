@@ -197,13 +197,22 @@ pub struct FileIo {
     index: PathBuf,
     /// Result of the hole probe (see `can_punch`).
     punches: OnceLock<bool>,
+    /// False: no sync at all (see [`FileIo::unsynced`]).
+    sync: bool,
 }
 
 impl FileIo {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         let dir = dir.into();
         let index = dir.with_file_name("index");
-        FileIo { dir, index, punches: OnceLock::new() }
+        FileIo { dir, index, punches: OnceLock::new(), sync: true }
+    }
+
+    /// As [`FileIo::new`], but no sync of files or directories: nothing is
+    /// durable at a power loss. Only for tests and benchmarks that measure
+    /// something else than the disk syncs.
+    pub fn unsynced(dir: impl Into<PathBuf>) -> Self {
+        FileIo { sync: false, ..Self::new(dir) }
     }
 
     /// Punch a hole in a small probe file in the pack directory.
@@ -225,7 +234,8 @@ impl FileIo {
     }
 }
 
-struct FilePack(File);
+/// A file, and whether `sync` syncs it.
+struct FilePack(File, bool);
 
 impl PackRead for FilePack {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
@@ -241,7 +251,10 @@ impl PackFile for FilePack {
         self.0.set_len(len)
     }
     fn sync(&mut self) -> io::Result<()> {
-        full_sync(&self.0)
+        if self.1 {
+            full_sync(&self.0)?;
+        }
+        Ok(())
     }
 }
 
@@ -275,7 +288,7 @@ impl PackIo for FileIo {
     }
 
     fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> io::Result<()> {
-        write_durable(&self.path(num, kind), data)
+        write_durable(&self.path(num, kind), data, self.sync)
     }
 
     fn remove(&self, num: u64, kind: Kind) -> io::Result<()> {
@@ -283,6 +296,9 @@ impl PackIo for FileIo {
     }
 
     fn sync_dir(&self) -> io::Result<()> {
+        if !self.sync {
+            return Ok(());
+        }
         sync_dir(&self.dir)?;
         if self.index.is_dir() {
             sync_dir(&self.index)?;
@@ -292,16 +308,16 @@ impl PackIo for FileIo {
 
     fn create(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
         let f = OpenOptions::new().read(true).write(true).create_new(true).open(self.path(num, Kind::Pack))?;
-        Ok(Box::new(FilePack(f)))
+        Ok(Box::new(FilePack(f, self.sync)))
     }
 
     fn open_rw(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
         let f = OpenOptions::new().read(true).write(true).open(self.path(num, Kind::Pack))?;
-        Ok(Box::new(FilePack(f)))
+        Ok(Box::new(FilePack(f, self.sync)))
     }
 
     fn open_read(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
-        Ok(Arc::new(FilePack(File::open(self.path(num, Kind::Pack))?)))
+        Ok(Arc::new(FilePack(File::open(self.path(num, Kind::Pack))?, self.sync)))
     }
 
     fn can_punch(&self) -> bool {
@@ -334,11 +350,11 @@ impl PackIo for FileIo {
 
     fn create_run(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
         let f = OpenOptions::new().read(true).write(true).create_new(true).open(self.path(num, Kind::Run))?;
-        Ok(Box::new(FilePack(f)))
+        Ok(Box::new(FilePack(f, self.sync)))
     }
 
     fn open_run(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
-        Ok(Arc::new(FilePack(File::open(self.path(num, Kind::Run))?)))
+        Ok(Arc::new(FilePack(File::open(self.path(num, Kind::Run))?, self.sync)))
     }
 
     fn map_run(&self, num: u64) -> io::Result<Option<RunMap>> {
@@ -399,11 +415,16 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
 }
 
 /// Write `data` to `path` atomically and durably.
-fn write_durable(path: &Path, data: &[u8]) -> io::Result<()> {
+fn write_durable(path: &Path, data: &[u8], sync: bool) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
     let mut f = File::create(&tmp)?;
     f.write_all(data)?;
-    full_sync(&f)?;
+    if sync {
+        full_sync(&f)?;
+    }
     fs::rename(&tmp, path)?;
-    sync_dir(path.parent().unwrap())
+    if sync {
+        sync_dir(path.parent().unwrap())?;
+    }
+    Ok(())
 }

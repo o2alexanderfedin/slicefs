@@ -13,7 +13,8 @@
 //! often.
 //!
 //! A request is a file in the store directory:
-//! 1. `slicefs gc` writes `gc.request`.
+//! 1. `slicefs gc` writes `gc.request` (with the text `full` for a full GC,
+//!    see `ChunkStore::gc_finish_full`; empty for a normal GC).
 //! 2. The GC thread renames it to `gc.running` (within about one second),
 //!    runs the GC, writes the outcome to `gc.result`, and removes
 //!    `gc.running`.
@@ -84,11 +85,17 @@ fn heartbeat_is_fresh(active: &Path) -> bool {
         .is_some_and(|age| age < PICKUP_TIMEOUT)
 }
 
-/// Run one GC on `fs` and give a one-line outcome for `gc.result`.
-fn run_once(fs: &SliceFsFilesystem, stop: &AtomicBool) -> String {
+/// The text of `gc.request` (and of `gc.running`) for a full GC.
+pub const FULL: &str = "full";
+
+/// Run one GC (a full GC if `full`) on `fs` and give a one-line outcome for
+/// `gc.result`, with the disk usage of `store` before and after.
+fn run_once(fs: &SliceFsFilesystem, store: &Path, full: bool, stop: &AtomicBool) -> String {
     let t = Instant::now();
+    let before = crate::gc::store_usage(store);
     // A panic in the GC must not end the GC thread (or leave gc.running).
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fs.gc_online(stop)))
+    let gc = || if full { fs.gc_online_full(stop) } else { fs.gc_online(stop) };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(gc))
         .unwrap_or_else(|p| {
             let msg = p.downcast_ref::<&str>().map(|s| s.to_string())
                 .or_else(|| p.downcast_ref::<String>().cloned())
@@ -97,8 +104,11 @@ fn run_once(fs: &SliceFsFilesystem, stop: &AtomicBool) -> String {
         });
     match result {
         Ok(Some(s)) => format!(
-            "ok: kept {} objects, removed {} ({} bytes) in {:.1} s",
-            s.kept_objects, s.removed_objects, s.removed_bytes, t.elapsed().as_secs_f64()
+            "ok{}: {}; {} in {:.1} s",
+            if full { " (full)" } else { "" },
+            crate::gc::stats_line(&s),
+            crate::gc::usage_line(before, crate::gc::store_usage(store)),
+            t.elapsed().as_secs_f64()
         ),
         Ok(None) => "stopped: the mount is shutting down".to_string(),
         Err(e) => format!("error: {e}"),
@@ -141,6 +151,8 @@ pub fn spawn_online_gc(
                     break;
                 }
                 let requested = std::fs::rename(store.join(REQUEST_FILE), store.join(RUNNING_FILE)).is_ok();
+                let full = requested
+                    && std::fs::read_to_string(store.join(RUNNING_FILE)).is_ok_and(|t| t.trim() == FULL);
                 let gap = interval.max(last_took * GC_DUTY);
                 let due = !interval.is_zero() && last.elapsed() >= gap;
                 if !requested && !due {
@@ -158,7 +170,7 @@ pub fn spawn_online_gc(
                 }
                 rechecked = unchanged;
                 let t = Instant::now();
-                let outcome = with_heartbeat(&store.join(ACTIVE_FILE), || run_once(&fs, &shutdown));
+                let outcome = with_heartbeat(&store.join(ACTIVE_FILE), || run_once(&fs, &store, full, &shutdown));
                 last_took = t.elapsed();
                 last_root = fs.meta().current_root();
                 drop(fs);
@@ -176,9 +188,14 @@ pub fn spawn_online_gc(
 /// Ask the mount of `store` to run a GC, wait for it, and return its outcome
 /// line. Used by `slicefs gc` when the store is mounted.
 pub fn request_gc(store: &Path) -> Result<String, String> {
+    request_gc_mode(store, false)
+}
+
+/// [`request_gc`], for a full GC if `full`.
+pub fn request_gc_mode(store: &Path, full: bool) -> Result<String, String> {
     let (request, running, result) = (store.join(REQUEST_FILE), store.join(RUNNING_FILE), store.join(RESULT_FILE));
     let _ = std::fs::remove_file(&result);
-    std::fs::write(&request, b"").map_err(|e| format!("cannot write {}: {e}", request.display()))?;
+    std::fs::write(&request, if full { FULL } else { "" }).map_err(|e| format!("cannot write {}: {e}", request.display()))?;
     let mut t = Instant::now();
     while request.exists() {
         if heartbeat_is_fresh(&store.join(ACTIVE_FILE)) {

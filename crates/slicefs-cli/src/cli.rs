@@ -123,6 +123,11 @@ pub enum Cmd {
     Gc {
         /// Path to the SliceFS block store directory.
         store: PathBuf,
+        /// Full GC: an exact mark (sorted temp files in the store, bounded
+        /// RAM) and no holes, so every dead object goes. Slower than the
+        /// normal GC, which can keep a few dead objects.
+        #[arg(long)]
+        full: bool,
     },
 
     /// Manage snapshots for a SliceFS block store.

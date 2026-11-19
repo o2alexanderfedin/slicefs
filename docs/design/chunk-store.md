@@ -906,6 +906,45 @@ mark and a spilled touched set) has its own random salt, mixed into the
 probe positions, so the false positives of one GC are not those of the
 next one, and a dead object does not stay forever.
 
+### Full GC
+
+`slicefs gc --full <store>` (offline), or `full` in `gc.request` (a
+mounted store), runs a GC that frees every dead object. It uses
+`gc_begin_full`, `metadata::gc::live_objects_exact` and `gc_finish_full`:
+
+- Exact mark in bounded RAM. The mark (and the objects put or read before
+  `gc_finish_full`, also the nodes that the mark reads) go to an external
+  sort: a buffer of `Options::gc_sort_chunk_ids` IDs (default 4 MiB of
+  IDs, 127,100) is sorted, deduplicated and written to a temp file. Then
+  merges of at most `Options::gc_merge_fan_in` files (default 32; the
+  same open-file limit as `GC_GROUP_PACKS`), each read through a 64 KiB
+  buffer, run pass after pass until one sorted file of distinct IDs is
+  left. RAM: one buffer or 32 x 64 KiB, never the object count.
+- Pass 1 is a merge join of the index (in ID order) with that file: no
+  false positive. Each dead entry goes as (pack, ID), pack first in big
+  endian, to a second sorted file. Pass 2 reads the dead IDs of one pack
+  at a time from it, in pack order.
+- No holes: every pack with a dead record is compacted (or deleted if it
+  has no live record). The rest (install, order, groups, error handling,
+  touched objects during `gc_finish_full`) is the GC above.
+- Temp files are in `Options::gc_tmp_dir` (`<store>/gc-tmp`), removed at
+  the end, also after an error; a writable open removes what a crash left.
+  They need about 33 bytes per live object plus 41 bytes per dead one.
+- `GcStats::dead_left` counts the dead objects that the GC did not remove
+  (packs kept because an object of theirs was put or read during the GC,
+  or whose entry list did not match the index): with no writes during
+  the GC it is 0. It needs no extra pass.
+
+Both modes print the counts, the pack counts, and the disk usage of all
+store files before and after (apparent and allocated bytes), offline and
+in the `gc.result` line.
+
+Peak heap of a full GC above the baseline (`gc_full_memory_tests`, 1 in 2
+objects live, 2,048 IDs a sort chunk, fan-in 8): 530 KB at 12,000 objects
+(one merge pass), 753 KB at 48,000 (two passes). An exact set of the live
+IDs would add at least 594 KB; the growth is the index filters and fences
+(about 3 bytes for each object, as without GC).
+
 ## Read path
 
 Manifest → `ObjectId` → index → `pread` → zstd decode if flagged → bytes. A

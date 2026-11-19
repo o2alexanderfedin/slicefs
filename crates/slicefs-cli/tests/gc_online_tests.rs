@@ -374,3 +374,79 @@ fn an_open_overlay_keeps_its_base_through_online_gc() {
     assert!(fs.test_read(ino, 0, (5 << 20) as u32).unwrap() == model, "content before remount");
     check_after_remount(fs, dir.path(), &[("open.bin", &model)]);
 }
+
+// ── Full GC (exact mark, no holes) ───────────────────────────────────────────
+
+#[test]
+fn a_full_online_gc_frees_all_garbage_and_keeps_live_files() {
+    let dir = TempDir::new().unwrap();
+    let fs = make_fs(dir.path());
+    let keep = data(41, 300_000);
+    write_file(&fs, "keep.bin", &keep);
+    make_garbage(&fs, "del.bin", &data(42, 300_000));
+
+    let stats = fs.gc_online_full(&no_stop()).unwrap().expect("not stopped");
+    // No false positive: every byte of the incompressible garbage goes.
+    assert!(stats.removed_bytes >= 300_000, "{stats:?}");
+    assert_eq!(stats.dead_left, Some(0), "{stats:?}");
+    assert_eq!(stats.packs_punched, 0, "{stats:?}");
+    let ino = fs.test_lookup(1, "keep.bin").unwrap().0;
+    assert_eq!(fs.test_read(ino, 0, keep.len() as u32 + 1).unwrap(), keep);
+    assert_eq!(std::fs::read_dir(dir.path().join("gc-tmp")).map(|d| d.count()).unwrap_or(0), 0, "temp files left");
+    check_after_remount(fs, dir.path(), &[("keep.bin", &keep)]);
+}
+
+#[test]
+fn a_write_that_dedups_against_garbage_during_a_full_gc_keeps_its_objects() {
+    let dir = TempDir::new().unwrap();
+    let fs = make_fs(dir.path());
+    let same = data(43, 300_000);
+    make_garbage(&fs, "old.bin", &same);
+    let other = data(44, 200_000);
+
+    let (gc, boundary) = fs.gc_start_full().unwrap();
+    let live = gc.live_exact(&no_stop()).unwrap().unwrap();
+    // The same bytes again (only the touch protects them), and new bytes.
+    write_file(&fs, "new.bin", &same);
+    write_file(&fs, "other.bin", &other);
+    let content = fs.content().gc_finish_full(live, boundary).unwrap();
+    drop(gc);
+    assert!(content.kept_objects > 0, "{content:?}");
+
+    for (name, want) in [("new.bin", &same), ("other.bin", &other)] {
+        let ino = fs.test_lookup(1, name).unwrap().0;
+        assert_eq!(&fs.test_read(ino, 0, want.len() as u32 + 1).unwrap(), want, "{name}");
+    }
+    check_after_remount(fs, dir.path(), &[("new.bin", &same), ("other.bin", &other)]);
+}
+
+/// The request protocol: `full` in `gc.request` runs a full GC on the
+/// mount's GC thread, and `gc.result` has the counts and the disk usage.
+#[test]
+fn a_full_gc_request_runs_on_the_gc_thread() {
+    use slicefs_cli::online_gc::{request_gc_mode, spawn_online_gc};
+    use std::time::Duration;
+    let dir = TempDir::new().unwrap();
+    let fs = Arc::new(make_fs(dir.path()));
+    let keep = data(45, 200_000);
+    write_file(&fs, "keep.bin", &keep);
+    make_garbage(&fs, "del.bin", &data(46, 300_000));
+    std::fs::write(dir.path().join("mount.lock"), b"").unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let thread = spawn_online_gc(Arc::downgrade(&fs), dir.path().to_path_buf(), Duration::ZERO, Arc::clone(&shutdown));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let store = dir.path().to_path_buf();
+    std::thread::spawn(move || tx.send(request_gc_mode(&store, true)).unwrap());
+    // request_gc_mode ends at the result, or when no mount takes the request.
+    let outcome = rx.recv_timeout(Duration::from_secs(60)).expect("no GC result in 60 s").unwrap();
+    shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    thread.join().unwrap();
+    assert!(outcome.starts_with("ok (full): "), "{outcome}");
+    assert!(outcome.contains("dead left: 0"), "{outcome}");
+    assert!(outcome.contains("store disk usage: before "), "{outcome}");
+    let ino = fs.test_lookup(1, "keep.bin").unwrap().0;
+    assert_eq!(fs.test_read(ino, 0, keep.len() as u32 + 1).unwrap(), keep);
+    std::fs::remove_file(dir.path().join("mount.lock")).unwrap();
+    let fs = Arc::try_unwrap(fs).ok().expect("the GC thread ended");
+    check_after_remount(fs, dir.path(), &[("keep.bin", &keep)]);
+}

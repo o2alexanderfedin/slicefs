@@ -145,6 +145,10 @@ pub fn check_format(store: &Path) -> std::io::Result<()> {
     }
 }
 
+/// The temp files of a full GC (`<store>/gc-tmp`; a writable open removes
+/// what a crash left).
+pub const GC_TMP_DIR: &str = "gc-tmp";
+
 /// Open the content store of `store` (creating it and the format marker if
 /// needed).
 pub fn open(store: &Path) -> std::io::Result<Content> {
@@ -153,7 +157,7 @@ pub fn open(store: &Path) -> std::io::Result<Content> {
     if !path.exists() {
         write_marker(store, DEFAULT_HASHER)?;
     }
-    let opts = Options { hasher: write_hasher(store)?, ..Options::default() };
+    let opts = Options { hasher: write_hasher(store)?, gc_tmp_dir: Some(store.join(GC_TMP_DIR)), ..Options::default() };
     let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
     Ok(Arc::new(cs))
 }
