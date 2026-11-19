@@ -47,6 +47,11 @@ pub fn spawn_commit_timer(
             if !fs.meta().has_uncommitted_changes() {
                 continue;
             }
+            // Sync the objects so far before the gate: writes go on while
+            // it runs, and the sync inside the commit (pre_root_sync) then
+            // has only the bytes written since (#108). An error here is
+            // seen again by that sync, which fails the commit.
+            let _ = fs.content().sync();
             let w = Instant::now();
             let _all = gate.write().unwrap_or_else(|e| e.into_inner());
             let gate_wait = w.elapsed();

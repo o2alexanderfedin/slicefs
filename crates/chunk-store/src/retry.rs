@@ -6,32 +6,50 @@
 //! last good sync. When a sync fails, it writes the copy again (the pages
 //! are dirty again) and then syncs again. A success after that is real.
 //!
-//! The copy is bounded: when it passes `KEEP_LIMIT` bytes, the pack is
-//! synced at once and the copy is dropped. So the RAM this layer uses does
-//! not depend on the size of a file or a commit (#98). After the last
-//! attempt the error goes to the store, which then stops all writes.
+//! The copy is bounded: when it passes `KEEP_LIMIT` bytes, a sync of the
+//! pack starts in a background thread, and the writes go on (#108: this
+//! sync took 0.35 to 1.7 s on a slow disk, inside a FUSE write). A copied
+//! write is dropped only after a sync that started after it succeeded. If
+//! the copy reaches `KEEP_CAP` while that sync runs, the next write waits
+//! for it. So the RAM this layer uses does not depend on the size of a file
+//! or a commit (#98). A failed background sync is repaired as any other
+//! failed sync, at the next write or sync. `sync` waits for a background
+//! sync and then syncs the rest, so its promise does not change. After the
+//! last attempt the error goes to the store, which then stops all writes.
 //!
 //! `write_durable` is retried as a whole (it writes the full file again).
 //! Directory syncs and punches are not retried.
 
-use crate::pack_io::{Kind, PackFile, PackIo, PackRead, RunMap};
+use crate::pack_io::{Kind, PackFile, PackIo, PackRead, RunMap, SyncWait};
+use std::collections::VecDeque;
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
-/// Waits before each new attempt; the number of entries is the number of
-/// retries.
-/// Most bytes of unsynced writes one pack keeps in RAM. Beyond it the pack
-/// is synced at once (an early sync is safe: objects that are durable
-/// before their root are only garbage until the next GC).
+/// Unsynced bytes of one pack at which a background sync starts (an early
+/// sync is safe: objects that are durable before their root are only
+/// garbage until the next GC).
 pub const KEEP_LIMIT: usize = 8 << 20;
 
+/// Most bytes of unsynced writes one pack keeps in RAM while a background
+/// sync runs; a write that passes it waits for that sync.
+pub const KEEP_CAP: usize = 3 * KEEP_LIMIT;
+
 /// When true, each pack sync prints one line to stderr: the wall time (epoch
-/// seconds), the unsynced bytes it made durable and its duration (#108: match
-/// slow writes to their cause). The mount turns it on.
+/// seconds), the unsynced bytes it made durable and its duration, and each
+/// wait of a write for a background sync (#108: match slow writes to their
+/// cause). The mount turns it on.
 pub static LOG_SYNCS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 const BACKOFF: [Duration; 3] = [Duration::from_millis(10), Duration::from_millis(100), Duration::from_millis(500)];
+
+pub(crate) fn log(what: &str) {
+    if LOG_SYNCS.load(std::sync::atomic::Ordering::Relaxed) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        eprintln!("[t={}.{:03}][pack] {what}", now.as_secs(), now.subsec_millis());
+    }
+}
 
 pub struct RetryingIo {
     inner: Arc<dyn PackIo>,
@@ -49,19 +67,46 @@ impl RetryingIo {
     }
 
     fn wrap(&self, file: Box<dyn PackFile>) -> Box<dyn PackFile> {
-        Box::new(RetryingPack { file, unsynced: Vec::new(), kept: 0, len: None, backoff: self.backoff.clone() })
+        Box::new(RetryingPack {
+            file,
+            unsynced: VecDeque::new(),
+            kept: 0,
+            len: None,
+            backoff: self.backoff.clone(),
+            flight: None,
+            broken: false,
+        })
     }
+}
+
+/// A background sync that runs now.
+struct Flight {
+    /// It covers this many first entries of `unsynced`...
+    covers: usize,
+    /// ...with this many bytes.
+    bytes: usize,
+    thread: JoinHandle<io::Result<()>>,
+    done: SyncWait,
 }
 
 struct RetryingPack {
     file: Box<dyn PackFile>,
     /// Writes since the last good sync, in order.
-    unsynced: Vec<(u64, Vec<u8>)>,
+    unsynced: VecDeque<(u64, Vec<u8>)>,
     /// Sum of the bytes in `unsynced`.
     kept: usize,
     /// The last `set_len` since the last good sync.
     len: Option<u64>,
     backoff: Vec<Duration>,
+    flight: Option<Flight>,
+    /// A sync failed after all retries. The pages may be clean without the
+    /// data, so a later sync could succeed falsely: every later write and
+    /// sync fails.
+    broken: bool,
+}
+
+fn broken() -> io::Error {
+    io::Error::other("an earlier sync of this pack failed after retries")
 }
 
 impl RetryingPack {
@@ -74,6 +119,103 @@ impl RetryingPack {
         }
         Ok(())
     }
+
+    /// Every copied write is durable now.
+    fn all_synced(&mut self) {
+        self.unsynced.clear();
+        self.kept = 0;
+        self.len = None;
+    }
+
+    /// After the failed sync `err`: write the copy again and sync, with
+    /// the waits of `backoff`.
+    fn repair(&mut self, mut err: io::Error) -> io::Result<()> {
+        for wait in self.backoff.clone() {
+            std::thread::sleep(wait);
+            let r = self.write_again().and_then(|()| self.file.sync());
+            match r {
+                Ok(()) => {
+                    tracing::warn!("chunk store: a sync failed ({err}); the data was written again and synced");
+                    self.all_synced();
+                    return Ok(());
+                }
+                Err(e) => err = e,
+            }
+        }
+        self.broken = true;
+        Err(err)
+    }
+
+    /// Sync now, in this thread (no background sync runs).
+    fn sync_here(&mut self) -> io::Result<()> {
+        let t = Instant::now();
+        let first = self.file.sync();
+        log(&format!("sync bytes={} ms={:.1}", self.kept, t.elapsed().as_secs_f64() * 1000.0));
+        match first {
+            Ok(()) => {
+                self.all_synced();
+                Ok(())
+            }
+            Err(e) => self.repair(e),
+        }
+    }
+
+    /// Start a background sync of every write so far (or sync here if the
+    /// file has no sync handle or no thread can start).
+    fn start(&mut self) -> io::Result<()> {
+        let Some(h) = self.file.sync_handle() else { return self.sync_here() };
+        let bytes = self.kept;
+        let done = SyncWait::default();
+        let end = done.clone();
+        let spawned = std::thread::Builder::new().name("pack-sync".into()).spawn(move || {
+            let t = Instant::now();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.sync()))
+                .unwrap_or_else(|_| Err(io::Error::other("the pack sync panicked")));
+            log(&format!("sync bytes={bytes} ms={:.1} bg=1", t.elapsed().as_secs_f64() * 1000.0));
+            end.done();
+            r
+        });
+        match spawned {
+            Ok(thread) => {
+                self.flight = Some(Flight { covers: self.unsynced.len(), bytes, thread, done });
+                Ok(())
+            }
+            Err(_) => self.sync_here(),
+        }
+    }
+
+    /// Settle the background sync if it ended, or (with `wait`) after it
+    /// ends: drop the writes it made durable, or repair a failure.
+    fn settle(&mut self, wait: bool) -> io::Result<()> {
+        if !self.flight.as_ref().is_some_and(|f| wait || f.thread.is_finished()) {
+            return Ok(());
+        }
+        let f = self.flight.take().unwrap();
+        let t = Instant::now();
+        let r = f.thread.join().unwrap_or_else(|_| Err(io::Error::other("the pack sync thread panicked")));
+        if wait {
+            log(&format!("wait ms={:.1}", t.elapsed().as_secs_f64() * 1000.0));
+        }
+        match r {
+            Ok(()) => {
+                self.unsynced.drain(..f.covers);
+                self.kept -= f.bytes;
+                // `set_len` settles first, so a cut is older than the sync.
+                self.len = None;
+                Ok(())
+            }
+            Err(e) => self.repair(e),
+        }
+    }
+}
+
+impl Drop for RetryingPack {
+    fn drop(&mut self) {
+        // Do not leave a sync running on a file that is gone for the store.
+        if let Some(f) = self.flight.take() {
+            let _ = f.thread.join();
+        }
+    }
 }
 
 impl PackRead for RetryingPack {
@@ -84,16 +226,25 @@ impl PackRead for RetryingPack {
 
 impl PackFile for RetryingPack {
     fn write_at(&mut self, data: &[u8], offset: u64) -> io::Result<()> {
+        if self.broken {
+            return Err(broken());
+        }
         self.file.write_at(data, offset)?;
-        self.unsynced.push((offset, data.to_vec()));
+        self.unsynced.push_back((offset, data.to_vec()));
         self.kept += data.len();
-        if self.kept > KEEP_LIMIT {
-            self.sync()?;
+        self.settle(false)?;
+        if self.flight.is_some() && self.kept > KEEP_CAP {
+            self.settle(true)?;
+        }
+        if self.flight.is_none() && self.kept > KEEP_LIMIT {
+            self.start()?;
         }
         Ok(())
     }
 
     fn set_len(&mut self, len: u64) -> io::Result<()> {
+        // The entries must not change under a background sync.
+        self.settle(true)?;
         self.file.set_len(len)?;
         // Writes before a cut that they do not reach again are cut too.
         self.unsynced.retain(|(o, _)| *o < len);
@@ -106,37 +257,24 @@ impl PackFile for RetryingPack {
     }
 
     fn sync(&mut self) -> io::Result<()> {
-        let t = std::time::Instant::now();
-        let first = self.file.sync();
-        if LOG_SYNCS.load(std::sync::atomic::Ordering::Relaxed) {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-            eprintln!("[t={}.{:03}][pack] sync bytes={} ms={:.1}",
-                now.as_secs(), now.subsec_millis(), self.kept, t.elapsed().as_secs_f64() * 1000.0);
+        // A background sync covers the older writes; one more sync covers
+        // the rest (it flushes only the pages dirtied since).
+        if self.broken {
+            return Err(broken());
         }
-        let mut err = match first {
-            Ok(()) => {
-                self.unsynced.clear();
-                self.kept = 0;
-                self.len = None;
-                return Ok(());
-            }
-            Err(e) => e,
-        };
-        for wait in self.backoff.clone() {
-            std::thread::sleep(wait);
-            let r = self.write_again().and_then(|()| self.file.sync());
-            match r {
-                Ok(()) => {
-                    tracing::warn!("chunk store: a sync failed ({err}); the data was written again and synced");
-                    self.unsynced.clear();
-                    self.kept = 0;
-                    self.len = None;
-                    return Ok(());
-                }
-                Err(e) => err = e,
-            }
+        self.settle(true)?;
+        self.sync_here()
+    }
+
+    fn sync_soon(&mut self) -> Option<SyncWait> {
+        if self.broken || self.settle(false).is_err() {
+            return None;
         }
-        Err(err)
+        if self.flight.is_none() && self.kept > 0 {
+            // An error marks the pack broken; `sync` reports it.
+            let _ = self.start();
+        }
+        self.flight.as_ref().map(|f| f.done.clone())
     }
 }
 
