@@ -66,7 +66,9 @@ mount_fs() {
   waitmnt
 }
 unmount_fs() {
-  run unmount $B unmount "$W/mnt"
+  # The unmount has its own short limit, so all limits fit in the CI step.
+  local t=$T; T=60; run unmount $B unmount "$W/mnt"; local rc=$?; T=$t
+  [ $rc -eq 0 ] || { waitexit; return $rc; }
   waitexit
 }
 
