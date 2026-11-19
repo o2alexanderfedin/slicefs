@@ -1096,6 +1096,23 @@ copied through an FSKit mount): 48 (packs/ 41, index/ 4, segments/ 1). The run
 passed (`RESULT fskit: 0 failure(s)`, `gc-freed: ok`). The time per step and
 the `fsync` and `write` time per call on FSKit are not measured yet.
 
+Time per step in that run (Boost 1.85: one tar and a tree of 77,655
+files; GitHub macOS runner, release build):
+
+| Step | Time | Note |
+|---|---|---|
+| tar copy to / from / cmp | 10 / 6 / 16 s | |
+| tree copy to the mount | 2,183 s | about 28 ms per file |
+| tree copy from the mount | 495 s | about 6.4 ms per file |
+| tree diff / diff after remount | 73 / 383 s | |
+| tar cmp after remount | 17 s | |
+| delete all (`rm -rf`) | 2,332 s | about 30 ms per file |
+| online GC after the delete | 0.2 s | removed 81,290 objects (199,859,608 bytes) |
+
+The per-file times are the step time divided by the file count. Most of the
+tree steps is the FSKit cost of each file operation (see the top of this
+document), not the store.
+
 To repeat: run `scripts/macos-mount-test/fetch-boost.sh <DIR> 1_85_0`, then
 `scripts/pack-measure/seed-measure.sh <BINARY> <DIR> 3` for each build (see
 `scripts/pack-measure/README.md`).
