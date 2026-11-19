@@ -309,10 +309,20 @@ impl Kick {
 #[cfg(target_os = "linux")]
 fn start_writeback(f: &File, offset: u64, len: u64) {
     use std::os::fd::AsRawFd;
+    static FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let t = std::time::Instant::now();
     // SAFETY: sync_file_range on a valid fd we own; no memory is passed.
-    unsafe {
+    let r = unsafe {
         libc::sync_file_range(f.as_raw_fd(), offset as libc::off64_t, len as libc::off64_t, libc::SYNC_FILE_RANGE_WRITE)
     };
+    if r != 0 && !FAILED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::warn!("chunk store: sync_file_range failed: {}", io::Error::last_os_error());
+    }
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
+    if ms >= 5.0 && crate::retry::LOG_SYNCS.load(std::sync::atomic::Ordering::Relaxed) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        eprintln!("[t={}.{:03}][kick] slow bytes={len} took={ms:.1}", now.as_secs(), now.subsec_millis());
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
