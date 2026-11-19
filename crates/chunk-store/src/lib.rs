@@ -570,8 +570,12 @@ impl ChunkStore {
                 Ok(b) => decode_index(&b, num)?,
                 Err(_) => None,
             };
+            let gap = |e: &[(ObjectId, Loc)]| num == hwm.pack && !covers(e, hwm.offset);
+            let missing = || format!("pack {num} lacks records that the index points to, below its high-water mark at {}", hwm.offset);
             let mut active = None;
             let entries = match loaded {
+                // A sealed pack: nothing to write, also after the repair below.
+                Some(e) if gap(&e) => return Ok(Loaded::Rebuild { reason: missing(), resync: None }),
                 Some(e) => e,
                 None => {
                     let buf = io.read(num, Kind::Pack)?;
@@ -582,16 +586,13 @@ impl ChunkStore {
                     // The active pack is cut at its first bad record. A sealed
                     // pack (its index is lost) may have holes or damage in the
                     // middle, so it is resynced past them.
-                    let (entries, end) = if is_active {
-                        scan_pack(&buf, num)
-                    } else {
-                        let e = resync_scan(&buf, num)?;
-                        let end = e.iter().map(|(_, l)| rec_end(l)).max().unwrap_or(PACK_HEADER as u64);
-                        (e, end)
-                    };
-                    if num == hwm.pack && end < hwm.offset {
-                        let reason =
-                            format!("pack {num} ends at {end}, below the index high-water mark at {}", hwm.offset);
+                    let (entries, end) = if is_active { scan_pack(&buf, num) } else { (resync_scan(&buf, num)?, 0) };
+                    if gap(&entries) {
+                        let reason = missing();
+                        // The pack becomes sealed first, with a durable
+                        // `.idx`: no later open cuts it at the damage, and an
+                        // open after a failure in the rebuild finds the same
+                        // gap through the `.idx` and starts it again.
                         if !opts.read_only {
                             let entries = if is_active { resync_scan(&buf, num)? } else { entries };
                             io.open_rw(num)?.sync()?;
@@ -1115,6 +1116,27 @@ enum Loaded {
 /// The end of the record at `l`.
 fn rec_end(l: &Loc) -> u64 {
     l.offset + (REC_HEADER + l.stored as usize + REC_CRC) as u64
+}
+
+/// True if the records of a pack below `hwm_offset` fill it from its header
+/// to `hwm_offset` with no gap: every record that a run can point to is
+/// there. The hwm pack is the active pack of the flush that set the hwm, so
+/// its records below the hwm are contiguous (GC punches only packs below
+/// the hwm pack). True if `hwm_offset` is 0 (no record is covered).
+fn covers(entries: &[(ObjectId, Loc)], hwm_offset: u64) -> bool {
+    if hwm_offset == 0 {
+        return true;
+    }
+    let mut below: Vec<&Loc> = entries.iter().map(|(_, l)| l).filter(|l| l.offset < hwm_offset).collect();
+    below.sort_unstable_by_key(|l| l.offset);
+    let mut pos = PACK_HEADER as u64;
+    for l in below {
+        if l.offset != pos {
+            return false;
+        }
+        pos = rec_end(l);
+    }
+    pos == hwm_offset
 }
 
 /// The disk part of the GC of a mostly live pack (see `plan_punch`).
