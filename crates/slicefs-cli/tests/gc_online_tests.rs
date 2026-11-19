@@ -67,6 +67,11 @@ fn no_stop() -> AtomicBool {
     AtomicBool::new(false)
 }
 
+/// The bytes of a 300,000-byte garbage file that a GC must free: all but
+/// a few chunks (at most 32 KiB each) that the filter mark keeps as false
+/// positives (#113).
+const GARBAGE_FREED: u64 = 200_000;
+
 #[test]
 fn online_gc_frees_garbage_and_keeps_live_files() {
     let dir = TempDir::new().unwrap();
@@ -233,9 +238,10 @@ fn online_gc_during_a_rebase_keeps_every_chunk() {
     fs.test_set_rebase_hook(None);
     assert_eq!(fs.test_rebase_count(), before + 1, "one rebase, at release");
     let stats = swept.lock().unwrap().take().expect("the GC ran inside the rebase");
-    // Every byte of the (incompressible) garbage file is freed. The object
-    // count also holds metadata nodes and differs from run to run.
-    assert!(stats.removed_bytes >= 300_000, "the garbage must go: {stats:?}");
+    // The (incompressible) garbage file is freed, but for the false
+    // positives of the mark (a salted Bloom filter, about 1 %, #113). The
+    // object count also holds metadata nodes and differs from run to run.
+    assert!(stats.removed_bytes >= GARBAGE_FREED, "the garbage must go: {stats:?}");
     assert!(fs.test_read(ino, 0, (33 << 20) as u32).unwrap() == model, "content before remount");
     check_after_remount(fs, dir.path(), &[("big.bin", &model)]);
 }
@@ -286,7 +292,7 @@ fn gc_start_waits_for_a_rebase_in_a_callback() {
     assert!(waited, "gc_start returned while a callback was inside a rebase");
     let (gc, boundary) = started.unwrap();
     let stats = fs.gc_content(&gc, boundary, &no_stop()).unwrap().expect("not stopped");
-    assert!(stats.removed_bytes >= 300_000, "the garbage must go: {stats:?}");
+    assert!(stats.removed_bytes >= GARBAGE_FREED, "the garbage must go: {stats:?}");
     check_after_remount(fs, dir.path(), &[("f.bin", &model)]);
 }
 
@@ -302,7 +308,7 @@ fn an_open_overlay_keeps_its_base_through_online_gc() {
     let (ino, fh, mut model) = open_overlay(&fs, "open.bin", 4, 800);
 
     let stats = fs.gc_online(&no_stop()).unwrap().expect("not stopped");
-    assert!(stats.removed_bytes >= 300_000, "the garbage must go: {stats:?}");
+    assert!(stats.removed_bytes >= GARBAGE_FREED, "the garbage must go: {stats:?}");
 
     let more = data(900, 4096);
     fs.test_write(fh, 3 << 20, &more).unwrap();

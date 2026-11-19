@@ -37,7 +37,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use backend::{backend_by_name, Backend, CreateOpts, Scope, SAVED_DIR};
-use chunk_store::{ObjectId, DEFAULT_HASHER};
+use chunk_store::{LiveFilter, LiveSet, ObjectId, DEFAULT_HASHER};
 
 const USAGE: &str = "usage: index-bench create|open|lookup|recover|gc|run --dir D [--backend NAME] [step flags] (see the doc comment of src/main.rs)";
 
@@ -719,9 +719,20 @@ fn step_gc(f: &Flags) -> Result<(), Fail> {
     // The live set (the mark of a real GC), before the open.
     let t0 = Instant::now();
     let dead = |i: u64| (i / r).is_multiple_of(k);
-    let live: HashSet<ObjectId> = (0..n).filter(|&i| !dead(i)).map(object_id).collect();
+    // A Bloom filter of the live IDs, as `metadata::gc::live_objects` makes
+    // it (#113): sized for every object of the store.
+    let mut live = LiveFilter::new(n);
+    let mut dead_objects = 0;
+    for i in 0..n {
+        if dead(i) {
+            dead_objects += 1;
+        } else {
+            live.insert(&object_id(i));
+        }
+    }
     let live_set_s = t0.elapsed().as_secs_f64();
-    let dead_objects = n - live.len() as u64;
+    // The dead objects that the filter keeps (its false positives).
+    let false_positives = (0..n).filter(|&i| dead(i) && live.may_contain(&object_id(i))).count();
 
     let store = backend.open(&dir, false)?;
     let marker = std::fs::read_to_string(dir.join(MARKER)).map_err(|e| format!("cannot read the marker file: {e}"))?;
@@ -746,6 +757,9 @@ fn step_gc(f: &Flags) -> Result<(), Fail> {
         ("objects_after", objects_after.to_string()),
         ("packs_after", packs_after.to_string()),
         ("max_rss_bytes", max_rss_bytes().to_string()),
+        ("live_set_bytes", live.bytes().to_string()),
+        ("live_false_positives", false_positives.to_string()),
+        ("dead_left", objects_after.saturating_sub(n - dead_objects).to_string()),
     ]);
     finish(&kv_text(&kv));
 }

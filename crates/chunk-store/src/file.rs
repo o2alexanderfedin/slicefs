@@ -331,18 +331,28 @@ impl FileReader {
 
 /// Every object of the content `key`: its nodes and its chunks (for GC).
 pub fn file_objects(store: &ChunkStore, key: ObjectId) -> Result<Vec<ObjectId>> {
-    let mut out = vec![key];
+    let mut out = Vec::new();
+    for_each_file_object(store, key, |id| out.push(id))?;
+    Ok(out)
+}
+
+/// Calls `f` with every object of the content `key` (its nodes and its
+/// chunks), without a list of them: RAM is one path of nodes and the
+/// pending siblings (depth x fan-out), not the file size. An object can
+/// come more than once.
+pub fn for_each_file_object(store: &ChunkStore, key: ObjectId, mut f: impl FnMut(ObjectId)) -> Result<()> {
+    f(key);
     let mut todo = vec![key];
     while let Some(id) = todo.pop() {
         let node = load_node(store, &id)?;
         for e in &node.entries {
-            out.push(e.id);
+            f(e.id);
             if node.level > 0 {
                 todo.push(e.id);
             }
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 // ── Splice ────────────────────────────────────────────────────────────────────
