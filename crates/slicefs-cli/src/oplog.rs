@@ -209,6 +209,14 @@ pub struct ReplayStats {
     pub skipped: usize,
 }
 
+/// Replay the write log of the store at `segments_dir` on `fs` (which holds
+/// the last committed root): what a mount does before it commits.
+pub fn replay_log(fs: &SliceFsFilesystem, segments_dir: &std::path::Path) -> Result<ReplayStats, String> {
+    let (_, _, pending) = metadata::segment::load_store_with_log(segments_dir)
+        .map_err(|e| format!("failed to read the write log: {}", e))?;
+    replay(fs, &pending)
+}
+
 /// Replay `records` (encoded) on `fs`, which holds the last committed root.
 /// Logging is off while it runs. Every replay handle is released at the end.
 /// The caller commits afterwards.
