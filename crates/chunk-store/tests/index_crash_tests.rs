@@ -403,6 +403,77 @@ fn background_merges_keep_the_run_count_small() {
     all_exact(&s, &more, "after close");
 }
 
+/// 320 objects in ten runs of 32 and an empty memtable; dropped without a
+/// close. A reopen with background merges starts a merge at once.
+fn ten_runs(mem: &MemIo) -> Vec<Obj> {
+    let s = store(mem, &opts());
+    let objs = put_many(&s, 320, 1);
+    s.sync().unwrap();
+    let info = s.index_info();
+    assert_eq!((info.runs, info.memtable_entries), (10, 0), "{info:?}");
+    objs
+}
+
+fn background() -> Options {
+    Options { index_background_merge: true, ..opts() }
+}
+
+// A merge on the thread meets a damaged page: it asks for a rebuild and
+// stops merging; the store keeps working; the next open rebuilds.
+#[test]
+fn a_damaged_page_found_by_the_merge_thread_leads_to_a_rebuild() {
+    let mem = MemIo::new();
+    let mut objs = ten_runs(&mem);
+    let runs = run_list(&mem);
+    mem.flip(runs[0], Kind::Run, 100);
+    let s = store(&mem, &background());
+    s.wait_index_idle();
+    assert_eq!(run_list(&mem), runs, "no output was kept");
+    assert_eq!(s.index_info().runs, 10);
+    assert!(!s.merge_index_now().unwrap(), "no merge after a rebuild request");
+    let more = put_many(&s, 40, 500);
+    s.wait_index_idle();
+    all_exact(&s, &more, "the store keeps working");
+    objs.extend(more);
+    s.sync().unwrap();
+    drop(s);
+    let s = store(&mem, &opts());
+    all_exact(&s, &objs, "after the rebuild");
+    assert_eq!(s.stats().objects, 360);
+    assert!(run_list(&mem).iter().all(|r| !runs.contains(r)), "the index was rebuilt");
+}
+
+// A merge on the thread fails at its MANIFEST write: the thread logs it,
+// the store is not failed, and the thread merges again after the next
+// flush.
+#[test]
+fn a_failed_merge_on_the_thread_is_tried_again_after_the_next_flush() {
+    let mem = MemIo::new();
+    let mut objs = ten_runs(&mem);
+    let runs = run_list(&mem);
+    mem.fail_next_write_durable(Kind::Manifest, 1);
+    let s = store(&mem, &background());
+    s.wait_index_idle();
+    assert_eq!(s.index_info().runs, 10, "the failed merge changed nothing");
+    assert_eq!(run_list(&mem).len(), 11, "its output stays until the next open");
+    let orphan = run_list(&mem).into_iter().find(|r| !runs.contains(r)).unwrap();
+    let more = put_many(&s, 40, 500);
+    s.wait_index_idle();
+    let info = s.index_info();
+    assert!(info.runs < 10, "the thread merged after the flush: {info:?}");
+    let tiers: Vec<u32> = s.index_run_entries().iter().map(|&e| tier(e, 32)).collect();
+    assert!(tiers.windows(4).all(|w| w.iter().any(|&t| t != w[0])), "tiers {tiers:?}");
+    objs.extend(more);
+    all_exact(&s, &objs, "after the merges");
+    s.sync().unwrap();
+    drop(s);
+    mem.crash();
+    assert!(mem.exists(orphan, Kind::Run));
+    let s = reopen_and_check(&mem, &opts(), &objs, &[], &[]);
+    assert_eq!(s.stats().objects, 360);
+    assert!(!mem.exists(orphan, Kind::Run), "the orphan output is removed");
+}
+
 /// The tier of a run at fan-in 4 (see `merges_keep_the_run_count_small`).
 fn tier(entries: u64, limit: u64) -> u32 {
     let mut n = (entries / limit).max(1);

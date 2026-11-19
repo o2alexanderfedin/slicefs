@@ -1040,6 +1040,37 @@ mod tests {
         assert_eq!(ix.get(&id(2)).unwrap(), Some(loc(1, 102)));
     }
 
+    // A merge whose stop flag is set (close or Drop of the store) writes
+    // nothing that stays: the partial output is removed, the runs and the
+    // MANIFEST do not change.
+    #[test]
+    fn a_stopped_merge_leaves_no_output() {
+        let mem = MemIo::new();
+        let ix = Index::empty();
+        for n in 0..4 {
+            for i in 0..100 {
+                ix.insert(id(n * 100 + i), loc(1, 100 + n * 100 + i));
+            }
+            ix.flush(&mem, Hwm { pack: 1, offset: 1000 + n }, Counts::default()).unwrap();
+        }
+        let mut runs = mem.list_runs().unwrap();
+        runs.sort_unstable();
+        let manifest = mem.read(0, Kind::Manifest).unwrap();
+        let plan = ix.pick_merge(4, 100, false).expect("four runs of one tier");
+        assert!(ix.write_merge(&mem, &plan, &AtomicBool::new(true)).unwrap().is_none());
+        let mut after = mem.list_runs().unwrap();
+        after.sort_unstable();
+        assert_eq!(after, runs, "the partial output is removed");
+        assert_eq!(mem.read(0, Kind::Manifest).unwrap(), manifest);
+        assert_eq!(ix.runs().len(), 4);
+        // The next merge works, with a new output number.
+        let plan = ix.pick_merge(4, 100, false).unwrap();
+        let out = ix.write_merge(&mem, &plan, &AtomicBool::new(false)).unwrap().unwrap();
+        assert_eq!(ix.install_merge(&mem, &plan, out).unwrap(), Some(runs.iter().rev().copied().collect()));
+        assert_eq!(ix.runs().len(), 1);
+        assert_eq!(ix.get(&id(250)).unwrap(), Some(loc(1, 350)));
+    }
+
     #[test]
     fn a_failed_flush_keeps_the_memtable_and_the_old_manifest() {
         let mem = MemIo::new();

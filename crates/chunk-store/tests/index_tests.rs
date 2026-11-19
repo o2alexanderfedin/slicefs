@@ -1183,6 +1183,8 @@ fn merges_keep_the_run_count_small() {
         let info = s.index_info();
         no_four_adjacent_runs_share_a_tier(s, 50);
         assert!(info.runs <= 9 && (info.runs as f64) < 10.0 + 2000f64.log(4.0), "{what}: {info:?}");
+        // 40 runs of tier 0 merge as base-4 digits: 2 x 800 + 2 x 200.
+        assert_eq!(s.index_run_entries(), vec![200, 200, 800, 800], "{what}");
         assert_eq!(info.run_entries, 2000, "{what}: {info:?}");
         assert_eq!(run_list(&mem).len() as u64, info.runs, "{what}: the inputs are removed");
         for (i, id) in ids.iter().enumerate() {
