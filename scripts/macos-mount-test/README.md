@@ -26,11 +26,20 @@ server replies to the SMB `CLOSE` at once, so the wait is in the macOS SMB
 client (macOS 26.2 does not have it). In CI, `diff -r` of the Boost tree
 (77,655 files) took 4090 s on SMB and 734 s on FSKit.
 
-## Large copy on FSKit (by hand, #20)
+## Large copy on FSKit (#20)
 
-This check is manual. Automated tests do not mount on macOS. The check copies
-a file of 1 GiB into an FSKit mount and records the peak memory (RSS) of the
-daemon. Then it compares the file after the copy and after a remount.
+The check copies a file of 1 GiB into an FSKit mount and records the peak
+memory (RSS) of the daemon. Then it compares the file after the copy and after
+a remount.
+
+CI runs it too: `large-copy.sh` does the steps below without a person, with a
+time limit on each wait, and the macOS mounts workflow (`macos-mounts.yml`)
+runs it as the step "Large copy (fskit)" before the Boost round trip. It prints
+`RESULT large-copy: PASS` or `FAIL`; it fails when a `cmp` fails or the peak
+RSS is above 512 MiB (`RSS_LIMIT_MIB`). To run it by hand:
+`scripts/macos-mount-test/large-copy.sh fskit`.
+
+The manual steps:
 
 Before you start, enable FSKit (`enable-fskit.sh`, see the table above). Run
 the steps in `bash` from the root of the repository:
