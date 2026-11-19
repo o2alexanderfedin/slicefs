@@ -1052,10 +1052,11 @@ Allocation cost (#8): for the Boost tree, the c2f82fa store allocates 2.41
 bytes on disk for each byte of store data (2,194.2 MB for 910.9 MB). The
 c447551 store allocates 1.00 bytes for each byte (290.0 MB for 288.6 MB).
 
-The FSKit Boost round trip (`scripts/macos-mount-test/boost-test.sh`) is a
-manual run, and nothing was mounted for these numbers. Add its numbers here
-when that run is done: time per step, `fsync` and `write` time per call, and
-the store file count after that copy.
+Store files after the FSKit Boost round trip (`scripts/macos-mount-test/boost-test.sh`,
+macOS CI run 44484947311, 2026-11-19, commit c921a11, Boost 1.85 tar and tree
+copied through an FSKit mount): 48 (packs/ 41, index/ 4, segments/ 1). The run
+passed (`RESULT fskit: 0 failure(s)`, `gc-freed: ok`). The time per step and
+the `fsync` and `write` time per call on FSKit are not measured yet.
 
 To repeat: run `scripts/macos-mount-test/fetch-boost.sh <DIR> 1_85_0`, then
 `scripts/pack-measure/seed-measure.sh <BINARY> <DIR> 3` for each build (see
