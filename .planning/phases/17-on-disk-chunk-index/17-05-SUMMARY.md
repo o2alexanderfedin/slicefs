@@ -20,9 +20,9 @@ affects: [17-06, 17-07, 17-08]
 actuals:
   tokens: 29000
   tasks: 2
-  commits: 3
+  commits: 4
 plan_head_before: 3f4aff30f3e78ff1b335ae95e6af8dcb80e7fe9f
-plan_head_after: 86482063a0857ba27cea0ae2cd64ee573b1b71d5
+plan_head_after: a514c34 (code and tests; the docs commits follow)
 
 tech-stack:
   added: []
@@ -56,7 +56,7 @@ key-decisions:
   - "SIGBUS on a disk read error inside a mapping is an accepted risk (documented on RunMap)"
   - "The index RAM (filters + fences) is anonymous memory; mapped run pages are file-backed page cache and are not counted"
 
-duration: about 45 minutes (16:52 to 17:38 local time)
+duration: about 40 minutes (16:56, the build of the before binary, to 17:35, the summary commit; local time)
 completed: 2026-11-18
 ---
 
@@ -161,7 +161,7 @@ In the 1M store, the 213,568 memtable entries (16 BTreeMap shards) cost about 0.
 ## Tests
 
 - `cargo test -q --locked -p chunk-store --lib bloom::`: 4 passed (`no_false_negatives`, `the_false_positive_rate_is_about_one_percent`, `the_size_is_ten_bits_per_key_in_whole_blocks`, `bytes_round_trip`).
-- `--lib run::`: 15 passed. The new ones:
+- `--lib run::`: 13 passed. The new ones:
   - `a_run_with_a_filter_answers_misses_without_a_page_read` (1,000 absent hashed IDs: at most 30 page reads; 5,000 entries);
   - `a_run_without_a_filter_round_trips`;
   - `tombstones_are_in_the_filter`;
@@ -169,7 +169,7 @@ In the 1M store, the 213,568 memtable entries (16 BTreeMap shards) cost about 0.
   - `a_damaged_tombstone_never_reads_as_a_miss_or_a_put`;
   - `the_interpolation_search_finds_what_a_binary_search_finds`.
 
-  `a_run_round_trips_through_each_io` now asserts 0 `read_at` per hit on FileIo, 1 on MemIo and RetryingIo(MemIo), and that `map_run` is `Some` only for files. `a_damaged_footer_or_table_is_refused` has five new filter cases.
+  `a_run_round_trips_through_each_io` now also checks decision 4: on FileIo, after the run file is removed, the open run still reads through its mapping (commit a514c34). It asserts 0 `read_at` per hit on FileIo, 1 on MemIo and RetryingIo(MemIo), and that `map_run` is `Some` only for files. `a_damaged_footer_or_table_is_refused` has five new filter cases.
 - `--lib race_tests::`: 3 passed (`a_put_hit_that_gc_removed_before_the_lock_writes_again`, `a_read_whose_loc_gc_moved_returns_the_bytes_from_the_new_pack`, `a_put_hit_without_a_gc_writes_nothing`).
 - `--test index_tests`: 30 passed. The new ones:
   - `hits_read_one_page_and_misses_read_almost_none`;
@@ -256,7 +256,10 @@ In the 1M store, the 213,568 memtable entries (16 BTreeMap shards) cost about 0.
 - `Run::open(file, map, num, len)`.
 - A `NotFound` from `map_run` on a listed run is `Damage::MissingRun`, so a read-only open reads the MANIFEST again, as for `open_run`.
 
-**7. [Process] Commits on `feature/17-on-disk-index`**
+**7. [Orchestrator instruction] The read path replaces two entries of the LOCKED 17-CONTEXT.md**
+- The 17-CONTEXT.md entry "[Disk I/O path] pread through the PackIo strategy" and the deferred "mmap read path" are replaced by the read-path decisions of the launch message (decision 1: map each sealed run). The orchestrator made this choice after the mmap spike; the user delegated it. PackIo stays the only way to the files (`map_run` is a PackIo method), and MemIo fault injection still reaches the lookups.
+
+**8. [Process] Commits on `feature/17-on-disk-index`**
 - The launch message said to commit there, as 17-02 to 17-04 did. STATE.md and ROADMAP.md are not updated, as the launch message said.
 
 ## Not covered by these tests
@@ -291,4 +294,4 @@ None beyond the plan's threat model.
 ## Self-Check: PASSED
 
 - FOUND: crates/chunk-store/src/bloom.rs, crates/chunk-store/src/race_tests.rs and the modified files
-- FOUND: fc1012e, e844cdd, 8648206 (in `git log 3f4aff3..HEAD`)
+- FOUND: fc1012e, e844cdd, 8648206, b4fa3c7, a514c34 (in `git log 3f4aff3..HEAD`)
