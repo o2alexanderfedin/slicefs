@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use chunk_store::{ChunkStore, ExactMark, LiveFilter, ObjectId};
+use chunk_store::{ChunkStore, ExactMark, GcPacer, LiveFilter, NoPacer, ObjectId};
 use slicefs_traits::key::ObjectKey;
 use slicefs_traits::metadata::MetaError;
 
@@ -49,8 +49,20 @@ pub fn live_objects(
     file_roots: &[ObjectKey],
     stop: &AtomicBool,
 ) -> Result<Option<LiveFilter>, MetaError> {
+    live_objects_paced(cs, meta_roots, file_roots, stop, &NoPacer)
+}
+
+/// [`live_objects`], with `pacer` called between roots and between files
+/// (no lock held then).
+pub fn live_objects_paced(
+    cs: &Arc<ChunkStore>,
+    meta_roots: &[ObjectKey],
+    file_roots: &[ObjectKey],
+    stop: &AtomicBool,
+    pacer: &dyn GcPacer,
+) -> Result<Option<LiveFilter>, MetaError> {
     let mut live = cs.live_filter();
-    let done = mark(cs, meta_roots, file_roots, stop, &mut |id| {
+    let done = mark(cs, meta_roots, file_roots, stop, pacer, &mut |id| {
         live.insert(&id);
         Ok(())
     })?;
@@ -66,24 +78,40 @@ pub fn live_objects_exact(
     file_roots: &[ObjectKey],
     stop: &AtomicBool,
 ) -> Result<Option<ExactMark>, MetaError> {
+    live_objects_exact_paced(cs, meta_roots, file_roots, stop, &NoPacer)
+}
+
+/// [`live_objects_exact`], with `pacer` called between roots and between
+/// files (no lock held then).
+pub fn live_objects_exact_paced(
+    cs: &Arc<ChunkStore>,
+    meta_roots: &[ObjectKey],
+    file_roots: &[ObjectKey],
+    stop: &AtomicBool,
+    pacer: &dyn GcPacer,
+) -> Result<Option<ExactMark>, MetaError> {
     let err = |e: chunk_store::Error| MetaError::Corrupted(format!("GC mark: temp file: {e}"));
     let mut live = cs.exact_mark().map_err(err)?;
-    let done = mark(cs, meta_roots, file_roots, stop, &mut |id| live.insert(&id).map_err(err))?;
+    let done = mark(cs, meta_roots, file_roots, stop, pacer, &mut |id| live.insert(&id).map_err(err))?;
     Ok(done.then_some(live))
 }
 
 /// The walk of a mark: calls `add` with every live object (an object can
-/// come more than once). False if `stop` was set first.
+/// come more than once). False if `stop` was set first. `pacer` runs before
+/// each root and each file (safe points: nothing is deleted during the
+/// mark, and the objects put or read meanwhile go to the touched set).
 fn mark(
     cs: &Arc<ChunkStore>,
     meta_roots: &[ObjectKey],
     file_roots: &[ObjectKey],
     stop: &AtomicBool,
+    pacer: &dyn GcPacer,
     add: &mut dyn FnMut(ObjectId) -> Result<(), MetaError>,
 ) -> Result<bool, MetaError> {
     let mut io = NodeReader(Arc::clone(cs));
     let mut values: Vec<ObjectKey> = file_roots.to_vec();
     for root in meta_roots {
+        pacer.at_safe_point();
         if stop.load(Ordering::Relaxed) {
             return Ok(false);
         }
@@ -94,6 +122,7 @@ fn mark(
     values.sort_unstable();
     values.dedup();
     for v in values {
+        pacer.at_safe_point();
         if stop.load(Ordering::Relaxed) {
             return Ok(false);
         }
@@ -139,6 +168,16 @@ impl OnlineGc {
     /// The exact mark of a full GC (see [`live_objects_exact`]).
     pub fn live_exact(&self, stop: &AtomicBool) -> Result<Option<ExactMark>, MetaError> {
         live_objects_exact(&self.cs, &self.meta_roots, &self.file_roots, stop)
+    }
+
+    /// [`OnlineGc::live`], paced (see [`live_objects_paced`]).
+    pub fn live_paced(&self, stop: &AtomicBool, pacer: &dyn GcPacer) -> Result<Option<LiveFilter>, MetaError> {
+        live_objects_paced(&self.cs, &self.meta_roots, &self.file_roots, stop, pacer)
+    }
+
+    /// [`OnlineGc::live_exact`], paced (see [`live_objects_exact_paced`]).
+    pub fn live_exact_paced(&self, stop: &AtomicBool, pacer: &dyn GcPacer) -> Result<Option<ExactMark>, MetaError> {
+        live_objects_exact_paced(&self.cs, &self.meta_roots, &self.file_roots, stop, pacer)
     }
 }
 

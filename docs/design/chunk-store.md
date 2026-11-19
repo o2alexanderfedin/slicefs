@@ -961,6 +961,44 @@ of the index (98 KB from 12,000 to 48,000), as without GC. The metadata walk
 (`metadata::gc::mark`) still holds one key for each node and file root
 (as the normal GC does).
 
+### GC pacing
+
+An online GC gives way to writes, depending on the free space of the file
+system under the store (`statvfs`, available / total blocks; an error or
+zero blocks counts as plenty). Code: `slicefs-cli/src/gc_pacing.rs`; all
+thresholds and sleeps are constants there, to be tuned (#121).
+
+| Free space | Mode | At each safe point |
+|---|---|---|
+| more than 20 % | yield | while writes came in the last 100 ms: sleep 50 ms, look again |
+| 5 % to 20 % | throttle | once per 100 ms of GC work: sleep up to 50 ms, in proportion to the write rate (full at 1,000 requests/s); never a full stop |
+| less than 5 % | full speed | no wait; the GC thread also starts a GC that changes made due at once, without `--gc-interval` or the duty gap (still one at a time; an interval of 0 still means only on request) |
+
+- Write signal: a counter of write, create and setattr requests
+  (`SliceFsFilesystem::note_write`, bumped in the FUSE handlers). The
+  pacer only reads it, and counts only the changes after it was made.
+- Safe points: in the mark (`metadata::gc::mark`) before each root and each
+  file; in the sweep before each group of `GC_GROUP_PACKS` packs. No store
+  lock, no install, no commit gate is held there. The chunk store sees only
+  the `GcPacer` trait (`gc_finish_paced`, `gc_finish_full_paced`), not FUSE.
+- Caps: the waits of the mark add up to at most 60 s, those of the sweep to
+  at most 30 s; then that phase runs at full speed. So a GC finishes also
+  under endless writes. The sweep cap matters most: the exact touched set
+  of the sweep grows with the writes during it. The mark does not abandon
+  at its cap: it deletes nothing, the objects put or read meanwhile go to
+  the touched set, and a retry under endless writes could never finish.
+- Low space starts GCs at once only while they free something: after a
+  GC that freed less than 1 MiB (`LOW_SPACE_MIN_FREED`), the next waits
+  the duty gap (at least 10 s), so GCs that free nothing do not loop.
+- A failed GC backs off: the next automatic GC waits 1 s, 2 s, 4 s, ...
+  after it, up to `--gc-interval` (5 min if it is 0); a success resets
+  this. A request from `slicefs gc` runs at once.
+- A wait ends at once when the mount shuts down, and when the free space
+  falls out of the yield mode (read again at most once a second).
+- The duty gap uses the GC time without the waits. `gc.result` and the log
+  line show the time waited.
+- Offline `slicefs gc` never waits (no writes).
+
 ## Read path
 
 Manifest → `ObjectId` → index → `pread` → zstd decode if flagged → bytes. A

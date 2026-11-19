@@ -253,6 +253,22 @@ pub const MAX_OPEN_PACKS: usize = 64;
 /// until the background merges take it into a larger run), not one file
 /// for each pack.
 pub const GC_GROUP_PACKS: usize = 32;
+
+/// Paces a GC: [`GcPacer::at_safe_point`] runs at points where the GC holds
+/// no store lock and no install is open (in the sweep: before each group of
+/// [`GC_GROUP_PACKS`] packs; in the metadata mark: between roots and between
+/// files). It may sleep to give way to writes. It must return in bounded
+/// time; the GC trusts it to cap its own waits. Offline GC uses [`NoPacer`].
+pub trait GcPacer {
+    fn at_safe_point(&self);
+}
+
+/// A pacer that never waits (offline GC, tests).
+pub struct NoPacer;
+
+impl GcPacer for NoPacer {
+    fn at_safe_point(&self) {}
+}
 /// GC copies at most this many records of a compacted pack per hold of the
 /// store lock (a 64 MiB pack of small objects has some 100,000 records).
 const COPY_BATCH: usize = 1024;
@@ -1280,7 +1296,13 @@ impl ChunkStore {
     /// or by the objects touched during the GC; see
     /// [`ChunkStore::last_gc_timing`].
     pub fn gc_finish(&self, live: &impl LiveSet, boundary: u64) -> Result<GcStats> {
-        self.gc_finish_mark(Mark::Filter(live), boundary)
+        self.gc_finish_mark(Mark::Filter(live), boundary, &NoPacer)
+    }
+
+    /// [`ChunkStore::gc_finish`], with `pacer` called before each group of
+    /// packs (no store lock held then).
+    pub fn gc_finish_paced(&self, live: &impl LiveSet, boundary: u64, pacer: &dyn GcPacer) -> Result<GcStats> {
+        self.gc_finish_mark(Mark::Filter(live), boundary, pacer)
     }
 
     /// End a full GC (started with [`ChunkStore::gc_begin_full`]): as
@@ -1305,14 +1327,20 @@ impl ChunkStore {
     /// not change, as in `gc_finish`; `GcStats::dead_left` counts the dead
     /// objects left so.
     pub fn gc_finish_full(&self, live: ExactMark, boundary: u64) -> Result<GcStats> {
-        self.gc_finish_mark(Mark::Exact(live), boundary)
+        self.gc_finish_mark(Mark::Exact(live), boundary, &NoPacer)
     }
 
-    fn gc_finish_mark(&self, mark: Mark<'_>, boundary: u64) -> Result<GcStats> {
+    /// [`ChunkStore::gc_finish_full`], with `pacer` called before each group
+    /// of packs (no store lock held then).
+    pub fn gc_finish_full_paced(&self, live: ExactMark, boundary: u64, pacer: &dyn GcPacer) -> Result<GcStats> {
+        self.gc_finish_mark(Mark::Exact(live), boundary, pacer)
+    }
+
+    fn gc_finish_mark(&self, mark: Mark<'_>, boundary: u64, pacer: &dyn GcPacer) -> Result<GcStats> {
         let start = Instant::now();
         let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
         let holds = Holds::default();
-        let r = self.gc_run(mark, boundary, &holds);
+        let r = self.gc_run(mark, boundary, &holds, pacer);
         *self.gc_timing.lock().unwrap() =
             GcTiming { lock_hold_max: holds.max.get(), lock_hold_total: holds.total.get(), wall: start.elapsed() };
         r
@@ -1347,7 +1375,7 @@ impl ChunkStore {
         let _ = pass;
     }
 
-    fn gc_run(&self, mark: Mark<'_>, boundary: u64, holds: &Holds) -> Result<GcStats> {
+    fn gc_run(&self, mark: Mark<'_>, boundary: u64, holds: &Holds, pacer: &dyn GcPacer) -> Result<GcStats> {
         // (1) Start. The touched set ends with this GC, also when it fails
         // (#63): the next GC starts its own set in `gc_begin`, before its
         // gate commit, so its mark sees everything put before that.
@@ -1368,7 +1396,7 @@ impl ChunkStore {
                         Ok(d) => d,
                         Err(e) => return Err(self.gc_abandon(e, &[], holds)),
                     };
-                return self.gc_groups(&snap, &keep, &mut |_| Ok(None), todo, unused, holds, st);
+                return self.gc_groups(&snap, &keep, &mut |_| Ok(None), todo, unused, holds, pacer, st);
             }
             Mark::Exact(live) => live,
         };
@@ -1437,7 +1465,7 @@ impl ChunkStore {
         // Only for the objects touched during this call (few): a read error
         // counts as "not live", which keeps their packs.
         let keep = |id: &ObjectId| live.contains(&id.0).unwrap_or(false);
-        let mut st = self.gc_groups(&snap, &keep, &mut dead_of, todo, unused, holds, st)?;
+        let mut st = self.gc_groups(&snap, &keep, &mut dead_of, todo, unused, holds, pacer, st)?;
         st.dead_left = Some(dead_n.saturating_sub(st.removed_objects));
         st.mark_merge_passes = live.passes();
         Ok(st)
@@ -1455,6 +1483,7 @@ impl ChunkStore {
         todo: Vec<GcTodo>,
         unused: Vec<u64>,
         holds: &Holds,
+        pacer: &dyn GcPacer,
         mut st: GcStats,
     ) -> Result<GcStats> {
         if todo.is_empty() && unused.is_empty() {
@@ -1471,6 +1500,10 @@ impl ChunkStore {
         let mut touched_packs = HashSet::new();
         let r = (|| -> Result<()> {
             for (g, group) in groups.iter().enumerate() {
+                // A safe point: no store lock, no install open. (The objects
+                // put or read while it waits go to the touched set, so their
+                // packs do not change.)
+                pacer.at_safe_point();
                 let unused: &[u64] = if g == last { &unused } else { &[] };
                 self.gc_group(snap, keep, dead_of, group, unused, g == last, &mut touched_packs, holds, &mut st)?;
             }

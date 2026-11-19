@@ -450,3 +450,76 @@ fn a_full_gc_request_runs_on_the_gc_thread() {
     let fs = Arc::try_unwrap(fs).ok().expect("the GC thread ended");
     check_after_remount(fs, dir.path(), &[("keep.bin", &keep)]);
 }
+
+/// A paced GC on a store with endless writes still finishes: the mark and
+/// the sweep each wait up to their cap (tiny here), then run at full speed.
+#[test]
+fn a_paced_gc_with_endless_writes_finishes_after_the_yield_caps() {
+    use slicefs_cli::gc_pacing::{RealClock, WritePacer};
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+    let dir = TempDir::new().unwrap();
+    let fs = Arc::new(make_fs(dir.path()));
+    let keep = data(51, 100_000);
+    write_file(&fs, "keep.bin", &keep);
+    make_garbage(&fs, "del.bin", &data(52, 300_000));
+    // Endless write requests (the counter that the FUSE write paths bump),
+    // until the test ends; at most 60 s.
+    let done = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let (fs, done) = (Arc::clone(&fs), Arc::clone(&done));
+        std::thread::spawn(move || {
+            let t = Instant::now();
+            while !done.load(Ordering::SeqCst) && t.elapsed() < Duration::from_secs(60) {
+                fs.note_write();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+    };
+    let cap = Duration::from_millis(300);
+    let stop = no_stop();
+    let pacer = || WritePacer::new(fs.write_activity(), Arc::new(|| 0.9), Box::new(RealClock::new()), cap, &stop);
+    let (mark, sweep) = (pacer(), pacer());
+    let t = Instant::now();
+    let stats = fs.gc_online_paced(false, &stop, &mark, &sweep).unwrap().expect("not stopped");
+    let took = t.elapsed();
+    done.store(true, Ordering::SeqCst);
+    writer.join().unwrap();
+    // (Exact caps: see the fake-clock tests in `gc_pacing`. A real clock on a
+    // busy machine can see a quiet gap in the writes.)
+    for (phase, w) in [("mark", mark.waited()), ("sweep", sweep.waited())] {
+        assert!(!w.is_zero() && w <= cap, "the {phase} waited {w:?}, cap {cap:?}");
+    }
+    assert!(took < Duration::from_secs(30), "the GC took {took:?}");
+    assert!(stats.removed_bytes >= GARBAGE_FREED, "{stats:?}");
+    let fs = Arc::try_unwrap(fs).ok().expect("the writer ended");
+    check_after_remount(fs, dir.path(), &[("keep.bin", &keep)]);
+}
+
+/// With low free space (an injected reading), the GC thread starts a GC at
+/// once, without waiting for the interval (an hour here).
+#[test]
+fn low_space_starts_a_gc_without_the_interval() {
+    use slicefs_cli::online_gc::spawn_online_gc_with;
+    use std::time::{Duration, Instant};
+    let dir = TempDir::new().unwrap();
+    let fs = Arc::new(make_fs(dir.path()));
+    make_garbage(&fs, "del.bin", &data(53, 300_000));
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let caps = (Duration::from_millis(100), Duration::from_millis(100));
+    let thread = spawn_online_gc_with(
+        Arc::downgrade(&fs),
+        dir.path().to_path_buf(),
+        Duration::from_secs(3600),
+        Arc::clone(&shutdown),
+        Arc::new(|| 0.01),
+        caps,
+    );
+    let t = Instant::now();
+    while fs.content().last_gc_timing().wall.is_zero() && t.elapsed() < Duration::from_secs(30) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    thread.join().unwrap();
+    assert!(!fs.content().last_gc_timing().wall.is_zero(), "no GC ran in 30 s");
+}
