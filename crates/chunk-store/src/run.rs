@@ -989,6 +989,16 @@ mod tests {
             // The verified path reads (and checks) one page with `read_at`.
             assert_eq!(run.get_verified(&entries[500].0).unwrap(), Some(entries[500].1), "{name}");
             assert_eq!(c.take().len(), 1, "{name}: get_verified reads its page");
+            if mapped {
+                // The run owns its mapping: a removed file (a merge or GC
+                // deleted it) still reads through an open run.
+                io.remove(1, Kind::Run).unwrap();
+                assert!(!io.exists(1, Kind::Run));
+                for (id, e) in entries.iter().step_by(37) {
+                    assert_eq!(run.get(id).unwrap(), Some(*e), "{name}: after the file was removed");
+                }
+                write_run(io, 1, &entries);
+            }
         }
         assert!(dir.path().join("index").join("0000000000000001.run").is_file());
         assert!(!dir.path().join("packs").join("0000000000000001.run").exists());
