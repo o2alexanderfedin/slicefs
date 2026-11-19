@@ -350,3 +350,41 @@ fn puts_go_on_while_a_store_sync_waits_for_the_disk() {
         assert_eq!(&s.get(id).unwrap(), d);
     }
 }
+
+#[test]
+fn puts_go_on_while_a_store_sync_waits_for_a_seal() {
+    let mem = MemIo::new();
+    let io = retrying(&mem);
+    let o = Options { pack_limit: 64 << 10, index_background_merge: false, ..Options::default() };
+    let s = Arc::new(ChunkStore::open_with(Arc::clone(&io), o).unwrap());
+    s.sync().unwrap();
+    mem.hold_syncs(true);
+    // Nine objects of 8000 bytes fill the first pack: its seal is held.
+    let objs = put_many(&s, 9, 700);
+    let (tx, done) = mpsc::channel();
+    let s2 = Arc::clone(&s);
+    let t = thread::spawn(move || {
+        let r = s2.sync();
+        let _ = tx.send(());
+        r
+    });
+    let (ptx, put) = mpsc::channel();
+    let s3 = Arc::clone(&s);
+    let p = thread::spawn(move || {
+        let more = put_many(&s3, 3, 800);
+        let _ = ptx.send(());
+        more
+    });
+    assert!(put.recv_timeout(LONG).is_ok(), "a put waited for the store sync");
+    assert!(done.recv_timeout(Duration::from_millis(300)).is_err(), "sync returned before the seal");
+    mem.hold_syncs(false);
+    t.join().unwrap().unwrap();
+    let more = p.join().unwrap();
+    s.sync().unwrap();
+    drop(s);
+    mem.crash();
+    let s = open(&io);
+    for (id, d) in objs.iter().chain(&more) {
+        assert_eq!(&s.get(id).unwrap(), d);
+    }
+}

@@ -42,7 +42,7 @@ pub mod mem;
 
 use crate::index::{Counts, Hwm, Index, MergeOut, Snapshot};
 use crate::run::Run;
-use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK};
+use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK, SyncWait};
 pub use crate::locality::LocalityStats;
 use crate::locality::LocalityCache;
 pub use crate::mark::{LiveFilter, LiveSet, LIVE_FILTER_BITS};
@@ -548,7 +548,14 @@ struct Inner {
     /// Told of every flush (see `MergeCtl`; the same as `ChunkStore::merge`).
     merge: Arc<MergeCtl>,
     /// The seal that runs in the background, if any (see `ChunkStore::seal`).
-    sealing: Option<JoinHandle<io::Result<()>>>,
+    sealing: Option<Sealing>,
+}
+
+/// A seal in a background thread, and the signal of its end (a wait on it
+/// needs no store lock; the join under the lock then takes no time).
+struct Sealing {
+    thread: JoinHandle<io::Result<()>>,
+    done: SyncWait,
 }
 
 /// The slow part of a seal: sync the pack, then write its `.idx` (#108).
@@ -1413,6 +1420,7 @@ impl ChunkStore {
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
             self.seal(&mut inner)?;
         }
+        inner.join_seal()?;
         inner.touched = Some(Touched::on_disk(extsort::Sorter::new(dir, "touched", self.sort_cfg())));
         Ok(inner.next_pack - 1)
     }
@@ -2412,12 +2420,14 @@ impl ChunkStore {
         // Start the sync of the active pack and wait for it without the
         // store lock, so puts go on meanwhile (#108). The sync below, under
         // the lock, then has only the bytes put since, and gives the outcome.
-        let wait = {
+        // The same for a background seal.
+        let (seal, wait) = {
             let mut inner = self.inner.lock().unwrap();
             inner.check()?;
-            inner.active.as_mut().filter(|a| a.dirty).and_then(|a| a.file.sync_soon())
+            let seal = inner.sealing.as_ref().map(|s| s.done.clone());
+            (seal, inner.active.as_mut().filter(|a| a.dirty).and_then(|a| a.file.sync_soon()))
         };
-        if let Some(w) = wait {
+        for w in seal.iter().chain(&wait) {
             w.wait();
         }
         let mut inner = self.inner.lock().unwrap();
@@ -2493,12 +2503,17 @@ impl ChunkStore {
         let job = SealJob { io: Arc::clone(&self.io), num: a.num, file: a.file, idx: encode_index(&a.entries), dirty: a.dirty };
         let slot = Arc::new(Mutex::new(Some(job)));
         let theirs = Arc::clone(&slot);
+        let done = SyncWait::default();
+        let end = done.clone();
         let spawned = std::thread::Builder::new().name("pack-seal".into()).spawn(move || {
             let job = theirs.lock().unwrap().take();
-            job.map_or(Ok(()), SealJob::run)
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.map_or(Ok(()), SealJob::run)))
+                .unwrap_or_else(|_| Err(io::Error::other("the pack seal panicked")));
+            end.done();
+            r
         });
         match spawned {
-            Ok(t) => inner.sealing = Some(t),
+            Ok(thread) => inner.sealing = Some(Sealing { thread, done }),
             Err(_) => {
                 // No thread: seal here.
                 let job = slot.lock().unwrap().take();
@@ -2711,7 +2726,7 @@ impl Inner {
     /// Wait for the background seal, if one runs. A failure is final.
     fn join_seal(&mut self) -> Result<()> {
         if let Some(t) = self.sealing.take() {
-            if let Err(e) = t.join().unwrap_or_else(|_| Err(io::Error::other("the pack seal thread panicked"))) {
+            if let Err(e) = t.thread.join().unwrap_or_else(|_| Err(io::Error::other("the pack seal thread panicked"))) {
                 self.failed = true;
                 return Err(e.into());
             }
