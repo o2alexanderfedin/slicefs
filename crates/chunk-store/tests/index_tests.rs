@@ -691,12 +691,22 @@ fn a_read_error_at_open_is_not_damage() {
     all_read_back(&open(&mem, &o), &objs, "after the error");
 }
 
-/// Run page layout (see run.rs): an 8-byte page header, then 58-byte
-/// entries: the 33-byte ID, pack u64, offset u64, stored u32, raw u32,
-/// flags u8.
-const RUN_PAGE_HEADER: usize = 8;
-const RUN_ENTRY: usize = 58;
-const RUN_ID: usize = 33;
+/// Run page layout (see run.rs): a 12-byte page header (entry count u16,
+/// tag u8, shared u8, CRC32C u32, then the byte widths of the pack, the
+/// offset, the stored length and the raw length; raw width 0xff: no raw
+/// field), then entries of one size: digest bytes `shared..32` of the ID,
+/// the four fields, flags u8.
+const RUN_PAGE_HEADER: usize = 12;
+
+/// The layout of page 0 of `run`: (shared, [pack, offset, stored, raw]
+/// widths in bytes, entry size).
+fn run_page_layout(mem: &MemIo, run: u64) -> (usize, [usize; 4], usize) {
+    let b = mem.read(run, Kind::Run).unwrap();
+    let shared = b[3] as usize;
+    let raw = if b[11] == 0xff { 0 } else { b[11] as usize };
+    let widths = [b[8] as usize, b[9] as usize, b[10] as usize, raw];
+    (shared, widths, 32 - shared + widths.iter().sum::<usize>() + 1)
+}
 
 // Lookups do not check the CRC of a run page on a hit (17-05): a damaged
 // ID is never a miss (the CRC is checked before a miss is returned), so it
@@ -709,7 +719,8 @@ fn a_damaged_run_page_gives_no_wrong_data() {
     let s = open(&mem, &o);
     // A digest byte of entry 1 of page 0 of run 1 (the first 32 objects).
     let r = run_list(&mem)[0];
-    mem.flip(r, Kind::Run, RUN_PAGE_HEADER + RUN_ENTRY + 20);
+    let (_, _, entry) = run_page_layout(&mem, r);
+    mem.flip(r, Kind::Run, RUN_PAGE_HEADER + entry + 12);
     let mut bad = Vec::new();
     for (i, (id, d)) in objs.iter().enumerate() {
         match s.read(id) {
@@ -744,12 +755,15 @@ fn a_damaged_run_page_gives_no_wrong_data() {
 // The bytes of the object are still in its pack: the rebuild finds them.
 #[test]
 fn a_damaged_run_entry_place_is_never_read_and_asks_for_a_rebuild() {
-    for field in [0, 8, 16] {
+    // Field 0: pack, 1: offset, 2: stored length.
+    for field in [0, 1, 2] {
         let mem = MemIo::new();
         let (o, objs) = closed_store(&mem);
         let s = open(&mem, &o);
         let r = run_list(&mem)[0];
-        mem.flip(r, Kind::Run, RUN_PAGE_HEADER + RUN_ENTRY + RUN_ID + field);
+        let (shared, w, entry) = run_page_layout(&mem, r);
+        assert!(w[field] > 0, "field {field}: {w:?}");
+        mem.flip(r, Kind::Run, RUN_PAGE_HEADER + entry + 32 - shared + w[..field].iter().sum::<usize>());
         let mut bad = Vec::new();
         for (i, (id, d)) in objs.iter().enumerate() {
             match s.read(id) {
@@ -812,7 +826,8 @@ fn a_damaged_newer_page_never_shows_an_older_entry() {
 // that GC deleted. A put then writes the object again (no silent loss).
 #[test]
 fn a_damaged_tombstone_never_shows_the_older_entry() {
-    for at in [20, RUN_ID + 24] {
+    // 0: a digest byte of the key, 1: the flags.
+    for what in [0, 1] {
         let mem = MemIo::new();
         let o = opts(10, 64 << 20);
         let s = open(&mem, &o);
@@ -822,12 +837,17 @@ fn a_damaged_tombstone_never_shows_the_older_entry() {
         let live: HashSet<ObjectId> = objs.iter().map(|(id, _)| *id).filter(|id| *id != x).collect();
         let b = s.gc_begin().unwrap();
         assert_eq!(s.gc_finish(&live, b).unwrap().removed_objects, 1);
-        let (r, pos) = run_list(&mem)
+        let (r, at) = run_list(&mem)
             .into_iter()
             .filter(|r| !r1.contains(r))
-            .find_map(|r| mem.read(r, Kind::Run).unwrap().windows(RUN_ID).position(|w| w == &x.0[..]).map(|p| (r, p)))
+            .find_map(|r| {
+                let (shared, w, _) = run_page_layout(&mem, r);
+                let key = &x.0[1 + shared..];
+                let pos = mem.read(r, Kind::Run).unwrap().windows(key.len()).position(|k| k == key)?;
+                Some((r, if what == 0 { pos + 10 } else { pos + key.len() + w.iter().sum::<usize>() }))
+            })
             .expect("the tombstone of x is in a newer run");
-        mem.flip(r, Kind::Run, pos + at);
+        mem.flip(r, Kind::Run, at);
         assert!(!s.contains(&x), "byte {at}");
         let got = s.read(&x);
         assert!(matches!(got, Err(chunk_store::Error::Corrupt(_))), "byte {at}: {got:?}");
@@ -1065,7 +1085,7 @@ fn a_cold_open_reads_no_entry_page() {
 }
 
 // The RAM of the index: Bloom filters (about 1.25 B per object at 10 bits
-// per key) and fence tables (8 bytes per 70 entries), at most 2 B per
+// per key) and fence tables (8 bytes per page), at most 2 B per
 // object. This is anonymous memory of the process. The run pages that
 // lookups read are file-backed (mapped page cache pages on files) and are
 // not counted here.
