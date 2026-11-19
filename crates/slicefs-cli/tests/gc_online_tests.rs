@@ -476,6 +476,14 @@ fn a_paced_gc_with_endless_writes_finishes_after_the_yield_caps() {
             }
         })
     };
+    // Start the GC only when the writer runs, so the first safe point of the
+    // mark already sees writes (else a fast mark can end before any write).
+    let writes = fs.write_activity();
+    let t0 = Instant::now();
+    while writes.load(Ordering::Relaxed) < 2 {
+        assert!(t0.elapsed() < Duration::from_secs(10), "the writer did not start");
+        std::thread::sleep(Duration::from_millis(1));
+    }
     let cap = Duration::from_millis(300);
     let stop = no_stop();
     let pacer = || WritePacer::new(fs.write_activity(), Arc::new(|| 0.9), Box::new(RealClock::new()), cap, &stop);
