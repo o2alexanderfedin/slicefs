@@ -222,6 +222,9 @@ const FLAG_ZSTD: u8 = 1;
 /// pack). More packs than this are opened again when needed, so a large
 /// store does not reach the limit of open files.
 pub const MAX_OPEN_PACKS: usize = 64;
+/// GC copies at most this many records of a compacted pack per hold of the
+/// store lock (a 64 MiB pack of small objects has some 100,000 records).
+const COPY_BATCH: usize = 1024;
 /// Objects smaller than this are not compressed.
 const MIN_COMPRESS: usize = 64;
 
@@ -1128,7 +1131,8 @@ impl ChunkStore {
     ///    snapshot (current only if the snapshot points to this record). The
     ///    tombstones of the victims go to a pending run on disk that no
     ///    MANIFEST lists yet. The live records of a pack to compact are
-    ///    copied under the store lock, one pack per lock hold.
+    ///    copied: a batch is read with no lock, then appended under the
+    ///    store lock.
     /// 5. Install (store lock): the plan of a pack that holds an object put
     ///    or read during the GC is dropped (that pack does not change). The
     ///    copies are synced; one MANIFEST write lists the pending runs of
@@ -1148,8 +1152,9 @@ impl ChunkStore {
     /// copy, and the filter and fences of the pending runs; no map of every
     /// object. Cost: one sequential pass over the runs, and one verified
     /// snapshot lookup per `.idx` entry of each selected pack (two for a
-    /// punched pack). Each store-lock hold is bounded by one pack, by the
-    /// memtable limit, or by the objects touched during the GC; see
+    /// punched pack). Each store-lock hold is bounded by a batch of copies
+    /// (`COPY_BATCH` records), by the memtable limit (a flush, the install),
+    /// or by the objects touched during the GC; see
     /// [`ChunkStore::last_gc_timing`].
     pub fn gc_finish(&self, live: &HashSet<ObjectId>, boundary: u64) -> Result<GcStats> {
         let start = Instant::now();
@@ -1410,17 +1415,26 @@ impl ChunkStore {
             };
             if !copies.is_empty() {
                 // The copies get newer places in the memtable; a flush at
-                // the size limit is fine: no pack changed yet.
-                let mut inner = self.held(holds);
-                inner.check()?;
-                let file = inner.reader(io, num)?;
-                for (id, l) in &copies {
-                    let mut rec = vec![0u8; (rec_end(l) - l.offset) as usize];
-                    file.read_at(&mut rec, l.offset)?;
-                    let nl = self.append(&mut inner, id, &rec, l.stored, l.raw, l.flags)?;
-                    inner.index.insert(*id, nl);
+                // the size limit is fine: no pack changed yet. A batch of
+                // records is read with no lock (the pack is sealed, and only
+                // GC changes it), then appended under one short hold.
+                let file = self.held(holds).reader(io, num)?;
+                let mut recs = Vec::new();
+                for batch in copies.chunks(COPY_BATCH) {
+                    recs.clear();
+                    for (_, l) in batch {
+                        let mut rec = vec![0u8; (rec_end(l) - l.offset) as usize];
+                        file.read_at(&mut rec, l.offset)?;
+                        recs.push(rec);
+                    }
+                    let mut inner = self.held(holds);
+                    inner.check()?;
+                    for ((id, l), rec) in batch.iter().zip(&recs) {
+                        let nl = self.append(&mut inner, id, rec, l.stored, l.raw, l.flags)?;
+                        inner.index.insert(*id, nl);
+                    }
+                    self.flush_if_full(&mut inner)?;
                 }
-                self.flush_if_full(&mut inner)?;
             }
             plans.push(GcPlan {
                 num,
