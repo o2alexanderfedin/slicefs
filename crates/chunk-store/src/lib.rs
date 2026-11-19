@@ -494,16 +494,57 @@ impl ChunkStore {
     /// reaches the limit, only between two packs, with the hwm at the start
     /// of the next pack (the entries of an `.idx` are in ID order, so a mark
     /// inside a pack would be wrong). A read-only open writes nothing.
+    ///
+    /// The index is derived data. If it cannot be used (damage, the rebuild
+    /// flag, see `Index::open`), or if it points to pack bytes that are not
+    /// there, the open starts again from an empty index and replays every
+    /// pack: a writable open writes a new index, a read-only open keeps it
+    /// in RAM.
     pub fn open_with(io: Arc<dyn PackIo>, opts: Options) -> Result<Self> {
         if !io.prepare(opts.read_only)? {
             let zstd_level = AtomicI32::new(opts.zstd_level);
             return Ok(ChunkStore { io, punches: false, zstd_level, opts, inner: Mutex::new(Inner::empty()) });
         }
+        let index = Index::open(&*io, opts.read_only)?;
+        let inner = match Self::load(&*io, &opts, index, None)? {
+            Loaded::Done(inner) => *inner,
+            Loaded::Rebuild { reason, resync } => {
+                let index = Index::rebuild(&*io, opts.read_only, &reason)?;
+                match Self::load(&*io, &opts, index, resync)? {
+                    Loaded::Done(inner) => *inner,
+                    // An empty index has no run to damage and no hwm.
+                    Loaded::Rebuild { reason, .. } => return Err(Error::Corrupt(reason)),
+                }
+            }
+        };
+        let punches = !opts.read_only && io.can_punch();
+        let zstd_level = AtomicI32::new(opts.zstd_level);
+        Ok(ChunkStore { io, punches, zstd_level, opts, inner: Mutex::new(inner) })
+    }
+
+    /// The pack part of `open_with` on the index `index`. `resync` is a pack
+    /// to treat as sealed (resynced past damage, never cut) although it is
+    /// the newest one: a read-only rebuild after damage below the hwm.
+    ///
+    /// Returns `Rebuild` before it changes any pack if the index points to
+    /// pack bytes that are gone: the hwm pack is missing, or it ends below
+    /// the hwm. Those bytes were synced before a run pointed to them, so this
+    /// is damage, not a torn tail. A cut there would leave run entries that
+    /// point past the end of the pack (a stale dedup hit in `put` loses the
+    /// object), and later appends would land below the hwm (a replay skips
+    /// them, so a crash loses them although they were synced). A writable
+    /// open first makes the pack sealed: resynced past the damage, synced,
+    /// and with a durable `.idx`, so no later open cuts it. A `Corrupt`
+    /// lookup during the replay (a damaged run page) also returns `Rebuild`.
+    fn load(io: &dyn PackIo, opts: &Options, index: Index, resync: Option<u64>) -> Result<Loaded> {
         let mut nums = io.list()?;
         nums.sort_unstable();
-        let index = Index::open(&*io, opts.read_only)?;
         let hwm = index.hwm();
         let c = index.counts();
+        if hwm.offset > 0 && nums.binary_search(&hwm.pack).is_err() {
+            let reason = format!("pack {} of the index high-water mark is missing", hwm.pack);
+            return Ok(Loaded::Rebuild { reason, resync: None });
+        }
 
         let mut inner = Inner {
             index,
@@ -529,6 +570,7 @@ impl ChunkStore {
                 Ok(b) => decode_index(&b, num)?,
                 Err(_) => None,
             };
+            let mut active = None;
             let entries = match loaded {
                 Some(e) => e,
                 None => {
@@ -536,54 +578,77 @@ impl ChunkStore {
                     if buf.starts_with(PACK_MAGIC) {
                         check_version(&buf, "pack", num)?;
                     }
-                    let active = Some(num) == last && !is_punched(&buf);
+                    let is_active = Some(num) == last && !is_punched(&buf) && resync != Some(num);
                     // The active pack is cut at its first bad record. A sealed
                     // pack (its index is lost) may have holes or damage in the
                     // middle, so it is resynced past them.
-                    let (entries, valid) = if active { scan_pack(&buf, num) } else { (resync_scan(&buf, num)?, 0) };
-                    if opts.read_only {
-                        inner.replay(&entries, hwm)?;
-                        continue;
+                    let (entries, end) = if is_active {
+                        scan_pack(&buf, num)
+                    } else {
+                        let e = resync_scan(&buf, num)?;
+                        let end = e.iter().map(|(_, l)| rec_end(l)).max().unwrap_or(PACK_HEADER as u64);
+                        (e, end)
+                    };
+                    if num == hwm.pack && end < hwm.offset {
+                        let reason =
+                            format!("pack {num} ends at {end}, below the index high-water mark at {}", hwm.offset);
+                        if !opts.read_only {
+                            let entries = if is_active { resync_scan(&buf, num)? } else { entries };
+                            io.open_rw(num)?.sync()?;
+                            io.write_durable(num, Kind::Idx, &encode_index(&entries))?;
+                        }
+                        return Ok(Loaded::Rebuild { reason, resync: Some(num) });
                     }
-                    if active {
+                    if is_active && !opts.read_only {
                         // The newest pack without an index is the active pack.
                         let mut file = io.open_rw(num)?;
-                        let valid = if valid < PACK_HEADER as u64 {
+                        let valid = if end < PACK_HEADER as u64 {
                             file.set_len(0)?;
                             file.write_at(&pack_header(num), 0)?;
                             PACK_HEADER as u64
                         } else {
-                            file.set_len(valid)?;
-                            valid
+                            file.set_len(end)?;
+                            end
                         };
                         file.sync()?;
-                        // The pack keeps all its entries (for its `.idx` at
-                        // seal); only the memtable skips those below the hwm.
-                        inner.replay(&entries, hwm)?;
-                        inner.active = Some(Active { num, file, len: valid, entries, dirty: false });
-                        continue;
+                        active = Some((file, valid));
+                    } else if !opts.read_only {
+                        // A run may point into this pack after the next
+                        // flush: its bytes must be durable first.
+                        io.open_rw(num)?.sync()?;
+                        io.write_durable(num, Kind::Idx, &encode_index(&entries))?;
                     }
-                    // A run may point into this pack after the next flush:
-                    // its bytes must be durable first.
-                    io.open_rw(num)?.sync()?;
-                    io.write_durable(num, Kind::Idx, &encode_index(&entries))?;
                     entries
                 }
             };
-            inner.replay(&entries, hwm)?;
+            match inner.replay(&entries, hwm) {
+                Ok(()) => {}
+                Err(Error::Corrupt(reason)) => return Ok(Loaded::Rebuild { reason, resync: None }),
+                Err(e) => return Err(e),
+            }
+            if let Some((file, len)) = active {
+                // The pack keeps all its entries (for its `.idx` at seal);
+                // only the memtable skips those below the hwm.
+                inner.active = Some(Active { num, file, len, entries, dirty: false });
+                continue;
+            }
             if !opts.read_only && inner.index.mem_len() >= limit {
                 // Between two packs: every record of the packs up to `num`
                 // is in the memtable or in a run.
-                inner.flush_at(&*io, Hwm { pack: num + 1, offset: 0 })?;
+                inner.flush_at(io, Hwm { pack: num + 1, offset: 0 })?;
             }
         }
-        let punches = !opts.read_only && io.can_punch();
-        let zstd_level = AtomicI32::new(opts.zstd_level);
-        Ok(ChunkStore { io, punches, zstd_level, opts, inner: Mutex::new(inner) })
+        Ok(Loaded::Done(Box::new(inner)))
     }
 
     /// Store `data` and return its ID. Bytes already in the store are not
     /// written again.
+    ///
+    /// An index lookup that fails (for example a damaged run page) counts as
+    /// "not found": the object is written again, and its new entry hides the
+    /// damaged page. The stats then count the object as new, so they can
+    /// count it twice until the index is rebuilt (see
+    /// [`ChunkStore::request_index_rebuild`]).
     pub fn put(&self, data: &[u8]) -> Result<ObjectId> {
         if self.opts.read_only {
             return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
@@ -956,6 +1021,20 @@ impl ChunkStore {
         }
     }
 
+    /// Ask for a rebuild of the index from the packs: the next writable open
+    /// removes the run files and the MANIFEST and replays every pack; a
+    /// read-only open replays every pack into RAM. For damage that is found
+    /// in a run after the open (a lookup that gives `Corrupt`). Writes the
+    /// rebuild flag into a durable MANIFEST; the index in use does not
+    /// change.
+    pub fn request_index_rebuild(&self) -> Result<()> {
+        if self.opts.read_only {
+            return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
+        }
+        let mut inner = self.inner.lock().unwrap();
+        inner.index.request_rebuild(&*self.io, "a caller asked for a rebuild")
+    }
+
     /// Write the memtable to a run when it has reached the limit.
     fn flush_if_full(&self, inner: &mut Inner) -> Result<()> {
         if inner.index.mem_len() < self.opts.index_memtable_limit.max(1) {
@@ -1023,6 +1102,19 @@ impl ChunkStore {
         inner.dir_dirty = false; // write_durable synced the directory
         Ok(())
     }
+}
+
+/// Outcome of the pack part of an open (see `ChunkStore::load`).
+enum Loaded {
+    Done(Box<Inner>),
+    /// The index cannot be used: start again from an empty index.
+    /// `resync`: a pack to resync, never cut, in that second pass.
+    Rebuild { reason: String, resync: Option<u64> },
+}
+
+/// The end of the record at `l`.
+fn rec_end(l: &Loc) -> u64 {
+    l.offset + (REC_HEADER + l.stored as usize + REC_CRC) as u64
 }
 
 /// The disk part of the GC of a mostly live pack (see `plan_punch`).

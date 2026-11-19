@@ -391,3 +391,363 @@ fn a_store_without_a_manifest_is_indexed_at_its_first_writable_open() {
         assert_eq!(s.get(id).as_ref(), Some(d));
     }
 }
+
+// ── Damage below the high-water mark (17-04) ─────────────────────────────────
+
+/// Bytes of the record of a `small` object: header (ID, flags, raw and
+/// stored lengths), 8 payload bytes, CRC.
+const SMALL_REC: usize = 33 + 9 + 8 + 4;
+
+/// Offset of the record of object `i` in a pack of `small` objects.
+fn small_at(i: usize) -> usize {
+    14 + i * SMALL_REC
+}
+
+/// 120 small objects in one active pack with two flushes, so the hwm is
+/// inside the active pack. No close.
+fn hwm_inside_the_active_pack(mem: &MemIo) -> (Options, Vec<ObjectId>) {
+    let o = opts(50, 64 << 20);
+    let s = open(mem, &o);
+    let ids: Vec<ObjectId> = (0..120).map(|i| s.put(&small(i)).unwrap()).collect();
+    s.sync().unwrap();
+    let info = s.index_info();
+    assert_eq!((info.hwm_pack, info.hwm_offset, info.runs), (1, small_at(100) as u64, 2), "{info:?}");
+    drop(s);
+    (o, ids)
+}
+
+/// After damage below the hwm of the active pack: the `lost` objects are not
+/// found and a put writes them again; every other object reads back; the
+/// stats count only what reads back; and puts after the reopen survive a
+/// power loss (they must not land below the hwm, where replay skips them).
+fn check_damage_below_the_hwm(mem: &MemIo, o: &Options, ids: &[ObjectId], lost: &[usize]) {
+    let s = open(mem, o);
+    for (i, id) in ids.iter().enumerate() {
+        if lost.contains(&i) {
+            assert!(!s.contains(id), "object {i}: a run points to bytes that are gone");
+            assert!(s.get(id).is_none(), "object {i}");
+        } else {
+            assert_eq!(s.get(id), Some(small(i as u64)), "object {i}");
+        }
+    }
+    assert_eq!(s.stats().objects, (ids.len() - lost.len()) as u64);
+    for &i in lost {
+        assert_eq!(s.put(&small(i as u64)).unwrap(), ids[i]);
+        assert_eq!(s.get(&ids[i]), Some(small(i as u64)), "object {i} is written again");
+    }
+    let more: Vec<ObjectId> = (1000..1010).map(|i| s.put(&small(i)).unwrap()).collect();
+    s.sync().unwrap();
+    drop(s);
+    mem.crash();
+
+    let s = open(mem, o);
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(s.get(id), Some(small(i as u64)), "object {i} after a power loss");
+    }
+    for (i, id) in more.iter().enumerate() {
+        assert_eq!(s.get(id), Some(small(1000 + i as u64)), "new object {i} after a power loss");
+    }
+    assert_eq!(s.stats().objects, ids.len() as u64 + 10);
+}
+
+#[test]
+fn an_active_pack_cut_below_the_hwm_is_rebuilt_from_the_packs() {
+    let mem = MemIo::new();
+    let (o, ids) = hwm_inside_the_active_pack(&mem);
+    // The pack loses its bytes from the middle of record 30 on.
+    let mut f = mem.open_rw(1).unwrap();
+    f.set_len(small_at(30) as u64 + 10).unwrap();
+    f.sync().unwrap();
+    drop(f);
+    let lost: Vec<usize> = (30..120).collect();
+    check_damage_below_the_hwm(&mem, &o, &ids, &lost);
+}
+
+#[test]
+fn a_damaged_record_below_the_hwm_costs_only_itself() {
+    let mem = MemIo::new();
+    let (o, ids) = hwm_inside_the_active_pack(&mem);
+    // One payload byte of record 30: its CRC fails. The records after it
+    // are intact, and the runs point to them.
+    mem.flip(1, Kind::Pack, small_at(30) + 45);
+    let manifest = mem.read(0, Kind::Manifest).unwrap();
+    let runs = run_list(&mem);
+    let packs = pack_lens(&mem);
+
+    // A read-only open sees the same and writes nothing.
+    let ro = Options { read_only: true, ..o.clone() };
+    let s = ChunkStore::open_with(Arc::new(mem.clone()), ro).unwrap();
+    for (i, id) in ids.iter().enumerate() {
+        if i == 30 {
+            assert!(!s.contains(id));
+            assert!(s.get(id).is_none());
+        } else {
+            assert_eq!(s.get(id), Some(small(i as u64)), "read-only: object {i}");
+        }
+    }
+    assert_eq!(s.stats().objects, 119);
+    drop(s);
+    assert_eq!(mem.read(0, Kind::Manifest).unwrap(), manifest);
+    assert_eq!(run_list(&mem), runs);
+    assert_eq!(pack_lens(&mem), packs);
+    assert!(!mem.exists(1, Kind::Idx));
+
+    check_damage_below_the_hwm(&mem, &o, &ids, &[30]);
+}
+
+// ── Orphans, damage and the rebuild flag (17-04) ─────────────────────────────
+
+/// 300 objects of 1,000 bytes in 64 KiB packs (five sealed packs) with a
+/// memtable limit of 32 (several runs), closed.
+fn closed_store(mem: &MemIo) -> (Options, Vec<(ObjectId, Vec<u8>)>) {
+    let o = opts(32, 64 << 10);
+    let s = open(mem, &o);
+    let objs = put_random(&s, 300, 4242);
+    s.close().unwrap();
+    assert!(s.index_info().runs >= 2, "{:?}", s.index_info());
+    drop(s);
+    (o, objs)
+}
+
+fn all_read_back(s: &ChunkStore, objs: &[(ObjectId, Vec<u8>)], what: &str) {
+    for (i, (id, d)) in objs.iter().enumerate() {
+        assert_eq!(s.get(id).as_ref(), Some(d), "{what}: object {i}");
+    }
+    assert_eq!(s.stats().objects, objs.len() as u64, "{what}");
+}
+
+/// Pack lengths, which packs have an `.idx`, run numbers, MANIFEST bytes.
+type Snapshot = (Vec<(u64, usize)>, Vec<bool>, Vec<u64>, Option<Vec<u8>>);
+
+/// Every file of the store, to check that an open wrote nothing.
+fn snapshot(mem: &MemIo) -> Snapshot {
+    let packs = pack_lens(mem);
+    let idx = packs.iter().map(|&(n, _)| mem.exists(n, Kind::Idx)).collect();
+    (packs, idx, run_list(mem), mem.read(0, Kind::Manifest).ok())
+}
+
+fn read_only(mem: &MemIo, o: &Options) -> ChunkStore {
+    ChunkStore::open_with(Arc::new(mem.clone()), Options { read_only: true, ..o.clone() }).unwrap()
+}
+
+/// A run file that no MANIFEST lists (the leftover of a failed flush).
+fn make_orphan(mem: &MemIo) -> u64 {
+    let num = run_list(mem).last().map_or(1, |r| r + 1);
+    let mut f = mem.create_run(num).unwrap();
+    f.write_at(b"a run that no MANIFEST lists", 0).unwrap();
+    f.sync().unwrap();
+    drop(f);
+    mem.sync_dir().unwrap();
+    num
+}
+
+#[test]
+fn an_orphan_run_is_removed_at_a_writable_open() {
+    let mem = MemIo::new();
+    let (o, objs) = closed_store(&mem);
+    let runs = run_list(&mem);
+    let orphan = make_orphan(&mem);
+
+    // A failed removal does not fail the open; a later open removes it.
+    mem.set_fail_removes(true);
+    let s = open(&mem, &o);
+    all_read_back(&s, &objs, "the removal failed");
+    drop(s);
+    mem.set_fail_removes(false);
+    assert!(mem.exists(orphan, Kind::Run));
+
+    let s = open(&mem, &o);
+    all_read_back(&s, &objs, "after the removal");
+    drop(s);
+    assert_eq!(run_list(&mem), runs);
+}
+
+#[test]
+fn a_read_only_open_keeps_an_orphan_run() {
+    let mem = MemIo::new();
+    let (o, objs) = closed_store(&mem);
+    make_orphan(&mem);
+    let before = snapshot(&mem);
+    let s = read_only(&mem, &o);
+    all_read_back(&s, &objs, "read-only");
+    drop(s);
+    assert_eq!(snapshot(&mem), before);
+}
+
+/// After `damage` to the index of a closed store: a read-only open replays
+/// every pack into RAM and writes nothing; a writable open removes the runs
+/// and the MANIFEST and rebuilds the index from the packs, with exact stats;
+/// the next open uses the new index.
+fn rebuilt_after(damage: impl Fn(&MemIo, &[u64])) {
+    let mem = MemIo::new();
+    let (o, objs) = closed_store(&mem);
+    let old_runs = run_list(&mem);
+    damage(&mem, &old_runs);
+
+    let before = snapshot(&mem);
+    let s = read_only(&mem, &o);
+    all_read_back(&s, &objs, "read-only");
+    let info = s.index_info();
+    assert_eq!((info.runs, info.memtable_entries, info.hwm_pack), (0, 300, 0), "{info:?}");
+    drop(s);
+    assert_eq!(snapshot(&mem), before, "a read-only open writes nothing");
+
+    let s = open(&mem, &o);
+    all_read_back(&s, &objs, "after the rebuild");
+    let info = s.index_info();
+    assert!(info.runs >= 1, "{info:?}");
+    drop(s);
+    let runs = run_list(&mem);
+    assert!(runs.iter().all(|r| !old_runs.contains(r)), "old runs {old_runs:?}, now {runs:?}");
+    assert_eq!(runs.len() as u64, info.runs, "no orphan");
+    let manifest = mem.read(0, Kind::Manifest).expect("a new MANIFEST");
+    assert_ne!(Some(manifest), before.3);
+
+    let s = open(&mem, &o);
+    all_read_back(&s, &objs, "after one more reopen");
+    assert_eq!(s.index_info(), info, "no second rebuild");
+    drop(s);
+    assert_eq!(run_list(&mem), runs);
+}
+
+#[test]
+fn a_damaged_manifest_is_rebuilt_from_the_packs() {
+    rebuilt_after(|mem, _| mem.flip(0, Kind::Manifest, 20));
+}
+
+#[test]
+fn a_manifest_of_another_version_is_rebuilt_from_the_packs() {
+    rebuilt_after(|mem, _| {
+        let mut b = mem.read(0, Kind::Manifest).unwrap();
+        b[4..6].copy_from_slice(&2u16.to_le_bytes());
+        let n = b.len() - 4;
+        let crc = crc32c::crc32c(&b[..n]);
+        b[n..].copy_from_slice(&crc.to_le_bytes());
+        mem.write_durable(0, Kind::Manifest, &b).unwrap();
+    });
+}
+
+#[test]
+fn a_manifest_that_names_a_missing_run_is_rebuilt() {
+    rebuilt_after(|mem, runs| mem.remove(runs[0], Kind::Run).unwrap());
+}
+
+#[test]
+fn a_damaged_run_footer_is_rebuilt() {
+    rebuilt_after(|mem, runs| {
+        let len = mem.len(runs[0], Kind::Run).unwrap();
+        mem.flip(runs[0], Kind::Run, len - 10);
+    });
+}
+
+#[test]
+fn a_read_error_at_open_is_not_damage() {
+    let mem = MemIo::new();
+    let (o, objs) = closed_store(&mem);
+    let before = snapshot(&mem);
+    // The MANIFEST read works; the read of the first run footer fails.
+    mem.fail_reads_after(1);
+    let r = ChunkStore::open_with(Arc::new(mem.clone()), o.clone());
+    mem.clear_fail_reads_after();
+    assert!(r.is_err(), "an I/O error fails the open");
+    assert_eq!(snapshot(&mem), before, "and does not remove the index");
+    all_read_back(&open(&mem, &o), &objs, "after the error");
+}
+
+#[test]
+fn a_damaged_run_page_gives_no_wrong_data() {
+    let mem = MemIo::new();
+    let (o, objs) = closed_store(&mem);
+    let s = open(&mem, &o);
+    // Run 1 holds the first 32 objects, all in its page 0.
+    let r = run_list(&mem)[0];
+    mem.flip(r, Kind::Run, 100);
+    for (i, (id, _)) in objs[..32].iter().enumerate() {
+        assert!(s.get(id).is_none(), "object {i}");
+        assert!(!s.contains(id), "object {i}");
+        assert!(matches!(s.read(id), Err(chunk_store::Error::Corrupt(_))), "object {i}");
+    }
+    for (i, (id, d)) in objs.iter().enumerate().skip(32) {
+        assert_eq!(s.get(id).as_ref(), Some(d), "object {i}");
+    }
+    // A put writes the object again; its new entry hides the damaged page.
+    let (id0, d0) = &objs[0];
+    assert_eq!(s.put(d0).unwrap(), *id0);
+    assert_eq!(s.get(id0).as_ref(), Some(d0));
+    s.sync().unwrap();
+    drop(s);
+
+    // The replay of the new record looks up its ID, finds the damaged page,
+    // and the open rebuilds the index from the packs.
+    let s = open(&mem, &o);
+    assert_eq!(s.get(id0).as_ref(), Some(d0));
+    all_read_back(&s, &objs, "after the reopen");
+}
+
+#[test]
+fn a_damaged_newer_page_never_shows_an_older_entry() {
+    let mem = MemIo::new();
+    let o = opts(10, 64 << 20);
+    let s = open(&mem, &o);
+    let objs = put_random(&s, 10, 777);
+    let r1 = run_list(&mem);
+    assert_eq!(r1.len(), 1, "run R1 holds the 10 put entries");
+    let x = objs[3].0;
+    let live: HashSet<ObjectId> = objs.iter().map(|(id, _)| *id).filter(|id| *id != x).collect();
+    let b = s.gc_begin().unwrap();
+    let st = s.gc_finish(&live, b).unwrap();
+    assert_eq!((st.packs_compacted, st.removed_objects), (1, 1), "{st:?}");
+    let newer: Vec<u64> = run_list(&mem).into_iter().filter(|r| !r1.contains(r)).collect();
+    assert!(!newer.is_empty());
+    for &r in &newer {
+        mem.flip(r, Kind::Run, 100);
+    }
+    assert!(!s.contains(&x), "a fall-through to R1 would find the removed object");
+    let r = s.read(&x);
+    assert!(matches!(r, Err(chunk_store::Error::Corrupt(_))), "{r:?}");
+
+    s.request_index_rebuild().unwrap();
+    drop(s);
+    let s = open(&mem, &o);
+    for (i, (id, d)) in objs.iter().enumerate().filter(|(_, (id, _))| *id != x) {
+        assert_eq!(s.get(id).as_ref(), Some(d), "object {i}");
+    }
+    assert!(!s.contains(&x));
+    assert_eq!(s.stats().objects, 9);
+}
+
+#[test]
+fn a_rebuild_request_rebuilds_the_index_at_the_next_writable_open() {
+    let mem = MemIo::new();
+    let o = opts(32, 64 << 10);
+    let s = open(&mem, &o);
+    let mut objs = put_random(&s, 200, 31_337);
+    s.request_index_rebuild().unwrap();
+    // Later flushes keep the flag.
+    let runs = s.index_info().runs;
+    objs.extend(put_random(&s, 100, 41_337));
+    assert!(s.index_info().runs > runs);
+    s.sync().unwrap();
+    drop(s);
+
+    let before = snapshot(&mem);
+    let s = read_only(&mem, &o);
+    all_read_back(&s, &objs, "read-only");
+    let info = s.index_info();
+    assert_eq!((info.runs, info.memtable_entries), (0, 300), "{info:?}");
+    drop(s);
+    assert_eq!(snapshot(&mem), before, "a read-only open writes nothing");
+
+    let s = open(&mem, &o);
+    all_read_back(&s, &objs, "after the rebuild");
+    assert!(s.index_info().runs >= 1);
+    drop(s);
+    let runs = run_list(&mem);
+    assert!(runs.iter().all(|r| !before.2.contains(r)), "the old runs are gone");
+
+    // The flag is clear: no second rebuild.
+    let s = open(&mem, &o);
+    all_read_back(&s, &objs, "one more reopen");
+    drop(s);
+    assert_eq!(run_list(&mem), runs);
+}

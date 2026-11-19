@@ -199,6 +199,14 @@ fn put_loc(e: Entry) -> Option<Loc> {
     }
 }
 
+/// Why the index files on disk cannot be used.
+enum Damage {
+    /// A run that the MANIFEST lists is missing (a read-only open reads the
+    /// MANIFEST once more).
+    MissingRun(String),
+    Other(String),
+}
+
 /// The index: the memtable, the open runs and the MANIFEST values.
 pub(crate) struct Index {
     mem: BTreeMap<ObjectId, Entry>,
@@ -214,36 +222,145 @@ impl Index {
     }
 
     /// Open the index of a store: read the MANIFEST (absent: an empty
-    /// index) and open each live run (its footer and tables only). Every
-    /// error but a missing MANIFEST fails the open: a guess here could
-    /// forget a durable tombstone.
+    /// index) and open each live run (its footer and tables only).
+    ///
+    /// The run files and the MANIFEST are derived data: the packs are the
+    /// truth. So damage (a MANIFEST or run that is `Corrupt`, of another
+    /// version, or a listed run that is missing) or the rebuild flag gives
+    /// [`Index::rebuild`]: an empty index, and the caller replays every pack.
+    /// A read-only open first reads the MANIFEST once more if a listed run
+    /// is missing (a merge of a writer process can replace both between the
+    /// two reads). Any other error (for example EIO) fails the open: one
+    /// transient read error must not remove the index.
+    ///
+    /// A writable open removes the obsolete runs that the MANIFEST names and
+    /// every run file that it does not list (orphans of a failed flush or
+    /// merge). A read-only open removes and writes nothing.
     pub fn open(io: &dyn PackIo, read_only: bool) -> Result<Index> {
-        let mut man = match io.read(0, Kind::Manifest) {
-            Ok(b) => Manifest::decode(&b)?,
+        let mut reason = match Self::load(io)? {
+            Ok(ix) => return Self::opened(io, read_only, ix),
+            Err(d) => d,
+        };
+        if read_only && matches!(reason, Damage::MissingRun(_)) {
+            reason = match Self::load(io)? {
+                Ok(ix) => return Self::opened(io, read_only, ix),
+                Err(d) => d,
+            };
+        }
+        let (Damage::MissingRun(r) | Damage::Other(r)) = reason;
+        Self::rebuild(io, read_only, &r)
+    }
+
+    /// The MANIFEST and its runs as they are on disk, or the damage that
+    /// makes them unusable.
+    fn load(io: &dyn PackIo) -> Result<std::result::Result<Index, Damage>> {
+        let man = match io.read(0, Kind::Manifest) {
+            Ok(b) => match Manifest::decode(&b) {
+                Ok(m) => m,
+                Err(Error::Corrupt(m)) => return Ok(Err(Damage::Other(m))),
+                Err(e) => return Err(e),
+            },
             Err(e) if e.kind() == io::ErrorKind::NotFound => Manifest::empty(),
             Err(e) => return Err(e.into()),
         };
         let mut runs = Vec::with_capacity(man.runs.len());
         for r in &man.runs {
-            let run = Run::open(io.open_run(r.num)?, r.num, r.len)?;
+            let file = match io.open_run(r.num) {
+                Ok(f) => f,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    return Ok(Err(Damage::MissingRun(format!("the MANIFEST lists run {:016x}, which is missing", r.num))))
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let run = match Run::open(file, r.num, r.len) {
+                Ok(run) => run,
+                Err(Error::Corrupt(m)) => return Ok(Err(Damage::Other(m))),
+                Err(e) => return Err(e),
+            };
             if run.entries() != r.entries {
-                return Err(Error::Corrupt(format!(
+                return Ok(Err(Damage::Other(format!(
                     "index run {:016x} has {} entries; the MANIFEST says {}",
                     r.num,
                     run.entries(),
                     r.entries
-                )));
+                ))));
             }
             runs.push(Arc::new(run));
         }
-        if !read_only {
-            // A run file that a failed flush left behind must not block the
-            // next flush with the same number.
-            if let Some(max) = io.list_runs()?.into_iter().max() {
-                man.next_run = man.next_run.max(max.saturating_add(1));
+        Ok(Ok(Index { mem: BTreeMap::new(), runs, man }))
+    }
+
+    /// The last steps of a good open: the rebuild flag, and for a writable
+    /// open the removal of runs that the MANIFEST does not use.
+    fn opened(io: &dyn PackIo, read_only: bool, mut ix: Index) -> Result<Index> {
+        if ix.man.flags & FLAG_REBUILD != 0 {
+            return Self::rebuild(io, read_only, "a rebuild of the index was requested");
+        }
+        if read_only {
+            return Ok(ix);
+        }
+        let on_disk = io.list_runs()?;
+        // A run file that a failed flush left behind must not block the next
+        // flush with the same number (also if its removal below fails).
+        if let Some(max) = on_disk.iter().max() {
+            ix.man.next_run = ix.man.next_run.max(max.saturating_add(1));
+        }
+        let live: Vec<u64> = ix.man.runs.iter().map(|r| r.num).collect();
+        let mut gone = ix.man.obsolete.clone();
+        gone.extend(on_disk.into_iter().filter(|n| !live.contains(n) && !ix.man.obsolete.contains(n)));
+        let mut removed = false;
+        for num in gone {
+            match io.remove(num, Kind::Run) {
+                Ok(()) => removed = true,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                // Harmless: the next writable open tries again.
+                Err(e) => tracing::warn!("chunk store: cannot remove the unused index run {num:016x}: {e}"),
             }
         }
-        Ok(Index { mem: BTreeMap::new(), runs, man })
+        if removed {
+            io.sync_dir()?;
+        }
+        Ok(ix)
+    }
+
+    /// An empty index that replaces one that cannot be used (`reason`); the
+    /// caller then replays every pack. A writable open removes the MANIFEST
+    /// and every run file first (the MANIFEST first: without it, a run file
+    /// that is left is only an orphan), and new run numbers start past every
+    /// old one. A read-only open writes nothing and keeps the index in RAM.
+    pub fn rebuild(io: &dyn PackIo, read_only: bool, reason: &str) -> Result<Index> {
+        if read_only {
+            tracing::warn!("chunk store: the index cannot be used ({reason}); this read-only open reads every pack");
+            return Ok(Index::empty());
+        }
+        tracing::warn!("chunk store: the index cannot be used ({reason}); it is rebuilt from the packs");
+        let on_disk = io.list_runs()?;
+        let mut ix = Index::empty();
+        ix.man.next_run = on_disk.iter().max().map_or(1, |m| m.saturating_add(1));
+        match io.remove(0, Kind::Manifest) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+        for num in on_disk {
+            if let Err(e) = io.remove(num, Kind::Run) {
+                if e.kind() != io::ErrorKind::NotFound {
+                    tracing::warn!("chunk store: cannot remove the index run {num:016x}: {e}");
+                }
+            }
+        }
+        io.sync_dir()?;
+        Ok(ix)
+    }
+
+    /// Set the rebuild flag in a durable MANIFEST (the same runs, hwm and
+    /// counts): the next writable open rebuilds the index from the packs.
+    /// The flag stays in RAM too, so a later flush keeps it. Reads no run.
+    pub fn request_rebuild(&mut self, io: &dyn PackIo, reason: &str) -> Result<()> {
+        tracing::error!("chunk store: index damage ({reason}); the index is rebuilt from the packs at the next writable open");
+        self.man.flags |= FLAG_REBUILD;
+        self.man.seq += 1;
+        io.write_durable(0, Kind::Manifest, &self.man.encode())?;
+        Ok(())
     }
 
     pub fn hwm(&self) -> Hwm {
@@ -543,6 +660,33 @@ mod tests {
         let r: Result<Vec<_>> = ix.iter_all().collect();
         mem.clear_fail_reads_after();
         assert!(r.is_err(), "an error after some pages ends the iteration with the error");
+    }
+
+    #[test]
+    fn the_obsolete_runs_of_the_manifest_are_removed_at_open() {
+        let mem = MemIo::new();
+        let mut ix = Index::empty();
+        for n in 0..3 {
+            ix.insert(id(n), loc(1, 100 + n));
+            ix.flush(&mem, Hwm { pack: 1, offset: 200 + n }, Counts::default()).unwrap();
+        }
+        assert_eq!(mem.list_runs().unwrap().len(), 3);
+        // A MANIFEST that replaced run 1 (as a merge does) and names it as
+        // obsolete; its file is still there.
+        let mut man = Manifest::decode(&mem.read(0, Kind::Manifest).unwrap()).unwrap();
+        let old = man.runs.pop().unwrap();
+        man.obsolete.push(old.num);
+        man.seq += 1;
+        mem.write_durable(0, Kind::Manifest, &man.encode()).unwrap();
+
+        let ro = Index::open(&mem, true).unwrap();
+        assert_eq!(ro.runs().len(), 2);
+        assert!(mem.exists(old.num, Kind::Run), "a read-only open removes nothing");
+        let ix = Index::open(&mem, false).unwrap();
+        assert_eq!(ix.runs().len(), 2);
+        assert!(!mem.exists(old.num, Kind::Run));
+        assert_eq!(ix.get(&id(0)).unwrap(), None, "run 1 is not read");
+        assert_eq!(ix.get(&id(2)).unwrap(), Some(loc(1, 102)));
     }
 
     #[test]

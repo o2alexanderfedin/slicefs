@@ -39,6 +39,15 @@ struct State {
     fail_syncs: bool,
     /// The next this many syncs fail (then they work again).
     fail_next_syncs: u32,
+    /// After this many more good syncs, the next one fails once (`None`: off).
+    fail_sync_after: Option<u32>,
+    /// The next this many durable writes of a kind fail and write nothing.
+    fail_next_write_durable: HashMap<Kind, u32>,
+    /// After this many more good durable writes of a kind, the next one
+    /// fails once.
+    fail_write_durable_after: HashMap<Kind, u32>,
+    /// Every removal fails and keeps the file.
+    fail_removes: bool,
     fail_punch: bool,
     no_punch: bool,
 }
@@ -62,7 +71,31 @@ impl State {
             self.fail_next_syncs -= 1;
             return true;
         }
+        if let Some(n) = self.fail_sync_after.as_mut() {
+            if *n == 0 {
+                self.fail_sync_after = None;
+                return true;
+            }
+            *n -= 1;
+        }
         self.fail_syncs
+    }
+
+    /// True if this durable write of `kind` must fail (counts down the two
+    /// per-kind knobs).
+    fn write_durable_fails(&mut self, kind: Kind) -> bool {
+        if let Some(n) = self.fail_next_write_durable.get_mut(&kind).filter(|n| **n > 0) {
+            *n -= 1;
+            return true;
+        }
+        if let Some(n) = self.fail_write_durable_after.get_mut(&kind) {
+            if *n == 0 {
+                self.fail_write_durable_after.remove(&kind);
+                return true;
+            }
+            *n -= 1;
+        }
+        false
     }
 
     fn grow(&mut self, by: u64) -> io::Result<()> {
@@ -120,6 +153,29 @@ impl MemIo {
     /// The next `n` syncs fail with EIO; later syncs work.
     pub fn fail_next_syncs(&self, n: u32) {
         self.s.lock().unwrap().fail_next_syncs = n;
+    }
+
+    /// After `skip` more good syncs (pack sync, directory sync or durable
+    /// write), the next one fails once with EIO. Unlike `fail_next_syncs`,
+    /// this can let the first sync of an operation pass and fail a later one.
+    pub fn fail_sync_after(&self, skip: u32) {
+        self.s.lock().unwrap().fail_sync_after = Some(skip);
+    }
+
+    /// The next `n` durable writes of `kind` fail with EIO and write nothing.
+    pub fn fail_next_write_durable(&self, kind: Kind, n: u32) {
+        self.s.lock().unwrap().fail_next_write_durable.insert(kind, n);
+    }
+
+    /// After `skip` more good durable writes of `kind`, the next one fails
+    /// once with EIO and writes nothing.
+    pub fn fail_write_durable_after(&self, kind: Kind, skip: u32) {
+        self.s.lock().unwrap().fail_write_durable_after.insert(kind, skip);
+    }
+
+    /// Every removal fails with EIO and keeps the file.
+    pub fn set_fail_removes(&self, on: bool) {
+        self.s.lock().unwrap().fail_removes = on;
     }
 
     /// Every punch fails with EIO (and punches nothing).
@@ -289,7 +345,7 @@ impl PackIo for MemIo {
 
     fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> io::Result<()> {
         let mut s = self.s.lock().unwrap();
-        if s.sync_fails() {
+        if s.write_durable_fails(kind) || s.sync_fails() {
             return Err(eio());
         }
         let cur = s.files.get(&(num, kind)).map_or(0, |f| f.lock().unwrap().data.len());
@@ -305,7 +361,11 @@ impl PackIo for MemIo {
     }
 
     fn remove(&self, num: u64, kind: Kind) -> io::Result<()> {
-        self.s.lock().unwrap().files.remove(&(num, kind)).map(|_| ()).ok_or_else(not_found)
+        let mut s = self.s.lock().unwrap();
+        if s.fail_removes {
+            return Err(eio());
+        }
+        s.files.remove(&(num, kind)).map(|_| ()).ok_or_else(not_found)
     }
 
     fn sync_dir(&self) -> io::Result<()> {
