@@ -286,7 +286,9 @@ fn online_gc_inside_a_rebase_step_keeps_every_chunk() {
         i += 1;
     }
     let stats = swept.lock().unwrap().take().expect("the GC ran inside the second step");
-    assert!(stats.removed_bytes >= 300_000, "the garbage must go: {stats:?}");
+    // The live mark is a salted Bloom filter (#113): a false positive can keep
+    // a garbage chunk, so allow a few of them.
+    assert!(stats.removed_bytes >= 200_000, "the garbage must go: {stats:?}");
     assert!(fs.test_read(ino, 0, (17 << 20) as u32).unwrap() == model, "content with the handle open");
     {
         let gate = fs.commit_gate();
