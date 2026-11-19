@@ -424,3 +424,23 @@ mod on_runs {
         }
     }
 }
+
+/// The sweep calls the pacer before each group of `GC_GROUP_PACKS` packs.
+#[test]
+fn the_sweep_calls_the_pacer_between_pack_groups() {
+    struct Count(std::cell::Cell<usize>);
+    impl chunk_store::GcPacer for Count {
+        fn at_safe_point(&self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+    let dir = TempDir::new().unwrap();
+    // About two objects in each pack: 50 packs, two groups.
+    let s = ChunkStore::open(dir.path(), Options { pack_limit: 16 * 1024, ..Options::default() }).unwrap();
+    put_many(&s, 100, 7);
+    assert!(packs(dir.path()) > chunk_store::GC_GROUP_PACKS);
+    let pacer = Count(std::cell::Cell::new(0));
+    let b = s.gc_begin().unwrap();
+    assert_eq!(s.gc_finish_paced(&HashSet::new(), b, &pacer).unwrap().removed_objects, 100);
+    assert!(pacer.0.get() >= 2, "{} safe points", pacer.0.get());
+}

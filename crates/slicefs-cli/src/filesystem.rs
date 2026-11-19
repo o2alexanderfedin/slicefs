@@ -232,6 +232,9 @@ pub struct SliceFsFilesystem {
     /// Run inside each rebase, after the new root is finished and before it
     /// is installed (for tests: online GC during a rebase).
     rebase_hook: Mutex<Option<RebaseHook>>,
+    /// Write requests so far (write, create, setattr): the online GC gives
+    /// way to writes by it (`gc_pacing`).
+    write_activity: Arc<AtomicU64>,
 }
 
 impl SliceFsFilesystem {
@@ -274,7 +277,18 @@ impl SliceFsFilesystem {
             write_rebase_bytes: AtomicU64::new(0),
             write_base_bytes: AtomicU64::new(0),
             rebase_hook: Mutex::new(None),
+            write_activity: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Count a write request (for the GC pacing).
+    pub fn note_write(&self) {
+        self.write_activity.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The counter of write requests (see `note_write`).
+    pub fn write_activity(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.write_activity)
     }
 
     /// Test hook: set the dirty limit of each overlay to `bytes`.
@@ -704,6 +718,37 @@ impl SliceFsFilesystem {
     ) -> Result<Option<chunk_store::GcStats>, String> {
         let (gc, boundary) = self.gc_start()?;
         self.gc_content(&gc, boundary, stop)
+    }
+
+    /// An online GC (a full one if `full`) whose mark calls `mark_pacer` and
+    /// whose sweep calls `sweep_pacer` at their safe points (see
+    /// `gc_pacing`). `Ok(None)` if `stop` was set first.
+    pub fn gc_online_paced(
+        &self,
+        full: bool,
+        stop: &std::sync::atomic::AtomicBool,
+        mark_pacer: &dyn chunk_store::GcPacer,
+        sweep_pacer: &dyn chunk_store::GcPacer,
+    ) -> Result<Option<chunk_store::GcStats>, String> {
+        let (gc, boundary) = self.gc_start_mode(full)?;
+        let cs = &self.content;
+        let r = if full {
+            gc.live_exact_paced(stop, mark_pacer)
+                .map(|m| m.map(|ids| cs.gc_finish_full_paced(ids, boundary, sweep_pacer)))
+        } else {
+            gc.live_paced(stop, mark_pacer).map(|m| m.map(|ids| cs.gc_finish_paced(&ids, boundary, sweep_pacer)))
+        };
+        match r {
+            Ok(Some(swept)) => swept.map(Some).map_err(|e| format!("GC failed: {e}")),
+            Ok(None) => {
+                cs.gc_abort();
+                Ok(None)
+            }
+            Err(e) => {
+                cs.gc_abort();
+                Err(format!("GC mark failed, nothing deleted: {e}"))
+            }
+        }
     }
 
     /// Run a full online GC (exact mark, no holes: every dead object of the

@@ -10,7 +10,13 @@
 //!
 //! The duty rule keeps GC at about 1/`GC_DUTY` of the time on any store size:
 //! a small store gets a GC each minute, a store with a million objects less
-//! often.
+//! often. (The time a GC waited for writes does not count as its duration.)
+//!
+//! Pacing (`gc_pacing`): a GC gives way to writes while the file system under
+//! the store has space. When it has little (`gc_pacing::Mode::FullSpeed`), a
+//! GC that is due by changes starts at once, without the interval or the
+//! duty gap (still one at a time; an `--gc-interval` of 0 still means: only
+//! on request).
 //!
 //! A request is a file in the store directory:
 //! 1. `slicefs gc` writes `gc.request` (with the text `full` for a full GC,
@@ -33,6 +39,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::filesystem::SliceFsFilesystem;
+use crate::gc_pacing::{self, FreeRatio, Mode, RealClock, WritePacer};
 
 /// Default minimum seconds between two automatic GC runs on a mounted store.
 pub const DEFAULT_GC_INTERVAL_SECS: u64 = 60;
@@ -88,13 +95,24 @@ fn heartbeat_is_fresh(active: &Path) -> bool {
 /// The text of `gc.request` (and of `gc.running`) for a full GC.
 pub const FULL: &str = "full";
 
-/// Run one GC (a full GC if `full`) on `fs` and give a one-line outcome for
-/// `gc.result`, with the disk usage of `store` before and after.
-fn run_once(fs: &SliceFsFilesystem, store: &Path, full: bool, stop: &AtomicBool) -> String {
+/// Run one GC (a full GC if `full`) on `fs`, paced by the writes and the
+/// free ratio `free` (see `gc_pacing`, with the yield caps `caps` of the mark
+/// and the sweep). Gives a one-line outcome for `gc.result`, with the disk
+/// usage of `store` before and after, and the time the GC waited for writes.
+fn run_once(
+    fs: &SliceFsFilesystem,
+    store: &Path,
+    full: bool,
+    stop: &AtomicBool,
+    free: &FreeRatio,
+    caps: (Duration, Duration),
+) -> (String, Duration) {
     let t = Instant::now();
     let before = crate::gc::store_usage(store);
+    let pacer = |cap| WritePacer::new(fs.write_activity(), Arc::clone(free), Box::new(RealClock::new()), cap, stop);
+    let (mark, sweep) = (pacer(caps.0), pacer(caps.1));
     // A panic in the GC must not end the GC thread (or leave gc.running).
-    let gc = || if full { fs.gc_online_full(stop) } else { fs.gc_online(stop) };
+    let gc = || fs.gc_online_paced(full, stop, &mark, &sweep);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(gc))
         .unwrap_or_else(|p| {
             let msg = p.downcast_ref::<&str>().map(|s| s.to_string())
@@ -102,17 +120,27 @@ fn run_once(fs: &SliceFsFilesystem, store: &Path, full: bool, stop: &AtomicBool)
                 .unwrap_or_else(|| "unknown".into());
             Err(format!("GC panicked: {msg}"))
         });
-    match result {
+    let waited = mark.waited() + sweep.waited();
+    let line = match result {
         Ok(Some(s)) => format!(
-            "ok{}: {}; {} in {:.1} s",
+            "ok{}: {}; {} in {:.1} s ({:.1} s waited for writes)",
             if full { " (full)" } else { "" },
             crate::gc::stats_line(&s),
             crate::gc::usage_line(before, crate::gc::store_usage(store)),
-            t.elapsed().as_secs_f64()
+            t.elapsed().as_secs_f64(),
+            waited.as_secs_f64()
         ),
         Ok(None) => "stopped: the mount is shutting down".to_string(),
         Err(e) => format!("error: {e}"),
-    }
+    };
+    (line, waited)
+}
+
+/// Whether an automatic GC is due: `since_last` after the end of the last GC,
+/// which took `last_took`, in pacing mode `mode`. An `interval` of zero:
+/// never. With low space (`Mode::FullSpeed`): at once.
+fn gc_due(interval: Duration, since_last: Duration, last_took: Duration, mode: Mode) -> bool {
+    !interval.is_zero() && (mode == Mode::FullSpeed || since_last >= interval.max(last_took * GC_DUTY))
 }
 
 /// Whether the GC thread skips a GC that is due. The mark is a Bloom filter
@@ -132,6 +160,21 @@ pub fn spawn_online_gc(
     store: PathBuf,
     interval: Duration,
     shutdown: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    let free = gc_pacing::store_free_ratio(&store);
+    let caps = (gc_pacing::MARK_YIELD_CAP, gc_pacing::SWEEP_YIELD_CAP);
+    spawn_online_gc_with(fs, store, interval, shutdown, free, caps)
+}
+
+/// [`spawn_online_gc`] with the free ratio reader `free` and the yield caps
+/// `caps` (mark, sweep) given (tests).
+pub fn spawn_online_gc_with(
+    fs: Weak<SliceFsFilesystem>,
+    store: PathBuf,
+    interval: Duration,
+    shutdown: Arc<AtomicBool>,
+    free: FreeRatio,
+    caps: (Duration, Duration),
 ) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("slicefs-gc".into())
@@ -153,8 +196,9 @@ pub fn spawn_online_gc(
                 let requested = std::fs::rename(store.join(REQUEST_FILE), store.join(RUNNING_FILE)).is_ok();
                 let full = requested
                     && std::fs::read_to_string(store.join(RUNNING_FILE)).is_ok_and(|t| t.trim() == FULL);
-                let gap = interval.max(last_took * GC_DUTY);
-                let due = !interval.is_zero() && last.elapsed() >= gap;
+                let due = !requested
+                    && !interval.is_zero()
+                    && gc_due(interval, last.elapsed(), last_took, gc_pacing::mode_for(free()));
                 if !requested && !due {
                     continue;
                 }
@@ -170,8 +214,10 @@ pub fn spawn_online_gc(
                 }
                 rechecked = unchanged;
                 let t = Instant::now();
-                let outcome = with_heartbeat(&store.join(ACTIVE_FILE), || run_once(&fs, &store, full, &shutdown));
-                last_took = t.elapsed();
+                let (outcome, waited) = with_heartbeat(&store.join(ACTIVE_FILE), || {
+                    run_once(&fs, &store, full, &shutdown, &free, caps)
+                });
+                last_took = t.elapsed().saturating_sub(waited);
                 last_root = fs.meta().current_root();
                 drop(fs);
                 last = Instant::now();
@@ -237,6 +283,21 @@ mod tests {
         assert!(skip_due_gc(true, true));
         // A new change ends the skip.
         assert!(!skip_due_gc(false, true));
+    }
+
+    #[test]
+    fn low_space_makes_a_gc_due_without_the_interval_or_the_duty_gap() {
+        let hour = Duration::from_secs(3600);
+        let s = Duration::from_secs(1);
+        // Plenty or medium space: the interval and the duty gap apply.
+        assert!(!gc_due(hour, s, s, Mode::Yield));
+        assert!(!gc_due(hour, s, s, Mode::Throttle));
+        assert!(gc_due(hour, hour, s, Mode::Yield));
+        assert!(!gc_due(Duration::from_secs(60), Duration::from_secs(60), Duration::from_secs(10), Mode::Yield));
+        // Low space: at once.
+        assert!(gc_due(hour, Duration::ZERO, hour, Mode::FullSpeed));
+        // An interval of zero means only on request, also with low space.
+        assert!(!gc_due(Duration::ZERO, hour, s, Mode::FullSpeed));
     }
 
     #[test]
