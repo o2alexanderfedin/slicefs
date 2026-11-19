@@ -3,8 +3,13 @@
 //! ## Usage
 //!
 //! ```text
-//! slicefs gc <store>
+//! slicefs gc [--full] <store>
 //! ```
+//!
+//! `--full` runs a full GC: an exact mark in sorted temp files (bounded
+//! RAM) and no holes, so every dead object goes (see
+//! `ChunkStore::gc_finish_full`). Both modes print the disk usage of the
+//! store before and after.
 //!
 //! The command:
 //! 1. If the store is mounted (`mount.lock` present), asks the mount to run
@@ -19,26 +24,79 @@
 
 use std::path::Path;
 
-use metadata::gc::{live_objects, GarbageCollector};
+use metadata::gc::{live_objects, live_objects_exact, GarbageCollector};
 use metadata::segment::load_store_from_segments;
 
-/// Run offline garbage collection on the store at `store_path`.
+/// Bytes of all files under `path`: (apparent size, allocated on disk).
+pub fn store_usage(path: &Path) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let mut sum = (0, 0);
+    let mut todo = vec![path.to_path_buf()];
+    while let Some(dir) = todo.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let Ok(m) = std::fs::symlink_metadata(e.path()) else { continue };
+            if m.is_dir() {
+                todo.push(e.path());
+            } else if m.is_file() {
+                sum.0 += m.len();
+                sum.1 += m.blocks() * 512;
+            }
+        }
+    }
+    sum
+}
+
+/// "store disk usage: before A bytes (B allocated), after C bytes (D allocated)".
+pub fn usage_line(before: (u64, u64), after: (u64, u64)) -> String {
+    format!(
+        "store disk usage: before {} bytes ({} allocated), after {} bytes ({} allocated)",
+        before.0, before.1, after.0, after.1
+    )
+}
+
+/// The counts of a chunk-store GC, in one line (also the online result).
+pub fn stats_line(s: &chunk_store::GcStats) -> String {
+    let mut line = format!(
+        "kept {} objects, removed {} ({} bytes); packs: deleted {}, compacted {}, punched {} ({} bytes freed in holes)",
+        s.kept_objects, s.removed_objects, s.removed_bytes, s.packs_deleted, s.packs_compacted, s.packs_punched, s.punched_bytes
+    );
+    if let Some(d) = s.dead_left {
+        line += &format!("; dead left: {d}");
+    }
+    line
+}
+
+/// Run offline garbage collection on the store at `store_path` and print
+/// the report.
 ///
 /// # Errors
 ///
 /// Returns an error if:
-/// - The store is currently mounted (`mount.lock` present).
+/// - The store is mounted and no mount takes the request, or its GC fails.
 /// - Segment files cannot be read.
 /// - No committed root is found in segments.
 pub fn run_gc(store_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    run_gc_mode(store_path, false)
+}
+
+/// [`run_gc`], or a full GC if `full`.
+pub fn run_gc_mode(store_path: &Path, full: bool) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}", gc_report(store_path, full)?);
+    Ok(())
+}
+
+/// Run the GC and return its report (the lines that `slicefs gc` prints).
+pub fn gc_report(store_path: &Path, full: bool) -> Result<String, Box<dyn std::error::Error>> {
     // Step 1: A mounted store runs the GC itself: ask the mount and wait.
     if store_path.join("mount.lock").exists() {
-        let outcome = crate::online_gc::request_gc(store_path)?;
-        println!("GC (mounted store): {outcome}");
-        return if outcome.starts_with("ok") { Ok(()) } else { Err(outcome.into()) };
+        let outcome = crate::online_gc::request_gc_mode(store_path, full)?;
+        let report = format!("GC (mounted store): {outcome}");
+        return if outcome.starts_with("ok") { Ok(report) } else { Err(report.into()) };
     }
 
     crate::content::check_format(store_path)?;
+    let before = store_usage(store_path);
     let segs_dir = store_path.join("segments");
 
     // Step 2: Load last committed root from segment files (no Dictionary needed).
@@ -57,31 +115,44 @@ pub fn run_gc(store_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // object, bad record) stops here, before anything is deleted.
     let mut io = crate::content::store_io(store_path)?;
     let cs = std::sync::Arc::clone(io.store());
-    let ids = live_objects(&cs, &roots, &[], &std::sync::atomic::AtomicBool::new(false))
-        .map_err(|e| format!("GC mark failed, nothing deleted: {}", e))?
-        .ok_or("GC mark stopped, nothing deleted")?;
-    let boundary = cs.gc_begin()?;
-    let content = cs.gc_finish(&ids, boundary)
-        .map_err(|e| format!("GC of file content failed: {}", e))?;
+    let no_stop = std::sync::atomic::AtomicBool::new(false);
+    let content = if full {
+        let boundary = cs.gc_begin_full()?;
+        let marked = live_objects_exact(&cs, &roots, &[], &no_stop);
+        let ids = match marked {
+            Ok(Some(ids)) => ids,
+            Ok(None) => {
+                cs.gc_abort();
+                return Err("GC mark stopped, nothing deleted".into());
+            }
+            Err(e) => {
+                cs.gc_abort();
+                return Err(format!("GC mark failed, nothing deleted: {}", e).into());
+            }
+        };
+        cs.gc_finish_full(ids, boundary)
+    } else {
+        let ids = live_objects(&cs, &roots, &[], &no_stop)
+            .map_err(|e| format!("GC mark failed, nothing deleted: {}", e))?
+            .ok_or("GC mark stopped, nothing deleted")?;
+        let boundary = cs.gc_begin()?;
+        cs.gc_finish(&ids, boundary)
+    }
+    .map_err(|e| format!("GC of file content failed: {}", e))?;
     cs.close()?;
-    println!(
-        "GC objects: kept {}, removed {} ({} bytes)",
-        content.kept_objects, content.removed_objects, content.removed_bytes
-    );
-    println!(
-        "GC packs: deleted {}, compacted {}, punched {} ({} bytes freed in holes)",
-        content.packs_deleted, content.packs_compacted, content.packs_punched, content.punched_bytes
-    );
 
     let gc = GarbageCollector::new(segs_dir);
     let stats = gc.run_gc(&mut io, &roots)
         .map_err(|e| format!("GC failed: {}", e))?;
+    drop(io);
+    drop(cs);
 
     // Step 4: Report statistics.
-    println!(
-        "GC complete: scanned {} entries, removed {}, compacted {} segments",
+    Ok(format!(
+        "GC{}: {}\n{}\nGC complete: scanned {} entries, removed {}, compacted {} segments",
+        if full { " (full)" } else { "" },
+        stats_line(&content),
+        usage_line(before, store_usage(store_path)),
         stats.entries_scanned, stats.entries_removed, stats.segments_compacted
-    );
-
-    Ok(())
+    ))
 }

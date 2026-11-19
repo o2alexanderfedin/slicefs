@@ -56,8 +56,8 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Cmd::Gc { store } => {
-            if let Err(e) = gc::run_gc(&store) {
+        Cmd::Gc { store, full } => {
+            if let Err(e) = gc::run_gc_mode(&store, full) {
                 if json {
                     eprintln!("{{\"error\": \"{e}\"}}");
                 } else {

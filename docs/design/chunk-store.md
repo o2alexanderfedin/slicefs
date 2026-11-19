@@ -906,6 +906,61 @@ mark and a spilled touched set) has its own random salt, mixed into the
 probe positions, so the false positives of one GC are not those of the
 next one, and a dead object does not stay forever.
 
+### Full GC
+
+`slicefs gc --full <store>` (offline), or `full` in `gc.request` (a
+mounted store), runs a GC that frees every dead object. It uses
+`gc_begin_full`, `metadata::gc::live_objects_exact` and `gc_finish_full`:
+
+- Exact mark in bounded RAM. The mark (and the objects put or read before
+  `gc_finish_full`, also the nodes that the mark reads) go to an external
+  sort: a buffer of `Options::gc_sort_chunk_ids` IDs (default 4 MiB of
+  IDs, 127,100) is sorted, deduplicated and written to a temp file. Then
+  merges of at most `Options::gc_merge_fan_in` files (default 32; the
+  same open-file limit as `GC_GROUP_PACKS`), each read through a 64 KiB
+  buffer, run pass after pass until one sorted file of distinct IDs is
+  left. RAM: never the object count. During a mark on a mount two
+  buffers fill at once (the mark and the touched set, 4 MiB each); the
+  merges need 32 x 64 KiB; the dead entries (below) have their own buffer
+  of the same record count (41 bytes each, about 5 MiB).
+- Pass 1 is a merge join of the index (in ID order) with that file: no
+  false positive. Each dead entry goes as (pack, ID), pack first in big
+  endian, to a second sorted file. Pass 2 reads the dead IDs of one pack
+  at a time from it, in pack order.
+- No holes: every pack with a dead record is compacted (or deleted if it
+  has no live record). So is a pack with dead bytes that the index no
+  longer lists: a punched pack (its holes and the parts of the removed
+  records outside whole blocks), or a pack whose `.idx` has more records
+  than current entries (an older copy of an object). This check reads the
+  header and the `.idx` of each pack that is otherwise kept. The rest (install, order, groups, error handling,
+  touched objects during `gc_finish_full`) is the GC above.
+- Temp files are in `Options::gc_tmp_dir` (`<store>/gc-tmp`), removed at
+  the end, also after an error; a writable open removes what a crash left.
+  They need about 33 bytes per live object plus 41 bytes per dead one.
+- `GcStats::dead_left` counts the dead objects that the GC did not remove
+  (packs kept because an object of theirs was put or read during the GC,
+  or whose entry list did not match the index): with no writes during
+  the GC it is 0. It needs no extra pass.
+
+Both modes print the counts, the pack counts, and the disk usage of all
+store files before and after (apparent and allocated bytes), offline and
+in the `gc.result` line.
+
+Peak heap of the chunk-store part of a full GC (`exact_mark` filled
+directly, then `gc_finish_full`) above the baseline (`gc_full_memory_tests`,
+1 in 2 objects live, 32 KiB packs, 2,048 IDs a sort chunk, fan-in 8):
+
+| Objects | 12,000 | 24,000 | 48,000 | 96,000 |
+|---|---|---|---|---|
+| Peak heap | 530 KB | 630 KB | 753 KB | 822 KB |
+
+The growth flattens; an exact set of the live IDs alone would add 33 bytes
+for each live object (594 KB from 12,000 to 48,000 objects). The run
+filters and fences of the index grow by about 2.7 bytes for each object
+of the index (98 KB from 12,000 to 48,000), as without GC. The metadata walk
+(`metadata::gc::mark`) still holds one key for each node and file root
+(as the normal GC does).
+
 ## Read path
 
 Manifest → `ObjectId` → index → `pread` → zstd decode if flagged → bytes. A

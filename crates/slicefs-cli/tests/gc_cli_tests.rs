@@ -136,9 +136,32 @@ fn test_cli_parses_gc_subcommand() {
         .expect("gc subcommand should parse");
 
     match cli.command {
-        Cmd::Gc { store } => {
+        Cmd::Gc { store, full } => {
             assert_eq!(store, PathBuf::from("/data/store"));
+            assert!(!full);
         }
         _ => panic!("expected Gc subcommand"),
     }
+    let cli = Cli::try_parse_from(["slicefs", "gc", "--full", "/data/store"]).expect("gc --full should parse");
+    assert!(matches!(cli.command, Cmd::Gc { full: true, .. }));
+}
+
+// ── Test 5: the report has the disk usage before and after ─────────────────
+
+/// Both modes print the store size before and after; the full GC also
+/// prints the dead objects it left (none here) and leaves no temp files.
+#[test]
+fn test_gc_report_has_the_store_size_before_and_after() {
+    let store_dir = TempDir::new().unwrap();
+    make_store_with_dead_entries(&store_dir);
+    for full in [false, true] {
+        let report = slicefs_cli::gc::gc_report(store_dir.path(), full).unwrap();
+        println!("{report}");
+        let line = report.lines().find(|l| l.starts_with("store disk usage: before ")).unwrap_or_else(|| panic!("{report}"));
+        assert!(line.contains(" allocated), after ") && line.ends_with(" allocated)"), "{line}");
+        assert!(report.contains("packs: deleted "), "{report}");
+        assert_eq!(report.contains("dead left: 0"), full, "{report}");
+        assert_eq!(report.starts_with("GC (full): "), full, "{report}");
+    }
+    assert!(!store_dir.path().join("gc-tmp").exists() || std::fs::read_dir(store_dir.path().join("gc-tmp")).unwrap().count() == 0);
 }

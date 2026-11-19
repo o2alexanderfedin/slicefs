@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use chunk_store::{ChunkStore, LiveFilter};
+use chunk_store::{ChunkStore, ExactMark, LiveFilter, ObjectId};
 use slicefs_traits::key::ObjectKey;
 use slicefs_traits::metadata::MetaError;
 
@@ -49,11 +49,43 @@ pub fn live_objects(
     file_roots: &[ObjectKey],
     stop: &AtomicBool,
 ) -> Result<Option<LiveFilter>, MetaError> {
+    let mut live = cs.live_filter();
+    let done = mark(cs, meta_roots, file_roots, stop, &mut |id| {
+        live.insert(&id);
+        Ok(())
+    })?;
+    Ok(done.then_some(live))
+}
+
+/// The mark of a full GC: as [`live_objects`], but exact, in sorted temp
+/// files of the chunk store (`ChunkStore::exact_mark`), so its RAM does not
+/// grow with the object count. Give it to `ChunkStore::gc_finish_full`.
+pub fn live_objects_exact(
+    cs: &Arc<ChunkStore>,
+    meta_roots: &[ObjectKey],
+    file_roots: &[ObjectKey],
+    stop: &AtomicBool,
+) -> Result<Option<ExactMark>, MetaError> {
+    let err = |e: chunk_store::Error| MetaError::Corrupted(format!("GC mark: temp file: {e}"));
+    let mut live = cs.exact_mark().map_err(err)?;
+    let done = mark(cs, meta_roots, file_roots, stop, &mut |id| live.insert(&id).map_err(err))?;
+    Ok(done.then_some(live))
+}
+
+/// The walk of a mark: calls `add` with every live object (an object can
+/// come more than once). False if `stop` was set first.
+fn mark(
+    cs: &Arc<ChunkStore>,
+    meta_roots: &[ObjectKey],
+    file_roots: &[ObjectKey],
+    stop: &AtomicBool,
+    add: &mut dyn FnMut(ObjectId) -> Result<(), MetaError>,
+) -> Result<bool, MetaError> {
     let mut io = NodeReader(Arc::clone(cs));
     let mut values: Vec<ObjectKey> = file_roots.to_vec();
     for root in meta_roots {
         if stop.load(Ordering::Relaxed) {
-            return Ok(None);
+            return Ok(false);
         }
         let (nodes, content) = referenced(&mut io, root)?;
         values.extend(nodes);
@@ -61,15 +93,24 @@ pub fn live_objects(
     }
     values.sort_unstable();
     values.dedup();
-    let mut live = cs.live_filter();
     for v in values {
         if stop.load(Ordering::Relaxed) {
-            return Ok(None);
+            return Ok(false);
         }
-        chunk_store::file::for_each_file_object(cs, to_id(&v), |id| live.insert(&id))
-            .map_err(|e| MetaError::Corrupted(format!("GC mark: object {v:?}: {e}")))?;
+        let mut failed = None;
+        chunk_store::file::for_each_file_object(cs, to_id(&v), |id| {
+            if failed.is_none() {
+                if let Err(e) = add(id) {
+                    failed = Some(e);
+                }
+            }
+        })
+        .map_err(|e| MetaError::Corrupted(format!("GC mark: object {v:?}: {e}")))?;
+        if let Some(e) = failed {
+            return Err(e);
+        }
     }
-    Ok(Some(live))
+    Ok(true)
 }
 
 /// A GC run on a mounted store.
@@ -93,6 +134,11 @@ impl OnlineGc {
     /// The mark. `Ok(None)` if `stop` was set first.
     pub fn live(&self, stop: &AtomicBool) -> Result<Option<LiveFilter>, MetaError> {
         live_objects(&self.cs, &self.meta_roots, &self.file_roots, stop)
+    }
+
+    /// The exact mark of a full GC (see [`live_objects_exact`]).
+    pub fn live_exact(&self, stop: &AtomicBool) -> Result<Option<ExactMark>, MetaError> {
+        live_objects_exact(&self.cs, &self.meta_roots, &self.file_roots, stop)
     }
 }
 

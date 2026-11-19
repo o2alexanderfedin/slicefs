@@ -636,6 +636,17 @@ impl SliceFsFilesystem {
     /// also a file root here. A rebase runs inside a callback that holds
     /// `commit_gate.read()`, so it never straddles `gc_begin`.
     pub fn gc_start(&self) -> Result<(metadata::gc::OnlineGc, u64), String> {
+        self.gc_start_mode(false)
+    }
+
+    /// As [`SliceFsFilesystem::gc_start`], for a full GC
+    /// (`ChunkStore::gc_begin_full`: the objects put or read during the GC
+    /// go to an exact set in temp files).
+    pub fn gc_start_full(&self) -> Result<(metadata::gc::OnlineGc, u64), String> {
+        self.gc_start_mode(true)
+    }
+
+    fn gc_start_mode(&self, full: bool) -> Result<(metadata::gc::OnlineGc, u64), String> {
         if !Arc::ptr_eq(&self.io, self.meta.io()) {
             return Err("file system and metadata do not share one StoreIo".into());
         }
@@ -645,7 +656,8 @@ impl SliceFsFilesystem {
         let gate = self.commit_gate.write().unwrap_or_else(|e| e.into_inner());
         // From here the chunk store keeps each object put or read (nodes and
         // file content), and the GC changes only packs up to `boundary`.
-        let boundary = self.content.gc_begin().map_err(|e| format!("GC start: chunk store error: {e}"))?;
+        let begin = if full { self.content.gc_begin_full() } else { self.content.gc_begin() };
+        let boundary = begin.map_err(|e| format!("GC start: chunk store error: {e}"))?;
         let mut file_roots = Vec::new();
         let mut states: Vec<Stream> = Vec::new();
         for s in self.open_files.lock().unwrap().values() {
@@ -692,6 +704,28 @@ impl SliceFsFilesystem {
     ) -> Result<Option<chunk_store::GcStats>, String> {
         let (gc, boundary) = self.gc_start()?;
         self.gc_content(&gc, boundary, stop)
+    }
+
+    /// Run a full online GC (exact mark, no holes: every dead object of the
+    /// packs up to the boundary goes; see `ChunkStore::gc_finish_full`).
+    /// `Ok(None)` if `stop` was set first (then nothing is deleted).
+    pub fn gc_online_full(
+        &self,
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<chunk_store::GcStats>, String> {
+        let (gc, boundary) = self.gc_start_full()?;
+        let cs = &self.content;
+        match gc.live_exact(stop) {
+            Ok(Some(ids)) => cs.gc_finish_full(ids, boundary).map(Some).map_err(|e| format!("GC failed: {e}")),
+            Ok(None) => {
+                cs.gc_abort();
+                Ok(None)
+            }
+            Err(e) => {
+                cs.gc_abort();
+                Err(format!("GC mark failed, nothing deleted: {e}"))
+            }
+        }
     }
 
     /// The mark and sweep of an online GC: mark the objects of `gc` (metadata

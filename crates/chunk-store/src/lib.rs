@@ -18,13 +18,14 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::ops::{Deref, DerefMut, Range};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 mod bloom;
+mod extsort;
 pub mod file;
 pub mod hash;
 mod index;
@@ -141,6 +142,17 @@ pub struct Options {
     /// RAM; a false positive only keeps a dead object). A tuning and test
     /// knob.
     pub gc_touched_exact: usize,
+    /// The directory for the temp files of a full GC (the exact mark; see
+    /// [`ChunkStore::gc_finish_full`]). A writable open removes it (files
+    /// that a crash left). [`ChunkStore::open`] sets `<dir>/gc-tmp` if
+    /// none. None: a full GC fails.
+    pub gc_tmp_dir: Option<PathBuf>,
+    /// IDs in one sorted chunk of the exact mark (RAM: 33 bytes each). A
+    /// tuning and test knob.
+    pub gc_sort_chunk_ids: usize,
+    /// Most sorted chunks that one merge of the exact mark reads at a time
+    /// (open files; 64 KiB of buffer each). A tuning and test knob.
+    pub gc_merge_fan_in: usize,
 }
 
 impl Default for Options {
@@ -155,6 +167,9 @@ impl Default for Options {
             index_merge_fan_in: 4,
             index_background_merge: true,
             gc_touched_exact: 1 << 16,
+            gc_tmp_dir: None,
+            gc_sort_chunk_ids: extsort::SORT_CHUNK_BYTES / ID_LEN,
+            gc_merge_fan_in: extsort::MERGE_FAN_IN,
         }
     }
 }
@@ -510,11 +525,48 @@ pub struct GcStats {
     pub removed_bytes: u64,
     pub packs_deleted: u64,
     pub packs_compacted: u64,
+    /// A full GC: the dead objects that it did not remove (in packs that an
+    /// object put or read during the GC kept, or whose entry list did not
+    /// match the index). `None` for a normal GC.
+    pub dead_left: Option<u64>,
+    /// A full GC: the merge passes of the sort of its mark (0 if one
+    /// sorted chunk held it).
+    pub mark_merge_passes: u32,
     /// Packs where GC punched holes over dead records.
     pub packs_punched: u64,
     /// Bytes in the punched ranges.
     pub punched_bytes: u64,
 }
+
+/// The mark of a full GC (see [`ChunkStore::gc_finish_full`]): the IDs go
+/// to sorted temp files, so RAM does not grow with their count.
+pub struct ExactMark {
+    sorter: extsort::Sorter<ID_LEN>,
+    inserted: u64,
+}
+
+impl ExactMark {
+    /// Add a live object (a duplicate is fine).
+    pub fn insert(&mut self, id: &ObjectId) -> Result<()> {
+        self.inserted += 1;
+        Ok(self.sorter.push(id.0)?)
+    }
+
+    /// The inserts so far (duplicates included).
+    pub fn inserted(&self) -> u64 {
+        self.inserted
+    }
+}
+
+/// The mark that a GC gets.
+enum Mark<'a> {
+    Filter(&'a dyn LiveSet),
+    Exact(ExactMark),
+}
+
+/// A dead entry of a full GC: the pack (big endian, so the records sort by
+/// pack) and the ID.
+const DEAD_REC: usize = 8 + ID_LEN;
 
 /// The time of a `gc_finish` and its holds of the store lock (puts and
 /// reads wait for the store lock; see [`ChunkStore::last_gc_timing`]).
@@ -851,7 +903,10 @@ impl ChunkStore {
     /// Open (or create) the store in `dir`. Packs without a valid index are
     /// scanned; the newest unsealed pack becomes the active pack, cut after
     /// its last valid record.
-    pub fn open(dir: &Path, opts: Options) -> Result<Self> {
+    pub fn open(dir: &Path, mut opts: Options) -> Result<Self> {
+        if opts.gc_tmp_dir.is_none() {
+            opts.gc_tmp_dir = Some(dir.join("gc-tmp"));
+        }
         let files = Arc::new(FileIo::new(dir.join("packs")));
         Self::open_with(Arc::new(retry::RetryingIo::new(files)), opts)
     }
@@ -871,6 +926,13 @@ impl ChunkStore {
     /// pack: a writable open writes a new index, a read-only open keeps it
     /// in RAM.
     pub fn open_with(io: Arc<dyn PackIo>, opts: Options) -> Result<Self> {
+        if let (Some(d), false) = (&opts.gc_tmp_dir, opts.read_only) {
+            // The temp files of a full GC that a crash ended.
+            match std::fs::remove_dir_all(d) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+        }
         if !io.prepare(opts.read_only)? {
             return Ok(ChunkStore::new(io, false, opts, Inner::empty()));
         }
@@ -1120,6 +1182,38 @@ impl ChunkStore {
         Ok(inner.next_pack - 1)
     }
 
+    /// Start a full GC (see [`ChunkStore::gc_finish_full`]): as
+    /// [`ChunkStore::gc_begin`], but the objects put or read from now on go
+    /// to an exact set in temp files (bounded RAM), not to a Bloom filter.
+    pub fn gc_begin_full(&self) -> Result<u64> {
+        let dir = self.gc_tmp()?;
+        let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock().unwrap();
+        inner.check()?;
+        if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
+            self.seal(&mut inner)?;
+        }
+        inner.touched = Some(Touched::on_disk(extsort::Sorter::new(dir, "touched", self.sort_cfg())));
+        Ok(inner.next_pack - 1)
+    }
+
+    /// An empty exact mark for [`ChunkStore::gc_finish_full`]: its IDs go
+    /// to sorted temp files in `Options::gc_tmp_dir`.
+    pub fn exact_mark(&self) -> Result<ExactMark> {
+        Ok(ExactMark { sorter: extsort::Sorter::new(self.gc_tmp()?, "live", self.sort_cfg()), inserted: 0 })
+    }
+
+    fn gc_tmp(&self) -> Result<Arc<extsort::TmpDir>> {
+        let Some(d) = &self.opts.gc_tmp_dir else {
+            return Err(Error::Io(io::Error::new(io::ErrorKind::Unsupported, "a full GC needs Options::gc_tmp_dir")));
+        };
+        Ok(Arc::new(extsort::TmpDir::new(d)?))
+    }
+
+    fn sort_cfg(&self) -> extsort::SortCfg {
+        extsort::SortCfg { chunk_records: self.opts.gc_sort_chunk_ids, fan_in: self.opts.gc_merge_fan_in }
+    }
+
     /// End a GC without deleting anything (for example after a failed mark).
     pub fn gc_abort(&self) {
         let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
@@ -1186,10 +1280,39 @@ impl ChunkStore {
     /// or by the objects touched during the GC; see
     /// [`ChunkStore::last_gc_timing`].
     pub fn gc_finish(&self, live: &impl LiveSet, boundary: u64) -> Result<GcStats> {
+        self.gc_finish_mark(Mark::Filter(live), boundary)
+    }
+
+    /// End a full GC (started with [`ChunkStore::gc_begin_full`]): as
+    /// [`ChunkStore::gc_finish`], but with an exact mark and no holes, so it
+    /// removes every dead object of the packs up to `boundary`.
+    ///
+    /// - The mark `live` and the objects put or read since `gc_begin_full`
+    ///   are sorted in temp files (chunks of `Options::gc_sort_chunk_ids`
+    ///   IDs, then merges of at most `Options::gc_merge_fan_in` chunks at a
+    ///   time) into one sorted file of distinct IDs.
+    /// - Pass 1 joins the index (in ID order) with that file: no false
+    ///   positive. The dead entries go, as (pack, ID), to a second sorted
+    ///   temp file.
+    /// - Each pack with a dead record is compacted (or deleted if it has no
+    ///   live record), never punched; pass 2 takes the dead IDs of one pack
+    ///   at a time from the second file.
+    ///
+    /// RAM does not grow with the object count: one sort chunk, or the read
+    /// buffers of one merge (64 KiB each), plus what `gc_finish` needs. The
+    /// temp files are removed at the end (and at a writable open after a
+    /// crash). A pack that holds an object put or read during the call does
+    /// not change, as in `gc_finish`; `GcStats::dead_left` counts the dead
+    /// objects left so.
+    pub fn gc_finish_full(&self, live: ExactMark, boundary: u64) -> Result<GcStats> {
+        self.gc_finish_mark(Mark::Exact(live), boundary)
+    }
+
+    fn gc_finish_mark(&self, mark: Mark<'_>, boundary: u64) -> Result<GcStats> {
         let start = Instant::now();
         let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
         let holds = Holds::default();
-        let r = self.gc_run(live, boundary, &holds);
+        let r = self.gc_run(mark, boundary, &holds);
         *self.gc_timing.lock().unwrap() =
             GcTiming { lock_hold_max: holds.max.get(), lock_hold_total: holds.total.get(), wall: start.elapsed() };
         r
@@ -1224,7 +1347,7 @@ impl ChunkStore {
         let _ = pass;
     }
 
-    fn gc_run(&self, live: &dyn LiveSet, boundary: u64, holds: &Holds) -> Result<GcStats> {
+    fn gc_run(&self, mark: Mark<'_>, boundary: u64, holds: &Holds) -> Result<GcStats> {
         // (1) Start. The touched set ends with this GC, also when it fails
         // (#63): the next GC starts its own set in `gc_begin`, before its
         // gate commit, so its mark sees everything put before that.
@@ -1235,14 +1358,105 @@ impl ChunkStore {
             inner.touched = Some(Touched::exact());
             (touched, inner.index.snapshot(), inner.active.as_ref().map(|a| a.num))
         };
-        let keep = |id: &ObjectId| live.may_contain(id) || touched.contains(id);
         let mut st = GcStats::default();
+        let live = match mark {
+            Mark::Filter(live) => {
+                let keep = |id: &ObjectId| live.may_contain(id) || touched.contains(id);
+                // (2) and (3).
+                let (todo, unused) =
+                    match self.gc_select(&snap, &mut |id, _| Ok(keep(id)), false, boundary, active, &mut st) {
+                        Ok(d) => d,
+                        Err(e) => return Err(self.gc_abandon(e, &[], holds)),
+                    };
+                return self.gc_groups(&snap, &keep, &mut |_| Ok(None), todo, unused, holds, st);
+            }
+            Mark::Exact(live) => live,
+        };
 
-        // (2) and (3).
-        let (todo, unused) = match self.gc_select(&snap, &keep, boundary, active, &mut st) {
-            Ok(d) => d,
+        // A full GC. The touched set so far joins the mark, and all of it is
+        // sorted.
+        let sorted = (|| -> Result<_> {
+            let mut sorter = live.sorter;
+            match touched.into_exact().map_err(|e| Error::Io(io::Error::other(e)))? {
+                Ok(t) => sorter.absorb(t)?,
+                Err(ids) => {
+                    for id in ids {
+                        sorter.push(id.0)?;
+                    }
+                }
+            }
+            let live = sorter.finish()?;
+            let dead = extsort::Sorter::<DEAD_REC>::new(self.gc_tmp()?, "dead", self.sort_cfg());
+            Ok((live, dead))
+        })();
+        let (live, mut dead) = match sorted {
+            Ok(x) => x,
             Err(e) => return Err(self.gc_abandon(e, &[], holds)),
         };
+        // (2) and (3): a merge join of the index with the sorted mark; the
+        // dead entries go to `dead`, as (pack, ID).
+        let mut dead_n = 0u64;
+        let selected = (|| -> Result<_> {
+            let mut cur = extsort::Cursor::new(live.reader()?)?;
+            let mut keep = |id: &ObjectId, l: &Loc| -> Result<bool> {
+                let k = cur.seek(&id.0)?;
+                if !k {
+                    let mut r = [0u8; DEAD_REC];
+                    r[..8].copy_from_slice(&l.pack.to_be_bytes());
+                    r[8..].copy_from_slice(&id.0);
+                    dead.push(r)?;
+                    dead_n += 1;
+                }
+                Ok(k)
+            };
+            self.gc_select(&snap, &mut keep, true, boundary, active, &mut st)
+        })();
+        let ((todo, unused), dead) = match selected.and_then(|sel| Ok((sel, dead.finish()?))) {
+            Ok(x) => x,
+            Err(e) => return Err(self.gc_abandon(e, &[], holds)),
+        };
+        let mut dc = match dead.reader().and_then(extsort::Cursor::new) {
+            Ok(c) => c,
+            Err(e) => return Err(self.gc_abandon(e.into(), &[], holds)),
+        };
+        // The dead IDs of pack `num` (the packs come in ascending order).
+        let mut dead_of = |num: u64| -> Result<Option<HashSet<ObjectId>>> {
+            let mut set = HashSet::new();
+            while let Some(r) = dc.peek() {
+                let p = u64::from_be_bytes(r[..8].try_into().unwrap());
+                if p > num {
+                    break;
+                }
+                if p == num {
+                    set.insert(ObjectId(r[8..].try_into().unwrap()));
+                }
+                dc.advance()?;
+            }
+            Ok(Some(set))
+        };
+        // Only for the objects touched during this call (few): a read error
+        // counts as "not live", which keeps their packs.
+        let keep = |id: &ObjectId| live.contains(&id.0).unwrap_or(false);
+        let mut st = self.gc_groups(&snap, &keep, &mut dead_of, todo, unused, holds, st)?;
+        st.dead_left = Some(dead_n.saturating_sub(st.removed_objects));
+        st.mark_merge_passes = live.passes();
+        Ok(st)
+    }
+
+    /// Steps 4 to 6 of a GC over the selected packs `todo` and the unused
+    /// packs. `dead_of(num)` gives the dead IDs of pack `num` (a full GC; the
+    /// calls come in pack order), or `None`: `keep` decides.
+    #[allow(clippy::too_many_arguments)]
+    fn gc_groups(
+        &self,
+        snap: &Snapshot,
+        keep: &dyn Fn(&ObjectId) -> bool,
+        dead_of: &mut dyn FnMut(u64) -> Result<Option<HashSet<ObjectId>>>,
+        todo: Vec<GcTodo>,
+        unused: Vec<u64>,
+        holds: &Holds,
+        mut st: GcStats,
+    ) -> Result<GcStats> {
         if todo.is_empty() && unused.is_empty() {
             self.held(holds).touched = None;
             return Ok(st);
@@ -1258,7 +1472,7 @@ impl ChunkStore {
         let r = (|| -> Result<()> {
             for (g, group) in groups.iter().enumerate() {
                 let unused: &[u64] = if g == last { &unused } else { &[] };
-                self.gc_group(&snap, &keep, group, unused, g == last, &mut touched_packs, holds, &mut st)?;
+                self.gc_group(snap, keep, dead_of, group, unused, g == last, &mut touched_packs, holds, &mut st)?;
             }
             Ok(())
         })();
@@ -1277,6 +1491,7 @@ impl ChunkStore {
         &self,
         snap: &Snapshot,
         keep: &dyn Fn(&ObjectId) -> bool,
+        dead_of: &mut dyn FnMut(u64) -> Result<Option<HashSet<ObjectId>>>,
         group: &[GcTodo],
         unused: &[u64],
         last: bool,
@@ -1288,7 +1503,7 @@ impl ChunkStore {
         let mut pending = Vec::new();
 
         // (4)
-        let mut plans = match self.gc_prepare(snap, keep, group, holds, &mut pending, st) {
+        let mut plans = match self.gc_prepare(snap, keep, dead_of, group, holds, &mut pending, st) {
             Ok(p) => p,
             Err(e) => return Err(self.gc_abandon(e, &pending, holds)),
         };
@@ -1399,7 +1614,8 @@ impl ChunkStore {
     fn gc_select(
         &self,
         snap: &Snapshot,
-        keep: &dyn Fn(&ObjectId) -> bool,
+        keep: &mut dyn FnMut(&ObjectId, &Loc) -> Result<bool>,
+        full: bool,
         boundary: u64,
         active: Option<u64>,
         st: &mut GcStats,
@@ -1417,7 +1633,7 @@ impl ChunkStore {
             let n = rec_end(&l) - l.offset;
             t.bytes += n;
             t.entries += 1;
-            if keep(&id) {
+            if keep(&id, &l)? {
                 t.keep_bytes += n;
             }
         }
@@ -1425,18 +1641,28 @@ impl ChunkStore {
         // (3) The decisions. A pack where everything is kept and that is
         // not small stays; so does a mostly live pack if holes cannot be
         // punched (its dead records stay in the index, so a later GC still
-        // counts their bytes).
+        // counts their bytes). A full GC never punches: it compacts every
+        // pack with a dead record.
         let mut todo = Vec::new();
         for (&num, t) in &totals {
             let small = t.bytes < self.opts.pack_limit / 8;
             let act = if t.keep_bytes == t.bytes && !small {
                 None
-            } else if t.keep_bytes > 0 && t.keep_bytes * 2 >= t.bytes && !small {
+            } else if !full && t.keep_bytes > 0 && t.keep_bytes * 2 >= t.bytes && !small {
                 self.punches.then_some(GcAct::Punch)
             } else if t.keep_bytes > 0 {
                 Some(GcAct::Compact)
             } else {
                 Some(GcAct::Delete)
+            };
+            // A full GC also compacts a pack with dead bytes that the index
+            // no longer lists: a punched pack (the holes and the parts of
+            // its removed records outside whole blocks), or a pack with
+            // more records than current entries (an older copy of an
+            // object). A read error ends the GC before any change.
+            let act = match act {
+                None if full && self.has_unlisted_bytes(num, t.entries)? => Some(GcAct::Compact),
+                a => a,
             };
             match act {
                 Some(a) => todo.push((num, a, t.entries)),
@@ -1453,13 +1679,23 @@ impl ChunkStore {
         Ok((todo, unused))
     }
 
+    /// True if the sealed pack `num` with `entries` current entries holds
+    /// bytes that are not in a current record (see `gc_select`).
+    fn has_unlisted_bytes(&self, num: u64, entries: u64) -> Result<bool> {
+        let mut head = [0u8; PACK_HEADER];
+        self.io.open_read(num)?.read_at(&mut head, 0)?;
+        Ok(is_punched(&head) || self.pack_entries(num)?.len() as u64 != entries)
+    }
+
     /// Step 4 of `gc_finish` for one group of selected packs: the plans
     /// with their pending runs and copies. Any error ends it (the caller
     /// removes the runs in `pending`).
+    #[allow(clippy::too_many_arguments)]
     fn gc_prepare(
         &self,
         snap: &Snapshot,
         keep: &dyn Fn(&ObjectId) -> bool,
+        dead_of: &mut dyn FnMut(u64) -> Result<Option<HashSet<ObjectId>>>,
         group: &[GcTodo],
         holds: &Holds,
         pending: &mut Vec<u64>,
@@ -1470,6 +1706,11 @@ impl ChunkStore {
         self.gc_pass(2);
         let mut plans = Vec::with_capacity(group.len());
         for &(num, act, entries) in group {
+            let dead = dead_of(num)?;
+            let keep = |id: &ObjectId| match &dead {
+                Some(d) => !d.contains(id),
+                None => keep(id),
+            };
             let mut current = Vec::new();
             for (id, l) in self.pack_entries(num)? {
                 if matches!(snap.get_verified(&id)?, Some(c) if c.pack == num && c.offset == l.offset) {
@@ -1487,7 +1728,7 @@ impl ChunkStore {
                 continue;
             }
             let (victims, copies) = if act == GcAct::Punch {
-                let v = punch_victims(&current, keep);
+                let v = punch_victims(&current, &keep);
                 if v.is_empty() {
                     st.kept_objects += entries;
                     continue;
