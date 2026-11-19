@@ -195,3 +195,168 @@ fn a_gc_that_cannot_read_the_index_changes_nothing() {
     }
     assert_eq!(s.get(&nid), Some(new));
 }
+
+// ── Replay above the high-water mark and exact stats ─────────────────────────
+
+#[test]
+fn a_failed_compaction_is_counted_once_after_a_reopen() {
+    let mem = MemIo::new();
+    let o = opts(30, 64 << 10);
+    let s = open(&mem, &o);
+    let objs = put_random(&s, 300, 2000);
+    s.sync().unwrap();
+    assert_eq!(s.index_info().runs, 10);
+    let live: HashSet<ObjectId> = objs.iter().step_by(4).map(|(id, _)| *id).collect();
+    let b = s.gc_begin().unwrap();
+    // The index pass reads ten pages; then five record copies work and the
+    // sixth fails. The copies sit above the hwm, their originals in runs.
+    mem.fail_reads_after(15);
+    let r = s.gc_finish(&live, b);
+    mem.clear_fail_reads_after();
+    assert!(r.is_err());
+    assert!(s.index_info().memtable_entries > 0, "the copies are in the memtable");
+    s.sync().unwrap();
+    assert_eq!(s.stats().objects, 300);
+    drop(s);
+
+    let s = open(&mem, &o);
+    assert_eq!(s.stats().objects, 300, "a copy above the hwm is not counted again");
+    for (id, d) in &objs {
+        assert_eq!(s.get(id).as_ref(), Some(d));
+    }
+}
+
+#[test]
+fn a_flush_inside_the_active_pack_is_replayed_from_its_offset() {
+    let mem = MemIo::new();
+    let o = opts(50, 64 << 20);
+    let s = open(&mem, &o);
+    let ids: Vec<ObjectId> = (0..120).map(|i| s.put(&small(i)).unwrap()).collect();
+    s.sync().unwrap();
+    drop(s); // no close: the pack stays active, without its `.idx`
+
+    let s = open(&mem, &o);
+    let info = s.index_info();
+    assert_eq!(info.hwm_pack, 1, "{info:?}");
+    assert!(info.hwm_offset > 14, "{info:?}");
+    assert_eq!(info.runs, 2, "{info:?}");
+    assert_eq!(info.memtable_entries, 20, "only the records above the offset are replayed");
+    assert_eq!(s.stats().objects, 120);
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(s.get(id), Some(small(i as u64)), "object {i}");
+    }
+    // The active pack goes on; a later reopen is still exact.
+    let more: Vec<ObjectId> = (120..150).map(|i| s.put(&small(i)).unwrap()).collect();
+    s.sync().unwrap();
+    drop(s);
+    let s = open(&mem, &o);
+    assert_eq!(s.stats().objects, 150);
+    for (i, id) in ids.iter().chain(&more).enumerate() {
+        assert_eq!(s.get(id), Some(small(i as u64)), "object {i}");
+    }
+}
+
+#[test]
+fn stats_are_the_same_after_a_reopen() {
+    let mem = MemIo::new();
+    let o = opts(40, 64 << 10);
+    let s = open(&mem, &o);
+    let objs = put_random(&s, 200, 1);
+    assert!(s.index_info().runs >= 1);
+    // A GC that compacts: one object in four is live.
+    let live: HashSet<ObjectId> = objs.iter().step_by(4).map(|(id, _)| *id).collect();
+    let b = s.gc_begin().unwrap();
+    let st = s.gc_finish(&live, b).unwrap();
+    assert!(st.packs_compacted > 0, "{st:?}");
+    assert_eq!(st.removed_objects, 150);
+    // More puts: new objects, a dedup hit, and a removed object again.
+    let more = put_random(&s, 30, 5000);
+    assert_eq!(s.put(&objs[0].1).unwrap(), objs[0].0);
+    assert_eq!(s.put(&objs[1].1).unwrap(), objs[1].0);
+    s.sync().unwrap();
+    let before = s.stats();
+    assert_eq!(before.objects, 50 + 30 + 1);
+    drop(s);
+
+    let s = open(&mem, &o);
+    assert_eq!(s.stats(), before);
+    for (id, d) in more.iter().chain(objs.iter().filter(|(id, _)| live.contains(id))).chain(&objs[1..2]) {
+        assert_eq!(s.get(id).as_ref(), Some(d));
+    }
+    // And after a close (seal) and one more reopen.
+    s.close().unwrap();
+    drop(s);
+    assert_eq!(open(&mem, &o).stats(), before);
+}
+
+#[test]
+fn a_read_only_open_writes_nothing() {
+    let mem = MemIo::new();
+    let o = opts(100, 64 << 10);
+    let s = open(&mem, &o);
+    let mut objs = put_random(&s, 200, 7);
+    // Records above the hwm, not in a run: a sealed pack and the active pack.
+    objs.extend(put_random(&s, 80, 9000));
+    s.sync().unwrap();
+    let info = s.index_info();
+    assert_eq!(info.memtable_entries, 80);
+    drop(s); // no close
+
+    let packs = pack_lens(&mem);
+    let idx: Vec<bool> = packs.iter().map(|&(n, _)| mem.exists(n, Kind::Idx)).collect();
+    assert!(idx.contains(&false), "the active pack has no .idx");
+    assert!(
+        packs.iter().zip(&idx).any(|(&(n, _), &has)| n >= info.hwm_pack && has),
+        "a sealed pack above the hwm"
+    );
+    let manifest = mem.read(0, Kind::Manifest).unwrap();
+    let runs = run_list(&mem);
+
+    // A limit of 1: a writable open would write a run after each pack.
+    let ro = Options { read_only: true, index_memtable_limit: 1, ..o.clone() };
+    let s = ChunkStore::open_with(Arc::new(mem.clone()), ro).unwrap();
+    assert_eq!(s.index_info().memtable_entries, 80);
+    assert_eq!(s.stats().objects, 280);
+    for (i, (id, d)) in objs.iter().enumerate() {
+        assert_eq!(s.get(id).as_ref(), Some(d), "object {i}");
+    }
+    assert!(s.put(b"no").is_err());
+    drop(s);
+
+    assert_eq!(pack_lens(&mem), packs);
+    assert_eq!(packs.iter().map(|&(n, _)| mem.exists(n, Kind::Idx)).collect::<Vec<_>>(), idx);
+    assert_eq!(mem.read(0, Kind::Manifest).unwrap(), manifest);
+    assert_eq!(run_list(&mem), runs);
+}
+
+#[test]
+fn a_store_without_a_manifest_is_indexed_at_its_first_writable_open() {
+    let mem = MemIo::new();
+    let s = open(&mem, &opts(1 << 18, 64 << 10));
+    let objs = put_random(&s, 500, 3);
+    s.close().unwrap();
+    drop(s);
+    assert!(!mem.exists(0, Kind::Manifest), "no flush happened");
+    assert!(run_list(&mem).is_empty());
+    assert!(pack_lens(&mem).len() > 2);
+
+    let o = opts(64, 64 << 10);
+    let s = open(&mem, &o);
+    let info = s.index_info();
+    assert!(info.runs >= 1, "{info:?}");
+    assert_eq!(info.hwm_offset, 0, "replay flushes only between packs");
+    assert!(info.memtable_entries < 64 + 70, "at most one pack over the limit: {info:?}");
+    assert_eq!(s.stats().objects, 500);
+    for (i, (id, d)) in objs.iter().enumerate() {
+        assert_eq!(s.get(id).as_ref(), Some(d), "object {i}");
+    }
+    drop(s);
+
+    // The next open replays only above the hwm and still counts exactly.
+    let s = open(&mem, &o);
+    assert_eq!(s.index_info().runs, info.runs);
+    assert_eq!(s.stats().objects, 500);
+    for (id, d) in &objs {
+        assert_eq!(s.get(id).as_ref(), Some(d));
+    }
+}
