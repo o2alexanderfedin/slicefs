@@ -150,6 +150,37 @@ fn a_gc_removal_is_a_durable_tombstone() {
 }
 
 #[test]
+fn a_tombstone_hides_a_put_in_an_older_run_after_a_crash() {
+    let mem = MemIo::new();
+    let o = opts(30, 64 << 10);
+    let s = open(&mem, &o);
+    let objs = put_random(&s, 300, 500);
+    s.sync().unwrap();
+    // Every put entry is in a run before the GC.
+    assert_eq!(s.index_info().memtable_entries, 0);
+    let b = s.gc_begin().unwrap();
+    assert_eq!(s.gc_finish(&HashSet::new(), b).unwrap().removed_objects, 300);
+    let (id0, d0) = &objs[0];
+    assert_eq!(s.put(d0).unwrap(), *id0);
+    s.sync().unwrap();
+    drop(s);
+    mem.crash();
+
+    let s = open(&mem, &o);
+    assert_eq!(s.stats().objects, 1);
+    assert_eq!(s.get(id0).as_ref(), Some(d0));
+    for (i, (id, _)) in objs.iter().enumerate().skip(1) {
+        assert!(!s.contains(id), "object {i}");
+        assert!(s.get(id).is_none(), "object {i}");
+    }
+    // No stale dedup hit: a removed object is written again.
+    let (id1, d1) = &objs[1];
+    assert_eq!(s.put(d1).unwrap(), *id1);
+    assert_eq!(s.get(id1).as_ref(), Some(d1));
+    assert_eq!(s.stats().objects, 2);
+}
+
+#[test]
 fn a_gc_that_cannot_read_the_index_changes_nothing() {
     let mem = MemIo::new();
     let o = opts(30, 64 << 10);
