@@ -356,11 +356,9 @@ pub fn run_mount(
     // by fsync before a crash. Then commit, which cuts the log. Not on a
     // snapshot mount (read-only; the log stays for the next normal mount).
     if snapshot_ref.is_none() {
-        let (_, _, pending) = metadata::segment::load_store_with_log(&store_path.join("segments"))
-            .map_err(|e| format!("failed to read the write log: {}", e))?;
-        if !pending.is_empty() {
-            let stats = crate::oplog::replay(&fs, &pending)
-                .map_err(|e| format!("write log replay failed: {}", e))?;
+        let stats = crate::oplog::replay_log(&fs, &store_path.join("segments"))
+            .map_err(|e| format!("write log replay failed: {}", e))?;
+        if stats.applied + stats.skipped > 0 {
             slicefs_traits::metadata::MetadataStore::commit(fs.meta().as_ref())
                 .map_err(|e| format!("commit after replay failed: {}", e))?;
             fs.meta().flush_wal().map_err(|e| format!("sync after replay failed: {}", e))?;

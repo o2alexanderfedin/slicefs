@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use metadata::segment::load_store_with_log;
+use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use metadata::wal::{create_wal, WalConfig};
@@ -42,7 +42,7 @@ fn reload_and_replay(store: &Path) -> SliceFsFilesystem {
 
 /// `reload_and_replay` with `setup` run on the new file system before replay.
 fn reload_and_replay_with(store: &Path, setup: impl FnOnce(&SliceFsFilesystem)) -> SliceFsFilesystem {
-    let (root, snaps, ops) = load_store_with_log(&store.join("segments")).unwrap();
+    let (root, snaps) = load_store_from_segments(&store.join("segments")).unwrap();
     let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
     let mut meta = DictMetadataStore::load_from_root(io.clone(), &root.unwrap()).unwrap();
     meta.set_snapshots(snaps);
@@ -50,7 +50,8 @@ fn reload_and_replay_with(store: &Path, setup: impl FnOnce(&SliceFsFilesystem)) 
     meta.set_wal(wal);
     let fs = SliceFsFilesystem::new(meta, io, Some(store.to_path_buf()));
     setup(&fs);
-    oplog::replay(&fs, &ops).unwrap();
+    // The mount's replay: it streams the log (#106).
+    oplog::replay_log(&fs, &store.join("segments")).unwrap();
     fs
 }
 
