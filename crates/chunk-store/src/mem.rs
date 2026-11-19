@@ -11,11 +11,11 @@
 //! Removals are durable at once (this is the order the store needs: it
 //! syncs copies before it removes originals).
 
-use crate::pack_io::{Kind, PackFile, PackIo, PackRead, RunMap, PUNCH_BLOCK};
+use crate::pack_io::{Kind, PackFile, PackIo, PackRead, PackSync, RunMap, PUNCH_BLOCK};
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 #[derive(Default)]
 struct MemFile {
@@ -136,6 +136,8 @@ pub struct MemIo {
     open: Arc<AtomicUsize>,
     /// The most handles that were open at one time (see `peak_handles`).
     peak: Arc<AtomicUsize>,
+    /// While true, pack syncs wait (a slow disk; see `hold_syncs`).
+    hold: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl MemIo {
@@ -198,6 +200,13 @@ impl MemIo {
     /// once with EIO and writes nothing.
     pub fn fail_write_durable_after(&self, kind: Kind, skip: u32) {
         self.s.lock().unwrap().fail_write_durable_after.insert(kind, skip);
+    }
+
+    /// While on, every pack sync (through a handle or a sync handle) waits
+    /// until it is turned off: a slow disk, with no timing in the test.
+    pub fn hold_syncs(&self, on: bool) {
+        *self.hold.0.lock().unwrap() = on;
+        self.hold.1.notify_all();
     }
 
     /// Every removal fails with EIO and keeps the file.
@@ -281,7 +290,7 @@ impl MemIo {
         let f = self.s.lock().unwrap().files.get(&(num, kind)).cloned().ok_or_else(not_found)?;
         let now = self.open.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(now, Ordering::SeqCst);
-        Ok(MemPack { s: Arc::clone(&self.s), f, kind, open: Arc::clone(&self.open) })
+        Ok(MemPack { s: Arc::clone(&self.s), f, kind, open: Arc::clone(&self.open), hold: Arc::clone(&self.hold) })
     }
 
     /// A new, empty file that must not exist, and a handle to it. Its name
@@ -310,6 +319,49 @@ struct MemPack {
     f: Arc<Mutex<MemFile>>,
     kind: Kind,
     open: Arc<AtomicUsize>,
+    hold: Arc<(Mutex<bool>, Condvar)>,
+}
+
+/// Wait while syncs are held.
+fn wait_hold(hold: &(Mutex<bool>, Condvar)) {
+    let mut held = hold.0.lock().unwrap();
+    while *held {
+        held = hold.1.wait(held).unwrap();
+    }
+}
+
+/// The pack sync of the model (see the module comment).
+fn sync_file(s: &Mutex<State>, f: &Mutex<MemFile>) -> io::Result<()> {
+    let mut s = s.lock().unwrap();
+    let mut f = f.lock().unwrap();
+    if s.sync_fails() {
+        // As on Linux: the dirty pages are marked clean without a save.
+        f.dirty.clear();
+        return Err(eio());
+    }
+    let f = &mut *f;
+    f.durable.resize(f.data.len(), 0);
+    for (a, b) in f.dirty.drain(..) {
+        let b = b.min(f.data.len());
+        if a < b {
+            f.durable[a..b].copy_from_slice(&f.data[a..b]);
+        }
+    }
+    Ok(())
+}
+
+/// A sync handle of a [`MemPack`].
+struct MemSync {
+    s: Arc<Mutex<State>>,
+    f: Arc<Mutex<MemFile>>,
+    hold: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl PackSync for MemSync {
+    fn sync(&self) -> io::Result<()> {
+        wait_hold(&self.hold);
+        sync_file(&self.s, &self.f)
+    }
 }
 
 impl Drop for MemPack {
@@ -357,22 +409,12 @@ impl PackFile for MemPack {
     }
 
     fn sync(&mut self) -> io::Result<()> {
-        let mut s = self.s.lock().unwrap();
-        let mut f = self.f.lock().unwrap();
-        if s.sync_fails() {
-            // As on Linux: the dirty pages are marked clean without a save.
-            f.dirty.clear();
-            return Err(eio());
-        }
-        let f = &mut *f;
-        f.durable.resize(f.data.len(), 0);
-        for (a, b) in f.dirty.drain(..) {
-            let b = b.min(f.data.len());
-            if a < b {
-                f.durable[a..b].copy_from_slice(&f.data[a..b]);
-            }
-        }
-        Ok(())
+        wait_hold(&self.hold);
+        sync_file(&self.s, &self.f)
+    }
+
+    fn sync_handle(&self) -> Option<Arc<dyn PackSync>> {
+        Some(Arc::new(MemSync { s: Arc::clone(&self.s), f: Arc::clone(&self.f), hold: Arc::clone(&self.hold) }))
     }
 }
 

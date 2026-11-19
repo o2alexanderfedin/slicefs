@@ -2,10 +2,12 @@
 //! store, and a plain retry (without a new write) is shown to lose data.
 
 use chunk_store::mem::MemIo;
-use chunk_store::pack_io::{Kind, PackIo};
-use chunk_store::retry::{RetryingIo, KEEP_LIMIT};
+use chunk_store::pack_io::{Kind, PackFile, PackIo};
+use chunk_store::retry::{RetryingIo, KEEP_CAP, KEEP_LIMIT};
 use chunk_store::{ChunkStore, ObjectId, Options};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
+use std::thread;
+use std::time::Duration;
 
 fn random(n: usize, seed: u64) -> Vec<u8> {
     let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
@@ -130,4 +132,125 @@ fn the_copy_of_unsynced_writes_stays_below_the_keep_limit() {
     for i in 0..n {
         assert_eq!(&saved[i * piece.len()..(i + 1) * piece.len()], &piece[..], "piece {i}");
     }
+}
+
+// ── #108: the sync that bounds the RAM copy runs in the background ──────────
+
+const MIB: usize = 1 << 20;
+const LONG: Duration = Duration::from_secs(20);
+
+/// Write `n` pieces of 1 MiB from offset 0 in a new thread; each finished
+/// write sends its index, and the thread gives the file back.
+fn writer(mut f: Box<dyn PackFile>, piece: Vec<u8>, n: usize) -> (mpsc::Receiver<usize>, thread::JoinHandle<Box<dyn PackFile>>) {
+    let (tx, rx) = mpsc::channel();
+    let h = thread::spawn(move || {
+        for i in 0..n {
+            f.write_at(&piece, (i * MIB) as u64).unwrap();
+            let _ = tx.send(i);
+        }
+        f
+    });
+    (rx, h)
+}
+
+/// After a crash, pack 1 holds the `n` pieces.
+fn assert_durable(mem: &MemIo, piece: &[u8], n: usize) {
+    mem.sync_dir().unwrap();
+    mem.crash();
+    let saved = mem.read(1, Kind::Pack).unwrap();
+    assert_eq!(saved.len(), n * MIB);
+    for i in 0..n {
+        assert_eq!(&saved[i * MIB..(i + 1) * MIB], piece, "piece {i}");
+    }
+}
+
+#[test]
+fn a_write_does_not_wait_for_a_slow_background_sync() {
+    let mem = MemIo::new();
+    let io = retrying(&mem);
+    let f = io.create(1).unwrap();
+    mem.hold_syncs(true); // the disk finishes no sync for now
+    let piece = random(MIB, 11);
+    // Past KEEP_LIMIT (a sync starts and hangs), but below the cap.
+    let n = KEEP_LIMIT / MIB + 4;
+    assert!(n * MIB < KEEP_CAP);
+    let (rx, h) = writer(f, piece.clone(), n);
+    for i in 0..n {
+        assert_eq!(rx.recv_timeout(LONG), Ok(i), "write {i} waited for the held sync");
+    }
+    let mut f = h.join().unwrap();
+    mem.hold_syncs(false);
+    f.sync().unwrap();
+    drop(f);
+    assert_durable(&mem, &piece, n);
+}
+
+#[test]
+fn a_write_waits_for_the_sync_at_the_cap() {
+    let mem = MemIo::new();
+    let io = retrying(&mem);
+    let f = io.create(1).unwrap();
+    mem.hold_syncs(true);
+    let piece = random(MIB, 12);
+    let n = KEEP_CAP / MIB + 4;
+    let (rx, h) = writer(f, piece.clone(), n);
+    let mut done = 0;
+    while rx.recv_timeout(Duration::from_millis(300)).is_ok() {
+        done += 1;
+        assert!(done <= n);
+    }
+    assert!(done < n, "no write waited at the cap");
+    assert!(done * MIB > KEEP_LIMIT && done * MIB <= KEEP_CAP + MIB, "stopped after {done} MiB");
+    mem.hold_syncs(false);
+    for i in done..n {
+        assert_eq!(rx.recv_timeout(LONG), Ok(i));
+    }
+    let mut f = h.join().unwrap();
+    f.sync().unwrap();
+    drop(f);
+    assert_durable(&mem, &piece, n);
+}
+
+#[test]
+fn a_failed_background_sync_is_written_again_and_nothing_is_lost() {
+    let mem = MemIo::new();
+    let io = retrying(&mem);
+    let mut f = io.create(1).unwrap();
+    // The background sync fails and (as on Linux) marks the pages clean.
+    mem.fail_next_syncs(1);
+    let piece = random(MIB, 13);
+    let n = 2 * KEEP_LIMIT / MIB + 3;
+    for i in 0..n {
+        f.write_at(&piece, (i * MIB) as u64).unwrap();
+    }
+    f.sync().unwrap();
+    drop(f);
+    assert_durable(&mem, &piece, n);
+}
+
+#[test]
+fn sync_waits_for_the_background_sync_and_the_rest() {
+    let mem = MemIo::new();
+    let io = retrying(&mem);
+    let f = io.create(1).unwrap();
+    mem.hold_syncs(true);
+    let piece = random(MIB, 14);
+    let n = KEEP_LIMIT / MIB + 3;
+    let (rx, h) = writer(f, piece.clone(), n);
+    for i in 0..n {
+        assert_eq!(rx.recv_timeout(LONG), Ok(i));
+    }
+    let mut f = h.join().unwrap();
+    let (tx, done) = mpsc::channel();
+    let s = thread::spawn(move || {
+        let r = f.sync();
+        let _ = tx.send(());
+        (f, r)
+    });
+    assert!(done.recv_timeout(Duration::from_millis(300)).is_err(), "sync returned before the disk synced");
+    mem.hold_syncs(false);
+    let (f, r) = s.join().unwrap();
+    r.unwrap();
+    drop(f);
+    assert_durable(&mem, &piece, n);
 }
