@@ -1254,7 +1254,9 @@ impl ChunkStore {
             inner.sync_dir(io)?;
             let runs: Vec<Arc<Run>> = plans.iter().filter(|p| !p.dropped).filter_map(|p| p.run.clone()).collect();
             let mut added = Vec::new();
-            if !runs.is_empty() || inner.index.mem_len() > 0 {
+            // Whenever a pack changes, also with nothing to add: the hwm
+            // must move past the packs that change.
+            if plans.iter().any(|p| !p.dropped) || !unused.is_empty() {
                 let hwm = match inner.active.as_ref() {
                     Some(a) => Hwm { pack: a.num, offset: a.len },
                     None => Hwm { pack: inner.next_pack, offset: 0 },

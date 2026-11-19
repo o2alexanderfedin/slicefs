@@ -335,6 +335,38 @@ mod on_runs {
         t.check(&s, &[*id9], "after a new put");
     }
 
+    // The last flush ends inside the last pack (hwm = that pack and an
+    // offset), and the GC deletes that pack with no copy (the memtable is
+    // empty at the install). The install must still move the hwm past it:
+    // else the next open finds the hwm pack missing and rebuilds the index
+    // from the packs, instead of using the tombstone runs.
+    #[test]
+    fn a_gc_with_an_empty_memtable_moves_the_hwm_past_the_changed_packs() {
+        let mem = MemIo::new();
+        let o = opts(30, 64 << 10);
+        let s = open(&mem, &o);
+        let objs = put_n(&s, 300, 1000, 9_000);
+        s.sync().unwrap();
+        let info = s.index_info();
+        assert_eq!(info.memtable_entries, 0, "{info:?}");
+        assert!(info.hwm_offset > 0, "the last flush is inside a pack: {info:?}");
+        let b = s.gc_begin().unwrap();
+        assert_eq!(s.gc_finish(&HashSet::new(), b).unwrap().removed_objects, 300);
+        let info = s.index_info();
+        assert!(info.hwm_pack > b, "the hwm is past every changed pack: {info:?}");
+        let mut runs = mem.list_runs().unwrap();
+        runs.sort_unstable();
+        drop(s);
+        let s = open(&mem, &o);
+        let mut again = mem.list_runs().unwrap();
+        again.sort_unstable();
+        assert_eq!(again, runs, "the open uses the runs (no rebuild)");
+        for (id, _) in &objs {
+            assert!(!s.contains(id));
+        }
+        assert_eq!(s.stats().objects, 0);
+    }
+
     #[test]
     fn the_put_dedup_check_of_a_removed_object_writes_it() {
         let (t, s) = Three::new();

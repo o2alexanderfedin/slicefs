@@ -881,9 +881,10 @@ impl Index {
     /// of its pack (and with it the pending run) before this call.
     ///
     /// The caller has synced the active pack and the directory (so the
-    /// pending runs have durable names). `hwm` is used only if the memtable
-    /// has entries (else the hwm stays); `counts` are the counts after the
-    /// GC. On an error before the MANIFEST write, a partial memtable run is
+    /// pending runs have durable names). `hwm` is the end of the active pack
+    /// (or the start of the next pack): the new hwm, also if the memtable is
+    /// empty; `counts` are the counts after the GC. On an error before the
+    /// MANIFEST write, a partial memtable run is
     /// removed; after a failed MANIFEST write the files stay (the write may
     /// be durable). Either way the index in RAM does not change.
     ///
@@ -907,8 +908,12 @@ impl Index {
         new.seq += 1;
         if let Some(r) = &mem_run {
             new.next_run = new.next_run.max(r.num() + 1);
-            new.hwm = hwm;
         }
+        // Also with an empty memtable: the hwm must move past every pack
+        // that the GC changes (the hwm pack must exist, and its records
+        // below the hwm must have no gap; see `covers` in lib.rs). Every
+        // record below `hwm` is then in a run.
+        new.hwm = hwm;
         new.counts = counts;
         let added: Vec<Arc<Run>> = pending.into_iter().chain(mem_run).collect();
         let metas = added.iter().map(|r| RunMeta { num: r.num(), len: r.len(), entries: r.entries() });
