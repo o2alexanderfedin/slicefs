@@ -901,9 +901,10 @@ The dead objects that stay are more than the false positives: the bench
 objects have records of 54 bytes, and a punched pack frees only whole
 4 KiB blocks, so one false positive keeps about 75 dead records. A chunk of
 file content (4 to 32 KiB) fills at least one block, so there we expect one
-false positive to keep about one object (not measured). The filter bits of
-an ID do not depend on the filter size, so the next GC can keep many of
-the same dead objects again.
+false positive to keep about one object (not measured). Each filter (the
+mark and a spilled touched set) has its own random salt, mixed into the
+probe positions, so the false positives of one GC are not those of the
+next one, and a dead object does not stay forever.
 
 ## Read path
 

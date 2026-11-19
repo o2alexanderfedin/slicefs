@@ -136,3 +136,53 @@ fn objects_read_before_gc_finish_survive_when_the_touched_set_spills_to_a_filter
         assert_eq!(s.get(id).as_deref(), Some(d.as_slice()), "touched object {id:?} lost");
     }
 }
+
+/// The live objects are all there; returns the dead objects still there.
+fn dead_left(s: &ChunkStore, objs: &[(ObjectId, Vec<u8>)], live: &HashSet<ObjectId>) -> HashSet<ObjectId> {
+    for (id, d) in objs.iter().filter(|(id, _)| live.contains(id)) {
+        assert_eq!(s.get(id).as_deref(), Some(d.as_slice()), "live object {id:?} lost");
+    }
+    objs.iter().map(|(id, _)| *id).filter(|id| !live.contains(id) && s.contains(id)).collect()
+}
+
+fn filter_of_seeded(live: &HashSet<ObjectId>, bits: u8, seed: u64) -> LiveFilter {
+    let mut f = LiveFilter::with_seed(live.len() as u64, bits, seed);
+    for id in live {
+        f.insert(id);
+    }
+    f
+}
+
+#[test]
+fn a_false_positive_of_one_gc_is_removed_by_a_later_gc_with_another_salt() {
+    let dir = TempDir::new().unwrap();
+    let s = ChunkStore::open(dir.path(), opts()).unwrap();
+    // Records of 9,000 bytes: each one covers a whole 4 KiB block, so a
+    // pack that is punched (most of it live after the first GC) frees
+    // every dead record, and only a false positive keeps one.
+    let objs: Vec<_> = (0..200).map(|i| { let d = random(9000, 7 + i); (s.put(&d).unwrap(), d) }).collect();
+    let live: HashSet<ObjectId> = objs.iter().step_by(4).map(|(id, _)| *id).collect();
+    // One 512-bit block, one probe, 50 keys: about 9 % false positives.
+    let gc = |seed: u64| {
+        let f = filter_of_seeded(&live, 2, seed);
+        let b = s.gc_begin().unwrap();
+        s.gc_finish(&f, b).unwrap()
+    };
+    gc(1);
+    let first = dead_left(&s, &objs, &live);
+    assert!(!first.is_empty(), "the first GC gave no false positive");
+    // The same salt again: the same false positives, nothing removed.
+    assert_eq!(gc(1).removed_objects, 0);
+    assert_eq!(dead_left(&s, &objs, &live), first);
+    // Other salts: after a few GCs no dead object is left.
+    let mut seed = 2;
+    while !dead_left(&s, &objs, &live).is_empty() {
+        assert!(seed < 20, "dead objects stay after {seed} salts: {:?}", dead_left(&s, &objs, &live));
+        gc(seed);
+        seed += 1;
+    }
+    drop(s);
+    let s = ChunkStore::open(dir.path(), opts()).unwrap();
+    assert!(dead_left(&s, &objs, &live).is_empty());
+    assert_eq!(s.stats().objects, live.len() as u64);
+}

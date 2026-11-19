@@ -82,9 +82,14 @@ fn gc_frees_deleted_files_and_keeps_live_and_snapshot_data() {
     assert_eq!(read_at_root(store, &snap_root, "snap.bin"), snap);
     assert_eq!(read_at_root(store, &snap_root, "keep.bin"), keep);
 
-    // A second run finds nothing more to free.
+    // A second run frees at most the false positives of the first mark
+    // (each mark is a Bloom filter with its own salt, #113), and keeps the
+    // live data.
     run_gc(store).unwrap();
-    assert_eq!(objects(store), after);
+    let again = objects(store);
+    assert!(again <= after && again + 5 >= after, "after {after}, again {again}");
+    assert_eq!(read_at_root(store, &snap_root, "snap.bin"), snap);
+    assert_eq!(read_at_root(store, &snap_root, "keep.bin"), keep);
 }
 
 #[test]
