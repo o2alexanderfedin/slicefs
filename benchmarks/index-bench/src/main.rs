@@ -2,13 +2,18 @@
 //! and recovery, on stores of many small synthetic objects.
 //!
 //! ```text
-//! index-bench create --dir D --objects N [--pack-limit BYTES]
+//! index-bench create --dir D --objects N [--pack-limit BYTES] [--memtable-limit ENTRIES]
 //! index-bench open   --dir D [--cache warm|cold]
 //! index-bench lookup --dir D [--hits K] [--misses K] [--seed S]
 //! index-bench recover --dir D [--packs 1|all] [--read-only]
-//! index-bench run    --dir D --objects N [--reps R] [--pack-limit BYTES] [--hits K] [--misses K] [--drop-caches]
+//! index-bench gc     --dir D [--live-every K] [--dead-run R]
+//! index-bench run    --dir D --objects N [--reps R] [--pack-limit BYTES] [--memtable-limit ENTRIES]
+//!                    [--hits K] [--misses K] [--drop-caches]
 //!   every step also takes --backend NAME (default chunk-store)
 //! ```
+//!
+//! `gc` is not part of `run`: it removes objects, so it needs a store made
+//! for it, and every step refuses that store after it.
 //!
 //! `create` makes a store of N unique 8-byte objects (object i is the bytes
 //! of `i` as a little-endian u64) through the public store API, closes it,
@@ -31,10 +36,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use backend::{backend_by_name, Backend, Scope, SAVED_DIR};
+use backend::{backend_by_name, Backend, CreateOpts, Scope, SAVED_DIR};
 use chunk_store::{ObjectId, DEFAULT_HASHER};
 
-const USAGE: &str = "usage: index-bench create|open|lookup|recover|run --dir D [--backend NAME] [step flags] (see the doc comment of src/main.rs)";
+const USAGE: &str = "usage: index-bench create|open|lookup|recover|gc|run --dir D [--backend NAME] [step flags] (see the doc comment of src/main.rs)";
 
 /// The marker file of a store made by this tool: the output of `create`.
 const MARKER: &str = "index-bench.txt";
@@ -69,11 +74,15 @@ struct Flags {
 /// The value flags and the flags without a value of each subcommand.
 fn spec(cmd: &str) -> Option<(&'static [&'static str], &'static [&'static str])> {
     Some(match cmd {
-        "create" => (&["dir", "backend", "objects", "pack-limit"], &[]),
+        "create" => (&["dir", "backend", "objects", "pack-limit", "memtable-limit"], &[]),
         "open" => (&["dir", "backend", "cache"], &[]),
         "lookup" => (&["dir", "backend", "hits", "misses", "seed"], &[]),
         "recover" => (&["dir", "backend", "packs"], &["read-only"]),
-        "run" => (&["dir", "backend", "objects", "reps", "pack-limit", "hits", "misses"], &["drop-caches"]),
+        "gc" => (&["dir", "backend", "live-every", "dead-run"], &[]),
+        "run" => (
+            &["dir", "backend", "objects", "reps", "pack-limit", "memtable-limit", "hits", "misses"],
+            &["drop-caches"],
+        ),
         _ => return None,
     })
 }
@@ -172,6 +181,80 @@ fn current_rss_bytes() -> Option<u64> {
     }
 }
 
+/// The resident pages of this process in two parts, in bytes: anonymous
+/// pages (heap, stacks) and file-backed pages (mapped files, the binary).
+///
+/// macOS: the `internal` and `external` fields of `task_info` with the
+/// `TASK_VM_INFO` flavor. `internal` counts resident anonymous pages (not
+/// the compressed ones); `external` counts resident pages of mapped files.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)] // libc points mach_task_self to the mach2 crate; no new crate here
+fn rss_split_bytes() -> Option<(u64, u64)> {
+    /// `struct task_vm_info` of `<mach/task_info.h>` up to `phys_footprint`
+    /// (revision 1), under `#pragma pack(4)`. libc does not define it.
+    #[repr(C, packed(4))]
+    #[derive(Default)]
+    struct TaskVmInfo {
+        virtual_size: u64,
+        region_count: i32,
+        page_size: i32,
+        resident_size: u64,
+        resident_size_peak: u64,
+        device: u64,
+        device_peak: u64,
+        internal: u64,
+        internal_peak: u64,
+        external: u64,
+        external_peak: u64,
+        reusable: u64,
+        reusable_peak: u64,
+        purgeable_volatile_pmap: u64,
+        purgeable_volatile_resident: u64,
+        purgeable_volatile_virtual: u64,
+        compressed: u64,
+        compressed_peak: u64,
+        compressed_lifetime: u64,
+        phys_footprint: u64,
+    }
+    const TASK_VM_INFO: libc::task_flavor_t = 22;
+    const COUNT: libc::mach_msg_type_number_t =
+        (std::mem::size_of::<TaskVmInfo>() / std::mem::size_of::<libc::natural_t>()) as _;
+    let mut info = TaskVmInfo::default();
+    let mut count = COUNT;
+    let kr = unsafe {
+        libc::task_info(
+            libc::mach_task_self(),
+            TASK_VM_INFO,
+            &mut info as *mut TaskVmInfo as libc::task_info_t,
+            &mut count,
+        )
+    };
+    (kr == libc::KERN_SUCCESS).then_some((info.internal, info.external))
+}
+
+/// The resident pages of this process in two parts, in bytes: `RssAnon` and
+/// `RssFile` of `/proc/self/status` on Linux.
+#[cfg(not(target_os = "macos"))]
+fn rss_split_bytes() -> Option<(u64, u64)> {
+    if cfg!(target_os = "linux") {
+        linux_rss_split_bytes()
+    } else {
+        None
+    }
+}
+
+/// `RssAnon` and `RssFile` of `/proc/self/status` (in kB there). Compiled on
+/// every system, so that a build on macOS checks it too.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn linux_rss_split_bytes() -> Option<(u64, u64)> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kb = |key: &str| -> Option<u64> {
+        let line = status.lines().find(|l| l.starts_with(key))?;
+        line[key.len()..].trim().trim_end_matches("kB").trim().parse::<u64>().ok().map(|v| v * 1024)
+    };
+    Some((kb("RssAnon:")?, kb("RssFile:")?))
+}
+
 /// Resident pages (second field of `/proc/self/statm`) times the page size.
 /// Compiled on every system, so that a build on macOS checks it too.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -267,29 +350,52 @@ fn read_marker(dir: &Path, backend: &dyn Backend) -> Result<HashMap<String, Stri
         return Err(not_a_store());
     }
     match kv.get("backend") {
-        Some(b) if b == backend.name() => Ok(kv),
-        Some(b) => Err(format!(
-            "the directory is not an index-bench store of backend {} (its marker says backend={b})",
-            backend.name()
-        )),
-        None => Err(not_a_store()),
+        Some(b) if b == backend.name() => {}
+        Some(b) => {
+            return Err(format!(
+                "the directory is not an index-bench store of backend {} (its marker says backend={b})",
+                backend.name()
+            ))
+        }
+        None => return Err(not_a_store()),
     }
+    if kv.contains_key(GC_DONE) {
+        return Err("the gc step changed this store (gc_done=1 in its marker), so it no longer has the objects \
+                    of the create step; make a new store"
+            .into());
+    }
+    Ok(kv)
+}
+
+/// The marker key that the gc step adds before it changes the store.
+const GC_DONE: &str = "gc_done";
+
+/// Sum of the file sizes under `dir`, recursively; 0 if `dir` does not
+/// exist. With `store`, `dir` is a store directory: the marker file and the
+/// saved-files directory of `recover` at its top are not counted, and every
+/// other file is (packs, `.idx` files and the index directory).
+fn dir_bytes(dir: &Path, store: bool) -> Result<u64, String> {
+    let rd = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(format!("cannot list the store files: {e}")),
+    };
+    let mut sum = 0;
+    for e in rd {
+        let e = e.map_err(|e| format!("cannot list the store files: {e}"))?;
+        let name = e.file_name();
+        if store && (name == MARKER || name == SAVED_DIR) {
+            continue;
+        }
+        let m = e.metadata().map_err(|e| format!("cannot read a file size: {e}"))?;
+        sum += if m.is_dir() { dir_bytes(&e.path(), false)? } else { m.len() };
+    }
+    Ok(sum)
 }
 
 /// The object count N of a marker.
 fn marker_objects(kv: &HashMap<String, String>) -> Result<u64, String> {
     kv.get("objects").and_then(|v| v.parse().ok()).ok_or_else(|| "the marker has no objects= line".to_string())
-}
-
-/// Sum of the file sizes in `dir`.
-fn dir_bytes(dir: &Path) -> Result<u64, String> {
-    let rd = std::fs::read_dir(dir).map_err(|e| format!("cannot list the store files: {e}"))?;
-    let mut sum = 0;
-    for e in rd {
-        let e = e.map_err(|e| format!("cannot list the store files: {e}"))?;
-        sum += e.metadata().map_err(|e| format!("cannot read a file size: {e}"))?.len();
-    }
-    Ok(sum)
 }
 
 // ── Steps ────────────────────────────────────────────────────────────────────
@@ -298,7 +404,10 @@ fn step_create(f: &Flags) -> Result<(), Fail> {
     let dir = f.dir()?;
     let backend = f.backend()?;
     let n = f.required_u64("objects")?;
-    let pack_limit = f.u64("pack-limit")?;
+    let opts = CreateOpts {
+        pack_limit: f.u64("pack-limit")?,
+        memtable_limit: f.u64("memtable-limit")?.map(|v| v as usize),
+    };
     if let Ok(mut rd) = std::fs::read_dir(&dir) {
         if rd.next().is_some() {
             return Err("the directory is not empty; create needs a new or empty directory".into());
@@ -308,7 +417,7 @@ fn step_create(f: &Flags) -> Result<(), Fail> {
 
     let t0 = Instant::now();
     let c0 = cpu_secs();
-    let store = backend.create(&dir, pack_limit)?;
+    let store = backend.create(&dir, opts)?;
     for i in 0..n {
         store.put(&object(i))?;
         if i > 0 && i % 10_000_000 == 0 {
@@ -322,8 +431,10 @@ fn step_create(f: &Flags) -> Result<(), Fail> {
     if objects != n {
         return Err(format!("the store has {objects} objects after create, not {n}").into());
     }
-    let disk = dir_bytes(&dir.join("packs"))?;
+    let disk = dir_bytes(&dir, true)?;
+    let index = dir_bytes(&dir.join("index"), false)?;
     let per_obj = if n > 0 { disk as f64 / n as f64 } else { f64::NAN };
+    let index_per_obj = if n > 0 { index as f64 / n as f64 } else { f64::NAN };
     let text = kv_text(&[
         ("step", "create".into()),
         ("backend", backend.name().into()),
@@ -335,6 +446,8 @@ fn step_create(f: &Flags) -> Result<(), Fail> {
         ("cpu_s", fmt_f(cpu)),
         ("puts_per_s", fmt_f(n as f64 / wall)),
         ("max_rss_bytes", max_rss_bytes().to_string()),
+        ("index_bytes", index.to_string()),
+        ("index_bytes_per_object", fmt_f(index_per_obj)),
     ]);
     std::fs::write(dir.join(MARKER), &text).map_err(|e| format!("cannot write the marker file: {e}"))?;
     finish(&text);
@@ -349,6 +462,7 @@ fn step_open(f: &Flags) -> Result<(), Fail> {
     }
     let n = marker_objects(&read_marker(&dir, &*backend)?)?;
 
+    let split_before = rss_split_bytes();
     let rss_before = current_rss_bytes();
     let max_before = max_rss_bytes();
     let t0 = Instant::now();
@@ -358,6 +472,7 @@ fn step_open(f: &Flags) -> Result<(), Fail> {
     let cpu = cpu_secs() - c0;
     let max_after = max_rss_bytes();
     let rss_after = current_rss_bytes();
+    let split_after = rss_split_bytes();
 
     let objects = store.objects();
     if objects != n {
@@ -369,7 +484,7 @@ fn step_open(f: &Flags) -> Result<(), Fail> {
         (Some(b), Some(a)) => per_obj(a.saturating_sub(b)),
         _ => "n/a".into(),
     };
-    finish(&kv_text(&[
+    let mut kv = vec![
         ("step", "open".into()),
         ("backend", backend.name().into()),
         ("cache", cache.into()),
@@ -383,7 +498,57 @@ fn step_open(f: &Flags) -> Result<(), Fail> {
         ("rss_after_bytes", opt(rss_after)),
         ("peak_bytes_per_object", per_obj(max_after.saturating_sub(max_before))),
         ("steady_bytes_per_object", steady),
-    ]));
+    ];
+    kv.extend(store.index_keys());
+    kv.extend(split_keys(OPEN_SPLIT, split_before, split_after, objects));
+    finish(&kv_text(&kv));
+}
+
+/// The split keys of the open step: anonymous RSS before and after, file
+/// RSS before and after, the growth of each per object.
+const OPEN_SPLIT: [&str; 6] = [
+    "rss_anon_before_bytes",
+    "rss_anon_after_bytes",
+    "rss_file_before_bytes",
+    "rss_file_after_bytes",
+    "steady_anon_bytes_per_object",
+    "steady_file_bytes_per_object",
+];
+
+/// The split keys of the lookup step, around the timed lookups.
+const LOOKUP_SPLIT: [&str; 6] = [
+    "rss_anon_before_lookups_bytes",
+    "rss_anon_after_lookups_bytes",
+    "rss_file_before_lookups_bytes",
+    "rss_file_after_lookups_bytes",
+    "lookups_anon_bytes_per_object",
+    "lookups_file_bytes_per_object",
+];
+
+/// The RSS split (anonymous and file-backed pages) before and after a part
+/// of a step, and the growth of each part per object, under the names in
+/// `keys`. `n/a` where the system gives no split.
+fn split_keys(
+    keys: [&'static str; 6],
+    before: Option<(u64, u64)>,
+    after: Option<(u64, u64)>,
+    objects: u64,
+) -> Vec<(&'static str, String)> {
+    let opt = |v: Option<u64>| v.map_or("n/a".to_string(), |v| v.to_string());
+    let per = |b: Option<u64>, a: Option<u64>| match (b, a) {
+        (Some(b), Some(a)) if objects > 0 => fmt_f(a.saturating_sub(b) as f64 / objects as f64),
+        _ => "n/a".into(),
+    };
+    let (ab, fb) = (before.map(|s| s.0), before.map(|s| s.1));
+    let (aa, fa) = (after.map(|s| s.0), after.map(|s| s.1));
+    vec![
+        (keys[0], opt(ab)),
+        (keys[1], opt(aa)),
+        (keys[2], opt(fb)),
+        (keys[3], opt(fa)),
+        (keys[4], per(ab, aa)),
+        (keys[5], per(fb, fa)),
+    ]
 }
 
 /// The default seed of the lookup sample, so runs repeat.
@@ -414,6 +579,7 @@ fn step_lookup(f: &Flags) -> Result<(), Fail> {
         return Err(format!("the store has {objects} objects, the marker says {n}").into());
     }
 
+    let split_before = rss_split_bytes();
     let t0 = Instant::now();
     let found = hit_ids.iter().filter(|id| store.contains(id)).count() as u64;
     let hit_s = t0.elapsed().as_secs_f64();
@@ -432,13 +598,14 @@ fn step_lookup(f: &Flags) -> Result<(), Fail> {
         store.put(&object(i))?;
     }
     let put_s = t0.elapsed().as_secs_f64();
+    let split_after = rss_split_bytes();
     if store.objects() != n {
         return Err(format!("put of objects in the store changed the count from {n} to {}", store.objects()).into());
     }
 
     let ns = |s: f64, k: u64| if k > 0 { fmt_f(s * 1e9 / k as f64) } else { "n/a".into() };
     let per_s = |s: f64, k: u64| if k > 0 && s > 0.0 { fmt_f(k as f64 / s) } else { "n/a".into() };
-    finish(&kv_text(&[
+    let mut kv = vec![
         ("step", "lookup".into()),
         ("backend", backend.name().into()),
         ("objects", objects.to_string()),
@@ -450,7 +617,9 @@ fn step_lookup(f: &Flags) -> Result<(), Fail> {
         ("contains_miss_per_s", per_s(miss_s, misses)),
         ("put_hit_ns", ns(put_s, hits)),
         ("put_hit_per_s", per_s(put_s, hits)),
-    ]));
+    ];
+    kv.extend(split_keys(LOOKUP_SPLIT, split_before, split_after, objects));
+    finish(&kv_text(&kv));
 }
 
 fn step_recover(f: &Flags) -> Result<(), Fail> {
@@ -463,6 +632,16 @@ fn step_recover(f: &Flags) -> Result<(), Fail> {
     };
     let read_only = f.has("read-only");
     let n = marker_objects(&read_marker(&dir, &*backend)?)?;
+
+    // The high-water mark of an on-disk index, before any .idx moves (a
+    // read-only open, not timed, writes nothing): the packs below it are in
+    // the index runs, so the recovery open does not scan them. Read after
+    // the timed open it could be later than the mark that the open used.
+    let hwm_pack: Option<u64> = {
+        let store = backend.open(&dir, true)?;
+        let keys = store.index_keys();
+        keys.iter().find(|(k, _)| *k == "hwm_pack").and_then(|(_, v)| v.parse().ok())
+    };
 
     let dropped = backend.drop_index(&dir, scope)?;
     let t0 = Instant::now();
@@ -491,6 +670,9 @@ fn step_recover(f: &Flags) -> Result<(), Fail> {
 
     let t = &dropped.targets;
     let active = t.iter().filter(|t| t.active).count();
+    // Only the packs at or above the mark are scanned.
+    let scanned: Vec<_> = t.iter().filter(|t| hwm_pack.is_none_or(|h| t.num >= h)).collect();
+    let covered = t.len() - scanned.len();
     finish(&kv_text(&[
         ("step", "recover".into()),
         ("backend", backend.name().into()),
@@ -499,13 +681,73 @@ fn step_recover(f: &Flags) -> Result<(), Fail> {
         ("packs_dropped", t.len().to_string()),
         ("sealed_packs", (t.len() - active).to_string()),
         ("active_packs", active.to_string()),
-        ("scanned_bytes", t.iter().map(|t| t.pack_bytes).sum::<u64>().to_string()),
-        ("scanned_objects", t.iter().map(|t| t.entries).sum::<u64>().to_string()),
+        ("scanned_bytes", scanned.iter().map(|t| t.pack_bytes).sum::<u64>().to_string()),
+        ("scanned_objects", scanned.iter().map(|t| t.entries).sum::<u64>().to_string()),
         ("wall_s", fmt_f(wall)),
         ("cpu_s", fmt_f(cpu)),
         ("objects", store.objects().to_string()),
         ("idx_identical", if restored.rebuilt > 0 { "yes" } else { "n/a" }.into()),
+        ("covered_packs", covered.to_string()),
+        ("hwm_pack", hwm_pack.map_or("n/a".into(), |h| h.to_string())),
     ]));
+}
+
+/// The default length of a dead run of the gc step, in objects: every K-th
+/// object is dead.
+const DEAD_RUN: u64 = 1;
+
+/// One GC of the store: object i is dead when (i / R) mod K is 0 (R =
+/// `--dead-run`, K = `--live-every`), so (K-1)/K of the objects stay live
+/// and the dead ones lie in runs of R objects. A full-size pack where at
+/// least half of the bytes stay live gets holes only over whole 4 KiB
+/// blocks of dead records, so in such a pack dead objects of 8 bytes that
+/// lie one by one (R = 1) are not removed at all; use R = 1024 to measure
+/// a GC that punches. (A small pack is compacted instead.)
+///
+/// The step changes the store: it adds `gc_done=1` to the marker before the
+/// GC, and every step refuses such a store after that.
+fn step_gc(f: &Flags) -> Result<(), Fail> {
+    let dir = f.dir()?;
+    let backend = f.backend()?;
+    let k = f.u64("live-every")?.unwrap_or(4);
+    let r = f.u64("dead-run")?.unwrap_or(DEAD_RUN);
+    if k == 0 || r == 0 {
+        return Err(Fail::Usage("--live-every and --dead-run must be at least 1".into()));
+    }
+    let n = marker_objects(&read_marker(&dir, &*backend)?)?;
+
+    // The live set (the mark of a real GC), before the open.
+    let t0 = Instant::now();
+    let dead = |i: u64| (i / r).is_multiple_of(k);
+    let live: HashSet<ObjectId> = (0..n).filter(|&i| !dead(i)).map(object_id).collect();
+    let live_set_s = t0.elapsed().as_secs_f64();
+    let dead_objects = n - live.len() as u64;
+
+    let store = backend.open(&dir, false)?;
+    let marker = std::fs::read_to_string(dir.join(MARKER)).map_err(|e| format!("cannot read the marker file: {e}"))?;
+    std::fs::write(dir.join(MARKER), format!("{marker}{GC_DONE}=1\n"))
+        .map_err(|e| format!("cannot write the marker file: {e}"))?;
+    let gc_keys = store.gc(&live)?;
+    let objects_after = store.objects();
+    let packs_after = store.packs();
+    store.close()?;
+
+    let mut kv = vec![
+        ("step", "gc".into()),
+        ("backend", backend.name().into()),
+        ("objects", n.to_string()),
+        ("live_every", k.to_string()),
+        ("dead_run", r.to_string()),
+        ("dead_objects", dead_objects.to_string()),
+        ("live_set_s", fmt_f(live_set_s)),
+    ];
+    kv.extend(gc_keys);
+    kv.extend([
+        ("objects_after", objects_after.to_string()),
+        ("packs_after", packs_after.to_string()),
+        ("max_rss_bytes", max_rss_bytes().to_string()),
+    ]);
+    finish(&kv_text(&kv));
 }
 
 // ── run driver ───────────────────────────────────────────────────────────────
@@ -601,8 +843,10 @@ fn step_run(f: &Flags) -> Result<(), Fail> {
     } else {
         let mut args = common("create");
         args.extend(["--objects".into(), n.to_string()]);
-        if let Some(limit) = f.get("pack-limit") {
-            args.extend(["--pack-limit".into(), limit.into()]);
+        for k in ["pack-limit", "memtable-limit"] {
+            if let Some(v) = f.get(k) {
+                args.extend([format!("--{k}"), v.into()]);
+            }
         }
         let out = child(&args)?;
         println!("# create");
@@ -676,7 +920,7 @@ fn step_run(f: &Flags) -> Result<(), Fail> {
     print!(
         "{}",
         table(
-            &["OS", "Objects", "Packs", "Disk B/object", "Create puts/s", "Creator peak RSS MB"],
+            &["OS", "Objects", "Packs", "Disk B/object", "Create puts/s", "Creator peak RSS MB", "Index B/object"],
             &[vec![
                 os.clone(),
                 label.clone(),
@@ -684,6 +928,7 @@ fn step_run(f: &Flags) -> Result<(), Fail> {
                 get("disk_bytes_per_object"),
                 get("puts_per_s"),
                 fmt_f(creator_mb),
+                get("index_bytes_per_object"),
             ]],
         )
     );
@@ -691,6 +936,7 @@ fn step_run(f: &Flags) -> Result<(), Fail> {
     let lo = walls.iter().copied().fold(f64::INFINITY, f64::min);
     let hi = walls.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let open_median = median(walls.clone());
+    let open_cpu = median(column(&opens, "cpu_s"));
     println!();
     println!("## Open");
     print!(
@@ -705,16 +951,22 @@ fn step_run(f: &Flags) -> Result<(), Fail> {
                 "Peak RSS B/object (median)",
                 "Steady RSS B/object (median)",
                 "Cache",
+                "Steady anon B/object (median)",
+                "Steady file B/object (median)",
+                "Index runs",
             ],
             &[vec![
                 os.clone(),
                 label.clone(),
                 fmt_f(open_median),
                 format!("{}-{}", fmt_f(lo), fmt_f(hi)),
-                fmt_f(median(column(&opens, "cpu_s"))),
+                fmt_f(open_cpu),
                 fmt_f(median(column(&opens, "peak_bytes_per_object"))),
                 fmt_f(median(column(&opens, "steady_bytes_per_object"))),
                 if cold { "cold".into() } else { "warm".into() },
+                fmt_f(median(column(&opens, "steady_anon_bytes_per_object"))),
+                fmt_f(median(column(&opens, "steady_file_bytes_per_object"))),
+                opens.last().and_then(|o| o.get("index_runs")).cloned().unwrap_or_else(|| "n/a".into()),
             ]],
         )
     );
@@ -751,6 +1003,13 @@ fn step_run(f: &Flags) -> Result<(), Fail> {
         let rec = median(column(runs, "wall_s"));
         let extra = rec - open_median;
         let rate = |amount: f64| if extra > 0.0 { fmt_f(amount / extra) } else { "n/a".into() };
+        // The same from CPU time, which a loaded host disturbs less.
+        let extra_cpu = median(column(runs, "cpu_s")) - open_cpu;
+        let cpu_rate = if extra_cpu > 0.0 && num("scanned_bytes") > 0.0 {
+            fmt_f(num("scanned_bytes") / 1e6 / extra_cpu)
+        } else {
+            "n/a".into()
+        };
         rows.push(vec![
             os.clone(),
             label.clone(),
@@ -763,6 +1022,9 @@ fn step_run(f: &Flags) -> Result<(), Fail> {
             fmt_f(extra),
             rate(num("scanned_bytes") / 1e6),
             rate(num("scanned_objects")),
+            first("covered_packs"),
+            fmt_f(extra_cpu),
+            cpu_rate,
         ]);
     }
     println!();
@@ -782,6 +1044,9 @@ fn step_run(f: &Flags) -> Result<(), Fail> {
                 "Extra s",
                 "Scan MB/s",
                 "Scan objects/s",
+                "Covered packs",
+                "Extra CPU s",
+                "Scan MB/s (CPU)",
             ],
             &rows,
         )
@@ -797,6 +1062,7 @@ fn real_main(args: &[String]) -> Result<(), Fail> {
         "open" => step_open(&flags),
         "lookup" => step_lookup(&flags),
         "recover" => step_recover(&flags),
+        "gc" => step_gc(&flags),
         "run" => step_run(&flags),
         _ => Err(Fail::Usage(format!("unknown subcommand {cmd}"))),
     }

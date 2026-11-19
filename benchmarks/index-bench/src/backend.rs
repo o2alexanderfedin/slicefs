@@ -4,6 +4,7 @@
 //! here (for example a spike on fjall). The steps in `main.rs` call only the
 //! traits in this file, so a new backend needs no change to the steps.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use chunk_store::pack_io::{pack_name, Kind};
@@ -61,17 +62,38 @@ pub trait Store {
     fn objects(&self) -> u64;
     /// Pack files of the store.
     fn packs(&self) -> u64;
-    /// Seal the store: every pack gets its index.
+    /// Seal the store: every pack gets its index. A backend with background
+    /// work waits for it first, so the next open finds a settled store.
     fn close(&self) -> Result<(), String>;
+    /// Extra `key=value` pairs that describe the index after an open (for
+    /// example its run count). Empty by default.
+    fn index_keys(&self) -> Vec<(&'static str, String)> {
+        Vec::new()
+    }
+    /// Remove every object that is not in `live` (one complete GC) and
+    /// return `key=value` pairs that describe it. Not supported by default.
+    fn gc(&self, _live: &HashSet<ObjectId>) -> Result<Vec<(&'static str, String)>, String> {
+        Err("gc is not supported by this backend".into())
+    }
+}
+
+/// Options of a new store. `None` keeps the default of the backend.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CreateOpts {
+    /// The pack size limit in bytes (for tests).
+    pub pack_limit: Option<u64>,
+    /// The entries of the index memtable before a flush to a run (for
+    /// tests).
+    pub memtable_limit: Option<usize>,
 }
 
 /// A kind of store: how to make one and how to open one.
 pub trait Backend {
     /// The name given with `--backend`.
     fn name(&self) -> &'static str;
-    /// Make a new store in `dir`. `pack_limit` replaces the default pack size
-    /// only when it is given.
-    fn create(&self, dir: &Path, pack_limit: Option<u64>) -> Result<Box<dyn Store>, String>;
+    /// Make a new store in `dir`. Each value of `opts` that is given replaces
+    /// the default.
+    fn create(&self, dir: &Path, opts: CreateOpts) -> Result<Box<dyn Store>, String>;
     /// Open the store in `dir`.
     fn open(&self, dir: &Path, read_only: bool) -> Result<Box<dyn Store>, String>;
 
@@ -112,7 +134,37 @@ impl Store for ChunkStoreHandle {
         self.0.stats().packs
     }
     fn close(&self) -> Result<(), String> {
+        // The background merges first: an open must not measure a store
+        // whose runs the creator left unmerged.
+        self.0.wait_index_idle();
         self.0.close().map_err(err)
+    }
+    fn index_keys(&self) -> Vec<(&'static str, String)> {
+        let i = self.0.index_info();
+        vec![
+            ("index_runs", i.runs.to_string()),
+            ("index_filter_bytes", i.filter_bytes.to_string()),
+            ("index_fence_bytes", i.fence_bytes.to_string()),
+            ("index_memtable_entries", i.memtable_entries.to_string()),
+            ("hwm_pack", i.hwm_pack.to_string()),
+        ]
+    }
+    fn gc(&self, live: &HashSet<ObjectId>) -> Result<Vec<(&'static str, String)>, String> {
+        let boundary = self.0.gc_begin().map_err(err)?;
+        let st = self.0.gc_finish(live, boundary).map_err(err)?;
+        let t = self.0.last_gc_timing();
+        let ms = |d: std::time::Duration| format!("{:.3}", d.as_secs_f64() * 1e3);
+        Ok(vec![
+            ("removed_objects", st.removed_objects.to_string()),
+            ("kept_objects", st.kept_objects.to_string()),
+            ("removed_bytes", st.removed_bytes.to_string()),
+            ("packs_punched", st.packs_punched.to_string()),
+            ("packs_compacted", st.packs_compacted.to_string()),
+            ("packs_deleted", st.packs_deleted.to_string()),
+            ("wall_s", format!("{:.3}", t.wall.as_secs_f64())),
+            ("lock_hold_max_ms", ms(t.lock_hold_max)),
+            ("lock_hold_total_ms", ms(t.lock_hold_total)),
+        ])
     }
 }
 
@@ -158,10 +210,13 @@ impl Backend for ChunkStoreBackend {
         "chunk-store"
     }
 
-    fn create(&self, dir: &Path, pack_limit: Option<u64>) -> Result<Box<dyn Store>, String> {
+    fn create(&self, dir: &Path, c: CreateOpts) -> Result<Box<dyn Store>, String> {
         let mut opts = Options::default();
-        if let Some(limit) = pack_limit {
+        if let Some(limit) = c.pack_limit {
             opts.pack_limit = limit;
+        }
+        if let Some(limit) = c.memtable_limit {
+            opts.index_memtable_limit = limit;
         }
         Ok(Box::new(ChunkStoreHandle(ChunkStore::open(dir, opts).map_err(err)?)))
     }
