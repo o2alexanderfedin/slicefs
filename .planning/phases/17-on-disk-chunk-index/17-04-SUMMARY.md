@@ -16,11 +16,11 @@ provides:
 affects: [17-05, 17-06, 17-07]
 
 actuals:
-  tokens: 12400
+  tokens: 13000
   tasks: 2
-  commits: 2
+  commits: 5
 plan_head_before: c48d351b2fd3499356dbbb19fb12f5924ad72439
-plan_head_after: d05736273f7e692c019f46b16a1dd0c9493f2718
+plan_head_after: d5dd20ff6c2955cde1499bf4056634225c447749
 
 tech-stack:
   added: []
@@ -40,13 +40,13 @@ key-files:
     - crates/chunk-store/tests/index_tests.rs
 
 key-decisions:
-  - "Damage below the hwm (17-03 note 1): rebuild the index from the packs in the same open. A writable open first resyncs the hwm pack past the damage, syncs it and writes its .idx durably (so no later open cuts it), then removes the MANIFEST and the runs and replays every pack. A read-only open does the same in RAM and writes nothing."
+  - "Damage below the hwm (17-03 note 1): rebuild the index from the packs in the same open. The check: the records of the hwm pack below the hwm must be contiguous from the pack header (from the scan, the resync or the .idx). A writable open first resyncs the hwm pack past the damage, syncs it and writes its .idx durably (so no later open cuts it), then removes the MANIFEST and the runs and replays every pack. If the rebuild stops after the .idx write, the next open finds the same gap through the .idx. A read-only open does the same in RAM and writes nothing."
   - "The hwm pack missing while hwm.offset > 0 is the same damage, and gives the same rebuild"
   - "A Corrupt lookup during the replay (a damaged run page) also rebuilds; an Io error still fails the open"
   - "request_index_rebuild() takes no argument (as planned); the crate-private Index::request_rebuild(io, reason) logs the reason, for 17-06 and 17-07"
   - "A failed removal of an orphan run logs a warning and does not fail the open; the next writable open tries again"
 
-duration: about 30 minutes (16:16 to 16:45 local time)
+duration: about 35 minutes (16:16 to 16:51 local time)
 completed: 2026-11-18
 ---
 
@@ -87,18 +87,22 @@ The two planned tests also failed on HEAD: `an_active_pack_cut_below_the_hwm_is_
 **How:**
 - `ChunkStore::load` checks the hwm pack first, before it changes any pack. The open needs a rebuild if `hwm.offset > 0` and either:
   - the hwm pack is missing, or
-  - the end of the valid records of the hwm pack is below `hwm.offset`. For the active pack this end is where the scan stops; for a sealed pack without an `.idx`, it is the end of the last resynced record.
+  - the records of the hwm pack below `hwm.offset` do not fill it from the pack header up to `hwm.offset` with no gap (`covers` in lib.rs). The records come from the scan (active pack), from the resync (sealed pack without an `.idx`), or from the `.idx`. The hwm pack was the active pack of the flush that set the hwm, so its records below the hwm are contiguous. GC punches only packs below the hwm pack.
 - The flush syncs the active pack before a run can point to it. So these bytes were durable, and this is damage, not a torn tail.
 - **Writable open:** it does not cut the pack. It resyncs the pack, so the records after the damage stay. Then it syncs the pack and writes its `.idx` durably, so no later open (for example after a crash during the rebuild) cuts the pack at the damage. Only then does `Index::rebuild` remove the MANIFEST and the runs. The second pass reads the pack from its `.idx` as a sealed pack, and new objects go to a new pack.
+- **A repair that stops after the `.idx` write** (the MANIFEST removal fails, or a crash): the next open reads the pack from its `.idx`, finds the same gap, and starts the rebuild again. The first version checked only packs without an `.idx`, and compared only the end of the last record. A review found the problem, and `a_repair_that_stops_after_the_idx_is_done_again_at_the_next_open` failed on that version (commit 47b2d9a: "object 30: a run points to bytes that are gone").
 - **Read-only open:** it ignores the runs and replays every pack into RAM. The damaged pack is resynced, not cut, and nothing is written.
 
 **Evidence after the fix:**
 - `an_active_pack_cut_below_the_hwm_is_rebuilt_from_the_packs` passes. Objects 30..119 are not found, and a put writes each of them again. Objects 0..29 read back, and the stats are 30. Ten new objects survive a sync and a crash.
 - `a_damaged_record_below_the_hwm_costs_only_itself` passes. One flipped payload byte in record 30 loses only object 30, in a read-only open (no file changes) and in a writable open. All 120 objects and 10 new ones survive a crash.
+- `a_repair_that_stops_after_the_idx_is_done_again_at_the_next_open` passes, for both the cut and the flip. The MANIFEST removal fails after the `.idx` write, and the open fails. The next open does the repair again, with the same results as above.
+- A probe made every detected gap panic, and I ran the chunk-store tests and the downstream tests with it. The probe fired only in the three damage tests above, so the check gave no false positive in the GC, punch, compaction or replay tests.
 - Mutants, each run and reverted:
   - no hwm check: both tests fail.
   - a cut instead of a resync in the writable path: the flip test fails.
   - a read-only rebuild that ignores the resync pack: the flip test fails.
+  - no check for a pack that has an `.idx` (the first version, commit e365010): `a_repair_that_stops_after_the_idx_is_done_again_at_the_next_open` fails (commit 47b2d9a).
 
 ## Item 2 from 17-03: a damaged MANIFEST or run
 
@@ -123,7 +127,7 @@ A `Corrupt` lookup during the replay (a damaged run page that an ID above the hw
   - `Index::rebuild(io, read_only, reason)` and `Index::request_rebuild(io, reason)`. `request_rebuild` sets the flag in RAM (so a later flush keeps it), increases the sequence and writes the MANIFEST with `write_durable`. It reads no run.
 - `lib.rs`:
   - `open_with` = `Index::open` + `load`. A second `load` runs on an empty index if the first one returns `Loaded::Rebuild`.
-  - New `ChunkStore::request_index_rebuild()` (an error on a read-only store), a `rec_end` helper, and a doc comment on `put` that says the stats can count an object twice after a failed lookup.
+  - New `ChunkStore::request_index_rebuild()` (an error on a read-only store), the `rec_end` and `covers` helpers, and a doc comment on `put` that says the stats can count an object twice after a failed lookup.
 - `mem.rs`: four knobs.
   - `fail_next_write_durable(kind, n)`
   - `fail_write_durable_after(kind, skip)`
@@ -138,12 +142,15 @@ A `Corrupt` lookup during the replay (a damaged run page that an ID above the hw
 | ---- | ---- | ------ | ----- |
 | 1 | Open-time cleanup, rebuild of a damaged index, damage below the hwm, damaged pages | e365010 | index.rs, lib.rs, mem.rs, tests/index_tests.rs |
 | 2 | Crash tests of the run flush | d057362 | tests/index_crash_tests.rs |
+| 1 (review fix, RED) | A repair that stops after the .idx write is done again | 47b2d9a | tests/index_tests.rs |
+| 1 (review fix, GREEN) | Check the hwm pack through its .idx too (contiguous records) | d5dd20f | lib.rs |
 
 ## Tests
 
-- `cargo test -q --locked -p chunk-store --test index_tests`: 22 passed (10 from 17-03 and 12 new):
+- `cargo test -q --locked -p chunk-store --test index_tests`: 23 passed (10 from 17-03 and 13 new):
   - `an_active_pack_cut_below_the_hwm_is_rebuilt_from_the_packs`
   - `a_damaged_record_below_the_hwm_costs_only_itself`
+  - `a_repair_that_stops_after_the_idx_is_done_again_at_the_next_open`
   - `an_orphan_run_is_removed_at_a_writable_open` (also: a failed removal does not fail the open)
   - `a_read_only_open_keeps_an_orphan_run`
   - `a_damaged_manifest_is_rebuilt_from_the_packs`
@@ -163,14 +170,16 @@ A `Corrupt` lookup during the replay (a damaged run page that an ID above the hw
   - `stats().objects` equals the number of objects that read back;
   - `list_runs` count equals `index_info().runs` (no orphan);
   - every run that was committed before the fault is still there. A rebuild would hide an ordering bug, so the test fails if one happens.
-- `cargo test -q --locked -p chunk-store`: every target passed (30, 10, 4, 5, 7, 22, 10, 9, 6, 11, 0).
-- Downstream, `cargo test -q --locked -p slicefs-cli -p metadata -p index-bench`: 39 test targets all ok, 976 passed, 0 failed, 6 ignored. The output has no `FAILED`, `panicked` or `error` line.
+- `cargo test -q --locked -p chunk-store`: every target passed (30, 10, 4, 5, 7, 23, 10, 9, 6, 11, 0).
+- Downstream, `cargo test -q --locked -p slicefs-cli -p metadata -p index-bench`: 39 test targets all ok, 976 passed, 0 failed, 6 ignored. The output has no `FAILED`, `panicked` or `error` line. I ran it twice: once on d057362, and once on d5dd20f with the gap probe (a panic on every detected gap), with the same counts and no probe line.
 - `cargo clippy -p chunk-store --all-targets`: no new warning. The two warnings that are left were there before: `lib.rs:318` type complexity, and `file_tests.rs:69`.
 
 ### Mutation checks (each run and then reverted)
 
 | Mutant | Tests that failed |
 | ------ | ----------------- |
+| No check for a hwm pack that has an `.idx` (the first version of this plan) | `a_repair_that_stops_after_the_idx_is_done_again_at_the_next_open` (RED commit 47b2d9a) |
+| The hwm-pack check compares only the end of the last record (not contiguity) | `a_repair_that_stops_after_the_idx_is_done_again_at_the_next_open` (the flip case) |
 | No hwm-pack check (the 17-03 behavior) | `a_damaged_record_below_the_hwm_costs_only_itself`, `an_active_pack_cut_below_the_hwm_is_rebuilt_from_the_packs` |
 | Writable damage below the hwm: cut instead of resync | `a_damaged_record_below_the_hwm_costs_only_itself` |
 | Read-only rebuild ignores the resync pack | `a_damaged_record_below_the_hwm_costs_only_itself` |
@@ -225,14 +234,20 @@ A `Corrupt` lookup during the replay (a damaged run page that an ID above the hw
 - `gc_copies_are_not_counted_twice_after_a_failed_tombstone_flush` uses 200 objects of 500 bytes, not 100, so that the 64 KiB packs give at least two packs.
 - `a_failed_run_sync` and `a_crash_after_the_run_file_before_the_manifest` check that the flush's sync of the active pack happened first: every object up to the flushing put reads back after the crash.
 
-**5. [Process] Commits on `feature/17-on-disk-index`, not on an `agent-*` branch**
+**5. [Rule 1 - Bug] A repair that stopped after the `.idx` write was not done again**
+- **Found during:** review after Task 2
+- **Issue:** the first version checked the hwm pack only when it had no valid `.idx`, and compared only where the last record ended. The repair writes the `.idx` first. If the MANIFEST removal then failed (or the process stopped), the next open read the pack from its `.idx`, skipped the check, and used the old runs again. That brought back the stale dedup hit. A resynced pack with a lost record in the middle also passed the end comparison.
+- **Fix:** `covers` checks that the records below the hwm are contiguous from the pack header, and the check runs for the `.idx`, scan and resync cases.
+- **Commits:** 47b2d9a (RED), d5dd20f (GREEN)
+
+**6. [Process] Commits on `feature/17-on-disk-index`, not on an `agent-*` branch**
 - The launch message said to switch to this branch, and the stock worktree branch check expects `agent-*`. This branch is not protected, and HEAD is attached (`refs/heads/feature/17-on-disk-index`). 17-02 and 17-03 did the same.
 - STATE.md and ROADMAP.md are not updated, as the launch message said.
 
 ## Not covered by these tests
 
 - I did not test the read-only path that reads the MANIFEST a second time after a listed run disappears, which happens when a writer process replaces the runs. MemIo has no hook to change the MANIFEST between two reads. If the second read also fails, the path falls back to the replay into RAM, and the `a_manifest_that_names_a_missing_run_is_rebuilt` test covers that fallback.
-- A sealed pack (with a valid `.idx`) that is damaged later below the hwm is not checked at open. This is the same as a damaged sealed pack anywhere: the read gives `Corrupt`, and a put of that object is a dedup hit. That was also the behavior before Phase 17 (the `.idx` listed the record). Scrub is the tool for this.
+- Only the hwm pack is checked at open. A pack below the hwm pack that is damaged later is not checked (to check it, the open would have to read every pack). This is the same as a damaged sealed pack anywhere: the read gives `Corrupt`, and a put of that object is a dedup hit. That was also the behavior before Phase 17 (the `.idx` listed the record). Scrub is the tool for this.
 - `stats` can count an object twice after a put re-writes an object behind a damaged page, until the next rebuild (now written in the doc comment of `put`).
 - A rebuild brings back objects that GC removed but whose packs are not yet deleted or punched. Their bytes are intact and verified, so this is not wrong data, and the next GC removes them again.
 
@@ -256,4 +271,4 @@ None. These threats are mitigated:
 ## Self-Check: PASSED
 
 - FOUND: crates/chunk-store/src/index.rs, crates/chunk-store/src/lib.rs, crates/chunk-store/src/mem.rs, crates/chunk-store/tests/index_tests.rs, crates/chunk-store/tests/index_crash_tests.rs
-- FOUND: e365010, d057362 (in `git log c48d351..HEAD`)
+- FOUND: e365010, d057362, 887dba0, 47b2d9a, d5dd20f (in `git log c48d351..HEAD`)
