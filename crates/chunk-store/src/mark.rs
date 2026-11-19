@@ -20,7 +20,8 @@
 use std::collections::HashSet;
 
 use crate::bloom::Bloom;
-use crate::{ObjectId, DIGEST_LEN};
+use crate::extsort::Sorter;
+use crate::{ObjectId, DIGEST_LEN, ID_LEN};
 
 /// A per-filter salt. The Bloom filter takes its probe positions from the
 /// digest bytes 0..24 (see `bloom.rs`); a salted filter gives it these
@@ -157,26 +158,61 @@ impl LiveSet for LiveFilter {
 /// keeps a dead object). During `gc_finish` the set must list its IDs (each
 /// one is looked up to find its pack), so it stays exact: its size is the
 /// distinct objects put or read during `gc_finish`, not the store size.
+///
+/// A full GC (`gc_begin_full`) records the IDs before `gc_finish_full` in an
+/// external sorter instead (temp files, bounded RAM, exact).
 pub(crate) struct Touched {
     ids: HashSet<ObjectId>,
     filter: Option<(Bloom, Salt)>,
     spill_at: usize,
+    disk: Option<Sorter<ID_LEN>>,
+    /// A write of `disk` failed: the set is not complete.
+    disk_err: Option<String>,
 }
 
 impl Touched {
     /// A set that moves into a filter after `spill_at` IDs.
     pub fn spilling(spill_at: usize) -> Touched {
-        Touched { ids: HashSet::new(), filter: None, spill_at: spill_at.max(1) }
+        Touched { ids: HashSet::new(), filter: None, spill_at: spill_at.max(1), disk: None, disk_err: None }
+    }
+
+    /// A set in an external sorter (a full GC).
+    pub fn on_disk(sorter: Sorter<ID_LEN>) -> Touched {
+        Touched { ids: HashSet::new(), filter: None, spill_at: usize::MAX, disk: Some(sorter), disk_err: None }
+    }
+
+    /// The sorter of a set made with [`Touched::on_disk`], or the exact IDs
+    /// of a set that never spilled. Err if the set is not exact (a Bloom
+    /// filter, or a failed write of the sorter).
+    pub fn into_exact(self) -> Result<Result<Sorter<ID_LEN>, HashSet<ObjectId>>, String> {
+        if let Some(e) = self.disk_err {
+            return Err(format!("the touched set of the GC could not be written: {e}"));
+        }
+        if self.filter.is_some() {
+            return Err("the touched set of the GC is a Bloom filter (start a full GC with gc_begin_full)".into());
+        }
+        Ok(match self.disk {
+            Some(s) => Ok(s),
+            None => Err(self.ids),
+        })
     }
 
     /// A set that stays exact.
     pub fn exact() -> Touched {
-        Touched { ids: HashSet::new(), filter: None, spill_at: usize::MAX }
+        Touched { ids: HashSet::new(), filter: None, spill_at: usize::MAX, disk: None, disk_err: None }
     }
 
     /// Record `id`. `objects` (the store's object count) sizes the filter
     /// of a spill.
     pub fn insert(&mut self, id: ObjectId, objects: u64) {
+        if let Some(s) = self.disk.as_mut() {
+            if self.disk_err.is_none() {
+                if let Err(e) = s.push(id.0) {
+                    self.disk_err = Some(e.to_string());
+                }
+            }
+            return;
+        }
         if let Some((f, salt)) = self.filter.as_mut() {
             f.insert(&salt.key(&id));
             return;
@@ -194,8 +230,10 @@ impl Touched {
         }
     }
 
+    /// (A set on disk answers true: only a full GC reads it, as a stream.)
     pub fn contains(&self, id: &ObjectId) -> bool {
-        self.ids.contains(id) || self.filter.as_ref().is_some_and(|(f, salt)| f.may_contain(&salt.key(id)))
+        self.disk.is_some()
+            || self.ids.contains(id) || self.filter.as_ref().is_some_and(|(f, salt)| f.may_contain(&salt.key(id)))
     }
 
     /// The exact IDs. Only for a set made with [`Touched::exact`], which
