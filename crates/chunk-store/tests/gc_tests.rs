@@ -200,4 +200,155 @@ mod on_runs {
         // the GC, so the GC adds more than one run.
         assert!(runs_small >= 2, "{runs_small} runs added");
     }
+
+    /// Three packs of four 8,000-byte objects (pack limit 30,000), every
+    /// entry in a run before the GC (memtable limit 4). The live set makes
+    /// one pack of each kind: nothing live (deleted), 1 of 4 live
+    /// (compacted), 3 of 4 live (punched).
+    struct Three {
+        mem: MemIo,
+        o: Options,
+        objs: Vec<Obj>,
+        live: HashSet<ObjectId>,
+    }
+
+    impl Three {
+        fn new() -> (Self, ChunkStore) {
+            let mem = MemIo::new();
+            let o = opts(4, 30_000);
+            let s = open(&mem, &o);
+            let objs = put_n(&s, 12, 8000, 7_000);
+            s.sync().unwrap();
+            assert_eq!(mem.list().unwrap().len(), 3, "three sealed packs");
+            assert_eq!(s.index_info().memtable_entries, 0, "every entry is in a run");
+            // Pack 1: none live; pack 2: object 4 live; pack 3: object 9 dead.
+            let live = [4, 8, 10, 11].iter().map(|&i| objs[i].0).collect();
+            (Three { mem, o, objs, live }, s)
+        }
+
+        fn removed(&self) -> Vec<&Obj> {
+            self.objs.iter().filter(|(id, _)| !self.live.contains(id)).collect()
+        }
+
+        fn gc(&self, s: &ChunkStore) -> GcStats {
+            let b = s.gc_begin().unwrap();
+            self.finish(s, b)
+        }
+
+        fn finish(&self, s: &ChunkStore, b: u64) -> GcStats {
+            let st = s.gc_finish(&self.live, b).unwrap();
+            assert_eq!((st.packs_deleted, st.packs_compacted, st.packs_punched), (1, 1, 1), "{st:?}");
+            assert_eq!(st.removed_objects, 8, "{st:?}");
+            st
+        }
+
+        /// Removed objects are missing (except `back`, put again), live
+        /// objects read back.
+        fn check(&self, s: &ChunkStore, back: &[ObjectId], what: &str) {
+            for (i, (id, d)) in self.objs.iter().enumerate() {
+                if self.live.contains(id) || back.contains(id) {
+                    assert_eq!(s.get(id).as_ref(), Some(d), "{what}: object {i}");
+                    assert!(s.contains(id), "{what}: object {i}");
+                } else {
+                    assert!(!s.contains(id), "{what}: removed object {i}");
+                    assert!(s.get(id).is_none(), "{what}: removed object {i}");
+                    assert!(s.stored_len(id).is_none(), "{what}: removed object {i}");
+                }
+            }
+        }
+
+        fn pack_bytes(&self) -> usize {
+            self.mem.list().unwrap().into_iter().map(|n| self.mem.len(n, Kind::Pack).unwrap()).sum()
+        }
+
+        /// Put `obj` again: the put writes it (the pack bytes grow), it reads
+        /// back, and the object count grows by one.
+        fn put_again(&self, s: &ChunkStore, (id, d): &Obj) {
+            let (bytes, objects) = (self.pack_bytes(), s.stats().objects);
+            assert_eq!(s.put(d).unwrap(), *id);
+            assert!(self.pack_bytes() > bytes, "the put of a removed object writes it");
+            assert_eq!(s.get(id).as_ref(), Some(d));
+            assert_eq!(s.stats().objects, objects + 1);
+        }
+
+        fn reopen(&self, s: ChunkStore) -> ChunkStore {
+            s.sync().unwrap();
+            drop(s);
+            open(&self.mem, &self.o)
+        }
+    }
+
+    use chunk_store::pack_io::{Kind, PackIo};
+
+    #[test]
+    fn removed_objects_stay_missing_for_each_kind_of_pack() {
+        let (t, s) = Three::new();
+        t.gc(&s);
+        t.check(&s, &[], "after the GC");
+        // One removed object of each pack (0: deleted, 1: compacted,
+        // 9: punched) is put again; the others stay missing.
+        let back: Vec<ObjectId> = [0, 1, 9].iter().map(|&i| t.objs[i].0).collect();
+        for &i in &[0, 1, 9] {
+            t.put_again(&s, &t.objs[i]);
+        }
+        t.check(&s, &back, "after the new puts");
+        assert_eq!(s.stats().objects, 4 + 3);
+        let s = t.reopen(s);
+        t.check(&s, &back, "after a reopen");
+        assert_eq!(s.stats().objects, 4 + 3);
+    }
+
+    #[test]
+    fn a_merge_between_gc_begin_and_gc_finish() {
+        let (t, s) = Three::new();
+        assert!(s.index_info().runs >= 2);
+        let b = s.gc_begin().unwrap();
+        assert!(s.merge_index_all().unwrap());
+        assert_eq!(s.index_info().runs, 1);
+        t.finish(&s, b);
+        t.check(&s, &[], "after the GC");
+        assert_eq!(s.stats().objects, 4);
+        let s = t.reopen(s);
+        t.check(&s, &[], "after a reopen");
+        assert_eq!(s.stats().objects, 4);
+        for (id, d) in t.removed() {
+            assert_eq!(s.put(d).unwrap(), *id);
+            assert_eq!(s.get(id).as_ref(), Some(d));
+        }
+        assert_eq!(s.stats().objects, 12);
+    }
+
+    #[test]
+    fn a_merge_after_gc_drops_the_tombstones_and_removed_objects_stay_missing() {
+        let (t, s) = Three::new();
+        t.gc(&s);
+        assert!(s.index_info().run_tombstones > 0);
+        assert!(s.merge_index_all().unwrap());
+        let info = s.index_info();
+        assert_eq!((info.runs, info.run_tombstones), (1, 0), "{info:?}");
+        t.check(&s, &[], "after the merge");
+        let s = t.reopen(s);
+        assert_eq!(s.index_info().run_tombstones, 0);
+        t.check(&s, &[], "after a reopen");
+        let (id9, _) = &t.objs[9];
+        t.put_again(&s, &t.objs[9]);
+        t.check(&s, &[*id9], "after a new put");
+    }
+
+    #[test]
+    fn the_put_dedup_check_of_a_removed_object_writes_it() {
+        let (t, s) = Three::new();
+        t.gc(&s);
+        // Every removed entry is behind a tombstone in a run (nothing in the
+        // memtable): the dedup check reads the runs and finds it.
+        assert_eq!(s.index_info().memtable_entries, 0);
+        for obj in t.removed() {
+            t.put_again(&s, obj);
+        }
+        assert_eq!(s.stats().objects, 12);
+        let s = t.reopen(s);
+        for (id, d) in &t.objs {
+            assert_eq!(s.get(id).as_ref(), Some(d));
+        }
+    }
 }
