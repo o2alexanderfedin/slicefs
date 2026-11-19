@@ -38,10 +38,17 @@ nsw(){ grep -c "$SWITCH_TEXT" $R/mount.log; }
 # reference file. One handle per file for the whole pass, opened O_RDWR with
 # no truncate. Each round is one 1 MiB write and 256 writes of 4 KiB, at random
 # 4 KiB-aligned offsets inside the file. fsync of the target every 64 MiB.
+# Each write and fsync of the target is logged (#108): start time (epoch s),
+# latency (ms), kind (W/F), size, offset -> $R/writes-<size>.log.
+# BW_QUIET_REF=1: the reference file is synced before the pass and gets the
+# same writes in a second pass after it, so that no dirty pages of the
+# reference are on the disk while the target is timed (its fsyncs and the
+# daemon's pack syncs then wait only for SliceFS's own data).
 cat > $R/rw.py <<'PY'
 import os, random, sys, time
 KB, MB = 4096, 1 << 20
 tgt = os.open(sys.argv[1], os.O_RDWR)
+log = open(sys.argv[5], "w", buffering=1 << 20)
 ref = os.open(sys.argv[2], os.O_RDWR)
 rnd = random.Random(int(sys.argv[3]))
 vol = int(sys.argv[4]) * MB
@@ -52,16 +59,20 @@ def put(fd, data, off):
         done += os.pwrite(fd, data[done:], off + done)
 written = writes = since_sync = 0
 max_w = max_s = 0.0
+quiet = len(sys.argv) > 6 and sys.argv[6] == "1"
 def one(n):
     global written, writes, since_sync, max_w
     off = rnd.randrange((size - n) // KB + 1) * KB
     data = rnd.randbytes(n)
-    t = time.perf_counter(); put(tgt, data, off); max_w = max(max_w, time.perf_counter() - t)
-    put(ref, data, off)
+    w = time.time(); t = time.perf_counter(); put(tgt, data, off); d = time.perf_counter() - t
+    max_w = max(max_w, d); log.write(f"{w:.3f} {d * 1000:.1f} W {n} {off}\n")
+    if not quiet:
+        put(ref, data, off)
     written += n; writes += 1; since_sync += n
 def sync():
     global since_sync, max_s
-    t = time.perf_counter(); os.fsync(tgt); max_s = max(max_s, time.perf_counter() - t)
+    w = time.time(); t = time.perf_counter(); os.fsync(tgt); d = time.perf_counter() - t
+    max_s = max(max_s, d); log.write(f"{w:.3f} {d * 1000:.1f} F 0 0\n")
     since_sync = 0
 while written < vol:
     one(MB)
@@ -70,8 +81,66 @@ while written < vol:
     if since_sync >= 64 * MB:
         sync()
 sync()
-os.close(tgt); os.close(ref)
+if quiet:  # the same writes into the reference, after the timed pass
+    rnd = random.Random(int(sys.argv[3])); done = 0
+    while done < vol:
+        for n in [MB] + [KB] * 256:
+            off = rnd.randrange((size - n) // KB + 1) * KB
+            put(ref, rnd.randbytes(n), off); done += n
+os.close(tgt); os.close(ref); log.close()
 print(f"writes {writes}, max write {max_w * 1000:.0f} ms, max fsync {max_s * 1000:.0f} ms")
+PY
+
+# Match the slowest writes of rw.py to the daemon probe lines ([t=epoch]...)
+# in mount.log that fall inside each write: rebase steps, timed commits,
+# pack syncs and the daemon's own time for the write (#108).
+cat > $R/match.py <<'PY'
+import re, sys
+writes = [l.split() for l in open(sys.argv[1])]
+writes = [(float(a), float(b), k, int(n), int(o)) for a, b, k, n, o in writes]
+ev = []
+for line in open(sys.argv[2], errors="replace"):
+    m = re.match(r"(?:\[[^\]]*\])?\[t=([0-9.]+)\]\[([a-z-]+)\] ?(.*)", line.strip())
+    if m:
+        ev.append((float(m.group(1)), m.group(2), m.group(3)))
+ev.sort()
+t0, t1 = writes[0][0], writes[-1][0] + writes[-1][1] / 1000
+inrw = [e for e in ev if t0 <= e[0] <= t1]
+def num(e, k):
+    m = re.search(k + r"=([0-9.]+)", e[2]); return float(m.group(1)) if m else 0.0
+reb = [e for e in inrw if e[1] == "rebase"]
+syn = [e for e in inrw if e[1] == "pack"]
+com = [e for e in inrw if e[1] == "commit-timer"]
+w = [x for x in writes if x[2] == "W"]
+print(f"    rw: {len(w)} writes, sum {sum(x[1] for x in w) / 1000:.1f} s; wall {t1 - t0:.1f} s")
+print(f"    rebase steps: {len(reb)}, splice sum {sum(num(e, 'splice_ms') for e in reb) / 1000:.1f} s, "
+      f"install sum {sum(num(e, 'install_ms') for e in reb) / 1000:.1f} s, rechunked {sum(num(e, 'rechunked') for e in reb) / 2**20:.0f} MiB, "
+      f"reused_entries {sum(num(e, 'reused_entries') for e in reb):.0f}")
+if reb:
+    print(f"    step splice_ms max {max(num(e, 'splice_ms') for e in reb):.0f}, install_ms max {max(num(e, 'install_ms') for e in reb):.0f}")
+    # Step time without the pack syncs inside it (a sync line comes before
+    # the rebase line of its step).
+    net, acc, k = [], 0.0, 0
+    for e in inrw:
+        if e[1] == "pack":
+            acc += num(e, "ms")
+        elif e[1] == "rebase":
+            net.append(num(e, "splice_ms") - acc); acc = 0.0
+    net.sort()
+    print(f"    step minus syncs: median {net[len(net) // 2]:.0f} ms, p99 {net[int(len(net) * 0.99)]:.0f} ms, max {net[-1]:.0f} ms; "
+          f"nodes_loaded mean {sum(num(e, 'nodes_loaded') for e in reb) / len(reb):.0f}")
+print(f"    pack syncs: {len(syn)}, sum {sum(num(e, 'ms') for e in syn) / 1000:.1f} s, max {max([num(e, 'ms') for e in syn] or [0]):.0f} ms")
+for e in com:
+    print(f"    commit at {e[0]:.3f}: {e[2]}")
+print("    slowest writes (start, ms, kind, size) and the daemon lines inside them:")
+for x in sorted(writes, key=lambda x: -x[1])[:int(sys.argv[3])]:
+    a, b = x[0] - 0.005, x[0] + x[1] / 1000 + 0.005
+    print(f"    - {x[0]:.3f} {x[1]:.0f} ms {x[2]} {x[3]} @ {x[4]}")
+    inside = [e for e in ev if a <= e[0] <= b]
+    for e in inside[:12]:
+        print(f"        {e[0]:.3f} [{e[1]}] {e[2][:200]}")
+    if len(inside) > 12:
+        print(f"        ... {len(inside) - 12} more")
 PY
 
 T0=$SECONDS
@@ -80,10 +149,11 @@ for S in "${SIZES[@]}"; do
   ST=$R/s$S; M=$R/m$S
   if ! $B seed $ST $R/empty >$R/step.out 2>&1; then bad "bw-seed-$S" "($(head -c 200 $R/step.out))"; continue; fi
   head -c $((S * 1048576)) /dev/urandom > $R/ref.bin
+  [ -n "${BW_QUIET_REF:-}" ] && sync
   if mnt $ST $M; then   # default commit interval
     N0=$(nsw)
     t=$SECONDS; step bw-cp-$S 900 cp $R/ref.bin $M/big.bin; T1=$((SECONDS - t)); H1=$(hwm)
-    t=$SECONDS; step bw-random-write-$S 1800 python3 $R/rw.py $M/big.bin $R/ref.bin $SEED $VOL_MIB
+    t=$SECONDS; step bw-random-write-$S 1800 python3 $R/rw.py $M/big.bin $R/ref.bin $SEED $VOL_MIB $R/writes-$S.log "${BW_QUIET_REF:-}"
     T2=$((SECONDS - t)); H2=$(hwm); RW=$(tail -1 $R/step.out)
     t=$SECONDS; step bw-cmp-$S 600 cmp $R/ref.bin $M/big.bin; T3=$((SECONDS - t)); H3=$(hwm)
     N=$(( $(nsw) - N0 ))
@@ -93,6 +163,10 @@ for S in "${SIZES[@]}"; do
       if [ "$N" -ge 1 ]; then ok bw-overlay-used-$S; else bad bw-overlay-used-$S "(no '$SWITCH_TEXT' line)"; fi
     fi
     umnt $M
+    python3 $R/match.py $R/writes-$S.log $R/mount.log 8 || echo "    (no write match)"
+    # Keep the logs on the target volume when it is writable (for a closer look).
+    if [ -n "${BW_KEEP:-}" ] && mkdir -p "$BW_KEEP/$S" 2>/dev/null; then
+      cp $R/writes-$S.log $R/mount.log "$BW_KEEP/$S/" 2>/dev/null; fi
     echo "    bigwrite $S MiB: VmHWM after cp $H1, after random write $H2, after cmp $H3 MiB ($([ -n "$CAP_MIB" ] && echo "cap $CAP_MIB MiB" || echo "measure only")); $RW; overlay switches $N; CAS bytes $(cas $ST); times cp/rw/cmp $T1/$T2/$T3 s"
     if mnt $ST $M; then
       step bw-cmp-after-remount-$S 600 cmp $R/ref.bin $M/big.bin

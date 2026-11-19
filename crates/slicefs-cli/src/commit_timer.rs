@@ -47,11 +47,14 @@ pub fn spawn_commit_timer(
             if !fs.meta().has_uncommitted_changes() {
                 continue;
             }
+            let w = Instant::now();
             let _all = gate.write().unwrap_or_else(|e| e.into_inner());
+            let gate_wait = w.elapsed();
             let t = Instant::now();
             // A clean cut: open files' content goes into the root (#20).
             match fs.commit_cut() {
-                Ok(_) => eprintln!("[{}][commit-timer] committed in {} ms", ts(), t.elapsed().as_millis()),
+                Ok(_) => eprintln!("[{}][t={}][commit-timer] committed: gate_wait_ms={} hold_ms={} relog_bytes={}",
+                    ts(), crate::util::epoch(), gate_wait.as_millis(), t.elapsed().as_millis(), fs.test_last_relog_bytes()),
                 Err(e) => eprintln!("[{}][commit-timer] commit failed: {}", ts(), e),
             }
         })

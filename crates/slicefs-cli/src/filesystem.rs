@@ -48,6 +48,8 @@ struct OverlaySource<'a> {
     cs: &'a chunk_store::ChunkStore,
     ov: &'a Overlay,
     reader: Option<content::Reader>,
+    /// Base bytes asked so far (for tests).
+    base_bytes: u64,
 }
 
 impl<'a> OverlaySource<'a> {
@@ -56,16 +58,19 @@ impl<'a> OverlaySource<'a> {
             Some(k) => Some(content::Reader::open(cs, k)?),
             None => None,
         };
-        Ok(OverlaySource { cs, ov, reader })
+        Ok(OverlaySource { cs, ov, reader, base_bytes: 0 })
     }
 }
 
 impl chunk_store::file::SpliceSource for OverlaySource<'_> {
     fn read(&mut self, offset: u64, len: usize) -> chunk_store::Result<Vec<u8>> {
-        let (cs, reader) = (self.cs, &mut self.reader);
-        self.ov.view(offset, len as u64).read(|o, n| match reader.as_mut() {
-            Some(r) => r.read(cs, o, n),
-            None => Ok(Vec::new()),
+        let (cs, reader, counted) = (self.cs, &mut self.reader, &mut self.base_bytes);
+        self.ov.view(offset, len as u64).read(|o, n| {
+            *counted += n as u64;
+            match reader.as_mut() {
+                Some(r) => r.read(cs, o, n),
+                None => Ok(Vec::new()),
+            }
         }).map_err(chunk_store::Error::Io)
     }
 }
@@ -77,7 +82,9 @@ const RELOG_PIECE: u64 = 1 << 20;
 
 /// Dirty limit of one open file: when the RAM of its overlay (extent
 /// capacity plus `EXTENT_OVERHEAD` per extent) passes it, the write that
-/// passed it stores the overlay as a new root (a rebase) before it returns.
+/// passed it stores a part of the overlay as a new root (a rebase step of
+/// about `REBASE_STEP` bytes, #108) before it returns. So an overlay that
+/// stays busy holds about the limit; release stores the rest.
 /// An extent grows by at most 1/8 of its length (`overlay::GROW_DIV`), not by
 /// doubling, so the capacity stays near the dirty bytes. The real
 /// peak of one handle is max(REORDER_WINDOW, DIRTY_LIMIT) + one write + the
@@ -88,6 +95,27 @@ const RELOG_PIECE: u64 = 1 << 20;
 /// slowest write of the run was 7778 ms against 7253 ms, so the value stays
 /// 32 MiB.
 pub const DIRTY_LIMIT: usize = 32 << 20;
+
+/// Bytes of overlay cost one rebase step frees: this, or the cost its write
+/// added if that is more (#108). A write past the dirty limit rebases only this much,
+/// so no single write pays for the rebase of the whole overlay.
+pub const REBASE_STEP: usize = 1 << 20;
+
+/// Budget of dirty bytes of all open files together (#105): when a write
+/// makes the sum pass it, the file with the most dirty bytes stores a step
+/// (an overlay rebase step; a stream's pending writes first become an
+/// overlay). Each file also keeps its own `DIRTY_LIMIT`. The same value as
+/// `REORDER_WINDOW`, so one stream can still use its whole window.
+pub const DIRTY_BUDGET: usize = 64 << 20;
+
+/// The RAM an open file holds in written bytes that are not in a stored
+/// root: the overlay cost, or the pending out-of-order writes of a stream.
+fn dirty_cost(s: &OpenFileState) -> usize {
+    match &s.write_mode {
+        WriteMode::Overlay(ov) => ov.cost(),
+        WriteMode::Streaming { pending, .. } => pending.values().map(Vec::len).sum(),
+    }
+}
 
 /// A function the tests run inside a rebase (see `test_set_rebase_hook`).
 pub type RebaseHook = Arc<dyn Fn() + Send + Sync>;
@@ -189,12 +217,18 @@ pub struct SliceFsFilesystem {
     replaying: std::sync::atomic::AtomicBool,
     /// Dirty limit of one overlay (`DIRTY_LIMIT`; tests set it lower).
     dirty_limit: AtomicUsize,
+    /// Dirty budget of all open files (`DIRTY_BUDGET`; tests set it lower).
+    dirty_budget: AtomicUsize,
     /// Rebases done so far (for tests).
     rebase_count: AtomicU64,
     /// Bytes the last rebase fed to the chunker (for tests).
     last_rebase_bytes: AtomicU64,
     /// `Write` payload bytes the last commit logged again (for tests).
     last_relog_bytes: AtomicU64,
+    /// Bytes the rebase steps of the last write cut again (for tests).
+    write_rebase_bytes: AtomicU64,
+    /// Base bytes the rebase steps of the last write read (for tests).
+    write_base_bytes: AtomicU64,
     /// Run inside each rebase, after the new root is finished and before it
     /// is installed (for tests: online GC during a rebase).
     rebase_hook: Mutex<Option<RebaseHook>>,
@@ -233,9 +267,12 @@ impl SliceFsFilesystem {
             commit_gate: Arc::new(RwLock::new(())),
             replaying: std::sync::atomic::AtomicBool::new(false),
             dirty_limit: AtomicUsize::new(DIRTY_LIMIT),
+            dirty_budget: AtomicUsize::new(DIRTY_BUDGET),
             rebase_count: AtomicU64::new(0),
             last_rebase_bytes: AtomicU64::new(0),
             last_relog_bytes: AtomicU64::new(0),
+            write_rebase_bytes: AtomicU64::new(0),
+            write_base_bytes: AtomicU64::new(0),
             rebase_hook: Mutex::new(None),
         }
     }
@@ -243,6 +280,11 @@ impl SliceFsFilesystem {
     /// Test hook: set the dirty limit of each overlay to `bytes`.
     pub fn test_set_dirty_limit(&self, bytes: usize) {
         self.dirty_limit.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Test hook: set the dirty budget of all open files to `bytes`.
+    pub fn test_set_dirty_budget(&self, bytes: usize) {
+        self.dirty_budget.store(bytes, Ordering::Relaxed);
     }
 
     /// Test hook: the number of rebases so far.
@@ -254,6 +296,23 @@ impl SliceFsFilesystem {
     /// or a size change with no open handle): `SpliceStats::rechunked`.
     pub fn test_last_rebase_bytes(&self) -> u64 {
         self.last_rebase_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Test hook: the bytes that the rebase work of the last write cut again
+    /// with FastCDC (0 if it ran no rebase).
+    pub fn test_last_write_rebase_bytes(&self) -> u64 {
+        self.write_rebase_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Test hook: the base bytes that the rebase work of the last write read.
+    pub fn test_last_write_base_bytes(&self) -> u64 {
+        self.write_base_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Test hook: the dirty bytes of all open files (overlay costs and the
+    /// pending out-of-order writes of streams).
+    pub fn test_dirty_total(&self) -> usize {
+        self.open_files.lock().unwrap().values().map(dirty_cost).sum()
     }
 
     /// Test hook: the `Write` payload bytes the last commit logged again.
@@ -736,13 +795,29 @@ impl SliceFsFilesystem {
     }
 
     /// Store the content of an overlay as a new root and start a clean
-    /// overlay on it. The splice cuts again only the chunks near the extents
-    /// (and near a cut or an extended tail); every other chunk and whole old
-    /// node is reused by ID. Fixed memory, canonical key, CPU in the change
-    /// (on long repeating non-zero data the re-chunk can run to the end of
-    /// the file). A clean overlay is kept.
+    /// overlay on it (release, and the full rebase of a small dirty limit).
     fn rebase_overlay(&self, ino: u64, s: &mut OpenFileState) -> Result<(), i32> {
-        let WriteMode::Overlay(ov) = &s.write_mode else {
+        self.rebase_step(ino, s, usize::MAX)
+    }
+
+    /// Store a part of an overlay as a new root (#108): take extents worth
+    /// `free` bytes of cost (`Overlay::take`; all of them for `usize::MAX`),
+    /// splice them onto the base, and go on with an overlay on the new root
+    /// that holds the extents not taken. The new root has the old bytes
+    /// under those extents; they stay on top of it, so the content does not
+    /// change. The first step also stores a cut or an extended tail.
+    ///
+    /// The splice cuts again only the chunks near the taken extents; every
+    /// other chunk and whole old node is reused by ID. Fixed memory,
+    /// canonical key, CPU in the change (on long repeating non-zero data the
+    /// re-chunk can run to the end of the file). A clean overlay is kept.
+    ///
+    /// GC: like a whole rebase, a step runs inside one callback under the
+    /// shared commit gate, and the old base stays in the manifest until the
+    /// new root is installed.
+    fn rebase_step(&self, ino: u64, s: &mut OpenFileState, free: usize) -> Result<(), i32> {
+        let modified = s.modified;
+        let WriteMode::Overlay(ov) = &mut s.write_mode else {
             return Ok(());
         };
         if ov.is_clean() {
@@ -754,22 +829,58 @@ impl SliceFsFilesystem {
             libc::EIO
         };
         let size = ov.size;
-        let (root, rechunked) = if size == 0 {
-            (None, 0)
-        } else {
-            let mut src = OverlaySource::new(cs, ov).map_err(store_err)?;
-            let (k, stats) = content::splice(cs, ov.base.as_ref(), ov.visible, &ov.extent_ranges(), size, &mut src)
-                .map_err(store_err)?;
-            (Some(k), stats.rechunked)
-        };
-        self.rebase_count.fetch_add(1, Ordering::Relaxed);
-        self.last_rebase_bytes.store(rechunked, Ordering::Relaxed);
-        let hook = self.rebase_hook.lock().unwrap().clone();
-        if let Some(hook) = hook {
-            hook();
+        let t0 = std::time::Instant::now();
+        let cost_before = ov.cost();
+        let mut part = ov.empty_like();
+        for (o, v) in ov.take(free) {
+            part.put(o, v);
         }
-        self.install_root(ino, root, size, s.modified)?;
-        s.write_mode = WriteMode::Overlay(Overlay::new(root, size, size));
+        let (taken_n, taken_bytes) = (part.extent_count(), part.extent_ranges().iter().map(|r| r.end - r.start).sum::<u64>());
+        let spliced = if size == 0 {
+            Ok((None, chunk_store::file::SpliceStats::default(), 0))
+        } else {
+            OverlaySource::new(cs, &part).and_then(|mut src| {
+                let (k, stats) = content::splice(cs, part.base.as_ref(), part.visible, &part.extent_ranges(), size, &mut src)?;
+                Ok((Some(k), stats, src.base_bytes))
+            })
+        };
+        let splice_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let installed = spliced.map_err(store_err).and_then(|(root, stats, base_bytes)| {
+            let rechunked = if root.is_some() { stats.rechunked } else { 0 };
+            let t1 = std::time::Instant::now();
+            self.rebase_count.fetch_add(1, Ordering::Relaxed);
+            self.last_rebase_bytes.store(rechunked, Ordering::Relaxed);
+            self.write_rebase_bytes.fetch_add(rechunked, Ordering::Relaxed);
+            self.write_base_bytes.fetch_add(base_bytes, Ordering::Relaxed);
+            let hook = self.rebase_hook.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+            let r = self.install_root(ino, root, size, modified).map(|_| root);
+            eprintln!("[t={}][rebase] ino={ino} size={size} free={} cost_before={cost_before} taken={taken_n}/{taken_bytes} \
+                rechunked={rechunked} base_read={base_bytes} reused_entries={} reused_nodes={} nodes_loaded={} splice_ms={splice_ms:.1} install_ms={:.1}",
+                crate::util::epoch(), if free == usize::MAX { "all".to_string() } else { free.to_string() },
+                stats.reused_entries, stats.reused_nodes, stats.nodes_loaded, t1.elapsed().as_secs_f64() * 1000.0);
+            r
+        });
+        let root = match installed {
+            Ok(root) => root,
+            Err(e) => {
+                // Put the taken extents back: no written byte is lost.
+                for (o, v) in part.into_extents() {
+                    ov.put(o, v);
+                }
+                return Err(e);
+            }
+        };
+        drop(part);
+        let mut next = Overlay::new(root, size, size);
+        next.set_sweep(ov.sweep());
+        let rest = std::mem::replace(ov, Overlay::new(None, 0, 0));
+        for (o, v) in rest.into_extents() {
+            next.put(o, v);
+        }
+        *ov = next;
         s.last_committed_root = root;
         s.byte_count = size;
         Ok(())
@@ -904,6 +1015,8 @@ impl SliceFsFilesystem {
     /// reads on other fh's). FUSE serializes per-fh writes.
     pub fn test_write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, i32> {
         let fh = self.owner_fh(fh);
+        self.write_rebase_bytes.store(0, Ordering::Relaxed);
+        self.write_base_bytes.store(0, Ordering::Relaxed);
         if offset.checked_add(data.len() as u64).map_or(true, |end| end > MAX_FILE_SIZE) {
             return Err(libc::EFBIG);
         }
@@ -914,6 +1027,8 @@ impl SliceFsFilesystem {
         };
         // open_files lock is released here.
 
+        // Dirty cost before this write (after a switch: of the new overlay).
+        let mut cost_before = dirty_cost(&file_state);
         let result = match &mut file_state.write_mode {
             WriteMode::Streaming { state, next_expected_offset, pending } => {
                 let end = offset + data.len() as u64;
@@ -972,7 +1087,10 @@ impl SliceFsFilesystem {
                         ts(), fh, ino, offset, data.len(), *next_expected_offset, pending_bytes, fresh, overlaps_pending);
                     // Older pending writes go in first, then this (newest) write.
                     match self.to_overlay(&mut file_state) {
-                        Ok(()) => Self::overlay_write(&mut file_state, offset, data),
+                        Ok(()) => {
+                            cost_before = dirty_cost(&file_state);
+                            Self::overlay_write(&mut file_state, offset, data)
+                        }
                         Err(e) => Err(e),
                     }
                 }
@@ -981,21 +1099,117 @@ impl SliceFsFilesystem {
         };
 
         // An overlay past the dirty limit (also right after a switch that
-        // moved pending writes in) is stored as a new root now, in this
-        // callback. Never at fsync or at a commit.
-        let over = matches!(&file_state.write_mode,
-            WriteMode::Overlay(ov) if ov.cost() > self.dirty_limit.load(Ordering::Relaxed));
+        // moved pending writes in) stores a part of itself as a new root now,
+        // in this callback (never at fsync or at a commit). One step frees
+        // the larger of the cost this write added and `REBASE_STEP`, down
+        // to `limit - REBASE_STEP`: the work of one write does not grow with
+        // the limit (#108), and the cost never grows while it is above the
+        // limit (after a switch it comes down with each write smaller than
+        // `REBASE_STEP`). Not the sum of both: bigwrite showed the 1 MiB
+        // writes, whose steps freed 2 MiB, as the slowest ones. The added cost
+        // counts at most the bytes of the write (and one extent overhead):
+        // the spare capacity of a growing extent (up to 1/8 of its length)
+        // is freed by the next steps, so a step does not grow with the limit.
+        let limit = self.dirty_limit.load(Ordering::Relaxed);
+        let cost = dirty_cost(&file_state);
+        let added = cost.saturating_sub(cost_before).min(data.len() + crate::overlay::EXTENT_OVERHEAD);
+        let over = matches!(&file_state.write_mode, WriteMode::Overlay(_)) && cost > limit;
         let result = match result {
             Ok(n) if over => {
                 let ino = file_state.ino;
-                self.rebase_overlay(ino, &mut file_state).map(|_| n).map_err(|_| libc::EIO)
+                let free = (cost - limit.saturating_sub(REBASE_STEP)).min(added.max(REBASE_STEP));
+                self.rebase_step(ino, &mut file_state, free).map(|_| n).map_err(|_| libc::EIO)
             }
+            r => r,
+        };
+        // Then the budget of all open files (#105), with the same bound.
+        let result = match result {
+            Ok(n) => self.keep_budget(&mut file_state, added).map(|_| n),
             r => r,
         };
 
         // Re-insert the file state back into the map.
         self.open_files.lock().unwrap().insert(fh, file_state);
         result
+    }
+
+    /// Keep the dirty bytes of all open files within the budget (#105). `own`
+    /// is the state of the handle being written (out of `open_files`), and
+    /// `added` the dirty cost its write added. If the sum is above the
+    /// budget, the files with the most dirty bytes (this one or another)
+    /// store steps until the cost `max(added, REBASE_STEP)` is freed, or the sum
+    /// is `REBASE_STEP` below the budget. So the sum does not grow while it
+    /// is above the budget, and a write pays for at most that much work, not
+    /// for the whole rebase of another file.
+    ///
+    /// Another file's state leaves `open_files` during its step (as during
+    /// its own writes); a failed step of another file is logged, its extents
+    /// stay, and this write still succeeds. Nothing can see the state gone:
+    /// the mount runs one fuser dispatch thread (`Config::n_threads` is not
+    /// set, so 1; fuser refuses more outside Linux), and the commit timer
+    /// and the GC start take the commit gate exclusively, which this
+    /// callback holds shared. A mount with more dispatch threads would need
+    /// the state kept in the map during the step.
+    fn keep_budget(&self, own: &mut OpenFileState, added: usize) -> Result<(), i32> {
+        let budget = self.dirty_budget.load(Ordering::Relaxed);
+        let target = budget.saturating_sub(REBASE_STEP);
+        let mut cap: Option<usize> = None;
+        let mut freed = 0usize;
+        loop {
+            let own_cost = dirty_cost(own);
+            let (others, largest) = {
+                let open_files = self.open_files.lock().unwrap();
+                let others: usize = open_files.values().map(dirty_cost).sum();
+                let largest = open_files.iter().map(|(&fh, s)| (dirty_cost(s), fh)).max();
+                (others, largest)
+            };
+            let total = own_cost + others;
+            if cap.is_none() && total <= budget {
+                return Ok(());
+            }
+            let cap = *cap.get_or_insert((total - target.min(total)).min(added.max(REBASE_STEP)));
+            if freed >= cap || total <= target {
+                return Ok(());
+            }
+            let want = cap - freed;
+            let step = match largest {
+                Some((c, fh)) if c > own_cost => {
+                    let Some(mut other) = self.open_files.lock().unwrap().remove(&fh) else {
+                        return Ok(());
+                    };
+                    let before = dirty_cost(&other);
+                    let r = self.free_dirty(&mut other, want);
+                    let after = dirty_cost(&other);
+                    let ino = other.ino;
+                    self.open_files.lock().unwrap().insert(fh, other);
+                    if r.is_err() {
+                        eprintln!("[{}][FUSE] budget: step of ino {ino} failed", ts());
+                        return Ok(());
+                    }
+                    before.saturating_sub(after)
+                }
+                _ => {
+                    let before = own_cost;
+                    self.free_dirty(own, want)?;
+                    before.saturating_sub(dirty_cost(own))
+                }
+            };
+            if step == 0 {
+                return Ok(());
+            }
+            freed += step;
+        }
+    }
+
+    /// Free about `want` bytes of dirty cost of `s`: a rebase step of its
+    /// overlay; a stream with pending writes becomes an overlay first (no
+    /// content is read or cut there).
+    fn free_dirty(&self, s: &mut OpenFileState, want: usize) -> Result<(), i32> {
+        if matches!(&s.write_mode, WriteMode::Streaming { pending, .. } if !pending.is_empty()) {
+            self.to_overlay(s)?;
+        }
+        let ino = s.ino;
+        self.rebase_step(ino, s, want).map_err(|_| libc::EIO)
     }
 
     /// pwrite into the overlay of `s` (no I/O, no allocation by offset).
@@ -1289,7 +1503,10 @@ impl SliceFsFilesystem {
                 items.push(Item { ino, time, ctime, what });
             }
         }
+        let t_commit = std::time::Instant::now();
         let root = self.meta.commit()?;
+        let commit_ms = t_commit.elapsed().as_millis();
+        let t_relog = std::time::Instant::now();
         // The commit deleted the old log segments, so these records are now
         // the only copy of bytes an fsync may already have made durable:
         // sync them before the commit returns (a buffered log keeps them in RAM).
@@ -1343,10 +1560,14 @@ impl SliceFsFilesystem {
             }
         }
         self.last_relog_bytes.store(relog_bytes, Ordering::Relaxed);
+        let relog_ms = t_relog.elapsed().as_millis();
+        let t_flush = std::time::Instant::now();
         if relogged {
             self.meta.flush_wal()
                 .map_err(|e| MetaError::Corrupted(format!("cut: sync of the write log failed: {e}")))?;
         }
+        eprintln!("[t={}][commit-cut] commit_ms={commit_ms} relog_bytes={relog_bytes} relog_ms={relog_ms} flush_ms={}",
+            crate::util::epoch(), t_flush.elapsed().as_millis());
         Ok(root)
     }
 

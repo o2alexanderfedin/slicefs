@@ -26,6 +26,11 @@ use std::time::Duration;
 /// before their root are only garbage until the next GC).
 pub const KEEP_LIMIT: usize = 8 << 20;
 
+/// When true, each pack sync prints one line to stderr: the wall time (epoch
+/// seconds), the unsynced bytes it made durable and its duration (#108: match
+/// slow writes to their cause). The mount turns it on.
+pub static LOG_SYNCS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 const BACKOFF: [Duration; 3] = [Duration::from_millis(10), Duration::from_millis(100), Duration::from_millis(500)];
 
 pub struct RetryingIo {
@@ -101,7 +106,14 @@ impl PackFile for RetryingPack {
     }
 
     fn sync(&mut self) -> io::Result<()> {
-        let mut err = match self.file.sync() {
+        let t = std::time::Instant::now();
+        let first = self.file.sync();
+        if LOG_SYNCS.load(std::sync::atomic::Ordering::Relaxed) {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            eprintln!("[t={}.{:03}][pack] sync bytes={} ms={:.1}",
+                now.as_secs(), now.subsec_millis(), self.kept, t.elapsed().as_secs_f64() * 1000.0);
+        }
+        let mut err = match first {
             Ok(()) => {
                 self.unsynced.clear();
                 self.kept = 0;

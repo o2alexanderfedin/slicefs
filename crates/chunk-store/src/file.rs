@@ -374,6 +374,8 @@ pub struct SpliceStats {
     pub reused_nodes: u64,
     /// Zero chunks pushed without a read or a hash.
     pub zero_runs: u64,
+    /// Old manifest nodes the walk loaded.
+    pub nodes_loaded: u64,
 }
 
 /// Walks the level-0 entries of a tree in order. Holds one node per level:
@@ -383,11 +385,13 @@ struct Cursor {
     path: Vec<(Arc<Node>, usize)>,
     /// Start offset of the current entry (the content length at the end).
     off: u64,
+    /// Nodes loaded so far (for `SpliceStats::nodes_loaded`).
+    loads: u64,
 }
 
 impl Cursor {
     fn new(store: &ChunkStore, root: Node) -> Result<Self> {
-        let mut c = Cursor { path: vec![(Arc::new(root), 0)], off: 0 };
+        let mut c = Cursor { path: vec![(Arc::new(root), 0)], off: 0, loads: 1 };
         if c.path[0].0.entries.is_empty() {
             c.path.clear();
         } else {
@@ -419,6 +423,7 @@ impl Cursor {
                 return Ok(());
             }
             let child = load_node(store, &e.id)?;
+            self.loads += 1;
             if child.len != e.len || child.level.checked_add(1) != Some(node.level) {
                 return Err(Error::Corrupt(format!(
                     "manifest node {:?}: level {} with {} bytes under a level-{} entry of {} bytes",
@@ -441,6 +446,48 @@ impl Cursor {
                 break;
             }
             self.path.pop();
+        }
+        self.descend(store)
+    }
+
+    /// Move past the current entry of frame `j` like `step`, then push the
+    /// old nodes that follow whole, without loading them, while each is
+    /// complete, ends before `limit` and the writer has no pending entries at
+    /// its level or below. Then descend to the next entry as `step` does.
+    ///
+    /// A node is complete when it is not on the right spine of the tree: the
+    /// writer closes every other node at a node cut, and a node is closed
+    /// only after its children are, so the entries of a node, but the last
+    /// one of a node on the right spine, are complete nodes. `step` loaded
+    /// the first leaf under each such sibling only to see that; on a big file
+    /// that was hundreds of node loads per small splice (#108). (A tree that
+    /// breaks this rule, from a peer, still gives the right bytes; only its
+    /// key may differ from a full write.)
+    fn step_over_whole(&mut self, store: &ChunkStore, j: usize, w: &mut FileWriter, limit: u64, st: &mut SpliceStats) -> Result<()> {
+        let (n, i) = &self.path[j];
+        self.off += n.entries[*i].len;
+        self.path.truncate(j + 1);
+        loop {
+            let Some((n, i)) = self.path.last_mut() else { return Ok(()) };
+            *i += 1;
+            if *i >= n.entries.len() {
+                self.path.pop();
+                continue;
+            }
+            let (node, i) = self.path.last().unwrap();
+            let level = node.level as usize;
+            if level == 0 {
+                break;
+            }
+            let e = node.entries[*i];
+            let complete = self.path.iter().any(|(n, i)| *i + 1 < n.entries.len());
+            if complete && self.off + e.len < limit && w.levels.iter().take(level).all(|l| l.is_empty()) {
+                w.push_entry(store, level, e)?;
+                st.reused_nodes += 1;
+                self.off += e.len;
+                continue;
+            }
+            break;
         }
         self.descend(store)
     }
@@ -546,7 +593,7 @@ fn copy_old(store: &ChunkStore, cur: &mut Cursor, w: &mut FileWriter, limit: u64
             let level = cur.path[f].0.level as usize + 1;
             w.push_entry(store, level, pe)?;
             st.reused_nodes += 1;
-            cur.step(store, f - 1)?;
+            cur.step_over_whole(store, f - 1, w, limit, st)?;
             continue;
         }
         let e = cur.entry();
@@ -582,7 +629,7 @@ pub fn splice(
 ) -> Result<(ObjectId, SpliceStats)> {
     let mut cur = match base {
         Some(id) => Cursor::new(store, load_node(store, &id)?)?,
-        None => Cursor { path: Vec::new(), off: 0 },
+        None => Cursor { path: Vec::new(), off: 0, loads: 0 },
     };
     let base_len = match &cur.path.first() {
         Some((root, _)) => root.len,
@@ -705,6 +752,7 @@ pub fn splice(
             break;
         }
     }
+    st.nodes_loaded = cur.loads;
     Ok((w.finish(store)?, st))
 }
 
@@ -1109,6 +1157,21 @@ mod tests {
         w.write(&s, &last).unwrap();
         assert_eq!(got, w.finish(&s).unwrap(), "shrink: {st:?}");
         assert!(st.reused_entries < 5000, "shrink: {st:?}");
+
+        // #108: the walk to a cut in the middle loads only the nodes on the
+        // path to it, not the first leaf under each whole node it reuses.
+        let j = 500_000;
+        let last = rng.bytes(8192);
+        let mut src = TailSource { at: (j as u64 - 1) * 8192, data: &last };
+        let (got, st) = splice(&s, Some(root), j as u64 * 8192, &[], j as u64 * 8192, &mut src).unwrap();
+        let mut w = FileWriter::new();
+        for e in &fk[..j - 1] {
+            w.push_entry(&s, 0, *e).unwrap();
+        }
+        w.write(&s, &last).unwrap();
+        assert_eq!(got, w.finish(&s).unwrap(), "middle cut: {st:?}");
+        eprintln!("middle cut of {leaves} leaves: {st:?}");
+        assert!(st.nodes_loaded <= 16, "middle cut loaded {} nodes: {st:?}", st.nodes_loaded);
     }
 
     /// A `VecSource` that counts the reads and bytes the splice asks for.

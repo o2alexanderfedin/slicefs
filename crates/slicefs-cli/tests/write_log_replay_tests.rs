@@ -758,8 +758,9 @@ fn an_overlay_with_more_than_64_mib_of_relog_replays() {
         // One extent that grows by 1 MiB per write. An extent costs its
         // capacity, which grows by at most 1/8 (overlay::GROW_DIV): at most
         // about 73 MiB at 65 MiB of length. So the limit is above that, or a
-        // rebase would run in the loop.
+        // rebase would run in the loop. The budget of all files too (#105).
         fs.test_set_dirty_limit(96 << 20);
+        fs.test_set_dirty_budget(96 << 20);
         let rebases = fs.test_rebase_count();
         // 65 MiB: the smallest whole number of MiB above MAX_PAYLOAD. Each
         // MiB is one random MiB with its index in the first 8 bytes.
@@ -777,11 +778,129 @@ fn an_overlay_with_more_than_64_mib_of_relog_replays() {
     };
     // The same high limit in replay: no rebase while the 65 pieces come in
     // (each would hash the whole file again), one at the end of replay.
-    let fs = reload_and_replay_with(dir.path(), |fs| fs.test_set_dirty_limit(96 << 20));
+    let fs = reload_and_replay_with(dir.path(), |fs| {
+        fs.test_set_dirty_limit(96 << 20);
+        fs.test_set_dirty_budget(96 << 20);
+    });
     let got = fs.test_read(ino, 0, model.len() as u32 + 1).unwrap();
     if got != model {
         // Only on a failure: a byte loop is slow in a debug build.
         let diff = got.iter().zip(&model).position(|(a, b)| a != b);
         panic!("replayed {} bytes, want {}; first difference at {diff:?}", got.len(), model.len());
+    }
+}
+
+// #108: a write past the dirty limit rebases one bounded step, so an overlay
+// gets many new roots while it is open, with commits between them. A crash
+// after more steps and writes replays to the same content and stat, with the
+// same limit in replay (steps again) and with the default limit (none).
+#[test]
+fn rebase_steps_with_commits_between_them_replay_after_a_crash() {
+    for replay_limit in [5usize << 18, slicefs_cli::filesystem::DIRTY_LIMIT] {
+        let dir = TempDir::new().unwrap();
+        let mut model = data(50, 8 * MIB);
+        let (ino, live) = {
+            let fs = new_fs_with(dir.path(), WalConfig::FlushOnFsync);
+            let t0 = 1_700_000_000i64;
+            let ino = {
+                let _t = at(t0);
+                let (ino, fh) = create(&fs, 1, "steps.bin");
+                for (i, piece) in model.clone().chunks(MIB).enumerate() {
+                    write(&fs, fh, (i * MIB) as u64, piece);
+                }
+                release(&fs, ino, fh);
+                ino
+            };
+            { let _t = at(t0 + 1); fs.commit_cut().unwrap(); }
+            fs.test_set_dirty_limit(5 << 18);
+            let fh = open_rw(&fs, ino);
+            let rebases = fs.test_rebase_count();
+            let mut commits_after_a_step = 0;
+            for i in 0..1200usize {
+                let _t = at(t0 + 10 + i as i64);
+                let r = data(1000 + i as u64, 8).iter().fold(0u64, |a, &b| a << 8 | b as u64);
+                let off = (r % (8 * MIB - 4096) as u64) as usize;
+                put(&fs, fh, &mut model, off, &data(3000 + i as u64, 4096));
+                if i % 300 == 299 {
+                    if fs.test_rebase_count() > rebases {
+                        commits_after_a_step += 1;
+                    }
+                    fs.commit_cut().unwrap();
+                }
+            }
+            let steps = fs.test_rebase_count() - rebases;
+            assert!(steps >= 3, "{steps} rebase steps");
+            assert!(commits_after_a_step >= 2, "{commits_after_a_step} commits after a step");
+            assert!(fs.test_read(ino, 0, model.len() as u32).unwrap() == model, "live content");
+            fs.meta().flush_wal().unwrap();
+            let d = dump_open(&fs);
+            std::mem::forget(fs); // a crash with the handle open
+            (ino, d)
+        };
+        let fs = reload_and_replay_with(dir.path(), |fs| fs.test_set_dirty_limit(replay_limit));
+        assert!(fs.test_read(ino, 0, model.len() as u32 + 1).unwrap() == model, "replay limit {replay_limit}: content");
+        assert_eq!(dump_open(&fs), live, "replay limit {replay_limit}");
+    }
+}
+
+// #105: under one budget for all open files, a write to one file stores
+// steps of another. Two open files, writes to each in turn, commits between
+// the cross-file steps, then a crash: replay gives the same content and
+// stat, with the same budget in replay and with the default one.
+#[test]
+fn cross_file_budget_steps_with_commits_replay_after_a_crash() {
+    let budget = 5usize << 18;
+    for replay_budget in [budget, slicefs_cli::filesystem::DIRTY_BUDGET] {
+        let dir = TempDir::new().unwrap();
+        let mut models = [data(60, 4 * MIB), data(61, 4 * MIB)];
+        let (inos, live) = {
+            let fs = new_fs_with(dir.path(), WalConfig::FlushOnFsync);
+            let t0 = 1_700_000_000i64;
+            let mut inos = [0u64; 2];
+            for (k, name) in ["x.bin", "y.bin"].iter().enumerate() {
+                let _t = at(t0 + k as i64);
+                let (ino, fh) = create(&fs, 1, name);
+                for (i, piece) in models[k].clone().chunks(MIB).enumerate() {
+                    write(&fs, fh, (i * MIB) as u64, piece);
+                }
+                release(&fs, ino, fh);
+                inos[k] = ino;
+            }
+            { let _t = at(t0 + 5); fs.commit_cut().unwrap(); }
+            fs.test_set_dirty_budget(budget);
+            let fhs = [open_rw(&fs, inos[0]), open_rw(&fs, inos[1])];
+            let rebases = fs.test_rebase_count();
+            let mut commits_after_a_step = 0;
+            for i in 0..800usize {
+                let _t = at(t0 + 10 + i as i64);
+                let k = i % 2;
+                let r = data(2000 + i as u64, 8).iter().fold(0u64, |a, &b| a << 8 | b as u64);
+                let off = (r % (4 * MIB - 4096) as u64) as usize;
+                put(&fs, fhs[k], &mut models[k], off, &data(4000 + i as u64, 4096));
+                assert!(fs.test_dirty_total() <= budget, "dirty total {}", fs.test_dirty_total());
+                if i % 200 == 199 {
+                    if fs.test_rebase_count() > rebases {
+                        commits_after_a_step += 1;
+                    }
+                    fs.commit_cut().unwrap();
+                }
+            }
+            let steps = fs.test_rebase_count() - rebases;
+            assert!(steps >= 3, "{steps} rebase steps");
+            assert!(commits_after_a_step >= 2, "{commits_after_a_step} commits after a step");
+            for k in 0..2 {
+                assert!(fs.test_read(inos[k], 0, (4 * MIB) as u32).unwrap() == models[k], "live content {k}");
+            }
+            fs.meta().flush_wal().unwrap();
+            let d = dump_open(&fs);
+            std::mem::forget(fs); // a crash with both handles open
+            (inos, d)
+        };
+        let fs = reload_and_replay_with(dir.path(), |fs| fs.test_set_dirty_budget(replay_budget));
+        for k in 0..2 {
+            assert!(fs.test_read(inos[k], 0, (4 * MIB) as u32 + 1).unwrap() == models[k],
+                "replay budget {replay_budget}: content {k}");
+        }
+        assert_eq!(dump_open(&fs), live, "replay budget {replay_budget}");
     }
 }
