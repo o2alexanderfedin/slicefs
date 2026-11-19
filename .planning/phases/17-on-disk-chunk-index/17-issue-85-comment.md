@@ -14,7 +14,7 @@ Each cell is "new / #66":
 
 - RAM: after open, the steady anonymous RAM is 2.19 B for each object at 10M and 3.29 B at 100M (target: a few bytes). Only the filters and the fences grow with the object count: 1.36 B for each object. The rest is fixed: the memtable (at most 262,144 entries) and the replay of the pack at the high-water mark (192 MB at 100M). At 1M, this fixed part gives most of the 182 B for each object.
 - Open: it reads the MANIFEST, the run footers, the tables and the filters, and the records above the high-water mark. It does not read the run entries.
-- Lookups are slower than with the map in RAM at 10M and 100M. At 100M a hit takes 3.2 µs against 0.8 µs (3.9 times). A lookup checks the filter of each run (3 runs at 1M, 5 at 10M, 9 at 100M), and a hit reads one page of a mapped run file. A probable cause of the slow hits at 100M is page faults on the run pages, because each lookup step is a new process. This cause is not measured. A separate measurement at 10M (macOS, one process, the second lookup pass) gave a hit of 1.03 µs and a miss of 0.50 µs with 5 runs, and 0.80 µs and 0.31 µs after a merge into 1 run (#66: 0.70 µs and 0.32 µs). Follow-up: {lookup-runs}.
+- Lookups are slower than with the map in RAM at 10M and 100M. At 100M a hit takes 3.2 µs against 0.8 µs (3.9 times). A lookup checks the filter of each run (3 runs at 1M, 5 at 10M, 9 at 100M), and a hit reads one page of a mapped run file. A probable cause of the slow hits at 100M is page faults on the run pages, because each lookup step is a new process. This cause is not measured. A separate measurement at 10M (macOS, one process, the second lookup pass) gave a hit of 1.03 µs and a miss of 0.50 µs with 5 runs, and 0.80 µs and 0.31 µs after a merge into 1 run (#66: 0.70 µs and 0.32 µs). Follow-up: #111.
 - A hit reads one 4 KiB page, and a miss usually reads none (test `hits_read_one_page_and_misses_read_almost_none`).
 - Disk: the index adds about 60 B for each object. The store needs 164 B for each object, against 104 B.
 - Create: 118k to 142k puts per CPU second, against 117k to 125k for #66. The wall-time rate is about 2 times the #66 rate, but the lower host load is part of that.
@@ -27,8 +27,8 @@ Each cell is "new / #66":
 
 Follow-up issues:
 
-- {lookup-runs}: fewer index runs for each lookup.
-- {locality-cache}: a locality cache for the dedup check.
-- {gc-mark-ram}: the RAM of the GC mark set and of the touched sets.
+- #111: fewer index runs for each lookup.
+- #112: a locality cache for the dedup check.
+- #113: the RAM of the GC mark set and of the touched sets.
 
 The acceptance items of this issue are met, so this issue is closed.
