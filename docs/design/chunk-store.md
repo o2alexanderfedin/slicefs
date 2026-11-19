@@ -876,8 +876,33 @@ bytes are valid, and the next GC removes them again.
 
 The RAM of a GC: the totals of each pack, the entries of one pack, the
 memtable copy, and the filters and fences of the pending runs of one
-group. The live set of the mark and the touched sets still grow with the
-number of objects.
+group.
+
+The mark (#113) is a Bloom filter of the live IDs, not a set of them:
+10 bits (1.25 bytes) for each object of the store
+(`ChunkStore::live_filter`). A false positive only keeps a dead object; a
+Bloom filter has no false negatives, so no live object is removed. The
+mark walk never asks the filter (a false "seen" would hide a live
+subtree). The objects put or read before `gc_finish` (also the nodes that
+the mark reads) are exact up to `Options::gc_touched_exact` IDs, then they
+move into a Bloom filter of the same size. The objects put or read during
+`gc_finish` stay an exact set, because each one is looked up to find its
+pack; it grows with the distinct objects touched during `gc_finish`, not
+with the store.
+
+`index-bench gc` (`--dead-run 1024`, 3 of 4 objects live, macOS):
+
+| Objects | Peak RSS, ID set | Peak RSS, filter | Filter | False positives | Dead left, ID set | Dead left, filter |
+|---|---|---|---|---|---|---|
+| 1M | 472 MB | 441 MB | 1.25 MB | 933 (0.37 %) | 27,692 | 82,376 |
+| 10M | 1,429 MB | 807 MB | 12.5 MB | 9,314 (0.37 %) | 113,090 | 699,087 |
+
+The dead objects that stay are more than the false positives: the bench
+objects have records of 54 bytes, and a punched pack frees only whole
+4 KiB blocks, so one false positive keeps about 75 dead records. A chunk of
+file content (4 to 32 KiB) fills at least one block, so there one false
+positive keeps about one object. The next GC has a filter of another size,
+so other false positives.
 
 ## Read path
 

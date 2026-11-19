@@ -99,6 +99,9 @@ Each step prints `key=value` lines, one key on each line, in a fixed order. The 
 | gc | `lock_hold_max_ms`, `lock_hold_total_ms` | The longest hold of the store lock in `gc_finish`, and the sum of all holds (`GcTiming`) |
 | gc | `objects_after`, `packs_after` | Objects and packs after the GC |
 | gc | `max_rss_bytes` | Peak RSS of the gc process (it includes the live set) |
+| gc | `live_set_bytes` | Bytes of the live set: a Bloom filter of the live IDs at 10 bits for each object of the store (#113) |
+| gc | `live_false_positives` | Dead objects that the filter says may be live (the GC keeps them) |
+| gc | `dead_left` | Dead objects still in the store after the GC: the false positives, and the dead records that a punched pack keeps because they do not fill a whole block |
 
 The `run` step adds lines that start with `#` (the step names) and these summary tables:
 

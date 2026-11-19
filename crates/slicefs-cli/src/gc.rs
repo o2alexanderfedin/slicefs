@@ -59,7 +59,7 @@ pub fn run_gc(store_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let cs = std::sync::Arc::clone(io.store());
     let ids = live_objects(&cs, &roots, &[], &std::sync::atomic::AtomicBool::new(false))
         .map_err(|e| format!("GC mark failed, nothing deleted: {}", e))?
-        .unwrap_or_default();
+        .ok_or("GC mark stopped, nothing deleted")?;
     let boundary = cs.gc_begin()?;
     let content = cs.gc_finish(&ids, boundary)
         .map_err(|e| format!("GC of file content failed: {}", e))?;

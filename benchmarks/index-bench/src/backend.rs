@@ -4,11 +4,10 @@
 //! here (for example a spike on fjall). The steps in `main.rs` call only the
 //! traits in this file, so a new backend needs no change to the steps.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use chunk_store::pack_io::{pack_name, Kind};
-use chunk_store::{ChunkStore, ObjectId, Options};
+use chunk_store::{ChunkStore, LiveFilter, ObjectId, Options};
 
 /// Where `drop_index` keeps the moved index files: next to `packs/`, so the
 /// store never sees them.
@@ -72,7 +71,7 @@ pub trait Store {
     }
     /// Remove every object that is not in `live` (one complete GC) and
     /// return `key=value` pairs that describe it. Not supported by default.
-    fn gc(&self, _live: &HashSet<ObjectId>) -> Result<Vec<(&'static str, String)>, String> {
+    fn gc(&self, _live: &LiveFilter) -> Result<Vec<(&'static str, String)>, String> {
         Err("gc is not supported by this backend".into())
     }
 }
@@ -149,7 +148,7 @@ impl Store for ChunkStoreHandle {
             ("hwm_pack", i.hwm_pack.to_string()),
         ]
     }
-    fn gc(&self, live: &HashSet<ObjectId>) -> Result<Vec<(&'static str, String)>, String> {
+    fn gc(&self, live: &LiveFilter) -> Result<Vec<(&'static str, String)>, String> {
         let boundary = self.0.gc_begin().map_err(err)?;
         let st = self.0.gc_finish(live, boundary).map_err(err)?;
         let t = self.0.last_gc_timing();

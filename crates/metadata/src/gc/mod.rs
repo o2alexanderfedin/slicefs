@@ -9,12 +9,11 @@
 
 pub mod background;
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use chunk_store::{ChunkStore, ObjectId};
+use chunk_store::{ChunkStore, LiveFilter};
 use slicefs_traits::key::ObjectKey;
 use slicefs_traits::metadata::MetaError;
 
@@ -37,6 +36,11 @@ pub fn collect_content_keys(io: &mut impl NodeRead, roots: &[ObjectKey]) -> Resu
 /// nodes and file content, and the objects of the file contents
 /// `file_roots` (open write handles). `Ok(None)` if `stop` was set first.
 ///
+/// The mark is a Bloom filter of the live IDs (`ChunkStore::live_filter`,
+/// about 1.25 bytes for each object of the store), not a set of them
+/// (#113): a false positive only keeps a dead object. The walk never asks
+/// the filter, so a false positive cannot hide a live subtree.
+///
 /// Fails if a reachable object is missing: then the caller must not sweep,
 /// because the live set is not complete.
 pub fn live_objects(
@@ -44,7 +48,7 @@ pub fn live_objects(
     meta_roots: &[ObjectKey],
     file_roots: &[ObjectKey],
     stop: &AtomicBool,
-) -> Result<Option<HashSet<ObjectId>>, MetaError> {
+) -> Result<Option<LiveFilter>, MetaError> {
     let mut io = NodeReader(Arc::clone(cs));
     let mut values: Vec<ObjectKey> = file_roots.to_vec();
     for root in meta_roots {
@@ -57,14 +61,13 @@ pub fn live_objects(
     }
     values.sort_unstable();
     values.dedup();
-    let mut live = HashSet::new();
+    let mut live = cs.live_filter();
     for v in values {
         if stop.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        let objs = chunk_store::file::file_objects(cs, to_id(&v))
+        chunk_store::file::for_each_file_object(cs, to_id(&v), |id| live.insert(&id))
             .map_err(|e| MetaError::Corrupted(format!("GC mark: object {v:?}: {e}")))?;
-        live.extend(objs);
     }
     Ok(Some(live))
 }
@@ -88,7 +91,7 @@ impl OnlineGc {
     }
 
     /// The mark. `Ok(None)` if `stop` was set first.
-    pub fn live(&self, stop: &AtomicBool) -> Result<Option<HashSet<ObjectId>>, MetaError> {
+    pub fn live(&self, stop: &AtomicBool) -> Result<Option<LiveFilter>, MetaError> {
         live_objects(&self.cs, &self.meta_roots, &self.file_roots, stop)
     }
 }

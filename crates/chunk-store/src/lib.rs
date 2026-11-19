@@ -28,6 +28,7 @@ mod bloom;
 pub mod file;
 pub mod hash;
 mod index;
+mod mark;
 pub mod pack_io;
 #[cfg(test)]
 mod race_tests;
@@ -38,6 +39,8 @@ pub mod mem;
 use crate::index::{Counts, Hwm, Index, MergeOut, Snapshot};
 use crate::run::Run;
 use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK};
+pub use crate::mark::{LiveFilter, LiveSet, LIVE_FILTER_BITS};
+use crate::mark::Touched;
 pub use crate::hash::{hasher_by_name, hasher_by_tag, hasher_names, hashers, Blake3_256, ObjectHasher, DEFAULT_HASHER};
 
 // ── Object IDs and chunking ───────────────────────────────────────────────────
@@ -133,6 +136,11 @@ pub struct Options {
     /// [`ChunkStore::merge_index_now`] and [`ChunkStore::merge_index_all`]
     /// (tests that need a fixed run list).
     pub index_background_merge: bool,
+    /// The objects put or read between `gc_begin` and `gc_finish` are kept
+    /// as exact IDs up to this many; more move into a Bloom filter (fixed
+    /// RAM; a false positive only keeps a dead object). A tuning and test
+    /// knob.
+    pub gc_touched_exact: usize,
 }
 
 impl Default for Options {
@@ -146,6 +154,7 @@ impl Default for Options {
             index_bloom_bits: index::DEFAULT_BLOOM_BITS,
             index_merge_fan_in: 4,
             index_background_merge: true,
+            gc_touched_exact: 1 << 16,
         }
     }
 }
@@ -483,7 +492,7 @@ struct Inner {
     dir_dirty: bool,
     /// While a GC runs: every object put or read since `gc_begin`. GC keeps
     /// them even if its mark did not find them.
-    touched: Option<HashSet<ObjectId>>,
+    touched: Option<Touched>,
     /// A sync failed. After that, a later sync can succeed without the data
     /// (Linux can mark the pages clean), so the store refuses every write and
     /// sync until it is opened again; the open scan finds the durable state.
@@ -1107,7 +1116,7 @@ impl ChunkStore {
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
             self.seal(&mut inner)?;
         }
-        inner.touched = Some(HashSet::new());
+        inner.touched = Some(Touched::spilling(self.opts.gc_touched_exact));
         Ok(inner.next_pack - 1)
     }
 
@@ -1173,7 +1182,7 @@ impl ChunkStore {
     /// (`COPY_BATCH` records), by the memtable limit (a flush, the install),
     /// or by the objects touched during the GC; see
     /// [`ChunkStore::last_gc_timing`].
-    pub fn gc_finish(&self, live: &HashSet<ObjectId>, boundary: u64) -> Result<GcStats> {
+    pub fn gc_finish(&self, live: &impl LiveSet, boundary: u64) -> Result<GcStats> {
         let start = Instant::now();
         let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
         let holds = Holds::default();
@@ -1212,18 +1221,18 @@ impl ChunkStore {
         let _ = pass;
     }
 
-    fn gc_run(&self, live: &HashSet<ObjectId>, boundary: u64, holds: &Holds) -> Result<GcStats> {
+    fn gc_run(&self, live: &dyn LiveSet, boundary: u64, holds: &Holds) -> Result<GcStats> {
         // (1) Start. The touched set ends with this GC, also when it fails
         // (#63): the next GC starts its own set in `gc_begin`, before its
         // gate commit, so its mark sees everything put before that.
         let (touched, snap, active) = {
             let mut inner = self.held(holds);
-            let touched = inner.touched.take().unwrap_or_default();
+            let touched = inner.touched.take().unwrap_or_else(Touched::exact);
             inner.check()?;
-            inner.touched = Some(HashSet::new());
+            inner.touched = Some(Touched::exact());
             (touched, inner.index.snapshot(), inner.active.as_ref().map(|a| a.num))
         };
-        let keep = |id: &ObjectId| live.contains(id) || touched.contains(id);
+        let keep = |id: &ObjectId| live.may_contain(id) || touched.contains(id);
         let mut st = GcStats::default();
 
         // (2) and (3).
@@ -1284,14 +1293,14 @@ impl ChunkStore {
         // (5) The install.
         let (added, before) = {
             let mut inner = self.held(holds);
-            let during = inner.touched.take().unwrap_or_default();
+            let during = inner.touched.take().unwrap_or_else(Touched::exact);
             if !last {
-                inner.touched = Some(HashSet::new());
+                inner.touched = Some(Touched::exact());
             }
             // An object put or read during the GC: its pack does not change
             // (in this group or in a later one).
             let checked = (|| -> Result<()> {
-                for id in during.iter().filter(|id| !keep(id)) {
+                for id in during.ids().iter().filter(|id| !keep(id)) {
                     if let Some(l) = snap.get_verified(id)? {
                         touched_packs.insert(l.pack);
                     }
@@ -1948,6 +1957,14 @@ impl ChunkStore {
         self.inner.lock().unwrap().stats
     }
 
+    /// An empty GC mark for this store: a [`LiveFilter`] for as many keys
+    /// as the store has objects (the live objects are not more), at
+    /// [`LIVE_FILTER_BITS`] bits each. Fill it and give it to
+    /// [`ChunkStore::gc_finish`].
+    pub fn live_filter(&self) -> LiveFilter {
+        LiveFilter::new(self.stats().objects)
+    }
+
     fn seal(&self, inner: &mut Inner) -> Result<()> {
         inner.sync_active()?;
         let Some(a) = inner.active.take() else { return Ok(()) };
@@ -2173,7 +2190,7 @@ impl Inner {
 
     fn touch(&mut self, id: ObjectId) {
         if let Some(t) = self.touched.as_mut() {
-            t.insert(id);
+            t.insert(id, self.stats.objects);
         }
     }
 
