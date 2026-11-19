@@ -90,6 +90,116 @@ pub trait WalStrategy: Send + Sync {
     fn rotate(&self, _seed: &[WalEntry]) -> Result<(), WalError> {
         Ok(())
     }
+    /// Start a new generation of the log (#108), for a commit whose root is
+    /// written later: write the records so far into the current segment
+    /// (no disk sync) and go on in a new segment, two ids on, that starts
+    /// with a `Cut` record. The id between is kept for the root segment
+    /// (`install_root`), so the root sorts after every record of the cut and
+    /// before every record after it. Fast: no disk sync. `None`: no log.
+    fn cut(&self) -> Result<Option<WalCut>, WalError> {
+        Ok(None)
+    }
+    /// After `cut`, when every object the root refers to is durable: sync
+    /// the records logged since the cut (they hold the relog of the open
+    /// files), write the root segment with `seed` (the root and the snapshot
+    /// records), sync it and the directory, then delete the segments before
+    /// it. Holds no lock of the log across a disk sync, so requests can log
+    /// meanwhile.
+    fn install_root(&self, _cut: &WalCut, _seed: &[WalEntry]) -> Result<(), WalError> {
+        Ok(())
+    }
+}
+
+/// A generation switch of the write log (see [`WalStrategy::cut`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalCut {
+    /// Id kept for the root segment of this commit.
+    pub root_id: u64,
+}
+
+/// Segments that a cut left behind, not yet synced (see [`WalStrategy::cut`]).
+/// An fsync after the cut syncs them first, in order, and the directory with
+/// the new segment's entry: the log after the cut is good only on top of
+/// every record before it.
+#[derive(Default)]
+pub(crate) struct Behind {
+    old: Vec<crate::segment::SegmentWriter>,
+    dir: Option<std::path::PathBuf>,
+}
+
+impl Behind {
+    /// Sync the segments left behind and the directory, then forget them.
+    pub(crate) fn settle(&mut self) -> std::io::Result<()> {
+        while let Some(w) = self.old.first_mut() {
+            w.sync()?;
+            self.old.remove(0);
+        }
+        if let Some(dir) = &self.dir {
+            std::fs::File::open(dir)?.sync_all()?;
+            self.dir = None;
+        }
+        Ok(())
+    }
+}
+
+/// The cut of [`WalStrategy::cut`] on `writer` (segment `loc`): the caller
+/// has written its held records into `writer`. Opens the new segment,
+/// moves the old writer to `behind` and returns the new location.
+pub(crate) fn cut_segment(
+    writer: &mut crate::segment::SegmentWriter,
+    loc: &mut (std::path::PathBuf, u64),
+    behind: &std::sync::Mutex<Behind>,
+) -> Result<WalCut, WalError> {
+    writer.flush()?;
+    let dir = loc.0.parent().ok_or_else(|| std::io::Error::other("segment has no directory"))?.to_path_buf();
+    let (old_id, records) = (loc.1, writer.records());
+    let new_id = old_id + 2;
+    let new_path = dir.join(format!("segment-{:06}.seg", new_id));
+    let mut new_writer = crate::segment::SegmentWriter::new(&new_path, new_id)?;
+    new_writer.write_entry(&crate::segment::SegmentEntry::Cut { prev_id: old_id, records })?;
+    new_writer.flush()?;
+    let old = std::mem::replace(writer, new_writer);
+    let mut b = behind.lock().unwrap();
+    b.old.push(old);
+    b.dir = Some(dir);
+    *loc = (new_path, new_id);
+    Ok(WalCut { root_id: old_id + 1 })
+}
+
+/// The second half of [`WalStrategy::install_root`], after the records of
+/// the current segment are durable: write segment `cut.root_id` with `seed`,
+/// sync it and the directory, delete the segments before it, sync the
+/// directory again, and forget the segments left behind (they are deleted).
+pub(crate) fn write_root_segment(
+    current: &Path,
+    cut: &WalCut,
+    seed: &[WalEntry],
+    behind: &std::sync::Mutex<Behind>,
+) -> Result<(), WalError> {
+    let dir = current.parent().ok_or_else(|| std::io::Error::other("segment has no directory"))?;
+    let path = dir.join(format!("segment-{:06}.seg", cut.root_id));
+    let mut writer = crate::segment::SegmentWriter::new(&path, cut.root_id)?;
+    for entry in seed {
+        writer.write_entry(&per_op::wal_entry_to_segment(entry))?;
+    }
+    writer.sync()?;
+    std::fs::File::open(dir)?.sync_all()?;
+    remove_segments_before(dir, cut.root_id)?;
+    std::fs::File::open(dir)?.sync_all()?;
+    *behind.lock().unwrap() = Behind::default();
+    Ok(())
+}
+
+/// Delete the segment files of `dir` whose id is lower than `id`.
+fn remove_segments_before(dir: &Path, id: u64) -> std::io::Result<()> {
+    for e in std::fs::read_dir(dir)?.filter_map(|e| e.ok()) {
+        let name = e.file_name().to_string_lossy().to_string();
+        let old = name.strip_prefix("segment-").and_then(|n| n.strip_suffix(".seg")).and_then(|n| n.parse::<u64>().ok());
+        if matches!(old, Some(o) if o < id) {
+            std::fs::remove_file(e.path())?;
+        }
+    }
+    Ok(())
 }
 
 /// Start segment `id + 1` next to `path` with `seed`, sync it and the
@@ -110,14 +220,7 @@ pub(crate) fn rotate_segment(
     }
     writer.sync()?;
     std::fs::File::open(dir)?.sync_all()?;
-    for e in std::fs::read_dir(dir)?.filter_map(|e| e.ok()) {
-        let p = e.path();
-        let name = e.file_name().to_string_lossy().to_string();
-        let old = name.strip_prefix("segment-").and_then(|n| n.strip_suffix(".seg")).and_then(|n| n.parse::<u64>().ok());
-        if matches!(old, Some(o) if o < new_id) {
-            std::fs::remove_file(&p)?;
-        }
-    }
+    remove_segments_before(dir, new_id)?;
     std::fs::File::open(dir)?.sync_all()?;
     Ok((writer, new_path, new_id))
 }

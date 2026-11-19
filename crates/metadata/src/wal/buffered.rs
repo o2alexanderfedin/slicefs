@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::segment::SegmentWriter;
-use super::{BUFFER_CAP_BYTES, WalEntry, WalError, per_op::wal_entry_to_segment};
+use super::{BUFFER_CAP_BYTES, Behind, WalCut, WalEntry, WalError, per_op::wal_entry_to_segment};
 
 /// Records held in RAM, and their size in bytes.
 #[derive(Default)]
@@ -56,6 +56,8 @@ pub(crate) struct BufferedLog {
     writer: Mutex<SegmentWriter>,
     /// Path and id of the current segment (for rotation).
     loc: Mutex<(PathBuf, u64)>,
+    /// Segments before the last cut that are not synced yet (#108).
+    behind: Mutex<Behind>,
 }
 
 impl BufferedLog {
@@ -64,6 +66,7 @@ impl BufferedLog {
             pending: Mutex::new(Pending::default()),
             writer: Mutex::new(SegmentWriter::new(path, segment_id)?),
             loc: Mutex::new((path.to_path_buf(), segment_id)),
+            behind: Mutex::new(Behind::default()),
         })
     }
 
@@ -93,6 +96,8 @@ impl BufferedLog {
     /// Write the held records to the segment and sync it. Fails after a
     /// failed write or sync, until the next `rotate`.
     pub(crate) fn flush_and_sync(&self) -> Result<(), WalError> {
+        // The records after a cut count only on top of the ones before it.
+        self.behind.lock().unwrap().settle()?;
         // Lock order everywhere: pending, then writer.
         let mut pending = self.pending.lock().unwrap();
         if pending.failed {
@@ -119,9 +124,46 @@ impl BufferedLog {
         pending.entries.clear();
         pending.bytes = 0;
         pending.failed = false;
+        *self.behind.lock().unwrap() = Behind::default();
         Ok(())
     }
 
+    /// See [`super::WalStrategy::cut`].
+    pub(crate) fn cut(&self) -> Result<Option<WalCut>, WalError> {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.failed {
+            return Err(write_failed());
+        }
+        let mut writer = self.writer.lock().unwrap();
+        let mut loc = self.loc.lock().unwrap();
+        if let Err(e) = write_out(&mut pending, &mut writer) {
+            pending.failed = true;
+            return Err(e.into());
+        }
+        super::cut_segment(&mut writer, &mut loc, &self.behind).map(Some)
+    }
+
+    /// See [`super::WalStrategy::install_root`].
+    pub(crate) fn install_root(&self, cut: &WalCut, seed: &[WalEntry]) -> Result<(), WalError> {
+        let (file, path) = {
+            let mut pending = self.pending.lock().unwrap();
+            if pending.failed {
+                return Err(write_failed());
+            }
+            let mut writer = self.writer.lock().unwrap();
+            let r = write_out(&mut pending, &mut writer).and_then(|()| writer.file_for_sync());
+            match r {
+                Ok(f) => (f, self.loc.lock().unwrap().0.clone()),
+                Err(e) => {
+                    pending.failed = true;
+                    return Err(e.into());
+                }
+            }
+        };
+        // The disk sync runs with no lock held: requests log meanwhile.
+        file.sync_all()?;
+        super::write_root_segment(&path, cut, seed, &self.behind)
+    }
     /// Bytes of the records held in RAM (for tests).
     #[cfg(test)]
     pub(crate) fn buffered_bytes(&self) -> usize {

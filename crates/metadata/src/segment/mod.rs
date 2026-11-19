@@ -14,6 +14,9 @@
 //!
 //! RootUpdate payload: `KEY_BYTES` (33) bytes — ObjectKey (tag + digest)
 //! SnapshotRecord payload: `SNAPSHOT_MIN` (53)+ bytes — version(8) + root(KEY_BYTES) + created_at(8) + name_len(4) + name_bytes(variable)
+//! Cut payload: 16 bytes — prev_id(8) + records(8): the first record of a
+//!   segment that a commit started (#108). The write log goes on from segment
+//!   `prev_id`, which had `records` records at the cut.
 //! EofMarker: no payload (payload_len = 0), terminates iteration
 //!
 //! The reader stops at the first cut, changed or out-of-sequence record.
@@ -100,7 +103,7 @@ pub fn load_store_from_segments(
                         snapshots.push(snap_entry);
                     }
                 }
-                SegmentEntry::Op { .. } => {}
+                SegmentEntry::Op { .. } | SegmentEntry::Cut { .. } => {}
             }
         }
     }
@@ -130,14 +133,22 @@ pub fn scan_store_with_log(
     let mut snapshots = Vec::new();
     let mut spans: Vec<LogSpan> = Vec::new();
     let mut ops = 0usize;
+    // Id and record count of the segment read last.
+    let mut last: Option<(u64, u64)> = None;
+    // The log after a broken link of the chain (see `SegmentEntry::Cut`) is
+    // not replayed, up to the next root.
+    let mut broken = false;
     for path in segment_paths(segments_dir)? {
         let mut reader = SegmentReader::open(&path)?;
+        let id = reader.segment_id();
         let (pos, seq) = reader.cursor();
         spans.push(LogSpan { path, pos, seq, end_seq: seq });
+        let mut first = true;
         while let Some(entry) = reader.next() {
             match entry {
                 SegmentEntry::RootUpdate { root } => {
                     last_root = Some(root);
+                    broken = false;
                     // The log starts after this record, in this segment.
                     let (pos, seq) = reader.cursor();
                     let span = spans.pop().expect("span of this segment");
@@ -150,11 +161,34 @@ pub fn scan_store_with_log(
                         snapshots.push(s);
                     }
                 }
-                SegmentEntry::Op { .. } => ops += 1,
+                SegmentEntry::Cut { prev_id, records } if first => {
+                    // A commit started this segment after `records` records of
+                    // segment `prev_id`. A root segment between them (a later
+                    // id) makes the link whole. Else the segment before must
+                    // be `prev_id` with all its records: after a power loss its
+                    // tail can be lost while this segment is on disk, and this
+                    // log would then skip requests (#108).
+                    let whole = matches!(last, Some((lid, n)) if lid > prev_id || (lid == prev_id && n == records));
+                    if !whole {
+                        broken = true;
+                    }
+                }
+                SegmentEntry::Cut { .. } => {}
+                SegmentEntry::Op { .. } if !broken => ops += 1,
+                SegmentEntry::Op { .. } => {}
             }
+            first = false;
         }
         // Pass 2 reads this segment up to here, and no further.
         let end = reader.cursor().1;
+        last = Some((id, end));
+        if broken {
+            // Nothing of this segment is replayed (no root came after the break).
+            let span = spans.last_mut().expect("span of this segment");
+            span.seq = end;
+            span.end_seq = end;
+            continue;
+        }
         spans.last_mut().expect("span of this segment").end_seq = end;
     }
     spans.retain(|s| s.end_seq > s.seq);
@@ -266,7 +300,7 @@ impl Iterator for WriteLogRecords<'_> {
                     self.ops += 1;
                     return Some(Ok(bytes));
                 }
-                Some(SegmentEntry::SnapshotRecord { .. }) => {}
+                Some(SegmentEntry::SnapshotRecord { .. }) | Some(SegmentEntry::Cut { .. }) => {}
                 Some(SegmentEntry::RootUpdate { .. }) => return self.changed("a root after the last root"),
                 // A record that pass 1 also read as the end of the segment
                 // (an EOF marker, a bad root): the span ends here.
@@ -347,6 +381,7 @@ pub fn frame_record(record_type: u8, seq: u64, payload: &[u8]) -> Vec<u8> {
 pub enum RecordType {
     RootUpdate     = 0x02,
     SnapshotRecord = 0x03,
+    Cut            = 0x04,
     Op             = 0x10,
     EofMarker      = 0xFF,
 }
@@ -357,6 +392,7 @@ impl RecordType {
             0x01 => None, // legacy DictEntry — caller should skip payload_len bytes
             0x02 => Some(RecordType::RootUpdate),
             0x03 => Some(RecordType::SnapshotRecord),
+            0x04 => Some(RecordType::Cut),
             0x10 => Some(RecordType::Op),
             0xFF => Some(RecordType::EofMarker),
             _ => None,
@@ -412,6 +448,9 @@ pub enum SegmentEntry {
     SnapshotRecord { version: u64, root: ObjectKey, created_at: u64, name: Option<String> },
     /// A file system request since the last root (opaque bytes, #20).
     Op { bytes: Vec<u8> },
+    /// First record of a segment that a commit started (#108): the log goes
+    /// on from segment `prev_id`, which had `records` records at the cut.
+    Cut { prev_id: u64, records: u64 },
 }
 
 impl SegmentEntry {
@@ -420,6 +459,7 @@ impl SegmentEntry {
             SegmentEntry::RootUpdate     { .. } => RecordType::RootUpdate,
             SegmentEntry::SnapshotRecord { .. } => RecordType::SnapshotRecord,
             SegmentEntry::Op { .. } => RecordType::Op,
+            SegmentEntry::Cut { .. } => RecordType::Cut,
         }
     }
 
@@ -427,6 +467,12 @@ impl SegmentEntry {
     pub fn payload_bytes(&self) -> Vec<u8> {
         match self {
             SegmentEntry::Op { bytes } => bytes.clone(),
+            SegmentEntry::Cut { prev_id, records } => {
+                let mut buf = Vec::with_capacity(16);
+                buf.extend_from_slice(&prev_id.to_le_bytes());
+                buf.extend_from_slice(&records.to_le_bytes());
+                buf
+            }
             SegmentEntry::RootUpdate { root } => {
                 root.0.to_vec()
             }
@@ -447,6 +493,14 @@ impl SegmentEntry {
                 buf
             }
         }
+    }
+
+    /// Parse a Cut from a 16-byte payload.
+    pub fn parse_cut(payload: &[u8]) -> Option<Self> {
+        if payload.len() < 16 { return None; }
+        let prev_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+        let records = u64::from_le_bytes(payload[8..16].try_into().unwrap());
+        Some(SegmentEntry::Cut { prev_id, records })
     }
 
     /// Parse a RootUpdate from a `KEY_BYTES`-byte payload.

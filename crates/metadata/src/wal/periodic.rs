@@ -80,6 +80,12 @@ impl WalStrategy for PeriodicWal {
     fn rotate(&self, seed: &[WalEntry]) -> Result<(), WalError> {
         self.log.rotate(seed)
     }
+    fn cut(&self) -> Result<Option<super::WalCut>, WalError> {
+        self.log.cut()
+    }
+    fn install_root(&self, cut: &super::WalCut, seed: &[WalEntry]) -> Result<(), WalError> {
+        self.log.install_root(cut, seed)
+    }
     fn log_mutation(&self, entry: &WalEntry) -> Result<(), WalError> {
         self.log.log(entry)
     }

@@ -105,6 +105,20 @@ impl SegmentWriter {
         Ok(())
     }
 
+    /// Number of records written so far (the sequence number of the next).
+    pub fn records(&self) -> u64 {
+        self.seq
+    }
+
+    /// Write the user-space buffer into the file and return a second handle
+    /// of the file, so a caller can sync it without holding this writer
+    /// (`sync_all` on the clone syncs the same file).
+    pub fn file_for_sync(&mut self) -> io::Result<File> {
+        self.injected_fault()?;
+        self.inner.flush()?;
+        self.inner.get_ref().try_clone()
+    }
+
     /// Number of real disk syncs so far.
     pub fn disk_syncs(&self) -> u64 {
         self.disk_syncs

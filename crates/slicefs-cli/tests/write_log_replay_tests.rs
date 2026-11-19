@@ -904,3 +904,176 @@ fn cross_file_budget_steps_with_commits_replay_after_a_crash() {
         assert_eq!(dump_open(&fs), live, "replay budget {replay_budget}");
     }
 }
+
+// ── #108: a crash between the generation switch and the root ────────────────
+
+/// Where `cut_window_scenario` stops the commit that it starts.
+#[derive(Clone, Copy, Debug)]
+enum Window {
+    /// Right after the cut (the gate is released), before any node is written.
+    AfterCut,
+    /// The nodes of the root are written, nothing is synced.
+    AfterNodes,
+    /// The nodes and the content are synced, the root is not logged.
+    AfterSyncs,
+    /// The root segment is durable, the old segments are not deleted yet.
+    AfterRoot,
+    /// The commit is done.
+    Done,
+}
+
+/// The segment files of `store`, by id.
+fn segment_paths(store: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<(u64, PathBuf)> = std::fs::read_dir(store.join("segments")).unwrap()
+        .filter_map(|e| {
+            let p = e.unwrap().path();
+            let n: u64 = p.file_name()?.to_str()?.strip_prefix("segment-")?.strip_suffix(".seg")?.parse().ok()?;
+            Some((n, p))
+        })
+        .collect();
+    v.sort();
+    v.into_iter().map(|(_, p)| p).collect()
+}
+
+/// Files in the old generation (closed, an overlay, a streaming handle with
+/// pending bytes, a directory of new files), a commit cut, requests after
+/// the cut (in the next generation, some fsynced), then the commit stopped
+/// at `w`, then one more write on each open handle.
+fn cut_window_scenario(fs: &SliceFsFilesystem, store: &Path, w: Window) {
+    use metadata::store::CommitFault;
+    let t0 = 1_700_000_000i64;
+    let a = {
+        let _t = at(t0);
+        let (k, fk) = create(fs, 1, "kept.bin");
+        write(fs, fk, 0, &data(50, 100_000));
+        fsync(fs, k, fk);
+        release(fs, k, fk);
+        let (a, fa) = create(fs, 1, "a.bin");
+        for (i, piece) in data(51, MIB).chunks(64 << 10).enumerate() {
+            write(fs, fa, (i << 16) as u64, piece);
+        }
+        release(fs, a, fa);
+        a
+    };
+    { let _t = at(t0 + 10); fs.commit_cut().unwrap(); } // a.bin's base is in the root
+    let fh = open_rw(fs, a);
+    let mut model = data(51, MIB);
+    { let _t = at(t0 + 20); put(fs, fh, &mut model, MIB / 2, &[0x11; 4096]); }
+    assert!(!fs.test_is_streaming(fh));
+    let fo = {
+        let _t = at(t0 + 30);
+        let (_, fo) = create(fs, 1, "ooo.bin");
+        write(fs, fo, 0, &data(52, 64 << 10));
+        write(fs, fo, 128 << 10, &data(53, 64 << 10)); // ahead of the stream: pending
+        assert!(fs.test_is_streaming(fo));
+        let d = match h::handle_mkdir(fs, 1, "d", S_IFDIR | 0o755, 0o022, 501, 20) { EntryResult::Ok(i, _) => i, _ => panic!() };
+        for i in 0..20u8 {
+            let (x, fx) = create(fs, d, &format!("x{i}"));
+            write(fs, fx, 0, &[i; 100]);
+            release(fs, x, fx);
+        }
+        fo
+    };
+
+    // The generation switch (what the commit timer does under the gate).
+    let cut = { let _t = at(t0 + 40); fs.commit_cut_begin().unwrap() };
+    // Requests after the cut, as they run while the commit finishes.
+    {
+        let _t = at(t0 + 50);
+        put(fs, fh, &mut model, 100, &[0x22; 4096]);
+        write(fs, fo, 64 << 10, &data(54, 64 << 10)); // fills the gap
+        let (l, fl) = create(fs, 1, "late.bin");
+        write(fs, fl, 0, &data(55, 30_000));
+        fsync(fs, l, fl);
+        release(fs, l, fl);
+        assert!(matches!(h::handle_rename(fs, 1, "kept.bin", 1, "kept2.bin", 0), EmptyResult::Ok));
+        fsync(fs, a, fh);
+    }
+    let _t = at(t0 + 60);
+    match w {
+        Window::AfterCut => std::mem::forget(cut),
+        Window::AfterNodes => {
+            fs.meta().test_fail_next_commit_at(CommitFault::BeforeSync);
+            assert!(fs.commit_cut_finish(cut).is_err());
+        }
+        Window::AfterSyncs => {
+            fs.meta().test_fail_next_commit_at(CommitFault::BeforeRoot);
+            assert!(fs.commit_cut_finish(cut).is_err());
+        }
+        Window::AfterRoot => {
+            // The old segments are final at the cut: keep a copy, and put back
+            // the ones the commit deletes, as a crash before the delete leaves them.
+            let saved: Vec<(PathBuf, Vec<u8>)> = segment_paths(store).into_iter()
+                .map(|p| { let b = std::fs::read(&p).unwrap(); (p, b) }).collect();
+            fs.commit_cut_finish(cut).unwrap();
+            for (p, b) in saved {
+                if !p.exists() {
+                    std::fs::write(&p, b).unwrap();
+                }
+            }
+        }
+        Window::Done => {
+            fs.commit_cut_finish(cut).unwrap();
+        }
+    }
+    // One more request on each open handle after the stop.
+    put(fs, fh, &mut model, 3000, &[0x33; 100]);
+    write(fs, fo, 192 << 10, &[0x44; 1000]);
+    assert_eq!(fs.test_read(a, 0, model.len() as u32 + 1).unwrap(), model, "live content");
+}
+
+// #108: a timed commit releases the gate after the generation switch, and
+// logs the root later. A crash at any point between gives the last durable
+// root plus the replayed log: the same file system as before the crash.
+#[test]
+fn a_crash_between_the_cut_and_the_root_replays() {
+    for config in [WalConfig::PerOp, WalConfig::FlushOnFsync] {
+        for w in [Window::AfterCut, Window::AfterNodes, Window::AfterSyncs, Window::AfterRoot, Window::Done] {
+            let dir = TempDir::new().unwrap();
+            let live = {
+                let fs = new_fs_with(dir.path(), config.clone());
+                cut_window_scenario(&fs, dir.path(), w);
+                fs.meta().flush_wal().unwrap();
+                let d = dump_open(&fs);
+                std::mem::forget(fs); // a crash with the handles open
+                d
+            };
+            let fs = reload_and_replay(dir.path());
+            assert_eq!(dump_open(&fs), live, "{config:?} {w:?}");
+        }
+    }
+}
+
+// #108: a power loss after a cut can keep the new segment while the tail of
+// the segment before it is lost (the cut does not sync it). The log after
+// the cut is then not replayed: replay must not apply it on top of a gap.
+#[test]
+fn a_torn_segment_before_a_cut_ends_the_log_there() {
+    let dir = TempDir::new().unwrap();
+    let kept = data(60, 50_000);
+    {
+        let fs = new_fs(dir.path());
+        let (k, fk) = create(&fs, 1, "kept.bin");
+        write(&fs, fk, 0, &kept);
+        fsync(&fs, k, fk);
+        release(&fs, k, fk);
+        // The sacrificial last record before the cut.
+        assert!(matches!(h::handle_mkdir(&fs, 1, "last", S_IFDIR | 0o755, 0o022, 501, 20), EntryResult::Ok(..)));
+        let cut = fs.commit_cut_begin().unwrap();
+        let (l, fl) = create(&fs, 1, "late.bin");
+        write(&fs, fl, 0, b"late");
+        release(&fs, l, fl);
+        std::mem::forget(cut);
+        // The new segment is on disk; the one before it loses its last record.
+        let segs = segment_paths(dir.path());
+        let old = &segs[segs.len() - 2];
+        let f = std::fs::OpenOptions::new().write(true).open(old).unwrap();
+        f.set_len(f.metadata().unwrap().len() - 3).unwrap();
+        std::mem::forget(fs);
+    }
+    let fs = reload_and_replay(dir.path());
+    let k = fs.meta().lookup(1, "kept.bin").unwrap();
+    assert_eq!(fs.test_read(k, 0, kept.len() as u32 + 1).unwrap(), kept);
+    assert!(fs.meta().lookup(1, "last").is_err(), "the torn record is not applied");
+    assert!(fs.meta().lookup(1, "late.bin").is_err(), "the log after the gap is not applied");
+}
