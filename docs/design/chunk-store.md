@@ -1096,7 +1096,7 @@ copied through an FSKit mount): 48 (packs/ 41, index/ 4, segments/ 1). The run
 passed (`RESULT fskit: 0 failure(s)`, `gc-freed: ok`). The time per step and
 the `fsync` and `write` time per call on FSKit are not measured yet.
 
-Time per step in that run (Boost 1.85: one tar of 791 MB, a tree of 77,655
+Time per step in that run (Boost 1.85: one tar and a tree of 77,655
 files; GitHub macOS runner, release build):
 
 | Step | Time | Note |
