@@ -975,8 +975,8 @@ thresholds and sleeps are constants there, to be tuned (#121).
 | less than 5 % | full speed | no wait; the GC thread also starts a GC that changes made due at once, without `--gc-interval` or the duty gap (still one at a time; an interval of 0 still means only on request) |
 
 - Write signal: a counter of write, create and setattr requests
-  (`SliceFsFilesystem::note_write`, bumped in the FUSE handlers; write
-  log replay does not count). The pacer only reads it.
+  (`SliceFsFilesystem::note_write`, bumped in the FUSE handlers). The
+  pacer only reads it, and counts only the changes after it was made.
 - Safe points: in the mark (`metadata::gc::mark`) before each root and each
   file; in the sweep before each group of `GC_GROUP_PACKS` packs. No store
   lock, no install, no commit gate is held there. The chunk store sees only

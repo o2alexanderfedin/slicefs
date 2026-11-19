@@ -455,7 +455,6 @@ fn a_full_gc_request_runs_on_the_gc_thread() {
 /// the sweep each wait up to their cap (tiny here), then run at full speed.
 #[test]
 fn a_paced_gc_with_endless_writes_finishes_after_the_yield_caps() {
-    use chunk_store::GcPacer;
     use slicefs_cli::gc_pacing::{RealClock, WritePacer};
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
@@ -486,13 +485,13 @@ fn a_paced_gc_with_endless_writes_finishes_after_the_yield_caps() {
     let took = t.elapsed();
     done.store(true, Ordering::SeqCst);
     writer.join().unwrap();
-    assert_eq!(mark.waited(), cap, "the mark gave way to the writes, up to its cap");
-    assert_eq!(sweep.waited(), cap, "the sweep gave way to the writes, up to its cap");
+    // (Exact caps: see the fake-clock tests in `gc_pacing`. A real clock on a
+    // busy machine can see a quiet gap in the writes.)
+    for (phase, w) in [("mark", mark.waited()), ("sweep", sweep.waited())] {
+        assert!(!w.is_zero() && w <= cap, "the {phase} waited {w:?}, cap {cap:?}");
+    }
     assert!(took < Duration::from_secs(30), "the GC took {took:?}");
     assert!(stats.removed_bytes >= GARBAGE_FREED, "{stats:?}");
-    // After the caps, the pacers do not wait any more.
-    mark.at_safe_point();
-    assert_eq!(mark.waited(), cap);
     let fs = Arc::try_unwrap(fs).ok().expect("the writer ended");
     check_after_remount(fs, dir.path(), &[("keep.bin", &keep)]);
 }
