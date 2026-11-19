@@ -112,6 +112,54 @@ fn lookup_finds_hits_not_misses_and_does_not_change_the_store() {
     assert_eq!(value(&open, "objects"), Some("5000"), "{open}");
 }
 
+#[test]
+fn lookup_only_times_one_phase_and_counts_its_faults() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path().join("s");
+    create(&d, "5000", &[]);
+    let out = ok(&["lookup", "--dir", p(&d), "--hits", "2000", "--misses", "2000", "--only", "put"]);
+    assert_eq!(value(&out, "only"), Some("put"), "{out}");
+    assert_eq!(value(&out, "cache"), Some("warm"), "{out}");
+    positive(&out, "put_hit_ns");
+    positive(&out, "put_hit_ns_2");
+    for key in ["contains_hit_ns", "contains_miss_ns", "contains_hit_ns_2", "hit_major_faults", "miss_read_bytes"] {
+        assert_eq!(value(&out, key), Some("n/a"), "{key}: {out}");
+    }
+    assert!(value(&out, "put_major_faults").is_some_and(|v| v.parse::<u64>().is_ok()), "{out}");
+    let all = ok(&["lookup", "--dir", p(&d), "--hits", "2000", "--misses", "2000"]);
+    assert_eq!(value(&all, "only"), Some("all"), "{all}");
+    for key in ["hit_major_faults", "miss_major_faults", "put_major_faults"] {
+        assert!(value(&all, key).is_some_and(|v| v.parse::<u64>().is_ok()), "{key}: {all}");
+    }
+    let bad = bench(&["lookup", "--dir", p(&d), "--only", "all"]);
+    assert_eq!(bad.status.code(), Some(2));
+}
+
+// --drop-caches needs Linux and root. Where it cannot drop the cache it must
+// fail with a clear message, not measure a warm cache as cold.
+#[test]
+fn drop_caches_fails_clearly_or_measures_cold() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path().join("s");
+    create(&d, "5000", &[]);
+    for args in [
+        vec!["open", "--dir", p(&d), "--drop-caches"],
+        vec!["lookup", "--dir", p(&d), "--hits", "100", "--misses", "100", "--drop-caches"],
+    ] {
+        let out = bench(&args);
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert_eq!(value(&text, "cache"), Some("cold"), "{args:?}: {text}");
+        } else {
+            assert_eq!(out.status.code(), Some(1), "{args:?}");
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(err.contains("drop") && (err.contains("purge") || err.contains("root")), "{args:?}: {err}");
+        }
+    }
+    let out = bench(&["open", "--dir", p(&d), "--drop-caches", "--cache", "warm"]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
 // Settle runs the idle merge of the index (#111): fewer runs after it, the
 // same objects, and the merge bytes reported. Waits for the idle delay of
 // the store (5 s).
