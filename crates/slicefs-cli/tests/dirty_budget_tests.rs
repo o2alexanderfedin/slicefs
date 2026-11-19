@@ -79,9 +79,10 @@ const BUDGET: usize = 4 << 20;
 /// Writes per file: about 4.7 MiB of 4 KiB writes, above the limit.
 const WRITES: u64 = 1200;
 /// Peak heap above the baseline: the budget, the chunk store's unsynced
-/// bytes (up to 8 MiB, see `memory_bound_tests.rs`) and the step work
-/// space. Without the budget the six overlays alone hold about 24 MiB.
-const PEAK_BOUND: usize = BUDGET + (12 << 20);
+/// bytes (at most `KEEP_CAP` while a background pack sync runs, #108) and
+/// the step work space. The budget itself is checked exactly through
+/// `test_dirty_total` below.
+const PEAK_BOUND: usize = BUDGET + chunk_store::retry::KEEP_CAP + (4 << 20);
 /// Most work of one write (see `rebase_step_tests.rs`).
 const WORK_BOUND: u64 = 6 * REBASE_STEP as u64;
 
