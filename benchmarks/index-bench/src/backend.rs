@@ -81,6 +81,13 @@ pub trait Store {
     fn gc(&self, _live: &LiveFilter) -> Result<Vec<(&'static str, String)>, String> {
         Err("gc is not supported by this backend".into())
     }
+    /// Wait for background index work (merges), with the store open.
+    fn wait_idle(&self) {}
+    /// The counters of the `put` locality cache (#112), as `key=value`
+    /// pairs. Empty by default.
+    fn locality_keys(&self) -> Vec<(&'static str, String)> {
+        Vec::new()
+    }
 }
 
 /// Options of a new store. `None` keeps the default of the backend.
@@ -91,6 +98,8 @@ pub struct CreateOpts {
     /// The entries of the index memtable before a flush to a run (for
     /// tests).
     pub memtable_limit: Option<usize>,
+    /// The `put` locality cache (#112) on or off.
+    pub locality_cache: Option<bool>,
 }
 
 /// A kind of store: how to make one and how to open one.
@@ -165,6 +174,20 @@ impl Store for ChunkStoreHandle {
     fn settle(&self, timeout: Duration) -> Result<bool, String> {
         Ok(self.0.wait_index_settled(timeout))
     }
+    fn wait_idle(&self) {
+        self.0.wait_index_idle();
+    }
+    fn locality_keys(&self) -> Vec<(&'static str, String)> {
+        let l = self.0.locality_stats();
+        vec![
+            ("cache_hits", l.hits.to_string()),
+            ("cache_misses", l.misses.to_string()),
+            ("cache_fills", l.fills.to_string()),
+            ("cache_fills_dropped", l.fills_dropped.to_string()),
+            ("cache_entries", l.entries.to_string()),
+            ("cache_packs", l.packs.to_string()),
+        ]
+    }
     fn gc(&self, live: &LiveFilter) -> Result<Vec<(&'static str, String)>, String> {
         let boundary = self.0.gc_begin().map_err(err)?;
         let st = self.0.gc_finish(live, boundary).map_err(err)?;
@@ -237,6 +260,9 @@ impl Backend for ChunkStoreBackend {
         // The runs as the write load leaves them (the settle step runs the
         // idle merge).
         opts.index_idle_merge_after = None;
+        if let Some(on) = c.locality_cache {
+            opts.locality_cache = on;
+        }
         Ok(Box::new(ChunkStoreHandle(ChunkStore::open(dir, opts).map_err(err)?)))
     }
 

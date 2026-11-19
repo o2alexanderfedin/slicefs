@@ -29,6 +29,9 @@ mod extsort;
 pub mod file;
 pub mod hash;
 mod index;
+mod locality;
+#[cfg(test)]
+mod locality_tests;
 mod mark;
 pub mod pack_io;
 #[cfg(test)]
@@ -40,6 +43,8 @@ pub mod mem;
 use crate::index::{Counts, Hwm, Index, MergeOut, Snapshot};
 use crate::run::Run;
 use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK};
+pub use crate::locality::LocalityStats;
+use crate::locality::LocalityCache;
 pub use crate::mark::{LiveFilter, LiveSet, LIVE_FILTER_BITS};
 use crate::mark::Touched;
 pub use crate::hash::{hasher_by_name, hasher_by_tag, hasher_names, hashers, Blake3_256, ObjectHasher, DEFAULT_HASHER};
@@ -158,6 +163,11 @@ pub struct Options {
     /// Most sorted chunks that one merge of the exact mark reads at a time
     /// (open files; 64 KiB of buffer each). A tuning and test knob.
     pub gc_merge_fan_in: usize,
+    /// The locality cache of `put` (#112; see `locality.rs`): after a few
+    /// dedup hits in a row in one pack that this process sealed, the
+    /// entries of its `.idx` answer the next dedup checks from RAM (at most
+    /// 65,536 entries). Off: every dedup check goes to the index.
+    pub locality_cache: bool,
 }
 
 impl Default for Options {
@@ -176,6 +186,7 @@ impl Default for Options {
             gc_tmp_dir: None,
             gc_sort_chunk_ids: extsort::SORT_CHUNK_BYTES / ID_LEN,
             gc_merge_fan_in: extsort::MERGE_FAN_IN,
+            locality_cache: true,
         }
     }
 }
@@ -633,6 +644,8 @@ pub struct ChunkStore {
     gc: Mutex<()>,
     /// See [`ChunkStore::last_gc_timing`].
     gc_timing: Mutex<GcTiming>,
+    /// The locality cache of `put` (see `locality.rs`).
+    locality: LocalityCache,
     /// Test hook: `gc_finish` calls it at the start of its pass 1 (with 1)
     /// and of its pass 2 (with 2), with no store lock held (see
     /// `race_tests.rs`).
@@ -925,6 +938,7 @@ impl ChunkStore {
             after_merge_write: Mutex::new(None),
             gc: Mutex::new(()),
             gc_timing: Mutex::new(GcTiming::default()),
+            locality: LocalityCache::default(),
             #[cfg(test)]
             gc_pass_hook: Mutex::new(None),
         };
@@ -1213,6 +1227,11 @@ impl ChunkStore {
     /// lose the object. So under the lock the answer is used only if the
     /// index generation is the same and the memtable has no entry of the
     /// ID (see `Index::gen`); else the lookup runs again under the lock.
+    ///
+    /// The locality cache (see `locality.rs`) can answer the lookup instead
+    /// of the index. Its hit takes the same path as an index hit: it is
+    /// touched (for a running GC) and checked under the lock in the same
+    /// way.
     pub fn put(&self, data: &[u8]) -> Result<ObjectId> {
         if self.opts.read_only {
             return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
@@ -1222,7 +1241,7 @@ impl ChunkStore {
         // object is written again, and its new memtable entry hides the run
         // that could not be read. Its stats then count it as new.
         let gen = self.index.gen();
-        let found = matches!(self.index.get(&id), Ok(Some(_)));
+        let found = self.dedup_lookup(&id);
         self.after_lookup();
         if found {
             let mut inner = self.inner.lock().unwrap();
@@ -1266,6 +1285,32 @@ impl ChunkStore {
             }
             r
         })
+    }
+
+    /// The dedup check of `put` outside the store lock: the locality cache,
+    /// then the index. An index hit can start a fill of the cache (a read
+    /// of one `.idx`, outside every lock).
+    fn dedup_lookup(&self, id: &ObjectId) -> bool {
+        if !self.opts.locality_cache {
+            return matches!(self.index.get(id), Ok(Some(_)));
+        }
+        if self.locality.get(id).is_some() {
+            return true;
+        }
+        let Ok(Some(loc)) = self.index.get(id) else { return false };
+        if let Some(epoch) = self.locality.index_hit(loc.pack) {
+            match self.io.read(loc.pack, Kind::Idx).map_err(Error::from).and_then(|b| decode_index(&b, loc.pack)) {
+                Ok(Some(entries)) => self.locality.fill(loc.pack, epoch, entries),
+                _ => self.locality.fill_failed(),
+            }
+        }
+        true
+    }
+
+    /// The counters of the locality cache of `put` (see
+    /// [`Options::locality_cache`]).
+    pub fn locality_stats(&self) -> LocalityStats {
+        self.locality.stats()
     }
 
     /// Append an encoded record to the active pack (made if there is none),
@@ -1690,6 +1735,11 @@ impl ChunkStore {
             // Whenever a pack changes, also with nothing to add: the hwm
             // must move past the packs that change.
             if plans.iter().any(|p| !p.dropped) || !unused.is_empty() {
+                // The `.idx` of a pack that changes can list removed objects
+                // from now on (see `locality.rs`); before the install, under
+                // the store lock, so no `put` that sees the new generation
+                // can get them from the cache.
+                self.locality.untrust(plans.iter().filter(|p| !p.dropped).map(|p| p.num).chain(unused.iter().copied()));
                 let hwm = match inner.active.as_ref() {
                     Some(a) => Hwm { pack: a.num, offset: a.len },
                     None => Hwm { pack: inner.next_pack, offset: 0 },
@@ -2373,6 +2423,8 @@ impl ChunkStore {
             return Err(e.into());
         }
         inner.dir_dirty = false; // write_durable synced the directory
+        // Its `.idx` lists exactly its records now (see `locality.rs`).
+        self.locality.trust(a.num, a.entries.len());
         Ok(())
     }
 }

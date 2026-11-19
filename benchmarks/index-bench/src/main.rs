@@ -8,6 +8,7 @@
 //! index-bench settle --dir D [--timeout-s S]
 //! index-bench recover --dir D [--packs 1|all] [--read-only]
 //! index-bench gc     --dir D [--live-every K] [--dead-run R]
+//! index-bench rewrite --dir D --objects N [--rewrite K] [--pack-limit BYTES] [--cache on|off]
 //! index-bench run    --dir D --objects N [--reps R] [--pack-limit BYTES] [--memtable-limit ENTRIES]
 //!                    [--hits K] [--misses K] [--drop-caches]
 //!   every step also takes --backend NAME (default chunk-store)
@@ -89,6 +90,7 @@ fn spec(cmd: &str) -> Option<(&'static [&'static str], &'static [&'static str])>
         "settle" => (&["dir", "backend", "timeout-s"], &[]),
         "recover" => (&["dir", "backend", "packs"], &["read-only"]),
         "gc" => (&["dir", "backend", "live-every", "dead-run"], &[]),
+        "rewrite" => (&["dir", "backend", "objects", "rewrite", "pack-limit", "cache", "seed"], &[]),
         "run" => (
             &["dir", "backend", "objects", "reps", "pack-limit", "memtable-limit", "hits", "misses"],
             &["drop-caches"],
@@ -417,6 +419,7 @@ fn step_create(f: &Flags) -> Result<(), Fail> {
     let opts = CreateOpts {
         pack_limit: f.u64("pack-limit")?,
         memtable_limit: f.u64("memtable-limit")?.map(|v| v as usize),
+        locality_cache: None,
     };
     if let Ok(mut rd) = std::fs::read_dir(&dir) {
         if rd.next().is_some() {
@@ -699,6 +702,102 @@ fn step_settle(f: &Flags) -> Result<(), Fail> {
         return Err(format!("the index did not settle in {timeout} s").into());
     }
     finish(&kv_text(&kv));
+}
+
+/// `rewrite` (#112): the dedup hits of `put` when data that is in the
+/// store is written again in the order of its packs (a copy of a tree that
+/// is already in the store), against random dedup hits (no locality).
+///
+/// One process makes the store (N objects; it needs a new or empty
+/// directory and writes no marker, so no other step uses it), waits for the
+/// background merges, then puts K objects again: first K random objects
+/// (the control), then the K objects from N/4 on in the order of their
+/// first put. The locality cache uses only packs that its own process
+/// sealed, so the store must be made in the same process.
+fn step_rewrite(f: &Flags) -> Result<(), Fail> {
+    let dir = f.dir()?;
+    let backend = f.backend()?;
+    let n = f.required_u64("objects")?;
+    let k = f.u64("rewrite")?.unwrap_or(n.min(1_000_000) / 2).min(n / 2);
+    let cache = match f.get("cache").unwrap_or("on") {
+        "on" => true,
+        "off" => false,
+        v => return Err(Fail::Usage(format!("--cache needs on or off, not {v}"))),
+    };
+    let mut seed = f.u64("seed")?.unwrap_or(LOOKUP_SEED);
+    if let Ok(mut rd) = std::fs::read_dir(&dir) {
+        if rd.next().is_some() {
+            return Err("the directory is not empty; rewrite needs a new or empty directory".into());
+        }
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot make the directory: {e}"))?;
+    let opts = CreateOpts { pack_limit: f.u64("pack-limit")?, memtable_limit: None, locality_cache: Some(cache) };
+    let store = backend.create(&dir, opts)?;
+    for i in 0..n {
+        store.put(&object(i))?;
+        if i > 0 && i % 10_000_000 == 0 {
+            eprintln!("rewrite: {i} objects");
+        }
+    }
+    store.wait_idle();
+    let packs = store.packs();
+    let random: Vec<u64> = (0..k).map(|_| splitmix64(&mut seed) % n).collect();
+    let timed = |vals: &mut dyn Iterator<Item = u64>, cnt: u64| -> Result<(String, Keys), Fail> {
+        let before = store.locality_keys();
+        let t0 = Instant::now();
+        for i in vals {
+            store.put(&object(i))?;
+        }
+        let ns = if cnt > 0 { fmt_f(t0.elapsed().as_secs_f64() * 1e9 / cnt as f64) } else { "n/a".into() };
+        let after = store.locality_keys();
+        // The counters of this phase only (the gauges as they are after it).
+        let diff = after
+            .iter()
+            .map(|(key, v)| {
+                let old = before.iter().find(|(b, _)| b == key).map(|(_, o)| o.parse::<u64>().unwrap_or(0)).unwrap_or(0);
+                let gauge = matches!(*key, "cache_entries" | "cache_packs");
+                (*key, if gauge { v.clone() } else { (v.parse::<u64>().unwrap_or(0) - old).to_string() })
+            })
+            .collect();
+        Ok((ns, diff))
+    };
+    let (random_ns, random_keys) = timed(&mut random.iter().copied(), k)?;
+    let (ordered_ns, ordered_keys) = timed(&mut (n / 4..n / 4 + k), k)?;
+    if store.objects() != n {
+        return Err(format!("put of objects in the store changed the count from {n} to {}", store.objects()).into());
+    }
+    let mut kv = vec![
+        ("step", "rewrite".into()),
+        ("backend", backend.name().into()),
+        ("objects", n.to_string()),
+        ("packs", packs.to_string()),
+        ("rewrite", k.to_string()),
+        ("cache", if cache { "on" } else { "off" }.into()),
+        ("put_random_hit_ns", random_ns),
+        ("put_ordered_hit_ns", ordered_ns),
+    ];
+    let index_per_put = |keys: &[(&'static str, String)]| {
+        let misses = keys.iter().find(|(key, _)| *key == "cache_misses").map(|(_, v)| v.parse::<f64>().unwrap_or(0.0));
+        match misses {
+            Some(m) if cache && k > 0 => format!("{:.4}", m / k as f64),
+            _ => "1".into(),
+        }
+    };
+    kv.push(("random_index_lookups_per_put", index_per_put(&random_keys)));
+    kv.push(("ordered_index_lookups_per_put", index_per_put(&ordered_keys)));
+    kv.extend(random_keys.into_iter().map(|(key, v)| (prefixed("random_", key), v)));
+    kv.extend(ordered_keys.into_iter().map(|(key, v)| (prefixed("ordered_", key), v)));
+    kv.push(("max_rss_bytes", max_rss_bytes().to_string()));
+    store.close()?;
+    finish(&kv_text(&kv));
+}
+
+/// `key=value` pairs of a step.
+type Keys = Vec<(&'static str, String)>;
+
+/// `prefix` + `key` as a static key (a handful per process).
+fn prefixed(prefix: &str, key: &str) -> &'static str {
+    Box::leak(format!("{prefix}{key}").into_boxed_str())
 }
 
 fn step_recover(f: &Flags) -> Result<(), Fail> {
@@ -1165,6 +1264,7 @@ fn real_main(args: &[String]) -> Result<(), Fail> {
         "settle" => step_settle(&flags),
         "recover" => step_recover(&flags),
         "gc" => step_gc(&flags),
+        "rewrite" => step_rewrite(&flags),
         "run" => step_run(&flags),
         _ => Err(Fail::Usage(format!("unknown subcommand {cmd}"))),
     }
