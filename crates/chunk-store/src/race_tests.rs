@@ -367,6 +367,28 @@ fn a_read_error_after_pending_runs_changes_nothing() {
     assert!(failed_after_a_pending_run, "some failure came after a pending run was written");
 }
 
+// One read fails and the reads after it work (a transient error), at many
+// points of both passes. Nothing live, so no copies: the GC must end with
+// the error and change nothing. A lookup error taken as "not current"
+// would let the GC go on and change other packs.
+#[test]
+fn a_transient_read_error_in_a_gc_pass_changes_nothing() {
+    for (pass, skip) in [(1, 0), (1, 6), (2, 0), (2, 5), (2, 70), (2, 150), (2, 250), (2, 320)] {
+        let what = format!("pass {pass}, after {skip} reads");
+        let mem = MemIo::new();
+        let (s, objs) = gc_store(&mem);
+        let before = Files::of(&mem);
+        let ran = Arc::new(AtomicBool::new(false));
+        let m = mem.clone();
+        at_pass(&s, pass, &ran, move |_| m.fail_read_once_after(skip));
+        let b = s.gc_begin().unwrap();
+        let r = s.gc_finish(&HashSet::new(), b);
+        assert!(ran.load(Ordering::SeqCst), "{what}");
+        assert!(matches!(r, Err(crate::Error::Io(_))), "{what}: {r:?}");
+        before.unchanged(&mem, s, &objs, &what);
+    }
+}
+
 // The passes run with the store lock free: puts go on, and an object that
 // the GC planned to remove and that is put again during pass 2 is kept
 // (the plan of its pack is dropped at the install).

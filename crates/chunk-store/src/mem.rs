@@ -36,6 +36,8 @@ struct State {
     fail_reads: bool,
     /// After this many more reads, every read fails (`None`: off).
     fail_reads_after: Option<u32>,
+    /// After this many more good reads, the next one fails once (`None`: off).
+    fail_read_once_after: Option<u32>,
     fail_syncs: bool,
     /// The next this many syncs fail (then they work again).
     fail_next_syncs: u32,
@@ -56,8 +58,16 @@ struct State {
 }
 
 impl State {
-    /// True if this read must fail (counts down `fail_reads_after`).
+    /// True if this read must fail (counts down `fail_read_once_after` and
+    /// `fail_reads_after`).
     fn read_fails(&mut self) -> bool {
+        if let Some(n) = self.fail_read_once_after.as_mut() {
+            if *n == 0 {
+                self.fail_read_once_after = None;
+                return true;
+            }
+            *n -= 1;
+        }
         match self.fail_reads_after.as_mut() {
             Some(0) => true,
             Some(n) => {
@@ -146,6 +156,12 @@ impl MemIo {
     /// `clear_fail_reads_after` (a failure in the middle of a long operation).
     pub fn fail_reads_after(&self, n: u32) {
         self.s.lock().unwrap().fail_reads_after = Some(n);
+    }
+
+    /// After `skip` more good reads, the next read fails once with EIO; the
+    /// reads after it work (a transient read error).
+    pub fn fail_read_once_after(&self, skip: u32) {
+        self.s.lock().unwrap().fail_read_once_after = Some(skip);
     }
 
     /// End `fail_reads_after`.
