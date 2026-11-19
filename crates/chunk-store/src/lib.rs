@@ -1176,7 +1176,10 @@ impl ChunkStore {
     ///
     /// RAM: the totals of each pack, the entries of one pack, the memtable
     /// copy, and the filter and fences of the pending runs; no map of every
-    /// object. Cost: one sequential pass over the runs, and one verified
+    /// object. `live` is the caller's (a [`LiveFilter`]: 1.25 bytes for each
+    /// object); the touched set before this call moves into a filter of the
+    /// same size after `Options::gc_touched_exact` IDs; the touched set
+    /// during this call is exact. Cost: one sequential pass over the runs, and one verified
     /// snapshot lookup per `.idx` entry of each selected pack (two for a
     /// punched pack). Each store-lock hold is bounded by a batch of copies
     /// (`COPY_BATCH` records), by the memtable limit (a flush, the install),

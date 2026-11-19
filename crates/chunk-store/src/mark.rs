@@ -6,8 +6,9 @@
 //! 33-byte IDs. A false positive only keeps a dead object (about 1 % of the
 //! dead objects at 10 bits for each key, more in packs that are punched,
 //! because a hole needs a whole block of dead records); a live object is
-//! never removed, because a Bloom filter has no false negatives. A later GC
-//! can remove the dead objects that stay: the filter of each GC is new.
+//! never removed, because a Bloom filter has no false negatives. The
+//! probes of an ID do not depend on the filter size, so a later GC can keep
+//! many of the same dead objects again.
 //!
 //! A mark must never use the filter to skip a part of its walk ("seen
 //! already"): a false positive would then lose the live objects under it.

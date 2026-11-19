@@ -81,6 +81,7 @@ fn a_saturated_filter_keeps_every_live_object() {
         let st = s.gc_finish(&f, b).unwrap();
         let left = check_live(dir.path(), s, &objs, &live);
         assert_eq!(left as u64, 300 - st.removed_objects, "n {n} bits {bits}");
+        assert!(left > 0, "n {n} bits {bits}: the filter gave no false positive");
     }
 }
 
