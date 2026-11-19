@@ -157,6 +157,32 @@ fn a_torn_record_at_the_scan_ends_both_passes() {
     assert_eq!(ops, vec![b"one".to_vec()]);
 }
 
+fn append(path: &std::path::Path, bytes: &[u8]) {
+    use std::io::Write;
+    std::fs::OpenOptions::new().append(true).open(path).unwrap().write_all(bytes).unwrap();
+}
+
+// The reader skips a record of an unknown type in the same call that reads
+// the next record: pass 2 must not return an op after the end of pass 1.
+#[test]
+fn an_op_after_an_unknown_last_record_is_not_read() {
+    use metadata::segment::frame_record;
+    let dir = TempDir::new().unwrap();
+    let meta = store(&dir, WalConfig::PerOp);
+    meta.commit().unwrap(); // seq 0: the root
+    meta.log_op(b"one".to_vec()); // seq 1
+    meta.flush_wal().unwrap();
+    let seg = only_segment(&dir);
+    append(&seg, &frame_record(0x01, 2, b"legacy")); // a type the reader skips
+    let (_, _, log) = scan_store_with_log(&dir.path().join("segments")).unwrap();
+    assert_eq!(log.len(), 1);
+    append(&seg, &frame_record(0x10, 3, b"late"));
+    let got: Vec<_> = log.records().collect();
+    assert_eq!(got[0].as_ref().unwrap(), b"one");
+    assert!(got.iter().all(|r| !matches!(r, Ok(b) if b == b"late")), "{got:?}");
+    assert!(got.last().unwrap().is_err(), "a record pass 1 did not see is an error");
+}
+
 #[test]
 fn the_log_continues_into_later_segments() {
     let dir = TempDir::new().unwrap();

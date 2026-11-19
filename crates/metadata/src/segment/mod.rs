@@ -255,7 +255,13 @@ impl Iterator for WriteLogRecords<'_> {
                     }
                 }
             };
-            match reader.next() {
+            let entry = reader.next();
+            // The reader skips records of unknown types, so one call can read
+            // past the span: a record there was not seen by pass 1.
+            if reader.cursor().1 > self.end_seq {
+                return self.changed("a record after the end of the log");
+            }
+            match entry {
                 Some(SegmentEntry::Op { bytes }) => {
                     self.ops += 1;
                     return Some(Ok(bytes));
