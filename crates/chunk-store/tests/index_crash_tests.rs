@@ -30,7 +30,9 @@ fn random(n: usize, seed: u64) -> Vec<u8> {
 
 /// 64 KiB packs (about 120 objects of 500 bytes) and a run every 32 entries.
 fn opts() -> Options {
-    Options { pack_limit: 64 << 10, index_memtable_limit: 32, ..Options::default() }
+    // A fixed run list and fault knobs that only the test uses: no
+    // background merges.
+    Options { pack_limit: 64 << 10, index_memtable_limit: 32, index_background_merge: false, ..Options::default() }
 }
 
 fn store(mem: &MemIo, o: &Options) -> ChunkStore {
@@ -229,7 +231,7 @@ fn a_power_loss_with_unsynced_puts_after_a_flush() {
 #[test]
 fn a_crash_during_the_replay_of_a_rebuild() {
     let mem = MemIo::new();
-    let s = store(&mem, &Options { pack_limit: 64 << 10, ..Options::default() });
+    let s = store(&mem, &Options { pack_limit: 64 << 10, index_background_merge: false, ..Options::default() });
     let objs = put_many(&s, 600, 1);
     s.close().unwrap();
     drop(s);

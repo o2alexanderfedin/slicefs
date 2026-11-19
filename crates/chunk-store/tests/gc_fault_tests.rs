@@ -20,7 +20,7 @@ fn random(n: usize, seed: u64) -> Vec<u8> {
 }
 
 fn store(mem: &MemIo) -> ChunkStore {
-    ChunkStore::open_with(Arc::new(mem.clone()), Options { pack_limit: 256 * 1024, ..Options::default() }).unwrap()
+    ChunkStore::open_with(Arc::new(mem.clone()), Options { pack_limit: 256 * 1024, index_background_merge: false, ..Options::default() }).unwrap()
 }
 
 fn put_many(s: &ChunkStore, n: u64, seed: u64) -> Vec<(ObjectId, Vec<u8>)> {

@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
 mod bloom;
@@ -32,7 +32,7 @@ pub mod retry;
 mod run;
 pub mod mem;
 
-use crate::index::{Counts, Hwm, Index};
+use crate::index::{Counts, Hwm, Index, MergeOut};
 use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK};
 pub use crate::hash::{hasher_by_name, hasher_by_tag, hasher_names, hashers, Blake3_256, ObjectHasher, DEFAULT_HASHER};
 
@@ -121,6 +121,14 @@ pub struct Options {
     /// positives at 10); 0 writes runs without a filter. A tuning and test
     /// knob.
     pub index_bloom_bits: u8,
+    /// Index runs merge when this many adjacent runs have one size tier
+    /// (size-tiered merges; at least 2). A tuning and test knob.
+    pub index_merge_fan_in: usize,
+    /// Merge index runs on a background thread of the store (a writable
+    /// store only). Off: runs merge only through
+    /// [`ChunkStore::merge_index_now`] and [`ChunkStore::merge_index_all`]
+    /// (tests that need a fixed run list).
+    pub index_background_merge: bool,
 }
 
 impl Default for Options {
@@ -132,6 +140,8 @@ impl Default for Options {
             hasher: DEFAULT_HASHER,
             index_memtable_limit: 1 << 18,
             index_bloom_bits: index::DEFAULT_BLOOM_BITS,
+            index_merge_fan_in: 4,
+            index_background_merge: true,
         }
     }
 }
@@ -143,6 +153,8 @@ pub struct IndexInfo {
     pub runs: u64,
     /// Entries in the runs (tombstones included).
     pub run_entries: u64,
+    /// Tombstone entries in the runs.
+    pub run_tombstones: u64,
     /// Entries in the memtable (not in a run yet).
     pub memtable_entries: u64,
     /// The high-water mark: every pack record below (pack, offset) is in a
@@ -489,12 +501,114 @@ pub struct ChunkStore {
     opts: Options,
     /// The index, for lookups outside the store lock (also in `Inner`).
     index: Arc<Index>,
-    inner: Mutex<Inner>,
+    inner: Arc<Mutex<Inner>>,
+    /// Shared with the merge thread (see `MergeCtl`).
+    merge: Arc<MergeCtl>,
     /// Test hook: `put` and `read` take it and call it once, right after
     /// their lookup outside the store lock and before they take the lock
     /// (see `race_tests.rs`).
     #[cfg(test)]
     after_lookup: Mutex<Option<LookupHook>>,
+    /// Test hook: `merge_index_now` and `merge_index_all` take it and call
+    /// it once, after the merge output is written and before the install,
+    /// with no store lock held (see `race_tests.rs`).
+    #[cfg(test)]
+    after_merge_write: Mutex<Option<LookupHook>>,
+}
+
+/// The merge state that the store shares with its merge thread.
+#[derive(Default)]
+struct MergeCtl {
+    /// One merge at a time: held for a whole merge step. Lock order: this
+    /// lock, then the store lock.
+    step: Mutex<()>,
+}
+
+/// The merge knobs of the options.
+#[derive(Clone, Copy)]
+struct MergeCfg {
+    fan_in: usize,
+    memtable_limit: usize,
+}
+
+impl MergeCfg {
+    fn of(o: &Options) -> Self {
+        MergeCfg { fan_in: o.index_merge_fan_in.max(2), memtable_limit: o.index_memtable_limit.max(1) }
+    }
+}
+
+/// What a merge step needs: the parts of the store that a merge thread
+/// shares (never the `ChunkStore` itself, so its `Drop` runs).
+#[derive(Clone)]
+struct Merger {
+    io: Arc<dyn PackIo>,
+    inner: Arc<Mutex<Inner>>,
+    index: Arc<Index>,
+    ctl: Arc<MergeCtl>,
+    cfg: MergeCfg,
+}
+
+impl Merger {
+    /// One merge step (see `Index::pick_merge`): pick the window under the
+    /// store lock, write the output with no lock held, install it under the
+    /// store lock, then remove the inputs. `all`: merge every run into one.
+    /// `between` runs after the write, with no lock held (a test hook).
+    ///
+    /// Returns false if there was nothing to merge, the window changed, the
+    /// store is failed, or `stop` was set. An error changes nothing that a
+    /// lookup sees: on a read error of an input the partial output is
+    /// removed; if the error is `Corrupt` (a damaged page), a rebuild of the
+    /// index is requested, so the next writable open rebuilds it from the
+    /// packs, and no merge runs until then. A merge never fails the store:
+    /// the runs are derived data.
+    fn step(&self, all: bool, stop: &AtomicBool, between: &mut dyn FnMut()) -> Result<bool> {
+        let (io, index) = (&*self.io, &*self.index);
+        let _one = self.ctl.step.lock().unwrap();
+        let plan = {
+            let inner = self.inner.lock().unwrap();
+            if inner.failed {
+                return Ok(false);
+            }
+            match index.pick_merge(self.cfg.fan_in, self.cfg.memtable_limit, all) {
+                Some(p) => p,
+                None => return Ok(false),
+            }
+        };
+        let out = match index.write_merge(io, &plan, stop) {
+            Ok(Some(out)) => out,
+            Ok(None) => return Ok(false),
+            Err(e) => {
+                if let Error::Corrupt(m) = &e {
+                    let _inner = self.inner.lock().unwrap();
+                    if !index.rebuild_requested() {
+                        if let Err(e) = index.request_rebuild(io, m) {
+                            tracing::warn!("chunk store: cannot ask for a rebuild of the index: {e}");
+                        }
+                    }
+                }
+                return Err(e);
+            }
+        };
+        between();
+        let gone = {
+            let inner = self.inner.lock().unwrap();
+            if inner.failed {
+                drop(inner);
+                if let MergeOut::Run(r) = out {
+                    let num = r.num();
+                    drop(r);
+                    let _ = io.remove(num, Kind::Run);
+                }
+                return Ok(false);
+            }
+            match index.install_merge(io, &plan, out)? {
+                Some(gone) => gone,
+                None => return Ok(false),
+            }
+        };
+        Index::remove_runs(io, &gone);
+        Ok(true)
+    }
 }
 
 /// See `ChunkStore::after_lookup`.
@@ -509,9 +623,23 @@ impl ChunkStore {
             zstd_level: AtomicI32::new(opts.zstd_level),
             opts,
             index: Arc::clone(&inner.index),
-            inner: Mutex::new(inner),
+            inner: Arc::new(Mutex::new(inner)),
+            merge: Arc::new(MergeCtl::default()),
             #[cfg(test)]
             after_lookup: Mutex::new(None),
+            #[cfg(test)]
+            after_merge_write: Mutex::new(None),
+        }
+    }
+
+    /// The merge test hook (see `after_merge_write`); nothing outside tests.
+    fn after_merge_write(&self) {
+        #[cfg(test)]
+        {
+            let hook = self.after_merge_write.lock().unwrap().take();
+            if let Some(mut f) = hook {
+                f(self);
+            }
         }
     }
 
@@ -1140,11 +1268,53 @@ impl ChunkStore {
         IndexInfo {
             runs: runs.len() as u64,
             run_entries: runs.iter().map(|r| r.entries()).sum(),
+            run_tombstones: runs.iter().map(|r| r.tombstones()).sum(),
             memtable_entries: ix.mem_len() as u64,
             hwm_pack: hwm.pack,
             hwm_offset: hwm.offset,
             filter_bytes: runs.iter().map(|r| r.filter_bytes()).sum(),
             fence_bytes: runs.iter().map(|r| r.fence_bytes()).sum(),
+        }
+    }
+
+    /// The entry counts of the live runs (tombstones included), from the
+    /// newest run to the oldest. For tests and tools.
+    pub fn index_run_entries(&self) -> Vec<u64> {
+        self.index.runs().iter().map(|r| r.entries()).collect()
+    }
+
+    /// One merge step of the index runs by the size-tiered policy (see
+    /// [`Options::index_merge_fan_in`]); false if no window is due. For tests
+    /// and tools: a writable store also merges in the background (see
+    /// [`Options::index_background_merge`]). An error is returned but does
+    /// not fail the store (see `Merger::step`). Refused on a read-only store.
+    pub fn merge_index_now(&self) -> Result<bool> {
+        self.merge_index(false)
+    }
+
+    /// Merge every index run into one (also one run alone, if it has
+    /// tombstones), so the result has no tombstone; false if there is
+    /// nothing to do. It rewrites the whole index. For tests and tools;
+    /// refused on a read-only store.
+    pub fn merge_index_all(&self) -> Result<bool> {
+        self.merge_index(true)
+    }
+
+    fn merge_index(&self, all: bool) -> Result<bool> {
+        if self.opts.read_only {
+            return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
+        }
+        let never = AtomicBool::new(false);
+        self.merger().step(all, &never, &mut || self.after_merge_write())
+    }
+
+    fn merger(&self) -> Merger {
+        Merger {
+            io: Arc::clone(&self.io),
+            inner: Arc::clone(&self.inner),
+            index: Arc::clone(&self.index),
+            ctl: Arc::clone(&self.merge),
+            cfg: MergeCfg::of(&self.opts),
         }
     }
 

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 /// Every put goes to a run at once (memtable limit 1).
 fn store(mem: &MemIo) -> ChunkStore {
-    let o = Options { index_memtable_limit: 1, ..Options::default() };
+    let o = Options { index_memtable_limit: 1, index_background_merge: false, ..Options::default() };
     ChunkStore::open_with(Arc::new(mem.clone()), o).unwrap()
 }
 
@@ -102,4 +102,88 @@ fn a_put_hit_without_a_gc_writes_nothing() {
     assert_eq!(pack_bytes(&mem), before, "a dedup hit writes nothing");
     assert_eq!(s.index.gen(), gen, "and flushes nothing");
     assert_eq!(s.stats().objects, 1);
+}
+
+fn set_merge_hook(s: &ChunkStore, ran: &Arc<AtomicBool>, f: impl FnOnce(&ChunkStore) + Send + 'static) {
+    let ran = Arc::clone(ran);
+    let mut f = Some(f);
+    *s.after_merge_write.lock().unwrap() = Some(Box::new(move |s: &ChunkStore| {
+        (f.take().unwrap())(s);
+        ran.store(true, Ordering::SeqCst);
+    }));
+}
+
+// A merge reads and writes with no store lock (17-06). Two flushes between
+// its write and its install add two newer runs: the install must keep them
+// (it builds the run list and the MANIFEST from the state at the install,
+// not from the state when the merge started).
+#[test]
+fn a_flush_during_a_merge_keeps_the_new_runs() {
+    let mem = MemIo::new();
+    let s = store(&mem);
+    let mut objs: Vec<_> = (0..4).map(|i| (s.put(&data(i)).unwrap(), data(i))).collect();
+    assert_eq!(s.index_info().runs, 4);
+    let ran = Arc::new(AtomicBool::new(false));
+    set_merge_hook(&s, &ran, |s| {
+        for i in 4..6 {
+            s.put(&data(i)).unwrap();
+        }
+        assert_eq!(s.index_info().runs, 6);
+    });
+    assert!(s.merge_index_now().unwrap());
+    assert!(ran.load(Ordering::SeqCst), "the hook ran between the write and the install");
+    objs.extend((4..6).map(|i| (s.hasher().id(&data(i)), data(i))));
+    assert_eq!(s.index_run_entries(), vec![1, 1, 4]);
+    for (id, d) in &objs {
+        assert_eq!(s.get(id).as_ref(), Some(d));
+    }
+    s.sync().unwrap();
+    drop(s);
+    mem.crash();
+    let s = store(&mem);
+    assert_eq!(s.index_run_entries(), vec![1, 1, 4], "the MANIFEST lists the new runs");
+    assert_eq!(mem.list_runs().unwrap().len(), 3, "the inputs are gone");
+    for (id, d) in &objs {
+        assert_eq!(s.get(id).as_ref(), Some(d), "after a crash and a reopen");
+    }
+    assert_eq!(s.stats().objects, 6);
+}
+
+// A GC between the write and the install of a merge removes X and moves
+// the other objects (their old pack is deleted). The merged run still has
+// the old entries; the GC run is newer, so it wins: X stays missing and the
+// others read from their new places.
+#[test]
+fn a_gc_during_a_merge_stays_newer_than_the_merged_run() {
+    let mem = MemIo::new();
+    let s = store(&mem);
+    let objs: Vec<_> = (0..4).map(|i| (s.put(&data(i)).unwrap(), data(i))).collect();
+    let x = objs[0].0;
+    let live: HashSet<_> = objs[1..].iter().map(|(id, _)| *id).collect();
+    let ran = Arc::new(AtomicBool::new(false));
+    set_merge_hook(&s, &ran, move |s| {
+        let b = s.gc_begin().unwrap();
+        let st = s.gc_finish(&live, b).unwrap();
+        assert_eq!((st.removed_objects, st.packs_compacted), (1, 1), "{st:?}");
+    });
+    assert!(s.merge_index_now().unwrap());
+    assert!(ran.load(Ordering::SeqCst), "the hook ran between the write and the install");
+    assert_eq!(s.index_info().runs, 2);
+    let check = |s: &ChunkStore, what: &str| {
+        assert!(!s.contains(&x), "{what}");
+        assert!(s.get(&x).is_none(), "{what}");
+        for (id, d) in &objs[1..] {
+            assert_eq!(s.get(id).as_ref(), Some(d), "{what}");
+        }
+        assert_eq!(s.stats().objects, 3, "{what}");
+    };
+    check(&s, "after the merge");
+    s.sync().unwrap();
+    drop(s);
+    mem.crash();
+    let s = store(&mem);
+    check(&s, "after a crash and a reopen");
+    // No stale dedup hit: X is written again.
+    assert_eq!(s.put(&objs[0].1).unwrap(), x);
+    assert_eq!(s.get(&x).as_ref(), Some(&objs[0].1));
 }

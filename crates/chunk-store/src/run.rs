@@ -403,7 +403,7 @@ struct TagRange {
 /// runs). The run owns its mapping: it is unmapped when the last `Arc` of
 /// the run drops, so a reader keeps valid bytes after a merge or GC removes
 /// the file.
-#[allow(dead_code)] // `tombstones` and the pack range: for the merges (17-06).
+#[allow(dead_code)] // The pack range: for GC (17-07).
 pub(crate) struct Run {
     file: Arc<dyn PackRead>,
     /// The whole file, mapped; `None`: lookups read pages with `read_at`.
@@ -579,7 +579,6 @@ impl Run {
         (self.fences.len() * FENCE) as u64
     }
 
-    #[allow(dead_code)] // For the merges (17-06).
     pub fn num(&self) -> u64 {
         self.num
     }
@@ -593,14 +592,14 @@ impl Run {
         self.entries
     }
 
-    #[allow(dead_code)] // For the merges (17-06).
+    /// Tombstone entries.
     pub fn tombstones(&self) -> u64 {
         self.tombstones
     }
 
     /// The smallest and largest pack of the put entries; `None` if the run
     /// has only tombstones.
-    #[allow(dead_code)] // For the merges (17-06).
+    #[allow(dead_code)] // For GC (17-07).
     pub fn pack_range(&self) -> Option<(u64, u64)> {
         (self.min_pack <= self.max_pack).then_some((self.min_pack, self.max_pack))
     }

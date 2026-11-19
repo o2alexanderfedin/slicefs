@@ -33,11 +33,11 @@
 //! CRC32C u32 of every byte before it.
 
 use crate::pack_io::{Kind, PackIo};
-use crate::run::{Entry, Run, RunWriter};
+use crate::run::{Entry, Run, RunWriter, PER_PAGE};
 use crate::{Error, Loc, ObjectId, Result};
 use std::collections::BTreeMap;
 use std::io;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 const MAGIC: &[u8; 4] = b"SFMF";
@@ -258,9 +258,44 @@ impl Snapshot {
         for r in self.runs.iter() {
             srcs.push(Box::new(r.iter()));
         }
-        let heads = vec![None; srcs.len()];
-        MergeIter { srcs, heads, started: false, done: false }
+        MergeIter { newest: Newest::new(srcs), done: false }
     }
+}
+
+/// A merge of runs that [`Index::pick_merge`] chose under the store lock.
+pub(crate) struct MergePlan {
+    /// The input runs: adjacent in the run list, from the newest to the
+    /// oldest.
+    inputs: Vec<Arc<Run>>,
+    /// The number of the output run (taken from the next run number of the
+    /// MANIFEST in RAM, so no flush can take it).
+    out: u64,
+    /// The window holds the oldest run: nothing older exists for a
+    /// tombstone to hide, so the output drops the tombstones.
+    drop_tombs: bool,
+}
+
+/// The output of a merge (see [`Index::write_merge`]).
+pub(crate) enum MergeOut {
+    /// The new run, durable with its name.
+    Run(Run),
+    /// Nothing is left (every entry was a dropped tombstone): the inputs go
+    /// and no run replaces them.
+    Empty,
+}
+
+/// The tier of a run of `entries` entries: the integer floor of log base
+/// `fan_in` of max(1, entries / `limit`). Runs of one tier have a similar
+/// size; a merge of `fan_in` of them gives a run of the next tier.
+pub fn tier(entries: u64, limit: u64, fan_in: u64) -> u32 {
+    let fan_in = fan_in.max(2);
+    let mut n = (entries / limit.max(1)).max(1);
+    let mut t = 0;
+    while n >= fan_in {
+        n /= fan_in;
+        t += 1;
+    }
+    t
 }
 
 impl Index {
@@ -462,7 +497,7 @@ impl Index {
     }
 
     /// The generation: it goes up, under the store lock, after each run
-    /// install (a flush; a merge in 17-06) and after each GC install (the
+    /// install (a flush or a merge) and after each GC install (the
     /// tombstones and new places of a GC are durable, before any pack
     /// changes). A caller reads it before a lookup outside the store lock;
     /// if it is the same under the lock, and the memtable has no entry of
@@ -619,6 +654,155 @@ impl Index {
         Ok(())
     }
 
+    /// The next merge, chosen under the store lock (`None`: no merge).
+    ///
+    /// The policy (size-tiered): walk the runs from the oldest to the
+    /// newest; the first window of `fan_in` adjacent runs of one tier (see
+    /// [`tier`]) is the next merge. With `all`, the window is every run (also
+    /// one run alone if it has tombstones: the merge drops them). Only
+    /// adjacent runs merge, so the newest entry of an ID stays the newest.
+    ///
+    /// No merge while a rebuild is requested: the index is then damaged,
+    /// and the next writable open rebuilds it from the packs.
+    pub fn pick_merge(&self, fan_in: usize, limit: usize, all: bool) -> Option<MergePlan> {
+        if self.rebuild_requested() {
+            return None;
+        }
+        let runs = self.runs();
+        let n = runs.len();
+        let window = if all {
+            if n == 0 || (n == 1 && runs[0].tombstones() == 0) {
+                return None;
+            }
+            0..n
+        } else {
+            let f = fan_in.max(2);
+            if n < f {
+                return None;
+            }
+            let tiers: Vec<u32> = runs.iter().map(|r| tier(r.entries(), limit as u64, f as u64)).collect();
+            // `end`: one past the oldest run of the window (the list is in
+            // order from the newest to the oldest).
+            let end = (f..=n).rev().find(|&end| tiers[end - f..end].iter().all(|&t| t == tiers[end - 1]))?;
+            end - f..end
+        };
+        let mut man = self.man.lock().unwrap();
+        let out = man.next_run;
+        man.next_run += 1;
+        Some(MergePlan { inputs: runs[window.clone()].to_vec(), out, drop_tombs: window.end == n })
+    }
+
+    /// Write the merge of `plan` to its output run, with no lock held. The
+    /// inputs are read through the verified page reads (every page CRC
+    /// checked); for each ID the entry of the newest input wins; tombstones
+    /// are dropped only if the window holds the oldest run. The output is
+    /// synced (every 64 MiB and at the end) and its name made durable.
+    ///
+    /// A read error of an input ends the merge with that error: a page is
+    /// never skipped (a skipped tombstone would bring back an older entry).
+    /// `Ok(None)`: `stop` was set. After an error or a stop, the partial
+    /// output is removed (best effort) and nothing else changed.
+    pub fn write_merge(&self, io: &dyn PackIo, plan: &MergePlan, stop: &AtomicBool) -> Result<Option<MergeOut>> {
+        let out = plan.out;
+        let r = (|| {
+            let expected: u64 = plan.inputs.iter().map(|r| r.entries()).sum();
+            let mut w = RunWriter::create(io, out, expected, self.bloom_bits)?;
+            let srcs: Vec<Source<'_>> = plan.inputs.iter().map(|r| Box::new(r.iter()) as Source<'_>).collect();
+            let mut merged = Newest::new(srcs);
+            let mut seen = 0usize;
+            while let Some((id, e)) = merged.next_entry()? {
+                // About once per input page.
+                if seen.is_multiple_of(PER_PAGE) && stop.load(Ordering::SeqCst) {
+                    return Ok(None);
+                }
+                seen += 1;
+                if plan.drop_tombs && matches!(e, Entry::Tomb(_)) {
+                    continue;
+                }
+                w.push(&id, &e)?;
+            }
+            let info = w.finish()?;
+            if info.entries == 0 {
+                io.remove(out, Kind::Run)?;
+                return Ok(Some(MergeOut::Empty));
+            }
+            io.sync_dir()?;
+            Ok(Some(MergeOut::Run(Run::open(io.open_run(out)?, io.map_run(out)?, out, info.len)?)))
+        })();
+        if !matches!(r, Ok(Some(_))) {
+            let _ = io.remove(out, Kind::Run);
+        }
+        r
+    }
+
+    /// Install the merge `plan` with its output `out`. The caller holds the
+    /// store lock. The new run list and MANIFEST come from the state now
+    /// (runs flushed during the merge stay): the window is replaced by the
+    /// output. The MANIFEST keeps the hwm, the counts and the flags (a merge
+    /// changes no content) and lists the inputs as obsolete; it is written
+    /// with `write_durable` before anything else changes.
+    ///
+    /// Returns the input run numbers, to remove after the store lock is
+    /// released (readers that hold the old runs keep reading them), or
+    /// `None` if the window is no longer in the run list (then the output is
+    /// removed). After a failed MANIFEST write the output file stays (the
+    /// write may still be durable, and then that MANIFEST lists it); its
+    /// number is never used again, and a writable open removes it if no
+    /// MANIFEST lists it.
+    pub fn install_merge(&self, io: &dyn PackIo, plan: &MergePlan, out: MergeOut) -> Result<Option<Vec<u64>>> {
+        let nums: Vec<u64> = plan.inputs.iter().map(|r| r.num()).collect();
+        let k = nums.len();
+        let cur = self.runs();
+        let mut man = self.man.lock().unwrap();
+        let same = |it: &mut dyn Iterator<Item = u64>| it.eq(nums.iter().copied());
+        let at = cur.windows(k).position(|w| same(&mut w.iter().map(|r| r.num()))).filter(|&at| {
+            man.runs.get(at..at + k).is_some_and(|m| same(&mut m.iter().map(|r| r.num)))
+                && (!plan.drop_tombs || at + k == cur.len())
+        });
+        let Some(at) = at else {
+            drop(man);
+            if matches!(out, MergeOut::Run(_)) {
+                let _ = io.remove(plan.out, Kind::Run);
+            }
+            return Ok(None);
+        };
+        let run = match out {
+            MergeOut::Run(r) => Some(r),
+            MergeOut::Empty => None,
+        };
+        let mut new = man.clone();
+        new.seq += 1;
+        let meta = run.as_ref().map(|r| RunMeta { num: r.num(), len: r.len(), entries: r.entries() });
+        new.runs.splice(at..at + k, meta);
+        new.obsolete = nums.clone();
+        io.write_durable(0, Kind::Manifest, &new.encode())?;
+        *man = new;
+        drop(man);
+        {
+            let mut runs = self.runs.write().unwrap();
+            let mut v: Vec<Arc<Run>> = runs.iter().cloned().collect();
+            v.splice(at..at + k, run.map(Arc::new));
+            *runs = Arc::new(v);
+        }
+        self.bump_gen();
+        Ok(Some(nums))
+    }
+
+    /// Remove the input runs of an installed merge (its MANIFEST is
+    /// durable). A failed removal is only logged: the MANIFEST lists them as
+    /// obsolete, and a writable open removes every run that the MANIFEST
+    /// does not list.
+    pub fn remove_runs(io: &dyn PackIo, nums: &[u64]) {
+        for &num in nums {
+            match io.remove(num, Kind::Run) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                    tracing::warn!("chunk store: cannot remove the merged index run {num:016x}: {e}")
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Write `entries` to run `num`, make its name durable, and open it.
     /// Every step that can fail comes before the MANIFEST write.
     fn write_run(io: &dyn PackIo, num: u64, entries: &[(ObjectId, Entry)], bloom_bits: u8) -> Result<Run> {
@@ -634,60 +818,72 @@ impl Index {
 
 type Source<'a> = Box<dyn Iterator<Item = Result<(ObjectId, Entry)>> + 'a>;
 
-/// See [`Snapshot::iter_all`]. The sources are in order from the newest (the
-/// memtable) to the oldest run.
-pub(crate) struct MergeIter<'a> {
+/// A merge of sorted sources, given in order from the newest to the oldest:
+/// each ID once, with the entry of the newest source that has it
+/// (tombstones included). The one place of the newest-wins rule, for
+/// [`Snapshot::iter_all`] and for merges. A source error is returned.
+struct Newest<'a> {
     srcs: Vec<Source<'a>>,
     /// The next entry of each source.
     heads: Vec<Option<(ObjectId, Entry)>>,
     started: bool,
-    done: bool,
 }
 
-impl MergeIter<'_> {
+impl<'a> Newest<'a> {
+    fn new(srcs: Vec<Source<'a>>) -> Self {
+        let heads = vec![None; srcs.len()];
+        Newest { srcs, heads, started: false }
+    }
+
     fn fill(&mut self, i: usize) -> Result<()> {
         self.heads[i] = self.srcs[i].next().transpose()?;
         Ok(())
     }
 
-    fn step(&mut self) -> Result<Option<(ObjectId, Loc)>> {
+    fn next_entry(&mut self) -> Result<Option<(ObjectId, Entry)>> {
         if !self.started {
             for i in 0..self.srcs.len() {
                 self.fill(i)?;
             }
             self.started = true;
         }
-        loop {
-            let Some(min) = self.heads.iter().flatten().map(|(id, _)| *id).min() else {
-                return Ok(None);
-            };
-            let mut newest = None;
-            for i in 0..self.heads.len() {
-                if matches!(self.heads[i], Some((id, _)) if id == min) {
-                    let (_, e) = self.heads[i].take().unwrap();
-                    newest.get_or_insert(e);
-                    self.fill(i)?;
-                }
-            }
-            if let Some(Entry::Put(l)) = newest {
-                return Ok(Some((min, l)));
+        let Some(min) = self.heads.iter().flatten().map(|(id, _)| *id).min() else {
+            return Ok(None);
+        };
+        let mut newest = None;
+        for i in 0..self.heads.len() {
+            if matches!(self.heads[i], Some((id, _)) if id == min) {
+                let (_, e) = self.heads[i].take().unwrap();
+                newest.get_or_insert(e);
+                self.fill(i)?;
             }
         }
+        Ok(newest.map(|e| (min, e)))
     }
+}
+
+/// See [`Snapshot::iter_all`]: the put entries of [`Newest`].
+pub(crate) struct MergeIter<'a> {
+    newest: Newest<'a>,
+    done: bool,
 }
 
 impl Iterator for MergeIter<'_> {
     type Item = Result<(ObjectId, Loc)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
+        while !self.done {
+            match self.newest.next_entry() {
+                Ok(Some((id, Entry::Put(l)))) => return Some(Ok((id, l))),
+                Ok(Some((_, Entry::Tomb(_)))) => {}
+                Ok(None) => self.done = true,
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
+            }
         }
-        let r = self.step();
-        if !matches!(r, Ok(Some(_))) {
-            self.done = true;
-        }
-        r.transpose()
+        None
     }
 }
 

@@ -29,7 +29,8 @@ fn small(i: u64) -> Vec<u8> {
 }
 
 fn opts(memtable_limit: usize, pack_limit: u64) -> Options {
-    Options { pack_limit, index_memtable_limit: memtable_limit, ..Options::default() }
+    // A fixed run list: merges only where a test asks for them.
+    Options { pack_limit, index_memtable_limit: memtable_limit, index_background_merge: false, ..Options::default() }
 }
 
 fn open(mem: &MemIo, o: &Options) -> ChunkStore {
@@ -1128,4 +1129,228 @@ fn lookups_outside_the_lock_never_miss_a_stored_object() {
     for i in 0..3000 {
         assert_eq!(s.get(&Blake3_256.id(&small(i))), Some(small(i)), "object {i}");
     }
+}
+
+// ── Merges (17-06) ────────────────────────────────────────────────────────────
+
+/// The tier of a run, as the merge policy computes it at fan-in 4: the
+/// integer floor of log4(max(1, entries / limit)).
+fn tier(entries: u64, limit: u64) -> u32 {
+    let mut n = (entries / limit).max(1);
+    let mut t = 0;
+    while n >= 4 {
+        n /= 4;
+        t += 1;
+    }
+    t
+}
+
+fn no_four_adjacent_runs_share_a_tier(s: &ChunkStore, limit: u64) {
+    let tiers: Vec<u32> = s.index_run_entries().iter().map(|&e| tier(e, limit)).collect();
+    assert!(tiers.windows(4).all(|w| w.iter().any(|&t| t != w[0])), "tiers {tiers:?}");
+}
+
+#[test]
+fn merges_keep_the_run_count_small() {
+    let mem = MemIo::new();
+    let o = opts(50, 64 << 10);
+    let s = open(&mem, &o);
+    let ids: Vec<ObjectId> = (0..2000).map(|i| s.put(&small(i)).unwrap()).collect();
+    assert_eq!(s.index_info().runs, 40);
+    let stats = s.stats();
+    let mut steps = 0;
+    while s.merge_index_now().unwrap() {
+        steps += 1;
+        assert!(steps < 100, "the policy must end");
+    }
+    let check = |s: &ChunkStore, what: &str| {
+        let info = s.index_info();
+        no_four_adjacent_runs_share_a_tier(s, 50);
+        assert!(info.runs <= 9 && (info.runs as f64) < 10.0 + 2000f64.log(4.0), "{what}: {info:?}");
+        assert_eq!(info.run_entries, 2000, "{what}: {info:?}");
+        assert_eq!(run_list(&mem).len() as u64, info.runs, "{what}: the inputs are removed");
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(s.get(id), Some(small(i as u64)), "{what}: object {i}");
+        }
+        assert_eq!(s.stats(), stats, "{what}");
+    };
+    check(&s, "after the merges");
+    let info = s.index_info();
+    drop(s);
+    let s = open(&mem, &o);
+    check(&s, "after a reopen");
+    assert_eq!(s.index_info(), info);
+}
+
+type Obj = (ObjectId, Vec<u8>);
+
+/// 400 objects of 1,000 bytes; every run merged into one (the oldest run,
+/// of a higher tier); then four GC rounds that each remove up to 50
+/// objects, so four newer, smaller runs hold tombstones. Returns the
+/// objects and which of them the GC removed.
+fn store_with_tombstone_runs(mem: &MemIo) -> (Options, Vec<Obj>, Vec<bool>) {
+    let o = opts(64, 64 << 10);
+    let s = open(mem, &o);
+    let objs = put_random(&s, 400, 77);
+    s.sync().unwrap();
+    assert!(s.merge_index_all().unwrap());
+    assert_eq!(s.index_info().runs, 1);
+    let mut removed = 0;
+    for round in 0..4 {
+        let gone = round * 100..round * 100 + 50;
+        let live: HashSet<ObjectId> =
+            objs.iter().enumerate().filter(|(i, _)| !gone.contains(i)).map(|(_, (id, _))| *id).collect();
+        let b = s.gc_begin().unwrap();
+        removed += s.gc_finish(&live, b).unwrap().removed_objects;
+    }
+    assert!(removed >= 100, "{removed} removed");
+    let info = s.index_info();
+    assert_eq!(info.runs, 5, "{info:?}");
+    assert!(info.run_tombstones > 0, "{info:?}");
+    let missing: Vec<bool> = objs.iter().map(|(id, _)| !s.contains(id)).collect();
+    assert_eq!(missing.iter().filter(|&&m| m).count() as u64, removed);
+    (o, objs, missing)
+}
+
+/// Every removed object is missing (and a put would write it again);
+/// every other object reads back byte-exact.
+fn same_content(s: &ChunkStore, objs: &[Obj], missing: &[bool], what: &str) {
+    for (i, ((id, d), &gone)) in objs.iter().zip(missing).enumerate() {
+        if gone {
+            assert!(!s.contains(id), "{what}: removed object {i}");
+            assert!(s.get(id).is_none(), "{what}: removed object {i}");
+        } else {
+            assert_eq!(s.get(id).as_ref(), Some(d), "{what}: object {i}");
+        }
+    }
+    let live = missing.iter().filter(|&&m| !m).count() as u64;
+    assert_eq!(s.stats().objects, live, "{what}");
+}
+
+#[test]
+fn a_merge_of_newer_runs_keeps_the_tombstones() {
+    let mem = MemIo::new();
+    let (o, objs, missing) = store_with_tombstone_runs(&mem);
+    let s = open(&mem, &o);
+    let oldest = run_list(&mem)[0];
+    let tombs = s.index_info().run_tombstones;
+    // The four small GC runs merge; the oldest run is not in the window.
+    assert!(s.merge_index_now().unwrap());
+    assert!(!s.merge_index_now().unwrap());
+    let info = s.index_info();
+    assert_eq!(info.runs, 2, "{info:?}");
+    assert_eq!(run_list(&mem)[0], oldest, "the oldest run was not merged");
+    assert_eq!(info.run_tombstones, tombs, "a merge without the oldest run keeps every tombstone: {info:?}");
+    same_content(&s, &objs, &missing, "after the merge");
+    drop(s);
+    let s = open(&mem, &o);
+    same_content(&s, &objs, &missing, "after a reopen");
+}
+
+#[test]
+fn merge_index_all_drops_the_tombstones() {
+    let mem = MemIo::new();
+    let (o, objs, missing) = store_with_tombstone_runs(&mem);
+    let s = open(&mem, &o);
+    assert!(s.merge_index_all().unwrap());
+    let info = s.index_info();
+    assert_eq!((info.runs, info.run_tombstones), (1, 0), "{info:?}");
+    same_content(&s, &objs, &missing, "after the merge");
+    assert!(!s.merge_index_all().unwrap(), "one run without tombstones: nothing to do");
+    drop(s);
+    assert_eq!(run_list(&mem).len(), 1);
+    let s = open(&mem, &o);
+    assert_eq!(s.index_info().run_tombstones, 0);
+    same_content(&s, &objs, &missing, "after a reopen");
+    // No stale dedup hit: a removed object is written again.
+    let i = missing.iter().position(|&m| m).unwrap();
+    assert_eq!(s.put(&objs[i].1).unwrap(), objs[i].0);
+    assert_eq!(s.get(&objs[i].0).as_ref(), Some(&objs[i].1));
+}
+
+// GC removes every object, then a merge of every run: nothing is left, so
+// no run replaces the inputs.
+#[test]
+fn a_merge_with_nothing_left_writes_no_run() {
+    let mem = MemIo::new();
+    let o = opts(32, 64 << 10);
+    let s = open(&mem, &o);
+    let objs = put_random(&s, 100, 9);
+    let b = s.gc_begin().unwrap();
+    assert_eq!(s.gc_finish(&HashSet::new(), b).unwrap().removed_objects, 100);
+    assert!(s.index_info().runs >= 2);
+    assert!(s.merge_index_all().unwrap());
+    let info = s.index_info();
+    assert_eq!((info.runs, info.run_entries), (0, 0), "{info:?}");
+    assert!(run_list(&mem).is_empty());
+    same_content(&s, &objs, &[true; 100], "after the merge");
+    drop(s);
+    let s = open(&mem, &o);
+    same_content(&s, &objs, &[true; 100], "after a reopen");
+}
+
+// A merge reads its inputs through the verified page reads. A damaged page
+// ends the merge with Corrupt, keeps no output, and asks for a rebuild:
+// the next open rebuilds the index from the packs (a read-only open in RAM).
+#[test]
+fn a_damaged_page_found_by_a_merge_leads_to_a_rebuild() {
+    let mem = MemIo::new();
+    let o = opts(32, 64 << 10);
+    let s = open(&mem, &o);
+    let mut objs = put_random(&s, 300, 4242);
+    s.sync().unwrap();
+    let runs = run_list(&mem);
+    assert!(runs.len() >= 4, "{runs:?}");
+    mem.flip(runs[0], Kind::Run, 100);
+    let e = s.merge_index_all().unwrap_err();
+    assert!(matches!(e, chunk_store::Error::Corrupt(_)), "{e}");
+    assert_eq!(run_list(&mem), runs, "no output was kept");
+    assert!(!s.merge_index_now().unwrap(), "no merge after a rebuild request");
+    // The store is not failed.
+    let d = random(1000, 1);
+    let id = s.put(&d).unwrap();
+    assert_eq!(s.get(&id).as_ref(), Some(&d));
+    objs.push((id, d));
+    s.sync().unwrap();
+    drop(s);
+
+    let before = snapshot(&mem);
+    let ro = read_only(&mem, &o);
+    let info = ro.index_info();
+    assert_eq!((info.runs, info.memtable_entries), (0, 301), "the read-only open replays every pack: {info:?}");
+    all_read_back(&ro, &objs, "read-only");
+    drop(ro);
+    assert_eq!(snapshot(&mem), before, "a read-only open writes nothing");
+
+    let s = open(&mem, &o);
+    all_read_back(&s, &objs, "after the rebuild");
+    assert!(run_list(&mem).iter().all(|r| !runs.contains(r)), "the old runs are gone");
+}
+
+// A merge removes its input runs once its MANIFEST is durable. A store
+// that has them open keeps reading them (a read-only tool next to a
+// mount); a store opened after the merge reads the new run.
+#[test]
+fn a_read_only_store_keeps_reading_after_a_merge_removed_its_runs() {
+    let mem = MemIo::new();
+    let (o, objs) = closed_store(&mem);
+    let a = open(&mem, &o);
+    let b = read_only(&mem, &o);
+    let old = run_list(&mem);
+    assert!(a.merge_index_all().unwrap());
+    assert!(old.iter().all(|&r| !mem.exists(r, Kind::Run)), "the inputs are removed");
+    all_read_back(&b, &objs, "the read-only store opened before the merge");
+    let c = read_only(&mem, &o);
+    assert_eq!(c.index_info().runs, 1);
+    all_read_back(&c, &objs, "a read-only store opened after the merge");
+    all_read_back(&a, &objs, "the writer");
+}
+
+#[test]
+fn a_read_only_store_refuses_a_merge() {
+    let mem = MemIo::new();
+    let (o, _) = closed_store(&mem);
+    let ro = read_only(&mem, &o);
+    assert!(ro.merge_index_now().is_err());
+    assert!(ro.merge_index_all().is_err());
 }
