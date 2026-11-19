@@ -8,7 +8,7 @@
 //! index-bench settle --dir D [--timeout-s S]
 //! index-bench recover --dir D [--packs 1|all] [--read-only]
 //! index-bench gc     --dir D [--live-every K] [--dead-run R]
-//! index-bench rewrite --dir D --objects N [--rewrite K] [--pack-limit BYTES] [--cache on|off]
+//! index-bench rewrite --dir D --objects N [--rewrite K] [--pack-limit BYTES] [--cache on|off] [--reopen]
 //! index-bench run    --dir D --objects N [--reps R] [--pack-limit BYTES] [--memtable-limit ENTRIES]
 //!                    [--hits K] [--misses K] [--drop-caches]
 //!   every step also takes --backend NAME (default chunk-store)
@@ -94,7 +94,7 @@ fn spec(cmd: &str) -> Option<(&'static [&'static str], &'static [&'static str])>
         "settle" => (&["dir", "backend", "timeout-s"], &[]),
         "recover" => (&["dir", "backend", "packs"], &["read-only"]),
         "gc" => (&["dir", "backend", "live-every", "dead-run"], &[]),
-        "rewrite" => (&["dir", "backend", "objects", "rewrite", "pack-limit", "cache", "seed"], &[]),
+        "rewrite" => (&["dir", "backend", "objects", "rewrite", "pack-limit", "cache", "seed"], &["reopen"]),
         "run" => (
             &["dir", "backend", "objects", "reps", "pack-limit", "memtable-limit", "hits", "misses"],
             &["drop-caches"],
@@ -825,8 +825,9 @@ fn step_settle(f: &Flags) -> Result<(), Fail> {
 /// directory and writes no marker, so no other step uses it), waits for the
 /// background merges, then puts K objects again: first K random objects
 /// (the control), then the K objects from N/4 on in the order of their
-/// first put. The locality cache uses only packs that its own process
-/// sealed, so the store must be made in the same process.
+/// first put. With `--reopen` the store is closed and opened again (same
+/// options) before the timed puts, so the locality cache gets only packs of
+/// an earlier open (their exact `.idx`, see `locality.rs`).
 fn step_rewrite(f: &Flags) -> Result<(), Fail> {
     let dir = f.dir()?;
     let backend = f.backend()?;
@@ -845,7 +846,8 @@ fn step_rewrite(f: &Flags) -> Result<(), Fail> {
     }
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot make the directory: {e}"))?;
     let opts = CreateOpts { pack_limit: f.u64("pack-limit")?, memtable_limit: None, locality_cache: Some(cache) };
-    let store = backend.create(&dir, opts)?;
+    let reopen = f.has("reopen");
+    let mut store = backend.create(&dir, opts)?;
     for i in 0..n {
         store.put(&object(i))?;
         if i > 0 && i % 10_000_000 == 0 {
@@ -853,6 +855,13 @@ fn step_rewrite(f: &Flags) -> Result<(), Fail> {
         }
     }
     store.wait_idle();
+    if reopen {
+        store.close()?;
+        drop(store);
+        // `create` opens the existing store with the same options.
+        store = backend.create(&dir, opts)?;
+        store.wait_idle();
+    }
     let packs = store.packs();
     let random: Vec<u64> = (0..k).map(|_| splitmix64(&mut seed) % n).collect();
     let timed = |vals: &mut dyn Iterator<Item = u64>, cnt: u64| -> Result<(String, Keys), Fail> {
@@ -886,6 +895,7 @@ fn step_rewrite(f: &Flags) -> Result<(), Fail> {
         ("packs", packs.to_string()),
         ("rewrite", k.to_string()),
         ("cache", if cache { "on" } else { "off" }.into()),
+        ("reopen", if reopen { "yes" } else { "no" }.into()),
         ("put_random_hit_ns", random_ns),
         ("put_ordered_hit_ns", ordered_ns),
     ];

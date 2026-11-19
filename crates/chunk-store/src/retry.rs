@@ -291,6 +291,9 @@ impl PackIo for RetryingIo {
     fn read(&self, num: u64, kind: Kind) -> io::Result<Vec<u8>> {
         self.inner.read(num, kind)
     }
+    fn file_len(&self, num: u64, kind: Kind) -> io::Result<u64> {
+        self.inner.file_len(num, kind)
+    }
     fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> io::Result<()> {
         let mut r = self.inner.write_durable(num, kind, data);
         for wait in &self.backoff {

@@ -325,9 +325,12 @@ impl Backend for ChunkStoreBackend {
         for t in &dropped.targets {
             let (live, keep) = idx_paths(dir, t.num);
             if live.exists() {
-                // The open wrote the index again: it must equal the saved copy.
+                // The open wrote the index again: it must equal the saved copy,
+                // but for the flag bits of the version field and the CRC (the
+                // scan writes it as not exact). The saved copy goes back, so
+                // the store keeps its exact `.idx` files (#112).
                 let same = match (std::fs::read(&live), std::fs::read(&keep)) {
-                    (Ok(a), Ok(b)) => a == b,
+                    (Ok(a), Ok(b)) => same_entries(&a, &b),
                     (Err(e), _) | (_, Err(e)) => {
                         errors.push(format!("cannot compare the index of pack {}: {e}", t.num));
                         continue;
@@ -337,8 +340,8 @@ impl Backend for ChunkStoreBackend {
                     errors.push(format!("the rebuilt index of pack {} differs from the saved copy", t.num));
                     continue;
                 }
-                if let Err(e) = std::fs::remove_file(&keep) {
-                    errors.push(format!("cannot remove a saved index: {e}"));
+                if let Err(e) = std::fs::rename(&keep, &live) {
+                    errors.push(format!("cannot move the saved index of pack {} back: {e}", t.num));
                     continue;
                 }
                 rebuilt += 1;
@@ -365,6 +368,17 @@ impl Backend for ChunkStoreBackend {
             Err(errors.join("; "))
         }
     }
+}
+
+/// True if two `.idx` files have the same magic, count and entries: they
+/// may differ in the flag bits of the version field (bytes 4..6, the low
+/// 12 bits must match) and so in the CRC (the last 4 bytes).
+fn same_entries(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len()
+        && a.len() >= 18
+        && a[..4] == b[..4]
+        && (u16::from_le_bytes([a[4], a[5]]) & 0x0fff) == (u16::from_le_bytes([b[4], b[5]]) & 0x0fff)
+        && a[6..a.len() - 4] == b[6..b.len() - 4]
 }
 
 /// The backend with this `--backend` name.

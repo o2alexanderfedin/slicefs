@@ -251,6 +251,11 @@ const FORMAT_VERSION: u16 = 2;
 /// Bit in the version field of a pack header: GC punched holes in the
 /// pack. Such a pack is never the active pack and never cut at open.
 const PACK_PUNCHED: u16 = 0x8000;
+/// Bit in the version field of a `.idx` header: the `.idx` is exact, every
+/// entry is the current index entry of its ID (see `locality.rs`).
+const IDX_EXACT: u16 = 0x4000;
+/// The `TRUST` file: magic(4) + floor(8) + CRC(4) (see `locality.rs`).
+const TRUST_MAGIC: &[u8; 4] = b"SFTR";
 /// magic(4) + version(2) + pack number(8)
 const PACK_HEADER: usize = 14;
 /// id(ID_LEN) + flags(1) + raw length(4) + stored length(4)
@@ -389,7 +394,7 @@ fn check_version(b: &[u8], what: &str, num: u64) -> Result<()> {
     if b.len() < 6 {
         return Ok(()); // short: the scan treats it as damaged
     }
-    let v = u16::from_le_bytes([b[4], b[5]]) & !PACK_PUNCHED;
+    let v = u16::from_le_bytes([b[4], b[5]]) & !(PACK_PUNCHED | IDX_EXACT);
     if v != FORMAT_VERSION {
         return Err(Error::Corrupt(format!(
             "{what} {num} has format version {v}; this SliceFS reads version {FORMAT_VERSION}"
@@ -461,12 +466,15 @@ fn resync_scan(buf: &[u8], num: u64) -> Result<Vec<(ObjectId, Loc)>> {
     Ok(out)
 }
 
-fn encode_index(entries: &[(ObjectId, Loc)]) -> Vec<u8> {
+/// A `.idx` of `entries`; `exact` sets the [`IDX_EXACT`] bit (only for a
+/// list where each entry is the current index entry of its ID).
+fn encode_index(entries: &[(ObjectId, Loc)], exact: bool) -> Vec<u8> {
     let mut sorted: Vec<&(ObjectId, Loc)> = entries.iter().collect();
     sorted.sort_by_key(|(id, _)| *id);
     let mut b = Vec::with_capacity(14 + entries.len() * IDX_ENTRY + 4);
     b.extend_from_slice(IDX_MAGIC);
-    b.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    let v = if exact { FORMAT_VERSION | IDX_EXACT } else { FORMAT_VERSION };
+    b.extend_from_slice(&v.to_le_bytes());
     b.extend_from_slice(&(entries.len() as u64).to_le_bytes());
     for (id, l) in sorted {
         b.extend_from_slice(&id.0);
@@ -475,6 +483,49 @@ fn encode_index(entries: &[(ObjectId, Loc)]) -> Vec<u8> {
         b.extend_from_slice(&l.raw.to_le_bytes());
         b.push(l.flags);
     }
+    let crc = crc32c::crc32c(&b);
+    b.extend_from_slice(&crc.to_le_bytes());
+    b
+}
+
+/// True if `b` is an intact `.idx` with the [`IDX_EXACT`] bit.
+fn idx_exact(b: &[u8]) -> bool {
+    if b.len() < 18 || &b[..4] != IDX_MAGIC {
+        return false;
+    }
+    let (body, crc) = b.split_at(b.len() - 4);
+    crc32c::crc32c(body) == u32::from_le_bytes(crc.try_into().unwrap())
+        && u16::from_le_bytes([b[4], b[5]]) & IDX_EXACT != 0
+}
+
+/// The intact `.idx` `b` without the [`IDX_EXACT`] bit (a new CRC).
+fn idx_without_exact(b: &[u8]) -> Vec<u8> {
+    let mut out = b[..b.len() - 4].to_vec();
+    let v = u16::from_le_bytes([out[4], out[5]]) & !IDX_EXACT;
+    out[4..6].copy_from_slice(&v.to_le_bytes());
+    let crc = crc32c::crc32c(&out);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out
+}
+
+/// The trust floor of the store (see `locality.rs`): 0 if there is no
+/// `TRUST` file, `None` (unknown: trust nothing, and write it at the next
+/// raise) if it is damaged or cannot be read.
+fn read_trust_floor(io: &dyn PackIo) -> Option<u64> {
+    match io.read(0, Kind::Trust) {
+        Ok(b) if b.len() == 16 && &b[..4] == TRUST_MAGIC
+            && crc32c::crc32c(&b[..12]) == u32::from_le_bytes(b[12..].try_into().unwrap()) =>
+        {
+            Some(u64::from_le_bytes(b[4..12].try_into().unwrap()))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Some(0),
+        _ => None,
+    }
+}
+
+fn encode_trust_floor(floor: u64) -> Vec<u8> {
+    let mut b = TRUST_MAGIC.to_vec();
+    b.extend_from_slice(&floor.to_le_bytes());
     let crc = crc32c::crc32c(&b);
     b.extend_from_slice(&crc.to_le_bytes());
     b
@@ -535,6 +586,9 @@ struct Inner {
     tick: u64,
     active: Option<Active>,
     next_pack: u64,
+    /// The durable trust floor (the `TRUST` file, see `locality.rs`);
+    /// `None` if the open could not read it.
+    trust_floor: Option<u64>,
     stats: Stats,
     /// A pack file was created since the last directory sync.
     dir_dirty: bool,
@@ -955,6 +1009,9 @@ type PassHook = Box<dyn FnMut(&ChunkStore, u32) + Send>;
 
 impl ChunkStore {
     fn new(io: Arc<dyn PackIo>, punches: bool, opts: Options, inner: Inner) -> Self {
+        let floor = inner.trust_floor.unwrap_or(u64::MAX);
+        // Packs from here on have no `.idx` yet (the active pack).
+        let unsealed = inner.active.as_ref().map_or(inner.next_pack, |a| a.num);
         let s = ChunkStore {
             io,
             punches,
@@ -974,6 +1031,8 @@ impl ChunkStore {
             #[cfg(test)]
             gc_pass_hook: Mutex::new(None),
         };
+        s.locality.forget_below(floor);
+        s.locality.sealed_below(unsealed);
         if !s.opts.read_only && s.opts.index_background_merge {
             s.start_merges();
         }
@@ -1154,6 +1213,7 @@ impl ChunkStore {
             active: None,
             // A new pack must never get a number that the hwm covers.
             next_pack: nums.last().map_or(1, |n| n + 1).max(hwm.pack).max(1),
+            trust_floor: read_trust_floor(io),
             stats: Stats {
                 objects: c.objects,
                 raw_bytes: c.raw_bytes,
@@ -1199,7 +1259,7 @@ impl ChunkStore {
                         if !opts.read_only {
                             let entries = if is_active { resync_scan(&buf, num)? } else { entries };
                             io.open_rw(num)?.sync()?;
-                            io.write_durable(num, Kind::Idx, &encode_index(&entries))?;
+                            io.write_durable(num, Kind::Idx, &encode_index(&entries, false))?;
                         }
                         return Ok(Loaded::Rebuild { reason, resync: Some(num) });
                     }
@@ -1220,7 +1280,7 @@ impl ChunkStore {
                         // A run may point into this pack after the next
                         // flush: its bytes must be durable first.
                         io.open_rw(num)?.sync()?;
-                        io.write_durable(num, Kind::Idx, &encode_index(&entries))?;
+                        io.write_durable(num, Kind::Idx, &encode_index(&entries, false))?;
                     }
                     entries
                 }
@@ -1274,12 +1334,12 @@ impl ChunkStore {
         // object is written again, and its new memtable entry hides the run
         // that could not be read. Its stats then count it as new.
         let gen = self.index.gen();
-        let found = self.dedup_lookup(&id);
+        let found = self.dedup_lookup(&id)?;
         self.after_lookup();
         if found {
             let mut inner = self.inner.lock().unwrap();
             inner.touch(id);
-            if self.unchanged(gen, &id) || self.locked_lookup(&inner, &id) {
+            if self.unchanged(gen, &id) || self.locked_lookup(&mut inner, &id)? {
                 return Ok(id);
             }
             // GC removed the object after the lookup: write it again.
@@ -1301,7 +1361,7 @@ impl ChunkStore {
                 inner.touch(id);
                 // Another put of the same bytes, or a flush, merge or GC,
                 // since the lookup: look up again.
-                if !self.unchanged(gen, &id) && self.locked_lookup(&inner, &id) {
+                if !self.unchanged(gen, &id) && self.locked_lookup(&mut inner, &id)? {
                     return Ok(id);
                 }
                 inner.check()?;
@@ -1322,45 +1382,77 @@ impl ChunkStore {
 
     /// The dedup check of `put` outside the store lock: the locality cache,
     /// then the index. An index hit can start a fill of the cache (a read
-    /// of one `.idx`, outside every lock).
-    fn dedup_lookup(&self, id: &ObjectId) -> bool {
-        if !self.opts.locality_cache {
-            return matches!(self.index.get(id), Ok(Some(_)));
-        }
-        if self.locality.get(id).is_some() {
-            return true;
+    /// of one exact `.idx`, outside every lock). A failed index lookup
+    /// counts as "not found" after it moved the trust floor (an error if it
+    /// could not).
+    fn dedup_lookup(&self, id: &ObjectId) -> Result<bool> {
+        if self.opts.locality_cache && self.locality.get(id).is_some() {
+            return Ok(true);
         }
         let loc = match self.index.get(id) {
             Ok(Some(loc)) => loc,
-            Ok(None) => return false,
+            Ok(None) => return Ok(false),
             Err(_) => {
-                self.locality.forget_all();
-                return false;
+                self.raise_trust_floor(&mut self.inner.lock().unwrap())?;
+                return Ok(false);
             }
         };
-        if let Some(epoch) = self.locality.index_hit(loc.pack) {
-            match self.io.read(loc.pack, Kind::Idx).map_err(Error::from).and_then(|b| decode_index(&b, loc.pack)) {
-                Ok(Some(entries)) => self.locality.fill(loc.pack, epoch, entries),
-                _ => self.locality.fill_failed(),
-            }
+        if !self.opts.locality_cache {
+            return Ok(true);
         }
-        true
+        if let Some(epoch) = self.locality.index_hit(loc.pack) {
+            self.fill_locality(loc.pack, epoch);
+        }
+        Ok(true)
+    }
+
+    /// Read the `.idx` of `pack` into the locality cache if it is exact
+    /// and not too big (see `locality.rs`).
+    fn fill_locality(&self, pack: u64, epoch: u64) {
+        match self.io.file_len(pack, Kind::Idx) {
+            Ok(n) if n > locality::max_idx_len(14, IDX_ENTRY) => return self.locality.refuse(pack),
+            Ok(_) => {}
+            Err(_) => return self.locality.fill_failed(),
+        }
+        let b = match self.io.read(pack, Kind::Idx) {
+            Ok(b) => b,
+            Err(_) => return self.locality.fill_failed(),
+        };
+        if !idx_exact(&b) {
+            return self.locality.refuse(pack);
+        }
+        match decode_index(&b, pack) {
+            Ok(Some(entries)) => self.locality.fill(pack, epoch, entries),
+            _ => self.locality.refuse(pack),
+        }
     }
 
     /// The index lookup of `put` under the store lock. A failed lookup
-    /// counts as "not found": the object is written again, so a pack may
-    /// then hold an older copy that a later GC does not select when it
-    /// removes the new copy. Its `.idx` would still list the object, so the
-    /// locality cache trusts no pack of this process after that (see
-    /// `locality.rs`).
-    fn locked_lookup(&self, inner: &Inner, id: &ObjectId) -> bool {
+    /// counts as "not found" after it moved the trust floor (an error if it
+    /// could not): the object is written again, so a pack may then hold an
+    /// older copy that a later GC does not select when it removes the new
+    /// copy, and its `.idx` would still list the object (see `locality.rs`).
+    fn locked_lookup(&self, inner: &mut Inner, id: &ObjectId) -> Result<bool> {
         match inner.index.get(id) {
-            Ok(l) => l.is_some(),
+            Ok(l) => Ok(l.is_some()),
             Err(_) => {
-                self.locality.forget_all();
-                false
+                self.raise_trust_floor(inner)?;
+                Ok(false)
             }
         }
+    }
+
+    /// Before `put` writes an object again after a failed lookup: no pack
+    /// that exists now is trusted again, in this process or a later one.
+    /// The new floor is durable before the caller writes (see `locality.rs`).
+    fn raise_trust_floor(&self, inner: &mut Inner) -> Result<()> {
+        let floor = inner.next_pack;
+        self.locality.forget_below(floor);
+        if inner.trust_floor.is_none_or(|f| floor > f) {
+            self.io.write_durable(0, Kind::Trust, &encode_trust_floor(floor))?;
+            inner.trust_floor = Some(floor);
+        }
+        Ok(())
     }
 
     /// The counters of the locality cache of `put` (see
@@ -1747,6 +1839,13 @@ impl ChunkStore {
         let io = &*self.io;
         let mut pending = Vec::new();
 
+        // Before any change of this group (copies, tombstones): its packs
+        // lose the exact mark of their `.idx`, durably (see `locality.rs`).
+        let mine = group.iter().map(|t| t.0).chain(unused.iter().copied());
+        if let Err(e) = self.gc_distrust(mine) {
+            return Err(self.gc_abandon(e, &pending, holds));
+        }
+
         // (4)
         let mut plans = match self.gc_prepare(snap, keep, dead_of, group, holds, &mut pending, st) {
             Ok(p) => p,
@@ -2065,6 +2164,25 @@ impl ChunkStore {
         }
     }
 
+    /// A GC is about to change `nums` (copies, tombstones, punches,
+    /// removals): drop them from the locality cache, and write each exact
+    /// `.idx` of them again without the exact bit, durably, before the
+    /// first change. A crash then never leaves an exact `.idx` that lists an
+    /// object that the GC removed or copied (see `locality.rs`). An error
+    /// ends the GC group before it changed anything.
+    fn gc_distrust(&self, nums: impl Iterator<Item = u64> + Clone) -> Result<()> {
+        self.locality.untrust(nums.clone());
+        for num in nums {
+            match self.io.read(num, Kind::Idx) {
+                Ok(b) if idx_exact(&b) => self.io.write_durable(num, Kind::Idx, &idx_without_exact(&b))?,
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+
     /// The entries of a sealed pack: its `.idx`, or a scan of the pack if
     /// the `.idx` is missing or damaged. A read error is returned.
     fn pack_entries(&self, num: u64) -> Result<Vec<(ObjectId, Loc)>> {
@@ -2188,7 +2306,7 @@ impl ChunkStore {
             return Ok(());
         }
         let marked = (|| -> io::Result<()> {
-            io.write_durable(num, Kind::Idx, &encode_index(&rest))?;
+            io.write_durable(num, Kind::Idx, &encode_index(&rest, true))?;
             let mut f = io.open_rw(num)?;
             f.write_at(&pack_header_with(num, PACK_PUNCHED), 0)?;
             f.sync()
@@ -2497,10 +2615,10 @@ impl ChunkStore {
     fn seal(&self, inner: &mut Inner) -> Result<()> {
         inner.join_seal()?;
         let Some(a) = inner.active.take() else { return Ok(()) };
-        let (num, entries) = (a.num, a.entries.len());
         // The directory is not marked clean: a pack made after this starts
         // may not be in the directory sync of the `.idx` write.
-        let job = SealJob { io: Arc::clone(&self.io), num: a.num, file: a.file, idx: encode_index(&a.entries), dirty: a.dirty };
+        let num = a.num;
+        let job = SealJob { io: Arc::clone(&self.io), num: a.num, file: a.file, idx: encode_index(&a.entries, true), dirty: a.dirty };
         let slot = Arc::new(Mutex::new(Some(job)));
         let theirs = Arc::clone(&slot);
         let done = SyncWait::default();
@@ -2523,10 +2641,10 @@ impl ChunkStore {
                 }
             }
         }
-        // Its `.idx` will list exactly its records (see `locality.rs`). The
-        // seal may still run: a fill before the `.idx` exists fails (no file,
-        // or not `entries` entries) and counts as a dropped fill.
-        self.locality.trust(num, entries);
+        // Its `.idx` is exact (see `locality.rs`): it lists the records of
+        // the pack, each one the current entry of its ID. A fill before the
+        // seal wrote it finds no file and counts as a dropped fill.
+        self.locality.sealed_below(num + 1);
         Ok(())
     }
 }
@@ -2704,6 +2822,7 @@ impl Inner {
             tick: 0,
             active: None,
             next_pack: 1,
+            trust_floor: Some(0),
             stats: Stats::default(),
             dir_dirty: false,
             touched: None,
