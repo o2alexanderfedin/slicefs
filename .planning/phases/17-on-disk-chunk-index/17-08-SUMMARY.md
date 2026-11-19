@@ -16,9 +16,9 @@ affects: [17-09]
 actuals:
   tokens: 25000
   tasks: 2
-  commits: 3
-plan_head_before: 8393b57
-plan_head_after: 92421b2849de9783385a1076887b17a1aa44c5fb
+  commits: 6
+plan_head_before: 8393b570235737f6d0b4d7160fcb7dbe6458c869
+plan_head_after: d6fef98 (the SUMMARY commit follows; commits counts it)
 
 tech-stack:
   added: []
@@ -46,19 +46,21 @@ key-decisions:
   - "recover reads hwm_pack with an untimed read-only open before the .idx files move"
   - "The post-install merge of a GC group takes the prefix of runs that were not in the list before the install, so a background merge of some of them does not stop it"
 
-duration: about 2 h 50 min (19:20 to about 22:10 local; the benchmark runs took about 50 min of it)
+duration: about 1 h 45 min (19:22 to about 21:05 local; the benchmark runs took about 50 min of it)
 completed: 2026-11-18
 ---
 
 # Phase 17 Plan 08: index benchmark against the #66 baseline Summary
 
-**The on-disk index needs 2.2 to 3.3 bytes of anonymous RAM for each object after open (#66: 106 to 196 B), opens a 100M store in 0.49 s (#66: 141 s), and holds the store lock at most about 105 ms in a GC at 10M and at 100M. Hits and misses are 1.5 to 4 times slower than with the map in RAM. The benchmark also found a real EMFILE limit in the 17-07 GC, now fixed.**
+**The on-disk index needs 2.2 to 3.3 bytes of anonymous RAM for each object after open (#66: 106 to 196 B), opens a 100M store in 0.49 s (#66: 141 s), and holds the store lock at most about 105 ms in a GC at 10M and at 100M. Lookups are slower than with the map in RAM at 10M and 100M (a hit up to 3.9 times at 100M: 3.2 µs against 0.8 µs); at 1M on macOS they are not. The benchmark also found a real EMFILE limit in the 17-07 GC, now fixed.**
 
 ## Task Commits
 
 1. **Task 1: bench changes** - `0eb63bb` (feat): store-wide disk_bytes and index_bytes, --memtable-limit, wait_index_idle before close, index keys, anon/file RSS split, covered_packs, gc step, new table columns, README.
 2. **EMFILE fix (deviation)** - `c1c20d7` (fix): GC in groups of 32 packs, MemIo peak counter, three tests.
 3. **Task 2: design note** - `92421b2` (docs): "Index on disk (#85)", "Index results (#85)", Storage strategies, Durability, GC; README disk size.
+4. **First SUMMARY** - `2be04aa` (docs).
+5. **Review fixes** - `d6fef98` (test): a race test for the touched-set re-arm after each group install (fails on a mutant without the re-arm), the open-run bound stated, lookup notes corrected. Test and comment only; the measured code is unchanged.
 
 All measurements are from commit `c1c20d7` (the binary was copied out of the target directory before the runs). The stores lived in a scratch directory outside the repo ($D) and the Docker volume; all were deleted after each size, and the Docker volumes `slicefs-index-bench` and `slicefs-target-idx85` were removed at the end.
 
@@ -93,7 +95,7 @@ The longest hold does not grow with the object count. The wall time is about 6 t
 - `ulimit -n` in the agent shell: 1048576 (kern.maxfilesperproc 245760); `launchctl limit maxfiles`: soft 256. No code in the repo raises the limit.
 - The 100M store has only 81 packs, so the 100M GC could not show the limit (with the old code it needed about 81 run files plus up to 64 pack readers).
 - Reproduction (index-bench, 400,000 objects, `--pack-limit 65536`: 330 packs; gc `--dead-run 1`, so every pack has victims; `ulimit -n 256`): `chunk store I/O: Too many open files (os error 24)`, nothing changed. With `--dead-run 1024` only about half of the packs had victims and it passed, which is why the first try did not show it.
-- Fix (`c1c20d7`): steps 4 to 6 of gc_finish run for groups of at most 32 packs. Test `a_gc_over_many_packs_keeps_a_bounded_number_of_handles_open` (150 packs): 165 handles at one time before the fix (bound 104), passes after it. A mutant with one group (the old behavior) gave 216 handles and failed. Two more tests: a put during group 1 keeps its pack in the last group (killed a mutant that clears the touched packs per group); a read error in group 2 leaves group 1 done, the store not failed, and the counts exact after a reopen.
+- Fix (`c1c20d7`): steps 4 to 6 of gc_finish run for groups of at most 32 packs. Test `a_gc_over_many_packs_keeps_a_bounded_number_of_handles_open` (150 packs): 165 handles at one time before the fix (bound 104), passes after it. A mutant with one group (the old behavior) gave 216 handles and failed. Two more tests: a put during group 1 keeps its pack in the last group (killed a mutant that clears the touched packs per group); a read error in group 2 leaves group 1 done, the store not failed, and the counts exact after a reopen. In d6fef98 a fourth test: a put during the pass of group 2 keeps its pack (killed a mutant that does not arm the touched set again after an install). Open-run bound: at most 32 pending runs plus one merged run per group done, until the background merges take them; shown up to 330 packs.
 - After the fix the same reproduction completes at `ulimit -n 256` and at 128. All three measured GC runs ran at 256.
 
 ## Deviations from Plan
@@ -113,14 +115,14 @@ The longest hold does not grow with the object count. The wall time is about 6 t
 
 ## Test results
 
-- `cargo test --locked -p chunk-store -p index-bench`: exit 0, 185 passed, 0 failed, 13 targets.
+- `cargo test --locked -p chunk-store -p index-bench`: exit 0, 186 passed, 0 failed, 13 targets (at d6fef98).
 - `cargo test --locked -p slicefs-cli -p metadata`: exit 0, 965 passed, 0 failed, 6 ignored, 37 targets.
 - clippy: index-bench clean with `-D warnings --no-deps`; chunk-store has only the three warnings that were there before.
-- Doc checks: `### Index results (#85)` 1; macOS rows 24 (>= 9); Linux rows 14 (>= 6); "lock hold" present; `### Index on disk (#85)` 1; `### Index in memory` 0; "marginal" present; no home path; no store file in the repo; "### File manifest" not changed.
+- Doc checks: `### Index results (#85)` 1; macOS rows 24 (>= 9); Linux rows 14 (>= 6); "lock hold" present; `### Index on disk (#85)` 1; `### Index in memory` 0; "marginal" present; no home path; no store file in the repo; "### File manifest" not changed (`git diff origin/develop...HEAD` has no hunk in it; the first hunk starts at the store layout block).
 
 ## Surprises
 
-- Lookups got slower: a 100M hit is 3.2 µs against 0.8 µs. Each lookup step is a fresh process, so most hits take a page fault on the mapped run (file-backed RSS grew by 32 to 57 B per object during the lookups). A miss checks 9 filters at 100M. Worth a follow-up (fewer runs, or a check of the fault cost in a long-lived process).
+- Lookups got slower: a 100M hit is 3.2 µs against 0.8 µs. A probable cause, not measured: each lookup step is a fresh process, so many hits take a page fault on the mapped run (the file-backed RSS grew by 31.5 B per object at 100M, about 3.2 GB of the 6 GB of runs, and 57 B at 10M). A miss checks 9 filters at 100M. Worth a follow-up (fewer runs, or a check of the fault cost in a long-lived process).
 - A normal open decodes the whole `.idx` of the hwm pack to replay only the records above the hwm; at 1M (one pack) this makes the normal open slower than the recovery open, and it is most of the fixed RAM at open on macOS (192 MB at 100M).
 - The 100M GC takes 12.4 min of wall time (one verified lookup per `.idx` entry), but holds the lock only 384 ms in total.
 - The creator peak RSS (3.9 GB at 100M) includes mapped run pages touched by the dedup checks; `ru_maxrss` cannot split it.
