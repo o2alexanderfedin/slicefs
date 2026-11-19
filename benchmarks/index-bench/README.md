@@ -120,7 +120,7 @@ Record the cache state with every number.
 
 ## Disk and memory
 
-- Disk: the packs and `.idx` files use about 104 bytes for each object (a 54-byte record in the pack and a 50-byte entry in the `.idx`). The on-disk index (#85) adds its run files in `D/index`: about 58 bytes for each entry, plus filters and tables. 100M objects use about 16 GB in about 81 packs and the index. A merge writes its output before it removes its inputs, so for a short time the index can use more.
+- Disk: the packs and `.idx` files use about 104 bytes for each object (a 54-byte record in the pack and a 50-byte entry in the `.idx`). The on-disk index (#85) adds its run files in `D/index`: about 58 bytes for each entry, plus filters and tables. 100M objects use about 16.4 GB (164 bytes for each object) in 81 packs and the index. A merge writes its output before it removes its inputs, so for a short time the index can use more.
 - RAM: the measured values are in the design note. With the in-memory index (#66), the create process and an open of 100M objects needed about 15 GB each.
 - The `gc` step keeps the live set in RAM: a set of (K-1)/K of the IDs.
 

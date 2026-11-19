@@ -198,6 +198,9 @@ store/
     00000001.pack      sealed (immutable)
     00000001.idx       index of a sealed pack
     00000002.pack      active (append-only)
+  index/               on-disk index (#85), next to packs/
+    MANIFEST           live runs, high-water mark, counts
+    0000000000000007.run   sorted run (immutable)
   segments/            metadata log (unchanged)
 ```
 
@@ -223,26 +226,83 @@ Record:
 - Records are written with `write` on a buffered file handle. Readers use
   `pread`; a sealed pack needs no lock.
 
-### Index in memory
+### Index on disk (#85)
 
-A `HashMap` from `ObjectId` (33 bytes) to `Loc` (pack, offset, stored
-length, raw length, flags: 25 bytes, padded to 32). One slot of the table
-is 72 bytes plus one control byte. The table size goes up in powers of two
-(slots = the next power of two above 8/7 of the object count), so the RAM
-for each object changes with the object count. By this rule, the live table
-is 153 bytes for each object at 1M objects, 122 at 10M and 98 at 100M. On
-Linux, the measured RSS after open is 153 and 123 bytes for each object at
-1M and 10M. During the last resize, the old and the new table are in
-memory together: the
-measured peak at 100M is 154 bytes for each object (15.4 GB, macOS). On
-macOS, the RSS after open is higher than the live table (390, 196 and 106
-bytes for each object at 1M, 10M and 100M), because memory that the open
-frees stays in the RSS of the process. See "Index baseline (#66)".
+Until #85, the index was a `HashMap` from `ObjectId` to `Loc` in RAM,
+filled at open from every `.idx` file: about 100 to 150 bytes of RAM for
+each object, and an open time that grew with the object count. The
+measured values are in "Index baseline (#66)". The on-disk index replaces
+it. The packs and the `.idx` files do not change: they stay the source of
+truth, and the index is derived data that can be built again from them.
 
-At open, the map is filled from the `.idx` files of the sealed packs and
-from a scan of the active pack. The map is not sized before the fill, so it
-grows by resizes. Issue #85 replaces this map with an on-disk index. The
-baseline for that change is in "Index baseline (#66)".
+The index is in the directory `index/` next to `packs/`. It has two parts:
+sorted run files on disk, and a memtable in RAM for the newest entries.
+
+Run file (`NNNNNNNNNNNNNNNN.run`, written one time, never changed):
+
+- Entries of 58 bytes: the full 33-byte ID, pack u64, offset u64, stored
+  length u32, raw length u32, flags u8. A tombstone is an entry with the
+  tombstone flag: its pack field names the pack whose entry it hides.
+- The entries are sorted by (tag, digest) and are in 4 KiB pages (70
+  entries at most). Each page has an entry count and a CRC32C.
+- A fence table: one 8-byte key for each page (digest bytes 0..8 of its
+  first entry), and a tag table (first page and page count of each tag).
+- A blocked Bloom filter over the digests of all entries, 10 bits for each
+  key (about 1 % false positives, about 1.25 bytes for each entry). The
+  probe positions come from the digest bytes, so the filter does no extra
+  hashing.
+- A footer with the counts, the offset, length and CRC32C of each table and
+  of the filter, and a CRC32C of the footer.
+
+MANIFEST: the list of the live runs (newest first), the runs that it made
+obsolete, the high-water mark (hwm), the object counts of the store and a
+rebuild flag. It is written with `write_durable` (temporary file, `fsync`,
+rename, directory `fsync`). This write is the commit point of every flush,
+merge and GC install. The hwm is a (pack, offset): every pack record below
+it is in a durable run (or hidden by a durable tombstone).
+
+Memtable: 16 shards by the first bits of the digest, each with its own
+lock. New entries (puts, GC copies, the records that the open replays) go
+there. The memtable is written to a new run when it has 262,144 entries
+(`Options::index_memtable_limit`), and at a GC install.
+
+Open: reads the MANIFEST, the footer, the tag table, the fence table and
+the filter of each run (the filter and fences stay in RAM), and maps each
+run file read-only. Then it replays into the memtable only the records at
+or above the hwm: from the `.idx` of such a pack, or from a scan of the
+pack. Packs below the hwm are not opened. Thus the open time grows with
+the filter bytes and with the records above the hwm, not with all entries.
+
+Lookup (`contains`, `get`, and the dedup check of `put`): the memtable,
+then each run from the newest to the oldest. For a run, the filter (in
+RAM) says "not here" or "maybe". For "maybe", a search of the fence table
+finds the page, and one page is read from the mapping. The newest entry
+wins, and a tombstone stops the search. The page read is done outside the
+store lock. `put` and `read` then take the lock, and a generation counter
+shows whether a flush, merge or GC install changed the index in between;
+if so, they look up again under the lock. (`contains` gives a
+point-in-time answer.)
+
+Merges: size-tiered, on one background thread of the store. When 4 runs
+of a similar size are next to each other in the list, they are merged into
+one. The merge reads its inputs with no store lock and takes the lock only
+for the install (one MANIFEST write). The input files are removed only
+after that MANIFEST is durable. A merge keeps the tombstones, except when
+its output becomes the oldest run.
+
+Read-only open (`slicefs stats`, scrub, the format check): it writes
+nothing, and keeps the replayed records in an in-RAM memtable. If a run
+that the MANIFEST lists is missing (a merge of a mount can replace the
+MANIFEST and the runs between two reads), it reads the MANIFEST one more
+time.
+
+Damage: a run or MANIFEST that fails its CRC or its size checks, a listed
+run file that is missing, or the rebuild flag makes the next writable open
+remove the index and build it again from the packs (a read-only open builds
+it in RAM). A read error that is not damage (for example `EIO`) fails the
+open, so that one transient error does not remove the index. When a record
+that the index points to cannot be read, the store checks the run page
+with its CRC; a damaged page sets the rebuild flag.
 
 ### Index baseline (#66)
 
@@ -398,6 +458,211 @@ Notes:
   on macOS that needs `sudo purge` by hand, and on Linux a privileged
   container.
 
+### Index results (#85)
+
+Method: the same tool (`benchmarks/index-bench`, see
+`benchmarks/index-bench/README.md`) and the same method as "Index baseline
+(#66)": 8-byte objects, default `Options` (64 MiB packs), one new process
+for each step, one warm-up open, then 3 measured opens (median), one
+create and one lookup run. Each store is new (a new directory, never a #66
+store). The `chunk-store` backend now waits for the background merges of
+the index before each close, so each open finds a settled store. "Disk
+B/object" now counts the whole store (packs, `.idx` files and `index/`);
+for the #66 stores that was the same as `packs/` alone. The RAM is split
+into anonymous pages (heap) and file-backed pages (the mapped run files):
+`RssAnon` and `RssFile` on Linux, and on macOS the `internal` and
+`external` values of `task_info(TASK_VM_INFO)` (resident anonymous pages,
+not the compressed ones; resident pages of mapped files). Peak RSS
+(`ru_maxrss`) has no such split.
+
+macOS: the same host as #66: Intel Xeon W-3245 (16 cores, 32 threads),
+192 GiB RAM, macOS 26.2 (x86_64), APFS on an internal PCIe SSD, commit
+`c1c20d7`, warm cache.
+
+Linux: Docker in the OrbStack VM on the same host
+(`scripts/docker-linux-test/run.sh index-bench 1000000 10000000`), kernel
+7.2.12-orbstack-00394-gbecdd6130068, btrfs on the Docker volume, same
+commit, warm cache. The VM had 11.2 GB of memory available
+(`MemAvailable` 11205952 kB). 100M was not run on Linux, as for #66. The
+gc step was run only on macOS: the Docker mode runs only `run`.
+
+The host was loaded by other work, but less than during the #66 runs: the
+load average was about 13 to 19 during the macOS runs (80 to 140 for
+#66). Thus the wall times of #66 are slower partly because of the load.
+The CPU times compare better.
+
+| OS | Objects | Load before (1, 5, 15 min) | Load after (1, 5, 15 min) |
+|---|---|---|---|
+| macOS | 1M | 18.07 19.36 18.93 | 17.62 19.14 18.86 |
+| macOS | 10M | 13.69 17.90 18.42 | 14.07 17.07 18.06 |
+| macOS | 100M | 14.07 17.07 18.06 | 12.83 13.35 15.20 |
+| Linux | 1M | 2.47 1.22 1.11 | 2.77 1.37 1.16 |
+| Linux | 10M | 2.77 1.37 1.16 | 3.07 1.67 1.27 |
+
+The Linux load values are the load of the VM. The load of the host was
+8.12 6.68 7.98 before the Linux run and 9.11 7.44 8.14 after it.
+
+In the tables, a column named "#66" gives the baseline value of the
+column before it, from "Index baseline (#66)".
+
+Store:
+
+| OS | Objects | Packs | Disk B/object | #66 | Index B/object | Create puts/s | #66 | Create puts per CPU s | #66 | Creator peak RSS MB | #66 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| macOS | 1M | 1 | 151.1 | 104 | 47.1 | 124,120 | 68,240 | 141,700 | 117,000 | 322 | 498 |
+| macOS | 10M | 9 | 163.6 | 104 | 59.6 | 129,574 | 64,026 | 138,000 | 125,000 | 856 | 2,803 |
+| macOS | 100M | 81 | 163.8 | 104 | 59.8 | 113,722 | 72,220 | 117,800 | 122,000 | 3,875 | 16,323 |
+| Linux | 1M | 1 | 151.1 | 104 | 47.1 | 239,909 | 132,072 | 251,600 | 137,000 | 256 | 386 |
+| Linux | 10M | 9 | 163.6 | 104 | 59.6 | 233,179 | 144,880 | 208,100 | 152,000 | 810 | 2,028 |
+
+Open (median of 3):
+
+| OS | Objects | Open s | #66 | Open CPU s | #66 | Steady RSS B/object | #66 | Steady anon B/object | Steady file B/object | Peak RSS B/object | #66 | Index runs | Memtable entries after open |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| macOS | 1M | 0.626 | 0.964 | 0.625 | 0.591 | 182.0 | 390.2 | 153.8 | 22.0 | 182.0 | 390.2 | 3 | 213,568 |
+| macOS | 10M | 0.060 | 12.844 | 0.060 | 5.881 | 4.56 | 195.8 | 2.19 | 0.90 | 4.56 | 256.3 | 5 | 38,528 |
+| macOS | 100M | 0.492 | 141.241 | 0.492 | 62.239 | 4.02 | 105.5 | 3.29 | 0.50 | 4.02 | 154.2 | 9 | 123,136 |
+| Linux | 1M | 0.506 | 0.595 | 0.504 | 0.593 | 77.6 | 153.4 | 31.2 | 46.4 | 149.7 | 302.0 | 3 | 213,568 |
+| Linux | 10M | 0.039 | 10.364 | 0.039 | 10.198 | 12.6 | 123.2 | 2.38 | 10.27 | 12.7 | 192.7 | 5 | 38,528 |
+
+Lookups (one thread, 1M hits and 1M misses, one run):
+
+| OS | Objects | contains hit ns | #66 | contains miss ns | #66 | put dedup-hit ns | #66 | put dedup-hit/s | #66 |
+|---|---|---|---|---|---|---|---|---|---|
+| macOS | 1M | 1,056 | 1,305 | 701 | 727 | 1,280 | 1,284 | 781,289 | 778,764 |
+| macOS | 10M | 1,385 | 701 | 544 | 324 | 1,374 | 945 | 727,986 | 1,058,016 |
+| macOS | 100M | 3,183 | 820 | 1,171 | 420 | 2,051 | 975 | 487,632 | 1,026,133 |
+| Linux | 1M | 858 | 695 | 501 | 266 | 1,125 | 796 | 888,726 | 1,255,822 |
+| Linux | 10M | 1,268 | 887 | 573 | 305 | 1,392 | 932 | 718,514 | 1,073,254 |
+
+Recovery (`recover` moves the `.idx` files away and opens; median of 3).
+These rows are not like for like with the #66 recovery rows: the new
+index does not read the `.idx` of a pack below the high-water mark, so
+only the packs at or above it are scanned ("Covered packs" are the others).
+A recovery open is thus about the same as a normal open, and "Extra CPU s"
+is in the range of the noise, so no scan rate is given.
+
+| OS | Objects | Scope | Mode | Dropped packs | Covered packs | Scanned objects | Recovery open s | Extra CPU s |
+|---|---|---|---|---|---|---|---|---|
+| macOS | 1M | one | rw | 1 | 0 | 1,000,000 | 0.324 | -0.323 |
+| macOS | 1M | all | rw | 1 | 0 | 1,000,000 | 0.400 | -0.248 |
+| macOS | 1M | all | ro | 1 | 0 | 1,000,000 | 0.282 | -0.343 |
+| macOS | 10M | one | rw | 1 | 1 | 0 | 0.055 | -0.005 |
+| macOS | 10M | all | rw | 9 | 8 | 57,944 | 0.127 | -0.003 |
+| macOS | 10M | all | ro | 9 | 8 | 57,944 | 0.048 | -0.012 |
+| macOS | 100M | one | rw | 1 | 1 | 0 | 0.412 | -0.080 |
+| macOS | 100M | all | rw | 81 | 80 | 579,440 | 0.356 | -0.165 |
+| macOS | 100M | all | ro | 81 | 80 | 579,440 | 0.335 | -0.157 |
+| Linux | 1M | one | rw | 1 | 0 | 1,000,000 | 0.261 | -0.267 |
+| Linux | 1M | all | rw | 1 | 0 | 1,000,000 | 0.254 | -0.277 |
+| Linux | 1M | all | ro | 1 | 0 | 1,000,000 | 0.236 | -0.268 |
+| Linux | 10M | one | rw | 1 | 1 | 0 | 0.038 | -0.001 |
+| Linux | 10M | all | rw | 9 | 8 | 57,944 | 0.046 | 0.004 |
+| Linux | 10M | all | ro | 9 | 8 | 57,944 | 0.044 | 0.005 |
+
+The "one ro" rows are left out; they are like the "one rw" rows. At 1M the
+store has one pack, and the recovery open is faster than a normal open
+(about 0.25 s against 0.5 to 0.6 s of CPU). A probable cause, not
+measured: the normal open decodes the whole `.idx` of that pack (1M
+entries) to replay the 213,568 records above the high-water mark, and the
+recovery open scans the pack (CRC check only) instead.
+
+GC (macOS only; `index-bench gc` on a new store made for it, 3 of 4
+objects live, one run). Object `i` is dead when `(i / R) mod 4` is 0. With
+R = 1024 the dead objects lie in runs of 1,024 (55 KiB of records), so a
+mostly live 64 MiB pack gets holes. #66 had no GC step, so there is no
+baseline. The gc step ran with `ulimit -n 256` (the default soft limit of
+open files of launchd); the shell limit was 1048576. The 1-minute load
+average before the three GC runs was 11.45, 6.70 and 7.23.
+
+| OS | Objects | Live share | Dead run R | GC wall s | Lock hold max ms | Lock hold total ms | Removed objects | Packs punched | Packs compacted | Packs deleted | gc process peak RSS MB |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| macOS | 10M | 3/4 | 1,024 | 60.6 | 108.3 | 336.4 | 2,387,518 of 2,500,608 | 8 | 1 | 0 | 1,416 |
+| macOS | 100M | 3/4 | 1,024 | 745.5 | 104.5 | 384.1 | 24,073,153 of 25,000,192 | 81 | 0 | 0 | 7,427 |
+| macOS | 10M | 3/4 | 1 | 34.0 | 111.9 | 345.7 | 14,486 of 2,500,000 | 0 | 1 | 0 | n/a |
+
+The longest hold of the store lock is about the same at 10M and at 100M
+(108 and 105 ms), and the sum of all holds grows only a little (336 and
+384 ms), because the passes over the index run outside the store lock.
+The wall time grows with the object count (about 6 to 7.5 µs for each
+object). The longest hold is probably a memtable flush or
+the install of a group (the tool does not show which one).
+A punch removes only the dead records in whole 4 KiB blocks, so some dead
+objects at the ends of each dead run stay (they are counted as kept). With
+R = 1 (every fourth object dead, one by one), no 64 MiB pack can get a
+hole: only the small last pack of the store was compacted, and 99.4 % of
+the dead objects stayed. The peak RSS of the gc process includes the live
+set of the mark (75M IDs at 100M).
+
+At 100M the GC changed 81 packs in 3 groups of at most 32 packs. Before
+this change, each pending GC run kept its file open until the
+install, so a GC over more packs with dead objects than the limit of open
+files stopped with `EMFILE` and changed nothing. A test store of 330
+packs (every fourth object dead) showed this at `ulimit -n 256`; after
+the fix, the same GC completes at 256 and at 128.
+
+Notes:
+
+- RAM per object, steady anonymous memory after open: 2.19 B at 10M and
+  3.29 B at 100M on macOS, 2.38 B at 10M on Linux. The target was "a few
+  bytes": it is met. The #66 index needed 106 to 196 B (macOS) and 123 to
+  153 B (Linux).
+- The marginal RAM per object, (steady RSS at 100M - steady RSS at 10M) /
+  90M, is 3.41 B of anonymous memory (3.95 B of all RSS). This value is
+  higher than the true cost for each object. The only part that grows
+  with the object count is the filters and the fences: 1.36 B for each
+  object at both sizes (13.6 MB at 10M, 136.3 MB at 100M). The rest is
+  fixed: the memtable (up to 262,144 entries) and the replay of the
+  records at or above the high-water mark, which reads the whole `.idx` of
+  that pack. At 100M that pack had 579,440 entries and the memtable 123,136
+  entries; at 10M 57,944 and 38,528. Thus the fixed part was 192 MB at
+  100M and 8 MB at 10M. It is bounded by one pack and the memtable limit,
+  not by the object count.
+- At 1M, the steady anonymous RSS is 154 B for each object on macOS and
+  31 B on Linux. That is the fixed part above, divided by only 1M objects
+  (the one pack of the store has 1M entries, and 213,568 records are
+  above the high-water mark). On macOS, memory that the open frees stays
+  in the RSS (see the #66 notes), so the value is higher there.
+- The file-backed RSS is the mapped run files. After the open it is small
+  (0.5 to 0.9 B for each object on macOS at 10M and 100M; 10.3 B on Linux
+  at 10M, where the kernel maps more pages around each touched page). The
+  lookups touch the run pages: the file-backed RSS grew by 57 B (10M) and
+  32 B (100M) for each object during the lookup step on macOS, and the
+  anonymous RSS did not grow. These pages are page cache, which the kernel
+  can drop.
+- The open reads only the filters, the fences and the tables of the runs,
+  and replays the records above the high-water mark. Its time does not
+  grow with the entries: 0.06 s at 10M and 0.49 s at 100M on macOS (12.8 s
+  and 141 s for #66), 0.04 s at 10M on Linux (10.4 s). The 100M open is
+  slower than the 10M open mostly because its replay is larger (see
+  above); the filters are about 1.25 B for each object.
+- Lookups are slower than with the map in RAM: a hit costs 0.9 to 1.4 µs
+  at 1M and 10M and 3.2 µs at 100M (0.7 to 1.3 µs for #66), a miss 0.5 to
+  1.2 µs (0.3 to 0.7 µs). A miss checks the memtable and the filter of
+  each run (5 runs at 10M, 9 at 100M). A hit also reads one page of the
+  mapping. Each lookup step is a new process, so the first touch of each
+  page is a page fault; at 100M the 1M hits touch most of the 6 GB of
+  runs. A long-running mount takes that fault only at the first touch of
+  each page. The dedup-hit `put` is 1.1 to 2.1 µs (0.8 to 1.3 µs for
+  #66).
+- Disk: the index adds 59.8 B for each object at 100M (58-byte entries,
+  the filter, the fences, page padding). The store needs 164 B for each
+  object in place of 104 B.
+- Create: 114k to 130k puts/s of wall time on macOS and 233k to 240k on
+  Linux, about 2 times the #66 values (which were measured at a higher
+  load). For each CPU second: 118k to 142k on macOS (117k to 125k for
+  #66), 208k to 252k on Linux (137k to 152k). The CPU time of create now
+  includes the background merges and the wait for them before the close;
+  on Linux at 10M it is higher than the wall time (48.1 s and 42.9 s),
+  because the merges run on a second thread. The creator peak RSS is 3.9 GB
+  at 100M (16.3 GB for #66). `ru_maxrss` counts the mapped run pages that
+  the dedup checks of the puts touch, so this value does not show the
+  anonymous memory alone (a sample of a 10M create had 164 MB of mapped
+  file pages in 675 MB of RSS).
+- Recovery: see the note above the Recovery table. The #66 scan rates do
+  not apply to the new index.
+- All numbers are for a warm page cache. No cold-cache number was taken.
+
 ### Dedup
 
 Before an object is written, its ID is looked up in the index. If the
@@ -448,6 +713,26 @@ If the sync still fails after the retries, it is final: the store refuses
 every write and sync until it is opened again. The open scan then finds the
 true durable state.
 
+The on-disk index (#85) adds these rules:
+
+- Before a run that points into the active pack is written (a flush, a GC
+  install), the active pack is synced (and the directory, if a pack was
+  made since the last directory sync). So a durable run never points to
+  bytes that are not durable.
+- A run file is synced and its name made durable before a MANIFEST lists
+  it. The MANIFEST is written with `write_durable`; this write is the
+  commit point. A crash before it leaves the old MANIFEST, and the new run
+  file is an orphan.
+- A writable open removes every run file that the MANIFEST does not list
+  (orphans of a failed flush, merge or GC) and the obsolete runs that it
+  names. The inputs of a merge are removed only after the MANIFEST without
+  them is durable; if a crash comes before their removal, the next
+  writable open removes them.
+- The memtable is not written at close. The next open replays the records
+  at or above the hwm from the packs, so nothing is lost.
+- A damaged index (see "Index on disk (#85)") is built again from the
+  packs.
+
 ## Storage strategies
 
 The store does every file operation through the `PackIo` trait
@@ -462,6 +747,16 @@ directory sync. The open handles are `PackFile` (the active pack) and
   bytes.
 - Other read or write paths (for example `mmap` reads, see
   `docs/research/arena-spikes.md`) can be added as new strategies.
+
+The index files (#85) go through the same trait, as two more file kinds:
+`Run` (a sorted run, `NNNNNNNNNNNNNNNN.run`) and `Manifest` (one file,
+`MANIFEST`). `FileIo` keeps them in the directory `index/` next to
+`packs/`. A run file is written like a pack (`create_run`, writes, `sync`,
+then a directory sync) and read with `open_run`; `map_run` maps it
+read-only for lookups (`FileIo`; `MemIo` has no mapping, so its lookups
+use `read_at` and its read faults reach them). The MANIFEST is written
+only with `write_durable`. Thus the crash and fault tests of `MemIo` cover
+the index files too.
 
 The strategies do not behave the same in every case. For example, with
 `mmap` a disk error is `SIGBUS`, not `EIO`. So the contract tests in
@@ -518,6 +813,63 @@ put of bytes that are already stored returns at once; without this record,
 the sweep could delete an object that a new file uses.) A pack that a reader has
 open stays readable after its file is deleted (POSIX), so readers need no
 lock against the GC; they only need the index entry to change atomically.
+
+GC with the on-disk index (#85). `gc_finish` keeps no map of all objects,
+and it holds the store lock only for short steps:
+
+1. Start (store lock): a snapshot of the index (a copy of the memtable and
+   the list of runs). From now on, a second touched set records the
+   objects that are put or read.
+2. Pass 1 (no store lock): one merged pass over the snapshot gives, for
+   each pack, its bytes, its live bytes and its entries. Then the same
+   rules as above choose: delete, compact, punch or keep.
+3. Pass 2 (no store lock), one selected pack at a time: the entries come
+   from the pack's `.idx` (or a scan of the pack). An entry is current
+   only if the snapshot points to this pack and offset. The dead entries
+   go as tombstones (ID, pack) into a pending run file that no MANIFEST
+   lists yet. Live records of a pack to compact are read with no lock and
+   appended in batches of 1,024 under the lock.
+4. Install (store lock): the plan of a pack that holds an object put or
+   read during the GC is dropped (that pack does not change). The active
+   pack and the directory are synced. Then one MANIFEST write lists the
+   pending runs as the newest runs, with the memtable (it can hold a
+   victim's put) in a run under them, and moves the hwm to the end of the
+   active pack.
+5. Only after that MANIFEST is durable, with no store lock, one pack at a
+   time: delete the pack (and its `.idx`), or punch it (its remaining
+   entries are read again from the index). Then the runs of the install are
+   merged into one run.
+
+So the tombstones and the copies are durable before any pack is punched or
+deleted, and no lookup (also not the dedup check of `put`) finds an object
+in a removed pack. Steps 3 to 5 run for groups of at most 32 packs
+(`GC_GROUP_PACKS`): each pending run keeps its file open until the merge
+after its install, so a GC over many packs must not hold one file for
+each pack (with more packs than the limit of open files, it would stop
+with `EMFILE`). The packs of objects that are touched during an earlier
+group stay unchanged in the later groups too.
+
+A read error or a damaged run page in the passes or at the install ends
+the GC with the error: the pending runs of that group are removed, and
+that group and the later ones change nothing (only harmless duplicate
+copies stay). A damaged page also sets the rebuild flag. The groups
+before it are done; each one is a complete GC of its packs. An index read
+error is never taken as "not current".
+
+Merges keep the tombstones; only a merge whose output becomes the oldest
+run drops them (no older entry is left for them to hide).
+
+If the removal of a pack fails after the install, its tombstones are
+durable and the pack stays. A later GC finds the pack with no current
+entries and removes it. But if the index is built again from the packs
+before that (after damage, or with the rebuild flag), the rebuild finds
+the objects of that pack and makes them live again. This is safe: their
+bytes are valid, and the next GC removes them again.
+
+The RAM of a GC: the totals of each pack, the entries of one pack, the
+memtable copy, and the filters and fences of the pending runs of one
+group. The live set of the mark and the touched sets still grow with the
+number of objects.
 
 ## Read path
 
