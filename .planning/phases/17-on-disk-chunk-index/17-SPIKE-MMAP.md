@@ -7,12 +7,21 @@ Spike after plan 17-01 (see `17-SPIKE.md` for the run layout and the
 Question: can a dedup hit get back to about 0.8 µs (the in-RAM HashMap of
 the Phase 16 baseline) while the RAM per object stays at a few bytes?
 
-Short answer: yes. With the run mapped read-only and interpolation search
-at both levels, a warm hit costs 0.43 to 0.48 µs at 1M objects and 0.64
-to 0.66 µs at 10M on macOS (0.51 and 0.81 µs on Linux). The anonymous RAM
-of the index stays at 1.37 to 1.46 B per object. The HashMap of today is
-still faster in the same session (0.30 to 0.39 µs on macOS), by about 1.4
-to 1.7 times.
+Short answer: yes, about 0.8 µs or less in most cases. With the run mapped
+read-only and interpolation search at both levels (warm page cache):
+
+| Value (interpolation / interpolation) | macOS 1M | macOS 10M | Linux 1M | Linux 10M |
+|---|---|---|---|---|
+| `contains` hit, pass 2 (pages already mapped: a running mount) | 0.43-0.44 µs | 0.64-0.66 µs | 0.51 µs | 0.81 µs |
+| `contains` hit, pass 1 (fresh process, the 17-01 method) | 0.46-0.48 µs | 0.93-0.95 µs | 0.51 µs | 0.82 µs |
+| put dedup-hit (the real dedup path, with the BLAKE3 hash) | 0.53-0.56 µs | 0.76 µs | 0.58 µs | 0.89 µs |
+| HashMap put dedup-hit, same session | 0.40-0.41 µs | 0.46-0.48 µs | 0.50 µs | 0.63 µs |
+
+The macOS 10M pass 1 value is above 0.8 µs: it includes one soft page
+fault for each first touch of a mapped page (see the notes). The anonymous
+RAM of the index stays at 1.37 to 1.46 B per object. The HashMap of today
+is still faster in the same session (`contains` 0.30 to 0.39 µs on macOS),
+by about 1.4 to 1.7 times.
 
 ## What was built
 
@@ -100,8 +109,8 @@ Linux (load inside the VM): 4.04 2.59 1.90 before, 3.45 3.12 2.30 after.
 The host load at the time of the Linux run was not recorded.
 
 The load was lower than in 17-01 (about 25 against about 80). The CPU
-time per operation is within 1 % of the wall time in every round, so the
-tables give wall time.
+time per operation is within about 1 % of the wall time in the medians
+(one B2 round at 10M differs by about 7 %), so the tables give wall time.
 
 ## Results: macOS
 
@@ -214,6 +223,17 @@ Linux maps 16 pages per fault (fault-around): pass 1 has 893 faults at 1M
 and 8,929 at 10M, so pass 1 and pass 2 are almost equal. B2 adds 420 to
 490 ns per hit.
 
+The Linux pread pass 1 values are not clean warm values. pread has no
+first-touch faults, so pass 1 and pass 2 must be about equal (macOS: 3109
+and 2929 ns). On Linux, pass 1 is 3.8 to 4.4 µs at 10M (all 3 rounds)
+against 2.3 to 2.5 µs for pass 2, and 1.7 µs at 1M in rounds 2 and 3
+against 1.1 µs in round 1. A likely cause: the cold rounds drop the run
+file from the page cache, and the pread round is the first to read it
+again; at 10M, the chunk-store create (2.6 GB peak) in a 12 GB VM can also
+have pushed run pages out. Use pass 2 for Linux pread: 1.1 to 1.5 µs at
+1M, 2.3 to 2.5 µs at 10M. The mmap rounds ran after the pread round, with
+the pages back in the cache.
+
 ## Cost of one hit (breakdown)
 
 Each part is a prefix of the hit path, timed alone over the same 1M hit
@@ -319,14 +339,14 @@ real cold read (from the OrbStack virtual disk):
 |---|---|---|---|---|---|---|
 | 1M | default | 3940 (3865-5226) | 746 | 21 | 878 | 58 MB (all 14,286 pages) |
 | 1M | MADV_RANDOM | 8284 (7953-8402) | 789 | 10,771 | 0 | 44 MB (10,771 pages) |
-| 10M | default | 27769 (27405-29655) | 1198 | 202 | 7,805 | 526 MB (142,846 of 142,858 pages) |
+| 10M | default | 27769 (27405-29655) | 1198 | 202 | 7,805 | 585 MB (142,846 of 142,858 pages; RssFile 526 MB) |
 | 10M | MADV_RANDOM | 16037 (12680-16818) | 1240 | 18,676 | 0 | 79 MB (18,676 pages) |
 
 Findings:
 
 - With default advice, Linux readahead reads large blocks around each
   fault. At 10M, 20,000 random hits read almost the full 585 MB run.
-  MADV_RANDOM reads only the touched pages: 6.6 times less data and 1.7
+  MADV_RANDOM reads only the touched pages: 7.6 times less data and 1.7
   times faster per hit at 10M.
 - At 1M (a 58 MB run), readahead is better: it reads the full run in 21
   large reads, and MADV_RANDOM is 2.1 times slower.
@@ -334,8 +354,9 @@ Findings:
   effect when the pages are warm. A reasonable rule for 17-05: use
   MADV_RANDOM on large runs and the default on small runs. The size limit
   needs its own measurement (between 58 MB and 585 MB here).
-- A cold hit through mmap is one blocking page fault: 8 to 16 µs on this
-  virtual disk. The pread path has the same disk read; this spike did not
+- A cold hit through mmap waits for one blocking page fault: about 14 to
+  17 µs per major fault on this virtual disk (8 to 16 µs per hit in the
+  MADV_RANDOM rounds, where some hits share a page). The pread path has the same disk read; this spike did not
   measure pread cold.
 
 ## Risks seen
@@ -393,8 +414,12 @@ Adopt the mmap read path in 17-05, with these choices:
 5. Each run as an `Arc<Run>` that owns the mapping; unmap when the last
    reference drops after the merge installs the new MANIFEST.
 
-With these, a warm dedup hit is 0.43 to 0.66 µs on macOS and 0.51 to 0.81
-µs on Linux (target: about 0.8 µs), against 1.5 to 4.0 µs for pread. The
+With these (warm page cache): a `contains` hit is 0.43 to 0.66 µs on
+macOS and 0.51 to 0.81 µs on Linux in a running process (0.93 to 0.95 µs
+on macOS at 10M in the first pass of a fresh process), and a put
+dedup-hit is 0.53 to 0.76 µs on macOS and 0.58 to 0.89 µs on Linux
+(target: about 0.8 µs). The pread path needs 2.5 to 2.9 µs on macOS and
+1.1 to 2.5 µs on Linux (pass 2) for a `contains` hit. The
 anonymous memory stays at 1.37 to 1.46 B per object, against 123 to 309 B
 for the chunk-store HashMap, and the open stays at 1 to 8 ms against 0.4
 to 7.8 s.
