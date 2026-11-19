@@ -28,7 +28,7 @@ INPUTS=${INPUTS:-tree tar rand}
 BOOST_VER=${BOOST_VER:-1_85_0}
 RAND_BYTES=${RAND_BYTES:-1073741824}
 R=$WORK/results-$LABEL.csv
-HDR=build,input,run,in_bytes,in_files,secs,mb_s,apparent_bytes,alloc_bytes,files,vt0_files,packs_files,segments_files,other_files,peak_rss_bytes
+HDR=build,input,run,in_bytes,in_files,secs,mb_s,apparent_bytes,alloc_bytes,files,vt0_files,packs_files,segments_files,index_files,other_files,peak_rss_bytes
 echo "$HDR"; echo "$HDR" > "$R"
 row() { echo "$1"; echo "$1" >> "$R"; }
 
@@ -45,7 +45,7 @@ median() {
 import csv, statistics, sys
 f, b, i = sys.argv[1:4]
 rows = [r for r in csv.reader(open(f)) if r[0] == b and r[1] == i and r[2] != "run" and r[2] != "median"]
-print(",".join([b, i, "median"] + [statistics.median_low([(float(r[c]), r[c]) for r in rows])[1] for c in range(3, 15)]))
+print(",".join([b, i, "median"] + [statistics.median_low([(float(r[c]), r[c]) for r in rows])[1] for c in range(3, 16)]))
 ' "$R" "$LABEL" "$1"
 }
 
@@ -95,8 +95,8 @@ for IN in $INPUTS; do
     rss=$(awk '/maximum resident set size/ {print $1; exit}' "$tf")
     mbs=$(python3 -c "import sys; print(f'{int(sys.argv[1])/1e6/max(float(sys.argv[2]),0.01):.1f}')" "$ib" "$secs")
     ab=$(fbytes "$store"); al=$(( $(du -sk "$store" | cut -f1) * 1024 ))
-    nf=$(nfiles "$store"); nv=$(nfiles "$store/vt0"); np=$(nfiles "$store/packs"); ns=$(nfiles "$store/segments")
-    row "$LABEL,$IN,$i,$ib,$inf,$secs,$mbs,$ab,$al,$nf,$nv,$np,$ns,$((nf - nv - np - ns)),$rss"
+    nf=$(nfiles "$store"); nv=$(nfiles "$store/vt0"); np=$(nfiles "$store/packs"); ns=$(nfiles "$store/segments"); ni=$(nfiles "$store/index")
+    row "$LABEL,$IN,$i,$ib,$inf,$secs,$mbs,$ab,$al,$nf,$nv,$np,$ns,$ni,$((nf - nv - np - ns - ni)),$rss"
     echo "  run $i: ${secs}s ${mbs} MB/s, store $ab bytes, $nf files" >&2
     rm -rf "${WORK:?}/$LABEL/$IN/store-$i"
   done

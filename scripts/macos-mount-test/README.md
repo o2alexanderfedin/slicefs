@@ -46,7 +46,7 @@ head -c 1073741824 /dev/urandom > $W/big.bin
 
 mounted() { mount | grep -q "${W#/private}/mnt "; }
 waitmnt() { for i in $(seq 1 60); do mounted && return 0; sleep 1; done; echo "MOUNT FAILED"; return 1; }
-waitexit() { while kill -0 $1 2>/dev/null; do sleep 0.5; done; }
+waitexit() { for i in $(seq 1 240); do kill -0 $1 2>/dev/null || return 0; sleep 0.5; done; echo "DAEMON DID NOT EXIT in 120 s"; return 1; }
 
 $B mount --store $W/store --backend fskit $W/mnt </dev/null >$W/mount.log 2>&1 &
 MP=$!

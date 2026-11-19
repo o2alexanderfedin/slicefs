@@ -5,7 +5,7 @@ it records:
 
 - seed wall time, MB/s and peak RSS (from `/usr/bin/time -l`)
 - store apparent bytes (sum of file sizes) and allocated bytes (`du`)
-- store file count, split into `vt0/`, `packs/`, `segments/` and other files
+- store file count, split into `vt0/`, `packs/`, `segments/`, `index/` and other files
 
 The script does not mount. It runs on macOS only (`stat -f`, `/usr/bin/time -l`).
 It calls only `slicefs seed <store> <dir>`, so it runs the same way on old and
@@ -69,8 +69,8 @@ missing.
 | `apparent_bytes` | bytes | Sum of the store file sizes |
 | `alloc_bytes` | bytes | `du -sk` of the store x 1024 |
 | `files` | files | All store files |
-| `vt0_files`, `packs_files`, `segments_files` | files | Store files under that top dir (0 when it is absent) |
-| `other_files` | files | `files` minus the three dirs (for example `FORMAT`) |
+| `vt0_files`, `packs_files`, `segments_files`, `index_files` | files | Store files under that top dir (0 when it is absent; `index/` exists since #85) |
+| `other_files` | files | `files` minus the four dirs (for example `FORMAT`) |
 | `peak_rss_bytes` | bytes | Maximum resident set size of `seed` |
 
 MB is 10^6 bytes. Each run seeds a new store, and the script deletes the store
