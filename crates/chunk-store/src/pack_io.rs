@@ -1,7 +1,12 @@
 //! Storage strategies: every file operation of the store goes through
 //! [`PackIo`], so the store can run on real files ([`FileIo`]), on an
 //! in-memory mock with faults ([`crate::mem::MemIo`]), or later on other
-//! read and write paths (for example mmap) without changes in the store.
+//! read and write paths without changes in the store.
+//!
+//! Index lookups read sealed run files through a read-only mapping
+//! ([`PackIo::map_run`], [`RunMap`]) where the strategy has one (files);
+//! other strategies give no mapping, and the lookups read the run pages
+//! with `read_at`, so the mock still counts them and can fail them.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -9,27 +14,37 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-/// The two kinds of file of one pack.
+/// The kinds of file of the store: the two files of one pack, and the
+/// files of the store index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
     /// The records.
     Pack,
     /// The index of a sealed pack.
     Idx,
+    /// A sorted run of the store index (see `run.rs`).
+    Run,
+    /// The list of live runs of the store index. There is one; callers
+    /// pass the number 0.
+    Manifest,
 }
 
 impl Kind {
-    fn ext(self) -> &'static str {
-        match self {
-            Kind::Pack => "pack",
-            Kind::Idx => "idx",
-        }
+    /// True for the files of the store index. They live in their own
+    /// directory, next to the pack directory.
+    pub fn is_index(self) -> bool {
+        matches!(self, Kind::Run | Kind::Manifest)
     }
 }
 
-/// File name of a pack file.
+/// File name of a store file.
 pub fn pack_name(num: u64, kind: Kind) -> String {
-    format!("{num:016x}.{}", kind.ext())
+    match kind {
+        Kind::Pack => format!("{num:016x}.pack"),
+        Kind::Idx => format!("{num:016x}.idx"),
+        Kind::Run => format!("{num:016x}.run"),
+        Kind::Manifest => "MANIFEST".to_string(),
+    }
 }
 
 /// Punched ranges must start and end on a multiple of this.
@@ -49,10 +64,10 @@ pub trait PackFile: PackRead {
     fn sync(&mut self) -> io::Result<()>;
 }
 
-/// The directory of pack files.
+/// The directory of pack files, and the files of the store index.
 pub trait PackIo: Send + Sync {
-    /// Make the directory if needed. With `read_only`, make nothing and
-    /// return whether the directory exists.
+    /// Make the directories if needed. With `read_only`, make nothing and
+    /// return whether the pack directory exists.
     fn prepare(&self, read_only: bool) -> io::Result<bool>;
     /// Numbers of every `.pack` file.
     fn list(&self) -> io::Result<Vec<u64>>;
@@ -62,7 +77,7 @@ pub trait PackIo: Send + Sync {
     /// Replace the file atomically and durably (also syncs the directory).
     fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> io::Result<()>;
     fn remove(&self, num: u64, kind: Kind) -> io::Result<()>;
-    /// Make creations and removals durable.
+    /// Make creations and removals durable (of packs and of index files).
     fn sync_dir(&self) -> io::Result<()>;
     /// Make a new, empty pack; it must not exist.
     fn create(&self, num: u64) -> io::Result<Box<dyn PackFile>>;
@@ -79,20 +94,116 @@ pub trait PackIo: Send + Sync {
     /// Each range is aligned to [`PUNCH_BLOCK`]. An error of kind
     /// `Unsupported` means the file system cannot punch holes.
     fn punch(&self, num: u64, ranges: &[(u64, u64)]) -> io::Result<()>;
+    /// Numbers of every `.run` file (empty if there is no index directory).
+    fn list_runs(&self) -> io::Result<Vec<u64>>;
+    /// Make a new, empty run file; it must not exist. It is written like a
+    /// pack: `write_at`, then `sync`, then `sync_dir` for its name.
+    fn create_run(&self, num: u64) -> io::Result<Box<dyn PackFile>>;
+    /// Open a run file for reads.
+    fn open_run(&self, num: u64) -> io::Result<Arc<dyn PackRead>>;
+    /// Map a sealed run file read-only for lookups, or `None` if this
+    /// strategy has no mapping (then lookups use `open_run` and `read_at`).
+    /// Required, with no default: a wrapper that forgot to pass it on would
+    /// silently put lookups back on `read_at`.
+    fn map_run(&self, num: u64) -> io::Result<Option<RunMap>>;
+}
+
+/// Runs of at least this many bytes are mapped with `MADV_RANDOM`: a lookup
+/// touches one random page, and readahead around a cold page fault of a
+/// large run reads far more than that page (the 17-05 mmap spike, Linux,
+/// cold page cache: 7.6 times less data read and 1.7 times faster per hit
+/// at 585 MB; at 58 MB the default readahead was 2.1 times faster). The
+/// limit lies between those two sizes; it is a first value that needs its
+/// own measurement.
+pub const MADV_RANDOM_MIN: u64 = 256 << 20;
+
+/// A read-only shared mapping (`PROT_READ`, `MAP_SHARED`) of a whole run
+/// file. It is unmapped when it is dropped. A run owns its mapping, and
+/// readers hold the run through an `Arc`, so a merge or GC that removes the
+/// run file never takes the bytes away from a reader: the file system keeps
+/// a removed file while a mapping of it exists.
+///
+/// Accepted risk: a read error of the disk inside the mapping raises
+/// SIGBUS, which stops the process, instead of an error value. Run files
+/// are sealed (never written or cut after their sync), so only a disk error
+/// or a change from outside SliceFS can cause it; scrub, merge and rebuild
+/// read runs with `read_at`, where a read error is a normal error.
+pub struct RunMap {
+    ptr: *const u8,
+    len: usize,
+}
+
+// SAFETY: the mapping is read-only and is never changed through this
+// pointer; reads of shared read-only memory are safe from any thread.
+unsafe impl Send for RunMap {}
+unsafe impl Sync for RunMap {}
+
+impl RunMap {
+    /// The bytes of the file as they were mapped.
+    pub fn bytes(&self) -> &[u8] {
+        if self.len == 0 {
+            return &[];
+        }
+        // SAFETY: `ptr` is a live mapping of `len` readable bytes until drop.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Map all of `file` read-only.
+    fn new(file: &File) -> io::Result<RunMap> {
+        use std::os::fd::AsRawFd;
+        let len = usize::try_from(file.metadata()?.len()).map_err(|_| io::Error::other("run file too large to map"))?;
+        if len == 0 {
+            return Ok(RunMap { ptr: std::ptr::null(), len: 0 });
+        }
+        // SAFETY: a new read-only shared mapping of a valid fd; the result
+        // is checked before use.
+        let p = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, file.as_raw_fd(), 0) };
+        if p == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        if len as u64 >= MADV_RANDOM_MIN {
+            // Only advice: a failure changes nothing that is correct.
+            // SAFETY: `p` is the mapping of `len` bytes made above.
+            unsafe { libc::madvise(p, len, libc::MADV_RANDOM) };
+        }
+        Ok(RunMap { ptr: p as *const u8, len })
+    }
+}
+
+impl Drop for RunMap {
+    fn drop(&mut self) {
+        if self.len != 0 {
+            // SAFETY: the mapping made in `new`, unmapped once.
+            unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.len) };
+        }
+    }
 }
 
 // ── Files ─────────────────────────────────────────────────────────────────────
 
-/// Packs as files in a directory, with pread and pwrite.
+/// Packs as files in a directory, with pread and pwrite. The files of the
+/// store index go in the directory `index` next to it (`STORE/packs` and
+/// `STORE/index`).
 pub struct FileIo {
     dir: PathBuf,
+    index: PathBuf,
     /// Result of the hole probe (see `can_punch`).
     punches: OnceLock<bool>,
 }
 
 impl FileIo {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        FileIo { dir: dir.into(), punches: OnceLock::new() }
+        let dir = dir.into();
+        let index = dir.with_file_name("index");
+        FileIo { dir, index, punches: OnceLock::new() }
     }
 
     /// Punch a hole in a small probe file in the pack directory.
@@ -109,7 +220,8 @@ impl FileIo {
     }
 
     fn path(&self, num: u64, kind: Kind) -> PathBuf {
-        self.dir.join(pack_name(num, kind))
+        let dir = if kind.is_index() { &self.index } else { &self.dir };
+        dir.join(pack_name(num, kind))
     }
 }
 
@@ -139,6 +251,7 @@ impl PackIo for FileIo {
             return Ok(self.dir.is_dir());
         }
         fs::create_dir_all(&self.dir)?;
+        fs::create_dir_all(&self.index)?;
         Ok(true)
     }
 
@@ -170,7 +283,11 @@ impl PackIo for FileIo {
     }
 
     fn sync_dir(&self) -> io::Result<()> {
-        sync_dir(&self.dir)
+        sync_dir(&self.dir)?;
+        if self.index.is_dir() {
+            sync_dir(&self.index)?;
+        }
+        Ok(())
     }
 
     fn create(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
@@ -197,6 +314,35 @@ impl PackIo for FileIo {
             punch_hole(&f, offset, len)?;
         }
         Ok(())
+    }
+
+    fn list_runs(&self) -> io::Result<Vec<u64>> {
+        let dir = match fs::read_dir(&self.index) {
+            Ok(d) => d,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        Ok(dir
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                let hex = n.strip_suffix(".run")?;
+                u64::from_str_radix(hex, 16).ok()
+            })
+            .collect())
+    }
+
+    fn create_run(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
+        let f = OpenOptions::new().read(true).write(true).create_new(true).open(self.path(num, Kind::Run))?;
+        Ok(Box::new(FilePack(f)))
+    }
+
+    fn open_run(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
+        Ok(Arc::new(FilePack(File::open(self.path(num, Kind::Run))?)))
+    }
+
+    fn map_run(&self, num: u64) -> io::Result<Option<RunMap>> {
+        RunMap::new(&File::open(self.path(num, Kind::Run))?).map(Some)
     }
 }
 

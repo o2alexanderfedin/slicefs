@@ -14,7 +14,7 @@
 //! `write_durable` is retried as a whole (it writes the full file again).
 //! Directory syncs and punches are not retried.
 
-use crate::pack_io::{Kind, PackFile, PackIo, PackRead};
+use crate::pack_io::{Kind, PackFile, PackIo, PackRead, RunMap};
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -175,5 +175,19 @@ impl PackIo for RetryingIo {
     /// reports the error, and a later GC compacts or deletes the pack.
     fn punch(&self, num: u64, ranges: &[(u64, u64)]) -> io::Result<()> {
         self.inner.punch(num, ranges)
+    }
+    fn list_runs(&self) -> io::Result<Vec<u64>> {
+        self.inner.list_runs()
+    }
+    /// Wrapped like a pack: a failed sync of a run is retried with the copy
+    /// of its unsynced bytes (at most `KEEP_LIMIT` of them).
+    fn create_run(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
+        Ok(self.wrap(self.inner.create_run(num)?))
+    }
+    fn open_run(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
+        self.inner.open_run(num)
+    }
+    fn map_run(&self, num: u64) -> io::Result<Option<RunMap>> {
+        self.inner.map_run(num)
     }
 }

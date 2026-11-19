@@ -240,6 +240,121 @@ fn open_refuses_a_dir_without_the_marker() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("not an index-bench store"));
 }
 
+/// Sum of the sizes of every file under `d`, recursively, except (at the top)
+/// the marker file and the saved-files directory.
+fn store_bytes(d: &Path, top: bool) -> u64 {
+    let mut sum = 0;
+    for e in std::fs::read_dir(d).unwrap() {
+        let e = e.unwrap();
+        let name = e.file_name();
+        if top && (name == "index-bench.txt" || name == "bench-saved") {
+            continue;
+        }
+        let m = e.metadata().unwrap();
+        sum += if m.is_dir() { store_bytes(&e.path(), false) } else { m.len() };
+    }
+    sum
+}
+
+fn num(out: &str, key: &str) -> u64 {
+    let v = value(out, key).unwrap_or_else(|| panic!("no {key}:\n{out}"));
+    v.parse().unwrap_or_else(|_| panic!("{key} is not a whole number:\n{out}"))
+}
+
+fn float(out: &str, key: &str) -> f64 {
+    let v = value(out, key).unwrap_or_else(|| panic!("no {key}:\n{out}"));
+    v.parse().unwrap_or_else(|_| panic!("{key} is not a number:\n{out}"))
+}
+
+#[test]
+fn create_counts_the_whole_store() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path().join("s");
+    let out = create(&d, "5000", &["--memtable-limit", "500"]);
+    let disk = num(&out, "disk_bytes");
+    assert_eq!(disk, store_bytes(&d, true), "{out}");
+    assert!(disk > store_bytes(&d.join("packs"), false), "disk_bytes counts only the packs:\n{out}");
+    assert!(num(&out, "index_bytes") > 0, "{out}");
+    assert_eq!(num(&out, "index_bytes"), store_bytes(&d.join("index"), false), "{out}");
+}
+
+#[test]
+fn open_prints_the_index_keys() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path().join("s");
+    create(&d, "5000", &["--memtable-limit", "500"]);
+    let out = ok(&["open", "--dir", p(&d)]);
+    assert!(num(&out, "index_runs") >= 1, "{out}");
+    for k in ["index_filter_bytes", "index_fence_bytes", "index_memtable_entries", "hwm_pack"] {
+        num(&out, k);
+    }
+    // The RSS split: anonymous and file-backed pages, before and after.
+    for k in ["rss_anon_before_bytes", "rss_anon_after_bytes", "rss_file_before_bytes", "rss_file_after_bytes"] {
+        num(&out, k);
+    }
+    float(&out, "steady_anon_bytes_per_object");
+    float(&out, "steady_file_bytes_per_object");
+    // The old keys come first, in their old order.
+    let keys: Vec<&str> = out.lines().filter_map(|l| l.split_once('=').map(|(k, _)| k)).collect();
+    let steady = keys.iter().position(|k| *k == "steady_bytes_per_object").unwrap();
+    let runs = keys.iter().position(|k| *k == "index_runs").unwrap();
+    assert!(steady < runs, "{out}");
+}
+
+#[test]
+fn recover_counts_only_the_scanned_packs() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path().join("s");
+    create(&d, "5000", &["--memtable-limit", "500", "--pack-limit", "65536"]);
+    let before = pack_files(&d);
+    let out = recover(&d, "all", false);
+    assert!(num(&out, "covered_packs") >= 1, "{out}");
+    assert!(num(&out, "covered_packs") <= num(&out, "packs_dropped"), "{out}");
+    assert!(num(&out, "scanned_objects") < 5000, "{out}");
+    assert_eq!(value(&out, "objects"), Some("5000"), "{out}");
+    assert_unchanged(&d, &before, "5000");
+}
+
+#[test]
+fn gc_reports_the_lock_hold() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path().join("s");
+    create(&d, "5000", &["--memtable-limit", "500", "--pack-limit", "65536"]);
+    let out = ok(&["gc", "--dir", p(&d)]);
+    assert_eq!(value(&out, "step"), Some("gc"), "{out}");
+    assert_eq!(value(&out, "live_every"), Some("4"), "{out}");
+    assert_eq!(value(&out, "dead_run"), Some("1"), "{out}");
+    assert_eq!(num(&out, "dead_objects"), 1250, "{out}");
+    // The packs of this store are small, so the GC compacts them and
+    // removes every dead object.
+    let removed = num(&out, "removed_objects");
+    assert_eq!(removed, 1250, "{out}");
+    assert_eq!(removed + num(&out, "kept_objects"), 5000, "{out}");
+    assert_eq!(num(&out, "objects_after"), 5000 - removed, "{out}");
+    let wall = float(&out, "wall_s");
+    for k in ["lock_hold_max_ms", "lock_hold_total_ms"] {
+        let v = float(&out, k);
+        assert!((0.0..=wall * 1000.0 + 1.0).contains(&v), "{k} is above the wall time:\n{out}");
+    }
+    assert!(float(&out, "lock_hold_max_ms") <= float(&out, "lock_hold_total_ms"), "{out}");
+    for k in ["packs_punched", "packs_compacted", "packs_deleted", "max_rss_bytes"] {
+        num(&out, k);
+    }
+    // The store no longer has N objects: every step refuses it now.
+    for args in [
+        vec!["open", "--dir", p(&d)],
+        vec!["lookup", "--dir", p(&d)],
+        vec!["recover", "--dir", p(&d), "--packs", "all"],
+        vec!["gc", "--dir", p(&d)],
+        vec!["run", "--dir", p(&d), "--objects", "5000"],
+    ] {
+        let r = bench(&args);
+        assert!(!r.status.success(), "{args:?} accepted a store after gc");
+        let err = String::from_utf8_lossy(&r.stderr);
+        assert!(err.contains("gc step"), "{args:?}: {err}");
+    }
+}
+
 #[test]
 fn bad_arguments_exit_with_code_2() {
     let out = bench(&["open", "--dir"]);

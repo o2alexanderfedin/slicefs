@@ -21,7 +21,7 @@ fn random(n: usize, seed: u64) -> Vec<u8> {
 }
 
 fn opts() -> Options {
-    Options { pack_limit: 256 * 1024, ..Options::default() }
+    Options { pack_limit: 256 * 1024, index_background_merge: false, ..Options::default() }
 }
 
 /// Run `f` once on files and once on the mock. `f` gets a function that
