@@ -22,7 +22,7 @@ At 100M, the lookup step of `index-bench` gave a hit of 3.2 µs and a miss of 1.
 
 - A merge policy that keeps fewer runs. Examples: a full merge when the store is idle, or a leveled policy.
 - The cost of each policy in rewritten bytes. The index is about 60 B for each object, thus about 6 GB at 100M objects, and a full merge rewrites all of it.
-- A bench change: `index-bench lookup` reports a second, warm lookup pass in the same process, next to the first pass. Then the effect of the run count and the effect of the page faults can be told apart.
+- A bench change: `index-bench lookup` reports a second, warm lookup pass in the same process, next to the first pass. Then the effect of the run count and the effect of the page faults can be separated.
 
 ## Measure
 
