@@ -235,8 +235,13 @@ if mnt $R/sL $R/mL; then   # default commit interval (30 s)
   B1=$(nbuf)
   if [ "$B1" = "$B0" ]; then ok no-switch-to-overlay; else bad no-switch-to-overlay "($((B1 - B0)) switch(es))"; fi
   echo "    timing: cp $TC s, out-of-order write $TW s, cmp $TM s"
-  echo "    daemon VmHWM: after cp $H1 MiB, after out-of-order write $H2 MiB, after cmp $H3 MiB (cap $CAP_MIB MiB)"
-  umnt $R/mL
+  # VmHWM only grows, so the last value read before the daemon exits covers
+  # the final commit at the unmount. The sampler ends when the daemon ends.
+  ( while kill -0 $MP 2>/dev/null; do h=$(hwm); [ -n "$h" ] && echo $h > $R/hwm.last; sleep 0.1; done ) & SP=$!
+  umnt $R/mL; wait $SP; H4=$(cat $R/hwm.last 2>/dev/null)
+  if [ -n "$H4" ] && [ "$H4" -le $CAP_MIB ]; then ok daemon-rss-bounded-at-unmount
+  else bad daemon-rss-bounded-at-unmount "(VmHWM $H4 MiB > cap $CAP_MIB MiB)"; fi
+  echo "    daemon VmHWM: after cp $H1 MiB, after out-of-order write $H2 MiB, after cmp $H3 MiB, at unmount $H4 MiB (cap $CAP_MIB MiB)"
   if mnt $R/sL $R/mL; then
     step big-in-order-cmp-after-remount 120 cmp $R/big.bin $R/mL/inorder.bin
     step big-out-of-order-cmp-after-remount 120 cmp $R/big.bin $R/mL/ooo.bin
