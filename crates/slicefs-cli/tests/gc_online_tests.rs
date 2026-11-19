@@ -476,10 +476,27 @@ fn a_paced_gc_with_endless_writes_finishes_after_the_yield_caps() {
             }
         })
     };
+    // Start the GC only when the writer runs, so the first safe point of the
+    // mark already sees writes (else a fast mark can end before any write).
+    let writes = fs.write_activity();
+    let t0 = Instant::now();
+    while writes.load(Ordering::Relaxed) < 2 {
+        assert!(t0.elapsed() < Duration::from_secs(10), "the writer did not start");
+        std::thread::sleep(Duration::from_millis(1));
+    }
     let cap = Duration::from_millis(300);
     let stop = no_stop();
     let pacer = || WritePacer::new(fs.write_activity(), Arc::new(|| 0.9), Box::new(RealClock::new()), cap, &stop);
     let (mark, sweep) = (pacer(), pacer());
+    // A pacer waits only after it sees the write counter change since it was
+    // made. The mark of this small store can end in less than one writer
+    // period (5 ms), so start the GC only after the counter moved.
+    let made = writes.load(Ordering::Relaxed);
+    let t1 = Instant::now();
+    while writes.load(Ordering::Relaxed) == made {
+        assert!(t1.elapsed() < Duration::from_secs(10), "no write after the pacers were made");
+        std::thread::sleep(Duration::from_millis(1));
+    }
     let t = Instant::now();
     let stats = fs.gc_online_paced(false, &stop, &mark, &sweep).unwrap().expect("not stopped");
     let took = t.elapsed();
