@@ -547,6 +547,31 @@ struct Inner {
     failed: bool,
     /// Told of every flush (see `MergeCtl`; the same as `ChunkStore::merge`).
     merge: Arc<MergeCtl>,
+    /// The seal that runs in the background, if any (see `ChunkStore::seal`).
+    sealing: Option<JoinHandle<io::Result<()>>>,
+}
+
+/// The slow part of a seal: sync the pack, then write its `.idx` (#108).
+struct SealJob {
+    io: Arc<dyn PackIo>,
+    num: u64,
+    file: Box<dyn PackFile>,
+    idx: Vec<u8>,
+    dirty: bool,
+}
+
+impl SealJob {
+    fn run(mut self) -> io::Result<()> {
+        let t = Instant::now();
+        if self.dirty {
+            self.file.sync()?;
+        }
+        let synced = t.elapsed();
+        self.io.write_durable(self.num, Kind::Idx, &self.idx)?;
+        retry::log(&format!("seal num={} sync_s={:.3} idx_s={:.3} bg=1",
+            self.num, synced.as_secs_f64(), (t.elapsed() - synced).as_secs_f64()));
+        Ok(())
+    }
 }
 
 /// Outcome of a GC.
@@ -1132,6 +1157,7 @@ impl ChunkStore {
             touched: None,
             failed: false,
             merge: Arc::new(MergeCtl::default()),
+            sealing: None,
         };
         let limit = opts.index_memtable_limit.max(1);
         let last = nums.last().copied();
@@ -1370,6 +1396,8 @@ impl ChunkStore {
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
             self.seal(&mut inner)?;
         }
+        // GC reads the `.idx` of every pack up to the one it returns.
+        inner.join_seal()?;
         inner.touched = Some(Touched::spilling(self.opts.gc_touched_exact));
         Ok(inner.next_pack - 1)
     }
@@ -2381,6 +2409,17 @@ impl ChunkStore {
     /// Make every object put so far durable. Without new objects this does
     /// not touch the disk.
     pub fn sync(&self) -> Result<()> {
+        // Start the sync of the active pack and wait for it without the
+        // store lock, so puts go on meanwhile (#108). The sync below, under
+        // the lock, then has only the bytes put since, and gives the outcome.
+        let wait = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.check()?;
+            inner.active.as_mut().filter(|a| a.dirty).and_then(|a| a.file.sync_soon())
+        };
+        if let Some(w) = wait {
+            w.wait();
+        }
         let mut inner = self.inner.lock().unwrap();
         inner.check()?;
         inner.sync_active()?;
@@ -2400,6 +2439,7 @@ impl ChunkStore {
         if inner.active.is_some() {
             self.seal(&mut inner)?;
         }
+        inner.join_seal()?;
         if inner.dir_dirty {
             inner.sync_dir(&*self.io)?;
         }
@@ -2437,17 +2477,41 @@ impl ChunkStore {
         LiveFilter::new(self.stats().objects)
     }
 
+    ///
+    /// The pack sync and the `.idx` write run in a background thread, so a
+    /// put that fills a pack does not wait for them (#108); `sync_active`
+    /// (so `sync`, a flush and GC) and the next seal wait for it. A crash
+    /// before it ends leaves a pack with no `.idx` below the newest pack:
+    /// the open scans it (`resync_scan`) and seals it then. Nothing durable
+    /// refers to its objects yet, since every sync waits for the seal.
     fn seal(&self, inner: &mut Inner) -> Result<()> {
-        inner.sync_active()?;
+        inner.join_seal()?;
         let Some(a) = inner.active.take() else { return Ok(()) };
-        if let Err(e) = self.io.write_durable(a.num, Kind::Idx, &encode_index(&a.entries)) {
-            // The pack is synced; without its index it is scanned at open.
-            inner.failed = true;
-            return Err(e.into());
+        let (num, entries) = (a.num, a.entries.len());
+        // The directory is not marked clean: a pack made after this starts
+        // may not be in the directory sync of the `.idx` write.
+        let job = SealJob { io: Arc::clone(&self.io), num: a.num, file: a.file, idx: encode_index(&a.entries), dirty: a.dirty };
+        let slot = Arc::new(Mutex::new(Some(job)));
+        let theirs = Arc::clone(&slot);
+        let spawned = std::thread::Builder::new().name("pack-seal".into()).spawn(move || {
+            let job = theirs.lock().unwrap().take();
+            job.map_or(Ok(()), SealJob::run)
+        });
+        match spawned {
+            Ok(t) => inner.sealing = Some(t),
+            Err(_) => {
+                // No thread: seal here.
+                let job = slot.lock().unwrap().take();
+                if let Err(e) = job.map_or(Ok(()), SealJob::run) {
+                    inner.failed = true;
+                    return Err(e.into());
+                }
+            }
         }
-        inner.dir_dirty = false; // write_durable synced the directory
-        // Its `.idx` lists exactly its records now (see `locality.rs`).
-        self.locality.trust(a.num, a.entries.len());
+        // Its `.idx` will list exactly its records (see `locality.rs`). The
+        // seal may still run: a fill before the `.idx` exists fails (no file,
+        // or not `entries` entries) and counts as a dropped fill.
+        self.locality.trust(num, entries);
         Ok(())
     }
 }
@@ -2458,6 +2522,10 @@ impl Drop for ChunkStore {
     /// partial output is removed, and an open removes what is left.
     fn drop(&mut self) {
         self.stop_merges();
+        // Let a background seal end; its error is lost (nothing was promised).
+        if let Ok(mut inner) = self.inner.lock() {
+            let _ = inner.join_seal();
+        }
     }
 }
 
@@ -2626,6 +2694,7 @@ impl Inner {
             touched: None,
             failed: false,
             merge: Arc::new(MergeCtl::default()),
+            sealing: None,
         }
     }
 
@@ -2639,8 +2708,22 @@ impl Inner {
         Ok(())
     }
 
-    /// Sync the active pack if it has new bytes. A failure is final.
+    /// Wait for the background seal, if one runs. A failure is final.
+    fn join_seal(&mut self) -> Result<()> {
+        if let Some(t) = self.sealing.take() {
+            if let Err(e) = t.join().unwrap_or_else(|_| Err(io::Error::other("the pack seal thread panicked"))) {
+                self.failed = true;
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Sync the active pack if it has new bytes, after the background seal
+    /// of the pack before it: then every record so far is durable. A failure
+    /// is final.
     fn sync_active(&mut self) -> Result<()> {
+        self.join_seal()?;
         if let Some(a) = self.active.as_mut() {
             if a.dirty {
                 if let Err(e) = a.file.sync() {

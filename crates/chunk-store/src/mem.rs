@@ -358,9 +358,28 @@ struct MemSync {
 }
 
 impl PackSync for MemSync {
+    /// Saves only the ranges that were dirty when the sync started: a write
+    /// made while it runs is not covered (a real fsync may or may not cover
+    /// it, so the caller must not count on it).
     fn sync(&self) -> io::Result<()> {
+        let started = self.f.lock().unwrap().dirty.clone();
         wait_hold(&self.hold);
-        sync_file(&self.s, &self.f)
+        let mut s = self.s.lock().unwrap();
+        let mut f = self.f.lock().unwrap();
+        if s.sync_fails() {
+            f.dirty.clear();
+            return Err(eio());
+        }
+        let f = &mut *f;
+        f.durable.resize(f.data.len(), 0);
+        for &(a, b) in &started {
+            let b = b.min(f.data.len());
+            if a < b {
+                f.durable[a..b].copy_from_slice(&f.data[a..b]);
+            }
+        }
+        f.dirty.retain(|r| !started.contains(r));
+        Ok(())
     }
 }
 

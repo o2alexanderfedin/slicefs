@@ -69,11 +69,37 @@ pub trait PackFile: PackRead {
     fn sync_handle(&self) -> Option<Arc<dyn PackSync>> {
         None
     }
+    /// Start a sync of every write so far in the background, if this file
+    /// can, and return a wait for its end. It only shortens a later `sync`
+    /// (which the caller still calls: only that one reports the outcome).
+    fn sync_soon(&mut self) -> Option<SyncWait> {
+        None
+    }
 }
 
 /// Syncs one file from any thread (see [`PackFile::sync_handle`]).
 pub trait PackSync: Send + Sync {
     fn sync(&self) -> io::Result<()>;
+}
+
+/// The end of a background sync (see [`PackFile::sync_soon`]).
+#[derive(Clone, Default)]
+pub struct SyncWait(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+
+impl SyncWait {
+    /// Mark the sync as ended.
+    pub fn done(&self) {
+        *self.0 .0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.0 .1.notify_all();
+    }
+
+    /// Wait until the sync has ended.
+    pub fn wait(&self) {
+        let mut d = self.0 .0.lock().unwrap_or_else(|e| e.into_inner());
+        while !*d {
+            d = self.0 .1.wait(d).unwrap_or_else(|e| e.into_inner());
+        }
+    }
 }
 
 /// The directory of pack files, and the files of the store index.

@@ -20,7 +20,7 @@
 //! `write_durable` is retried as a whole (it writes the full file again).
 //! Directory syncs and punches are not retried.
 
-use crate::pack_io::{Kind, PackFile, PackIo, PackRead, RunMap};
+use crate::pack_io::{Kind, PackFile, PackIo, PackRead, RunMap, SyncWait};
 use std::collections::VecDeque;
 use std::io;
 use std::sync::Arc;
@@ -44,7 +44,7 @@ pub static LOG_SYNCS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 
 const BACKOFF: [Duration; 3] = [Duration::from_millis(10), Duration::from_millis(100), Duration::from_millis(500)];
 
-fn log(what: &str) {
+pub(crate) fn log(what: &str) {
     if LOG_SYNCS.load(std::sync::atomic::Ordering::Relaxed) {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         eprintln!("[t={}.{:03}][pack] {what}", now.as_secs(), now.subsec_millis());
@@ -74,6 +74,7 @@ impl RetryingIo {
             len: None,
             backoff: self.backoff.clone(),
             flight: None,
+            broken: false,
         })
     }
 }
@@ -85,6 +86,7 @@ struct Flight {
     /// ...with this many bytes.
     bytes: usize,
     thread: JoinHandle<io::Result<()>>,
+    done: SyncWait,
 }
 
 struct RetryingPack {
@@ -97,6 +99,14 @@ struct RetryingPack {
     len: Option<u64>,
     backoff: Vec<Duration>,
     flight: Option<Flight>,
+    /// A sync failed after all retries. The pages may be clean without the
+    /// data, so a later sync could succeed falsely: every later write and
+    /// sync fails.
+    broken: bool,
+}
+
+fn broken() -> io::Error {
+    io::Error::other("an earlier sync of this pack failed after retries")
 }
 
 impl RetryingPack {
@@ -132,6 +142,7 @@ impl RetryingPack {
                 Err(e) => err = e,
             }
         }
+        self.broken = true;
         Err(err)
     }
 
@@ -154,15 +165,19 @@ impl RetryingPack {
     fn start(&mut self) -> io::Result<()> {
         let Some(h) = self.file.sync_handle() else { return self.sync_here() };
         let bytes = self.kept;
+        let done = SyncWait::default();
+        let end = done.clone();
         let spawned = std::thread::Builder::new().name("pack-sync".into()).spawn(move || {
             let t = Instant::now();
-            let r = h.sync();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.sync()))
+                .unwrap_or_else(|_| Err(io::Error::other("the pack sync panicked")));
             log(&format!("sync bytes={bytes} ms={:.1} bg=1", t.elapsed().as_secs_f64() * 1000.0));
+            end.done();
             r
         });
         match spawned {
             Ok(thread) => {
-                self.flight = Some(Flight { covers: self.unsynced.len(), bytes, thread });
+                self.flight = Some(Flight { covers: self.unsynced.len(), bytes, thread, done });
                 Ok(())
             }
             Err(_) => self.sync_here(),
@@ -211,6 +226,9 @@ impl PackRead for RetryingPack {
 
 impl PackFile for RetryingPack {
     fn write_at(&mut self, data: &[u8], offset: u64) -> io::Result<()> {
+        if self.broken {
+            return Err(broken());
+        }
         self.file.write_at(data, offset)?;
         self.unsynced.push_back((offset, data.to_vec()));
         self.kept += data.len();
@@ -241,8 +259,22 @@ impl PackFile for RetryingPack {
     fn sync(&mut self) -> io::Result<()> {
         // A background sync covers the older writes; one more sync covers
         // the rest (it flushes only the pages dirtied since).
+        if self.broken {
+            return Err(broken());
+        }
         self.settle(true)?;
         self.sync_here()
+    }
+
+    fn sync_soon(&mut self) -> Option<SyncWait> {
+        if self.broken || self.settle(false).is_err() {
+            return None;
+        }
+        if self.flight.is_none() && self.kept > 0 {
+            // An error marks the pack broken; `sync` reports it.
+            let _ = self.start();
+        }
+        self.flight.as_ref().map(|f| f.done.clone())
     }
 }
 

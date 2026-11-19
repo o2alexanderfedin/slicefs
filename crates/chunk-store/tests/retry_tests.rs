@@ -254,3 +254,99 @@ fn sync_waits_for_the_background_sync_and_the_rest() {
     drop(f);
     assert_durable(&mem, &piece, n);
 }
+
+#[test]
+fn writes_after_the_start_of_a_background_sync_are_kept_until_synced() {
+    // The background sync covers only the writes before it started; the
+    // later ones must stay in the copy, so a failed sync after it repairs them.
+    let mem = MemIo::new();
+    let io = retrying(&mem);
+    let f = io.create(1).unwrap();
+    mem.hold_syncs(true);
+    let piece = random(MIB, 15);
+    let n = KEEP_LIMIT / MIB + 4;
+    let (rx, h) = writer(f, piece.clone(), n);
+    for i in 0..n {
+        assert_eq!(rx.recv_timeout(LONG), Ok(i));
+    }
+    let mut f = h.join().unwrap();
+    // The held background sync works; the sync of the rest fails once.
+    mem.fail_sync_after(1);
+    mem.hold_syncs(false);
+    f.sync().unwrap();
+    drop(f);
+    assert_durable(&mem, &piece, n);
+}
+
+#[test]
+fn a_put_that_fills_a_pack_does_not_wait_for_its_seal() {
+    let mem = MemIo::new();
+    let io = retrying(&mem);
+    let o = Options { pack_limit: 64 << 10, index_background_merge: false, ..Options::default() };
+    let s = Arc::new(ChunkStore::open_with(Arc::clone(&io), o).unwrap());
+    s.sync().unwrap();
+    mem.hold_syncs(true);
+    // Objects of 8000 bytes: the ninth fills the first pack and seals it.
+    let (tx, rx) = mpsc::channel();
+    let s2 = Arc::clone(&s);
+    let h = thread::spawn(move || {
+        let objs = put_many(&s2, 12, 400);
+        let _ = tx.send(());
+        objs
+    });
+    assert!(rx.recv_timeout(LONG).is_ok(), "a put waited for the seal");
+    let objs = h.join().unwrap();
+    assert_eq!(s.stats().packs, 2);
+    let (tx, done) = mpsc::channel();
+    let s3 = Arc::clone(&s);
+    let t = thread::spawn(move || {
+        let r = s3.sync();
+        let _ = tx.send(());
+        r
+    });
+    assert!(done.recv_timeout(Duration::from_millis(300)).is_err(), "sync did not wait for the seal");
+    mem.hold_syncs(false);
+    t.join().unwrap().unwrap();
+    drop(s);
+    mem.crash();
+    let s = open(&io);
+    for (id, d) in &objs {
+        assert_eq!(&s.get(id).unwrap(), d);
+    }
+}
+
+#[test]
+fn puts_go_on_while_a_store_sync_waits_for_the_disk() {
+    let mem = MemIo::new();
+    let io = retrying(&mem);
+    let s = Arc::new(open(&io));
+    let objs = put_many(&s, 5, 500);
+    mem.hold_syncs(true);
+    let (tx, done) = mpsc::channel();
+    let s2 = Arc::clone(&s);
+    let t = thread::spawn(move || {
+        let r = s2.sync();
+        let _ = tx.send(());
+        r
+    });
+    // The sync waits for the held disk; puts do not wait for it.
+    let (ptx, put) = mpsc::channel();
+    let s3 = Arc::clone(&s);
+    let p = thread::spawn(move || {
+        let more = put_many(&s3, 5, 600);
+        let _ = ptx.send(());
+        more
+    });
+    assert!(put.recv_timeout(LONG).is_ok(), "a put waited for the store sync");
+    assert!(done.recv_timeout(Duration::from_millis(300)).is_err(), "sync returned before the disk synced");
+    mem.hold_syncs(false);
+    t.join().unwrap().unwrap();
+    let more = p.join().unwrap();
+    s.sync().unwrap();
+    drop(s);
+    mem.crash();
+    let s = open(&io);
+    for (id, d) in objs.iter().chain(&more) {
+        assert_eq!(&s.get(id).unwrap(), d);
+    }
+}
