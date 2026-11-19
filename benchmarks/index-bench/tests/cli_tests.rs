@@ -103,9 +103,34 @@ fn lookup_finds_hits_not_misses_and_does_not_change_the_store() {
     for key in ["contains_hit_per_s", "contains_miss_per_s", "put_hit_per_s", "contains_hit_ns", "put_hit_ns"] {
         positive(&out, key);
     }
+    for key in ["contains_hit_ns_2", "contains_miss_ns_2", "put_hit_ns_2"] {
+        positive(&out, key);
+    }
+    assert!(value(&out, "index_runs").is_some_and(|v| v.parse::<u64>().is_ok()), "{out}");
     assert_eq!(pack_files(&d), before, "lookup changed the pack files");
     let open = ok(&["open", "--dir", p(&d)]);
     assert_eq!(value(&open, "objects"), Some("5000"), "{open}");
+}
+
+// Settle runs the idle merge of the index (#111): fewer runs after it, the
+// same objects, and the merge bytes reported. Waits for the idle delay of
+// the store (5 s).
+#[test]
+fn settle_merges_the_runs_of_an_idle_store() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path().join("s");
+    // 23 flushes of 1,000 entries: five runs (16 + 4 + 1 + 1 + 1).
+    let c = create(&d, "23000", &["--memtable-limit", "1000"]);
+    assert_eq!(value(&c, "index_runs"), Some("5"), "{c}");
+    positive(&c, "merge_bytes_per_index_byte");
+    let out = ok(&["settle", "--dir", p(&d), "--timeout-s", "120"]);
+    assert_eq!(value(&out, "settled"), Some("1"), "{out}");
+    assert_eq!(value(&out, "index_runs_before"), Some("5"), "{out}");
+    let after: u64 = value(&out, "index_runs_after").unwrap().parse().unwrap();
+    assert!(after <= 2, "{out}");
+    positive(&out, "merge_bytes");
+    let lk = ok(&["lookup", "--dir", p(&d), "--hits", "2000", "--misses", "2000"]);
+    assert_eq!(value(&lk, "index_runs"), Some(after.to_string().as_str()), "{lk}");
 }
 
 #[test]

@@ -5,6 +5,7 @@
 //! traits in this file, so a new backend needs no change to the steps.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chunk_store::pack_io::{pack_name, Kind};
 use chunk_store::{ChunkStore, LiveFilter, ObjectId, Options};
@@ -69,6 +70,12 @@ pub trait Store {
     fn index_keys(&self) -> Vec<(&'static str, String)> {
         Vec::new()
     }
+    /// Wait at most `timeout` until the background work of the index (also
+    /// the merges that wait for an idle store) is done; true if done. Not
+    /// supported by default.
+    fn settle(&self, _timeout: Duration) -> Result<bool, String> {
+        Err("settle is not supported by this backend".into())
+    }
     /// Remove every object that is not in `live` (one complete GC) and
     /// return `key=value` pairs that describe it. Not supported by default.
     fn gc(&self, _live: &LiveFilter) -> Result<Vec<(&'static str, String)>, String> {
@@ -93,8 +100,14 @@ pub trait Backend {
     /// Make a new store in `dir`. Each value of `opts` that is given replaces
     /// the default.
     fn create(&self, dir: &Path, opts: CreateOpts) -> Result<Box<dyn Store>, String>;
-    /// Open the store in `dir`.
+    /// Open the store in `dir`, with no merge that waits for an idle store
+    /// (so a step measures the index as the last step left it).
     fn open(&self, dir: &Path, read_only: bool) -> Result<Box<dyn Store>, String>;
+    /// Open the store in `dir` for writes with the default background work
+    /// of the backend (for the settle step). Not supported by default.
+    fn open_default(&self, _dir: &Path) -> Result<Box<dyn Store>, String> {
+        Err(format!("settle is not supported by backend {}", self.name()))
+    }
 
     /// Move the index of the `scope` packs away, so the next open must scan
     /// those packs.
@@ -146,7 +159,11 @@ impl Store for ChunkStoreHandle {
             ("index_fence_bytes", i.fence_bytes.to_string()),
             ("index_memtable_entries", i.memtable_entries.to_string()),
             ("hwm_pack", i.hwm_pack.to_string()),
+            ("index_merge_bytes", self.0.index_merge_bytes().to_string()),
         ]
+    }
+    fn settle(&self, timeout: Duration) -> Result<bool, String> {
+        Ok(self.0.wait_index_settled(timeout))
     }
     fn gc(&self, live: &LiveFilter) -> Result<Vec<(&'static str, String)>, String> {
         let boundary = self.0.gc_begin().map_err(err)?;
@@ -217,12 +234,19 @@ impl Backend for ChunkStoreBackend {
         if let Some(limit) = c.memtable_limit {
             opts.index_memtable_limit = limit;
         }
+        // The runs as the write load leaves them (the settle step runs the
+        // idle merge).
+        opts.index_idle_merge_after = None;
         Ok(Box::new(ChunkStoreHandle(ChunkStore::open(dir, opts).map_err(err)?)))
     }
 
     fn open(&self, dir: &Path, read_only: bool) -> Result<Box<dyn Store>, String> {
-        let opts = Options { read_only, ..Options::default() };
+        let opts = Options { read_only, index_idle_merge_after: None, ..Options::default() };
         Ok(Box::new(ChunkStoreHandle(ChunkStore::open(dir, opts).map_err(err)?)))
+    }
+
+    fn open_default(&self, dir: &Path) -> Result<Box<dyn Store>, String> {
+        Ok(Box::new(ChunkStoreHandle(ChunkStore::open(dir, Options::default()).map_err(err)?)))
     }
 
     fn drop_index(&self, dir: &Path, scope: Scope) -> Result<Dropped, String> {

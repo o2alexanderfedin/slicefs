@@ -57,6 +57,16 @@ const CRC: usize = 4;
 pub(crate) const DEFAULT_BLOOM_BITS: u8 = 10;
 /// Memtable shards (by the high 4 bits of digest byte 0).
 pub(crate) const SHARDS: usize = 16;
+/// The idle merge (#111) acts only when the index has more runs than this.
+pub(crate) const IDLE_TARGET_RUNS: usize = 2;
+/// The idle merge takes an older run into its window only if the newer
+/// runs of the window have at least 1/this of its entries: a run is
+/// rewritten only for new data of at least 1/this of its size, so the
+/// bytes that the idle merges write stay bounded per byte of new data.
+pub(crate) const IDLE_MAX_REWRITE: u64 = 4;
+/// No new entry and no flush, merge or GC for this long: the store is
+/// idle, and the merge thread runs the idle merge (#111).
+pub(crate) const IDLE_MERGE_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn shard_of(id: &ObjectId) -> usize {
     (id.digest()[0] >> 4) as usize
@@ -240,6 +250,8 @@ pub(crate) struct Index {
     gen: AtomicU64,
     /// Bloom filter bits per key of new runs (0: no filter).
     bloom_bits: u8,
+    /// Bytes of the merge outputs installed since the open.
+    merge_bytes: AtomicU64,
 }
 
 /// A copy of the memtable and a snapshot of the runs, for a full pass.
@@ -303,6 +315,30 @@ pub(crate) enum MergeOut {
     Empty,
 }
 
+/// The idle merge window (#111) of runs with these entry counts (from the
+/// newest to the oldest): the number of newest runs to merge, or 0 for no
+/// merge. Nothing if there are at most `target` runs. Else the window
+/// starts with the newest run and takes the next older run while the
+/// window has at least 1/`max_rewrite` of that run's entries; it must hold
+/// at least 2 runs. Only a prefix of the list (newest runs) merges, so the
+/// newest entry of an ID stays the newest.
+pub fn idle_window(entries: &[u64], target: usize, max_rewrite: u64) -> usize {
+    if entries.len() <= target.max(1) {
+        return 0;
+    }
+    let mut sum = entries[0];
+    let mut k = 1;
+    while k < entries.len() && sum.saturating_mul(max_rewrite.max(1)) >= entries[k] {
+        sum += entries[k];
+        k += 1;
+    }
+    if k >= 2 {
+        k
+    } else {
+        0
+    }
+}
+
 /// The tier of a run of `entries` entries: the integer floor of log base
 /// `fan_in` of max(1, entries / `limit`). Runs of one tier have a similar
 /// size; a merge of `fan_in` of them gives a run of the next tier.
@@ -326,6 +362,7 @@ impl Index {
             man: Mutex::new(man),
             gen: AtomicU64::new(0),
             bloom_bits: DEFAULT_BLOOM_BITS,
+            merge_bytes: AtomicU64::new(0),
         }
     }
 
@@ -508,6 +545,12 @@ impl Index {
 
     pub fn mem_len(&self) -> usize {
         self.mem_len.load(Ordering::SeqCst)
+    }
+
+    /// Bytes of the merge outputs installed since the open (the write cost
+    /// of the merges; for tests and tools).
+    pub fn merge_bytes(&self) -> u64 {
+        self.merge_bytes.load(Ordering::SeqCst)
     }
 
     /// The live runs now, from the newest to the oldest.
@@ -712,6 +755,35 @@ impl Index {
         Some(MergePlan { inputs: runs[window.clone()].to_vec(), out, drop_tombs: window.end == n })
     }
 
+    /// The window of the idle merge now (see [`idle_window`]), or `None`.
+    fn idle_range(&self) -> Option<std::ops::Range<usize>> {
+        if self.rebuild_requested() {
+            return None;
+        }
+        let runs = self.runs();
+        let entries: Vec<u64> = runs.iter().map(|r| r.entries()).collect();
+        let k = idle_window(&entries, IDLE_TARGET_RUNS, IDLE_MAX_REWRITE);
+        (k >= 2).then_some(0..k)
+    }
+
+    /// True if the idle merge has a window now (no lock needed: a hint for
+    /// the merge thread; [`Index::pick_idle_merge`] decides).
+    pub fn idle_merge_due(&self) -> bool {
+        self.idle_range().is_some()
+    }
+
+    /// The idle merge (#111), chosen under the store lock (`None`: no
+    /// merge): the newest runs of [`idle_window`] into one. Tombstones are
+    /// dropped if the window holds the oldest run.
+    pub fn pick_idle_merge(&self) -> Option<MergePlan> {
+        let window = self.idle_range()?;
+        let runs = self.runs();
+        let mut man = self.man.lock().unwrap();
+        let out = man.next_run;
+        man.next_run += 1;
+        Some(MergePlan { inputs: runs[window.clone()].to_vec(), out, drop_tombs: window.end == runs.len() })
+    }
+
     /// Write the merge of `plan` to its output run, with no lock held. The
     /// inputs are read through the verified page reads (every page CRC
     /// checked); for each ID the entry of the newest input wins; tombstones
@@ -798,6 +870,9 @@ impl Index {
         io.write_durable(0, Kind::Manifest, &new.encode())?;
         *man = new;
         drop(man);
+        if let Some(r) = &run {
+            self.merge_bytes.fetch_add(r.len(), Ordering::SeqCst);
+        }
         {
             let mut runs = self.runs.write().unwrap();
             let mut v: Vec<Arc<Run>> = runs.iter().cloned().collect();
@@ -1210,6 +1285,24 @@ mod tests {
         assert_eq!(ix.install_merge(&mem, &plan, out).unwrap(), Some(runs.iter().rev().copied().collect()));
         assert_eq!(ix.runs().len(), 1);
         assert_eq!(ix.get(&id(250)).unwrap(), Some(loc(1, 350)));
+    }
+
+    #[test]
+    fn the_idle_window_rewrites_a_run_only_for_enough_new_data() {
+        let w = |e: &[u64]| idle_window(e, 2, 4);
+        // At most the target: nothing.
+        assert_eq!(w(&[]), 0);
+        assert_eq!(w(&[1, 100]), 0);
+        // The runs of a long create (size-tiered, sizes in flushes): all.
+        assert_eq!(w(&[1, 1, 4, 16, 16]), 5);
+        assert_eq!(w(&[1, 4, 4, 4, 16, 16, 16, 64, 256]), 9);
+        // A small flush does not pull in a run more than 4 times its size.
+        assert_eq!(w(&[1, 8, 100]), 0);
+        assert_eq!(w(&[1, 1, 8, 100]), 3, "2 * 4 >= 8; 10 * 4 < 100");
+        assert_eq!(w(&[1, 1, 1, 1, 100]), 4);
+        assert_eq!(w(&[25, 100]), 0, "two runs: at the target");
+        assert_eq!(w(&[1, 24, 100]), 0);
+        assert_eq!(w(&[6, 24, 100]), 3);
     }
 
     #[test]
