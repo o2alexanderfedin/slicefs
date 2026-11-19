@@ -277,3 +277,138 @@ fn gc_copies_are_not_counted_twice_after_a_failed_tombstone_flush() {
     let s = reopen_and_check(&mem, &o, &objs, &[], &[]);
     assert_eq!(s.stats().objects, 200, "each copy is counted once");
 }
+
+// ── Merges (17-06) ────────────────────────────────────────────────────────────
+
+/// `n` synced objects; with `opts()` 200 objects give six runs of one tier
+/// (32 entries each), so `merge_index_now` merges the four oldest.
+fn before_a_merge(mem: &MemIo, o: &Options, n: u64) -> (ChunkStore, Vec<Obj>) {
+    let s = store(mem, o);
+    let objs = put_many(&s, n, 1);
+    s.sync().unwrap();
+    assert!(s.index_info().runs >= 4, "{:?}", s.index_info());
+    (s, objs)
+}
+
+fn all_exact(s: &ChunkStore, objs: &[Obj], what: &str) {
+    for (i, (id, d)) in objs.iter().enumerate() {
+        assert_eq!(s.get(id).as_ref(), Some(d), "{what}: object {i}");
+    }
+}
+
+#[test]
+fn a_crash_after_the_merge_output_before_the_manifest() {
+    let mem = MemIo::new();
+    let o = opts();
+    let (s, mut synced) = before_a_merge(&mem, &o, 200);
+    let committed = run_list(&mem);
+    let manifest = mem.read(0, Kind::Manifest).unwrap();
+    mem.fail_next_write_durable(Kind::Manifest, 1);
+    assert!(s.merge_index_now().is_err());
+    assert_eq!(mem.read(0, Kind::Manifest).unwrap(), manifest);
+    assert_eq!(run_list(&mem).len(), committed.len() + 1, "the output stays: its MANIFEST write may be durable");
+    assert_eq!(s.index_info().runs, committed.len() as u64, "the old runs stay in use");
+    // The store is not failed: puts (with a flush) and gets work.
+    synced.extend(put_many(&s, 40, 500));
+    all_exact(&s, &synced, "after the failed merge");
+    s.sync().unwrap();
+    drop(s);
+    mem.crash();
+    // The orphan output is removed; the MANIFEST runs are the run files.
+    let s = reopen_and_check(&mem, &o, &synced, &[], &committed);
+    assert_eq!(s.stats().objects, 240);
+}
+
+#[test]
+fn a_crash_after_the_merge_manifest_before_the_inputs_are_removed() {
+    let mem = MemIo::new();
+    let o = opts();
+    let (s, synced) = before_a_merge(&mem, &o, 200);
+    let before = run_list(&mem);
+    mem.set_fail_removes(true);
+    assert!(s.merge_index_now().unwrap());
+    mem.set_fail_removes(false);
+    let after = run_list(&mem);
+    assert_eq!(after.len(), before.len() + 1, "the input runs are still there: {after:?}");
+    // The four oldest runs merged into the newest file.
+    let inputs = &before[..4];
+    let mut committed = before[4..].to_vec();
+    committed.push(*after.last().unwrap());
+    all_exact(&s, &synced, "after the merge");
+    drop(s);
+    mem.crash();
+    let s = reopen_and_check(&mem, &o, &synced, &[], &committed);
+    assert!(inputs.iter().all(|&r| !mem.exists(r, Kind::Run)), "the obsolete inputs are removed");
+    assert_eq!(s.index_info().runs, before.len() as u64 - 3);
+}
+
+#[test]
+fn a_read_error_during_a_merge_keeps_the_store_working() {
+    let mem = MemIo::new();
+    // Runs of 150 entries (three pages): the sixth page read fails inside
+    // the merge, after the first page of each input.
+    let o = Options { index_memtable_limit: 150, ..opts() };
+    let (s, mut synced) = before_a_merge(&mem, &o, 650);
+    let runs = run_list(&mem);
+    mem.fail_reads_after(5);
+    let e = s.merge_index_now().unwrap_err();
+    mem.clear_fail_reads_after();
+    assert!(matches!(e, chunk_store::Error::Io(_)), "{e}");
+    assert_eq!(run_list(&mem), runs, "the partial output is removed");
+    // The store is not failed, and an I/O error asks for no rebuild.
+    synced.extend(put_many(&s, 160, 5000));
+    all_exact(&s, &synced, "after the failed merge");
+    s.sync().unwrap();
+    drop(s);
+    let s = reopen_and_check(&mem, &o, &synced, &[], &runs);
+    assert!(s.merge_index_now().unwrap(), "the merge works after the error");
+    all_exact(&s, &synced, "after the merge");
+}
+
+#[test]
+fn a_drop_during_background_merges_returns() {
+    let mem = MemIo::new();
+    let o = Options { index_memtable_limit: 16, index_background_merge: true, ..opts() };
+    let s = store(&mem, &o);
+    let objs = put_many(&s, 2000, 1);
+    s.sync().unwrap();
+    // The drop stops and joins the merge thread, which may be merging now.
+    drop(s);
+    mem.crash();
+    let s = reopen_and_check(&mem, &opts(), &objs, &[], &[]);
+    assert_eq!(s.stats().objects, 2000);
+}
+
+#[test]
+fn background_merges_keep_the_run_count_small() {
+    let mem = MemIo::new();
+    let o = Options { index_memtable_limit: 50, index_background_merge: true, ..opts() };
+    let s = store(&mem, &o);
+    let objs = put_many(&s, 2000, 1);
+    s.wait_index_idle();
+    let tiers: Vec<u32> = s.index_run_entries().iter().map(|&e| tier(e, 50)).collect();
+    assert!(tiers.windows(4).all(|w| w.iter().any(|&t| t != w[0])), "tiers {tiers:?}");
+    let info = s.index_info();
+    assert!(info.runs <= 9, "{info:?}");
+    assert_eq!(info.run_entries, 2000, "{info:?}");
+    assert_eq!(run_list(&mem).len() as u64, info.runs, "the inputs are removed");
+    all_exact(&s, &objs, "after the merges");
+    assert_eq!(s.stats().objects, 2000);
+    // After close the thread is gone: a flush leaves work pending, and
+    // wait_index_idle still returns.
+    s.close().unwrap();
+    let more = put_many(&s, 100, 9000);
+    s.wait_index_idle();
+    all_exact(&s, &more, "after close");
+}
+
+/// The tier of a run at fan-in 4 (see `merges_keep_the_run_count_small`).
+fn tier(entries: u64, limit: u64) -> u32 {
+    let mut n = (entries / limit).max(1);
+    let mut t = 0;
+    while n >= 4 {
+        n /= 4;
+        t += 1;
+    }
+    t
+}

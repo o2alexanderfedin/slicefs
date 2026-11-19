@@ -1076,8 +1076,19 @@ fn the_index_ram_is_about_two_bytes_per_object() {
 // while a flush moves it from the memtable to a run.
 #[test]
 fn lookups_outside_the_lock_never_miss_a_stored_object() {
+    lookups_never_miss(false);
+}
+
+// The same while background merges replace runs (17-06).
+#[test]
+fn lookups_never_miss_a_stored_object_during_background_merges() {
+    lookups_never_miss(true);
+}
+
+fn lookups_never_miss(background: bool) {
     let mem = MemIo::new();
-    let s = Arc::new(open(&mem, &opts(50, 64 << 10)));
+    let o = Options { index_background_merge: background, ..opts(50, 64 << 10) };
+    let s = Arc::new(open(&mem, &o));
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Objects 0..k are stored: k only goes up after the put returned.
     let stored = Arc::new(AtomicU64::new(0));
@@ -1124,7 +1135,12 @@ fn lookups_outside_the_lock_never_miss_a_stored_object() {
     done.store(true, AtomicOrdering::SeqCst);
     let checks: u64 = readers.into_iter().map(|r| r.join().unwrap()).sum();
     assert!(checks > 1000, "{checks} lookups");
-    assert!(s.index_info().runs >= 50, "{:?}", s.index_info());
+    if background {
+        s.wait_index_idle();
+        assert!(s.index_info().runs <= 9, "{:?}", s.index_info());
+    } else {
+        assert!(s.index_info().runs >= 50, "{:?}", s.index_info());
+    }
     assert_eq!(s.stats().objects, 3000);
     for i in 0..3000 {
         assert_eq!(s.get(&Blake3_256.id(&small(i))), Some(small(i)), "object {i}");

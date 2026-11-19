@@ -19,7 +19,8 @@ use std::io;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 
 mod bloom;
 pub mod file;
@@ -474,6 +475,8 @@ struct Inner {
     /// (Linux can mark the pages clean), so the store refuses every write and
     /// sync until it is opened again; the open scan finds the durable state.
     failed: bool,
+    /// Told of every flush (see `MergeCtl`; the same as `ChunkStore::merge`).
+    merge: Arc<MergeCtl>,
 }
 
 /// Outcome of a GC.
@@ -504,6 +507,9 @@ pub struct ChunkStore {
     inner: Arc<Mutex<Inner>>,
     /// Shared with the merge thread (see `MergeCtl`).
     merge: Arc<MergeCtl>,
+    /// The merge thread (a writable store with background merges), until
+    /// `close` or `Drop` joins it.
+    merge_thread: Mutex<Option<JoinHandle<()>>>,
     /// Test hook: `put` and `read` take it and call it once, right after
     /// their lookup outside the store lock and before they take the lock
     /// (see `race_tests.rs`).
@@ -520,8 +526,57 @@ pub struct ChunkStore {
 #[derive(Default)]
 struct MergeCtl {
     /// One merge at a time: held for a whole merge step. Lock order: this
-    /// lock, then the store lock.
+    /// lock, then the store lock. `state` is a leaf lock: nothing else is
+    /// taken while it is held.
     step: Mutex<()>,
+    /// Set at `close` and `Drop`: the thread ends, and its merge stops
+    /// between two input pages.
+    stop: AtomicBool,
+    state: Mutex<MergeState>,
+    /// Signals a change of `state` (and `stop`).
+    cv: Condvar,
+}
+
+#[derive(Default)]
+struct MergeState {
+    /// A flush wrote a run since the thread last looked for a merge.
+    pending: bool,
+    /// The thread is merging.
+    busy: bool,
+    /// The thread is alive.
+    running: bool,
+}
+
+impl MergeCtl {
+    fn state(&self) -> std::sync::MutexGuard<'_, MergeState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A flush wrote a run: the thread looks for a merge.
+    fn notify(&self) {
+        self.state().pending = true;
+        self.cv.notify_all();
+    }
+
+    /// Ask the thread to end (under the state lock, so no wakeup is lost).
+    fn request_stop(&self) {
+        let _s = self.state();
+        self.stop.store(true, Ordering::SeqCst);
+        self.cv.notify_all();
+    }
+}
+
+/// Marks the merge thread as gone when it ends, also by a panic, so
+/// `wait_index_idle` never waits for it.
+struct ThreadExit<'a>(&'a MergeCtl);
+
+impl Drop for ThreadExit<'_> {
+    fn drop(&mut self) {
+        let mut s = self.0.state();
+        s.running = false;
+        s.busy = false;
+        self.0.cv.notify_all();
+    }
 }
 
 /// The merge knobs of the options.
@@ -609,6 +664,40 @@ impl Merger {
         Index::remove_runs(io, &gone);
         Ok(true)
     }
+
+    /// The merge thread: wait until a flush notifies, then merge until the
+    /// policy finds no window, and wait again; end when `stop` is set. A
+    /// failed merge is logged and tried again after the next flush; it never
+    /// fails the store (the foreground keeps working).
+    fn run(self) {
+        let ctl = Arc::clone(&self.ctl);
+        let _exit = ThreadExit(&ctl);
+        loop {
+            {
+                let mut s = ctl.state();
+                while !s.pending && !ctl.stop.load(Ordering::SeqCst) {
+                    s = ctl.cv.wait(s).unwrap_or_else(|e| e.into_inner());
+                }
+                if ctl.stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                s.pending = false;
+                s.busy = true;
+            }
+            while !ctl.stop.load(Ordering::SeqCst) {
+                match self.step(false, &ctl.stop, &mut || {}) {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(e) => {
+                        tracing::warn!("chunk store: a background merge of the index failed (tried again after the next flush): {e}");
+                        break;
+                    }
+                }
+            }
+            ctl.state().busy = false;
+            ctl.cv.notify_all();
+        }
+    }
 }
 
 /// See `ChunkStore::after_lookup`.
@@ -617,18 +706,65 @@ type LookupHook = Box<dyn FnMut(&ChunkStore) + Send>;
 
 impl ChunkStore {
     fn new(io: Arc<dyn PackIo>, punches: bool, opts: Options, inner: Inner) -> Self {
-        ChunkStore {
+        let s = ChunkStore {
             io,
             punches,
             zstd_level: AtomicI32::new(opts.zstd_level),
-            opts,
             index: Arc::clone(&inner.index),
+            merge: Arc::clone(&inner.merge),
             inner: Arc::new(Mutex::new(inner)),
-            merge: Arc::new(MergeCtl::default()),
+            merge_thread: Mutex::new(None),
+            opts,
             #[cfg(test)]
             after_lookup: Mutex::new(None),
             #[cfg(test)]
             after_merge_write: Mutex::new(None),
+        };
+        if !s.opts.read_only && s.opts.index_background_merge {
+            s.start_merges();
+        }
+        s
+    }
+
+    /// Start the merge thread. It first looks for a merge at once (the runs
+    /// of earlier sessions and of the replay at open).
+    fn start_merges(&self) {
+        {
+            let mut st = self.merge.state();
+            st.running = true;
+            st.pending = true;
+        }
+        let m = self.merger();
+        match std::thread::Builder::new().name("chunk-store-merge".into()).spawn(move || m.run()) {
+            Ok(h) => *self.merge_thread.lock().unwrap() = Some(h),
+            Err(e) => {
+                // The store works without it: the runs only stay more.
+                tracing::warn!("chunk store: cannot start the index merge thread: {e}");
+                self.merge.state().running = false;
+            }
+        }
+    }
+
+    /// Stop the merge thread and wait for it (its merge stops between two
+    /// input pages and removes its partial output). The caller holds no
+    /// store lock: the thread may wait for it.
+    fn stop_merges(&self) {
+        self.merge.request_stop();
+        let h = self.merge_thread.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(h) = h {
+            if h.join().is_err() {
+                tracing::warn!("chunk store: the index merge thread panicked");
+            }
+        }
+    }
+
+    /// Wait until the merge thread has no merge to do and is not merging.
+    /// Returns at once if background merges are off, the store is
+    /// read-only, or the thread has stopped. For tests and benchmarks.
+    pub fn wait_index_idle(&self) {
+        let mut s = self.merge.state();
+        while s.running && (s.pending || s.busy) {
+            s = self.merge.cv.wait(s).unwrap_or_else(|e| e.into_inner());
         }
     }
 
@@ -743,6 +879,7 @@ impl ChunkStore {
             dir_dirty: false,
             touched: None,
             failed: false,
+            merge: Arc::new(MergeCtl::default()),
         };
         let limit = opts.index_memtable_limit.max(1);
         let last = nums.last().copied();
@@ -1352,8 +1489,11 @@ impl ChunkStore {
         Ok(())
     }
 
-    /// Seal the active pack (sync, write its index). Call at unmount.
+    /// Seal the active pack (sync, write its index). Call at unmount. Stops
+    /// the background merges first (`merge_index_now` still works). Does
+    /// not flush the memtable: an open replays the records above the hwm.
     pub fn close(&self) -> Result<()> {
+        self.stop_merges();
         let mut inner = self.inner.lock().unwrap();
         inner.check()?;
         if inner.active.is_some() {
@@ -1398,6 +1538,15 @@ impl ChunkStore {
         }
         inner.dir_dirty = false; // write_durable synced the directory
         Ok(())
+    }
+}
+
+impl Drop for ChunkStore {
+    /// Stop and join the merge thread (it holds no `ChunkStore`, so this
+    /// runs). A merge in progress stops between two input pages; its
+    /// partial output is removed, and an open removes what is left.
+    fn drop(&mut self) {
+        self.stop_merges();
     }
 }
 
@@ -1467,6 +1616,7 @@ impl Inner {
             dir_dirty: false,
             touched: None,
             failed: false,
+            merge: Arc::new(MergeCtl::default()),
         }
     }
 
@@ -1563,6 +1713,7 @@ impl Inner {
             self.failed = true;
             return Err(e);
         }
+        self.merge.notify();
         Ok(())
     }
 
