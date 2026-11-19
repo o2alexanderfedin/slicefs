@@ -23,6 +23,10 @@ pub const EXTENT_OVERHEAD: usize = 64;
 /// (not the 2x of `Vec` doubling), so its cost stays near its length.
 pub const GROW_DIV: usize = 8;
 
+/// `Overlay::take` splits an extent only if it is longer than what is still
+/// needed plus this, and then takes at least this many bytes of it.
+pub const MIN_TAKE: usize = 64 << 10;
+
 /// Base content plus the extents written since that base.
 ///
 /// Invariants: `visible <= base_len`; extents do not overlap and do not touch
@@ -38,12 +42,67 @@ pub struct Overlay {
     pub size: u64,
     extents: BTreeMap<u64, Vec<u8>>,
     cost: usize,
+    /// Where the next `take` starts. Steps go through the file in offset
+    /// order, so the extents of one step are close and change few nodes.
+    sweep: u64,
 }
 
 impl Overlay {
     /// A clean overlay on `base` (of `base_len` bytes) with logical size `size`.
     pub fn new(base: Option<ObjectKey>, base_len: u64, size: u64) -> Self {
-        Overlay { base, base_len, visible: base_len, size, extents: BTreeMap::new(), cost: 0 }
+        Overlay { base, base_len, visible: base_len, size, extents: BTreeMap::new(), cost: 0, sweep: 0 }
+    }
+
+    /// A clean overlay with the base, visible part and size of this one.
+    pub fn empty_like(&self) -> Self {
+        Overlay { extents: BTreeMap::new(), cost: 0, sweep: 0, ..*self }
+    }
+
+    /// Take extents out until at least `free` bytes of cost are freed (or no
+    /// extent is left): in offset order from the sweep point, then from 0.
+    /// An extent longer than what is still needed plus `MIN_TAKE` gives only
+    /// its head (at least `MIN_TAKE` bytes); its rest moves down in place,
+    /// so no second buffer of the extent is made.
+    pub fn take(&mut self, free: usize) -> Vec<(u64, Vec<u8>)> {
+        let mut out = Vec::new();
+        let start = self.cost;
+        while start.saturating_sub(self.cost) < free && !self.extents.is_empty() {
+            let Some(s) = self.extents.range(self.sweep..).next().map(|(&s, _)| s) else {
+                self.sweep = 0;
+                continue;
+            };
+            let need = free - start.saturating_sub(self.cost);
+            let mut v = self.remove(s);
+            if v.len() > need.saturating_add(MIN_TAKE) {
+                let k = need.max(MIN_TAKE);
+                let head = v[..k].to_vec();
+                v.drain(..k);
+                v.shrink_to_fit();
+                let rest = s + k as u64;
+                self.insert(rest, v);
+                self.sweep = rest;
+                out.push((s, head));
+            } else {
+                self.sweep = s + v.len() as u64;
+                out.push((s, v));
+            }
+        }
+        out
+    }
+
+    /// The sweep point (see `take`).
+    pub fn sweep(&self) -> u64 {
+        self.sweep
+    }
+
+    /// Set the sweep point (an overlay on a new base goes on from the old one).
+    pub fn set_sweep(&mut self, at: u64) {
+        self.sweep = at;
+    }
+
+    /// All extents, in offset order (they move out, no copy).
+    pub fn into_extents(self) -> impl Iterator<Item = (u64, Vec<u8>)> {
+        self.extents.into_iter()
     }
 
     /// Write `data` at `off` (pwrite semantics: the file grows to the end).
@@ -386,7 +445,7 @@ mod tests {
         model[1000..4000].fill(1);
         model[10_000..15_000].fill(2);
         let mut asked: Vec<(u64, usize)> = Vec::new();
-        let mut read_counted = |off: u64, len: u64, asked: &mut Vec<(u64, usize)>| {
+        let read_counted = |off: u64, len: u64, asked: &mut Vec<(u64, usize)>| {
             ov.view(off, len).read(|o, n| {
                 asked.push((o, n));
                 Ok(base[o as usize..o as usize + n].to_vec())
@@ -399,6 +458,51 @@ mod tests {
         asked.clear();
         assert_eq!(read_counted(12_000, 10_000, &mut asked), model[12_000..22_000]);
         assert_eq!(asked, vec![(15_000, 7000)]);
+    }
+
+    /// `take` frees at least what is asked (or everything), in sweep order,
+    /// splits a long extent, and the taken pieces plus the rest are the same
+    /// bytes as before.
+    #[test]
+    fn take_frees_what_is_asked_and_keeps_every_byte() {
+        for seed in 1..=4u64 {
+            let mut r = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let mut ov = Overlay::new(None, 0, 0);
+            for _ in 0..300 {
+                let off = r.below(8 << 20);
+                let n = if r.below(10) == 0 { 1 + r.below(1 << 20) as usize } else { 1 + r.below(8192) as usize };
+                ov.write(off, &r.bytes(n));
+            }
+            let size = ov.size;
+            let whole = read(&ov, &[], 0, size);
+            let mut pieces: Vec<(u64, Vec<u8>)> = Vec::new();
+            let mut last_sweep = 0;
+            while ov.extent_count() > 0 {
+                let before = ov.cost();
+                let free = 1 + r.below(512 << 10) as usize;
+                let got = ov.take(free);
+                assert!(!got.is_empty());
+                assert!(before - ov.cost() >= free.min(before), "seed {seed}: freed {} of {free}", before - ov.cost());
+                // A step takes at most about what is asked: no piece is much
+                // longer than `free` plus one split margin.
+                let taken: usize = got.iter().map(|(_, v)| v.len()).sum();
+                let last = got.last().map_or(0, |(_, v)| v.len());
+                assert!(taken - last < free, "seed {seed}: took {taken} bytes for {free}");
+                assert!(last <= free.max(MIN_TAKE) + MIN_TAKE, "seed {seed}: a piece of {last} bytes for {free}");
+                // The first piece starts at the sweep point of the step
+                // before, or the sweep went back to 0.
+                let first = got[0].0;
+                assert!(first >= last_sweep || ov.extent_ranges().iter().all(|e| e.start < last_sweep),
+                    "seed {seed}: step started at {first}, sweep was {last_sweep}");
+                last_sweep = ov.sweep();
+                pieces.extend(got);
+            }
+            let mut back = Overlay::new(None, 0, size);
+            for (o, v) in pieces {
+                back.put(o, v);
+            }
+            assert!(read(&back, &[], 0, size) == whole, "seed {seed}: bytes changed");
+        }
     }
 
     #[test]

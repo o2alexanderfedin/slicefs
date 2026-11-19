@@ -246,6 +246,58 @@ fn online_gc_during_a_rebase_keeps_every_chunk() {
     check_after_remount(fs, dir.path(), &[("big.bin", &model)]);
 }
 
+/// #108: writes past the dirty limit rebase in steps, each one a new root on
+/// top of the root of the step before. The GC starts before the first step
+/// (its roots hold the switch base only) and marks and sweeps inside the
+/// second step: the first step's new nodes and chunks are in no root of
+/// this GC, so only the chunk store's keep of objects put during a GC
+/// protects them. Every chunk must survive, also after more steps, the
+/// release and a remount (the offline GC mark fails on a missing object).
+#[test]
+fn online_gc_inside_a_rebase_step_keeps_every_chunk() {
+    let dir = TempDir::new().unwrap();
+    let fs = make_fs(dir.path());
+    let (ino, fh, mut model) = open_overlay(&fs, "big.bin", 16, 200);
+    make_garbage(&fs, "junk.bin", &data(98, 300_000));
+    fs.test_set_dirty_limit(2 << 20);
+
+    let (gc, boundary) = fs.gc_start().unwrap();
+    let pending = Arc::new(Mutex::new(Some((gc, boundary))));
+    let swept: Arc<Mutex<Option<chunk_store::GcStats>>> = Arc::new(Mutex::new(None));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (cs, slot, out, n) = (Arc::clone(fs.content()), Arc::clone(&pending), Arc::clone(&swept), Arc::clone(&calls));
+    fs.test_set_rebase_hook(Some(Arc::new(move || {
+        if n.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 1 {
+            let (gc, boundary) = slot.lock().unwrap().take().unwrap();
+            let ids = gc.live(&no_stop()).unwrap().expect("not stopped");
+            *out.lock().unwrap() = Some(cs.gc_finish(&ids, boundary).unwrap());
+        }
+    })));
+    let before = fs.test_rebase_count();
+    let mut i = 0u64;
+    while fs.test_rebase_count() < before + 4 {
+        assert!(i < 20_000, "no rebase steps");
+        let gate = fs.commit_gate();
+        let _shared = gate.read().unwrap();
+        let off = (data(5000 + i, 8).iter().fold(0u64, |a, &b| a << 8 | b as u64) % ((16 << 20) - 4096)) as usize;
+        let patch = data(9000 + i, 4096);
+        fs.test_write(fh, off as u64, &patch).unwrap();
+        model[off..off + 4096].copy_from_slice(&patch);
+        i += 1;
+    }
+    let stats = swept.lock().unwrap().take().expect("the GC ran inside the second step");
+    assert!(stats.removed_bytes >= 300_000, "the garbage must go: {stats:?}");
+    assert!(fs.test_read(ino, 0, (17 << 20) as u32).unwrap() == model, "content with the handle open");
+    {
+        let gate = fs.commit_gate();
+        let _shared = gate.read().unwrap();
+        fs.test_release(ino, fh).unwrap();
+    }
+    fs.test_set_rebase_hook(None);
+    assert!(fs.test_read(ino, 0, (17 << 20) as u32).unwrap() == model, "content before remount");
+    check_after_remount(fs, dir.path(), &[("big.bin", &model)]);
+}
+
 /// `gc_start` takes the commit gate exclusively before `gc_begin`, so it
 /// waits while a callback (holding the gate shared) is inside a rebase.
 /// Without the gate, `gc_begin` would run during the rebase: the chunks the
