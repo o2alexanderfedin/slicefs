@@ -374,6 +374,7 @@ fn a_drop_during_background_merges_returns() {
     s.sync().unwrap();
     // The drop stops and joins the merge thread, which may be merging now.
     drop(s);
+    assert_eq!(mem.open_handles(), 0, "no thread keeps the packs or runs of the store open");
     mem.crash();
     let s = reopen_and_check(&mem, &opts(), &objs, &[], &[]);
     assert_eq!(s.stats().objects, 2000);
