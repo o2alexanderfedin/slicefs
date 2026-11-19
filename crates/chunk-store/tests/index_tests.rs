@@ -495,6 +495,31 @@ fn a_damaged_record_below_the_hwm_costs_only_itself() {
     check_damage_below_the_hwm(&mem, &o, &ids, &[30]);
 }
 
+#[test]
+fn a_repair_that_stops_after_the_idx_is_done_again_at_the_next_open() {
+    // A writable open makes the damaged pack sealed (a durable `.idx`), then
+    // fails to remove the old index. The next open finds the pack through
+    // its `.idx` and must still see that the runs point to missing bytes.
+    let cut = |mem: &MemIo| {
+        let mut f = mem.open_rw(1).unwrap();
+        f.set_len(small_at(30) as u64 + 10).unwrap();
+        f.sync().unwrap();
+    };
+    let flip = |mem: &MemIo| mem.flip(1, Kind::Pack, small_at(30) + 45);
+    let cases: [(&dyn Fn(&MemIo), Vec<usize>); 2] = [(&cut, (30..120).collect()), (&flip, vec![30])];
+    for (damage, lost) in cases {
+        let mem = MemIo::new();
+        let (o, ids) = hwm_inside_the_active_pack(&mem);
+        damage(&mem);
+        mem.set_fail_removes(true);
+        assert!(ChunkStore::open_with(Arc::new(mem.clone()), o.clone()).is_err(), "the MANIFEST removal fails");
+        mem.set_fail_removes(false);
+        assert!(mem.exists(1, Kind::Idx), "the pack was sealed first");
+        assert!(mem.exists(0, Kind::Manifest));
+        check_damage_below_the_hwm(&mem, &o, &ids, &lost);
+    }
+}
+
 // ── Orphans, damage and the rebuild flag (17-04) ─────────────────────────────
 
 /// 300 objects of 1,000 bytes in 64 KiB packs (five sealed packs) with a
