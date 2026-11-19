@@ -1122,6 +1122,21 @@ saved for each put at 10M, not as a percentage. The bench is one thread,
 so it does not show the cost of the cache mutex under many writers. With the default 64 MiB packs and 8-byte objects a
 pack has 1.2M entries and is never cached.
 
+After a reopen (`index-bench rewrite --reopen`: the store is closed and
+opened again before the timed puts, so every pack is of an earlier open;
+same flags, 2026-11-19, macOS, ns per `put`, each run on a new store):
+
+| Objects | in-order re-write, cache off | cache on | random dedup hits, off | on |
+|---|---|---|---|---|
+| 1M (3 runs) | 1,723 / 1,182 / 1,022 | 1,213 / 1,017 / 735 | 1,846 / 1,265 / 1,136 | 2,034 / 1,316 / 1,124 |
+| 10M (2 runs) | 1,444 / 1,168 | 605 / 577 | 1,887 / 1,681 | 1,833 / 1,845 |
+
+In order, 0.0005 index lookups for each put, as in the same process: the
+`.idx` files of the earlier open are exact and fill the cache. The first
+1M runs are slower in all columns (the first phase after the reopen takes
+the page faults of the mapped runs; the machine had other load). Random
+hits do not fill and cost the same within the noise.
+
 ## Compression
 
 zstd level 3, per object. The compressed form is kept only if it is at least
