@@ -987,6 +987,12 @@ thresholds and sleeps are constants there, to be tuned (#121).
   of the sweep grows with the writes during it. The mark does not abandon
   at its cap: it deletes nothing, the objects put or read meanwhile go to
   the touched set, and a retry under endless writes could never finish.
+- Low space starts GCs at once only while they free something: after a
+  GC that freed less than 1 MiB (`LOW_SPACE_MIN_FREED`), the next waits
+  the duty gap (at least 10 s), so GCs that free nothing do not loop.
+- A failed GC backs off: the next automatic GC waits 1 s, 2 s, 4 s, ...
+  after it, up to `--gc-interval` (5 min if it is 0); a success resets
+  this. A request from `slicefs gc` runs at once.
 - A wait ends at once when the mount shuts down, and when the free space
   falls out of the yield mode (read again at most once a second).
 - The duty gap uses the GC time without the waits. `gc.result` and the log

@@ -16,7 +16,12 @@
 //! the store has space. When it has little (`gc_pacing::Mode::FullSpeed`), a
 //! GC that is due by changes starts at once, without the interval or the
 //! duty gap (still one at a time; an `--gc-interval` of 0 still means: only
-//! on request).
+//! on request), but only while GCs free something: after a GC that freed
+//! less than `gc_pacing::LOW_SPACE_MIN_FREED`, the duty gap applies again.
+//!
+//! A failed GC backs off: the next automatic GC waits 1 s, 2 s, 4 s, ... (up
+//! to the interval) after the end of the last one; a success resets it. A
+//! request from `slicefs gc` runs at once.
 //!
 //! A request is a file in the store directory:
 //! 1. `slicefs gc` writes `gc.request` (with the text `full` for a full GC,
@@ -106,7 +111,7 @@ fn run_once(
     stop: &AtomicBool,
     free: &FreeRatio,
     caps: (Duration, Duration),
-) -> (String, Duration) {
+) -> (String, Duration, Ran) {
     let t = Instant::now();
     let before = crate::gc::store_usage(store);
     let pacer = |cap| WritePacer::new(fs.write_activity(), Arc::clone(free), Box::new(RealClock::new()), cap, stop);
@@ -121,6 +126,11 @@ fn run_once(
             Err(format!("GC panicked: {msg}"))
         });
     let waited = mark.waited() + sweep.waited();
+    let ran = match &result {
+        Ok(Some(s)) => Ran::Freed(s.removed_bytes),
+        Ok(None) => Ran::Stopped,
+        Err(_) => Ran::Failed,
+    };
     let line = match result {
         Ok(Some(s)) => format!(
             "ok{}: {}; {} in {:.1} s ({:.1} s waited for writes)",
@@ -133,14 +143,71 @@ fn run_once(
         Ok(None) => "stopped: the mount is shutting down".to_string(),
         Err(e) => format!("error: {e}"),
     };
-    (line, waited)
+    (line, waited, ran)
+}
+
+/// How a GC run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ran {
+    /// It finished and freed this many bytes.
+    Freed(u64),
+    Failed,
+    Stopped,
+}
+
+/// What the schedule knows of the GCs so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct History {
+    /// Bytes the last successful GC freed (`None`: no GC yet).
+    freed: Option<u64>,
+    /// Failed GCs in a row.
+    failures: u32,
+}
+
+impl History {
+    const NEW: History = History { freed: None, failures: 0 };
+
+    /// The history after a GC that ended as `ran`.
+    fn after(self, ran: Ran) -> History {
+        match ran {
+            Ran::Freed(b) => History { freed: Some(b), failures: 0 },
+            Ran::Failed => History { failures: self.failures.saturating_add(1), ..self },
+            Ran::Stopped => self,
+        }
+    }
+}
+
+/// The wait after `failures` (at least 1) failed GCs in a row: 1 s, 2 s,
+/// 4 s, ..., at most `interval` (or `FAILURE_BACKOFF_MAX` if it is 0).
+fn failure_backoff(failures: u32, interval: Duration) -> Duration {
+    let max = if interval.is_zero() { gc_pacing::FAILURE_BACKOFF_MAX } else { interval };
+    let shift = failures.saturating_sub(1).min(30);
+    gc_pacing::FAILURE_BACKOFF_FIRST.saturating_mul(1u32 << shift).min(max)
 }
 
 /// Whether an automatic GC is due: `since_last` after the end of the last GC,
-/// which took `last_took`, in pacing mode `mode`. An `interval` of zero:
-/// never. With low space (`Mode::FullSpeed`): at once.
-fn gc_due(interval: Duration, since_last: Duration, last_took: Duration, mode: Mode) -> bool {
-    !interval.is_zero() && (mode == Mode::FullSpeed || since_last >= interval.max(last_took * GC_DUTY))
+/// which took `last_took`, in pacing mode `mode`, after the GCs `history`.
+/// - An `interval` of zero: never.
+/// - After failures: the backoff (`failure_backoff`).
+/// - With low space (`Mode::FullSpeed`): at once, unless the last GC freed
+///   less than `LOW_SPACE_MIN_FREED`; then the duty gap, at least
+///   `LOW_SPACE_MIN_GAP`.
+/// - Else: the interval and the duty gap.
+fn gc_due(interval: Duration, since_last: Duration, last_took: Duration, mode: Mode, history: History) -> bool {
+    if interval.is_zero() {
+        return false;
+    }
+    if history.failures > 0 {
+        return since_last >= failure_backoff(history.failures, interval);
+    }
+    let duty = last_took * GC_DUTY;
+    if mode == Mode::FullSpeed {
+        if history.freed.is_none_or(|b| b >= gc_pacing::LOW_SPACE_MIN_FREED) {
+            return true;
+        }
+        return since_last >= duty.max(gc_pacing::LOW_SPACE_MIN_GAP);
+    }
+    since_last >= interval.max(duty)
 }
 
 /// Whether the GC thread skips a GC that is due. The mark is a Bloom filter
@@ -185,6 +252,7 @@ pub fn spawn_online_gc_with(
             // The last GC ran on a tree that did not change since the GC
             // before it (see `skip_due_gc`).
             let mut rechecked = false;
+            let mut history = History::NEW;
             // Files left by a daemon that died during a GC.
             let _ = std::fs::remove_file(store.join(ACTIVE_FILE));
             let _ = std::fs::remove_file(store.join(RUNNING_FILE));
@@ -198,7 +266,7 @@ pub fn spawn_online_gc_with(
                     && std::fs::read_to_string(store.join(RUNNING_FILE)).is_ok_and(|t| t.trim() == FULL);
                 let due = !requested
                     && !interval.is_zero()
-                    && gc_due(interval, last.elapsed(), last_took, gc_pacing::mode_for(free()));
+                    && gc_due(interval, last.elapsed(), last_took, gc_pacing::mode_for(free()), history);
                 if !requested && !due {
                     continue;
                 }
@@ -214,9 +282,10 @@ pub fn spawn_online_gc_with(
                 }
                 rechecked = unchanged;
                 let t = Instant::now();
-                let (outcome, waited) = with_heartbeat(&store.join(ACTIVE_FILE), || {
+                let (outcome, waited, ran) = with_heartbeat(&store.join(ACTIVE_FILE), || {
                     run_once(&fs, &store, full, &shutdown, &free, caps)
                 });
+                history = history.after(ran);
                 last_took = t.elapsed().saturating_sub(waited);
                 last_root = fs.meta().current_root();
                 drop(fs);
@@ -285,19 +354,68 @@ mod tests {
         assert!(!skip_due_gc(false, true));
     }
 
+    const MIB: u64 = 1024 * 1024;
+
+    fn freed(b: u64) -> History {
+        History::NEW.after(Ran::Freed(b))
+    }
+
     #[test]
     fn low_space_makes_a_gc_due_without_the_interval_or_the_duty_gap() {
         let hour = Duration::from_secs(3600);
         let s = Duration::from_secs(1);
+        let h = freed(100 * MIB);
         // Plenty or medium space: the interval and the duty gap apply.
-        assert!(!gc_due(hour, s, s, Mode::Yield));
-        assert!(!gc_due(hour, s, s, Mode::Throttle));
-        assert!(gc_due(hour, hour, s, Mode::Yield));
-        assert!(!gc_due(Duration::from_secs(60), Duration::from_secs(60), Duration::from_secs(10), Mode::Yield));
-        // Low space: at once.
-        assert!(gc_due(hour, Duration::ZERO, hour, Mode::FullSpeed));
+        assert!(!gc_due(hour, s, s, Mode::Yield, h));
+        assert!(!gc_due(hour, s, s, Mode::Throttle, h));
+        assert!(gc_due(hour, hour, s, Mode::Yield, h));
+        assert!(!gc_due(Duration::from_secs(60), Duration::from_secs(60), Duration::from_secs(10), Mode::Yield, h));
+        // Low space, the last GC freed enough (or no GC yet): at once.
+        assert!(gc_due(hour, Duration::ZERO, hour, Mode::FullSpeed, h));
+        assert!(gc_due(hour, Duration::ZERO, hour, Mode::FullSpeed, History::NEW));
         // An interval of zero means only on request, also with low space.
-        assert!(!gc_due(Duration::ZERO, hour, s, Mode::FullSpeed));
+        assert!(!gc_due(Duration::ZERO, hour, s, Mode::FullSpeed, h));
+    }
+
+    #[test]
+    fn with_low_space_a_gc_that_freed_little_makes_the_next_wait_the_duty_gap() {
+        let hour = Duration::from_secs(3600);
+        let little = freed(gc_pacing::LOW_SPACE_MIN_FREED - 1);
+        // A 3 s GC that freed little: the next waits 10 x 3 s, not the hour.
+        let took = Duration::from_secs(3);
+        assert!(!gc_due(hour, Duration::from_secs(29), took, Mode::FullSpeed, little));
+        assert!(gc_due(hour, Duration::from_secs(30), took, Mode::FullSpeed, little));
+        // A short GC: at least LOW_SPACE_MIN_GAP.
+        let quick = Duration::from_millis(10);
+        assert!(!gc_due(hour, gc_pacing::LOW_SPACE_MIN_GAP - Duration::from_millis(1), quick, Mode::FullSpeed, little));
+        assert!(gc_due(hour, gc_pacing::LOW_SPACE_MIN_GAP, quick, Mode::FullSpeed, little));
+        // A GC that freed enough again: at once.
+        assert!(gc_due(hour, Duration::ZERO, took, Mode::FullSpeed, little.after(Ran::Freed(MIB))));
+        // A stopped GC changes nothing.
+        assert_eq!(little.after(Ran::Stopped), little);
+    }
+
+    #[test]
+    fn failed_gcs_back_off_up_to_a_cap_and_a_success_resets() {
+        let min = Duration::from_secs(60);
+        let waits: Vec<u64> = (1..=8).map(|n| failure_backoff(n, min).as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60]);
+        assert_eq!(failure_backoff(1000, Duration::ZERO), gc_pacing::FAILURE_BACKOFF_MAX);
+        assert_eq!(failure_backoff(1000, Duration::from_secs(3600)), Duration::from_secs(3600));
+        // In the schedule: three failures in a row wait 4 s, also with low space.
+        let mut h = freed(100 * MIB);
+        for _ in 0..3 {
+            h = h.after(Ran::Failed);
+        }
+        let s = Duration::ZERO;
+        for mode in [Mode::Yield, Mode::FullSpeed] {
+            assert!(!gc_due(min, Duration::from_millis(3999), s, mode, h));
+            assert!(gc_due(min, Duration::from_secs(4), s, mode, h));
+        }
+        // A success resets: low space starts at once again.
+        let h = h.after(Ran::Freed(100 * MIB));
+        assert_eq!(h.failures, 0);
+        assert!(gc_due(min, Duration::ZERO, s, Mode::FullSpeed, h));
     }
 
     #[test]

@@ -80,7 +80,8 @@ pub enum Cmd {
         /// only when something was committed since the last GC, and with a
         /// gap of at least 10 times the last GC's duration
         /// (0 = only when `slicefs gc` asks for one). With less than 5 % free
-        /// disk space, a GC starts at once, without this wait.
+        /// disk space, a GC starts at once, without this wait, while GCs free
+        /// at least 1 MiB. A failed GC backs off (1 s, 2 s, 4 s, ... up to SECS).
         #[arg(long, value_name = "SECS", default_value_t = crate::online_gc::DEFAULT_GC_INTERVAL_SECS)]
         gc_interval: u64,
         /// Compression of new file data in this mount: `zstd`, `zstd:LEVEL`

@@ -51,6 +51,17 @@ pub const MARK_YIELD_CAP: Duration = Duration::from_secs(60);
 pub const SWEEP_YIELD_CAP: Duration = Duration::from_secs(30);
 /// The free ratio is read again after this time.
 pub const FREE_SPACE_REFRESH: Duration = Duration::from_secs(1);
+/// With low space, a GC starts at once only if the last GC freed at least
+/// this many bytes; else the duty gap applies (at least
+/// [`LOW_SPACE_MIN_GAP`]), so GCs that free nothing do not loop.
+pub const LOW_SPACE_MIN_FREED: u64 = 1024 * 1024;
+/// The shortest gap after a GC that freed little, with low space.
+pub const LOW_SPACE_MIN_GAP: Duration = Duration::from_secs(10);
+/// The first wait after a failed GC; it doubles with each failure in a row.
+pub const FAILURE_BACKOFF_FIRST: Duration = Duration::from_secs(1);
+/// The longest wait after failed GCs when the interval is 0 (only on
+/// request; then it does not delay requests). Else the interval caps it.
+pub const FAILURE_BACKOFF_MAX: Duration = Duration::from_secs(300);
 
 /// How the GC treats writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
