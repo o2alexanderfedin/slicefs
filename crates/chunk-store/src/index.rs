@@ -59,10 +59,10 @@ pub(crate) const DEFAULT_BLOOM_BITS: u8 = 10;
 pub(crate) const SHARDS: usize = 16;
 /// The idle merge (#111) acts only when the index has more runs than this.
 pub(crate) const IDLE_TARGET_RUNS: usize = 2;
-/// The idle merge takes an older run into its window only if the newer
-/// runs of the window have at least 1/this of its entries: a run is
-/// rewritten only for new data of at least 1/this of its size, so the
-/// bytes that the idle merges write stay bounded per byte of new data.
+/// The oldest run of an idle merge window has at most this many times the
+/// entries of the newer runs of the window: the largest run is rewritten
+/// only together with at least 1/this of its size of other data, so the
+/// bytes that the idle merges write stay bounded (see `idle_window`).
 pub(crate) const IDLE_MAX_REWRITE: u64 = 4;
 /// No new entry and no flush, merge or GC for this long: the store is
 /// idle, and the merge thread runs the idle merge (#111).
@@ -317,26 +317,25 @@ pub(crate) enum MergeOut {
 
 /// The idle merge window (#111) of runs with these entry counts (from the
 /// newest to the oldest): the number of newest runs to merge, or 0 for no
-/// merge. Nothing if there are at most `target` runs. Else the window
-/// starts with the newest run and takes the next older run while the
-/// window has at least 1/`max_rewrite` of that run's entries; it must hold
-/// at least 2 runs. Only a prefix of the list (newest runs) merges, so the
-/// newest entry of an ID stays the newest.
+/// merge. Nothing if there are at most `target` runs. Else the window is
+/// the longest prefix of at least 2 runs whose oldest run has at most
+/// `max_rewrite` times the entries of the newer runs of the window: the
+/// largest run of a merge is rewritten only for at least 1/`max_rewrite`
+/// of its size of other data. Only a prefix of the list (newest runs)
+/// merges, so the newest entry of an ID stays the newest.
 pub fn idle_window(entries: &[u64], target: usize, max_rewrite: u64) -> usize {
     if entries.len() <= target.max(1) {
         return 0;
     }
-    let mut sum = entries[0];
-    let mut k = 1;
-    while k < entries.len() && sum.saturating_mul(max_rewrite.max(1)) >= entries[k] {
-        sum += entries[k];
-        k += 1;
+    let mut newer = 0u64;
+    let mut best = 0;
+    for (k, &e) in entries.iter().enumerate() {
+        if k >= 1 && e <= newer.saturating_mul(max_rewrite.max(1)) {
+            best = k + 1;
+        }
+        newer = newer.saturating_add(e);
     }
-    if k >= 2 {
-        k
-    } else {
-        0
-    }
+    best
 }
 
 /// The tier of a run of `entries` entries: the integer floor of log base
@@ -1296,13 +1295,16 @@ mod tests {
         // The runs of a long create (size-tiered, sizes in flushes): all.
         assert_eq!(w(&[1, 1, 4, 16, 16]), 5);
         assert_eq!(w(&[1, 4, 4, 4, 16, 16, 16, 64, 256]), 9);
-        // A small flush does not pull in a run more than 4 times its size.
+        // Shapes that the size-tiered merges leave (33 and 49 flushes).
+        assert_eq!(w(&[1, 16, 16]), 3);
+        assert_eq!(w(&[1, 16, 16, 16]), 4);
+        // A run more than 4 times the newer runs is not rewritten.
         assert_eq!(w(&[1, 8, 100]), 0);
         assert_eq!(w(&[1, 1, 8, 100]), 3, "2 * 4 >= 8; 10 * 4 < 100");
         assert_eq!(w(&[1, 1, 1, 1, 100]), 4);
         assert_eq!(w(&[25, 100]), 0, "two runs: at the target");
-        assert_eq!(w(&[1, 24, 100]), 0);
-        assert_eq!(w(&[6, 24, 100]), 3);
+        assert_eq!(w(&[1, 24, 100]), 3, "25 * 4 >= 100");
+        assert_eq!(w(&[1, 24, 101]), 0);
     }
 
     #[test]

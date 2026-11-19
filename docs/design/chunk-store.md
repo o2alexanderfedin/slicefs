@@ -293,11 +293,11 @@ its output becomes the oldest run.
 Idle merge (#111): when the index has had no new entry and no flush, merge
 or GC install for 5 s (`Options::index_idle_merge_after`), and it has more
 than 2 runs, the same thread merges the newest runs into one. The window
-starts at the newest run and takes the next older run only while the
-window already holds at least 1/4 of that run's entries
-(`IDLE_MAX_REWRITE`): a run is rewritten only for new data of at least a
-quarter of its size. It uses the same write and install steps as the other
-merges. See "Idle merge (#111)" for the measurements.
+is the longest run of newest runs (at least 2) whose oldest run has at
+most 4 times the entries of the newer runs of the window
+(`IDLE_MAX_REWRITE`): the largest run is rewritten only together with at
+least a quarter of its size of other data. It uses the same write and
+install steps as the other merges. See "Idle merge (#111)" for the measurements.
 
 Read-only open (`slicefs stats`, scrub, the format check): it writes
 nothing, and keeps the replayed records in an in-RAM memtable. If a run
@@ -685,29 +685,43 @@ merges keep 3 runs at 1M objects, 5 at 10M and 9 at 100M.
 Policy: the idle merge (see "Index on disk (#85)"). When the store is idle
 (no new index entry and no flush, merge or GC install for 5 s) and the
 index has more than 2 runs (`IDLE_TARGET_RUNS`), the merge thread merges
-the newest runs into one. An older run joins the window only if the newer
-runs in the window have at least 1/4 of its entries (`IDLE_MAX_REWRITE`).
-The constants are in `index.rs`; the delay is
-`Options::index_idle_merge_after`. The idle merge uses the same write and
-install steps as the size-tiered merges, so it has the same crash and GC
-safety. An idle merge that has started runs to its end; puts during it go
-to the memtable and its flushes queue their merges behind it.
+the newest runs into one. The window is the longest prefix of the run list
+(at least 2 runs) whose oldest run has at most 4 times the entries of the
+newer runs in the window (`IDLE_MAX_REWRITE`). The constants are in
+`index.rs`; the delay is `Options::index_idle_merge_after`. The idle merge
+uses the same write and install steps as the size-tiered merges, so it
+has the same crash and GC safety. An idle merge that has started runs to
+its end; puts during it go to the memtable, and the merges of their
+flushes wait until it ends.
 
 Why this policy: a model of the merges (sizes in memtable flushes, the
 size-tiered merges after each flush, then an idle merge after each burst of
-B flushes) compares it with the first proposal, "merge every run, but leave
-out the largest if the merge would rewrite more than 4 times the new
-data". With B = 1 (an idle pause after each flush, the worst case), that
-proposal keeps at most 3 runs, but the merges write 23.9 bytes for each
-byte of index at 100M, because the second run is rewritten at each pause.
-The chosen rule bounds this cost: a run is rewritten only after new data
-of at least 1/4 of its size. It writes 7.9 bytes for each index byte at
-100M and keeps at most 5 runs (size-tiered alone: 3.5 bytes, up to 12
-runs). After one long write load and one pause (B = all), both rules merge
-every run into one (4.5 bytes for each index byte at 100M, of which 1.0 is
-the idle merge). A ratio of 2 gives 6.0 bytes and up to 7 runs, and a ratio
-of 8 gives 13.2 bytes and up to 4 runs (100M, B = 1). These model values
-were not measured on a store.
+B flushes) compares three rules. These are model values, not measured on
+a store.
+
+- "Merge every run, but leave out the largest if the merge would rewrite
+  more than 4 times the new data": with B = 1 (an idle pause after each
+  flush, the worst case) it keeps at most 3 runs, but the merges write
+  23.9 bytes for each byte of index at 100M (381 flushes), because the
+  second run is rewritten at each pause.
+- "Grow the window from the newest run while the window has 1/4 of the next
+  run": 7.9 bytes and at most 5 runs at B = 1, but it stops at the first
+  large run. The size-tiered merges often leave a small run before two
+  large ones (for example 1, 16, 16 flushes at 33 flushes), and then it
+  merges nothing: after one long write load and one pause, 3 to 7 runs
+  stay for 111 of the flush counts from 1 to 400.
+- The chosen rule (longest prefix whose oldest run passes): 9.1 bytes and
+  at most 5 runs at B = 1. After one long write load and one pause it
+  leaves 1 run for 311 of the flush counts from 1 to 400, 2 runs for 86 and
+  3 runs for 3. A store at 33 flushes (1M objects, memtable limit 30,303)
+  went from 3 runs to 1 on a real store.
+
+The size-tiered merges alone write 3.5 bytes for each index byte at 100M
+and keep up to 12 runs. After one long write load and one pause, every
+rule merges every run into one (4.5 bytes for each index byte at 100M, of
+which 1.0 is the idle merge). With the chosen rule at B = 1 and 100M, a
+ratio of 2 gives 6.8 bytes and up to 6 runs, and a ratio of 8 gives 13.2
+bytes and up to 4 runs.
 
 Bench: `index-bench lookup` now times a second pass over the same sample
 in the same process (`*_2` keys). The first pass takes the page faults of
@@ -719,7 +733,9 @@ Method: macOS, the host of "Index results (#85)", commit of this change,
 release build, warm cache. For each size: `create` (the size-tiered merges
 only), 3 `lookup` runs, `settle`, 3 `lookup` runs, all on the same store.
 Each lookup run is a new process. The values are the median of the 3 runs.
-The load average (1 min) was 10.5 to 13.0.
+The load average (1 min) was 10.5 to 13.0. These runs used the second
+rule of the list above; for these run lists (3 and 5 runs) both rules
+merge every run, so the chosen rule gives the same result.
 
 Runs and merge bytes ("Merge B / index B" is the bytes that the merges
 wrote, divided by the size of the index after the create):
@@ -758,8 +774,8 @@ Notes:
   so one idle merge after a long write load writes about 6 GB; the run at
   100M was not made.
 - The run count at 100M is not measured. By the model above it is 1 after
-  a long write load and a pause, and at most 5 under a load with a pause
-  after each flush.
+  a long write load and a pause (381 flushes), and at most 5 under a load
+  with a pause after each flush.
 
 ### Dedup
 
