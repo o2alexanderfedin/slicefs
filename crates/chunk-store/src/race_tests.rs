@@ -450,3 +450,115 @@ fn a_listed_but_missing_run_requests_a_rebuild() {
     }
     assert_eq!(s.stats().objects, 300);
 }
+
+// ── GC in groups of packs (17-08) ────────────────────────────────────────────
+//
+// `gc_finish` installs and changes the selected packs in groups of
+// `GC_GROUP_PACKS`, so that only the pending runs of one group are open at
+// a time. These stores have more packs than three groups.
+
+fn many_opts() -> Options {
+    Options { pack_limit: 4096, index_memtable_limit: 64, index_background_merge: false, ..Options::default() }
+}
+
+/// Objects of 1,000 bytes in 4 KiB packs (four in each pack), synced.
+fn many_packs_store(mem: &MemIo) -> (ChunkStore, Vec<Obj>) {
+    let s = ChunkStore::open_with(Arc::new(mem.clone()), many_opts()).unwrap();
+    let n = (crate::GC_GROUP_PACKS * 4 * 3 + 40) as u64;
+    let objs: Vec<Obj> = (0..n).map(|i| (s.put(&blob(i)).unwrap(), blob(i))).collect();
+    s.sync().unwrap();
+    (s, objs)
+}
+
+// An object put during the pass of the first group, whose pack is in the
+// last group: that pack does not change, though its plan is made after the
+// install of the first group (the touched packs carry over).
+#[test]
+fn an_object_put_in_an_early_group_keeps_its_pack_in_a_later_group() {
+    let mem = MemIo::new();
+    let (s, objs) = many_packs_store(&mem);
+    let live = one_in_four(&objs);
+    let pack_of = |id: &crate::ObjectId| s.index.get(id).unwrap().unwrap().pack;
+    let packs: Vec<u64> = objs.iter().map(|(id, _)| pack_of(id)).collect();
+    let distinct: HashSet<u64> = packs.iter().copied().collect();
+    assert!(distinct.len() > 3 * crate::GC_GROUP_PACKS, "{} packs", distinct.len());
+    // The dead object in the pack with the highest number: its pack is in
+    // the last group.
+    let xi = (0..objs.len()).filter(|&i| !live.contains(&objs[i].0)).max_by_key(|&i| packs[i]).unwrap();
+    let (x, dx) = objs[xi].clone();
+    let x_pack = packs[xi];
+    let ran = Arc::new(AtomicBool::new(false));
+    at_pass(&s, 2, &ran, move |s| assert_eq!(s.put(&dx).unwrap(), x));
+    let b = s.gc_begin().unwrap();
+    let st = s.gc_finish(&live, b).unwrap();
+    assert!(ran.load(Ordering::SeqCst), "the hook ran in the pass of the first group");
+    assert!(s.inner.lock().unwrap().touched.is_none(), "the touched set ends with the GC");
+    let kept = |i: usize| live.contains(&objs[i].0) || packs[i] == x_pack;
+    for (i, (id, d)) in objs.iter().enumerate() {
+        assert_eq!(s.get(id).as_ref() == Some(d), kept(i), "object {i} in pack {}", packs[i]);
+    }
+    let removed = (0..objs.len()).filter(|&i| !kept(i)).count() as u64;
+    assert_eq!(st.removed_objects, removed, "{st:?}");
+    assert_eq!(s.stats().objects, objs.len() as u64 - removed);
+    drop(s);
+    let s = ChunkStore::open_with(Arc::new(mem.clone()), many_opts()).unwrap();
+    for (i, (id, d)) in objs.iter().enumerate() {
+        assert_eq!(s.get(id).as_ref() == Some(d), kept(i), "object {i} after a reopen");
+    }
+    assert_eq!(s.stats().objects, objs.len() as u64 - removed, "after a reopen");
+}
+
+// A read error in the pass of the second group: the GC ends with the error.
+// The first group is done (some victims are gone), the later groups did not
+// change (some victims are still there), the store is not failed, and the
+// counts are exact, also after a reopen.
+#[test]
+fn a_read_error_in_a_later_group_leaves_the_earlier_groups_done() {
+    let mem = MemIo::new();
+    let (s, objs) = many_packs_store(&mem);
+    let live = one_in_four(&objs);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (c, m) = (Arc::clone(&calls), mem.clone());
+    *s.gc_pass_hook.lock().unwrap() = Some(Box::new(move |_: &ChunkStore, pass: u32| {
+        if pass == 2 && c.fetch_add(1, Ordering::SeqCst) == 1 {
+            m.fail_reads_after(1);
+        }
+    }));
+    let b = s.gc_begin().unwrap();
+    let r = s.gc_finish(&live, b);
+    mem.clear_fail_reads_after();
+    *s.gc_pass_hook.lock().unwrap() = None;
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "the GC stopped in the pass of the second group");
+    assert!(matches!(r, Err(crate::Error::Io(_))), "{r:?}");
+    assert!(s.inner.lock().unwrap().touched.is_none(), "the touched set ends with the GC");
+    let check = |s: &ChunkStore, what: &str| {
+        let mut gone = 0;
+        for (i, (id, d)) in objs.iter().enumerate() {
+            match s.get(id) {
+                Some(g) => assert_eq!(&g, d, "{what}: object {i}"),
+                None => {
+                    assert!(!live.contains(id), "{what}: live object {i} is gone");
+                    gone += 1;
+                }
+            }
+        }
+        let dead = objs.len() - live.len();
+        assert!(gone > 0 && gone < dead, "{what}: {gone} of {dead} dead objects are gone");
+        assert_eq!(s.stats().objects, (objs.len() - gone) as u64, "{what}");
+        gone
+    };
+    let gone = check(&s, "after the GC");
+    let new = blob(50_000);
+    let nid = s.put(&new).expect("the store is not failed");
+    s.sync().unwrap();
+    drop(s);
+    let s = ChunkStore::open_with(Arc::new(mem.clone()), many_opts()).unwrap();
+    assert_eq!(s.get(&nid), Some(new));
+    assert_eq!(s.stats().objects, (objs.len() - gone + 1) as u64, "after a reopen");
+    for (i, (id, d)) in objs.iter().enumerate() {
+        if let Some(g) = s.get(id) {
+            assert_eq!(&g, d, "object {i} after a reopen");
+        }
+    }
+    assert_eq!(objs.iter().filter(|(id, _)| s.get(id).is_none()).count(), gone, "after a reopen");
+}

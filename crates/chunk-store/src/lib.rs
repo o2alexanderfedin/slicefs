@@ -222,6 +222,11 @@ const FLAG_ZSTD: u8 = 1;
 /// pack). More packs than this are opened again when needed, so a large
 /// store does not reach the limit of open files.
 pub const MAX_OPEN_PACKS: usize = 64;
+/// `gc_finish` changes the selected packs in groups of at most this many
+/// packs. Each pending GC run keeps its file open until the group is
+/// installed and merged, so a GC holds at most about this many run files
+/// open, also over more packs than the limit of open files.
+pub const GC_GROUP_PACKS: usize = 32;
 /// GC copies at most this many records of a compacted pack per hold of the
 /// store lock (a 64 MiB pack of small objects has some 100,000 records).
 const COPY_BATCH: usize = 1024;
@@ -1126,6 +1131,11 @@ impl ChunkStore {
     /// 2. Pass 1, no store lock: one merged pass over the snapshot gives
     ///    the totals of each pack (bytes, kept bytes, entries).
     /// 3. The decision for each pack, from its totals.
+    ///
+    /// Steps 4 to 6 run for one group of at most [`GC_GROUP_PACKS`]
+    /// selected packs at a time (in pack order), so that the pending runs
+    /// of only one group are open at a time. The packs that the index no
+    /// longer uses go with the last group.
     /// 4. Pass 2, no store lock, one selected pack at a time: its entries
     ///    from its `.idx` (or a scan of the pack), each checked against the
     ///    snapshot (current only if the snapshot points to this record). The
@@ -1134,19 +1144,24 @@ impl ChunkStore {
     ///    copied: a batch is read with no lock, then appended under the
     ///    store lock.
     /// 5. Install (store lock): the plan of a pack that holds an object put
-    ///    or read during the GC is dropped (that pack does not change). The
-    ///    copies are synced; one MANIFEST write lists the pending runs of
-    ///    the kept plans as the newest runs, and the memtable in a run under
-    ///    them. This write is the durable point.
+    ///    or read during the GC (also during an earlier group) is dropped
+    ///    (that pack does not change). The copies are synced; one MANIFEST
+    ///    write lists the pending runs of the kept plans as the newest runs,
+    ///    and the memtable in a run under them. This write is the durable
+    ///    point of the group.
     /// 6. Only then, with no store lock, one pack at a time: delete, or
-    ///    punch (its remaining entries are read again from the index).
+    ///    punch (its remaining entries are read again from the index). Then
+    ///    the runs of the install are merged into one run, which closes the
+    ///    files of the pending runs.
     ///
-    /// No pack changes and no tombstone becomes durable unless every index
-    /// read of steps 2, 4 and 5 succeeded. A read error (also a damaged run
-    /// page, which also asks for a rebuild of the index) ends the call with
-    /// the error before the install: the pending runs are removed and
-    /// nothing else changed except the copies (duplicates with newer, valid
-    /// places). An index read error is never taken as "not current".
+    /// No pack of a group changes and no tombstone of it becomes durable
+    /// unless every index read of steps 2, 4 and 5 for it succeeded. A read
+    /// error (also a damaged run page, which also asks for a rebuild of the
+    /// index) ends the call with the error before the install of its group:
+    /// the pending runs of that group are removed, and nothing of that group
+    /// or of a later group changed except the copies (duplicates with newer,
+    /// valid places). The groups before it are done: each one is a complete
+    /// GC of its packs. An index read error is never taken as "not current".
     ///
     /// RAM: the totals of each pack, the entries of one pack, the memtable
     /// copy, and the filter and fences of the pending runs; no map of every
@@ -1196,7 +1211,6 @@ impl ChunkStore {
     }
 
     fn gc_run(&self, live: &HashSet<ObjectId>, boundary: u64, holds: &Holds) -> Result<GcStats> {
-        let io = &*self.io;
         // (1) Start. The touched set ends with this GC, also when it fails
         // (#63): the next GC starts its own set in `gc_begin`, before its
         // gate commit, so its mark sees everything put before that.
@@ -1209,34 +1223,82 @@ impl ChunkStore {
         };
         let keep = |id: &ObjectId| live.contains(id) || touched.contains(id);
         let mut st = GcStats::default();
-        let mut pending = Vec::new();
 
-        // (2) to (4).
-        let (mut plans, unused) = match self.gc_decide(&snap, &keep, boundary, active, holds, &mut pending, &mut st) {
+        // (2) and (3).
+        let (todo, unused) = match self.gc_select(&snap, &keep, boundary, active, &mut st) {
             Ok(d) => d,
-            Err(e) => return Err(self.gc_abandon(e, &pending, holds)),
+            Err(e) => return Err(self.gc_abandon(e, &[], holds)),
         };
-        if plans.is_empty() && unused.is_empty() {
+        if todo.is_empty() && unused.is_empty() {
             self.held(holds).touched = None;
             return Ok(st);
         }
 
+        // (4) to (6), one group of at most `GC_GROUP_PACKS` packs at a time:
+        // the pending runs of a group are open until its install and merge,
+        // so a GC over many packs holds few files open. The unused packs go
+        // with the last group.
+        let groups: Vec<&[GcTodo]> = if todo.is_empty() { vec![&[]] } else { todo.chunks(GC_GROUP_PACKS).collect() };
+        let last = groups.len() - 1;
+        let mut touched_packs = HashSet::new();
+        let r = (|| -> Result<()> {
+            for (g, group) in groups.iter().enumerate() {
+                let unused: &[u64] = if g == last { &unused } else { &[] };
+                self.gc_group(&snap, &keep, group, unused, g == last, &mut touched_packs, holds, &mut st)?;
+            }
+            Ok(())
+        })();
+        // The touched set ends with this GC, also after an error.
+        self.held(holds).touched = None;
+        r.map(|()| st)
+    }
+
+    /// Steps 4 to 6 of `gc_finish` for one group of selected packs (and,
+    /// with the last group, the unused packs). `touched_packs` collects,
+    /// over the groups, the packs of the objects put or read during the GC;
+    /// such a pack does not change. The touched set records again after the
+    /// install of a group that is not the last one.
+    #[allow(clippy::too_many_arguments)]
+    fn gc_group(
+        &self,
+        snap: &Snapshot,
+        keep: &dyn Fn(&ObjectId) -> bool,
+        group: &[GcTodo],
+        unused: &[u64],
+        last: bool,
+        touched_packs: &mut HashSet<u64>,
+        holds: &Holds,
+        st: &mut GcStats,
+    ) -> Result<()> {
+        let io = &*self.io;
+        let mut pending = Vec::new();
+
+        // (4)
+        let mut plans = match self.gc_prepare(snap, keep, group, holds, &mut pending, st) {
+            Ok(p) => p,
+            Err(e) => return Err(self.gc_abandon(e, &pending, holds)),
+        };
+
         // (5) The install.
-        let added = {
+        let (added, before) = {
             let mut inner = self.held(holds);
             let during = inner.touched.take().unwrap_or_default();
-            // An object put or read during the GC: its pack does not change.
+            if !last {
+                inner.touched = Some(HashSet::new());
+            }
+            // An object put or read during the GC: its pack does not change
+            // (in this group or in a later one).
             let checked = (|| -> Result<()> {
                 for id in during.iter().filter(|id| !keep(id)) {
                     if let Some(l) = snap.get_verified(id)? {
-                        if let Ok(i) = plans.binary_search_by_key(&l.pack, |p| p.num) {
-                            plans[i].dropped = true;
-                        }
+                        touched_packs.insert(l.pack);
                     }
                 }
                 inner.check()
             })();
-            if let Err(e) = checked {
+            for p in plans.iter_mut().filter(|p| touched_packs.contains(&p.num)) {
+                p.dropped = true;
+            }            if let Err(e) = checked {
                 drop(inner);
                 drop(plans);
                 return Err(self.gc_abandon(e, &pending, holds));
@@ -1253,6 +1315,7 @@ impl ChunkStore {
             inner.sync_active()?;
             inner.sync_dir(io)?;
             let runs: Vec<Arc<Run>> = plans.iter().filter(|p| !p.dropped).filter_map(|p| p.run.clone()).collect();
+            let before: HashSet<u64> = inner.index.runs().iter().map(|r| r.num()).collect();
             let mut added = Vec::new();
             // Whenever a pack changes, also with nothing to add: the hwm
             // must move past the packs that change.
@@ -1272,7 +1335,7 @@ impl ChunkStore {
                 inner.merge.notify();
             }
             inner.stats = after;
-            added
+            (added, before)
         };
         let dropped: Vec<u64> = plans.iter_mut().filter(|p| p.dropped).filter_map(|p| p.run.take()).map(|r| r.num()).collect();
         self.remove_pending(&dropped);
@@ -1296,9 +1359,9 @@ impl ChunkStore {
         let changed = (|| -> Result<()> {
             let kept = || plans.iter().filter(|p| !p.dropped);
             for p in kept().filter(|p| p.act == GcAct::Punch) {
-                self.gc_punch(p.num, holds, &mut st)?;
+                self.gc_punch(p.num, holds, st)?;
             }
-            for num in kept().filter(|p| p.act != GcAct::Punch).map(|p| p.num).chain(unused) {
+            for num in kept().filter(|p| p.act != GcAct::Punch).map(|p| p.num).chain(unused.iter().copied()) {
                 let _ = io.remove(num, Kind::Idx);
                 io.remove(num, Kind::Pack)?;
                 let mut inner = self.held(holds);
@@ -1308,26 +1371,25 @@ impl ChunkStore {
             self.held(holds).sync_dir(io)
         })();
         // One run for the runs of this install, so a GC over many packs
-        // does not leave one small run per pack.
-        self.gc_merge_added(&added, holds);
-        changed.map(|()| st)
+        // does not leave one small run per pack, and the files of the
+        // pending runs of this group close.
+        if !added.is_empty() {
+            self.gc_merge_added(&before, holds);
+        }
+        changed
     }
 
-    /// Steps 2 to 4 of `gc_finish`: the totals, the decisions, and the
-    /// plans with their pending runs and copies. Also returns the packs that
-    /// the index no longer uses. Any error ends it (the caller removes the
-    /// runs in `pending`).
-    #[allow(clippy::too_many_arguments)]
-    fn gc_decide(
+    /// Steps 2 and 3 of `gc_finish`: the totals and the decisions. Returns
+    /// the selected packs (number, action, current entries) in pack order,
+    /// and the packs that the index no longer uses.
+    fn gc_select(
         &self,
         snap: &Snapshot,
         keep: &dyn Fn(&ObjectId) -> bool,
         boundary: u64,
         active: Option<u64>,
-        holds: &Holds,
-        pending: &mut Vec<u64>,
         st: &mut GcStats,
-    ) -> Result<(Vec<GcPlan>, Vec<u64>)> {
+    ) -> Result<(Vec<GcTodo>, Vec<u64>)> {
         let io = &*self.io;
         // (2) The totals of each pack, from one complete pass.
         self.gc_pass(1);
@@ -1374,12 +1436,26 @@ impl ChunkStore {
         let mut unused: Vec<u64> =
             io.list()?.into_iter().filter(|&n| n <= boundary && Some(n) != active && !totals.contains_key(&n)).collect();
         unused.sort_unstable();
-        drop(totals);
+        Ok((todo, unused))
+    }
 
+    /// Step 4 of `gc_finish` for one group of selected packs: the plans
+    /// with their pending runs and copies. Any error ends it (the caller
+    /// removes the runs in `pending`).
+    fn gc_prepare(
+        &self,
+        snap: &Snapshot,
+        keep: &dyn Fn(&ObjectId) -> bool,
+        group: &[GcTodo],
+        holds: &Holds,
+        pending: &mut Vec<u64>,
+        st: &mut GcStats,
+    ) -> Result<Vec<GcPlan>> {
+        let io = &*self.io;
         // (4) One selected pack at a time.
         self.gc_pass(2);
-        let mut plans = Vec::with_capacity(todo.len());
-        for (num, act, entries) in todo {
+        let mut plans = Vec::with_capacity(group.len());
+        for &(num, act, entries) in group {
             let mut current = Vec::new();
             for (id, l) in self.pack_entries(num)? {
                 if matches!(snap.get_verified(&id)?, Some(c) if c.pack == num && c.offset == l.offset) {
@@ -1449,11 +1525,12 @@ impl ChunkStore {
                 dropped: false,
             });
         }
-        Ok((plans, unused))
+        Ok(plans)
     }
 
-    /// The end of a GC that failed before its install: nothing changed but
-    /// the copies. A damaged run page asks for a rebuild of the index.
+    /// The end of a GC group that failed before its install: nothing of
+    /// this group changed but the copies (the groups before it are done).
+    /// A damaged run page asks for a rebuild of the index.
     fn gc_abandon(&self, e: Error, pending: &[u64], holds: &Holds) -> Error {
         {
             let mut inner = self.held(holds);
@@ -1500,16 +1577,22 @@ impl ChunkStore {
 
     /// Merge the runs that one GC install added into one run (see
     /// `Merger::step`; a failure is only logged: the runs are derived data).
+    /// These are the runs at the head of the list that were not in it
+    /// before the install (`before`): the runs of the install, and the runs
+    /// that a flush or a background merge of them put there since. They are
+    /// adjacent, also when a background merge took some of them first.
     /// Takes no merge lock: a merge that runs at the same time is seen at
     /// the install, which checks that the window is still in the list.
-    fn gc_merge_added(&self, nums: &[u64], holds: &Holds) {
+    fn gc_merge_added(&self, before: &HashSet<u64>, holds: &Holds) {
         let io = &*self.io;
         let plan = {
             let inner = self.held(holds);
             if inner.failed {
                 return;
             }
-            match inner.index.plan_merge_of(nums) {
+            let nums: Vec<u64> =
+                inner.index.runs().iter().map(|r| r.num()).take_while(|n| !before.contains(n)).collect();
+            match inner.index.plan_merge_of(&nums) {
                 Some(p) => p,
                 None => return,
             }
@@ -1935,6 +2018,10 @@ struct PackTotals {
     keep_bytes: u64,
     entries: u64,
 }
+
+/// A pack that the GC selected: its number, the action, and its current
+/// entries (from the totals pass).
+type GcTodo = (u64, GcAct, u64);
 
 /// The plan of a GC for one pack (small: no entries of the pack).
 struct GcPlan {

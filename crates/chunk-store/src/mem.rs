@@ -134,6 +134,8 @@ pub struct MemIo {
     s: Arc<Mutex<State>>,
     /// Pack handles that are open now (like file descriptors).
     open: Arc<AtomicUsize>,
+    /// The most handles that were open at one time (see `peak_handles`).
+    peak: Arc<AtomicUsize>,
 }
 
 impl MemIo {
@@ -246,6 +248,18 @@ impl MemIo {
         self.open.load(Ordering::SeqCst)
     }
 
+    /// The most handles (packs, `.idx` files and runs) that were open at one
+    /// time since the last `reset_peak_handles`: the file descriptors a real
+    /// store would need at its worst.
+    pub fn peak_handles(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
+    }
+
+    /// Start a new peak at the handles open now.
+    pub fn reset_peak_handles(&self) {
+        self.peak.store(self.open.load(Ordering::SeqCst), Ordering::SeqCst);
+    }
+
     /// Current length of a file, if it exists.
     pub fn len(&self, num: u64, kind: Kind) -> Option<usize> {
         self.s.lock().unwrap().files.get(&(num, kind)).map(|f| f.lock().unwrap().data.len())
@@ -265,7 +279,8 @@ impl MemIo {
     /// usable after the name is removed.
     fn handle(&self, num: u64, kind: Kind) -> io::Result<MemPack> {
         let f = self.s.lock().unwrap().files.get(&(num, kind)).cloned().ok_or_else(not_found)?;
-        self.open.fetch_add(1, Ordering::SeqCst);
+        let now = self.open.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
         Ok(MemPack { s: Arc::clone(&self.s), f, kind, open: Arc::clone(&self.open) })
     }
 

@@ -188,6 +188,46 @@ mod on_runs {
         (st, stats, runs_added)
     }
 
+    /// A GC over many more packs than `GC_GROUP_PACKS`, with a victim in
+    /// every pack (four objects in each pack, keep 1 of 4: every pack is
+    /// compacted). Each
+    /// pending GC run keeps a handle (a file descriptor with real files)
+    /// until it is installed and merged. The handles open at one time must
+    /// stay at the pack readers plus about one group, and must not grow
+    /// with the number of packs: else a GC over more packs than the limit of
+    /// open files ends with EMFILE and never completes (17-08).
+    #[test]
+    fn a_gc_over_many_packs_keeps_a_bounded_number_of_handles_open() {
+        let mem = MemIo::new();
+        let o = opts(1 << 18, 4096);
+        let s = open(&mem, &o);
+        let objs = put_n(&s, 600, 1000, 900);
+        s.sync().unwrap();
+        let packs = mem.list().unwrap().len();
+        assert!(packs > 3 * chunk_store::GC_GROUP_PACKS, "{packs} packs");
+        let live: HashSet<ObjectId> = objs.iter().step_by(4).map(|(id, _)| *id).collect();
+        let b = s.gc_begin().unwrap();
+        mem.reset_peak_handles();
+        let base = mem.open_handles();
+        let st = s.gc_finish(&live, b).unwrap();
+        let peak = mem.peak_handles();
+        let bound = base + chunk_store::MAX_OPEN_PACKS + chunk_store::GC_GROUP_PACKS + 8;
+        assert!(peak <= bound, "{peak} handles open at one time (bound {bound}) in a GC over {packs} packs");
+        assert_eq!(st.removed_objects, 450, "{st:?}");
+        assert_eq!(st.kept_objects, 150, "{st:?}");
+        assert_eq!(st.packs_compacted as usize, packs, "{st:?}");
+        for (id, d) in &objs {
+            assert_eq!(s.get(id).as_deref() == Some(d.as_slice()), live.contains(id));
+        }
+        assert_eq!(s.stats().objects, 150);
+        drop(s);
+        let s = open(&mem, &o);
+        assert_eq!(s.stats().objects, 150, "after a reopen");
+        for (id, d) in &objs {
+            assert_eq!(s.get(id).as_deref() == Some(d.as_slice()), live.contains(id), "after a reopen");
+        }
+    }
+
     #[test]
     fn many_packs_gc_with_a_small_memtable() {
         let (st_small, stats_small, runs_small) = gc_keep_one_of_three(16);
