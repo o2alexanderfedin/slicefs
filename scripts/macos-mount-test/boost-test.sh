@@ -98,6 +98,9 @@ for v in "${VERS[@]}"; do
 done
 echo "== dedup summary (data added -> store growth)"
 column -t -s, $R/dedup.csv | sed 's/^/  /'
+# Store file count after the copies (#8: tens, not hundreds of thousands).
+nf() { if [ -d "$1" ]; then find "$1" -type f | wc -l | tr -d ' '; else echo 0; fi; }
+echo "  store files: $(nf $R/store) (packs $(nf $R/store/packs), index $(nf $R/store/index), segments $(nf $R/store/segments))"
 unmount_fs
 
 echo "== remount + re-verify"
