@@ -463,8 +463,9 @@ Notes:
   for a `contains` hit, 219 to 413 ns for a miss, and 776 to 929 ns for a
   dedup-hit `put`. Thus the macOS 1M row in the table is slow because of
   the load.
-- All numbers are for a warm page cache. For a cold page cache (Linux
-  only), see "Index with a cold page cache".
+- All numbers are for a warm page cache. No cold-cache number was taken
+  for this (in-memory) index. For the on-disk index (#85) with a cold
+  page cache, see "Index with a cold page cache".
 
 ### Index results (#85)
 
@@ -780,28 +781,37 @@ Notes:
 ### Index with a cold page cache
 
 The numbers of #66, #85 and #111 are for a warm page cache. This section
-measures the open and the lookups after a drop of the page cache.
+measures the on-disk index (#85) after a drop of the page cache: the open
+and the lookups.
 
 Method: Linux only, Docker in the OrbStack VM on the host of "Index results
 (#85)" (`scripts/docker-linux-test/run.sh index-bench-cold 1000000
 10000000`), kernel 7.2.12-orbstack-00394-gbecdd6130068, btrfs on the Docker
 volume, commit `a9a51ce` plus the `--drop-caches` and `--only` flags of
-`index-bench`, release build. The VM had 12.9 GB of memory available. The
-container is privileged, so root can write `/proc/sys/vm/drop_caches`. Each
-store is new. For each size: `create`, `settle` (the idle merge, #111: 3
-runs to 1 at 1M, 5 runs to 1 at 10M), one warm-up open, 3 warm opens, one
-warm lookup, 3 cold opens, one cold lookup, then 3 cold lookups of a small
-sample (seeds 1 to 3) for each phase (hit, miss, put), each in a new
-process. A cold step calls `sync` and writes `3` to `drop_caches` just
-before the timed part: `open` before the open, `lookup` after the open and
-before the first pass. The load average of the VM was about 1.4 to 2.3;
-the macOS host had a load of about 27.
+`index-bench`, release build. The VM had 12.9 GB of memory available
+(`MemAvailable`). The container is privileged, so root can write
+`/proc/sys/vm/drop_caches`. Each store is new. For each size: `create`,
+`settle` (the idle merge, #111: 3 runs to 1 at 1M, 5 runs to 1 at 10M),
+one warm-up open, 3 warm opens, one warm lookup, 3 cold opens, one cold
+lookup, then 3 cold lookups of a small sample (seeds 1 to 3) for each phase
+(hit, miss, put), each in a new process. A cold step calls `sync` and
+writes `3` to `drop_caches` just before the timed part: `open` before the
+open, `lookup` after the open and before the first pass. The load average
+of the VM was about 0.8 to 2.3. The load of the macOS host was 27.6 before
+the first run and 29.3 before the last run.
+
+A third store, "1M, no tail", has 1M objects made with `--memtable-limit
+250000`: 4 whole flushes, so nothing stays above the high-water mark and
+the open puts no record in the memtable (see the 1M note below). It was
+measured with the same steps (by hand, with the same binary).
 
 What a cold step can and cannot show:
 
 - The drop does not remove pages that a process has mapped. So in one
   process the put phase finds the run pages that the hit phase read; a
-  cold put needs its own process (`--only put`).
+  cold put needs its own process (`--only put`). For the same reason, a
+  lookup after an open that has read the run pages through the mapping is
+  not cold (the default 1M store, see below).
 - With the default sample (1M lookups) the first pass reads almost every
   page of the run (142k pages at 10M), so its mean mixes cold and warm
   reads. The small sample (K = N/1000: 1,000 at 1M, 10,000 at 10M) reads
@@ -821,43 +831,51 @@ What a cold step can and cannot show:
   bound of a cold disk.
 - macOS: no cold run. `purge` needs sudo, and `index-bench` refuses
   `--drop-caches` on macOS.
-- 100M: not run. The store is about 16.4 GB and the VM has about 12.6 GB
-  of RAM, so the page cache cannot hold it, and the warm numbers would not
-  be warm. It needs a host with about 25 GB of free RAM.
+- 100M: not run. The store is about 16.4 GB and the VM has about 12.9 GB
+  of free memory, so the page cache cannot hold it, and the warm numbers
+  would not be warm. It needs a host with about 25 GB of free RAM.
 
-Open (median of 3; "Read MB" is `read_bytes` of the open):
+Open (median of 3; "Read MB" is `read_bytes` of the open; "Mapped MB" is
+the growth of the mapped file pages, `RssFile`, in the first cold open):
 
-| Objects | Runs | Warm open s | Cold open s | Cold read MB | Cold major faults |
-|---|---|---|---|---|---|
-| 1M | 1 | 0.740 | 0.826 | 98.4 | 5 |
-| 10M | 1 | 0.042 | 0.060 | 19.4 | 415 |
+| Store | Runs (MB) | Memtable after open | Warm open s | Cold open s | Cold read MB | Cold major faults | Mapped MB |
+|---|---|---|---|---|---|---|---|
+| 1M | 1 (47) | 213,568 | 0.740 | 0.826 | 98.4 | 5 | 46.3 |
+| 1M, no tail | 1 (60) | 0 | 0.831 | 0.840 | 52.6 | 3 | 0.5 |
+| 10M | 1 (596) | 38,528 | 0.042 | 0.060 | 19.4 | 415 | 2.3 |
 
 Lookups, default sample (1M hits, 1M misses, 1M dedup-hit puts, one
 process; ns per call; "pass 2" is the second pass over the same sample):
 
-| Objects | Cache | Hit, pass 1 | Hit, pass 2 | Miss, pass 1 | Put dedup-hit, pass 1 | Hit major faults | Hit read MB |
+| Store | Cache | Hit, pass 1 | Hit, pass 2 | Miss, pass 1 | Put dedup-hit, pass 1 | Hit major faults | Hit read MB |
 |---|---|---|---|---|---|---|---|
 | 1M | warm | 1,349 | 1,372 | 791 | 1,803 | 0 | 0 |
-| 1M | cold | 1,337 | 1,375 | 878 | 1,756 | 4 | 0.3 |
+| 1M | after a drop, but the run is still mapped by the open (not cold) | 1,337 | 1,375 | 878 | 1,756 | 4 | 0.3 |
+| 1M, no tail | warm | 679 | 686 | 166 | 889 | 0 | 0 |
+| 1M, no tail | cold | 973 | 795 | 202 | 1,005 (warm: after the hits) | 21 | 59.9 |
 | 10M | warm | 1,678 | 1,524 | 518 | 1,923 | 0 | 0 |
 | 10M | cold | 5,253 | 1,453 | 529 | 1,720 (warm: after the hits) | 141,769 | 580.7 |
 
-Lookups, small sample (one phase for each process, cold first pass; the
+Lookups, small sample (one phase for each process; cold first pass; the
 median of 3 seeds; "Warm" is the second pass of the same process; page
 reads per call = major faults / K):
 
-| Objects | K | Phase | Cold ns | Warm ns | Page reads per call | Read KiB per call |
+| Store | K | Phase | Cold ns | Warm ns | Page reads per call | Read KiB per call |
 |---|---|---|---|---|---|---|
-| 1M | 1,000 | hit | 2,420 | 1,715 | 0.002 | 0.26 |
-| 1M | 1,000 | miss | 1,446 | 945 | 0 | 0 |
-| 1M | 1,000 | put dedup-hit | 2,775 | 2,176 | 0.002 | 0.26 |
+| 1M, no tail | 1,000 | hit | 27,699 | 815 | 0.021 | 58,512 |
+| 1M, no tail | 1,000 | miss | 13,423 | 172 | 0.008 | 29,284 |
+| 1M, no tail | 1,000 | put dedup-hit | 27,932 | 992 | 0.021 | 58,512 |
 | 10M | 10,000 | hit | 18,130 | 1,588 | 0.96 | 3.8 |
 | 10M | 10,000 | miss | 987 | 560 | 0.012 | 0.05 |
 | 10M | 10,000 | put dedup-hit | 23,779 | 1,874 | 0.92 | 3.7 |
 
+The default 1M store has no cold row in this table: its open has already
+read the run (see the notes), so its "cold" small sample read no page
+(0.002 page reads per call; hit 2,420 ns against 1,715 ns warm).
+
 The 3 cold values of the 10M small sample: hit 13,973, 25,859 and 18,130
-ns; put 38,492, 23,779 and 14,383 ns. They vary much, as the load of the
-host varied.
+ns; put 38,492, 23,779 and 14,383 ns. They vary much; the host was loaded
+(see above).
 
 Notes:
 
@@ -873,20 +891,34 @@ Notes:
   is about 27 µs for each page read. After that the whole run is in the
   cache, so the puts of the same pass are warm.
 - 10M open: a cold open reads the filter (12.5 MB), the fence and tag
-  tables, the MANIFEST and the newest pack (at the high-water mark): 19.4
-  MB, 18 ms more than warm. It reads few or no run pages (the mapped file
-  pages grow by 2.3 MB).
-- 1M: a cold lookup is as fast as a warm one, because the open already
-  reads the whole run. The 1M store has one pack, and its records above
-  the high-water mark (213,568) are put in the memtable at open; the
-  replay looks up each ID in the index (`replay` in `lib.rs`), which is
-  the probable cause. The mapped file pages of the open grow by 45 MB (the run is 47 MB), and the cold
-  open reads 98 MB (the run and the pack). So at 1M the cold cost is in
-  the open (+0.09 s), not in the lookups. The small cold hit (2.4 µs
-  against 1.7 µs) reads no page; the difference is not a disk read.
-- Linux warm values here are slower than the macOS values of #111 (10M,
-  1 run: 751 ns hit, 295 ns miss). The macOS host had a load of about 27
-  during these runs.
+  tables, the MANIFEST, the `.idx` of the newest pack (2.9 MB) and about
+  400 run pages: 19.4 MB, 18 ms more than warm. The run pages come from
+  the replay of the 38,528 records above the high-water mark (see the 1M
+  note): 415 faults are about the false-positive rate of the filter
+  (1.1 %) of 38,528 lookups.
+- 1M (default store): the open reads the whole run. The store has one
+  pack, and its 213,568 records above the high-water mark (1,000,000 - 3
+  × 262,144 flushed entries) are put in the memtable at open. The replay
+  looks up each ID in the index (`replay` in `lib.rs`), and the run is
+  smaller than 256 MiB, so it has the default readahead: the mapped file
+  pages of the open grow by 46 MB (the run is 47 MB). The cold open reads
+  98 MB: the run and the 50 MB `.idx` of the pack. So the cold cost of this
+  store is in the open (+0.09 s), and its lookups after the open are warm.
+  A cold lookup of this store cannot be measured in the lookup step.
+- 1M, no tail: the open reads only the `.idx` (52.6 MB) and maps 0.5 MB.
+  Here the readahead of a run below 256 MiB shows: the first cold faults
+  read the whole 60 MB run in about 21 faults (about 2.9 MB for each
+  fault). 1,000 cold hits take 27.7 ms in total, about the time to read
+  the run; after that every lookup is warm. 1,000 cold misses read about
+  30 MB in 8 faults (the false positives of the filter), 13.4 ms. So below
+  `MADV_RANDOM_MIN` the first cold lookups pay for the whole run at once;
+  the cost does not grow with the number of lookups.
+- The warm hit of "1M, no tail" (679 ns) is half of the default 1M store
+  (1,349 ns). The default store answers part of its lookups from the
+  memtable with 213,568 entries; this was not studied further.
+- The Linux warm values of the default stores are slower than the macOS
+  values of #111 (10M, 1 run: 751 ns hit, 295 ns miss). The macOS host had
+  a load of about 28 during these runs.
 
 ### Dedup
 
