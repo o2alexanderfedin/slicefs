@@ -240,11 +240,21 @@ sorted run files on disk, and a memtable in RAM for the newest entries.
 
 Run file (`NNNNNNNNNNNNNNNN.run`, written one time, never changed):
 
-- Entries of 58 bytes: the full 33-byte ID, pack u64, offset u64, stored
-  length u32, raw length u32, flags u8. A tombstone is an entry with the
+- An entry holds the full ID, the pack, the offset, the stored length,
+  the raw length and the flags. A tombstone is an entry with the
   tombstone flag: its pack field names the pack whose entry it hides.
-- The entries are sorted by (tag, digest) and are in 4 KiB pages (70
-  entries at most). Each page has an entry count and a CRC32C.
+- The entries are sorted by (tag, digest) and are in 4 KiB pages. A page
+  holds one tag only. Its 12-byte header has the entry count, the tag, a
+  "shared" count, a CRC32C (over the header and the entries), and the byte
+  widths of the pack, offset, stored and raw fields of this page (run
+  format version 2, see "Index size"). All entries of a page have the same
+  size, so a search can go to entry `i` directly. An entry is: the digest
+  bytes after the shared bytes (the leading bytes that all keys of the page
+  have in common, at most 8; they are the first bytes of the page fence),
+  the four fields in the widths of the page, and the flags. The raw field
+  takes no byte in a page where each raw length is the stored length.
+  The index still holds the full 33-byte ID of each object: no byte of the
+  ID is dropped, only bytes that the page header or the fence already give.
 - A fence table: one 8-byte key for each page (digest bytes 0..8 of its
   first entry), and a tag table (first page and page count of each tag).
 - A blocked Bloom filter over the digests of all entries, 10 bits for each
@@ -677,6 +687,106 @@ Notes:
   not apply to the new index.
 - All numbers are for a warm page cache. For a cold page cache (Linux
   only), see "Index with a cold page cache".
+- The index size was made smaller after these runs: see "Index size".
+
+### Index size
+
+The run files of #85 used about 60 B for each object (58-byte entries with
+fixed-size fields, 70 for each page). Three ways to make them smaller were
+measured. The object ID stays the full 33-byte BLAKE3-256 ID in every
+content identity; option A shortens it only inside the local index.
+
+- A: keep only 16 digest bytes of the ID in the run entries, and confirm
+  a hit against the full ID (a read of the 33-byte ID at the start of the
+  record in the pack). On a mismatch, the search would go on.
+- B: per-page field widths. Each page holds the byte widths of its pack,
+  offset, stored and raw fields (the smallest width that holds each value
+  of the page; 0 to 8 bytes, so no pack number, offset or length has a
+  limit). The raw field takes no byte in a page where each raw length is
+  the stored length. The tag moves to the page header.
+- C: prefix compression in a page. The leading digest bytes that all keys
+  of a page share (at most 8) are not stored; they are the first bytes of
+  the page fence, which is in RAM and checked at open.
+
+Kept: B and C (run format version 2). A was measured with a throwaway
+spike only and is not kept (see below).
+
+Method: `benchmarks/index-bench` (`create`, then `lookup`), macOS on the
+host of "Index results (#85)", base commit `a9a51ce`, B and C at
+`6b51539`. Each variant had its own new store. The lookups ran 3 times
+for each variant, interleaved (base, B, B+C, A, then again), with a
+1-minute load average of 7 to 8; the table gives the median of the 3
+first-pass times (each lookup is a new process, so the first pass takes
+the page faults of the mapped runs). The objects are 8 bytes, so the
+stored lengths are 1 byte and the raw field is empty: the bench favours B.
+The unit test `a_run_of_real_places_needs_about_41_bytes_for_each_entry`
+(`run.rs`) gives the value for real places: 1,000 packs of 64 MiB, chunks
+of 2 to 32 KiB, half of them compressed.
+
+Disk (index bytes for each object; `index_bytes_per_object` of `create`):
+
+| Variant | 1M | 10M | Store B/object at 10M | Bytes for each entry in the pages (bench) | Real places (unit test, 200k entries) |
+|---|---|---|---|---|---|
+| #85 (base) | 47.1 | 59.6 | 163.6 | 58.5 | 58.5 |
+| B | 31.7 | 40.6 | 144.6 | about 39.5 | not measured |
+| B + C (kept) | 31.0 | 39.5 | 143.5 | about 38.5 | 42.4 (43.7 with filter and tables) |
+| A + B + C (spike) | 18.3 | 23.4 | 127.4 | about 22 | about 27 (estimate) |
+
+At 1M, about 213,000 entries are still in the memtable (above the
+high-water mark) and are not in the runs, so the 1M values are lower.
+
+Lookups (ns, median of 3 first passes; the second, warm pass gave the
+same order):
+
+| Variant | Objects | contains hit | contains miss | put dedup-hit |
+|---|---|---|---|---|
+| #85 (base) | 1M | 797 | 449 | 1,134 |
+| B | 1M | 731 | 446 | 1,131 |
+| B + C | 1M | 754 | 458 | 1,140 |
+| A + B + C | 1M | 2,080 | 459 | 2,566 |
+| #85 (base) | 10M | 1,295 | 496 | 1,358 |
+| B | 10M | 1,065 | 485 | 1,238 |
+| B + C | 10M | 1,153 | 497 | 1,299 |
+
+Create of 10M objects, base and B + C, twice each, interleaved (base, B +
+C, base, B + C; 1-minute load 5 to 8). The wall times vary much with the
+host load; the CPU time and the merge bytes compare better:
+
+| Variant | CPU s | Wall s | Merge bytes written |
+|---|---|---|---|
+| #85 (base) | 85.9, 69.3 | 174.2, 112.6 | 1,067 MB |
+| B + C | 73.0, 66.3 | 155.6, 68.7 | 706 MB |
+
+Results:
+
+- B + C: the index uses 20 B less for each object at 10M (39.5 against
+  59.6 B, -34 %); the store uses 143.5 B in place of 163.6 B (-12 %).
+  With real places, an entry needs about 42 B (58.5 B before). The
+  lookup times stay in the noise of the base: a hit reads one page as
+  before, and there is no extra read. B gives almost all of the gain; C
+  adds about 1 B for each entry (the pages of a run of 2 to 10M entries
+  share 1 to 2 leading bytes), at no measured cost. The merges write
+  34 % fewer bytes, and the create needs no more CPU time.
+- A gives 16 B more for each object (23.4 B at 10M), but:
+  - Each hit of `contains` and of the dedup check of `put` needs one more
+    read (the record ID in the pack) and the pack handle, which is taken
+    under the store lock: +1.3 µs for a hit at 1M (2,080 against 754 ns),
+    +1.4 µs for a dedup hit. (`read` checks the record ID already, so it
+    needs no extra read.)
+  - The merges and the GC need the full IDs of the run entries: the merge
+    must keep two objects with the same 16-byte prefix apart, and GC asks
+    the live set with the full ID of each entry (`Snapshot::iter_all`).
+    With prefixes only, each of these would need a read of the record or
+    of the `.idx` for every entry, or a GC by prefix, and a tombstone would
+    have to name the record it hides, not only its pack. The spike shows
+    the problem: its merges wrote zero-padded IDs into the Bloom filters,
+    so at 10M most hits were not found (its 10M lookups are not valid and
+    are not given).
+  - The change would reach `lib.rs` (GC, put, contains), not only the
+    index files.
+  Thus A is not kept. It can come back if the disk size of the index
+  becomes the limit; it then needs a filter on the prefix, tombstones
+  with the full place, and a GC that is correct with prefix matches.
 
 ### Idle merge (#111)
 

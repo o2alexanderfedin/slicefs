@@ -1561,7 +1561,7 @@ mod tests {
             for &b in &values {
                 let small = |v: u64| (v & 0xffff_ffff) as u32;
                 let loc = Loc { pack: a, offset: b.max(1), stored: small(b), raw: small(a), flags: (i % 2) as u8 };
-                let e = if i % 7 == 0 { Entry::Tomb(a) } else { Entry::Put(loc) };
+                let e = if i.is_multiple_of(7) { Entry::Tomb(a) } else { Entry::Put(loc) };
                 entries.push((hashed(3, i), e));
                 i += 1;
             }
