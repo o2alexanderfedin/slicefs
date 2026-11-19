@@ -11,6 +11,17 @@
 //! from the newest to the oldest. A put entry gives the place of the object;
 //! a tombstone says that GC removed it.
 //!
+//! Concurrency: the index is shared (`Arc<Index>`) by the store and by
+//! lookups that run outside the store lock. The memtable has [`SHARDS`]
+//! shards by digest prefix, each with its own lock; the run list is an
+//! `Arc` snapshot behind a read-write lock, so a lookup holds no lock while
+//! it reads a run page. Every change of the memtable, the runs and the
+//! MANIFEST happens under the store lock (lock order: the store lock, then
+//! one shard lock or the run-list lock; never the reverse, and a lookup
+//! never holds two of them). A generation counter ([`Index::gen`]) goes up
+//! at each run install and GC install, so that a caller can see under the
+//! store lock that the answer of a lookup outside it may be stale.
+//!
 //! Layout of the MANIFEST (integers are little-endian): magic `SFMF`,
 //! version u16, flags u32 (bit 0: rebuild the index from the packs at the
 //! next writable open; any other bit is damage), sequence u64, next run
@@ -26,7 +37,8 @@ use crate::run::{Entry, Run, RunWriter};
 use crate::{Error, Loc, ObjectId, Result};
 use std::collections::BTreeMap;
 use std::io;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 const MAGIC: &[u8; 4] = b"SFMF";
 /// Format version of the MANIFEST.
@@ -43,6 +55,12 @@ const COUNT: usize = 4;
 const CRC: usize = 4;
 /// Bloom filter bits per key of new runs, unless the store sets another.
 pub(crate) const DEFAULT_BLOOM_BITS: u8 = 10;
+/// Memtable shards (by the high 4 bits of digest byte 0).
+pub(crate) const SHARDS: usize = 16;
+
+fn shard_of(id: &ObjectId) -> usize {
+    (id.digest()[0] >> 4) as usize
+}
 
 /// A place in the packs: every record below it is in a durable run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -211,18 +229,55 @@ enum Damage {
 
 /// The index: the memtable, the open runs and the MANIFEST values.
 pub(crate) struct Index {
-    mem: BTreeMap<ObjectId, Entry>,
-    /// From the newest to the oldest, as in `man.runs`.
-    runs: Vec<Arc<Run>>,
-    man: Manifest,
+    shards: [Mutex<BTreeMap<ObjectId, Entry>>; SHARDS],
+    /// Entries in the shards (changed only under the store lock).
+    mem_len: AtomicUsize,
+    /// From the newest to the oldest, as in `man.runs`. A lookup clones the
+    /// `Arc` and reads pages with no lock held.
+    runs: RwLock<Arc<Vec<Arc<Run>>>>,
+    man: Mutex<Manifest>,
+    /// See [`Index::gen`].
+    gen: AtomicU64,
     /// Bloom filter bits per key of new runs (0: no filter).
     bloom_bits: u8,
 }
 
+/// A copy of the memtable and a snapshot of the runs, for a full pass.
+pub(crate) struct Snapshot {
+    mem: Vec<(ObjectId, Entry)>,
+    runs: Arc<Vec<Arc<Run>>>,
+}
+
+impl Snapshot {
+    /// Every current put entry in ID order: the memtable and the runs merged,
+    /// the newest entry of each ID wins, and tombstones hide. A run read
+    /// error ends the iteration with that error.
+    pub fn iter_all(&self) -> MergeIter<'_> {
+        let mut srcs: Vec<Source<'_>> = Vec::with_capacity(1 + self.runs.len());
+        srcs.push(Box::new(self.mem.iter().map(|(id, e)| Ok((*id, *e)))));
+        for r in self.runs.iter() {
+            srcs.push(Box::new(r.iter()));
+        }
+        let heads = vec![None; srcs.len()];
+        MergeIter { srcs, heads, started: false, done: false }
+    }
+}
+
 impl Index {
+    fn with(runs: Vec<Arc<Run>>, man: Manifest) -> Self {
+        Index {
+            shards: std::array::from_fn(|_| Mutex::new(BTreeMap::new())),
+            mem_len: AtomicUsize::new(0),
+            runs: RwLock::new(Arc::new(runs)),
+            man: Mutex::new(man),
+            gen: AtomicU64::new(0),
+            bloom_bits: DEFAULT_BLOOM_BITS,
+        }
+    }
+
     /// An index with nothing in it (a store with no files).
     pub fn empty() -> Self {
-        Index { mem: BTreeMap::new(), runs: Vec::new(), man: Manifest::empty(), bloom_bits: DEFAULT_BLOOM_BITS }
+        Self::with(Vec::new(), Manifest::empty())
     }
 
     /// Open the index of a store: read the MANIFEST (absent: an empty
@@ -298,27 +353,28 @@ impl Index {
             }
             runs.push(Arc::new(run));
         }
-        Ok(Ok(Index { mem: BTreeMap::new(), runs, man, bloom_bits: DEFAULT_BLOOM_BITS }))
+        Ok(Ok(Index::with(runs, man)))
     }
 
     /// The last steps of a good open: the rebuild flag, and for a writable
     /// open the removal of runs that the MANIFEST does not use.
     fn opened(io: &dyn PackIo, read_only: bool, mut ix: Index) -> Result<Index> {
-        if ix.man.flags & FLAG_REBUILD != 0 {
+        if ix.rebuild_requested() {
             return Self::rebuild(io, read_only, "a rebuild of the index was requested");
         }
         if read_only {
             return Ok(ix);
         }
         let on_disk = io.list_runs()?;
+        let man = ix.man.get_mut().unwrap();
         // A run file that a failed flush left behind must not block the next
         // flush with the same number (also if its removal below fails).
         if let Some(max) = on_disk.iter().max() {
-            ix.man.next_run = ix.man.next_run.max(max.saturating_add(1));
+            man.next_run = man.next_run.max(max.saturating_add(1));
         }
-        let live: Vec<u64> = ix.man.runs.iter().map(|r| r.num).collect();
-        let mut gone = ix.man.obsolete.clone();
-        gone.extend(on_disk.into_iter().filter(|n| !live.contains(n) && !ix.man.obsolete.contains(n)));
+        let live: Vec<u64> = man.runs.iter().map(|r| r.num).collect();
+        let mut gone = man.obsolete.clone();
+        gone.extend(on_disk.into_iter().filter(|n| !live.contains(n) && !man.obsolete.contains(n)));
         let mut removed = false;
         for num in gone {
             match io.remove(num, Kind::Run) {
@@ -347,7 +403,7 @@ impl Index {
         tracing::warn!("chunk store: the index cannot be used ({reason}); it is rebuilt from the packs");
         let on_disk = io.list_runs()?;
         let mut ix = Index::empty();
-        ix.man.next_run = on_disk.iter().max().map_or(1, |m| m.saturating_add(1));
+        ix.man.get_mut().unwrap().next_run = on_disk.iter().max().map_or(1, |m| m.saturating_add(1));
         match io.remove(0, Kind::Manifest) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
             _ => {}
@@ -366,12 +422,19 @@ impl Index {
     /// Set the rebuild flag in a durable MANIFEST (the same runs, hwm and
     /// counts): the next writable open rebuilds the index from the packs.
     /// The flag stays in RAM too, so a later flush keeps it. Reads no run.
-    pub fn request_rebuild(&mut self, io: &dyn PackIo, reason: &str) -> Result<()> {
+    /// The caller holds the store lock.
+    pub fn request_rebuild(&self, io: &dyn PackIo, reason: &str) -> Result<()> {
         tracing::error!("chunk store: index damage ({reason}); the index is rebuilt from the packs at the next writable open");
-        self.man.flags |= FLAG_REBUILD;
-        self.man.seq += 1;
-        io.write_durable(0, Kind::Manifest, &self.man.encode())?;
+        let mut man = self.man.lock().unwrap();
+        man.flags |= FLAG_REBUILD;
+        man.seq += 1;
+        io.write_durable(0, Kind::Manifest, &man.encode())?;
         Ok(())
+    }
+
+    /// True if the MANIFEST asks for a rebuild at the next writable open.
+    pub fn rebuild_requested(&self) -> bool {
+        self.man.lock().unwrap().flags & FLAG_REBUILD != 0
     }
 
     /// Bloom filter bits per key of the runs that this index writes from
@@ -381,31 +444,62 @@ impl Index {
     }
 
     pub fn hwm(&self) -> Hwm {
-        self.man.hwm
+        self.man.lock().unwrap().hwm
     }
 
     /// The counts as of the last flush.
     pub fn counts(&self) -> Counts {
-        self.man.counts
+        self.man.lock().unwrap().counts
     }
 
     pub fn mem_len(&self) -> usize {
-        self.mem.len()
+        self.mem_len.load(Ordering::SeqCst)
     }
 
-    pub fn runs(&self) -> &[Arc<Run>] {
-        &self.runs
+    /// The live runs now, from the newest to the oldest.
+    pub fn runs(&self) -> Arc<Vec<Arc<Run>>> {
+        Arc::clone(&self.runs.read().unwrap())
+    }
+
+    /// The generation: it goes up, under the store lock, after each run
+    /// install (a flush; a merge in 17-06) and after each GC install (the
+    /// tombstones and new places of a GC are durable, before any pack
+    /// changes). A caller reads it before a lookup outside the store lock;
+    /// if it is the same under the lock, and the memtable has no entry of
+    /// the ID, the answer of the lookup is still the current one: every
+    /// other change of an entry is a memtable insert under the store lock.
+    pub fn gen(&self) -> u64 {
+        self.gen.load(Ordering::SeqCst)
+    }
+
+    /// See [`Index::gen`]. The caller holds the store lock.
+    pub fn bump_gen(&self) {
+        self.gen.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn shard(&self, id: &ObjectId) -> &Mutex<BTreeMap<ObjectId, Entry>> {
+        &self.shards[shard_of(id)]
+    }
+
+    /// True if the memtable has an entry (put or tombstone) of `id`.
+    pub fn mem_has(&self, id: &ObjectId) -> bool {
+        self.shard(id).lock().unwrap().contains_key(id)
     }
 
     /// The current place of `id`: the newest entry decides (a tombstone
     /// gives `None`). A run read error is returned at once: the search never
     /// goes on to an older run, whose put entry could be one that a
     /// tombstone in the unread page hides.
+    ///
+    /// Safe outside the store lock: the shard first, then a snapshot of the
+    /// runs. A flush installs its run before it clears the shards, so an
+    /// entry that moves from the memtable to a run is seen in one of them.
     pub fn get(&self, id: &ObjectId) -> Result<Option<Loc>> {
-        if let Some(e) = self.mem.get(id) {
-            return Ok(put_loc(*e));
+        let e = self.shard(id).lock().unwrap().get(id).copied();
+        if let Some(e) = e {
+            return Ok(put_loc(e));
         }
-        for r in &self.runs {
+        for r in self.runs().iter() {
             if let Some(e) = r.get(id)? {
                 return Ok(put_loc(e));
             }
@@ -416,10 +510,11 @@ impl Index {
     /// [`Index::get`] through the verified page reads of the runs (every
     /// page CRC checked): damage is always `Corrupt`.
     pub fn get_verified(&self, id: &ObjectId) -> Result<Option<Loc>> {
-        if let Some(e) = self.mem.get(id) {
-            return Ok(put_loc(*e));
+        let e = self.shard(id).lock().unwrap().get(id).copied();
+        if let Some(e) = e {
+            return Ok(put_loc(e));
         }
-        for r in &self.runs {
+        for r in self.runs().iter() {
             if let Some(e) = r.get_verified(id)? {
                 return Ok(put_loc(e));
             }
@@ -427,95 +522,119 @@ impl Index {
         Ok(None)
     }
 
-    /// True if the MANIFEST asks for a rebuild at the next writable open.
-    pub fn rebuild_requested(&self) -> bool {
-        self.man.flags & FLAG_REBUILD != 0
+    /// Put `id` at `loc` in the memtable (no I/O). The caller holds the
+    /// store lock.
+    pub fn insert(&self, id: ObjectId, loc: Loc) {
+        self.set(id, Entry::Put(loc));
     }
 
-    /// Put `id` at `loc` in the memtable (no I/O).
-    pub fn insert(&mut self, id: ObjectId, loc: Loc) {
-        self.mem.insert(id, Entry::Put(loc));
+    fn set(&self, id: ObjectId, e: Entry) {
+        if self.shard(&id).lock().unwrap().insert(id, e).is_none() {
+            self.mem_len.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     /// Record that GC removed the entry of `id` in `pack` (no I/O). The
-    /// caller has proved, with a complete read of the index under the same
-    /// lock, that this entry is the current one. A put of `id` in another
-    /// pack in the memtable is a newer copy and stays.
+    /// caller holds the store lock, and has proved, with a complete read of
+    /// the index under it, that this entry is the current one. A put of `id`
+    /// in another pack in the memtable is a newer copy and stays.
     ///
     /// Lookups and merges take the newest entry of an ID, so the tombstone
     /// hides exactly the entry it was written for, and no older entry of
     /// the same ID can come back.
-    pub fn tombstone(&mut self, id: ObjectId, pack: u64) {
-        if matches!(self.mem.get(&id), Some(Entry::Put(l)) if l.pack != pack) {
-            return;
+    pub fn tombstone(&self, id: ObjectId, pack: u64) {
+        let newer = matches!(self.shard(&id).lock().unwrap().get(&id), Some(Entry::Put(l)) if l.pack != pack);
+        if !newer {
+            self.set(id, Entry::Tomb(pack));
         }
-        self.mem.insert(id, Entry::Tomb(pack));
+    }
+
+    /// The memtable entries in ID order (a copy). The shards split by
+    /// digest, but IDs sort by tag first, so the copy is sorted as a whole.
+    fn sorted_mem(&self) -> Vec<(ObjectId, Entry)> {
+        let mut v = Vec::with_capacity(self.mem_len());
+        for s in &self.shards {
+            v.extend(s.lock().unwrap().iter().map(|(id, e)| (*id, *e)));
+        }
+        v.sort_unstable_by_key(|(id, _)| *id);
+        v
+    }
+
+    /// A copy of the memtable and a snapshot of the runs. The caller holds
+    /// the store lock, so the two agree.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot { mem: self.sorted_mem(), runs: self.runs() }
     }
 
     /// Write the memtable to a new run and commit it with a new MANIFEST
     /// (the hwm `hwm`, the counts `counts`). Nothing to do if the memtable is
-    /// empty. The caller has synced every pack record that the memtable
-    /// points to: a run never points to bytes that are not durable.
+    /// empty. The caller holds the store lock, and has synced every pack
+    /// record that the memtable points to: a run never points to bytes that
+    /// are not durable.
+    ///
+    /// The entries stay visible to lookups outside the store lock: the new
+    /// run goes into the run list first, then the shards are cleared, then
+    /// the generation goes up.
     ///
     /// On an error the memtable and the old MANIFEST values stay. A partial
     /// run file from before the MANIFEST write is removed (best effort).
     /// After a failed MANIFEST write the run file stays: the write may still
     /// be durable, and then the MANIFEST lists that run.
-    pub fn flush(&mut self, io: &dyn PackIo, hwm: Hwm, counts: Counts) -> Result<()> {
-        if self.mem.is_empty() {
+    pub fn flush(&self, io: &dyn PackIo, hwm: Hwm, counts: Counts) -> Result<()> {
+        if self.mem_len() == 0 {
             return Ok(());
         }
-        let num = self.man.next_run;
-        let run = match self.write_run(io, num) {
+        let entries = self.sorted_mem();
+        let mut man = self.man.lock().unwrap();
+        let num = man.next_run;
+        let run = match Self::write_run(io, num, &entries, self.bloom_bits) {
             Ok(r) => r,
             Err(e) => {
                 let _ = io.remove(num, Kind::Run);
                 return Err(e);
             }
         };
-        let mut man = self.man.clone();
-        man.seq += 1;
-        man.next_run = num + 1;
-        man.hwm = hwm;
-        man.counts = counts;
-        man.runs.insert(0, RunMeta { num, len: run.len(), entries: run.entries() });
-        man.obsolete.clear();
-        io.write_durable(0, Kind::Manifest, &man.encode())?;
-        self.man = man;
-        self.runs.insert(0, Arc::new(run));
-        self.mem.clear();
+        let mut new = man.clone();
+        new.seq += 1;
+        new.next_run = num + 1;
+        new.hwm = hwm;
+        new.counts = counts;
+        new.runs.insert(0, RunMeta { num, len: run.len(), entries: run.entries() });
+        new.obsolete.clear();
+        io.write_durable(0, Kind::Manifest, &new.encode())?;
+        *man = new;
+        drop(man);
+        {
+            let mut runs = self.runs.write().unwrap();
+            let mut v = Vec::with_capacity(runs.len() + 1);
+            v.push(Arc::new(run));
+            v.extend(runs.iter().cloned());
+            *runs = Arc::new(v);
+        }
+        for s in &self.shards {
+            s.lock().unwrap().clear();
+        }
+        self.mem_len.store(0, Ordering::SeqCst);
+        self.bump_gen();
         Ok(())
     }
 
-    /// Write the memtable to run `num`, make its name durable, and open it.
+    /// Write `entries` to run `num`, make its name durable, and open it.
     /// Every step that can fail comes before the MANIFEST write.
-    fn write_run(&self, io: &dyn PackIo, num: u64) -> Result<Run> {
-        let mut w = RunWriter::create(io, num, self.mem.len() as u64, self.bloom_bits)?;
-        for (id, e) in &self.mem {
+    fn write_run(io: &dyn PackIo, num: u64, entries: &[(ObjectId, Entry)], bloom_bits: u8) -> Result<Run> {
+        let mut w = RunWriter::create(io, num, entries.len() as u64, bloom_bits)?;
+        for (id, e) in entries {
             w.push(id, e)?;
         }
         let info = w.finish()?;
         io.sync_dir()?;
         Run::open(io.open_run(num)?, io.map_run(num)?, num, info.len)
     }
-
-    /// Every current put entry in ID order: the memtable and the runs merged,
-    /// the newest entry of each ID wins, and tombstones hide. A run read
-    /// error ends the iteration with that error.
-    pub fn iter_all(&self) -> MergeIter<'_> {
-        let mut srcs: Vec<Source<'_>> = Vec::with_capacity(1 + self.runs.len());
-        srcs.push(Box::new(self.mem.iter().map(|(id, e)| Ok((*id, *e)))));
-        for r in &self.runs {
-            srcs.push(Box::new(r.iter()));
-        }
-        let heads = vec![None; srcs.len()];
-        MergeIter { srcs, heads, started: false, done: false }
-    }
 }
 
 type Source<'a> = Box<dyn Iterator<Item = Result<(ObjectId, Entry)>> + 'a>;
 
-/// See [`Index::iter_all`]. The sources are in order from the newest (the
+/// See [`Snapshot::iter_all`]. The sources are in order from the newest (the
 /// memtable) to the oldest run.
 pub(crate) struct MergeIter<'a> {
     srcs: Vec<Source<'a>>,
@@ -633,7 +752,7 @@ mod tests {
     #[test]
     fn the_newest_entry_wins_in_get_and_iter_all() {
         let mem = MemIo::new();
-        let mut ix = Index::empty();
+        let ix = Index::empty();
         let c = Counts::default();
         // Run 1: ids 0..10 in pack 1.
         for i in 0..10 {
@@ -660,7 +779,7 @@ mod tests {
         assert_eq!(ix.get(&id(20)).unwrap(), Some(loc(2, 50)));
         assert_eq!(ix.get(&id(99)).unwrap(), None);
 
-        let all: Vec<(ObjectId, Loc)> = ix.iter_all().map(|r| r.unwrap()).collect();
+        let all: Vec<(ObjectId, Loc)> = ix.snapshot().iter_all().map(|r| r.unwrap()).collect();
         let mut want: Vec<(ObjectId, Loc)> = (0..10).filter(|i| ![3, 4, 5, 6].contains(i)).map(|i| (id(i), loc(1, 100 + i))).collect();
         want.extend([(id(3), loc(2, 14)), (id(6), loc(3, 14)), (id(20), loc(2, 50))]);
         want.sort_by_key(|(i, _)| *i);
@@ -677,7 +796,7 @@ mod tests {
     #[test]
     fn a_read_error_ends_get_and_iter_all_with_the_error() {
         let mem = MemIo::new();
-        let mut ix = Index::empty();
+        let ix = Index::empty();
         for i in 0..200 {
             ix.insert(id(i), loc(1, 100 + i));
         }
@@ -688,12 +807,12 @@ mod tests {
         // id 7: the newest run would say "removed"; the error must not turn
         // into the older run's put entry or into "not found".
         assert!(ix.get(&id(7)).is_err());
-        let items: Vec<_> = ix.iter_all().collect();
+        let items: Vec<_> = ix.snapshot().iter_all().collect();
         assert_eq!(items.len(), 1);
         assert!(items[0].is_err());
         mem.set_fail_reads(false);
         mem.fail_reads_after(2);
-        let r: Result<Vec<_>> = ix.iter_all().collect();
+        let r: Result<Vec<_>> = ix.snapshot().iter_all().collect();
         mem.clear_fail_reads_after();
         assert!(r.is_err(), "an error after some pages ends the iteration with the error");
     }
@@ -701,7 +820,7 @@ mod tests {
     #[test]
     fn the_obsolete_runs_of_the_manifest_are_removed_at_open() {
         let mem = MemIo::new();
-        let mut ix = Index::empty();
+        let ix = Index::empty();
         for n in 0..3 {
             ix.insert(id(n), loc(1, 100 + n));
             ix.flush(&mem, Hwm { pack: 1, offset: 200 + n }, Counts::default()).unwrap();
@@ -728,7 +847,7 @@ mod tests {
     #[test]
     fn a_failed_flush_keeps_the_memtable_and_the_old_manifest() {
         let mem = MemIo::new();
-        let mut ix = Index::empty();
+        let ix = Index::empty();
         ix.insert(id(1), loc(1, 14));
         ix.flush(&mem, Hwm { pack: 1, offset: 100 }, Counts::default()).unwrap();
         let before = mem.read(0, Kind::Manifest).unwrap();

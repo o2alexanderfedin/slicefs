@@ -994,3 +994,138 @@ fn a_hit_on_files_reads_the_run_page_in_place() {
     let n = reads.load(AtomicOrdering::SeqCst);
     assert!((100..=100 + 100 * 6 * 3 / 100).contains(&n), "MemIo: {n} page reads for 100 hits");
 }
+
+/// 6,000 small objects with a memtable limit of 500 (12 runs) in 64 KiB
+/// packs, closed, and the IDs.
+fn twelve_runs(mem: &MemIo) -> (Options, Vec<ObjectId>) {
+    let o = opts(500, 64 << 10);
+    let s = open(mem, &o);
+    let ids: Vec<ObjectId> = (0..6000).map(|i| s.put(&small(i)).unwrap()).collect();
+    s.close().unwrap();
+    let info = s.index_info();
+    assert_eq!((info.runs, info.memtable_entries), (12, 0), "{info:?}");
+    (o, ids)
+}
+
+// IDX-01: a hit reads one run page (a filter false positive of a newer run
+// adds about 1 % per run), a miss almost none.
+#[test]
+fn hits_read_one_page_and_misses_read_almost_none() {
+    let mem = MemIo::new();
+    let (o, ids) = twelve_runs(&mem);
+    let s = open(&mem, &o);
+    let runs = s.index_info().runs;
+    assert_eq!(s.index_info().memtable_entries, 0, "every lookup goes to the runs");
+    let fp_bound = 1000 * runs * 3 / 100;
+    mem.reset_read_counters();
+    for id in ids.iter().step_by(6) {
+        assert!(s.contains(id));
+    }
+    let hits = mem.reads(Kind::Run);
+    assert!((1000..=1000 + fp_bound).contains(&hits), "{hits} run page reads for 1,000 hits ({runs} runs)");
+    mem.reset_read_counters();
+    for i in 6000..7000 {
+        assert!(!s.contains(&Blake3_256.id(&small(i))));
+    }
+    let misses = mem.reads(Kind::Run);
+    assert!(misses <= fp_bound, "{misses} run page reads for 1,000 misses ({runs} runs)");
+    assert_eq!(mem.bytes_read(Kind::Run), misses * 4096, "a lookup reads whole pages only");
+}
+
+// IDX-02: a cold open reads the MANIFEST, the run footers, tables and
+// filters, and the `.idx` of the packs at or above the hwm; no entry page
+// and no `.idx` of a pack below the hwm.
+#[test]
+fn a_cold_open_reads_no_entry_page() {
+    let mem = MemIo::new();
+    let (o, _) = twelve_runs(&mem);
+    mem.reset_read_counters();
+    let s = open(&mem, &o);
+    let info = s.index_info();
+    let packs = mem.list().unwrap();
+    assert!(packs.len() >= 4, "{packs:?}");
+    let entry_bytes = info.run_entries * 58;
+    let run_bytes = mem.bytes_read(Kind::Run);
+    assert!(run_bytes * 20 < entry_bytes, "{run_bytes} bytes read of runs with {entry_bytes} entry bytes");
+    assert!(run_bytes >= info.filter_bytes + info.fence_bytes, "{run_bytes} < filters and fences {info:?}");
+    let above = packs.iter().filter(|&&n| n >= info.hwm_pack).count() as u64;
+    assert_eq!(mem.reads(Kind::Idx), above, "only the .idx of the packs at or above the hwm {info:?}");
+    assert!(above < packs.len() as u64, "some packs are below the hwm");
+    assert_eq!(mem.reads(Kind::Manifest), 1);
+}
+
+// The RAM of the index: Bloom filters (about 1.25 B per object at 10 bits
+// per key) and fence tables (8 bytes per 70 entries), at most 2 B per
+// object. This is anonymous memory of the process. The run pages that
+// lookups read are file-backed (mapped page cache pages on files) and are
+// not counted here.
+#[test]
+fn the_index_ram_is_about_two_bytes_per_object() {
+    let mem = MemIo::new();
+    let (o, _) = twelve_runs(&mem);
+    let s = open(&mem, &o);
+    let info = s.index_info();
+    let per_object = (info.filter_bytes + info.fence_bytes) as f64 / info.run_entries as f64;
+    assert!(per_object <= 2.0, "{per_object} B per object: {info:?}");
+    assert!(info.filter_bytes > 0 && info.fence_bytes > 0);
+}
+
+// Lookups run outside the store lock while other threads put and flush:
+// once a put of an object has returned, every later lookup finds it, also
+// while a flush moves it from the memtable to a run.
+#[test]
+fn lookups_outside_the_lock_never_miss_a_stored_object() {
+    let mem = MemIo::new();
+    let s = Arc::new(open(&mem, &opts(50, 64 << 10)));
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Objects 0..k are stored: k only goes up after the put returned.
+    let stored = Arc::new(AtomicU64::new(0));
+    let readers: Vec<_> = (0..3)
+        .map(|t| {
+            let (s, done, stored) = (Arc::clone(&s), Arc::clone(&done), Arc::clone(&stored));
+            std::thread::spawn(move || {
+                let mut checks = 0u64;
+                let mut x = 0x9E37_79B9_7F4A_7C15u64 ^ t;
+                while !done.load(AtomicOrdering::SeqCst) {
+                    let k = stored.load(AtomicOrdering::SeqCst);
+                    if k == 0 {
+                        continue;
+                    }
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    let i = x % k;
+                    assert!(s.contains(&Blake3_256.id(&small(i))), "object {i} of {k}");
+                    checks += 1;
+                }
+                checks
+            })
+        })
+        .collect();
+    let writers: Vec<_> = (0..2)
+        .map(|_| {
+            let s = Arc::clone(&s);
+            std::thread::spawn(move || {
+                for i in 0..3000 {
+                    s.put(&small(i)).unwrap();
+                }
+            })
+        })
+        .collect();
+    // A third writer that publishes what is stored.
+    for i in 0..3000 {
+        s.put(&small(i)).unwrap();
+        stored.store(i + 1, AtomicOrdering::SeqCst);
+    }
+    for w in writers {
+        w.join().unwrap();
+    }
+    done.store(true, AtomicOrdering::SeqCst);
+    let checks: u64 = readers.into_iter().map(|r| r.join().unwrap()).sum();
+    assert!(checks > 1000, "{checks} lookups");
+    assert!(s.index_info().runs >= 50, "{:?}", s.index_info());
+    assert_eq!(s.stats().objects, 3000);
+    for i in 0..3000 {
+        assert_eq!(s.get(&Blake3_256.id(&small(i))), Some(small(i)), "object {i}");
+    }
+}

@@ -50,6 +50,9 @@ struct State {
     fail_removes: bool,
     fail_punch: bool,
     no_punch: bool,
+    /// Per kind: reads made (whole-file reads and `read_at` calls), and
+    /// their bytes.
+    reads: HashMap<Kind, (u64, u64)>,
 }
 
 impl State {
@@ -96,6 +99,12 @@ impl State {
             *n -= 1;
         }
         false
+    }
+
+    fn count_read(&mut self, kind: Kind, bytes: usize) {
+        let r = self.reads.entry(kind).or_default();
+        r.0 += 1;
+        r.1 += bytes as u64;
     }
 
     fn grow(&mut self, by: u64) -> io::Result<()> {
@@ -198,6 +207,23 @@ impl MemIo {
         }
     }
 
+    /// Reads of files of `kind` that worked since the last
+    /// `reset_read_counters`: whole-file reads plus `read_at` calls on
+    /// handles (for runs: one per page that a lookup reads).
+    pub fn reads(&self, kind: Kind) -> u64 {
+        self.s.lock().unwrap().reads.get(&kind).map_or(0, |r| r.0)
+    }
+
+    /// Bytes of the reads that `reads` counts.
+    pub fn bytes_read(&self, kind: Kind) -> u64 {
+        self.s.lock().unwrap().reads.get(&kind).map_or(0, |r| r.1)
+    }
+
+    /// Set `reads` and `bytes_read` of every kind to zero.
+    pub fn reset_read_counters(&self) {
+        self.s.lock().unwrap().reads.clear();
+    }
+
     /// Pack handles that are open now (the file descriptors a real store
     /// would hold).
     pub fn open_handles(&self) -> usize {
@@ -224,7 +250,7 @@ impl MemIo {
     fn handle(&self, num: u64, kind: Kind) -> io::Result<MemPack> {
         let f = self.s.lock().unwrap().files.get(&(num, kind)).cloned().ok_or_else(not_found)?;
         self.open.fetch_add(1, Ordering::SeqCst);
-        Ok(MemPack { s: Arc::clone(&self.s), f, open: Arc::clone(&self.open) })
+        Ok(MemPack { s: Arc::clone(&self.s), f, kind, open: Arc::clone(&self.open) })
     }
 
     /// A new, empty file that must not exist, and a handle to it. Its name
@@ -251,6 +277,7 @@ fn eio() -> io::Error {
 struct MemPack {
     s: Arc<Mutex<State>>,
     f: Arc<Mutex<MemFile>>,
+    kind: Kind,
     open: Arc<AtomicUsize>,
 }
 
@@ -271,6 +298,7 @@ impl PackRead for MemPack {
         let end = start.checked_add(buf.len()).filter(|&e| e <= f.data.len());
         let end = end.ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
         buf.copy_from_slice(&f.data[start..end]);
+        s.count_read(self.kind, buf.len());
         Ok(())
     }
 }
@@ -340,7 +368,9 @@ impl PackIo for MemIo {
         if s.read_fails() {
             return Err(eio());
         }
-        s.files.get(&(num, kind)).map(|f| f.lock().unwrap().data.clone()).ok_or_else(not_found)
+        let data = s.files.get(&(num, kind)).map(|f| f.lock().unwrap().data.clone()).ok_or_else(not_found)?;
+        s.count_read(kind, data.len());
+        Ok(data)
     }
 
     fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> io::Result<()> {

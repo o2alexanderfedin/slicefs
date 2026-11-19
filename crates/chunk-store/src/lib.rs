@@ -26,6 +26,8 @@ pub mod file;
 pub mod hash;
 mod index;
 pub mod pack_io;
+#[cfg(test)]
+mod race_tests;
 pub mod retry;
 mod run;
 pub mod mem;
@@ -440,9 +442,10 @@ struct Active {
 }
 
 struct Inner {
-    /// The memtable and the run files. Every access is under the store lock
-    /// in this version.
-    index: Index,
+    /// The memtable and the run files: the same index as
+    /// `ChunkStore::index`. Changes happen under the store lock; lookups
+    /// also run outside it (see `index.rs`).
+    index: Arc<Index>,
     /// Open packs for reads, with the tick of their last use (LRU, at most
     /// `MAX_OPEN_PACKS`).
     readers: HashMap<u64, (Arc<dyn PackRead>, u64)>,
@@ -484,10 +487,51 @@ pub struct ChunkStore {
     /// zstd level for new objects (0 = none); starts as `opts.zstd_level`.
     zstd_level: AtomicI32,
     opts: Options,
+    /// The index, for lookups outside the store lock (also in `Inner`).
+    index: Arc<Index>,
     inner: Mutex<Inner>,
+    /// Test hook: `put` and `read` take it and call it once, right after
+    /// their lookup outside the store lock and before they take the lock
+    /// (see `race_tests.rs`).
+    #[cfg(test)]
+    after_lookup: Mutex<Option<LookupHook>>,
 }
 
+/// See `ChunkStore::after_lookup`.
+#[cfg(test)]
+type LookupHook = Box<dyn FnMut(&ChunkStore) + Send>;
+
 impl ChunkStore {
+    fn new(io: Arc<dyn PackIo>, punches: bool, opts: Options, inner: Inner) -> Self {
+        ChunkStore {
+            io,
+            punches,
+            zstd_level: AtomicI32::new(opts.zstd_level),
+            opts,
+            index: Arc::clone(&inner.index),
+            inner: Mutex::new(inner),
+            #[cfg(test)]
+            after_lookup: Mutex::new(None),
+        }
+    }
+
+    /// The test hook (see `after_lookup`); nothing outside tests.
+    fn after_lookup(&self) {
+        #[cfg(test)]
+        {
+            let hook = self.after_lookup.lock().unwrap().take();
+            if let Some(mut f) = hook {
+                f(self);
+            }
+        }
+    }
+
+    /// True if the answer of a lookup of `id` made when the generation was
+    /// `gen` is still the current one (see `Index::gen`). The caller holds
+    /// the store lock.
+    fn unchanged(&self, gen: u64, id: &ObjectId) -> bool {
+        self.index.gen() == gen && !self.index.mem_has(id)
+    }
     /// Open (or create) the store in `dir`. Packs without a valid index are
     /// scanned; the newest unsealed pack becomes the active pack, cut after
     /// its last valid record.
@@ -512,8 +556,7 @@ impl ChunkStore {
     /// in RAM.
     pub fn open_with(io: Arc<dyn PackIo>, opts: Options) -> Result<Self> {
         if !io.prepare(opts.read_only)? {
-            let zstd_level = AtomicI32::new(opts.zstd_level);
-            return Ok(ChunkStore { io, punches: false, zstd_level, opts, inner: Mutex::new(Inner::empty()) });
+            return Ok(ChunkStore::new(io, false, opts, Inner::empty()));
         }
         let index = Index::open(&*io, opts.read_only)?;
         let inner = match Self::load(&*io, &opts, index, None)? {
@@ -528,8 +571,7 @@ impl ChunkStore {
             }
         };
         let punches = !opts.read_only && io.can_punch();
-        let zstd_level = AtomicI32::new(opts.zstd_level);
-        Ok(ChunkStore { io, punches, zstd_level, opts, inner: Mutex::new(inner) })
+        Ok(ChunkStore::new(io, punches, opts, inner))
     }
 
     /// The pack part of `open_with` on the index `index`. `resync` is a pack
@@ -558,7 +600,7 @@ impl ChunkStore {
         }
 
         let mut inner = Inner {
-            index,
+            index: Arc::new(index),
             readers: HashMap::new(),
             tick: 0,
             active: None,
@@ -661,20 +703,31 @@ impl ChunkStore {
     /// damaged page. The stats then count the object as new, so they can
     /// count it twice until the index is rebuilt (see
     /// [`ChunkStore::request_index_rebuild`]).
+    ///
+    /// The dedup lookup (with its run page read) runs outside the store
+    /// lock. A GC can run between that lookup and the lock: a hit can then
+    /// be an object that the GC removed, and a write skipped on it would
+    /// lose the object. So under the lock the answer is used only if the
+    /// index generation is the same and the memtable has no entry of the
+    /// ID (see `Index::gen`); else the lookup runs again under the lock.
     pub fn put(&self, data: &[u8]) -> Result<ObjectId> {
         if self.opts.read_only {
             return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
         }
         let id = self.opts.hasher.id(data);
-        // A failed index read counts as "not found" in both checks: the
+        // A failed index read counts as "not found" in every check: the
         // object is written again, and its new memtable entry hides the run
         // that could not be read. Its stats then count it as new.
-        {
+        let gen = self.index.gen();
+        let found = matches!(self.index.get(&id), Ok(Some(_)));
+        self.after_lookup();
+        if found {
             let mut inner = self.inner.lock().unwrap();
-            if matches!(inner.index.get(&id), Ok(Some(_))) {
-                inner.touch(id);
+            inner.touch(id);
+            if self.unchanged(gen, &id) || matches!(inner.index.get(&id), Ok(Some(_))) {
                 return Ok(id);
             }
+            // GC removed the object after the lookup: write it again.
         }
         if data.len() > u32::MAX as usize - REC_HEADER {
             return Err(Error::TooLarge(data.len()));
@@ -691,7 +744,9 @@ impl ChunkStore {
             let r = (|| {
                 let mut inner = self.inner.lock().unwrap();
                 inner.touch(id);
-                if matches!(inner.index.get(&id), Ok(Some(_))) {
+                // Another put of the same bytes, or a flush, merge or GC,
+                // since the lookup: look up again.
+                if !self.unchanged(gen, &id) && matches!(inner.index.get(&id), Ok(Some(_))) {
                     return Ok(id);
                 }
                 inner.check()?;
@@ -782,7 +837,8 @@ impl ChunkStore {
         // (A) The current entries of each pack, from one complete pass. An
         // error returns before any change (the store is not failed).
         let mut by_pack: HashMap<u64, Vec<(ObjectId, Loc)>> = HashMap::new();
-        for item in inner.index.iter_all() {
+        let snap = inner.index.snapshot();
+        for item in snap.iter_all() {
             let (id, l) = item?;
             if l.pack <= boundary && Some(l.pack) != active {
                 by_pack.entry(l.pack).or_default().push((id, l));
@@ -862,6 +918,9 @@ impl ChunkStore {
         inner.sync_active()?;
         inner.sync_dir(&*self.io)?;
         inner.flush_index(&*self.io)?;
+        // The GC install: a lookup made outside the store lock before it
+        // must be checked again (see `Index::gen`).
+        inner.index.bump_gen();
 
         // (E) Only now change the packs.
         for p in punches {
@@ -975,12 +1034,22 @@ impl ChunkStore {
     /// Errors: `Missing`, `Corrupt` (a damaged record, or a damaged index
     /// entry), `UnknownHash` (a tag this build does not know: a damaged or
     /// newer store), `Io`.
+    ///
+    /// The lookup (with its run page read) runs outside the store lock.
+    /// Under the lock, the place is used only if the index generation is
+    /// the same and the memtable has no entry of the ID; else it is looked
+    /// up again (a GC may have moved the object and deleted its old pack).
+    /// The pack handle is taken under the lock, so the pack is still there.
     pub fn read(&self, id: &ObjectId) -> Result<Vec<u8>> {
         let hasher = hasher_by_tag(id.tag()).ok_or(Error::UnknownHash(*id))?;
+        let gen = self.index.gen();
+        // An index read error is returned, never taken as "missing".
+        let looked = self.index.get(id);
+        self.after_lookup();
+        let loc = looked?.ok_or(Error::Missing(*id))?;
         let (loc, file) = {
             let mut inner = self.inner.lock().unwrap();
-            // An index read error is returned, never taken as "missing".
-            let loc = inner.index.get(id)?.ok_or(Error::Missing(*id))?;
+            let loc = if self.unchanged(gen, id) { loc } else { inner.index.get(id)?.ok_or(Error::Missing(*id))? };
             inner.touch(*id);
             match inner.reader(&*self.io, loc.pack) {
                 Ok(file) => (loc, file),
@@ -1031,7 +1100,7 @@ impl ChunkStore {
         if !suspect {
             return err;
         }
-        let mut inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap();
         match inner.index.get_verified(id) {
             Err(Error::Corrupt(m)) => {
                 if !self.opts.read_only && !inner.index.rebuild_requested() {
@@ -1051,29 +1120,31 @@ impl ChunkStore {
     }
 
     /// True if the store has `id` (false also if the index cannot be read).
+    /// A point-in-time answer: the lookup runs outside the store lock.
     pub fn contains(&self, id: &ObjectId) -> bool {
-        matches!(self.inner.lock().unwrap().index.get(id), Ok(Some(_)))
+        matches!(self.index.get(id), Ok(Some(_)))
     }
 
     /// Stored (possibly compressed) payload length of `id` (`None` also if
-    /// the index cannot be read).
+    /// the index cannot be read). A point-in-time answer, as `contains`.
     pub fn stored_len(&self, id: &ObjectId) -> Option<u32> {
-        self.inner.lock().unwrap().index.get(id).ok().flatten().map(|l| l.stored)
+        self.index.get(id).ok().flatten().map(|l| l.stored)
     }
 
     /// The shape of the index now.
     pub fn index_info(&self) -> IndexInfo {
-        let inner = self.inner.lock().unwrap();
-        let ix = &inner.index;
+        let _inner = self.inner.lock().unwrap();
+        let ix = &self.index;
         let hwm = ix.hwm();
+        let runs = ix.runs();
         IndexInfo {
-            runs: ix.runs().len() as u64,
-            run_entries: ix.runs().iter().map(|r| r.entries()).sum(),
+            runs: runs.len() as u64,
+            run_entries: runs.iter().map(|r| r.entries()).sum(),
             memtable_entries: ix.mem_len() as u64,
             hwm_pack: hwm.pack,
             hwm_offset: hwm.offset,
-            filter_bytes: ix.runs().iter().map(|r| r.filter_bytes()).sum(),
-            fence_bytes: ix.runs().iter().map(|r| r.fence_bytes()).sum(),
+            filter_bytes: runs.iter().map(|r| r.filter_bytes()).sum(),
+            fence_bytes: runs.iter().map(|r| r.fence_bytes()).sum(),
         }
     }
 
@@ -1087,7 +1158,7 @@ impl ChunkStore {
         if self.opts.read_only {
             return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
         }
-        let mut inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap();
         inner.index.request_rebuild(&*self.io, "a caller asked for a rebuild")
     }
 
@@ -1217,7 +1288,7 @@ fn pack_header_with(num: u64, flags: u16) -> Vec<u8> {
 impl Inner {
     fn empty() -> Self {
         Inner {
-            index: Index::empty(),
+            index: Arc::new(Index::empty()),
             readers: HashMap::new(),
             tick: 0,
             active: None,
