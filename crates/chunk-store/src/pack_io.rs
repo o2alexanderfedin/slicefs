@@ -272,8 +272,51 @@ impl FileIo {
     }
 }
 
-/// A file, and whether `sync` syncs it.
-struct FilePack(File, bool);
+/// A file, whether `sync` syncs it, and the written range whose writeback
+/// has not been started yet (see [`Kick`]).
+struct FilePack(File, bool, Kick);
+
+/// Bytes of new writes after which the kernel is told to start their
+/// writeback (Linux only, #108).
+const KICK_BYTES: u64 = 1 << 20;
+
+/// The range `from..to` of a file written since the last start of writeback.
+/// On Linux, each `KICK_BYTES` of it are handed to the disk at once with
+/// `sync_file_range(SYNC_FILE_RANGE_WRITE)`, so the periodic fsync finds
+/// fewer dirty pages and takes less time (#108). This does not make anything
+/// durable: the fsync stays.
+#[derive(Default)]
+struct Kick {
+    from: u64,
+    to: u64,
+}
+
+impl Kick {
+    fn wrote(&mut self, f: &File, offset: u64, len: u64) {
+        if offset != self.to {
+            self.from = offset;
+        }
+        self.to = offset + len;
+        if self.to - self.from >= KICK_BYTES {
+            start_writeback(f, self.from, self.to - self.from);
+            self.from = self.to;
+        }
+    }
+}
+
+/// Ask the kernel to start writing back the dirty pages of a range, without
+/// waiting for them. Only a hint: an error is ignored.
+#[cfg(target_os = "linux")]
+fn start_writeback(f: &File, offset: u64, len: u64) {
+    use std::os::fd::AsRawFd;
+    // SAFETY: sync_file_range on a valid fd we own; no memory is passed.
+    unsafe {
+        libc::sync_file_range(f.as_raw_fd(), offset as libc::off64_t, len as libc::off64_t, libc::SYNC_FILE_RANGE_WRITE)
+    };
+}
+
+#[cfg(not(target_os = "linux"))]
+fn start_writeback(_: &File, _: u64, _: u64) {}
 
 impl PackRead for FilePack {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
@@ -283,7 +326,11 @@ impl PackRead for FilePack {
 
 impl PackFile for FilePack {
     fn write_at(&mut self, data: &[u8], offset: u64) -> io::Result<()> {
-        self.0.write_all_at(data, offset)
+        self.0.write_all_at(data, offset)?;
+        if self.1 {
+            self.2.wrote(&self.0, offset, data.len() as u64);
+        }
+        Ok(())
     }
     fn set_len(&mut self, len: u64) -> io::Result<()> {
         self.0.set_len(len)
@@ -298,7 +345,7 @@ impl PackFile for FilePack {
         // A second descriptor of the same open file: its fsync flushes the
         // dirty pages of the file, whoever wrote them.
         let f = self.0.try_clone().ok()?;
-        Some(Arc::new(FilePack(f, self.1)))
+        Some(Arc::new(FilePack(f, self.1, Kick::default())))
     }
 }
 
@@ -361,16 +408,16 @@ impl PackIo for FileIo {
 
     fn create(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
         let f = OpenOptions::new().read(true).write(true).create_new(true).open(self.path(num, Kind::Pack))?;
-        Ok(Box::new(FilePack(f, self.sync)))
+        Ok(Box::new(FilePack(f, self.sync, Kick::default())))
     }
 
     fn open_rw(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
         let f = OpenOptions::new().read(true).write(true).open(self.path(num, Kind::Pack))?;
-        Ok(Box::new(FilePack(f, self.sync)))
+        Ok(Box::new(FilePack(f, self.sync, Kick::default())))
     }
 
     fn open_read(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
-        Ok(Arc::new(FilePack(File::open(self.path(num, Kind::Pack))?, self.sync)))
+        Ok(Arc::new(FilePack(File::open(self.path(num, Kind::Pack))?, self.sync, Kick::default())))
     }
 
     fn can_punch(&self) -> bool {
@@ -403,11 +450,11 @@ impl PackIo for FileIo {
 
     fn create_run(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
         let f = OpenOptions::new().read(true).write(true).create_new(true).open(self.path(num, Kind::Run))?;
-        Ok(Box::new(FilePack(f, self.sync)))
+        Ok(Box::new(FilePack(f, self.sync, Kick::default())))
     }
 
     fn open_run(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
-        Ok(Arc::new(FilePack(File::open(self.path(num, Kind::Run))?, self.sync)))
+        Ok(Arc::new(FilePack(File::open(self.path(num, Kind::Run))?, self.sync, Kick::default())))
     }
 
     fn map_run(&self, num: u64) -> io::Result<Option<RunMap>> {
