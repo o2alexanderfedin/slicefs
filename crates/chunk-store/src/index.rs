@@ -260,6 +260,25 @@ impl Snapshot {
         }
         MergeIter { newest: Newest::new(srcs), done: false }
     }
+
+    /// The current place of `id` in the snapshot (a tombstone gives
+    /// `None`), through the verified page reads of the runs (every page CRC
+    /// checked, after the filter): damage is always `Corrupt`, and a read
+    /// error is returned, never taken as "not found". For GC decisions.
+    pub fn get_verified(&self, id: &ObjectId) -> Result<Option<Loc>> {
+        if let Ok(i) = self.mem.binary_search_by_key(id, |(k, _)| *k) {
+            return Ok(put_loc(self.mem[i].1));
+        }
+        for r in self.runs.iter() {
+            if !r.may_contain(id) {
+                continue;
+            }
+            if let Some(e) = r.get_verified(id)? {
+                return Ok(put_loc(e));
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// A merge of runs that [`Index::pick_merge`] chose under the store lock.
@@ -543,13 +562,17 @@ impl Index {
     }
 
     /// [`Index::get`] through the verified page reads of the runs (every
-    /// page CRC checked): damage is always `Corrupt`.
+    /// page CRC checked, in the runs whose filter may have the ID): damage
+    /// is always `Corrupt`.
     pub fn get_verified(&self, id: &ObjectId) -> Result<Option<Loc>> {
         let e = self.shard(id).lock().unwrap().get(id).copied();
         if let Some(e) = e {
             return Ok(put_loc(e));
         }
         for r in self.runs().iter() {
+            if !r.may_contain(id) {
+                continue;
+            }
             if let Some(e) = r.get_verified(id)? {
                 return Ok(put_loc(e));
             }
@@ -569,14 +592,11 @@ impl Index {
         }
     }
 
-    /// Record that GC removed the entry of `id` in `pack` (no I/O). The
-    /// caller holds the store lock, and has proved, with a complete read of
-    /// the index under it, that this entry is the current one. A put of `id`
-    /// in another pack in the memtable is a newer copy and stays.
-    ///
-    /// Lookups and merges take the newest entry of an ID, so the tombstone
-    /// hides exactly the entry it was written for, and no older entry of
-    /// the same ID can come back.
+    /// A tombstone of the entry of `id` in `pack` in the memtable (no I/O),
+    /// unless the memtable has a put of `id` in another pack (a newer copy).
+    /// For tests: GC writes its tombstones to pending runs on disk (see
+    /// [`Index::write_pending`]).
+    #[cfg(test)]
     pub fn tombstone(&self, id: ObjectId, pack: u64) {
         let newer = matches!(self.shard(&id).lock().unwrap().get(&id), Some(Entry::Put(l)) if l.pack != pack);
         if !newer {
@@ -813,6 +833,122 @@ impl Index {
         let info = w.finish()?;
         io.sync_dir()?;
         Run::open(io.open_run(num)?, io.map_run(num)?, num, info.len)
+    }
+
+    // ── GC (17-07) ───────────────────────────────────────────────────────────
+
+    /// A new run number (taken from the next run number of the MANIFEST in
+    /// RAM, so no flush or merge can take it). The caller holds the store
+    /// lock.
+    pub fn take_run_num(&self) -> u64 {
+        let mut man = self.man.lock().unwrap();
+        let num = man.next_run;
+        man.next_run += 1;
+        num
+    }
+
+    /// Write a pending GC run `num`: a tombstone `(id, pack)` for each
+    /// victim, sorted by ID, synced, and opened. No lock is needed: the run
+    /// is in no MANIFEST until [`Index::install_gc`], so lookups never see
+    /// it, and an open after a stop removes it as an orphan. Its name is
+    /// made durable by the `sync_dir` before the install. On an error the
+    /// partial file is removed (best effort).
+    pub fn write_pending(&self, io: &dyn PackIo, num: u64, victims: &[(ObjectId, u64)]) -> Result<Run> {
+        let r = (|| {
+            let mut w = RunWriter::create(io, num, victims.len() as u64, self.bloom_bits)?;
+            for (id, pack) in victims {
+                w.push(id, &Entry::Tomb(*pack))?;
+            }
+            let info = w.finish()?;
+            Run::open(io.open_run(num)?, io.map_run(num)?, num, info.len)
+        })();
+        if r.is_err() {
+            let _ = io.remove(num, Kind::Run);
+        }
+        r
+    }
+
+    /// The GC install, under the store lock: write the memtable to a run
+    /// (if it has entries), then one MANIFEST with the pending GC runs as
+    /// the newest runs, that run right after them, and the runs of the
+    /// current list (also those that a flush or merge installed during the
+    /// GC). This MANIFEST write is the durable point of a GC.
+    ///
+    /// Order: a victim's put entry can still be in the memtable (it was put
+    /// before the GC and not flushed), so the tombstones must be newer than
+    /// the memtable run. No entry in the memtable is newer than a tombstone
+    /// of a pending run: an object put or read during the GC drops the plan
+    /// of its pack (and with it the pending run) before this call.
+    ///
+    /// The caller has synced the active pack and the directory (so the
+    /// pending runs have durable names). `hwm` is used only if the memtable
+    /// has entries (else the hwm stays); `counts` are the counts after the
+    /// GC. On an error before the MANIFEST write, a partial memtable run is
+    /// removed; after a failed MANIFEST write the files stay (the write may
+    /// be durable). Either way the index in RAM does not change.
+    ///
+    /// Returns the numbers of the added runs, from the newest.
+    pub fn install_gc(&self, io: &dyn PackIo, pending: Vec<Arc<Run>>, hwm: Hwm, counts: Counts) -> Result<Vec<u64>> {
+        let mut man = self.man.lock().unwrap();
+        let mem_run = if self.mem_len() > 0 {
+            let num = man.next_run;
+            let entries = self.sorted_mem();
+            match Self::write_run(io, num, &entries, self.bloom_bits) {
+                Ok(r) => Some(Arc::new(r)),
+                Err(e) => {
+                    let _ = io.remove(num, Kind::Run);
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
+        let mut new = man.clone();
+        new.seq += 1;
+        if let Some(r) = &mem_run {
+            new.next_run = new.next_run.max(r.num() + 1);
+            new.hwm = hwm;
+        }
+        new.counts = counts;
+        let added: Vec<Arc<Run>> = pending.into_iter().chain(mem_run).collect();
+        let metas = added.iter().map(|r| RunMeta { num: r.num(), len: r.len(), entries: r.entries() });
+        new.runs.splice(0..0, metas);
+        new.obsolete.clear();
+        io.write_durable(0, Kind::Manifest, &new.encode())?;
+        *man = new;
+        drop(man);
+        let nums = added.iter().map(|r| r.num()).collect();
+        {
+            let mut runs = self.runs.write().unwrap();
+            let mut v = added;
+            v.extend(runs.iter().cloned());
+            *runs = Arc::new(v);
+        }
+        for s in &self.shards {
+            s.lock().unwrap().clear();
+        }
+        self.mem_len.store(0, Ordering::SeqCst);
+        self.bump_gen();
+        Ok(nums)
+    }
+
+    /// A merge of exactly the runs `nums` (adjacent in the run list, from
+    /// the newest to the oldest), chosen under the store lock; `None` if
+    /// they are no longer adjacent there, or a rebuild is requested. For the
+    /// runs that one GC install added. The output keeps the tombstones also
+    /// if the window holds the oldest run: the size-tiered merges drop them
+    /// later, as for any run.
+    pub fn plan_merge_of(&self, nums: &[u64]) -> Option<MergePlan> {
+        if self.rebuild_requested() || nums.len() < 2 {
+            return None;
+        }
+        let runs = self.runs();
+        let k = nums.len();
+        let at = runs.windows(k).position(|w| w.iter().map(|r| r.num()).eq(nums.iter().copied()))?;
+        let mut man = self.man.lock().unwrap();
+        let out = man.next_run;
+        man.next_run += 1;
+        Some(MergePlan { inputs: runs[at..at + k].to_vec(), out, drop_tombs: false })
     }
 }
 

@@ -138,3 +138,66 @@ fn compaction_into_an_empty_active_pack_from_open_keeps_every_live_object() {
         assert!(s.get(id).is_some());
     }
 }
+
+// ── GC on the run index (17-07) ──────────────────────────────────────────────
+
+mod on_runs {
+    use super::random;
+    use chunk_store::mem::MemIo;
+    use chunk_store::{ChunkStore, GcStats, ObjectId, Options, Stats};
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    type Obj = (ObjectId, Vec<u8>);
+
+    fn opts(memtable_limit: usize, pack_limit: u64) -> Options {
+        Options { pack_limit, index_memtable_limit: memtable_limit, index_background_merge: false, ..Options::default() }
+    }
+
+    fn open(mem: &MemIo, o: &Options) -> ChunkStore {
+        ChunkStore::open_with(Arc::new(mem.clone()), o.clone()).unwrap()
+    }
+
+    fn put_n(s: &ChunkStore, n: u64, size: usize, seed: u64) -> Vec<Obj> {
+        (0..n).map(|i| { let d = random(size, seed + i); (s.put(&d).unwrap(), d) }).collect()
+    }
+
+    /// 300 objects of 1,000 bytes in 64 KiB packs, keep 1 of 3, with the
+    /// memtable limit `limit`: the GC result, the stats after it, and the
+    /// runs that the GC added.
+    fn gc_keep_one_of_three(limit: usize) -> (GcStats, Stats, u64) {
+        let mem = MemIo::new();
+        let s = open(&mem, &opts(limit, 64 << 10));
+        let objs = put_n(&s, 300, 1000, 42);
+        s.sync().unwrap();
+        let live: HashSet<ObjectId> = objs.iter().step_by(3).map(|(id, _)| *id).collect();
+        let runs_before = s.index_info().runs;
+        let b = s.gc_begin().unwrap();
+        let st = s.gc_finish(&live, b).unwrap();
+        let runs_added = s.index_info().runs.saturating_sub(runs_before);
+        for (id, d) in &objs {
+            assert_eq!(s.get(id).as_deref() == Some(d.as_slice()), live.contains(id), "limit {limit}");
+        }
+        let stats = s.stats();
+        drop(s);
+        let s = open(&mem, &opts(limit, 64 << 10));
+        assert_eq!(s.stats().objects, stats.objects, "limit {limit}: after a reopen");
+        for (id, d) in &objs {
+            assert_eq!(s.get(id).as_deref() == Some(d.as_slice()), live.contains(id), "limit {limit}: after a reopen");
+        }
+        (st, stats, runs_added)
+    }
+
+    #[test]
+    fn many_packs_gc_with_a_small_memtable() {
+        let (st_small, stats_small, runs_small) = gc_keep_one_of_three(16);
+        let (st_big, stats_big, _) = gc_keep_one_of_three(1 << 18);
+        assert!(st_small.packs_compacted >= 4, "{st_small:?}");
+        assert_eq!(st_small.removed_objects, 200, "{st_small:?}");
+        assert_eq!(st_small, st_big);
+        assert_eq!(stats_small, stats_big);
+        // 100 copies with a limit of 16: the copies flush in the middle of
+        // the GC, so the GC adds more than one run.
+        assert!(runs_small >= 2, "{runs_small} runs added");
+    }
+}

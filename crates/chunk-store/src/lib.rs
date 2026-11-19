@@ -14,13 +14,15 @@
 //! every object in RAM. Open replays only the pack records above the
 //! high-water mark of the MANIFEST.
 
-use std::collections::{HashMap, HashSet};
+use std::cell::Cell;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
-use std::ops::Range;
+use std::ops::{Deref, DerefMut, Range};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 mod bloom;
 pub mod file;
@@ -33,7 +35,8 @@ pub mod retry;
 mod run;
 pub mod mem;
 
-use crate::index::{Counts, Hwm, Index, MergeOut};
+use crate::index::{Counts, Hwm, Index, MergeOut, Snapshot};
+use crate::run::Run;
 use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK};
 pub use crate::hash::{hasher_by_name, hasher_by_tag, hasher_names, hashers, Blake3_256, ObjectHasher, DEFAULT_HASHER};
 
@@ -494,6 +497,18 @@ pub struct GcStats {
     pub punched_bytes: u64,
 }
 
+/// The time of a `gc_finish` and its holds of the store lock (puts and
+/// reads wait for the store lock; see [`ChunkStore::last_gc_timing`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GcTiming {
+    /// The longest hold of the store lock.
+    pub lock_hold_max: Duration,
+    /// All holds of the store lock together.
+    pub lock_hold_total: Duration,
+    /// The whole call.
+    pub wall: Duration,
+}
+
 /// A content-addressed object store in pack files.
 pub struct ChunkStore {
     io: Arc<dyn PackIo>,
@@ -520,6 +535,16 @@ pub struct ChunkStore {
     /// with no store lock held (see `race_tests.rs`).
     #[cfg(test)]
     after_merge_write: Mutex<Option<LookupHook>>,
+    /// One GC at a time: `gc_begin`, `gc_abort` and the whole `gc_finish`
+    /// hold it. Lock order: this lock, then the store lock.
+    gc: Mutex<()>,
+    /// See [`ChunkStore::last_gc_timing`].
+    gc_timing: Mutex<GcTiming>,
+    /// Test hook: `gc_finish` calls it at the start of its pass 1 (with 1)
+    /// and of its pass 2 (with 2), with no store lock held (see
+    /// `race_tests.rs`).
+    #[cfg(test)]
+    gc_pass_hook: Mutex<Option<PassHook>>,
 }
 
 /// The merge state that the store shares with its merge thread.
@@ -704,6 +729,10 @@ impl Merger {
 #[cfg(test)]
 type LookupHook = Box<dyn FnMut(&ChunkStore) + Send>;
 
+/// See `ChunkStore::gc_pass_hook`: the store and the pass number.
+#[cfg(test)]
+type PassHook = Box<dyn FnMut(&ChunkStore, u32) + Send>;
+
 impl ChunkStore {
     fn new(io: Arc<dyn PackIo>, punches: bool, opts: Options, inner: Inner) -> Self {
         let s = ChunkStore {
@@ -719,6 +748,10 @@ impl ChunkStore {
             after_lookup: Mutex::new(None),
             #[cfg(test)]
             after_merge_write: Mutex::new(None),
+            gc: Mutex::new(()),
+            gc_timing: Mutex::new(GcTiming::default()),
+            #[cfg(test)]
+            gc_pass_hook: Mutex::new(None),
         };
         if !s.opts.read_only && s.opts.index_background_merge {
             s.start_merges();
@@ -1058,6 +1091,7 @@ impl ChunkStore {
     /// sealed pack, and record from now on each object that is put or read.
     /// Returns the last pack number that the GC may change.
     pub fn gc_begin(&self) -> Result<u64> {
+        let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
         let mut inner = self.inner.lock().unwrap();
         inner.check()?;
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
@@ -1069,6 +1103,7 @@ impl ChunkStore {
 
     /// End a GC without deleting anything (for example after a failed mark).
     pub fn gc_abort(&self) {
+        let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
         self.inner.lock().unwrap().touched = None;
     }
 
@@ -1076,205 +1111,489 @@ impl ChunkStore {
     /// not in `live` and was not put or read since `gc_begin`. A pack with no
     /// live object is deleted; a pack with less than half of its bytes live,
     /// or a small pack, is compacted (its live records are copied to the
-    /// active pack, which is synced before the old pack is deleted).
+    /// active pack, which is synced before the old pack is deleted); a pack
+    /// with at least half of its bytes live gets holes over its dead records
+    /// (if the storage can punch). A pack that the index no longer uses at
+    /// all is deleted.
     ///
-    /// Five phases: (A) read the whole index; (B) copy the live records of
-    /// the packs to compact; (C) tombstones for the removed entries (no
-    /// I/O); (D) sync the copies and flush the memtable, so the tombstones
-    /// and the new places are durable in a run; (E) punch and delete packs.
+    /// The steps:
+    /// 1. Start (store lock): the touched set so far decides with `live`; a
+    ///    new touched set records the objects put or read from now on. A
+    ///    snapshot of the index: a copy of the memtable and the run list.
+    /// 2. Pass 1, no store lock: one merged pass over the snapshot gives
+    ///    the totals of each pack (bytes, kept bytes, entries).
+    /// 3. The decision for each pack, from its totals.
+    /// 4. Pass 2, no store lock, one selected pack at a time: its entries
+    ///    from its `.idx` (or a scan of the pack), each checked against the
+    ///    snapshot (current only if the snapshot points to this record). The
+    ///    tombstones of the victims go to a pending run on disk that no
+    ///    MANIFEST lists yet. The live records of a pack to compact are
+    ///    copied under the store lock, one pack per lock hold.
+    /// 5. Install (store lock): the plan of a pack that holds an object put
+    ///    or read during the GC is dropped (that pack does not change). The
+    ///    copies are synced; one MANIFEST write lists the pending runs of
+    ///    the kept plans as the newest runs, and the memtable in a run under
+    ///    them. This write is the durable point.
+    /// 6. Only then, with no store lock, one pack at a time: delete, or
+    ///    punch (its remaining entries are read again from the index).
+    ///
     /// No pack changes and no tombstone becomes durable unless every index
-    /// read of (A) succeeded: an index read error is never taken as "not
-    /// current", which could delete a pack that holds live objects.
+    /// read of steps 2, 4 and 5 succeeded. A read error (also a damaged run
+    /// page, which also asks for a rebuild of the index) ends the call with
+    /// the error before the install: the pending runs are removed and
+    /// nothing else changed except the copies (duplicates with newer, valid
+    /// places). An index read error is never taken as "not current".
+    ///
+    /// RAM: the totals of each pack, the entries of one pack, the memtable
+    /// copy, and the filter and fences of the pending runs; no map of every
+    /// object. Cost: one sequential pass over the runs, and one verified
+    /// snapshot lookup per `.idx` entry of each selected pack (two for a
+    /// punched pack). Each store-lock hold is bounded by one pack, by the
+    /// memtable limit, or by the objects touched during the GC; see
+    /// [`ChunkStore::last_gc_timing`].
     pub fn gc_finish(&self, live: &HashSet<ObjectId>, boundary: u64) -> Result<GcStats> {
-        let mut inner = self.inner.lock().unwrap();
-        // The touched set ends with this GC, also when it fails (#63). This
-        // call used it to choose what to remove. A failure can stop the work
-        // at any point, but loses no kept object: old packs are deleted only
-        // after their live copies are synced, and an open rebuilds the index
-        // from the packs. The next GC starts its own set in `gc_begin`, before
-        // its gate commit, so its mark sees everything put before that.
-        // Tests: tests/gc_fault_tests.rs.
-        let touched = inner.touched.take().unwrap_or_default();
-        inner.check()?;
+        let start = Instant::now();
+        let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
+        let holds = Holds::default();
+        let r = self.gc_run(live, boundary, &holds);
+        *self.gc_timing.lock().unwrap() =
+            GcTiming { lock_hold_max: holds.max.get(), lock_hold_total: holds.total.get(), wall: start.elapsed() };
+        r
+    }
+
+    /// The store-lock holds and the time of the last `gc_finish` (zero
+    /// before the first one).
+    pub fn last_gc_timing(&self) -> GcTiming {
+        *self.gc_timing.lock().unwrap()
+    }
+
+    /// The store lock, with the time it is held added to `holds`.
+    fn held<'a>(&'a self, holds: &'a Holds) -> Held<'a> {
+        let g = self.inner.lock().unwrap();
+        Held { g, at: Instant::now(), holds }
+    }
+
+    /// The GC test hook (see `gc_pass_hook`); nothing outside tests.
+    fn gc_pass(&self, pass: u32) {
+        #[cfg(test)]
+        {
+            let hook = self.gc_pass_hook.lock().unwrap().take();
+            if let Some(mut f) = hook {
+                f(self, pass);
+                let mut slot = self.gc_pass_hook.lock().unwrap();
+                if slot.is_none() {
+                    *slot = Some(f);
+                }
+            }
+        }
+        #[cfg(not(test))]
+        let _ = pass;
+    }
+
+    fn gc_run(&self, live: &HashSet<ObjectId>, boundary: u64, holds: &Holds) -> Result<GcStats> {
+        let io = &*self.io;
+        // (1) Start. The touched set ends with this GC, also when it fails
+        // (#63): the next GC starts its own set in `gc_begin`, before its
+        // gate commit, so its mark sees everything put before that.
+        let (touched, snap, active) = {
+            let mut inner = self.held(holds);
+            let touched = inner.touched.take().unwrap_or_default();
+            inner.check()?;
+            inner.touched = Some(HashSet::new());
+            (touched, inner.index.snapshot(), inner.active.as_ref().map(|a| a.num))
+        };
         let keep = |id: &ObjectId| live.contains(id) || touched.contains(id);
-        let active = inner.active.as_ref().map(|a| a.num);
-
-        // (A) The current entries of each pack, from one complete pass. An
-        // error returns before any change (the store is not failed).
-        let mut by_pack: HashMap<u64, Vec<(ObjectId, Loc)>> = HashMap::new();
-        let snap = inner.index.snapshot();
-        for item in snap.iter_all() {
-            let (id, l) = item?;
-            if l.pack <= boundary && Some(l.pack) != active {
-                by_pack.entry(l.pack).or_default().push((id, l));
-            }
-        }
-
-        // (B) Choose what to do with each pack, and copy the live records of
-        // the packs to compact. A read error returns: the copies made so far
-        // are duplicates with newer, valid places.
         let mut st = GcStats::default();
-        let mut doomed = Vec::new();
-        let mut removed: Vec<(ObjectId, Loc)> = Vec::new();
-        let mut punches: Vec<Punch> = Vec::new();
-        let mut nums: Vec<u64> = by_pack.keys().copied().collect();
-        nums.sort_unstable();
-        for num in nums {
-            let entries = &by_pack[&num];
-            let rec_len = |l: &Loc| (REC_HEADER + l.stored as usize + REC_CRC) as u64;
-            let total: u64 = entries.iter().map(|(_, l)| rec_len(l)).sum();
-            let live_bytes: u64 = entries.iter().filter(|(id, _)| keep(id)).map(|(_, l)| rec_len(l)).sum();
-            let small = total < self.opts.pack_limit / 8;
-            if live_bytes == total && !small {
-                st.kept_objects += entries.len() as u64;
-                continue;
-            }
-            if live_bytes > 0 && live_bytes * 2 >= total && !small {
-                if let Some((p, victims)) = self.plan_punch(num, entries, &keep, &mut st) {
-                    removed.extend(victims);
-                    punches.push(p);
-                }
-                continue;
-            }
-            // Delete, or compact: copy the live records first.
-            let file = inner.reader(&*self.io, num)?;
-            for (id, l) in entries {
-                if keep(id) {
-                    let mut rec = vec![0u8; rec_len(l) as usize];
-                    file.read_at(&mut rec, l.offset)?;
-                    let nl = self.append(&mut inner, id, &rec, l.stored, l.raw, l.flags)?;
-                    inner.index.insert(*id, nl);
-                    st.kept_objects += 1;
-                } else {
-                    removed.push((*id, *l));
-                }
-            }
-            if live_bytes > 0 {
-                st.packs_compacted += 1;
-            } else {
-                st.packs_deleted += 1;
-            }
-            doomed.push(num);
-        }
-        // Packs that the index no longer uses at all (older copies). This
-        // needs the complete pass of (A).
-        for num in 1..=boundary {
-            if Some(num) != active && !by_pack.contains_key(&num) && self.io.exists(num, Kind::Pack) {
-                doomed.push(num);
-            }
-        }
-        if doomed.is_empty() && punches.is_empty() {
+        let mut pending = Vec::new();
+
+        // (2) to (4).
+        let (mut plans, unused) = match self.gc_decide(&snap, &keep, boundary, active, holds, &mut pending, &mut st) {
+            Ok(d) => d,
+            Err(e) => return Err(self.gc_abandon(e, &pending, holds)),
+        };
+        if plans.is_empty() && unused.is_empty() {
+            self.held(holds).touched = None;
             return Ok(st);
         }
 
-        // (C) Tombstones, in RAM only: nothing here can fail.
-        for (id, l) in &removed {
-            inner.index.tombstone(*id, l.pack);
-            inner.stats.objects -= 1;
-            inner.stats.raw_bytes -= l.raw as u64;
-            inner.stats.stored_bytes -= l.stored as u64;
-            st.removed_objects += 1;
-            st.removed_bytes += l.stored as u64;
-        }
-
-        // (D) The durable point: the copies, then a run with the tombstones
-        // and the new places. A failure fails the store, so the tombstones
-        // in RAM are never flushed, and no pack changes.
-        inner.sync_active()?;
-        inner.sync_dir(&*self.io)?;
-        inner.flush_index(&*self.io)?;
-        // The GC install: a lookup made outside the store lock before it
-        // must be checked again (see `Index::gen`).
-        inner.index.bump_gen();
-
-        // (E) Only now change the packs.
-        for p in punches {
-            self.punch_pack(&mut inner, p, &mut st)?;
-        }
-        for num in doomed {
-            let _ = self.io.remove(num, Kind::Idx);
-            self.io.remove(num, Kind::Pack)?;
-            inner.readers.remove(&num);
-            inner.stats.packs -= 1;
-        }
-        inner.sync_dir(&*self.io)?;
-        Ok(st)
-    }
-
-    /// GC of a mostly live pack, the plan: the dead records in the gaps
-    /// between live records (cut to whole blocks) to remove, the ranges to
-    /// punch, and the entries the pack keeps. `None` if nothing is punched
-    /// (the store cannot punch, or no gap holds a dead record); then every
-    /// entry stays in the index.
-    fn plan_punch(
-        &self,
-        num: u64,
-        entries: &[(ObjectId, Loc)],
-        keep: &dyn Fn(&ObjectId) -> bool,
-        st: &mut GcStats,
-    ) -> Option<(Punch, Vec<(ObjectId, Loc)>)> {
-        if !self.punches {
-            // No holes here: keep the dead records in the index, so a later
-            // GC still sees their bytes and compacts the pack when it is
-            // mostly dead.
-            st.kept_objects += entries.len() as u64;
-            return None;
-        }
-        let rec_end = |l: &Loc| l.offset + (REC_HEADER + l.stored as usize + REC_CRC) as u64;
-        let mut sorted: Vec<&(ObjectId, Loc)> = entries.iter().collect();
-        sorted.sort_by_key(|(_, l)| l.offset);
-        let end = sorted.iter().map(|(_, l)| rec_end(l)).max().unwrap_or(0);
-        // Gaps between live records, cut to whole blocks inside them.
-        let mut ranges = Vec::new();
-        let mut from = PACK_HEADER as u64;
-        let lives = sorted.iter().filter(|(id, _)| keep(id)).map(|(_, l)| (l.offset, rec_end(l)));
-        for (s, e) in lives.chain(std::iter::once((end, end))) {
-            let a = from.div_ceil(PUNCH_BLOCK) * PUNCH_BLOCK;
-            let b = s / PUNCH_BLOCK * PUNCH_BLOCK;
-            if b > a {
-                ranges.push((a, b - a));
+        // (5) The install.
+        let added = {
+            let mut inner = self.held(holds);
+            let during = inner.touched.take().unwrap_or_default();
+            // An object put or read during the GC: its pack does not change.
+            let checked = (|| -> Result<()> {
+                for id in during.iter().filter(|id| !keep(id)) {
+                    if let Some(l) = snap.get_verified(id)? {
+                        if let Ok(i) = plans.binary_search_by_key(&l.pack, |p| p.num) {
+                            plans[i].dropped = true;
+                        }
+                    }
+                }
+                inner.check()
+            })();
+            if let Err(e) = checked {
+                drop(inner);
+                drop(plans);
+                return Err(self.gc_abandon(e, &pending, holds));
             }
-            from = from.max(e);
+            let mut after = inner.stats;
+            for p in plans.iter().filter(|p| !p.dropped) {
+                after.objects -= p.victims;
+                after.raw_bytes -= p.raw;
+                after.stored_bytes -= p.stored;
+            }
+            // A failure from here on fails the store (the MANIFEST may be
+            // durable). The pending runs stay: an open removes them if no
+            // MANIFEST lists them.
+            inner.sync_active()?;
+            inner.sync_dir(io)?;
+            let runs: Vec<Arc<Run>> = plans.iter().filter(|p| !p.dropped).filter_map(|p| p.run.clone()).collect();
+            let mut added = Vec::new();
+            if !runs.is_empty() || inner.index.mem_len() > 0 {
+                let hwm = match inner.active.as_ref() {
+                    Some(a) => Hwm { pack: a.num, offset: a.len },
+                    None => Hwm { pack: inner.next_pack, offset: 0 },
+                };
+                let counts = Counts { objects: after.objects, raw_bytes: after.raw_bytes, stored_bytes: after.stored_bytes };
+                match inner.index.install_gc(io, runs, hwm, counts) {
+                    Ok(nums) => added = nums,
+                    Err(e) => {
+                        inner.failed = true;
+                        return Err(e);
+                    }
+                }
+                inner.merge.notify();
+            }
+            inner.stats = after;
+            added
+        };
+        let dropped: Vec<u64> = plans.iter_mut().filter(|p| p.dropped).filter_map(|p| p.run.take()).map(|r| r.num()).collect();
+        self.remove_pending(&dropped);
+        for p in &mut plans {
+            p.run = None;
+            if p.dropped {
+                st.kept_objects += p.entries;
+                continue;
+            }
+            st.kept_objects += p.entries - p.victims;
+            st.removed_objects += p.victims;
+            st.removed_bytes += p.stored;
+            match p.act {
+                GcAct::Delete => st.packs_deleted += 1,
+                GcAct::Compact => st.packs_compacted += 1,
+                GcAct::Punch => {}
+            }
         }
-        let hits = |l: &Loc, a: u64, n: u64| l.offset < a + n && rec_end(l) > a;
-        let victims: Vec<(ObjectId, Loc)> = sorted
-            .iter()
-            .copied()
-            .filter(|(id, l)| !keep(id) && ranges.iter().any(|&(a, n)| hits(l, a, n)))
-            .copied()
-            .collect();
-        // Keep only the ranges with a dead record (skip holes of earlier GCs).
-        ranges.retain(|&(a, n)| victims.iter().any(|(_, l)| hits(l, a, n)));
-        if victims.is_empty() {
-            st.kept_objects += entries.len() as u64;
-            return None;
-        }
-        let gone: HashSet<ObjectId> = victims.iter().map(|(id, _)| *id).collect();
-        let rest: Vec<(ObjectId, Loc)> = entries.iter().filter(|(id, _)| !gone.contains(id)).copied().collect();
-        st.kept_objects += rest.len() as u64;
-        Some((Punch { num, ranges, rest }, victims))
+        // (6) Only now change the packs. An error returns: the tombstones
+        // are durable, and a later GC removes the packs that are left.
+        let changed = (|| -> Result<()> {
+            let kept = || plans.iter().filter(|p| !p.dropped);
+            for p in kept().filter(|p| p.act == GcAct::Punch) {
+                self.gc_punch(p.num, holds, &mut st)?;
+            }
+            for num in kept().filter(|p| p.act != GcAct::Punch).map(|p| p.num).chain(unused) {
+                let _ = io.remove(num, Kind::Idx);
+                io.remove(num, Kind::Pack)?;
+                let mut inner = self.held(holds);
+                inner.readers.remove(&num);
+                inner.stats.packs -= 1;
+            }
+            self.held(holds).sync_dir(io)
+        })();
+        // One run for the runs of this install, so a GC over many packs
+        // does not leave one small run per pack.
+        self.gc_merge_added(&added, holds);
+        changed.map(|()| st)
     }
 
-    /// GC of a mostly live pack, the change on disk, after the tombstones of
-    /// the victims are durable in a run.
+    /// Steps 2 to 4 of `gc_finish`: the totals, the decisions, and the
+    /// plans with their pending runs and copies. Also returns the packs that
+    /// the index no longer uses. Any error ends it (the caller removes the
+    /// runs in `pending`).
+    #[allow(clippy::too_many_arguments)]
+    fn gc_decide(
+        &self,
+        snap: &Snapshot,
+        keep: &dyn Fn(&ObjectId) -> bool,
+        boundary: u64,
+        active: Option<u64>,
+        holds: &Holds,
+        pending: &mut Vec<u64>,
+        st: &mut GcStats,
+    ) -> Result<(Vec<GcPlan>, Vec<u64>)> {
+        let io = &*self.io;
+        // (2) The totals of each pack, from one complete pass.
+        self.gc_pass(1);
+        let mut totals: BTreeMap<u64, PackTotals> = BTreeMap::new();
+        for item in snap.iter_all() {
+            let (id, l) = item?;
+            if l.pack > boundary || Some(l.pack) == active {
+                continue;
+            }
+            let t = totals.entry(l.pack).or_default();
+            let n = rec_end(&l) - l.offset;
+            t.bytes += n;
+            t.entries += 1;
+            if keep(&id) {
+                t.keep_bytes += n;
+            }
+        }
+
+        // (3) The decisions. A pack where everything is kept and that is
+        // not small stays; so does a mostly live pack if holes cannot be
+        // punched (its dead records stay in the index, so a later GC still
+        // counts their bytes).
+        let mut todo = Vec::new();
+        for (&num, t) in &totals {
+            let small = t.bytes < self.opts.pack_limit / 8;
+            let act = if t.keep_bytes == t.bytes && !small {
+                None
+            } else if t.keep_bytes > 0 && t.keep_bytes * 2 >= t.bytes && !small {
+                self.punches.then_some(GcAct::Punch)
+            } else if t.keep_bytes > 0 {
+                Some(GcAct::Compact)
+            } else {
+                Some(GcAct::Delete)
+            };
+            match act {
+                Some(a) => todo.push((num, a, t.entries)),
+                None => st.kept_objects += t.entries,
+            }
+        }
+        // Packs that the index no longer uses at all (older copies). This
+        // needs the complete pass. No pack at or below the boundary gets
+        // new entries: new records go to the active pack of the start or
+        // to packs above the boundary.
+        let mut unused: Vec<u64> =
+            io.list()?.into_iter().filter(|&n| n <= boundary && Some(n) != active && !totals.contains_key(&n)).collect();
+        unused.sort_unstable();
+        drop(totals);
+
+        // (4) One selected pack at a time.
+        self.gc_pass(2);
+        let mut plans = Vec::with_capacity(todo.len());
+        for (num, act, entries) in todo {
+            let mut current = Vec::new();
+            for (id, l) in self.pack_entries(num)? {
+                if matches!(snap.get_verified(&id)?, Some(c) if c.pack == num && c.offset == l.offset) {
+                    current.push((id, l));
+                }
+            }
+            if current.len() as u64 != entries {
+                // The entry list of the pack does not have every entry that
+                // the index has: the pack must not change.
+                tracing::warn!(
+                    "chunk store: GC keeps pack {num}: its entry list has {} of the {entries} entries that the index has",
+                    current.len()
+                );
+                st.kept_objects += entries;
+                continue;
+            }
+            let (victims, copies) = if act == GcAct::Punch {
+                let v = punch_victims(&current, keep);
+                if v.is_empty() {
+                    st.kept_objects += entries;
+                    continue;
+                }
+                (v, Vec::new())
+            } else {
+                current.into_iter().partition(|(id, _)| !keep(id))
+            };
+            let run = if victims.is_empty() {
+                None
+            } else {
+                let n = self.held(holds).index.take_run_num();
+                pending.push(n);
+                let mut tombs: Vec<(ObjectId, u64)> = victims.iter().map(|(id, _)| (*id, num)).collect();
+                tombs.sort_unstable_by_key(|(id, _)| *id);
+                Some(Arc::new(self.index.write_pending(io, n, &tombs)?))
+            };
+            if !copies.is_empty() {
+                // The copies get newer places in the memtable; a flush at
+                // the size limit is fine: no pack changed yet.
+                let mut inner = self.held(holds);
+                inner.check()?;
+                let file = inner.reader(io, num)?;
+                for (id, l) in &copies {
+                    let mut rec = vec![0u8; (rec_end(l) - l.offset) as usize];
+                    file.read_at(&mut rec, l.offset)?;
+                    let nl = self.append(&mut inner, id, &rec, l.stored, l.raw, l.flags)?;
+                    inner.index.insert(*id, nl);
+                }
+                self.flush_if_full(&mut inner)?;
+            }
+            plans.push(GcPlan {
+                num,
+                act,
+                run,
+                victims: victims.len() as u64,
+                raw: victims.iter().map(|(_, l)| l.raw as u64).sum(),
+                stored: victims.iter().map(|(_, l)| l.stored as u64).sum(),
+                entries,
+                dropped: false,
+            });
+        }
+        Ok((plans, unused))
+    }
+
+    /// The end of a GC that failed before its install: nothing changed but
+    /// the copies. A damaged run page asks for a rebuild of the index.
+    fn gc_abandon(&self, e: Error, pending: &[u64], holds: &Holds) -> Error {
+        {
+            let mut inner = self.held(holds);
+            inner.touched = None;
+            if let Error::Corrupt(m) = &e {
+                if !self.opts.read_only && !inner.index.rebuild_requested() {
+                    if let Err(e) = inner.index.request_rebuild(&*self.io, m) {
+                        tracing::warn!("chunk store: cannot ask for a rebuild of the index: {e}");
+                    }
+                }
+            }
+        }
+        self.remove_pending(pending);
+        e
+    }
+
+    /// Remove pending GC runs that no MANIFEST lists (best effort: a
+    /// writable open removes what is left).
+    fn remove_pending(&self, nums: &[u64]) {
+        for &num in nums {
+            match self.io.remove(num, Kind::Run) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                    tracing::warn!("chunk store: cannot remove the pending GC run {num:016x}: {e}")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The entries of a sealed pack: its `.idx`, or a scan of the pack if
+    /// the `.idx` is missing or damaged. A read error is returned.
+    fn pack_entries(&self, num: u64) -> Result<Vec<(ObjectId, Loc)>> {
+        match self.io.read(num, Kind::Idx) {
+            Ok(b) => {
+                if let Some(e) = decode_index(&b, num)? {
+                    return Ok(e);
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        resync_scan(&self.io.read(num, Kind::Pack)?, num)
+    }
+
+    /// Merge the runs that one GC install added into one run (see
+    /// `Merger::step`; a failure is only logged: the runs are derived data).
+    /// Takes no merge lock: a merge that runs at the same time is seen at
+    /// the install, which checks that the window is still in the list.
+    fn gc_merge_added(&self, nums: &[u64], holds: &Holds) {
+        let io = &*self.io;
+        let plan = {
+            let inner = self.held(holds);
+            if inner.failed {
+                return;
+            }
+            match inner.index.plan_merge_of(nums) {
+                Some(p) => p,
+                None => return,
+            }
+        };
+        let never = AtomicBool::new(false);
+        let r = (|| -> Result<()> {
+            let Some(out) = self.index.write_merge(io, &plan, &never)? else { return Ok(()) };
+            let gone = {
+                let inner = self.held(holds);
+                if inner.failed {
+                    drop(inner);
+                    if let MergeOut::Run(r) = out {
+                        let num = r.num();
+                        drop(r);
+                        let _ = io.remove(num, Kind::Run);
+                    }
+                    return Ok(());
+                }
+                inner.index.install_merge(io, &plan, out)?
+            };
+            if let Some(gone) = gone {
+                Index::remove_runs(io, &gone);
+            }
+            Ok(())
+        })();
+        if let Err(e) = r {
+            if let Error::Corrupt(m) = &e {
+                let inner = self.held(holds);
+                if !inner.index.rebuild_requested() {
+                    if let Err(e) = inner.index.request_rebuild(io, m) {
+                        tracing::warn!("chunk store: cannot ask for a rebuild of the index: {e}");
+                    }
+                }
+            }
+            tracing::warn!("chunk store: the merge of the runs of a GC failed (a later merge does it): {e}");
+        }
+    }
+
+    /// Step 6 for a mostly live pack, after the tombstones of its victims
+    /// are durable. Its remaining entries come from its `.idx` and lookups
+    /// in the index (the victims now read as removed); the holes are the
+    /// whole blocks in the gaps between them that hold a removed record.
+    /// A lookup error skips the punch (the tombstones are durable; the dead
+    /// bytes stay until a later GC).
     ///
-    /// Order: (1) write the pack's `.idx` durably without the victims; (2)
-    /// mark the pack as punched in its header and sync; (3) punch. A crash at
-    /// any point leaves an `.idx` that lists only bytes that are still
-    /// there, and a punched pack is resynced at open, never cut.
-    fn punch_pack(&self, inner: &mut Inner, p: Punch, st: &mut GcStats) -> Result<()> {
-        let Punch { num, ranges, rest } = p;
+    /// Order: (1) write the pack's `.idx` durably with the remaining
+    /// entries; (2) mark the pack as punched in its header and sync; (3)
+    /// punch. A crash at any point leaves an `.idx` that lists only bytes
+    /// that are still there, and a punched pack is resynced at open, never
+    /// cut.
+    fn gc_punch(&self, num: u64, holds: &Holds, st: &mut GcStats) -> Result<()> {
+        let io = &*self.io;
+        let skip = |e: &Error| {
+            tracing::warn!("chunk store: GC does not punch pack {num} ({e}); its dead bytes stay until a later GC");
+        };
+        let entries = match self.pack_entries(num) {
+            Ok(e) => e,
+            Err(e) => {
+                skip(&e);
+                return Ok(());
+            }
+        };
+        let end = entries.iter().map(|(_, l)| rec_end(l)).max().unwrap_or(0);
+        let mut rest = Vec::new();
+        let mut dead = Vec::new();
+        for (id, l) in entries {
+            match self.index.get_verified(&id) {
+                Ok(Some(c)) if c.pack == num && c.offset == l.offset => rest.push((id, l)),
+                Ok(_) => dead.push(l),
+                Err(e) => {
+                    if let Error::Corrupt(m) = &e {
+                        let inner = self.held(holds);
+                        if !inner.index.rebuild_requested() {
+                            if let Err(e) = inner.index.request_rebuild(io, m) {
+                                tracing::warn!("chunk store: cannot ask for a rebuild of the index: {e}");
+                            }
+                        }
+                    }
+                    skip(&e);
+                    return Ok(());
+                }
+            }
+        }
+        let mut ranges = punch_ranges(rest.iter().map(|(_, l)| l).collect(), end);
+        // Only the gaps with a removed record (not the holes of earlier GCs).
+        ranges.retain(|&(a, n)| dead.iter().any(|l| hits(l, a, n)));
+        if ranges.is_empty() {
+            return Ok(());
+        }
         let marked = (|| -> io::Result<()> {
-            self.io.write_durable(num, Kind::Idx, &encode_index(&rest))?;
-            let mut f = self.io.open_rw(num)?;
+            io.write_durable(num, Kind::Idx, &encode_index(&rest))?;
+            let mut f = io.open_rw(num)?;
             f.write_at(&pack_header_with(num, PACK_PUNCHED), 0)?;
             f.sync()
         })();
         if let Err(e) = marked {
-            inner.failed = true;
+            self.held(holds).failed = true;
             return Err(e.into());
         }
-        match self.io.punch(num, &ranges) {
+        match io.punch(num, &ranges) {
             Ok(()) => {
                 st.packs_punched += 1;
                 st.punched_bytes += ranges.iter().map(|&(_, n)| n).sum::<u64>();
@@ -1584,12 +1903,106 @@ fn covers(entries: &[(ObjectId, Loc)], hwm_offset: u64) -> bool {
     pos == hwm_offset
 }
 
-/// The disk part of the GC of a mostly live pack (see `plan_punch`).
-struct Punch {
+/// What a GC does with a pack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GcAct {
+    Delete,
+    Compact,
+    Punch,
+}
+
+/// The totals of one pack in pass 1 of a GC (record bytes, with the
+/// header and the CRC).
+#[derive(Clone, Copy, Default)]
+struct PackTotals {
+    bytes: u64,
+    keep_bytes: u64,
+    entries: u64,
+}
+
+/// The plan of a GC for one pack (small: no entries of the pack).
+struct GcPlan {
     num: u64,
-    ranges: Vec<(u64, u64)>,
-    /// The entries that the pack's new `.idx` lists.
-    rest: Vec<(ObjectId, Loc)>,
+    act: GcAct,
+    /// The pending run with the tombstones of the victims (none if no
+    /// victim).
+    run: Option<Arc<Run>>,
+    victims: u64,
+    /// Raw and stored bytes of the victims.
+    raw: u64,
+    stored: u64,
+    /// The current entries of the pack.
+    entries: u64,
+    /// An object of the pack was put or read during the GC: the pack does
+    /// not change.
+    dropped: bool,
+}
+
+/// Store-lock holds of one `gc_finish`.
+#[derive(Default)]
+struct Holds {
+    max: Cell<Duration>,
+    total: Cell<Duration>,
+}
+
+/// The store lock, held for a GC: its hold time goes into `Holds`.
+struct Held<'a> {
+    g: std::sync::MutexGuard<'a, Inner>,
+    at: Instant,
+    holds: &'a Holds,
+}
+
+impl Deref for Held<'_> {
+    type Target = Inner;
+    fn deref(&self) -> &Inner {
+        &self.g
+    }
+}
+
+impl DerefMut for Held<'_> {
+    fn deref_mut(&mut self) -> &mut Inner {
+        &mut self.g
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        let d = self.at.elapsed();
+        self.holds.total.set(self.holds.total.get() + d);
+        self.holds.max.set(self.holds.max.get().max(d));
+    }
+}
+
+/// Is the record at `l` in the range of `n` bytes at `a`?
+fn hits(l: &Loc, a: u64, n: u64) -> bool {
+    l.offset < a + n && rec_end(l) > a
+}
+
+/// The whole blocks in the gaps between the records `stay` of a pack whose
+/// records end at `end` (also the gap after the last one).
+fn punch_ranges(mut stay: Vec<&Loc>, end: u64) -> Vec<(u64, u64)> {
+    stay.sort_unstable_by_key(|l| l.offset);
+    let mut ranges = Vec::new();
+    let mut from = PACK_HEADER as u64;
+    for (s, e) in stay.iter().map(|l| (l.offset, rec_end(l))).chain(std::iter::once((end, end))) {
+        let a = from.div_ceil(PUNCH_BLOCK) * PUNCH_BLOCK;
+        let b = s / PUNCH_BLOCK * PUNCH_BLOCK;
+        if b > a {
+            ranges.push((a, b - a));
+        }
+        from = from.max(e);
+    }
+    ranges
+}
+
+/// The victims of the GC of a mostly live pack: the records that are not
+/// kept and lie in a whole block of a gap between kept records. A dead
+/// record that holds no whole block of such a gap stays (a later GC
+/// punches it when a neighbour dies too).
+fn punch_victims(entries: &[(ObjectId, Loc)], keep: &dyn Fn(&ObjectId) -> bool) -> Vec<(ObjectId, Loc)> {
+    let end = entries.iter().map(|(_, l)| rec_end(l)).max().unwrap_or(0);
+    let ranges = punch_ranges(entries.iter().filter(|(id, _)| keep(id)).map(|(_, l)| l).collect(), end);
+    entries.iter().filter(|(id, l)| !keep(id) && ranges.iter().any(|&(a, n)| hits(l, a, n))).copied().collect()
 }
 
 fn pack_header(num: u64) -> Vec<u8> {

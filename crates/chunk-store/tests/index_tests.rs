@@ -234,20 +234,29 @@ fn a_gc_that_cannot_read_the_index_changes_nothing() {
 
 #[test]
 fn a_failed_compaction_is_counted_once_after_a_reopen() {
-    let mem = MemIo::new();
     let o = opts(30, 64 << 10);
-    let s = open(&mem, &o);
-    let objs = put_random(&s, 300, 2000);
-    s.sync().unwrap();
-    assert_eq!(s.index_info().runs, 10);
-    let live: HashSet<ObjectId> = objs.iter().step_by(4).map(|(id, _)| *id).collect();
-    let b = s.gc_begin().unwrap();
-    // The index pass reads ten pages; then five record copies work and the
-    // sixth fails. The copies sit above the hwm, their originals in runs.
-    mem.fail_reads_after(15);
-    let r = s.gc_finish(&live, b);
-    mem.clear_fail_reads_after();
-    assert!(r.is_err());
+    // The GC reads the runs (pass 1), the `.idx` of the first pack and a
+    // run page per entry (pass 2), then copies the live records of that
+    // pack. Fail reads at the first point after some copies: the copies
+    // sit above the hwm, their originals in runs. (17-07: the point moved
+    // when pass 2 came before the copies; it is searched, not fixed.)
+    let (mem, s, objs) = (15..1000)
+        .step_by(5)
+        .find_map(|after| {
+            let mem = MemIo::new();
+            let s = open(&mem, &o);
+            let objs = put_random(&s, 300, 2000);
+            s.sync().unwrap();
+            assert_eq!(s.index_info().runs, 10);
+            let live: HashSet<ObjectId> = objs.iter().step_by(4).map(|(id, _)| *id).collect();
+            let b = s.gc_begin().unwrap();
+            mem.fail_reads_after(after);
+            let r = s.gc_finish(&live, b);
+            mem.clear_fail_reads_after();
+            assert!(r.is_err(), "the GC fails after {after} reads");
+            (s.index_info().memtable_entries > 0).then_some((mem, s, objs))
+        })
+        .expect("a failure point after some copies");
     assert!(s.index_info().memtable_entries > 0, "the copies are in the memtable");
     s.sync().unwrap();
     assert_eq!(s.stats().objects, 300);

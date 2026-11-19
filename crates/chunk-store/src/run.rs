@@ -597,9 +597,15 @@ impl Run {
         self.tombstones
     }
 
+    /// False if the filter (in RAM, checked at open) says that the run has
+    /// no entry of `id`; true if it may have one, or has no filter.
+    pub fn may_contain(&self, id: &ObjectId) -> bool {
+        self.filter.as_ref().is_none_or(|f| f.may_contain(id.digest()))
+    }
+
     /// The smallest and largest pack of the put entries; `None` if the run
     /// has only tombstones.
-    #[allow(dead_code)] // For GC (17-07).
+    #[allow(dead_code)] // Not used: a GC must not skip a run by its pack range.
     pub fn pack_range(&self) -> Option<(u64, u64)> {
         (self.min_pack <= self.max_pack).then_some((self.min_pack, self.max_pack))
     }

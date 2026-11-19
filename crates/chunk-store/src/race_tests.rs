@@ -168,7 +168,9 @@ fn a_gc_during_a_merge_stays_newer_than_the_merged_run() {
     });
     assert!(s.merge_index_now().unwrap());
     assert!(ran.load(Ordering::SeqCst), "the hook ran between the write and the install");
-    assert_eq!(s.index_info().runs, 2);
+    // The GC tombstone run, the run of its copies (the memtable limit is 1,
+    // so the copies flush during the GC, 17-07), and the merged run.
+    assert_eq!(s.index_info().runs, 3);
     let check = |s: &ChunkStore, what: &str| {
         assert!(!s.contains(&x), "{what}");
         assert!(s.get(&x).is_none(), "{what}");
