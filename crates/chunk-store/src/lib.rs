@@ -21,6 +21,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
+mod bloom;
 pub mod file;
 pub mod hash;
 mod index;
@@ -114,6 +115,10 @@ pub struct Options {
     /// The index writes its memtable to a new run file when it holds this
     /// many entries (a tuning and test knob; at least 1).
     pub index_memtable_limit: usize,
+    /// Bloom filter bits per key of new index runs (about 1 % false
+    /// positives at 10); 0 writes runs without a filter. A tuning and test
+    /// knob.
+    pub index_bloom_bits: u8,
 }
 
 impl Default for Options {
@@ -124,6 +129,7 @@ impl Default for Options {
             read_only: false,
             hasher: DEFAULT_HASHER,
             index_memtable_limit: 1 << 18,
+            index_bloom_bits: index::DEFAULT_BLOOM_BITS,
         }
     }
 }
@@ -141,6 +147,10 @@ pub struct IndexInfo {
     /// durable run.
     pub hwm_pack: u64,
     pub hwm_offset: u64,
+    /// Bytes of the Bloom filters of the runs, in RAM.
+    pub filter_bytes: u64,
+    /// Bytes of the fence tables of the runs, in RAM.
+    pub fence_bytes: u64,
 }
 
 /// Counts for `slicefs stats` and tests.
@@ -536,7 +546,8 @@ impl ChunkStore {
     /// open first makes the pack sealed: resynced past the damage, synced,
     /// and with a durable `.idx`, so no later open cuts it. A `Corrupt`
     /// lookup during the replay (a damaged run page) also returns `Rebuild`.
-    fn load(io: &dyn PackIo, opts: &Options, index: Index, resync: Option<u64>) -> Result<Loaded> {
+    fn load(io: &dyn PackIo, opts: &Options, mut index: Index, resync: Option<u64>) -> Result<Loaded> {
+        index.set_bloom_bits(opts.index_bloom_bits);
         let mut nums = io.list()?;
         nums.sort_unstable();
         let hwm = index.hwm();
@@ -1019,6 +1030,8 @@ impl ChunkStore {
             memtable_entries: ix.mem_len() as u64,
             hwm_pack: hwm.pack,
             hwm_offset: hwm.offset,
+            filter_bytes: ix.runs().iter().map(|r| r.filter_bytes()).sum(),
+            fence_bytes: ix.runs().iter().map(|r| r.fence_bytes()).sum(),
         }
     }
 

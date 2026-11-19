@@ -41,6 +41,8 @@ const RUN_ROW: usize = 24;
 /// A list count (u32).
 const COUNT: usize = 4;
 const CRC: usize = 4;
+/// Bloom filter bits per key of new runs, unless the store sets another.
+pub(crate) const DEFAULT_BLOOM_BITS: u8 = 10;
 
 /// A place in the packs: every record below it is in a durable run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -213,12 +215,14 @@ pub(crate) struct Index {
     /// From the newest to the oldest, as in `man.runs`.
     runs: Vec<Arc<Run>>,
     man: Manifest,
+    /// Bloom filter bits per key of new runs (0: no filter).
+    bloom_bits: u8,
 }
 
 impl Index {
     /// An index with nothing in it (a store with no files).
     pub fn empty() -> Self {
-        Index { mem: BTreeMap::new(), runs: Vec::new(), man: Manifest::empty() }
+        Index { mem: BTreeMap::new(), runs: Vec::new(), man: Manifest::empty(), bloom_bits: DEFAULT_BLOOM_BITS }
     }
 
     /// Open the index of a store: read the MANIFEST (absent: an empty
@@ -287,7 +291,7 @@ impl Index {
             }
             runs.push(Arc::new(run));
         }
-        Ok(Ok(Index { mem: BTreeMap::new(), runs, man }))
+        Ok(Ok(Index { mem: BTreeMap::new(), runs, man, bloom_bits: DEFAULT_BLOOM_BITS }))
     }
 
     /// The last steps of a good open: the rebuild flag, and for a writable
@@ -361,6 +365,12 @@ impl Index {
         self.man.seq += 1;
         io.write_durable(0, Kind::Manifest, &self.man.encode())?;
         Ok(())
+    }
+
+    /// Bloom filter bits per key of the runs that this index writes from
+    /// now on (0: no filter). Runs on disk keep their own.
+    pub fn set_bloom_bits(&mut self, bits: u8) {
+        self.bloom_bits = bits;
     }
 
     pub fn hwm(&self) -> Hwm {
@@ -454,7 +464,7 @@ impl Index {
     /// Write the memtable to run `num`, make its name durable, and open it.
     /// Every step that can fail comes before the MANIFEST write.
     fn write_run(&self, io: &dyn PackIo, num: u64) -> Result<Run> {
-        let mut w = RunWriter::create(io, num, self.mem.len() as u64)?;
+        let mut w = RunWriter::create(io, num, self.mem.len() as u64, self.bloom_bits)?;
         for (id, e) in &self.mem {
             w.push(id, e)?;
         }

@@ -12,7 +12,9 @@
 //!   page u64, page count u64 ([`TAG_ROW`] bytes).
 //! - The fence table: for each page, digest bytes 0..8 of its first entry
 //!   ([`FENCE`] bytes, in digest byte order).
-//! - The filter block (empty when the filter type is [`FILTER_NONE`]).
+//! - The filter block: empty when the filter type is [`FILTER_NONE`]; a
+//!   blocked Bloom filter over the digests of every entry (tombstones too)
+//!   when it is [`FILTER_BLOOM`] (see `bloom.rs`).
 //! - The footer ([`FOOTER`] bytes): magic `SFRN`, run format version u16,
 //!   filter type u8, bits per key u8, entry count u64, tombstone count u64,
 //!   page count u64; then offset u64, length u64 and CRC32C u32 of the tag
@@ -29,6 +31,7 @@
 //! allocation. Damage is [`Error::Corrupt`], never a panic, a skipped page or
 //! a wrong answer.
 
+use crate::bloom::{self, Bloom};
 use crate::pack_io::{PackFile, PackIo, PackRead};
 use crate::{Error, Loc, ObjectId, Result, ID_LEN};
 use std::io;
@@ -53,6 +56,8 @@ const MAGIC: &[u8; 4] = b"SFRN";
 pub(crate) const RUN_VERSION: u16 = 1;
 /// Filter type: no filter (the filter block is empty).
 pub(crate) const FILTER_NONE: u8 = 0;
+/// Filter type: a blocked Bloom filter (see `bloom.rs`).
+pub(crate) const FILTER_BLOOM: u8 = 1;
 /// Offset u64, length u64, CRC32C u32 of one block after the pages.
 const SECTION: usize = 8 + 8 + 4;
 /// Magic, version, filter type, bits per key, entry count, tombstone count,
@@ -222,6 +227,10 @@ pub(crate) struct RunWriter {
     /// Tag, first page, page count.
     tags: Vec<(u8, u64, u64)>,
     fences: Vec<u8>,
+    /// The filter, sized from the expected entry count; `None` for filter
+    /// type none. The writer keeps no digests: only the filter bits.
+    filter: Option<Bloom>,
+    bits_per_key: u8,
     last: Option<ObjectId>,
     entries: u64,
     tombstones: u64,
@@ -231,9 +240,13 @@ pub(crate) struct RunWriter {
 
 impl RunWriter {
     /// A writer of a new run file `num`. `expected` is an upper bound of the
-    /// entry count (the filter of a later format version is sized from it);
-    /// the footer holds the real count.
-    pub fn create(io: &dyn PackIo, num: u64, expected: u64) -> Result<Self> {
+    /// entry count: the filter is sized from it (a merge passes the sum of
+    /// its input counts); the footer holds the real count. `bits_per_key` 0
+    /// writes no filter (filter type none).
+    pub fn create(io: &dyn PackIo, num: u64, expected: u64, bits_per_key: u8) -> Result<Self> {
+        if bits_per_key > 0 && bloom::blocks_for(expected, bits_per_key).is_none() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "index run filter size overflows").into());
+        }
         let file = io.create_run(num)?;
         let pages = expected.div_ceil(PER_PAGE as u64);
         let fences = Vec::with_capacity(usize::try_from(pages.saturating_mul(FENCE as u64)).unwrap_or(0).min(1 << 24));
@@ -246,6 +259,8 @@ impl RunWriter {
             unsynced: 0,
             tags: Vec::new(),
             fences,
+            filter: (bits_per_key > 0).then(|| Bloom::new(expected, bits_per_key)),
+            bits_per_key,
             last: None,
             entries: 0,
             tombstones: 0,
@@ -278,6 +293,9 @@ impl RunWriter {
         }
         let at = PAGE_HEADER + self.in_page * ENTRY;
         encode_entry(&mut self.page[at..at + ENTRY], id, e);
+        if let Some(f) = self.filter.as_mut() {
+            f.insert(id.digest());
+        }
         self.in_page += 1;
         self.entries += 1;
         match *e {
@@ -332,20 +350,22 @@ impl RunWriter {
         let tags_at = self.pos;
         let fences_at = tags_at + tags.len() as u64;
         let filter_at = fences_at + self.fences.len() as u64;
+        let filter = self.filter.take().map_or_else(Vec::new, |f| f.to_bytes());
         let footer = Footer {
-            filter_type: FILTER_NONE,
-            bits_per_key: 0,
+            filter_type: if self.bits_per_key > 0 { FILTER_BLOOM } else { FILTER_NONE },
+            bits_per_key: self.bits_per_key,
             entries: self.entries,
             tombstones: self.tombstones,
             pages,
             tags: Section { off: tags_at, len: tags.len() as u64, crc: crc32c::crc32c(&tags) },
             fences: Section { off: fences_at, len: self.fences.len() as u64, crc: crc32c::crc32c(&self.fences) },
-            filter: Section { off: filter_at, len: 0, crc: crc32c::crc32c(&[]) },
+            filter: Section { off: filter_at, len: filter.len() as u64, crc: crc32c::crc32c(&filter) },
             min_pack: self.min_pack,
             max_pack: self.max_pack,
         };
         let mut tail = tags;
         tail.extend_from_slice(&std::mem::take(&mut self.fences));
+        tail.extend_from_slice(&filter);
         tail.extend_from_slice(&footer.encode());
         self.write(&tail)?;
         self.file.sync()?;
@@ -361,8 +381,8 @@ struct TagRange {
     count: usize,
 }
 
-/// An open run: the footer values, the tag table and the fences in RAM; the
-/// pages stay on disk.
+/// An open run: the footer values, the tag table, the fences and the filter
+/// in RAM; the pages stay on disk.
 #[allow(dead_code)] // `tombstones` and the pack range: for the merges (17-06).
 pub(crate) struct Run {
     file: Arc<dyn PackRead>,
@@ -375,6 +395,8 @@ pub(crate) struct Run {
     tags: Vec<TagRange>,
     /// Digest bytes 0..8 of the first entry of each page (see `prefix`).
     fences: Vec<u64>,
+    /// `None` for filter type none (every ID may be in the run).
+    filter: Option<Bloom>,
 }
 
 impl Run {
@@ -433,6 +455,15 @@ impl Run {
         match f.filter_type {
             FILTER_NONE if f.filter.len == 0 && f.bits_per_key == 0 => {}
             FILTER_NONE => return Err(bad("filter type none with a filter")),
+            FILTER_BLOOM => {
+                // The writer sizes the filter from an upper bound of the
+                // entry count, so the filter is at least the size for the
+                // real count, in whole blocks.
+                let min = bloom::blocks_for(f.entries, f.bits_per_key).and_then(|b| b.checked_mul(bloom::BLOCK_BYTES as u64));
+                if f.bits_per_key == 0 || f.filter.len % bloom::BLOCK_BYTES as u64 != 0 || min.is_none_or(|m| f.filter.len < m) {
+                    return Err(bad("the filter length does not fit its parameters"));
+                }
+            }
             t => return Err(Self::corrupt(num, format_args!("unknown filter type {t}"))),
         }
         let max_entries = f.pages.checked_mul(PER_PAGE as u64).ok_or_else(|| bad("page count overflows"))?;
@@ -485,6 +516,17 @@ impl Run {
             }
         }
 
+        let filter = if f.filter_type == FILTER_BLOOM {
+            let mut b = vec![0u8; usize::try_from(f.filter.len).map_err(|_| bad("filter too long"))?];
+            Self::read(&*file, num, &mut b, f.filter.off)?;
+            if crc32c::crc32c(&b) != f.filter.crc {
+                return Err(bad("bad filter CRC"));
+            }
+            Some(Bloom::from_bytes(&b, f.bits_per_key).map_err(|e| Self::corrupt(num, e))?)
+        } else {
+            None
+        };
+
         Ok(Run {
             file,
             num,
@@ -495,7 +537,18 @@ impl Run {
             max_pack: f.max_pack,
             tags,
             fences,
+            filter,
         })
+    }
+
+    /// Bytes of the filter in RAM.
+    pub fn filter_bytes(&self) -> u64 {
+        self.filter.as_ref().map_or(0, |f| f.len() as u64)
+    }
+
+    /// Bytes of the fence table in RAM.
+    pub fn fence_bytes(&self) -> u64 {
+        (self.fences.len() * FENCE) as u64
     }
 
     #[allow(dead_code)] // For the merges (17-06).
@@ -543,11 +596,15 @@ impl Run {
         Ok(count)
     }
 
-    /// The entry of `id`, if the run has one. One page read when the run has
-    /// pages of the ID's tag and the ID is not below the first of them; a
-    /// key whose 8-byte prefix equals a page fence can need the page before
+    /// The entry of `id`, if the run has one. No page read when the filter
+    /// says the digest is not in the run. Else one page read when the run
+    /// has pages of the ID's tag and the ID is not below the first of them;
+    /// a key whose 8-byte prefix equals a page fence can need the page before
     /// it too. A damaged page is `Corrupt`, never `None`.
     pub fn get(&self, id: &ObjectId) -> Result<Option<Entry>> {
+        if self.filter.as_ref().is_some_and(|f| !f.may_contain(id.digest())) {
+            return Ok(None);
+        }
         let Ok(t) = self.tags.binary_search_by_key(&id.tag(), |t| t.tag) else {
             return Ok(None);
         };
@@ -687,7 +744,11 @@ mod tests {
     }
 
     fn write_run(io: &dyn PackIo, num: u64, entries: &[(ObjectId, Entry)]) -> RunInfo {
-        let mut w = RunWriter::create(io, num, entries.len() as u64).unwrap();
+        write_run_bits(io, num, entries, 10)
+    }
+
+    fn write_run_bits(io: &dyn PackIo, num: u64, entries: &[(ObjectId, Entry)], bits: u8) -> RunInfo {
+        let mut w = RunWriter::create(io, num, entries.len() as u64, bits).unwrap();
         for (id, e) in entries {
             w.push(id, e).unwrap();
         }
@@ -760,9 +821,11 @@ mod tests {
         (io, run, info)
     }
 
-    /// Bytes of the file length a run of `pages` pages and `tags` tags has.
-    fn run_len(pages: u64, tags: u64) -> u64 {
-        pages * PAGE as u64 + tags * TAG_ROW as u64 + pages * FENCE as u64 + FOOTER as u64
+    /// Bytes of the file length a run of `pages` pages, `tags` tags and `n`
+    /// entries has (10 bits per key).
+    fn run_len(pages: u64, tags: u64, n: u64) -> u64 {
+        let filter = (n * 10).div_ceil(512).max(1) * 64;
+        pages * PAGE as u64 + tags * TAG_ROW as u64 + pages * FENCE as u64 + filter + FOOTER as u64
     }
 
     #[test]
@@ -771,7 +834,7 @@ mod tests {
             let entries: Vec<(ObjectId, Entry)> = (0..n).map(|i| (key(0x1e, i), put(i))).collect();
             let (_io, run, info) = mem_run(&entries);
             let pages = n.div_ceil(PER_PAGE as u64);
-            assert_eq!(info.len, run_len(pages, (n > 0) as u64), "n {n}");
+            assert_eq!(info.len, run_len(pages, (n > 0) as u64, n), "n {n}");
             assert_eq!(run.entries(), n);
             check_run(&run, &entries);
         }
@@ -784,7 +847,7 @@ mod tests {
         let io = MemIo::new();
         let info = write_run(&io, 1, &entries);
         // 70 + 30 entries of tag 0x1e, then a page of 50 of tag 0xf0.
-        assert_eq!(info.len, run_len(3, 2));
+        assert_eq!(info.len, run_len(3, 2, 150));
         let (run, c) = open_counting(&io, 1, info.len);
         c.take();
         check_run(&run, &entries);
@@ -846,7 +909,7 @@ mod tests {
     #[test]
     fn the_writer_refuses_keys_out_of_order() {
         let io = MemIo::new();
-        let mut w = RunWriter::create(&io, 1, 3).unwrap();
+        let mut w = RunWriter::create(&io, 1, 3, 10).unwrap();
         w.push(&key(0x1e, 2), &put(2)).unwrap();
         assert!(w.push(&key(0x1e, 2), &put(2)).is_err(), "a duplicate");
         assert!(w.push(&key(0x1e, 1), &put(1)).is_err(), "a smaller key");
@@ -900,7 +963,21 @@ mod tests {
             ("tag table length u64::MAX", refooter(&good, |f| set_u64(f, 40, u64::MAX))),
             ("fence table length past the end", refooter(&good, |f| set_u64(f, 60, u64::MAX - 7))),
             ("fence table offset past the end", refooter(&good, |f| set_u64(f, 52, u64::MAX))),
-            ("filter length past the end", refooter(&good, |f| set_u64(f, 80, 64))),
+            ("filter length past the end", refooter(&good, |f| set_u64(f, 80, 128))),
+            ("filter length shorter than its parameters", {
+                // 200 keys at 10 bits need 4 blocks: a footer that says 2
+                // blocks, with the file cut to match.
+                let mut b = good[..good.len() - FOOTER - 128].to_vec();
+                b.extend_from_slice(&good[good.len() - FOOTER..]);
+                refooter(&b, |f| set_u64(f, 80, 128))
+            }),
+            ("filter length not whole blocks", {
+                let mut b = good[..good.len() - FOOTER - 8].to_vec();
+                b.extend_from_slice(&good[good.len() - FOOTER..]);
+                refooter(&b, |f| set_u64(f, 80, 256 - 8))
+            }),
+            ("filter type none with a filter", refooter(&good, |f| f[6] = FILTER_NONE)),
+            ("bloom with 0 bits per key", refooter(&good, |f| f[7] = 0)),
             ("unknown filter type", refooter(&good, |f| f[6] = 9)),
             ("wrong magic", refooter(&good, |f| f[0] = b'X')),
             ("unknown version", refooter(&good, |f| f[4..6].copy_from_slice(&2u16.to_le_bytes()))),
@@ -919,6 +996,11 @@ mod tests {
             ("bad fence table CRC", {
                 let mut b = good.clone();
                 b[3 * PAGE + TAG_ROW] ^= 1;
+                b
+            }),
+            ("bad filter CRC", {
+                let mut b = good.clone();
+                b[3 * PAGE + TAG_ROW + 3 * FENCE + 5] ^= 1;
                 b
             }),
             ("shorter than a footer", good[..FOOTER - 1].to_vec()),
@@ -957,6 +1039,65 @@ mod tests {
             io.flip(1, Kind::Run, at);
             assert!(is_corrupt(&run.get(&key(0x1e, 150))), "byte {at}");
             assert!(run.iter().any(|r| is_corrupt(&r)), "byte {at}");
+        }
+    }
+
+    /// An ID with a uniform digest (as BLAKE3 gives).
+    fn hashed(seed: u64, i: u64) -> ObjectId {
+        let mut h = blake3::Hasher::new();
+        h.update(&seed.to_le_bytes());
+        h.update(&i.to_le_bytes());
+        ObjectId::new(0x1e, *h.finalize().as_bytes())
+    }
+
+    fn hashed_entries(n: u64) -> Vec<(ObjectId, Entry)> {
+        let mut e: Vec<(ObjectId, Entry)> = (0..n).map(|i| (hashed(1, i), put(i))).collect();
+        e.sort_by_key(|(id, _)| *id);
+        e
+    }
+
+    #[test]
+    fn a_run_with_a_filter_answers_misses_without_a_page_read() {
+        let entries = hashed_entries(5000);
+        let io = MemIo::new();
+        let info = write_run(&io, 1, &entries);
+        let (run, c) = open_counting(&io, 1, info.len);
+        c.take();
+        assert_eq!(run.filter_bytes(), (5000u64 * 10).div_ceil(512) * 64);
+        assert_eq!(run.fence_bytes(), 5000u64.div_ceil(PER_PAGE as u64) * FENCE as u64);
+        for i in 0..1000 {
+            assert_eq!(run.get(&hashed(2, i)).unwrap(), None);
+        }
+        let reads = c.take().len();
+        assert!(reads <= 30, "{reads} page reads for 1,000 absent IDs");
+        for (id, e) in &entries {
+            assert_eq!(run.get(id).unwrap(), Some(*e));
+        }
+        assert_eq!(c.take().len(), entries.len(), "one page read for each hit");
+    }
+
+    #[test]
+    fn a_run_without_a_filter_round_trips() {
+        let entries = hashed_entries(500);
+        let io = MemIo::new();
+        let info = write_run_bits(&io, 1, &entries, 0);
+        let (run, c) = open_counting(&io, 1, info.len);
+        assert_eq!(run.filter_bytes(), 0);
+        check_run(&run, &entries);
+        c.take();
+        for i in 0..100 {
+            assert_eq!(run.get(&hashed(2, i)).unwrap(), None);
+        }
+        let reads = c.take().len();
+        assert!(reads >= 90, "without a filter almost every miss reads a page: {reads}");
+    }
+
+    #[test]
+    fn tombstones_are_in_the_filter() {
+        let entries: Vec<(ObjectId, Entry)> = hashed_entries(300).into_iter().map(|(id, _)| (id, Entry::Tomb(3))).collect();
+        let (_io, run, _) = mem_run(&entries);
+        for (id, _) in &entries {
+            assert_eq!(run.get(id).unwrap(), Some(Entry::Tomb(3)));
         }
     }
 }
