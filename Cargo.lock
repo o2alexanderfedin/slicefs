@@ -480,6 +480,7 @@ name = "index-bench"
 version = "0.1.0"
 dependencies = [
  "chunk-store",
+ "crc32c",
  "fjall",
  "libc",
  "tempfile",

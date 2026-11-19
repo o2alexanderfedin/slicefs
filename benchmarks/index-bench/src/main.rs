@@ -73,7 +73,7 @@ fn spec(cmd: &str) -> Option<(&'static [&'static str], &'static [&'static str])>
     Some(match cmd {
         "create" => (&["dir", "backend", "objects", "pack-limit"], &[]),
         "open" => (&["dir", "backend", "cache"], &[]),
-        "lookup" => (&["dir", "backend", "hits", "misses", "seed"], &[]),
+        "lookup" => (&["dir", "backend", "hits", "misses", "seed"], &["breakdown"]),
         "recover" => (&["dir", "backend", "packs"], &["read-only"]),
         "run" => (&["dir", "backend", "objects", "reps", "pack-limit", "hits", "misses"], &["drop-caches"]),
         _ => return None,
@@ -184,6 +184,87 @@ fn linux_rss_bytes() -> Option<u64> {
     (page > 0).then(|| pages * page as u64)
 }
 
+/// Spike: (minor, major) page faults of this process so far.
+fn faults() -> (i64, i64) {
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+    (ru.ru_minflt as i64, ru.ru_majflt as i64)
+}
+
+/// Spike: macOS phys_footprint (0 elsewhere).
+#[cfg(target_os = "macos")]
+fn footprint() -> u64 {
+    let mut ri: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    let r = unsafe {
+        libc::proc_pid_rusage(libc::getpid(), libc::RUSAGE_INFO_V4, &mut ri as *mut _ as *mut libc::rusage_info_t)
+    };
+    if r == 0 {
+        ri.ri_phys_footprint
+    } else {
+        0
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn footprint() -> u64 {
+    0
+}
+
+/// Spike: (anonymous, file-backed) resident bytes of this process.
+/// macOS: `task_info(TASK_VM_INFO)` fields `internal` and `external`.
+/// Linux: `RssAnon` and `RssFile` of /proc/self/status.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn mem_split() -> (u64, u64) {
+    #[repr(C)]
+    #[derive(Default)]
+    struct TaskVmInfo {
+        virtual_size: u64,
+        region_count: i32,
+        page_size: i32,
+        resident_size: u64,
+        resident_size_peak: u64,
+        device: u64,
+        device_peak: u64,
+        internal: u64,
+        internal_peak: u64,
+        external: u64,
+        external_peak: u64,
+        reusable: u64,
+        reusable_peak: u64,
+        pv_pmap: u64,
+        pv_resident: u64,
+        pv_virtual: u64,
+        compressed: u64,
+        compressed_peak: u64,
+        compressed_lifetime: u64,
+        phys_footprint: u64,
+    }
+    const TASK_VM_INFO: u32 = 22;
+    let mut info = TaskVmInfo::default();
+    let mut count = (std::mem::size_of::<TaskVmInfo>() / 4) as u32;
+    let kr = unsafe {
+        libc::task_info(libc::mach_task_self(), TASK_VM_INFO, &mut info as *mut TaskVmInfo as libc::task_info_t, &mut count)
+    };
+    if kr != libc::KERN_SUCCESS {
+        return (0, 0);
+    }
+    (info.internal, info.external)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mem_split() -> (u64, u64) {
+    let st = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let kb = |k: &str| {
+        st.lines()
+            .find(|l| l.starts_with(k))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+            * 1024
+    };
+    (kb("RssAnon:"), kb("RssFile:"))
+}
+
 /// Drop the page cache before a cold open: Linux only, as root.
 fn drop_caches() -> Result<(), String> {
     if !cfg!(target_os = "linux") {
@@ -270,6 +351,8 @@ fn read_marker(dir: &Path, backend: &dyn Backend) -> Result<HashMap<String, Stri
     }
     match kv.get("backend") {
         Some(b) if b == backend.name() => Ok(kv),
+        // Spike: the mmap read path opens the same run files.
+        Some(b) if b == "spike-runs" && backend.name() == "spike-runs-mmap" => Ok(kv),
         Some(b) => Err(format!(
             "the directory is not an index-bench store of backend {} (its marker says backend={b})",
             backend.name()
@@ -410,39 +493,78 @@ fn step_lookup(f: &Flags) -> Result<(), Fail> {
     let hit_ids: Vec<ObjectId> = hit_vals.iter().map(|&i| object_id(i)).collect();
     let miss_ids: Vec<ObjectId> = (0..misses).map(|_| object_id(n + (splitmix64(&mut seed) % (1 << 62)))).collect();
 
+    let mem0 = mem_split();
+    let t0 = Instant::now();
+    let c0 = cpu_secs();
     let store = backend.open(&dir, false)?;
+    let open_s = t0.elapsed().as_secs_f64();
+    let open_cpu = cpu_secs() - c0;
+    let mem1 = mem_split();
     let objects = store.objects();
     if objects != n {
         return Err(format!("the store has {objects} objects, the marker says {n}").into());
     }
 
+    let mut extra = store.before_hits();
+    let flt0 = faults();
     let t0 = Instant::now();
+    let c0 = cpu_secs();
     let found = hit_ids.iter().filter(|id| store.contains(id)).count() as u64;
     let hit_s = t0.elapsed().as_secs_f64();
+    let hit_cpu = cpu_secs() - c0;
     if found != hits {
         return Err(format!("contains found {found} of {hits} objects that are in the store").into());
     }
+    let mem2 = mem_split();
+    let flt1 = faults();
+    extra.extend(store.after_hits());
+    // Spike: a second hit pass in the same process (pages already mapped:
+    // the state of a long-running daemon).
     let t0 = Instant::now();
+    let c0 = cpu_secs();
+    let found2 = hit_ids.iter().filter(|id| store.contains(id)).count() as u64;
+    let hit2_s = t0.elapsed().as_secs_f64();
+    let hit2_cpu = cpu_secs() - c0;
+    let flt2 = faults();
+    if found2 != hits {
+        return Err("second hit pass: wrong count".into());
+    }
+    extra.push(("hit_pass1_minflt", (flt1.0 - flt0.0).to_string()));
+    extra.push(("hit_pass1_majflt", (flt1.1 - flt0.1).to_string()));
+    extra.push(("hit_pass2_minflt", (flt2.0 - flt1.0).to_string()));
+    extra.push(("hit_pass2_majflt", (flt2.1 - flt1.1).to_string()));
+    extra.push(("contains_hit2_ns", fmt_f(hit2_s * 1e9 / hits.max(1) as f64)));
+    extra.push(("contains_hit2_cpu_ns", fmt_f(hit2_cpu * 1e9 / hits.max(1) as f64)));
+    let t0 = Instant::now();
+    let c0 = cpu_secs();
     let found = miss_ids.iter().filter(|id| store.contains(id)).count() as u64;
     let miss_s = t0.elapsed().as_secs_f64();
+    let miss_cpu = cpu_secs() - c0;
     if found != 0 {
         return Err(format!("contains found {found} of {misses} objects that are not in the store").into());
     }
     // The dedup-hit path of put: its time includes the hash of the data.
     let t0 = Instant::now();
+    let c0 = cpu_secs();
     for &i in &hit_vals {
         store.put(&object(i))?;
     }
     let put_s = t0.elapsed().as_secs_f64();
+    let put_cpu = cpu_secs() - c0;
+    let mem3 = mem_split();
+    if f.has("breakdown") {
+        extra.extend(store.breakdown(&hit_ids));
+    }
     if store.objects() != n {
         return Err(format!("put of objects in the store changed the count from {n} to {}", store.objects()).into());
     }
 
     let ns = |s: f64, k: u64| if k > 0 { fmt_f(s * 1e9 / k as f64) } else { "n/a".into() };
     let per_s = |s: f64, k: u64| if k > 0 && s > 0.0 { fmt_f(k as f64 / s) } else { "n/a".into() };
-    finish(&kv_text(&[
+    let mut kv = vec![
         ("step", "lookup".into()),
         ("backend", backend.name().into()),
+        ("variant", store.variant()),
         ("objects", objects.to_string()),
         ("hits", hits.to_string()),
         ("misses", misses.to_string()),
@@ -452,7 +574,23 @@ fn step_lookup(f: &Flags) -> Result<(), Fail> {
         ("contains_miss_per_s", per_s(miss_s, misses)),
         ("put_hit_ns", ns(put_s, hits)),
         ("put_hit_per_s", per_s(put_s, hits)),
-    ]));
+        ("contains_hit_cpu_ns", ns(hit_cpu, hits)),
+        ("contains_miss_cpu_ns", ns(miss_cpu, misses)),
+        ("put_hit_cpu_ns", ns(put_cpu, hits)),
+        ("open_s", fmt_f(open_s)),
+        ("open_cpu_s", fmt_f(open_cpu)),
+        ("anon_before_open", mem0.0.to_string()),
+        ("file_before_open", mem0.1.to_string()),
+        ("anon_after_open", mem1.0.to_string()),
+        ("file_after_open", mem1.1.to_string()),
+        ("anon_after_hits", mem2.0.to_string()),
+        ("file_after_hits", mem2.1.to_string()),
+        ("anon_after_all", mem3.0.to_string()),
+        ("file_after_all", mem3.1.to_string()),
+        ("footprint_after_all", footprint().to_string()),
+    ];
+    kv.extend(extra);
+    finish(&kv_text(&kv));
 }
 
 fn step_recover(f: &Flags) -> Result<(), Fail> {

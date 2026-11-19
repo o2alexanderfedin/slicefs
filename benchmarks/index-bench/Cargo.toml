@@ -8,6 +8,7 @@ description = "Measure the chunk store index: open time, RSS, lookups, recovery 
 [dependencies]
 chunk-store = { path = "../../crates/chunk-store" }
 libc.workspace = true
+crc32c = "0.6"
 fjall = "=3.1.13"
 
 [dev-dependencies]

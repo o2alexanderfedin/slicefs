@@ -63,6 +63,22 @@ pub trait Store {
     fn packs(&self) -> u64;
     /// Seal the store: every pack gets its index.
     fn close(&self) -> Result<(), String>;
+    /// Spike: the variant label of the backend.
+    fn variant(&self) -> String {
+        String::new()
+    }
+    /// Spike: called just before the timed hit round.
+    fn before_hits(&self) -> Vec<(&'static str, String)> {
+        vec![]
+    }
+    /// Spike: called just after the timed hit round.
+    fn after_hits(&self) -> Vec<(&'static str, String)> {
+        vec![]
+    }
+    /// Spike: the cost of the parts of one hit.
+    fn breakdown(&self, _ids: &[ObjectId]) -> Vec<(&'static str, String)> {
+        vec![]
+    }
 }
 
 /// A kind of store: how to make one and how to open one.
@@ -267,7 +283,8 @@ impl Backend for ChunkStoreBackend {
 pub fn backend_by_name(name: &str) -> Option<Box<dyn Backend>> {
     match name {
         "chunk-store" => Some(Box::new(ChunkStoreBackend)),
-        "spike-runs" => Some(Box::new(crate::spike_runs::SpikeRunsBackend)),
+        "spike-runs" => Some(Box::new(crate::spike_runs::SpikeRunsBackend { mmap: false })),
+        "spike-runs-mmap" => Some(Box::new(crate::spike_runs::SpikeRunsBackend { mmap: true })),
         "spike-fjall" => Some(Box::new(crate::spike_fjall::SpikeFjallBackend)),
         _ => None,
     }

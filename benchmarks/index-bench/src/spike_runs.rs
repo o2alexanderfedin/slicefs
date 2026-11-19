@@ -66,6 +66,105 @@ fn io(e: std::io::Error) -> String {
     e.to_string()
 }
 
+/// How the page is found and read (spike-runs-mmap variants; from the
+/// environment, so all variants open the same spike-runs store).
+#[derive(Clone, Copy, Debug)]
+pub struct Cfg {
+    /// Map each sealed run read-only and search the page in the mapping.
+    mmap: bool,
+    /// Check the page CRC32C on each page search (variant B2).
+    crc: bool,
+    /// Fence search: 0 binary, 1 interpolation, 2 Eytzinger.
+    fence: u8,
+    /// Search inside the page: interpolation (else binary).
+    page_interp: bool,
+    /// madvise(MADV_RANDOM) on each mapping.
+    random: bool,
+}
+
+impl Cfg {
+    fn pread() -> Cfg {
+        Cfg { mmap: false, crc: false, fence: 0, page_interp: false, random: false }
+    }
+    fn from_env() -> Cfg {
+        let v = |k: &str| std::env::var(k).unwrap_or_default();
+        Cfg {
+            mmap: true,
+            crc: v("SPIKE_CRC") == "1",
+            fence: match v("SPIKE_FENCE").as_str() {
+                "interp" => 1,
+                "eytz" => 2,
+                _ => 0,
+            },
+            page_interp: v("SPIKE_PAGE") == "interp",
+            random: v("SPIKE_ADVISE") == "random",
+        }
+    }
+    fn label(&self) -> String {
+        format!(
+            "{}{}-fence_{}-page_{}{}",
+            if self.mmap { "mmap" } else { "pread" },
+            if self.crc { "-crc" } else { "" },
+            ["bin", "interp", "eytz"][self.fence as usize],
+            if self.page_interp { "interp" } else { "bin" },
+            if self.random { "-random" } else { "" }
+        )
+    }
+}
+
+/// A read-only shared mapping of the page area of a sealed run.
+struct Map {
+    ptr: *const u8,
+    len: usize,
+}
+
+impl Map {
+    fn new(file: &File, len: usize, random: bool) -> Result<Map, String> {
+        use std::os::unix::io::AsRawFd;
+        if len == 0 {
+            return Ok(Map { ptr: std::ptr::null(), len: 0 });
+        }
+        let p = unsafe {
+            libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, file.as_raw_fd(), 0)
+        };
+        if p == libc::MAP_FAILED {
+            return Err(format!("mmap: {}", std::io::Error::last_os_error()));
+        }
+        if random {
+            unsafe { libc::madvise(p, len, libc::MADV_RANDOM) };
+        }
+        Ok(Map { ptr: p as *const u8, len })
+    }
+    fn bytes(&self) -> &[u8] {
+        if self.len == 0 {
+            return &[];
+        }
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+    /// Resident pages of the mapping (mincore: in the page cache).
+    fn resident_pages(&self) -> u64 {
+        if self.len == 0 {
+            return 0;
+        }
+        let ps = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let n = self.len.div_ceil(ps);
+        let mut v = vec![0u8; n];
+        let r = unsafe { libc::mincore(self.ptr as *mut libc::c_void as _, self.len, v.as_mut_ptr() as _) };
+        if r != 0 {
+            return u64::MAX;
+        }
+        v.iter().filter(|&&b| b & 1 != 0).count() as u64
+    }
+}
+
+impl Drop for Map {
+    fn drop(&mut self) {
+        if self.len != 0 {
+            unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.len) };
+        }
+    }
+}
+
 /// A run file, opened: only fences and filter in RAM.
 struct Run {
     path: PathBuf,
@@ -74,6 +173,23 @@ struct Run {
     fences: Vec<u64>,
     filter: Vec<u64>,
     nblocks: u64,
+    cfg: Cfg,
+    map: Option<Map>,
+    /// Eytzinger (BFS) copy of the fences, 1-based, and the sorted index of
+    /// each BFS slot; only for fence == 2.
+    eytz: Vec<u64>,
+    eytz_idx: Vec<u32>,
+}
+
+/// Fill `out` (1-based BFS order) from sorted `src`.
+fn eytz_fill(src: &[u64], out: &mut [u64], idx: &mut [u32], i: &mut usize, k: usize) {
+    if k < out.len() {
+        eytz_fill(src, out, idx, i, 2 * k);
+        out[k] = src[*i];
+        idx[k] = *i as u32;
+        *i += 1;
+        eytz_fill(src, out, idx, i, 2 * k + 1);
+    }
 }
 
 /// Read `out.len()` u64 words straight into their final buffer (no temporary
@@ -88,7 +204,7 @@ fn read_words(file: &File, off: u64, out: &mut [u64]) -> Result<(), String> {
 }
 
 impl Run {
-    fn open(path: PathBuf) -> Result<Run, String> {
+    fn open(path: PathBuf, cfg: Cfg) -> Result<Run, String> {
         let file = File::open(&path).map_err(io)?;
         let len = file.metadata().map_err(io)?.len();
         let mut f = [0u8; FOOTER];
@@ -102,7 +218,161 @@ impl Run {
         read_words(&file, fence_off, &mut fences)?;
         let mut filter = vec![0u64; nblocks as usize * BLOCK_WORDS];
         read_words(&file, filter_off, &mut filter)?;
-        Ok(Run { path, file, entries, fences, filter, nblocks })
+        let map = if cfg.mmap { Some(Map::new(&file, pages as usize * PAGE, cfg.random)?) } else { None };
+        let (mut eytz, mut eytz_idx) = (Vec::new(), Vec::new());
+        if cfg.fence == 2 {
+            eytz = vec![0u64; fences.len() + 1];
+            eytz_idx = vec![0u32; fences.len() + 1];
+            let mut i = 0;
+            eytz_fill(&fences, &mut eytz, &mut eytz_idx, &mut i, 1);
+        }
+        Ok(Run { path, file, entries, fences, filter, nblocks, cfg, map, eytz, eytz_idx })
+    }
+
+    /// Map the run again (drop the process mapping); on Linux also ask the
+    /// kernel to drop the clean file pages from the page cache.
+    fn make_cold(&mut self) -> Result<(), String> {
+        let len = self.fences.len() * PAGE;
+        self.map = None;
+        #[cfg(target_os = "linux")]
+        unsafe {
+            use std::os::unix::io::AsRawFd;
+            libc::posix_fadvise(self.file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED);
+        }
+        self.map = Some(Map::new(&self.file, len, self.cfg.random)?);
+        Ok(())
+    }
+
+    /// Index of the page that can hold prefix `p` (the number of fences
+    /// <= p, minus one); None if p is below the first fence. `probes` counts
+    /// the fence reads.
+    #[inline]
+    fn find_page(&self, p: u64, probes: &mut u32) -> Option<usize> {
+        let f = &self.fences;
+        let n = f.len();
+        match self.cfg.fence {
+            1 => {
+                // Interpolation search: the keys are uniform digests.
+                // Invariant: fences[..lo] <= p, fences[hi..] > p.
+                let (mut lo, mut hi) = (0usize, n);
+                let (mut vlo, mut vhi) = (0u64, u64::MAX);
+                while hi - lo > 8 {
+                    // f64, not u128: a u128 division is a slow library call.
+                    let g = lo + (p.saturating_sub(vlo) as f64 / ((vhi - vlo) as f64 + 1.0) * (hi - lo) as f64) as usize;
+                    let g = g.min(hi - 1);
+                    *probes += 1;
+                    if f[g] <= p {
+                        lo = g + 1;
+                        vlo = f[g];
+                    } else {
+                        hi = g;
+                        vhi = f[g];
+                    }
+                }
+                while lo < hi && f[lo] <= p {
+                    *probes += 1;
+                    lo += 1;
+                }
+                if lo < hi {
+                    *probes += 1;
+                }
+                lo.checked_sub(1)
+            }
+            2 => {
+                // Eytzinger: the first slot with a value > p.
+                let e = &self.eytz;
+                let mut k = 1usize;
+                while k < e.len() {
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        let pf = (8 * k).min(e.len() - 1);
+                        std::arch::x86_64::_mm_prefetch(e.as_ptr().add(pf) as *const i8, std::arch::x86_64::_MM_HINT_T0);
+                    }
+                    *probes += 1;
+                    k = 2 * k + (e[k] <= p) as usize;
+                }
+                k >>= k.trailing_ones() + 1;
+                let idx = if k == 0 { n } else { self.eytz_idx[k] as usize };
+                idx.checked_sub(1)
+            }
+            _ => {
+                let mut pb = 0;
+                let (mut lo, mut hi) = (0usize, n);
+                while lo < hi {
+                    let mid = (lo + hi) / 2;
+                    pb += 1;
+                    if f[mid] <= p {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                *probes += pb;
+                lo.checked_sub(1)
+            }
+        }
+    }
+
+    /// Search one page in the mapping. `probes` counts the entry reads.
+    #[inline]
+    fn search_mapped(&self, page: usize, id: &Key, probes: &mut u32) -> Option<Loc> {
+        let m = self.map.as_ref().unwrap().bytes();
+        let pg = &m[page * PAGE..(page + 1) * PAGE];
+        if self.cfg.crc {
+            let want = u32::from_le_bytes(pg[PAGE - 4..].try_into().unwrap());
+            if crc32c::crc32c(&pg[..PAGE - 4]) != want {
+                return None; // a real store reports damage here
+            }
+        }
+        let cnt = self.page_entries(page);
+        let b = &pg[..cnt * ENTRY];
+        let key = |i: usize| &b[i * ENTRY..i * ENTRY + ID];
+        let loc = |i: usize| -> Loc { b[i * ENTRY + ID..(i + 1) * ENTRY].try_into().unwrap() };
+        if self.cfg.page_interp && cnt > 0 {
+            let p = dig(id, 0);
+            let lo_v = self.fences[page];
+            let hi_v = self.fences.get(page + 1).copied().unwrap_or(u64::MAX);
+            let mut i = (p.saturating_sub(lo_v) as f64 / (hi_v.saturating_sub(lo_v) as f64 + 1.0) * cnt as f64) as usize;
+            i = i.min(cnt - 1);
+            *probes += 1;
+            match key(i).cmp(&id[..]) {
+                std::cmp::Ordering::Equal => return Some(loc(i)),
+                std::cmp::Ordering::Less => {
+                    i += 1;
+                    while i < cnt {
+                        *probes += 1;
+                        match key(i).cmp(&id[..]) {
+                            std::cmp::Ordering::Equal => return Some(loc(i)),
+                            std::cmp::Ordering::Greater => return None,
+                            _ => i += 1,
+                        }
+                    }
+                }
+                std::cmp::Ordering::Greater => {
+                    while i > 0 {
+                        i -= 1;
+                        *probes += 1;
+                        match key(i).cmp(&id[..]) {
+                            std::cmp::Ordering::Equal => return Some(loc(i)),
+                            std::cmp::Ordering::Less => return None,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            return None;
+        }
+        let (mut lo, mut hi) = (0, cnt);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            *probes += 1;
+            match key(mid).cmp(&id[..]) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return Some(loc(mid)),
+            }
+        }
+        None
     }
 
     fn may_contain(&self, id: &Key) -> bool {
@@ -137,6 +407,10 @@ impl Run {
         if !self.may_contain(id) {
             return None;
         }
+        if self.map.is_some() {
+            let (mut fp, mut pp) = (0, 0);
+            return self.get_mapped(id, &mut fp, &mut pp);
+        }
         let p = dig(id, 0);
         let idx = self.fences.partition_point(|&f| f <= p);
         if idx == 0 {
@@ -153,10 +427,24 @@ impl Run {
         }
         None
     }
+
+    /// Mapped lookup after the filter. `fp` / `pp` count fence and entry probes.
+    #[inline]
+    fn get_mapped(&self, id: &Key, fp: &mut u32, pp: &mut u32) -> Option<Loc> {
+        let p = dig(id, 0);
+        let page = self.find_page(p, fp)?;
+        if let Some(l) = self.search_mapped(page, id, pp) {
+            return Some(l);
+        }
+        if page > 0 && self.fences[page] == p {
+            return self.search_mapped(page - 1, id, pp);
+        }
+        None
+    }
 }
 
 /// Write a run of `n` sorted entries to `path` (fsync), then open it.
-fn write_run(path: PathBuf, n: u64, entries: impl Iterator<Item = (Key, Loc)>) -> Result<Run, String> {
+fn write_run(path: PathBuf, n: u64, entries: impl Iterator<Item = (Key, Loc)>, cfg: Cfg) -> Result<Run, String> {
     let tmp = path.with_extension("tmp");
     let file = File::create(&tmp).map_err(io)?;
     let mut w = BufWriter::with_capacity(1 << 20, &file);
@@ -165,7 +453,17 @@ fn write_run(path: PathBuf, n: u64, entries: impl Iterator<Item = (Key, Loc)>) -
     let mut fences = Vec::with_capacity((n as usize).div_ceil(PER_PAGE));
     let mut in_page = 0;
     let mut written = 0u64;
-    let pad = [0u8; PAGE - PER_PAGE * ENTRY];
+    // Each page: the entries, zero padding, then the CRC32C of the first
+    // PAGE - 4 bytes in its last 4 bytes.
+    let mut page_buf = Vec::with_capacity(PAGE);
+    let end_page = |w: &mut BufWriter<&File>, pb: &mut Vec<u8>| -> Result<(), String> {
+        pb.resize(PAGE - 4, 0);
+        let c = crc32c::crc32c(pb);
+        w.write_all(pb).map_err(io)?;
+        w.write_all(&c.to_le_bytes()).map_err(io)?;
+        pb.clear();
+        Ok(())
+    };
     for (k, l) in entries {
         if in_page == 0 {
             fences.push(dig(&k, 0));
@@ -174,18 +472,18 @@ fn write_run(path: PathBuf, n: u64, entries: impl Iterator<Item = (Key, Loc)>) -
         for bit in bloom_bits(&k) {
             filter[b + (bit / 64) as usize] |= 1 << (bit % 64);
         }
-        w.write_all(&k).map_err(io)?;
-        w.write_all(&l).map_err(io)?;
+        page_buf.extend_from_slice(&k);
+        page_buf.extend_from_slice(&l);
         written += 1;
         in_page += 1;
         if in_page == PER_PAGE {
-            w.write_all(&pad).map_err(io)?;
+            end_page(&mut w, &mut page_buf)?;
             in_page = 0;
         }
     }
     assert_eq!(written, n);
     if in_page != 0 {
-        w.write_all(&vec![0u8; PAGE - in_page * ENTRY]).map_err(io)?;
+        end_page(&mut w, &mut page_buf)?;
     }
     let pages = fences.len() as u64;
     let fence_off = pages * PAGE as u64;
@@ -206,7 +504,7 @@ fn write_run(path: PathBuf, n: u64, entries: impl Iterator<Item = (Key, Loc)>) -
     drop(w);
     file.sync_all().map_err(io)?;
     std::fs::rename(&tmp, &path).map_err(io)?;
-    Run::open(path)
+    Run::open(path, cfg)
 }
 
 /// Sequential reader of the entries of a run file.
@@ -245,6 +543,7 @@ struct State {
     runs: Vec<Run>,
     next_run: u64,
     count: u64,
+    cfg: Cfg,
 }
 
 impl State {
@@ -271,7 +570,7 @@ impl State {
         }
         let mem = std::mem::take(&mut self.mem);
         let path = self.run_path();
-        let run = write_run(path, mem.len() as u64, mem.into_iter())?;
+        let run = write_run(path, mem.len() as u64, mem.into_iter(), self.cfg)?;
         self.runs.push(run);
         Ok(())
     }
@@ -313,7 +612,7 @@ impl State {
         // Duplicates never happen here (put checks every run), so the count
         // is the sum; a duplicate would make write_run's assert fail.
         let path = self.run_path();
-        let merged = write_run(path, total, iter)?;
+        let merged = write_run(path, total, iter, self.cfg)?;
         if let Some(e) = err {
             return Err(e);
         }
@@ -325,7 +624,19 @@ impl State {
     }
 }
 
-pub struct SpikeRunsBackend;
+pub struct SpikeRunsBackend {
+    pub mmap: bool,
+}
+
+impl SpikeRunsBackend {
+    fn cfg(&self) -> Cfg {
+        if self.mmap {
+            Cfg::from_env()
+        } else {
+            Cfg::pread()
+        }
+    }
+}
 
 struct Handle(RefCell<State>);
 
@@ -359,6 +670,101 @@ impl Store for Handle {
     fn packs(&self) -> u64 {
         self.0.borrow().runs.len() as u64
     }
+    fn variant(&self) -> String {
+        self.0.borrow().cfg.label()
+    }
+    /// SPIKE_COLD=1: map every run again before the hit round (and on Linux
+    /// drop its clean pages from the page cache).
+    fn before_hits(&self) -> Vec<(&'static str, String)> {
+        let mut s = self.0.borrow_mut();
+        if std::env::var("SPIKE_COLD").as_deref() != Ok("1") || !s.cfg.mmap {
+            return vec![];
+        }
+        let before: u64 = s.runs.iter().map(|r| r.map.as_ref().map_or(0, |m| m.resident_pages())).sum();
+        for r in s.runs.iter_mut() {
+            r.make_cold().expect("remap");
+        }
+        let after: u64 = s.runs.iter().map(|r| r.map.as_ref().map_or(0, |m| m.resident_pages())).sum();
+        vec![("cold_incore_pages_before", before.to_string()), ("cold_incore_pages_after", after.to_string())]
+    }
+    fn after_hits(&self) -> Vec<(&'static str, String)> {
+        let s = self.0.borrow();
+        let res: u64 = s.runs.iter().map(|r| r.map.as_ref().map_or(0, |m| m.resident_pages())).sum();
+        let pages: u64 = s.runs.iter().map(|r| r.fences.len() as u64).sum();
+        vec![("map_incore_pages", res.to_string()), ("run_pages", pages.to_string())]
+    }
+    /// The cost of the parts of one hit: each prefix of the path timed alone
+    /// over all `ids` (one run, empty memtable: the state after open).
+    fn breakdown(&self, ids: &[ObjectId]) -> Vec<(&'static str, String)> {
+        use std::hint::black_box;
+        let s = self.0.borrow();
+        if !s.cfg.mmap || s.runs.len() != 1 || !s.mem.is_empty() || ids.is_empty() {
+            return vec![];
+        }
+        let r = &s.runs[0];
+        let n = ids.len() as f64;
+        let time = |f: &mut dyn FnMut() -> u64| {
+            let t = std::time::Instant::now();
+            let c = crate::cpu_secs();
+            black_box(f());
+            (t.elapsed().as_secs_f64() * 1e9 / n, (crate::cpu_secs() - c) * 1e9 / n)
+        };
+        let m = r.map.as_ref().unwrap().bytes();
+        let mut out = vec![];
+        for _round in 0..2 {
+            // Round 0 warms the caches; round 1 is the result.
+            let bloom = time(&mut || ids.iter().filter(|id| r.may_contain(&black_box(id).0)).count() as u64);
+            let fence = time(&mut || {
+                let mut acc = 0u64;
+                for id in ids {
+                    let mut fp = 0;
+                    acc = acc.wrapping_add(r.find_page(dig(&black_box(id).0, 0), &mut fp).unwrap_or(0) as u64);
+                }
+                acc
+            });
+            let touch = time(&mut || {
+                let mut acc = 0u64;
+                for id in ids {
+                    let mut fp = 0;
+                    let pg = r.find_page(dig(&black_box(id).0, 0), &mut fp).unwrap_or(0);
+                    let b = unsafe { std::ptr::read_volatile(m.as_ptr().add(pg * PAGE + (PER_PAGE / 2) * ENTRY)) };
+                    acc = acc.wrapping_add(b as u64);
+                }
+                acc
+            });
+            let search = time(&mut || {
+                let mut acc = 0u64;
+                for id in ids {
+                    let (mut fp, mut pp) = (0, 0);
+                    acc = acc.wrapping_add(r.get_mapped(&black_box(id).0, &mut fp, &mut pp).is_some() as u64);
+                }
+                acc
+            });
+            let full = time(&mut || ids.iter().filter(|id| r.get(&black_box(id).0).is_some()).count() as u64);
+            out = vec![
+                ("bd_bloom_ns", crate::fmt_f(bloom.0)),
+                ("bd_fence_ns", crate::fmt_f(fence.0)),
+                ("bd_fence_touch_ns", crate::fmt_f(touch.0)),
+                ("bd_fence_touch_search_ns", crate::fmt_f(search.0)),
+                ("bd_full_get_ns", crate::fmt_f(full.0)),
+                ("bd_bloom_cpu_ns", crate::fmt_f(bloom.1)),
+                ("bd_fence_cpu_ns", crate::fmt_f(fence.1)),
+                ("bd_fence_touch_cpu_ns", crate::fmt_f(touch.1)),
+                ("bd_fence_touch_search_cpu_ns", crate::fmt_f(search.1)),
+                ("bd_full_get_cpu_ns", crate::fmt_f(full.1)),
+            ];
+        }
+        let (mut fps, mut pps) = (0u64, 0u64);
+        for id in ids {
+            let (mut fp, mut pp) = (0, 0);
+            r.get_mapped(&id.0, &mut fp, &mut pp);
+            fps += fp as u64;
+            pps += pp as u64;
+        }
+        out.push(("bd_fence_probes_avg", crate::fmt_f(fps as f64 / n)));
+        out.push(("bd_page_probes_avg", crate::fmt_f(pps as f64 / n)));
+        out
+    }
     fn close(&self) -> Result<(), String> {
         let mut s = self.0.borrow_mut();
         s.flush()?;
@@ -370,7 +776,7 @@ impl Store for Handle {
     }
 }
 
-fn open_state(dir: &Path) -> Result<State, String> {
+fn open_state(dir: &Path, cfg: Cfg) -> Result<State, String> {
     let idx = dir.join("index");
     let count: u64 = std::fs::read_to_string(idx.join(COUNT_FILE))
         .map_err(io)?
@@ -388,22 +794,26 @@ fn open_state(dir: &Path) -> Result<State, String> {
         .collect();
     names.sort();
     let next_run = names.last().map_or(0, |(n, _)| n + 1);
-    let runs = names.into_iter().map(|(_, p)| Run::open(p)).collect::<Result<Vec<_>, _>>()?;
-    Ok(State { dir: dir.to_path_buf(), mem: BTreeMap::new(), runs, next_run, count })
+    let runs = names.into_iter().map(|(_, p)| Run::open(p, cfg)).collect::<Result<Vec<_>, _>>()?;
+    Ok(State { dir: dir.to_path_buf(), mem: BTreeMap::new(), runs, next_run, count, cfg })
 }
 
 impl Backend for SpikeRunsBackend {
     fn name(&self) -> &'static str {
-        "spike-runs"
+        if self.mmap {
+            "spike-runs-mmap"
+        } else {
+            "spike-runs"
+        }
     }
     fn create(&self, dir: &Path, _pack_limit: Option<u64>) -> Result<Box<dyn Store>, String> {
         std::fs::create_dir_all(dir.join("index")).map_err(io)?;
         // The create step counts the bytes in packs/; there are none.
         std::fs::create_dir_all(dir.join("packs")).map_err(io)?;
-        let s = State { dir: dir.to_path_buf(), mem: BTreeMap::new(), runs: Vec::new(), next_run: 0, count: 0 };
+        let s = State { dir: dir.to_path_buf(), mem: BTreeMap::new(), runs: Vec::new(), next_run: 0, count: 0, cfg: self.cfg() };
         Ok(Box::new(Handle(RefCell::new(s))))
     }
     fn open(&self, dir: &Path, _read_only: bool) -> Result<Box<dyn Store>, String> {
-        Ok(Box::new(Handle(RefCell::new(open_state(dir)?))))
+        Ok(Box::new(Handle(RefCell::new(open_state(dir, self.cfg())?))))
     }
 }
