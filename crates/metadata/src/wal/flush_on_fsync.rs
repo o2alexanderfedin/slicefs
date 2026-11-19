@@ -85,4 +85,34 @@ mod tests {
         wal.log_mutation(&WalEntry::Op { bytes: vec![1; 10] }).unwrap();
         assert!(wal.flush_and_sync().is_ok(), "after rotate (commit), fsync works again");
     }
+
+    // #108: a commit cuts the log instead of rotating it. After a failed
+    // write-out, the commit must still work (it is the way back), fsync must
+    // fail until its root is logged and work after it, and the log after the
+    // root must replay.
+    #[test]
+    fn a_failed_write_out_fails_fsync_until_a_commit_and_the_commit_works() {
+        use crate::store::DictMetadataStore;
+        use crate::store_io::StoreIo;
+        use slicefs_traits::metadata::MetadataStore;
+        use std::sync::{Arc, Mutex};
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+        let wal = FlushOnFsyncWal::new(&dir.path().join("segments").join("segment-000001.seg"), 1).unwrap();
+        wal.log.fail_next_io();
+        let mut meta = DictMetadataStore::new(Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap())));
+        meta.set_wal(Box::new(wal));
+        let record = 64 * 1024;
+        for i in 0..(super::super::BUFFER_CAP_BYTES / record + 2) {
+            meta.log_op(vec![i as u8; record]);
+        }
+        assert!(meta.flush_wal().is_err(), "fsync after a failed write-out must fail");
+        let root = meta.commit().expect("the commit after a failed write-out");
+        assert!(meta.flush_wal().is_ok(), "after the commit, fsync works again");
+        meta.log_op(b"after".to_vec());
+        meta.flush_wal().unwrap();
+        let (last, _, ops) = crate::segment::load_store_with_log(&dir.path().join("segments")).unwrap();
+        assert_eq!(last, Some(root));
+        assert_eq!(ops, vec![b"after".to_vec()]);
+    }
 }

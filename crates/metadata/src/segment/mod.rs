@@ -133,8 +133,10 @@ pub fn scan_store_with_log(
     let mut snapshots = Vec::new();
     let mut spans: Vec<LogSpan> = Vec::new();
     let mut ops = 0usize;
-    // Id and record count of the segment read last.
-    let mut last: Option<(u64, u64)> = None;
+    // Id and record count of each segment read, and the id of the segment
+    // of the last root.
+    let mut counts: Vec<(u64, u64)> = Vec::new();
+    let mut root_seg: Option<u64> = None;
     // The log after a broken link of the chain (see `SegmentEntry::Cut`) is
     // not replayed, up to the next root.
     let mut broken = false;
@@ -145,9 +147,16 @@ pub fn scan_store_with_log(
         spans.push(LogSpan { path, pos, seq, end_seq: seq });
         let mut first = true;
         while let Some(entry) = reader.next() {
+            if first && !matches!(entry, SegmentEntry::Cut { .. }) {
+                // A segment that a mount started (no Cut record): its
+                // requests come after the replay of that mount, so they
+                // apply on top of what was replayed then.
+                broken = false;
+            }
             match entry {
                 SegmentEntry::RootUpdate { root } => {
                     last_root = Some(root);
+                    root_seg = Some(id);
                     broken = false;
                     // The log starts after this record, in this segment.
                     let (pos, seq) = reader.cursor();
@@ -163,15 +172,14 @@ pub fn scan_store_with_log(
                 }
                 SegmentEntry::Cut { prev_id, records } if first => {
                     // A commit started this segment after `records` records of
-                    // segment `prev_id`. A root segment between them (a later
-                    // id) makes the link whole. Else the segment before must
-                    // be `prev_id` with all its records: after a power loss its
-                    // tail can be lost while this segment is on disk, and this
-                    // log would then skip requests (#108).
-                    let whole = matches!(last, Some((lid, n)) if lid > prev_id || (lid == prev_id && n == records));
-                    if !whole {
-                        broken = true;
-                    }
+                    // segment `prev_id`. A root read from a later segment (the
+                    // root segment between them) makes the link whole. Else
+                    // segment `prev_id` must have all its records: after a
+                    // power loss its tail can be lost while this segment is
+                    // on disk, and this log would then skip requests (#108).
+                    let whole = root_seg.is_some_and(|r| r > prev_id)
+                        || counts.iter().any(|&(i, n)| i == prev_id && n == records);
+                    broken = !whole;
                 }
                 SegmentEntry::Cut { .. } => {}
                 SegmentEntry::Op { .. } if !broken => ops += 1,
@@ -181,7 +189,7 @@ pub fn scan_store_with_log(
         }
         // Pass 2 reads this segment up to here, and no further.
         let end = reader.cursor().1;
-        last = Some((id, end));
+        counts.push((id, end));
         if broken {
             // Nothing of this segment is replayed (no root came after the break).
             let span = spans.last_mut().expect("span of this segment");

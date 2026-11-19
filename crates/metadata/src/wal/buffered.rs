@@ -131,16 +131,17 @@ impl BufferedLog {
     /// See [`super::WalStrategy::cut`].
     pub(crate) fn cut(&self) -> Result<Option<WalCut>, WalError> {
         let mut pending = self.pending.lock().unwrap();
-        if pending.failed {
-            return Err(write_failed());
-        }
         let mut writer = self.writer.lock().unwrap();
         let mut loc = self.loc.lock().unwrap();
-        if let Err(e) = write_out(&mut pending, &mut writer) {
-            pending.failed = true;
-            return Err(e.into());
-        }
-        super::cut_segment(&mut writer, &mut loc, &self.behind).map(Some)
+        // A failed segment is cut too: the root of this commit holds every
+        // record before the cut, and the new segment starts whole.
+        let failed = pending.failed || write_out(&mut pending, &mut writer).is_err();
+        let mut cut = super::cut_segment(&mut writer, &mut loc, &self.behind)?;
+        cut.old_failed |= failed;
+        pending.entries.clear();
+        pending.bytes = 0;
+        pending.failed = false;
+        Ok(Some(cut))
     }
 
     /// See [`super::WalStrategy::install_root`].

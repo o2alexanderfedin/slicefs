@@ -685,12 +685,17 @@ impl DictMetadataStore {
     pub fn begin_commit(&self) -> Result<PreparedCommit<'_>, MetaError> {
         let serial = self.commit_lock.lock().unwrap();
         let wal = self.wal_handle();
-        let fail_seq = self.wal_fail_seq.load(Ordering::SeqCst);
         // The log first: if it cannot cut, nothing has changed.
         let cut = match &wal {
             Some(w) => w.cut().map_err(|e| MetaError::Corrupted(format!("commit: write-log cut failed: {e}")))?,
             None => None,
         };
+        if cut.is_some_and(|c| c.old_failed) {
+            self.wal_fail_seq.fetch_add(1, Ordering::SeqCst);
+        }
+        // Failures up to here are of records before the cut: the root of
+        // this commit holds their requests. Later ones are not cleared by it.
+        let fail_seq = self.wal_fail_seq.load(Ordering::SeqCst);
         let changes = self.changes.load(Ordering::Relaxed);
         let dirs = self.dir_live.lock().unwrap().take_dirty();
         let inode_map = self.inode_map.lock().unwrap().clone();

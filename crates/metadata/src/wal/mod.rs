@@ -115,6 +115,9 @@ pub trait WalStrategy: Send + Sync {
 pub struct WalCut {
     /// Id kept for the root segment of this commit.
     pub root_id: u64,
+    /// A write or sync of the segment before the cut failed: records before
+    /// the cut may be lost, and fsync must fail until this commit's root.
+    pub old_failed: bool,
 }
 
 /// Segments that a cut left behind, not yet synced (see [`WalStrategy::cut`]).
@@ -150,7 +153,10 @@ pub(crate) fn cut_segment(
     loc: &mut (std::path::PathBuf, u64),
     behind: &std::sync::Mutex<Behind>,
 ) -> Result<WalCut, WalError> {
-    writer.flush()?;
+    // The old segment is not needed once the root is logged: a failure here
+    // only makes fsync fail until then (and the Cut record below no longer
+    // matches the segment, so replay stops before the new one).
+    let old_failed = writer.flush().is_err();
     let dir = loc.0.parent().ok_or_else(|| std::io::Error::other("segment has no directory"))?.to_path_buf();
     let (old_id, records) = (loc.1, writer.records());
     let new_id = old_id + 2;
@@ -163,7 +169,7 @@ pub(crate) fn cut_segment(
     b.old.push(old);
     b.dir = Some(dir);
     *loc = (new_path, new_id);
-    Ok(WalCut { root_id: old_id + 1 })
+    Ok(WalCut { root_id: old_id + 1, old_failed })
 }
 
 /// The second half of [`WalStrategy::install_root`], after the records of
