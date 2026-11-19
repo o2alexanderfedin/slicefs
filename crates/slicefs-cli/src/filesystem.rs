@@ -829,19 +829,25 @@ impl SliceFsFilesystem {
             libc::EIO
         };
         let size = ov.size;
+        let t0 = std::time::Instant::now();
+        let cost_before = ov.cost();
         let mut part = ov.empty_like();
         for (o, v) in ov.take(free) {
             part.put(o, v);
         }
+        let (taken_n, taken_bytes) = (part.extent_count(), part.extent_ranges().iter().map(|r| r.end - r.start).sum::<u64>());
         let spliced = if size == 0 {
-            Ok((None, 0, 0))
+            Ok((None, chunk_store::file::SpliceStats::default(), 0))
         } else {
             OverlaySource::new(cs, &part).and_then(|mut src| {
                 let (k, stats) = content::splice(cs, part.base.as_ref(), part.visible, &part.extent_ranges(), size, &mut src)?;
-                Ok((Some(k), stats.rechunked, src.base_bytes))
+                Ok((Some(k), stats, src.base_bytes))
             })
         };
-        let installed = spliced.map_err(store_err).and_then(|(root, rechunked, base_bytes)| {
+        let splice_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let installed = spliced.map_err(store_err).and_then(|(root, stats, base_bytes)| {
+            let rechunked = if root.is_some() { stats.rechunked } else { 0 };
+            let t1 = std::time::Instant::now();
             self.rebase_count.fetch_add(1, Ordering::Relaxed);
             self.last_rebase_bytes.store(rechunked, Ordering::Relaxed);
             self.write_rebase_bytes.fetch_add(rechunked, Ordering::Relaxed);
@@ -850,7 +856,12 @@ impl SliceFsFilesystem {
             if let Some(hook) = hook {
                 hook();
             }
-            self.install_root(ino, root, size, modified).map(|_| root)
+            let r = self.install_root(ino, root, size, modified).map(|_| root);
+            eprintln!("[t={}][rebase] ino={ino} size={size} free={} cost_before={cost_before} taken={taken_n}/{taken_bytes} \
+                rechunked={rechunked} base_read={base_bytes} reused_entries={} reused_nodes={} splice_ms={splice_ms:.1} install_ms={:.1}",
+                crate::util::epoch(), if free == usize::MAX { "all".to_string() } else { free.to_string() },
+                stats.reused_entries, stats.reused_nodes, t1.elapsed().as_secs_f64() * 1000.0);
+            r
         });
         let root = match installed {
             Ok(root) => root,
@@ -1490,7 +1501,10 @@ impl SliceFsFilesystem {
                 items.push(Item { ino, time, ctime, what });
             }
         }
+        let t_commit = std::time::Instant::now();
         let root = self.meta.commit()?;
+        let commit_ms = t_commit.elapsed().as_millis();
+        let t_relog = std::time::Instant::now();
         // The commit deleted the old log segments, so these records are now
         // the only copy of bytes an fsync may already have made durable:
         // sync them before the commit returns (a buffered log keeps them in RAM).
@@ -1544,10 +1558,14 @@ impl SliceFsFilesystem {
             }
         }
         self.last_relog_bytes.store(relog_bytes, Ordering::Relaxed);
+        let relog_ms = t_relog.elapsed().as_millis();
+        let t_flush = std::time::Instant::now();
         if relogged {
             self.meta.flush_wal()
                 .map_err(|e| MetaError::Corrupted(format!("cut: sync of the write log failed: {e}")))?;
         }
+        eprintln!("[t={}][commit-cut] commit_ms={commit_ms} relog_bytes={relog_bytes} relog_ms={relog_ms} flush_ms={}",
+            crate::util::epoch(), t_flush.elapsed().as_millis());
         Ok(root)
     }
 

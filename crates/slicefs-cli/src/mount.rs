@@ -99,6 +99,7 @@ pub fn load_store(
     // Step 4: Reconstruct the metadata store on the chunk store (StoreIo), with the
     // write hash of `--hash` (recorded now, under the lock).
     crate::content::select_hash(store_path, hash)?;
+    chunk_store::retry::LOG_SYNCS.store(true, std::sync::atomic::Ordering::Relaxed);
     let io = Arc::new(Mutex::new(crate::content::store_io(store_path)?));
     let mut meta = DictMetadataStore::load_from_root(io.clone(), &root)
         .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;

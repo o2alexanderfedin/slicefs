@@ -451,10 +451,19 @@ impl Filesystem for MountedFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
+        let t_gate = std::time::Instant::now();
         let gate = self.commit_gate();
         let _op = gate.read().unwrap_or_else(|e| e.into_inner());
+        let gate_wait = t_gate.elapsed();
         eprintln!("[{}][FUSE] write: ENTRY ino={}, fh={}, offset={}, data_len={}, write_flags={:#x}, flags={:#x}, lock_owner={:?}", ts(), ino.0, fh.0, offset, data.len(), _write_flags.bits(), _flags.0, _lock_owner.map(|l| l.0));
-        match handle_write(self, fh.0, offset, data) {
+        let t_handle = std::time::Instant::now();
+        let handled = handle_write(self, fh.0, offset, data);
+        let handle = t_handle.elapsed();
+        if (gate_wait + handle).as_millis() >= 50 {
+            eprintln!("[t={}][slow-write] ino={} offset={} len={} gate_wait_ms={} handle_ms={}",
+                crate::util::epoch(), ino.0, offset, data.len(), gate_wait.as_millis(), handle.as_millis());
+        }
+        match handled {
             WriteResult::Ok(n) => {
                 eprintln!("[{}][FUSE] write: EXIT ino={}, fh={} -> ok, written={} bytes", ts(), ino.0, fh.0, n);
                 reply.written(n);
