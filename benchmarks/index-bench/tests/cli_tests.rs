@@ -325,10 +325,14 @@ fn gc_reports_the_lock_hold() {
     assert_eq!(value(&out, "live_every"), Some("4"), "{out}");
     assert_eq!(value(&out, "dead_run"), Some("1"), "{out}");
     assert_eq!(num(&out, "dead_objects"), 1250, "{out}");
-    // The packs of this store are small, so the GC compacts them and
-    // removes every dead object.
+    // The packs of this store are small, so the GC compacts them and removes
+    // every dead object except the false positives of the live filter (#113;
+    // the filter has a random salt, so their number changes between runs).
     let removed = num(&out, "removed_objects");
-    assert_eq!(removed, 1250, "{out}");
+    let fp = num(&out, "live_false_positives");
+    assert!(fp <= 1250 / 20, "{out}");
+    assert_eq!(removed + fp, 1250, "{out}");
+    assert_eq!(num(&out, "dead_left"), fp, "{out}");
     assert_eq!(removed + num(&out, "kept_objects"), 5000, "{out}");
     assert_eq!(num(&out, "objects_after"), 5000 - removed, "{out}");
     let wall = float(&out, "wall_s");
