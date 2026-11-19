@@ -101,6 +101,13 @@ pub const DIRTY_LIMIT: usize = 32 << 20;
 /// so no single write pays for the rebase of the whole overlay.
 pub const REBASE_STEP: usize = 1 << 20;
 
+/// Budget of dirty bytes of all open files together (#105): when a write
+/// makes the sum pass it, the file with the most dirty bytes stores a step
+/// (an overlay rebase step; a stream's pending writes first become an
+/// overlay). Each file also keeps its own `DIRTY_LIMIT`. The same value as
+/// `REORDER_WINDOW`, so one stream can still use its whole window.
+pub const DIRTY_BUDGET: usize = 64 << 20;
+
 /// The RAM an open file holds in written bytes that are not in a stored
 /// root: the overlay cost, or the pending out-of-order writes of a stream.
 fn dirty_cost(s: &OpenFileState) -> usize {
@@ -210,6 +217,8 @@ pub struct SliceFsFilesystem {
     replaying: std::sync::atomic::AtomicBool,
     /// Dirty limit of one overlay (`DIRTY_LIMIT`; tests set it lower).
     dirty_limit: AtomicUsize,
+    /// Dirty budget of all open files (`DIRTY_BUDGET`; tests set it lower).
+    dirty_budget: AtomicUsize,
     /// Rebases done so far (for tests).
     rebase_count: AtomicU64,
     /// Bytes the last rebase fed to the chunker (for tests).
@@ -258,6 +267,7 @@ impl SliceFsFilesystem {
             commit_gate: Arc::new(RwLock::new(())),
             replaying: std::sync::atomic::AtomicBool::new(false),
             dirty_limit: AtomicUsize::new(DIRTY_LIMIT),
+            dirty_budget: AtomicUsize::new(DIRTY_BUDGET),
             rebase_count: AtomicU64::new(0),
             last_rebase_bytes: AtomicU64::new(0),
             last_relog_bytes: AtomicU64::new(0),
@@ -270,6 +280,11 @@ impl SliceFsFilesystem {
     /// Test hook: set the dirty limit of each overlay to `bytes`.
     pub fn test_set_dirty_limit(&self, bytes: usize) {
         self.dirty_limit.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Test hook: set the dirty budget of all open files to `bytes`.
+    pub fn test_set_dirty_budget(&self, bytes: usize) {
+        self.dirty_budget.store(bytes, Ordering::Relaxed);
     }
 
     /// Test hook: the number of rebases so far.
@@ -1002,7 +1017,7 @@ impl SliceFsFilesystem {
         // open_files lock is released here.
 
         // Dirty cost before this write (after a switch: of the new overlay).
-        let mut cost_before = 0usize;
+        let mut cost_before = dirty_cost(&file_state);
         let result = match &mut file_state.write_mode {
             WriteMode::Streaming { state, next_expected_offset, pending } => {
                 let end = offset + data.len() as u64;
@@ -1069,10 +1084,7 @@ impl SliceFsFilesystem {
                     }
                 }
             }
-            WriteMode::Overlay(_) => {
-                cost_before = dirty_cost(&file_state);
-                Self::overlay_write(&mut file_state, offset, data)
-            }
+            WriteMode::Overlay(_) => Self::overlay_write(&mut file_state, offset, data),
         };
 
         // An overlay past the dirty limit (also right after a switch that
@@ -1094,10 +1106,89 @@ impl SliceFsFilesystem {
             }
             r => r,
         };
+        // Then the budget of all open files (#105), with the same bound.
+        let result = match result {
+            Ok(n) => self.keep_budget(&mut file_state, cost.saturating_sub(cost_before)).map(|_| n),
+            r => r,
+        };
 
         // Re-insert the file state back into the map.
         self.open_files.lock().unwrap().insert(fh, file_state);
         result
+    }
+
+    /// Keep the dirty bytes of all open files within the budget (#105). `own`
+    /// is the state of the handle being written (out of `open_files`), and
+    /// `added` the dirty cost its write added. If the sum is above the
+    /// budget, the files with the most dirty bytes (this one or another)
+    /// store steps until the cost `added + REBASE_STEP` is freed, or the sum
+    /// is `REBASE_STEP` below the budget. So the sum does not grow while it
+    /// is above the budget, and a write pays for at most that much work, not
+    /// for the whole rebase of another file.
+    ///
+    /// Another file's state leaves `open_files` during its step (as during
+    /// its own writes); a failed step of another file is logged, its extents
+    /// stay, and this write still succeeds.
+    fn keep_budget(&self, own: &mut OpenFileState, added: usize) -> Result<(), i32> {
+        let budget = self.dirty_budget.load(Ordering::Relaxed);
+        let target = budget.saturating_sub(REBASE_STEP);
+        let mut cap: Option<usize> = None;
+        let mut freed = 0usize;
+        loop {
+            let own_cost = dirty_cost(own);
+            let (others, largest) = {
+                let open_files = self.open_files.lock().unwrap();
+                let others: usize = open_files.values().map(dirty_cost).sum();
+                let largest = open_files.iter().map(|(&fh, s)| (dirty_cost(s), fh)).max();
+                (others, largest)
+            };
+            let total = own_cost + others;
+            if cap.is_none() && total <= budget {
+                return Ok(());
+            }
+            let cap = *cap.get_or_insert((total - target.min(total)).min(added.saturating_add(REBASE_STEP)));
+            if freed >= cap || total <= target {
+                return Ok(());
+            }
+            let want = cap - freed;
+            let step = match largest {
+                Some((c, fh)) if c > own_cost => {
+                    let Some(mut other) = self.open_files.lock().unwrap().remove(&fh) else {
+                        return Ok(());
+                    };
+                    let before = dirty_cost(&other);
+                    let r = self.free_dirty(&mut other, want);
+                    let after = dirty_cost(&other);
+                    let ino = other.ino;
+                    self.open_files.lock().unwrap().insert(fh, other);
+                    if r.is_err() {
+                        eprintln!("[{}][FUSE] budget: step of ino {ino} failed", ts());
+                        return Ok(());
+                    }
+                    before.saturating_sub(after)
+                }
+                _ => {
+                    let before = own_cost;
+                    self.free_dirty(own, want)?;
+                    before.saturating_sub(dirty_cost(own))
+                }
+            };
+            if step == 0 {
+                return Ok(());
+            }
+            freed += step;
+        }
+    }
+
+    /// Free about `want` bytes of dirty cost of `s`: a rebase step of its
+    /// overlay; a stream with pending writes becomes an overlay first (no
+    /// content is read or cut there).
+    fn free_dirty(&self, s: &mut OpenFileState, want: usize) -> Result<(), i32> {
+        if matches!(&s.write_mode, WriteMode::Streaming { pending, .. } if !pending.is_empty()) {
+            self.to_overlay(s)?;
+        }
+        let ino = s.ino;
+        self.rebase_step(ino, s, want).map_err(|_| libc::EIO)
     }
 
     /// pwrite into the overlay of `s` (no I/O, no allocation by offset).
