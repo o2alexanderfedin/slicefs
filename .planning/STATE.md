@@ -2,15 +2,15 @@
 gsd_state_version: "1.0"
 milestone: v2.1
 milestone_name: Store Index & Measurements
-status: planning
-last_updated: "2026-11-18T06:50:02.991Z"
-last_activity: 2026-11-17
+status: complete
+last_updated: "2026-11-19T07:10:00.000Z"
+last_activity: 2026-11-19
 progress:
-  total_phases: 0
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_phases: 5
+  completed_phases: 5
+  total_plans: 27
+  completed_plans: 27
+  percent: 100
 ---
 
 # Project State
@@ -20,14 +20,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-17)
 
 **Core value:** High-ratio data deduplication that works transparently as a real, daily-driver POSIX filesystem
-**Current focus:** Planning next milestone (candidates: #86 roots/refs, #85 on-disk chunk index)
+**Current focus:** v2.1 milestone audit, then completion (no tag without the user)
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-11-17 — Milestone v2.1 started
+Phase: 17 of 13-17 (all complete)
+Plan: 17-09 complete
+Status: Milestone v2.1 complete, audit pending. The FSKit large copy (#20) is run by hand by the user.
+Last activity: 2026-11-19 — #85 closed; follow-ups #111, #112, #113
 
 
 ## Performance Metrics
