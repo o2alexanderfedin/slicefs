@@ -33,7 +33,7 @@
 //! CRC32C u32 of every byte before it.
 
 use crate::pack_io::{Kind, PackIo};
-use crate::run::{Entry, Run, RunWriter, PER_PAGE};
+use crate::run::{Entry, Run, RunWriter, MAX_PER_PAGE};
 use crate::{Error, Loc, ObjectId, Result};
 use std::collections::BTreeMap;
 use std::io;
@@ -803,7 +803,7 @@ impl Index {
             let mut seen = 0usize;
             while let Some((id, e)) = merged.next_entry()? {
                 // About once per input page.
-                if seen.is_multiple_of(PER_PAGE) && stop.load(Ordering::SeqCst) {
+                if seen.is_multiple_of(MAX_PER_PAGE) && stop.load(Ordering::SeqCst) {
                     return Ok(None);
                 }
                 seen += 1;
