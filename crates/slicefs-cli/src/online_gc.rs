@@ -1,7 +1,9 @@
 //! GC of the stored objects while the store is mounted (#25).
 //!
 //! The mount runs a GC thread. It runs a GC:
-//! - automatically, when something was committed since the last GC, and at
+//! - automatically, when something was committed since the last GC (or once
+//!   more after that, to free the false positives of the last GC's live
+//!   filter, #113), and at
 //!   least `--gc-interval` seconds (0 = never automatically) and at least
 //!   `GC_DUTY` times the duration of the last GC after it; and
 //! - when `slicefs gc <store>` asks for one.
@@ -103,6 +105,15 @@ fn run_once(fs: &SliceFsFilesystem, stop: &AtomicBool) -> String {
     }
 }
 
+/// Whether the GC thread skips a GC that is due. The mark is a Bloom filter
+/// with a new random salt for each GC (#113), so a GC can keep a few dead
+/// objects (false positives), and the store cannot tell which. Thus after a
+/// change, the thread runs one more GC on the unchanged tree to free them, and
+/// skips only after that (an object stays only if both filters keep it).
+fn skip_due_gc(unchanged: bool, rechecked: bool) -> bool {
+    unchanged && rechecked
+}
+
 /// Spawn the GC thread of a mount. `interval` of zero means: only on request.
 /// The thread ends when `shutdown` is set or the file system is gone; a GC
 /// that runs then stops at its next check.
@@ -118,6 +129,9 @@ pub fn spawn_online_gc(
             let mut last = Instant::now();
             let mut last_took = Duration::ZERO;
             let mut last_root = None;
+            // The last GC ran on a tree that did not change since the GC
+            // before it (see `skip_due_gc`).
+            let mut rechecked = false;
             // Files left by a daemon that died during a GC.
             let _ = std::fs::remove_file(store.join(ACTIVE_FILE));
             let _ = std::fs::remove_file(store.join(RUNNING_FILE));
@@ -133,17 +147,16 @@ pub fn spawn_online_gc(
                     continue;
                 }
                 let Some(fs) = fs.upgrade() else { break };
-                // Nothing changed since the last GC: nothing new can be garbage.
                 // (With --commit-interval 0 only the GC commits, so also look
                 // at changes that are not committed yet.)
-                if !requested
-                    && last_root.is_some()
+                let unchanged = last_root.is_some()
                     && fs.meta().current_root() == last_root
-                    && !fs.meta().has_uncommitted_changes()
-                {
+                    && !fs.meta().has_uncommitted_changes();
+                if !requested && skip_due_gc(unchanged, rechecked) {
                     last = Instant::now();
                     continue;
                 }
+                rechecked = unchanged;
                 let t = Instant::now();
                 let outcome = with_heartbeat(&store.join(ACTIVE_FILE), || run_once(&fs, &shutdown));
                 last_took = t.elapsed();
@@ -197,6 +210,17 @@ pub fn request_gc(store: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unchanged_tree_gets_one_more_gc_then_none() {
+        // A change: the GC runs, and the next GC on the same tree runs too.
+        assert!(!skip_due_gc(false, false));
+        assert!(!skip_due_gc(true, false));
+        // After that GC on the unchanged tree, the thread skips.
+        assert!(skip_due_gc(true, true));
+        // A new change ends the skip.
+        assert!(!skip_due_gc(false, true));
+    }
 
     #[test]
     fn a_request_without_a_mount_times_out_and_is_removed() {
