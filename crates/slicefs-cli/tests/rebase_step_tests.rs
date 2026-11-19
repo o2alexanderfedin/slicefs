@@ -15,7 +15,7 @@ const MIB: u64 = 1 << 20;
 /// Dirty limit of these tests. A whole rebase at this limit cuts again about
 /// three times the dirty bytes when they are scattered 4 KiB writes.
 const LIMIT: usize = 8 << 20;
-/// Most work of one write: a step frees what the write added plus
+/// Most work of one write: a step frees what the write added or
 /// `REBASE_STEP`; scattered 4 KiB extents cut about 3x their bytes again.
 const WORK_BOUND: u64 = 6 * REBASE_STEP as u64;
 
@@ -151,7 +151,7 @@ fn growing_extent(limit: usize, base_mib: u64, from_mib: u64, to_mib: u64) {
     }
     eprintln!("growing extent, limit {} MiB: {work:?}", limit >> 20);
     assert!(work.writes_with_steps >= 2, "the limit was passed: {work:?}");
-    // In-order bytes are cut again about once, so a step of one write plus
+    // In-order bytes are cut again about once, so a step of the larger of one write and
     // `REBASE_STEP` is well below 2 * REBASE_STEP. If the step freed the
     // spare capacity of the extent too, it would be about limit / 8 more.
     assert!(work.max_rechunk <= 2 * REBASE_STEP as u64, "one write cut {} bytes again", work.max_rechunk);

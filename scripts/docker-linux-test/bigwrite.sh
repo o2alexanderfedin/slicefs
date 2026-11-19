@@ -40,6 +40,10 @@ nsw(){ grep -c "$SWITCH_TEXT" $R/mount.log; }
 # 4 KiB-aligned offsets inside the file. fsync of the target every 64 MiB.
 # Each write and fsync of the target is logged (#108): start time (epoch s),
 # latency (ms), kind (W/F), size, offset -> $R/writes-<size>.log.
+# BW_QUIET_REF=1: the reference file is synced before the pass and gets the
+# same writes in a second pass after it, so that no dirty pages of the
+# reference are on the disk while the target is timed (its fsyncs and the
+# daemon's pack syncs then wait only for SliceFS's own data).
 cat > $R/rw.py <<'PY'
 import os, random, sys, time
 KB, MB = 4096, 1 << 20
@@ -55,13 +59,15 @@ def put(fd, data, off):
         done += os.pwrite(fd, data[done:], off + done)
 written = writes = since_sync = 0
 max_w = max_s = 0.0
+quiet = len(sys.argv) > 6 and sys.argv[6] == "1"
 def one(n):
     global written, writes, since_sync, max_w
     off = rnd.randrange((size - n) // KB + 1) * KB
     data = rnd.randbytes(n)
     w = time.time(); t = time.perf_counter(); put(tgt, data, off); d = time.perf_counter() - t
     max_w = max(max_w, d); log.write(f"{w:.3f} {d * 1000:.1f} W {n} {off}\n")
-    put(ref, data, off)
+    if not quiet:
+        put(ref, data, off)
     written += n; writes += 1; since_sync += n
 def sync():
     global since_sync, max_s
@@ -75,6 +81,12 @@ while written < vol:
     if since_sync >= 64 * MB:
         sync()
 sync()
+if quiet:  # the same writes into the reference, after the timed pass
+    rnd = random.Random(int(sys.argv[3])); done = 0
+    while done < vol:
+        for n in [MB] + [KB] * 256:
+            off = rnd.randrange((size - n) // KB + 1) * KB
+            put(ref, rnd.randbytes(n), off); done += n
 os.close(tgt); os.close(ref); log.close()
 print(f"writes {writes}, max write {max_w * 1000:.0f} ms, max fsync {max_s * 1000:.0f} ms")
 PY
@@ -106,6 +118,17 @@ print(f"    rebase steps: {len(reb)}, splice sum {sum(num(e, 'splice_ms') for e 
       f"reused_entries {sum(num(e, 'reused_entries') for e in reb):.0f}")
 if reb:
     print(f"    step splice_ms max {max(num(e, 'splice_ms') for e in reb):.0f}, install_ms max {max(num(e, 'install_ms') for e in reb):.0f}")
+    # Step time without the pack syncs inside it (a sync line comes before
+    # the rebase line of its step).
+    net, acc, k = [], 0.0, 0
+    for e in inrw:
+        if e[1] == "pack":
+            acc += num(e, "ms")
+        elif e[1] == "rebase":
+            net.append(num(e, "splice_ms") - acc); acc = 0.0
+    net.sort()
+    print(f"    step minus syncs: median {net[len(net) // 2]:.0f} ms, p99 {net[int(len(net) * 0.99)]:.0f} ms, max {net[-1]:.0f} ms; "
+          f"nodes_loaded mean {sum(num(e, 'nodes_loaded') for e in reb) / len(reb):.0f}")
 print(f"    pack syncs: {len(syn)}, sum {sum(num(e, 'ms') for e in syn) / 1000:.1f} s, max {max([num(e, 'ms') for e in syn] or [0]):.0f} ms")
 for e in com:
     print(f"    commit at {e[0]:.3f}: {e[2]}")
@@ -126,10 +149,11 @@ for S in "${SIZES[@]}"; do
   ST=$R/s$S; M=$R/m$S
   if ! $B seed $ST $R/empty >$R/step.out 2>&1; then bad "bw-seed-$S" "($(head -c 200 $R/step.out))"; continue; fi
   head -c $((S * 1048576)) /dev/urandom > $R/ref.bin
+  [ -n "${BW_QUIET_REF:-}" ] && sync
   if mnt $ST $M; then   # default commit interval
     N0=$(nsw)
     t=$SECONDS; step bw-cp-$S 900 cp $R/ref.bin $M/big.bin; T1=$((SECONDS - t)); H1=$(hwm)
-    t=$SECONDS; step bw-random-write-$S 1800 python3 $R/rw.py $M/big.bin $R/ref.bin $SEED $VOL_MIB $R/writes-$S.log
+    t=$SECONDS; step bw-random-write-$S 1800 python3 $R/rw.py $M/big.bin $R/ref.bin $SEED $VOL_MIB $R/writes-$S.log "${BW_QUIET_REF:-}"
     T2=$((SECONDS - t)); H2=$(hwm); RW=$(tail -1 $R/step.out)
     t=$SECONDS; step bw-cmp-$S 600 cmp $R/ref.bin $M/big.bin; T3=$((SECONDS - t)); H3=$(hwm)
     N=$(( $(nsw) - N0 ))

@@ -96,8 +96,8 @@ const RELOG_PIECE: u64 = 1 << 20;
 /// 32 MiB.
 pub const DIRTY_LIMIT: usize = 32 << 20;
 
-/// Most bytes of overlay cost one rebase step frees beyond the cost that its
-/// write added (#108). A write past the dirty limit rebases only this much,
+/// Bytes of overlay cost one rebase step frees: this, or the cost its write
+/// added if that is more (#108). A write past the dirty limit rebases only this much,
 /// so no single write pays for the rebase of the whole overlay.
 pub const REBASE_STEP: usize = 1 << 20;
 
@@ -858,9 +858,9 @@ impl SliceFsFilesystem {
             }
             let r = self.install_root(ino, root, size, modified).map(|_| root);
             eprintln!("[t={}][rebase] ino={ino} size={size} free={} cost_before={cost_before} taken={taken_n}/{taken_bytes} \
-                rechunked={rechunked} base_read={base_bytes} reused_entries={} reused_nodes={} splice_ms={splice_ms:.1} install_ms={:.1}",
+                rechunked={rechunked} base_read={base_bytes} reused_entries={} reused_nodes={} nodes_loaded={} splice_ms={splice_ms:.1} install_ms={:.1}",
                 crate::util::epoch(), if free == usize::MAX { "all".to_string() } else { free.to_string() },
-                stats.reused_entries, stats.reused_nodes, t1.elapsed().as_secs_f64() * 1000.0);
+                stats.reused_entries, stats.reused_nodes, stats.nodes_loaded, t1.elapsed().as_secs_f64() * 1000.0);
             r
         });
         let root = match installed {
@@ -1101,10 +1101,12 @@ impl SliceFsFilesystem {
         // An overlay past the dirty limit (also right after a switch that
         // moved pending writes in) stores a part of itself as a new root now,
         // in this callback (never at fsync or at a commit). One step frees
-        // the cost this write added plus `REBASE_STEP`, down to
-        // `limit - REBASE_STEP`: the work of one write does not grow with
-        // the limit (#108), and an overlay above the limit (after a switch)
-        // comes down by at least `REBASE_STEP` per write. The added cost
+        // the larger of the cost this write added and `REBASE_STEP`, down
+        // to `limit - REBASE_STEP`: the work of one write does not grow with
+        // the limit (#108), and the cost never grows while it is above the
+        // limit (after a switch it comes down with each write smaller than
+        // `REBASE_STEP`). Not the sum of both: bigwrite showed the 1 MiB
+        // writes, whose steps freed 2 MiB, as the slowest ones. The added cost
         // counts at most the bytes of the write (and one extent overhead):
         // the spare capacity of a growing extent (up to 1/8 of its length)
         // is freed by the next steps, so a step does not grow with the limit.
@@ -1115,7 +1117,7 @@ impl SliceFsFilesystem {
         let result = match result {
             Ok(n) if over => {
                 let ino = file_state.ino;
-                let free = (cost - limit.saturating_sub(REBASE_STEP)).min(added + REBASE_STEP);
+                let free = (cost - limit.saturating_sub(REBASE_STEP)).min(added.max(REBASE_STEP));
                 self.rebase_step(ino, &mut file_state, free).map(|_| n).map_err(|_| libc::EIO)
             }
             r => r,
@@ -1135,7 +1137,7 @@ impl SliceFsFilesystem {
     /// is the state of the handle being written (out of `open_files`), and
     /// `added` the dirty cost its write added. If the sum is above the
     /// budget, the files with the most dirty bytes (this one or another)
-    /// store steps until the cost `added + REBASE_STEP` is freed, or the sum
+    /// store steps until the cost `max(added, REBASE_STEP)` is freed, or the sum
     /// is `REBASE_STEP` below the budget. So the sum does not grow while it
     /// is above the budget, and a write pays for at most that much work, not
     /// for the whole rebase of another file.
@@ -1165,7 +1167,7 @@ impl SliceFsFilesystem {
             if cap.is_none() && total <= budget {
                 return Ok(());
             }
-            let cap = *cap.get_or_insert((total - target.min(total)).min(added.saturating_add(REBASE_STEP)));
+            let cap = *cap.get_or_insert((total - target.min(total)).min(added.max(REBASE_STEP)));
             if freed >= cap || total <= target {
                 return Ok(());
             }
