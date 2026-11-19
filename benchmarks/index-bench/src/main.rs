@@ -5,12 +5,21 @@
 //! index-bench create --dir D --objects N [--pack-limit BYTES] [--memtable-limit ENTRIES]
 //! index-bench open   --dir D [--cache warm|cold]
 //! index-bench lookup --dir D [--hits K] [--misses K] [--seed S]
+//! index-bench settle --dir D [--timeout-s S]
 //! index-bench recover --dir D [--packs 1|all] [--read-only]
 //! index-bench gc     --dir D [--live-every K] [--dead-run R]
 //! index-bench run    --dir D --objects N [--reps R] [--pack-limit BYTES] [--memtable-limit ENTRIES]
 //!                    [--hits K] [--misses K] [--drop-caches]
 //!   every step also takes --backend NAME (default chunk-store)
 //! ```
+//!
+//! `lookup` times two passes over the same sample in one process: the
+//! first pass takes the page faults of the mapped index, the second
+//! (`*_2` keys) is warm. `settle` opens the store with the default
+//! background work (the idle merge of the index, #111), waits until it is
+//! done, and reports the runs and the bytes that the merges wrote; every
+//! other step opens with no idle merge, so it measures the index as the
+//! step before left it.
 //!
 //! `gc` is not part of `run`: it removes objects, so it needs a store made
 //! for it, and every step refuses that store after it.
@@ -39,7 +48,7 @@ use std::time::Instant;
 use backend::{backend_by_name, Backend, CreateOpts, Scope, SAVED_DIR};
 use chunk_store::{LiveFilter, LiveSet, ObjectId, DEFAULT_HASHER};
 
-const USAGE: &str = "usage: index-bench create|open|lookup|recover|gc|run --dir D [--backend NAME] [step flags] (see the doc comment of src/main.rs)";
+const USAGE: &str = "usage: index-bench create|open|lookup|settle|recover|gc|run --dir D [--backend NAME] [step flags] (see the doc comment of src/main.rs)";
 
 /// The marker file of a store made by this tool: the output of `create`.
 const MARKER: &str = "index-bench.txt";
@@ -77,6 +86,7 @@ fn spec(cmd: &str) -> Option<(&'static [&'static str], &'static [&'static str])>
         "create" => (&["dir", "backend", "objects", "pack-limit", "memtable-limit"], &[]),
         "open" => (&["dir", "backend", "cache"], &[]),
         "lookup" => (&["dir", "backend", "hits", "misses", "seed"], &[]),
+        "settle" => (&["dir", "backend", "timeout-s"], &[]),
         "recover" => (&["dir", "backend", "packs"], &["read-only"]),
         "gc" => (&["dir", "backend", "live-every", "dead-run"], &[]),
         "run" => (
@@ -435,6 +445,13 @@ fn step_create(f: &Flags) -> Result<(), Fail> {
     let index = dir_bytes(&dir.join("index"), false)?;
     let per_obj = if n > 0 { disk as f64 / n as f64 } else { f64::NAN };
     let index_per_obj = if n > 0 { index as f64 / n as f64 } else { f64::NAN };
+    let ik = store.index_keys();
+    let key = |k: &str| ik.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone()).unwrap_or_else(|| "n/a".into());
+    let merge_bytes = key("index_merge_bytes");
+    let merge_per_index = match merge_bytes.parse::<f64>() {
+        Ok(m) if index > 0 => fmt_f(m / index as f64),
+        _ => "n/a".into(),
+    };
     let text = kv_text(&[
         ("step", "create".into()),
         ("backend", backend.name().into()),
@@ -448,6 +465,9 @@ fn step_create(f: &Flags) -> Result<(), Fail> {
         ("max_rss_bytes", max_rss_bytes().to_string()),
         ("index_bytes", index.to_string()),
         ("index_bytes_per_object", fmt_f(index_per_obj)),
+        ("index_runs", key("index_runs")),
+        ("merge_bytes", merge_bytes),
+        ("merge_bytes_per_index_byte", merge_per_index),
     ]);
     std::fs::write(dir.join(MARKER), &text).map_err(|e| format!("cannot write the marker file: {e}"))?;
     finish(&text);
@@ -579,29 +599,36 @@ fn step_lookup(f: &Flags) -> Result<(), Fail> {
         return Err(format!("the store has {objects} objects, the marker says {n}").into());
     }
 
+    // One pass: the hits, the misses, then the dedup-hit path of put (its
+    // time includes the hash of the data). Seconds of each.
+    let pass = || -> Result<(f64, f64, f64), Fail> {
+        let t0 = Instant::now();
+        let found = hit_ids.iter().filter(|id| store.contains(id)).count() as u64;
+        let hit_s = t0.elapsed().as_secs_f64();
+        if found != hits {
+            return Err(format!("contains found {found} of {hits} objects that are in the store").into());
+        }
+        let t0 = Instant::now();
+        let found = miss_ids.iter().filter(|id| store.contains(id)).count() as u64;
+        let miss_s = t0.elapsed().as_secs_f64();
+        if found != 0 {
+            return Err(format!("contains found {found} of {misses} objects that are not in the store").into());
+        }
+        let t0 = Instant::now();
+        for &i in &hit_vals {
+            store.put(&object(i))?;
+        }
+        let put_s = t0.elapsed().as_secs_f64();
+        if store.objects() != n {
+            return Err(format!("put of objects in the store changed the count from {n} to {}", store.objects()).into());
+        }
+        Ok((hit_s, miss_s, put_s))
+    };
     let split_before = rss_split_bytes();
-    let t0 = Instant::now();
-    let found = hit_ids.iter().filter(|id| store.contains(id)).count() as u64;
-    let hit_s = t0.elapsed().as_secs_f64();
-    if found != hits {
-        return Err(format!("contains found {found} of {hits} objects that are in the store").into());
-    }
-    let t0 = Instant::now();
-    let found = miss_ids.iter().filter(|id| store.contains(id)).count() as u64;
-    let miss_s = t0.elapsed().as_secs_f64();
-    if found != 0 {
-        return Err(format!("contains found {found} of {misses} objects that are not in the store").into());
-    }
-    // The dedup-hit path of put: its time includes the hash of the data.
-    let t0 = Instant::now();
-    for &i in &hit_vals {
-        store.put(&object(i))?;
-    }
-    let put_s = t0.elapsed().as_secs_f64();
+    let (hit_s, miss_s, put_s) = pass()?;
     let split_after = rss_split_bytes();
-    if store.objects() != n {
-        return Err(format!("put of objects in the store changed the count from {n} to {}", store.objects()).into());
-    }
+    // The second pass: the same sample, the pages now mapped.
+    let (hit2_s, miss2_s, put2_s) = pass()?;
 
     let ns = |s: f64, k: u64| if k > 0 { fmt_f(s * 1e9 / k as f64) } else { "n/a".into() };
     let per_s = |s: f64, k: u64| if k > 0 && s > 0.0 { fmt_f(k as f64 / s) } else { "n/a".into() };
@@ -619,6 +646,58 @@ fn step_lookup(f: &Flags) -> Result<(), Fail> {
         ("put_hit_per_s", per_s(put_s, hits)),
     ];
     kv.extend(split_keys(LOOKUP_SPLIT, split_before, split_after, objects));
+    let runs = store.index_keys().into_iter().find(|(k, _)| *k == "index_runs").map_or("n/a".into(), |(_, v)| v);
+    kv.extend([
+        ("contains_hit_ns_2", ns(hit2_s, hits)),
+        ("contains_miss_ns_2", ns(miss2_s, misses)),
+        ("put_hit_ns_2", ns(put2_s, hits)),
+        ("index_runs", runs),
+    ]);
+    finish(&kv_text(&kv));
+}
+
+/// The default time limit of the settle step.
+const SETTLE_TIMEOUT_S: u64 = 900;
+
+fn step_settle(f: &Flags) -> Result<(), Fail> {
+    let dir = f.dir()?;
+    let backend = f.backend()?;
+    let n = marker_objects(&read_marker(&dir, &*backend)?)?;
+    let timeout = f.u64("timeout-s")?.unwrap_or(SETTLE_TIMEOUT_S);
+    let index_before = dir_bytes(&dir.join("index"), false)?;
+    let t0 = Instant::now();
+    let store = backend.open_default(&dir)?;
+    let key = |kv: &[(&'static str, String)], k: &str| kv.iter().find(|(n, _)| *n == k).map_or("n/a".into(), |(_, v)| v.clone());
+    let before = store.index_keys();
+    let settled = store.settle(std::time::Duration::from_secs(timeout))?;
+    let wait = t0.elapsed().as_secs_f64();
+    let after = store.index_keys();
+    store.close()?;
+    if store.objects() != n {
+        return Err(format!("the store has {} objects after settle, not {n}", store.objects()).into());
+    }
+    let index_after = dir_bytes(&dir.join("index"), false)?;
+    let merge_bytes = key(&after, "index_merge_bytes");
+    let per = |b: u64| match merge_bytes.parse::<f64>() {
+        Ok(m) if b > 0 => fmt_f(m / b as f64),
+        _ => "n/a".into(),
+    };
+    let kv = vec![
+        ("step", "settle".into()),
+        ("backend", backend.name().into()),
+        ("objects", n.to_string()),
+        ("settled", u8::from(settled).to_string()),
+        ("wait_s", fmt_f(wait)),
+        ("index_runs_before", key(&before, "index_runs")),
+        ("index_runs_after", key(&after, "index_runs")),
+        ("index_bytes_before", index_before.to_string()),
+        ("index_bytes_after", index_after.to_string()),
+        ("merge_bytes", merge_bytes.clone()),
+        ("merge_bytes_per_index_byte", per(index_before)),
+    ];
+    if !settled {
+        return Err(format!("the index did not settle in {timeout} s").into());
+    }
     finish(&kv_text(&kv));
 }
 
@@ -998,6 +1077,10 @@ fn step_run(f: &Flags) -> Result<(), Fail> {
                 "put dedup-hit ns",
                 "contains hit/s",
                 "contains miss/s",
+                "Index runs",
+                "Warm hit ns",
+                "Warm miss ns",
+                "Warm put dedup-hit ns",
             ],
             &[vec![
                 os.clone(),
@@ -1007,6 +1090,10 @@ fn step_run(f: &Flags) -> Result<(), Fail> {
                 lk("put_hit_ns"),
                 lk("contains_hit_per_s"),
                 lk("contains_miss_per_s"),
+                lk("index_runs"),
+                lk("contains_hit_ns_2"),
+                lk("contains_miss_ns_2"),
+                lk("put_hit_ns_2"),
             ]],
         )
     );
@@ -1075,6 +1162,7 @@ fn real_main(args: &[String]) -> Result<(), Fail> {
         "create" => step_create(&flags),
         "open" => step_open(&flags),
         "lookup" => step_lookup(&flags),
+        "settle" => step_settle(&flags),
         "recover" => step_recover(&flags),
         "gc" => step_gc(&flags),
         "run" => step_run(&flags),

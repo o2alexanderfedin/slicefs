@@ -13,6 +13,7 @@ use chunk_store::pack_io::{Kind, PackIo};
 use chunk_store::{ChunkStore, ObjectId, Options};
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 type Obj = (ObjectId, Vec<u8>);
 
@@ -483,4 +484,72 @@ fn tier(entries: u64, limit: u64) -> u32 {
         t += 1;
     }
     t
+}
+
+// ── Idle merge (#111) ─────────────────────────────────────────────────────────
+
+fn idle(after_ms: u64) -> Options {
+    Options {
+        index_memtable_limit: 50,
+        index_background_merge: true,
+        index_idle_merge_after: Some(Duration::from_millis(after_ms)),
+        ..opts()
+    }
+}
+
+// After a write load and a GC, the idle store merges its runs down to at
+// most two; every lookup gives the same answer as before; a crash after it
+// loses nothing.
+#[test]
+fn the_idle_merge_leaves_at_most_two_runs_with_the_same_answers() {
+    let mem = MemIo::new();
+    let s = store(&mem, &idle(50));
+    let objs = put_many(&s, 2000, 1);
+    s.sync().unwrap();
+    // A GC: runs of 64 objects in four go (tombstones in the runs). A
+    // punch frees only whole blocks, so a few dead objects can stay.
+    let live: HashSet<ObjectId> = objs.iter().enumerate().filter(|(i, _)| (i / 64) % 4 != 0).map(|(_, (id, _))| *id).collect();
+    let b = s.gc_begin().unwrap();
+    s.gc_finish(&live, b).unwrap();
+    let (kept, gone): (Vec<Obj>, Vec<Obj>) = objs.into_iter().partition(|(id, _)| s.contains(id));
+    assert!(gone.len() > 300, "{} removed", gone.len());
+    assert!(s.index_info().run_tombstones > 0, "{:?}", s.index_info());
+    let never: Vec<ObjectId> = (0..200).map(|i| ObjectId::new(1, [i as u8; 32])).collect();
+    let ids: Vec<ObjectId> = kept.iter().chain(&gone).map(|o| o.0).chain(never.iter().copied()).collect();
+    let answers = |s: &ChunkStore| -> Vec<bool> { ids.iter().map(|id| s.contains(id)).collect() };
+    s.wait_index_idle();
+    let before = answers(&s);
+    assert!(before[..kept.len()].iter().all(|&b| b) && before[kept.len()..].iter().all(|&b| !b));
+    assert!(s.wait_index_settled(Duration::from_secs(60)), "the idle merge ends");
+    let info = s.index_info();
+    assert!(info.runs <= 2, "{info:?}");
+    assert!(s.index_merge_bytes() > 0);
+    assert_eq!(answers(&s), before, "the same answers after the idle merge");
+    all_exact(&s, &kept, "after the idle merge");
+    assert_eq!(run_list(&mem).len() as u64, info.runs, "the inputs are removed");
+    drop(s);
+    mem.crash();
+    let s = reopen_and_check(&mem, &opts(), &kept, &[], &[]);
+    assert_eq!(s.stats().objects, kept.len() as u64);
+    assert!(gone.iter().all(|(id, _)| !s.contains(id)), "removed objects stay removed");
+}
+
+// The idle merge waits for the idle delay: before it, the runs stay.
+#[test]
+fn the_idle_merge_waits_for_the_idle_delay() {
+    let mem = MemIo::new();
+    let s = store(&mem, &idle(600_000));
+    // 23 flushes of 50: five runs (16 + 4 + 1 + 1 + 1).
+    let objs = put_many(&s, 1150, 1);
+    s.wait_index_idle();
+    let runs = s.index_info().runs;
+    assert!(runs > 2, "{:?}", s.index_info());
+    assert!(!s.wait_index_settled(Duration::from_millis(200)), "the idle check is still due");
+    assert_eq!(s.index_info().runs, runs);
+    // The same merge on request.
+    assert!(s.merge_index_idle().unwrap());
+    assert!(s.index_info().runs <= 2, "{:?}", s.index_info());
+    all_exact(&s, &objs, "after the idle merge");
+    // Drop returns while the thread waits for idle.
+    drop(s);
 }

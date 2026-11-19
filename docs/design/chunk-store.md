@@ -290,6 +290,15 @@ for the install (one MANIFEST write). The input files are removed only
 after that MANIFEST is durable. A merge keeps the tombstones, except when
 its output becomes the oldest run.
 
+Idle merge (#111): when the index has had no new entry and no flush, merge
+or GC install for 5 s (`Options::index_idle_merge_after`), and it has more
+than 2 runs, the same thread merges the newest runs into one. The window
+is the longest run of newest runs (at least 2) whose oldest run has at
+most 4 times the entries of the newer runs of the window
+(`IDLE_MAX_REWRITE`): the largest run is rewritten only together with at
+least a quarter of its size of other data. It uses the same write and
+install steps as the other merges. See "Idle merge (#111)" for the measurements.
+
 Read-only open (`slicefs stats`, scrub, the format check): it writes
 nothing, and keeps the replayed records in an in-RAM memtable. If a run
 that the MANIFEST lists is missing (a merge of a mount can replace the
@@ -667,6 +676,106 @@ Notes:
 - Recovery: see the note above the Recovery table. The #66 scan rates do
   not apply to the new index.
 - All numbers are for a warm page cache. No cold-cache number was taken.
+
+### Idle merge (#111)
+
+Problem: a lookup checks the filter of each run, and the size-tiered
+merges keep 3 runs at 1M objects, 5 at 10M and 9 at 100M.
+
+Policy: the idle merge (see "Index on disk (#85)"). When the store is idle
+(no new index entry and no flush, merge or GC install for 5 s) and the
+index has more than 2 runs (`IDLE_TARGET_RUNS`), the merge thread merges
+the newest runs into one. The window is the longest prefix of the run list
+(at least 2 runs) whose oldest run has at most 4 times the entries of the
+newer runs in the window (`IDLE_MAX_REWRITE`). The constants are in
+`index.rs`; the delay is `Options::index_idle_merge_after`. The idle merge
+uses the same write and install steps as the size-tiered merges, so it
+has the same crash and GC safety. An idle merge that has started runs to
+its end; puts during it go to the memtable, and the merges of their
+flushes wait until it ends.
+
+Why this policy: a model of the merges (sizes in memtable flushes, the
+size-tiered merges after each flush, then an idle merge after each burst of
+B flushes) compares three rules. These are model values, not measured on
+a store.
+
+- "Merge every run, but leave out the largest if the merge would rewrite
+  more than 4 times the new data": with B = 1 (an idle pause after each
+  flush, the worst case) it keeps at most 3 runs, but the merges write
+  23.9 bytes for each byte of index at 100M (381 flushes), because the
+  second run is rewritten at each pause.
+- "Grow the window from the newest run while the window has 1/4 of the next
+  run": 7.9 bytes and at most 5 runs at B = 1, but it stops at the first
+  large run. The size-tiered merges often leave a small run before two
+  large ones (for example 1, 16, 16 flushes at 33 flushes), and then it
+  merges nothing: after one long write load and one pause, 3 to 7 runs
+  stay for 111 of the flush counts from 1 to 400.
+- The chosen rule (longest prefix whose oldest run passes): 9.1 bytes and
+  at most 5 runs at B = 1. After one long write load and one pause it
+  leaves 1 run for 311 of the flush counts from 1 to 400, 2 runs for 86 and
+  3 runs for 3. A store at 33 flushes (1M objects, memtable limit 30,303)
+  went from 3 runs to 1 on a real store.
+
+The size-tiered merges alone write 3.5 bytes for each index byte at 100M
+and keep up to 12 runs. After one long write load and one pause, every
+rule merges every run into one (4.5 bytes for each index byte at 100M, of
+which 1.0 is the idle merge). With the chosen rule at B = 1 and 100M, a
+ratio of 2 gives 6.8 bytes and up to 6 runs, and a ratio of 8 gives 13.2
+bytes and up to 4 runs.
+
+Bench: `index-bench lookup` now times a second pass over the same sample
+in the same process (`*_2` keys). The first pass takes the page faults of
+the mapped runs, and the second pass does not. The new step `settle` opens
+the store with the default options, waits for the idle merge, and reports
+the runs and the merge bytes. All other steps open with no idle merge.
+
+Method: macOS, the host of "Index results (#85)", commit of this change,
+release build, warm cache. For each size: `create` (the size-tiered merges
+only), 3 `lookup` runs, `settle`, 3 `lookup` runs, all on the same store.
+Each lookup run is a new process. The values are the median of the 3 runs.
+The load average (1 min) was 10.5 to 13.0. These runs used the second
+rule of the list above; for these run lists (3 and 5 runs) both rules
+merge every run, so the chosen rule gives the same result.
+
+Runs and merge bytes ("Merge B / index B" is the bytes that the merges
+wrote, divided by the size of the index after the create):
+
+| Objects | Runs after create | Merge B / index B in create | Runs after idle | Merge B / index B of the idle merge | Settle s (with the 5 s delay) |
+|---|---|---|---|---|---|
+| 1M | 3 | 0 | 1 | 1.00 | 6.6 |
+| 10M | 5 | 1.79 | 1 | 1.00 | 17.6 |
+
+Lookups (ns; 1M hits, 1M misses and 1M dedup-hit puts in each pass):
+
+| Objects | Runs | Hit, pass 1 | Hit, pass 2 | Miss, pass 1 | Miss, pass 2 | Put dedup-hit, pass 1 | Put dedup-hit, pass 2 |
+|---|---|---|---|---|---|---|---|
+| 1M | 3 (as created) | 875 | 847 | 546 | 533 | 1,196 | 1,164 |
+| 1M | 1 (after idle) | 789 | 755 | 444 | 438 | 1,072 | 1,074 |
+| 10M | 5 (as created) | 1,219 | 960 | 473 | 479 | 1,205 | 1,223 |
+| 10M | 1 (after idle) | 983 | 751 | 295 | 295 | 1,005 | 996 |
+
+Notes:
+
+- At 10M the warm hit goes from 960 to 751 ns (-22 %) and the miss from
+  479 to 295 ns (-38 %); the dedup-hit put from 1,223 to 996 ns. The
+  values with one run are near the #66 baseline (701 ns hit, 324 ns miss
+  at 10M) and near the values of the spike in #111 (0.80 µs, 0.31 µs).
+- The page faults of the first pass cost about 240 to 260 ns for each hit
+  at 10M (1,219 against 960 ns, 983 against 751 ns), with 5 runs and with
+  1 run. They do not depend on the run count. The misses read no page, so
+  they have no such cost. At 1M the store is small and the difference is
+  about 30 ns.
+- At 1M about 213,568 entries stay in the memtable after the open (the
+  records above the high-water mark), so a part of the lookups ends in the
+  memtable.
+- The idle merge rewrote the index one time (1.00 byte for each byte of
+  index). With the size-tiered merges of the create, the merges wrote 2.79
+  bytes for each byte of index at 10M. At 100M the index is about 6 GB,
+  so one idle merge after a long write load writes about 6 GB; the run at
+  100M was not made.
+- The run count at 100M is not measured. By the model above it is 1 after
+  a long write load and a pause (381 flushes), and at most 5 under a load
+  with a pause after each flush.
 
 ### Dedup
 

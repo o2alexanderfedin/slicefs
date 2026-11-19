@@ -31,7 +31,8 @@ Each step is a subcommand. Every step takes `--dir D` and `--backend NAME` (defa
 |---|---|---|
 | `create` | `--objects N`, `--pack-limit BYTES` and `--memtable-limit ENTRIES` (both only for tests) | Makes a store of N objects in an empty directory, waits until the background merges of the index stop, closes it (every pack is sealed and has an `.idx`), and writes the marker file `D/index-bench.txt`. `--memtable-limit` sets `Options::index_memtable_limit`, so that a small store has several index runs. |
 | `open` | `--cache warm\|cold` | Opens the store one time and measures the time and the RSS (resident set size). `--cache` is only a label in the output. It does not change the cache. |
-| `lookup` | `--hits K`, `--misses K`, `--seed S` | Opens the store and times `contains` for K IDs in the store (hits) and K IDs not in the store (misses), and `put` of K objects that are in the store (the dedup-hit path, with the hash). K is 1,000,000 by default, or N if N is smaller. The seed is 66 by default. |
+| `lookup` | `--hits K`, `--misses K`, `--seed S` | Opens the store and times `contains` for K IDs in the store (hits) and K IDs not in the store (misses), and `put` of K objects that are in the store (the dedup-hit path, with the hash). K is 1,000,000 by default, or N if N is smaller. The seed is 66 by default. It times two passes over the same sample in one process: the first pass takes the page faults of the mapped index runs, the second pass is warm. |
+| `settle` | `--timeout-s S` (default 900) | Opens the store with the default background work of the index, so the idle merge (#111) runs after the idle delay, waits at most S seconds until it is done, and reports the runs before and after and the bytes that the merges wrote. Fails if the index did not settle in time. |
 | `recover` | `--packs 1\|all`, `--read-only` | Moves the `.idx` of one pack or of all packs to `D/bench-saved`, times an open that must scan those packs, and then restores the `.idx` files. |
 | `gc` | `--live-every K` (default 4), `--dead-run R` (default 1) | Opens the store and runs one complete GC (`gc_begin`, then `gc_finish`). Object `i` is dead when `(i / R) mod K` is 0, so (K-1)/K of the objects stay live, and the dead objects lie in runs of R objects. Reports what the GC removed, its wall time, and the longest and the total hold of the store lock (`ChunkStore::last_gc_timing`). |
 | `run` | `--objects N`, `--reps R` (default 3), `--pack-limit`, `--memtable-limit`, `--hits`, `--misses`, `--drop-caches` | Runs create (if necessary), one warm-up open, R opens, lookup, R recovery opens for each scope (one, all) and mode (rw, ro), and a last open as a check. Then it prints the summary tables with the median of the R runs. |
@@ -77,12 +78,20 @@ Each step prints `key=value` lines, one key on each line, in a fixed order. The 
 | open | `rss_anon_before_bytes`, `rss_anon_after_bytes` | Anonymous resident memory (heap, stacks) before and after the open: `RssAnon` of `/proc/self/status` on Linux, the `internal` value of `task_info(TASK_VM_INFO)` on macOS |
 | open | `rss_file_before_bytes`, `rss_file_after_bytes` | Resident pages of mapped files (the mapped index runs, the binary) before and after the open: `RssFile` on Linux, the `external` value of `task_info(TASK_VM_INFO)` on macOS |
 | open | `steady_anon_bytes_per_object`, `steady_file_bytes_per_object` | The growth of each part during the open / objects |
+| create | `index_runs` | Run files of the index after the write load (before the close) |
+| create | `merge_bytes`, `merge_bytes_per_index_byte` | Bytes that the index merges wrote during the create, in total and for each byte of `index_bytes` |
 | lookup | `objects`, `hits`, `misses` | Objects in the store and the sample sizes |
 | lookup | `contains_hit_ns`, `contains_hit_per_s` | Time of one `contains` that finds the ID, and calls per second |
 | lookup | `contains_miss_ns`, `contains_miss_per_s` | The same for IDs that are not in the store |
 | lookup | `put_hit_ns`, `put_hit_per_s` | Time of one `put` of an object that is in the store, and calls per second |
 | lookup | `rss_anon_before_lookups_bytes`, `rss_anon_after_lookups_bytes`, `rss_file_before_lookups_bytes`, `rss_file_after_lookups_bytes` | The two parts of the RSS before and after the timed lookups. The lookups read run pages through the mapping, so the file part grows here. |
 | lookup | `lookups_anon_bytes_per_object`, `lookups_file_bytes_per_object` | The growth of each part during the lookups / objects |
+| lookup | `contains_hit_ns_2`, `contains_miss_ns_2`, `put_hit_ns_2` | The same times in the second (warm) pass |
+| lookup | `index_runs` | Run files of the index during the lookups |
+| settle | `objects`, `settled`, `wait_s` | Objects in the store; 1 if the index settled; time of the open and the wait |
+| settle | `index_runs_before`, `index_runs_after` | Run files after the open and after the idle merge |
+| settle | `index_bytes_before`, `index_bytes_after` | Size of the files in `D/index` before and after |
+| settle | `merge_bytes`, `merge_bytes_per_index_byte` | Bytes that the merges wrote, in total and for each byte of `index_bytes_before` |
 | recover | `scope`, `mode` | `one` or `all`; `rw` (normal open) or `ro` (read-only open) |
 | recover | `packs_dropped`, `sealed_packs`, `active_packs` | Packs without an `.idx` for this open, and how many of them are sealed packs and the last (active) pack |
 | recover | `scanned_bytes`, `scanned_objects` | Size and objects of the dropped packs that the open scans: the packs at or above the high-water mark (all dropped packs if the backend has no mark) |
@@ -107,7 +116,7 @@ The `run` step adds lines that start with `#` (the step names) and these summary
 
 - Store: packs, disk bytes for each object, puts per second of `create`, peak RSS of the create process, index bytes for each object.
 - Open: median, minimum and maximum open time, median CPU time, median peak and steady RSS for each object, the cache state, the median steady anonymous and file-backed RSS for each object, and the index runs.
-- Lookups: `contains` hit and miss time, `put` dedup-hit time, and calls per second.
+- Lookups: `contains` hit and miss time, `put` dedup-hit time, and calls per second; the index runs; and the hit, miss and dedup-hit times of the second (warm) pass.
 - Recovery: one row for each scope and mode. "Recovery open s" is the median time of the recovery open. "Extra s" is that time minus the median normal open time. The scan rates (MB/s and objects/s) are the scanned amount divided by "Extra s". "Covered packs" is `covered_packs`. "Extra CPU s" is the median CPU time of the recovery opens minus the median CPU time of the normal opens, and "Scan MB/s (CPU)" is the scanned MB divided by it (`n/a` if nothing was scanned or the value is not positive). A loaded host changes the CPU time less than the wall time.
 
 Peak RSS (`ru_maxrss`) has no split into anonymous and file-backed pages.
@@ -149,4 +158,4 @@ docker volume rm slicefs-index-bench
 
 ## Other backends
 
-All store calls go through the `Backend` and `Store` traits in `src/backend.rs`. A new backend goes there; the steps do not change. `Store::index_keys` and `Store::gc` have defaults (no keys; gc not supported), so a backend without an index or a GC still works with every other step. The `chunk-store` backend waits for its background merges (`ChunkStore::wait_index_idle`) before each close, so each measured open finds a settled store.
+All store calls go through the `Backend` and `Store` traits in `src/backend.rs`. A new backend goes there; the steps do not change. `Store::index_keys` and `Store::gc` have defaults (no keys; gc not supported), so a backend without an index or a GC still works with every other step. The `chunk-store` backend waits for its background merges (`ChunkStore::wait_index_idle`) before each close, so each measured open finds a settled store. Every step except `settle` opens the chunk store with no idle merge (`Options::index_idle_merge_after = None`), so a step measures the runs as the step before left them; `settle` opens with the default options and waits with `ChunkStore::wait_index_settled`.

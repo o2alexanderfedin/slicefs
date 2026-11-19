@@ -137,6 +137,11 @@ pub struct Options {
     /// [`ChunkStore::merge_index_now`] and [`ChunkStore::merge_index_all`]
     /// (tests that need a fixed run list).
     pub index_background_merge: bool,
+    /// The idle merge (#111): when the index has had no new entry and no
+    /// flush, merge or GC for this long, the merge thread merges the newest
+    /// runs (see `index::idle_window`), so lookups check fewer runs. `None`:
+    /// no idle merge. Needs `index_background_merge`. A tuning and test knob.
+    pub index_idle_merge_after: Option<Duration>,
     /// The objects put or read between `gc_begin` and `gc_finish` are kept
     /// as exact IDs up to this many; more move into a Bloom filter (fixed
     /// RAM; a false positive only keeps a dead object). A tuning and test
@@ -166,6 +171,7 @@ impl Default for Options {
             index_bloom_bits: index::DEFAULT_BLOOM_BITS,
             index_merge_fan_in: 4,
             index_background_merge: true,
+            index_idle_merge_after: Some(index::IDLE_MERGE_AFTER),
             gc_touched_exact: 1 << 16,
             gc_tmp_dir: None,
             gc_sort_chunk_ids: extsort::SORT_CHUNK_BYTES / ID_LEN,
@@ -657,6 +663,9 @@ struct MergeState {
     busy: bool,
     /// The thread is alive.
     running: bool,
+    /// The idle merge check is due: the thread waits until the index is
+    /// idle, then runs the idle merge (see `Options::index_idle_merge_after`).
+    idle_check: bool,
 }
 
 impl MergeCtl {
@@ -696,12 +705,28 @@ impl Drop for ThreadExit<'_> {
 struct MergeCfg {
     fan_in: usize,
     memtable_limit: usize,
+    idle_after: Option<Duration>,
 }
 
 impl MergeCfg {
     fn of(o: &Options) -> Self {
-        MergeCfg { fan_in: o.index_merge_fan_in.max(2), memtable_limit: o.index_memtable_limit.max(1) }
+        MergeCfg {
+            fan_in: o.index_merge_fan_in.max(2),
+            memtable_limit: o.index_memtable_limit.max(1),
+            idle_after: o.index_idle_merge_after,
+        }
     }
+}
+
+/// Which merge a merge step picks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Policy {
+    /// Size-tiered (see `Index::pick_merge`).
+    Tiered,
+    /// Every run into one.
+    All,
+    /// The idle merge (see `Index::pick_idle_merge`).
+    Idle,
 }
 
 /// What a merge step needs: the parts of the store that a merge thread
@@ -716,9 +741,9 @@ struct Merger {
 }
 
 impl Merger {
-    /// One merge step (see `Index::pick_merge`): pick the window under the
-    /// store lock, write the output with no lock held, install it under the
-    /// store lock, then remove the inputs. `all`: merge every run into one.
+    /// One merge step (see `Index::pick_merge` and `Index::pick_idle_merge`):
+    /// pick the window under the store lock, write the output with no lock
+    /// held, install it under the store lock, then remove the inputs.
     /// `between` runs after the write, with no lock held (a test hook).
     ///
     /// Returns false if there was nothing to merge, the window changed, the
@@ -728,7 +753,7 @@ impl Merger {
     /// index is requested, so the next writable open rebuilds it from the
     /// packs, and no merge runs until then. A merge never fails the store:
     /// the runs are derived data.
-    fn step(&self, all: bool, stop: &AtomicBool, between: &mut dyn FnMut()) -> Result<bool> {
+    fn step(&self, policy: Policy, stop: &AtomicBool, between: &mut dyn FnMut()) -> Result<bool> {
         let (io, index) = (&*self.io, &*self.index);
         let _one = self.ctl.step.lock().unwrap();
         let plan = {
@@ -736,7 +761,12 @@ impl Merger {
             if inner.failed {
                 return Ok(false);
             }
-            match index.pick_merge(self.cfg.fan_in, self.cfg.memtable_limit, all) {
+            let plan = match policy {
+                Policy::Tiered => index.pick_merge(self.cfg.fan_in, self.cfg.memtable_limit, false),
+                Policy::All => index.pick_merge(self.cfg.fan_in, self.cfg.memtable_limit, true),
+                Policy::Idle => index.pick_idle_merge(),
+            };
+            match plan {
                 Some(p) => p,
                 None => return Ok(false),
             }
@@ -777,37 +807,95 @@ impl Merger {
         Ok(true)
     }
 
-    /// The merge thread: wait until a flush notifies, then merge until the
-    /// policy finds no window, and wait again; end when `stop` is set. A
-    /// failed merge is logged and tried again after the next flush; it never
-    /// fails the store (the foreground keeps working).
+    /// The merge thread: wait until a flush notifies, then merge by the
+    /// size-tiered policy until it finds no window. Then, with an idle delay
+    /// (`MergeCfg::idle_after`) and an idle window, wait until the index is
+    /// idle: no new memtable entry and no generation change (flush, merge,
+    /// GC) for the whole delay; then run the idle merge. A flush during the
+    /// wait starts over with the size-tiered merges; an idle merge that
+    /// started runs to its end. End when `stop` is set. A failed merge is
+    /// logged and tried again after the next flush; it never fails the
+    /// store (the foreground keeps working).
     fn run(self) {
         let ctl = Arc::clone(&self.ctl);
         let _exit = ThreadExit(&ctl);
         loop {
-            {
-                let mut s = ctl.state();
-                while !s.pending && !ctl.stop.load(Ordering::SeqCst) {
-                    s = ctl.cv.wait(s).unwrap_or_else(|e| e.into_inner());
-                }
-                if ctl.stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                s.pending = false;
-                s.busy = true;
-            }
+            let Some(policy) = self.next_work(&ctl) else { return };
+            let mut failed = false;
             while !ctl.stop.load(Ordering::SeqCst) {
-                match self.step(false, &ctl.stop, &mut || {}) {
+                match self.step(policy, &ctl.stop, &mut || {}) {
                     Ok(true) => {}
                     Ok(false) => break,
                     Err(e) => {
                         tracing::warn!("chunk store: a background merge of the index failed (tried again after the next flush): {e}");
+                        failed = true;
                         break;
                     }
                 }
             }
-            ctl.state().busy = false;
+            let mut s = ctl.state();
+            s.busy = false;
+            // After the size-tiered merges, the idle check (not after a
+            // failure: the next flush tries again).
+            s.idle_check = policy == Policy::Tiered && !failed && self.cfg.idle_after.is_some();
+            drop(s);
             ctl.cv.notify_all();
+        }
+    }
+
+    /// Wait for the next work of the merge thread and mark it busy; `None`:
+    /// `stop` is set.
+    fn next_work(&self, ctl: &MergeCtl) -> Option<Policy> {
+        let mut s = ctl.state();
+        loop {
+            if ctl.stop.load(Ordering::SeqCst) {
+                return None;
+            }
+            if s.pending {
+                s.pending = false;
+                s.busy = true;
+                return Some(Policy::Tiered);
+            }
+            let delay = match self.cfg.idle_after {
+                Some(d) if s.idle_check => d,
+                _ => {
+                    s = ctl.cv.wait(s).unwrap_or_else(|e| e.into_inner());
+                    continue;
+                }
+            };
+            // `state` is a leaf lock: look at the runs without it.
+            drop(s);
+            let due = self.index.idle_merge_due();
+            s = ctl.state();
+            if s.pending || ctl.stop.load(Ordering::SeqCst) {
+                continue;
+            }
+            if !due {
+                s.idle_check = false;
+                ctl.cv.notify_all();
+                continue;
+            }
+            // Idle: the memtable size and the generation do not change for
+            // the whole delay (both are atomics: `state` stays a leaf lock).
+            let mark = (self.index.mem_len(), self.index.gen());
+            let until = Instant::now() + delay;
+            let mut idle = true;
+            loop {
+                let left = until.saturating_duration_since(Instant::now());
+                if left.is_zero() || s.pending || ctl.stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                s = ctl.cv.wait_timeout(s, left).unwrap_or_else(|e| e.into_inner()).0;
+                if (self.index.mem_len(), self.index.gen()) != mark {
+                    idle = false;
+                    break;
+                }
+            }
+            if idle && !s.pending && !ctl.stop.load(Ordering::SeqCst) {
+                s.idle_check = false;
+                s.busy = true;
+                return Some(Policy::Idle);
+            }
         }
     }
 }
@@ -880,12 +968,32 @@ impl ChunkStore {
 
     /// Wait until the merge thread has no merge to do and is not merging.
     /// Returns at once if background merges are off, the store is
-    /// read-only, or the thread has stopped. For tests and benchmarks.
+    /// read-only, or the thread has stopped. Does not wait for the idle
+    /// merge (see [`ChunkStore::wait_index_settled`]). For tests and
+    /// benchmarks.
     pub fn wait_index_idle(&self) {
         let mut s = self.merge.state();
         while s.running && (s.pending || s.busy) {
             s = self.merge.cv.wait(s).unwrap_or_else(|e| e.into_inner());
         }
+    }
+
+    /// [`ChunkStore::wait_index_idle`], and also the idle merge (see
+    /// [`Options::index_idle_merge_after`]): wait until the thread has no
+    /// merge to do and no idle check due, at most `timeout`. True if
+    /// settled. Puts during the wait delay the idle merge. For tests and
+    /// benchmarks.
+    pub fn wait_index_settled(&self, timeout: Duration) -> bool {
+        let until = Instant::now() + timeout;
+        let mut s = self.merge.state();
+        while s.running && (s.pending || s.busy || s.idle_check) {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            s = self.merge.cv.wait_timeout(s, left).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        true
     }
 
     /// The merge test hook (see `after_merge_write`); nothing outside tests.
@@ -2120,6 +2228,12 @@ impl ChunkStore {
         }
     }
 
+    /// Bytes of the index merge outputs installed since the open (the write
+    /// cost of the merges). For tests and tools.
+    pub fn index_merge_bytes(&self) -> u64 {
+        self.index.merge_bytes()
+    }
+
     /// The entry counts of the live runs (tombstones included), from the
     /// newest run to the oldest. For tests and tools.
     pub fn index_run_entries(&self) -> Vec<u64> {
@@ -2132,7 +2246,15 @@ impl ChunkStore {
     /// [`Options::index_background_merge`]). An error is returned but does
     /// not fail the store (see `Merger::step`). Refused on a read-only store.
     pub fn merge_index_now(&self) -> Result<bool> {
-        self.merge_index(false)
+        self.merge_index(Policy::Tiered)
+    }
+
+    /// One step of the idle merge (#111; see
+    /// [`Options::index_idle_merge_after`]) now, with no wait for idle;
+    /// false if it has no window. For tests and tools; refused on a
+    /// read-only store.
+    pub fn merge_index_idle(&self) -> Result<bool> {
+        self.merge_index(Policy::Idle)
     }
 
     /// Merge every index run into one (also one run alone, if it has
@@ -2140,15 +2262,15 @@ impl ChunkStore {
     /// nothing to do. It rewrites the whole index. For tests and tools;
     /// refused on a read-only store.
     pub fn merge_index_all(&self) -> Result<bool> {
-        self.merge_index(true)
+        self.merge_index(Policy::All)
     }
 
-    fn merge_index(&self, all: bool) -> Result<bool> {
+    fn merge_index(&self, policy: Policy) -> Result<bool> {
         if self.opts.read_only {
             return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
         }
         let never = AtomicBool::new(false);
-        self.merger().step(all, &never, &mut || self.after_merge_write())
+        self.merger().step(policy, &never, &mut || self.after_merge_write())
     }
 
     fn merger(&self) -> Merger {

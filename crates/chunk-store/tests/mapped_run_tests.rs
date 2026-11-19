@@ -187,7 +187,14 @@ fn lookups_on_files_stay_right_while_merges_and_gc_replace_the_runs() {
     let removed = Arc::new(AtomicU64::new(0));
     let io = Arc::new(Guard { inner: files(dir.path()), seen: Arc::clone(&seen), removed_runs: Arc::clone(&removed) });
     // About 12 flushes in all: each one syncs (F_FULLFSYNC on macOS).
-    let o = Options { pack_limit: 128 << 10, index_memtable_limit: 300, index_merge_fan_in: 2, ..Options::default() };
+    let o = Options {
+        pack_limit: 128 << 10,
+        index_memtable_limit: 300,
+        index_merge_fan_in: 2,
+        // The test asserts the run shape: no idle merge.
+        index_idle_merge_after: None,
+        ..Options::default()
+    };
     let s = ChunkStore::open_with(io, o.clone()).unwrap();
 
     let put = |from: u64, n: u64| -> Vec<(ObjectId, Vec<u8>)> {
