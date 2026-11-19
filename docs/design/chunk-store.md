@@ -803,7 +803,9 @@ default): after 4 index hits in a row in one pack, it reads that pack's
   from the trusted set and from the cache, and moves an epoch so that a
   fill running at that time is dropped. A cache hit takes the same path as
   an index hit: it is touched for a running GC and checked again under the
-  lock (`Index::gen`).
+  lock (`Index::gen`). A failed index lookup in `put` writes the object
+  again, so an older copy can stay in a trusted pack that a later GC does
+  not select; after such a failure no pack sealed so far is trusted.
 - Limit: packs of an earlier process are never cached, because nothing on
   disk shows whether a GC left their `.idx` stale. A re-write of data from
   an earlier mount gets no gain until a durable marker (for example a pack
@@ -822,7 +824,10 @@ ns per `put`):
 In order, 99.95 % of the dedup checks hit the cache (0.0005 index lookups
 for each put; 1 `.idx` read per 8K puts). Random hits never fill and cost
 the same within the noise (the machine had other load; the 1M random
-numbers vary by 30 %). With the default 64 MiB packs and 8-byte objects a
+numbers vary by 30 %). The bench hashes 8-byte objects; with 8 KiB chunks
+the hash is a larger part of each put, so read the gain as about 0.8 µs
+saved for each put at 10M, not as a percentage. The bench is one thread,
+so it does not show the cost of the cache mutex under many writers. With the default 64 MiB packs and 8-byte objects a
 pack has 1.2M entries and is never cached.
 
 ## Compression

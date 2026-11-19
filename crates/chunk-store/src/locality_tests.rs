@@ -250,3 +250,36 @@ fn packs_of_an_earlier_process_are_never_cached() {
     assert_eq!((st.fills, st.hits), (0, 0), "{st:?}");
     assert!(st.misses >= 3 * PER_PACK - u64::from(FILL_STREAK));
 }
+
+// A failed index lookup makes put write X again (into the active pack), so
+// the pack P of the first copy still lists X in its `.idx`. A GC that
+// removes X then selects only the pack of the new copy. If P stayed
+// trusted, a streak in P would cache X, and a put of X would skip the
+// write and lose X.
+#[test]
+fn a_failed_lookup_ends_the_trust_in_the_packs_so_far() {
+    let mem = MemIo::new();
+    let s = store(&mem, true);
+    let ids = fill(&s, 3 * PER_PACK);
+    let xi = XI;
+    let x = ids[xi as usize];
+    let p = s.index.get(&x).unwrap().unwrap().pack;
+    mem.fail_read_once_after(0);
+    assert_eq!(s.put(&data(xi)).unwrap(), x);
+    mem.clear_fail_reads_after();
+    let p2 = s.index.get(&x).unwrap().unwrap().pack;
+    assert_ne!(p, p2, "the failed lookup wrote X again");
+    let live: HashSet<ObjectId> = ids.iter().copied().filter(|&i| i != x).collect();
+    let b = s.gc_begin().unwrap();
+    s.gc_finish(&live, b).unwrap();
+    assert!(!s.contains(&x));
+    let in_p: Vec<u64> =
+        (0..3 * PER_PACK).filter(|&i| i != xi && s.index.get(&ids[i as usize]).unwrap().unwrap().pack == p).collect();
+    assert!(in_p.len() > 2 * FILL_STREAK as usize);
+    for &i in &in_p {
+        s.put(&data(i)).unwrap();
+    }
+    assert_eq!(s.locality_stats().fills, 0);
+    assert_eq!(s.put(&data(xi)).unwrap(), x);
+    assert_eq!(s.get(&x), Some(data(xi)), "X is readable");
+}

@@ -1246,7 +1246,7 @@ impl ChunkStore {
         if found {
             let mut inner = self.inner.lock().unwrap();
             inner.touch(id);
-            if self.unchanged(gen, &id) || matches!(inner.index.get(&id), Ok(Some(_))) {
+            if self.unchanged(gen, &id) || self.locked_lookup(&inner, &id) {
                 return Ok(id);
             }
             // GC removed the object after the lookup: write it again.
@@ -1268,7 +1268,7 @@ impl ChunkStore {
                 inner.touch(id);
                 // Another put of the same bytes, or a flush, merge or GC,
                 // since the lookup: look up again.
-                if !self.unchanged(gen, &id) && matches!(inner.index.get(&id), Ok(Some(_))) {
+                if !self.unchanged(gen, &id) && self.locked_lookup(&inner, &id) {
                     return Ok(id);
                 }
                 inner.check()?;
@@ -1297,7 +1297,14 @@ impl ChunkStore {
         if self.locality.get(id).is_some() {
             return true;
         }
-        let Ok(Some(loc)) = self.index.get(id) else { return false };
+        let loc = match self.index.get(id) {
+            Ok(Some(loc)) => loc,
+            Ok(None) => return false,
+            Err(_) => {
+                self.locality.forget_all();
+                return false;
+            }
+        };
         if let Some(epoch) = self.locality.index_hit(loc.pack) {
             match self.io.read(loc.pack, Kind::Idx).map_err(Error::from).and_then(|b| decode_index(&b, loc.pack)) {
                 Ok(Some(entries)) => self.locality.fill(loc.pack, epoch, entries),
@@ -1305,6 +1312,22 @@ impl ChunkStore {
             }
         }
         true
+    }
+
+    /// The index lookup of `put` under the store lock. A failed lookup
+    /// counts as "not found": the object is written again, so a pack may
+    /// then hold an older copy that a later GC does not select when it
+    /// removes the new copy. Its `.idx` would still list the object, so the
+    /// locality cache trusts no pack of this process after that (see
+    /// `locality.rs`).
+    fn locked_lookup(&self, inner: &Inner, id: &ObjectId) -> bool {
+        match inner.index.get(id) {
+            Ok(l) => l.is_some(),
+            Err(_) => {
+                self.locality.forget_all();
+                false
+            }
+        }
     }
 
     /// The counters of the locality cache of `put` (see

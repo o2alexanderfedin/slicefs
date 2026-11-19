@@ -26,6 +26,11 @@
 //! an earlier process are never trusted (no trace on disk says whether a GC
 //! left their `.idx` stale).
 //!
+//! A failed index lookup in `put` writes the object again, so a trusted pack
+//! can then hold an older copy that a GC does not select when it removes
+//! the new one; [`LocalityCache::forget_all`] then drops the whole trusted
+//! set.
+//!
 //! A fill reads the `.idx` outside every lock. It records the epoch first;
 //! `untrust` moves the epoch, so a fill that overlaps a GC install is
 //! dropped.
@@ -228,6 +233,19 @@ impl LocalityCache {
             st.total -= dropped;
             st.map.retain(|_, l| !gone.contains(&l.pack));
         }
+    }
+
+    /// A dedup lookup of `put` failed: the object is written again, and the
+    /// pack of its older copy keeps it in its `.idx` although a GC may
+    /// remove the new copy without selecting that pack. So no pack sealed
+    /// so far is trusted again, and the cache is emptied.
+    pub(crate) fn forget_all(&self) {
+        let mut st = self.state();
+        st.epoch += 1;
+        st.trusted.clear();
+        st.lru.clear();
+        st.map = IdMap::default();
+        st.total = 0;
     }
 
     pub(crate) fn stats(&self) -> LocalityStats {
