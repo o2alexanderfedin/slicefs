@@ -114,23 +114,34 @@ fn scattered_writes_past_the_limit_each_pay_a_bounded_step() {
 }
 
 /// One extent that grows past the limit (in-order writes through an
-/// overlay handle): a step takes a part of it, not all of it.
+/// overlay handle): a step takes a part of it, not all of it. Also at the
+/// production limit: the spare capacity of a growing extent (1/8 of its
+/// length) must not make the step grow with the limit.
 #[test]
 fn a_growing_extent_past_the_limit_is_rebased_in_parts() {
+    growing_extent(LIMIT, 32, 4, 28);
+    // At 32 MiB the extent runs past the end of a small file (no 48 MiB base
+    // to stream in a debug build).
+    growing_extent(slicefs_cli::filesystem::DIRTY_LIMIT, 2, 2, 38);
+}
+
+/// A `base_mib` file; a write at its middle switches to an overlay; then
+/// in-order 128 KiB writes from `from_mib` to `to_mib` make one extent.
+fn growing_extent(limit: usize, base_mib: u64, from_mib: u64, to_mib: u64) {
     let (fs, _dir) = fresh_fs();
-    let (ino, mut model) = random_file(&fs, "f", 32);
-    fs.test_set_dirty_limit(LIMIT);
+    let (ino, mut model) = random_file(&fs, "f", base_mib);
+    fs.test_set_dirty_limit(limit);
     let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
     let mut work = Work::default();
-    // A write in the middle switches to an overlay; then in-order 128 KiB
-    // writes from 4 MiB to 28 MiB make one extent.
+    let at = base_mib * MIB / 2 + 7;
     let first = seeded(1, 4096);
-    fs.test_write(fh, 20 * MIB + 7, &first).unwrap();
-    model[(20 * MIB + 7) as usize..(20 * MIB + 7 + 4096) as usize].copy_from_slice(&first);
+    fs.test_write(fh, at, &first).unwrap();
+    model[at as usize..(at + 4096) as usize].copy_from_slice(&first);
     assert!(!fs.test_is_streaming(fh));
-    let mut off = 4 * MIB;
+    model.resize(model.len().max((to_mib * MIB) as usize), 0);
+    let mut off = from_mib * MIB;
     let mut i = 0;
-    while off < 28 * MIB {
+    while off < to_mib * MIB {
         let data = seeded(900 + i, 128 * KIB as usize);
         fs.test_write(fh, off, &data).unwrap();
         model[off as usize..(off + 128 * KIB) as usize].copy_from_slice(&data);
@@ -138,9 +149,12 @@ fn a_growing_extent_past_the_limit_is_rebased_in_parts() {
         off += 128 * KIB;
         i += 1;
     }
-    eprintln!("growing extent: {work:?}");
+    eprintln!("growing extent, limit {} MiB: {work:?}", limit >> 20);
     assert!(work.writes_with_steps >= 2, "the limit was passed: {work:?}");
-    assert!(work.max_rechunk <= WORK_BOUND, "one write cut {} bytes again", work.max_rechunk);
+    // In-order bytes are cut again about once, so a step of one write plus
+    // `REBASE_STEP` is well below 2 * REBASE_STEP. If the step freed the
+    // spare capacity of the extent too, it would be about limit / 8 more.
+    assert!(work.max_rechunk <= 2 * REBASE_STEP as u64, "one write cut {} bytes again", work.max_rechunk);
     check_content(&fs, ino, &model, "with the handle open");
     fs.test_release(ino, fh).unwrap();
     check_content(&fs, ino, &model, "after release");
@@ -185,4 +199,54 @@ fn a_switch_above_the_limit_comes_down_in_bounded_steps() {
     check_content(&fs, ino, &model, "with the handle open");
     fs.test_release(ino, fh).unwrap();
     check_content(&fs, ino, &model, "after release");
+}
+
+/// The budget of all open files (#105) picks the file with the most dirty
+/// bytes, here a new file whose out-of-order writes wait in the reorder
+/// window. Writes to another file make the sum pass the budget: the stream
+/// becomes an overlay (its pending writes the extents) and stores a step.
+/// Then its gap is filled in order, and both files read back right before
+/// and after release.
+#[test]
+fn the_budget_turns_a_stream_with_pending_writes_into_steps() {
+    let (fs, _dir) = fresh_fs();
+    // A: a new file, 3 MiB of writes ahead of the stream (pending).
+    let (a, fa) = fs.test_create(1, "a", 0o644, 0, 0, 0).unwrap();
+    let mut model_a = vec![0u8; (4 * MIB) as usize];
+    for i in 1..4u64 {
+        let data = seeded(40 + i, MIB as usize);
+        fs.test_write(fa, i * MIB, &data).unwrap();
+        model_a[(i * MIB) as usize..((i + 1) * MIB) as usize].copy_from_slice(&data);
+    }
+    assert!(fs.test_is_streaming(fa), "A waits in the reorder window");
+    // B: an existing file, random 4 KiB writes. The budget is set now, so
+    // a write to B (not A's own write) is the first to pass it.
+    let (b, mut model_b) = random_file(&fs, "b", 8);
+    fs.test_set_dirty_budget(2 << 20);
+    let (fb, _) = fs.test_open(b, libc::O_RDWR).unwrap();
+    let mut work = Work::default();
+    for i in 0..64u64 {
+        let off = splitmix(300 + i) % (8 * MIB - 4 * KIB);
+        let data = seeded(600 + i, 4 * KIB as usize);
+        fs.test_write(fb, off, &data).unwrap();
+        model_b[off as usize..(off + 4 * KIB) as usize].copy_from_slice(&data);
+        work.add(&fs);
+    }
+    eprintln!("budget picks a stream: dirty total {} KiB; {work:?}", fs.test_dirty_total() >> 10);
+    assert!(!fs.test_is_streaming(fa), "the budget turned A into an overlay");
+    assert!(fs.test_dirty_total() <= 2 << 20, "dirty total {}", fs.test_dirty_total());
+    assert!(work.max_rechunk <= WORK_BOUND, "one write cut {} bytes again", work.max_rechunk);
+    check_content(&fs, a, &model_a, "A after the steps");
+    // Fill A's gap [0, 1 MiB) in order.
+    for i in 0..8u64 {
+        let data = seeded(80 + i, 128 * KIB as usize);
+        fs.test_write(fa, i * 128 * KIB, &data).unwrap();
+        model_a[(i * 128 * KIB) as usize..((i + 1) * 128 * KIB) as usize].copy_from_slice(&data);
+    }
+    check_content(&fs, a, &model_a, "A with the gap filled");
+    check_content(&fs, b, &model_b, "B");
+    fs.test_release(a, fa).unwrap();
+    fs.test_release(b, fb).unwrap();
+    check_content(&fs, a, &model_a, "A after release");
+    check_content(&fs, b, &model_b, "B after release");
 }

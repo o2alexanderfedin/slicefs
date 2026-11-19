@@ -1093,22 +1093,25 @@ impl SliceFsFilesystem {
         // the cost this write added plus `REBASE_STEP`, down to
         // `limit - REBASE_STEP`: the work of one write does not grow with
         // the limit (#108), and an overlay above the limit (after a switch)
-        // comes down by at least `REBASE_STEP` per write.
+        // comes down by at least `REBASE_STEP` per write. The added cost
+        // counts at most the bytes of the write (and one extent overhead):
+        // the spare capacity of a growing extent (up to 1/8 of its length)
+        // is freed by the next steps, so a step does not grow with the limit.
         let limit = self.dirty_limit.load(Ordering::Relaxed);
         let cost = dirty_cost(&file_state);
+        let added = cost.saturating_sub(cost_before).min(data.len() + crate::overlay::EXTENT_OVERHEAD);
         let over = matches!(&file_state.write_mode, WriteMode::Overlay(_)) && cost > limit;
         let result = match result {
             Ok(n) if over => {
                 let ino = file_state.ino;
-                let free = (cost - limit.saturating_sub(REBASE_STEP))
-                    .min(cost.saturating_sub(cost_before).saturating_add(REBASE_STEP));
+                let free = (cost - limit.saturating_sub(REBASE_STEP)).min(added + REBASE_STEP);
                 self.rebase_step(ino, &mut file_state, free).map(|_| n).map_err(|_| libc::EIO)
             }
             r => r,
         };
         // Then the budget of all open files (#105), with the same bound.
         let result = match result {
-            Ok(n) => self.keep_budget(&mut file_state, cost.saturating_sub(cost_before)).map(|_| n),
+            Ok(n) => self.keep_budget(&mut file_state, added).map(|_| n),
             r => r,
         };
 
@@ -1128,7 +1131,12 @@ impl SliceFsFilesystem {
     ///
     /// Another file's state leaves `open_files` during its step (as during
     /// its own writes); a failed step of another file is logged, its extents
-    /// stay, and this write still succeeds.
+    /// stay, and this write still succeeds. Nothing can see the state gone:
+    /// the mount runs one fuser dispatch thread (`Config::n_threads` is not
+    /// set, so 1; fuser refuses more outside Linux), and the commit timer
+    /// and the GC start take the commit gate exclusively, which this
+    /// callback holds shared. A mount with more dispatch threads would need
+    /// the state kept in the map during the step.
     fn keep_budget(&self, own: &mut OpenFileState, added: usize) -> Result<(), i32> {
         let budget = self.dirty_budget.load(Ordering::Relaxed);
         let target = budget.saturating_sub(REBASE_STEP);
