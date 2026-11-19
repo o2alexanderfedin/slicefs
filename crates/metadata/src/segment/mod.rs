@@ -109,31 +109,166 @@ pub fn load_store_from_segments(
 }
 
 /// Like [`load_store_from_segments`], and also return the operation records
-/// after the last `RootUpdate`, in order (the write log, #20). A mount must
-/// replay them on top of the root.
+/// after the last `RootUpdate`, in order (the write log, #20), all in RAM.
+/// For tests and tools; a mount streams them with [`scan_store_with_log`].
 pub fn load_store_with_log(
     segments_dir: &Path,
 ) -> Result<(Option<ObjectKey>, Vec<SnapshotEntry>, Vec<Vec<u8>>), SegmentError> {
+    let (root, snapshots, log) = scan_store_with_log(segments_dir)?;
+    let ops = log.records().collect::<Result<Vec<_>, _>>()?;
+    Ok((root, snapshots, ops))
+}
+
+/// Like [`load_store_from_segments`], and also find the write log (#20): the
+/// operation records after the last `RootUpdate`. Pass 1 of 2: it keeps only
+/// where the log is, not its records, so memory does not grow with the log
+/// (#106). [`WriteLog::records`] is pass 2.
+pub fn scan_store_with_log(
+    segments_dir: &Path,
+) -> Result<(Option<ObjectKey>, Vec<SnapshotEntry>, WriteLog), SegmentError> {
     let mut last_root = None;
     let mut snapshots = Vec::new();
-    let mut ops: Vec<Vec<u8>> = Vec::new();
+    let mut spans: Vec<LogSpan> = Vec::new();
+    let mut ops = 0usize;
     for path in segment_paths(segments_dir)? {
-        for entry in SegmentReader::open(&path)? {
+        let mut reader = SegmentReader::open(&path)?;
+        let (pos, seq) = reader.cursor();
+        spans.push(LogSpan { path, pos, seq, end_seq: seq });
+        while let Some(entry) = reader.next() {
             match entry {
                 SegmentEntry::RootUpdate { root } => {
                     last_root = Some(root);
-                    ops.clear();
+                    // The log starts after this record, in this segment.
+                    let (pos, seq) = reader.cursor();
+                    let span = spans.pop().expect("span of this segment");
+                    spans.clear();
+                    spans.push(LogSpan { path: span.path, pos, seq, end_seq: seq });
+                    ops = 0;
                 }
                 ref snap @ SegmentEntry::SnapshotRecord { .. } => {
                     if let Some(s) = snap.as_snapshot_entry() {
                         snapshots.push(s);
                     }
                 }
-                SegmentEntry::Op { bytes } => ops.push(bytes),
+                SegmentEntry::Op { .. } => ops += 1,
+            }
+        }
+        // Pass 2 reads this segment up to here, and no further.
+        let end = reader.cursor().1;
+        spans.last_mut().expect("span of this segment").end_seq = end;
+    }
+    spans.retain(|s| s.end_seq > s.seq);
+    Ok((last_root, snapshots, WriteLog { spans, ops }))
+}
+
+/// Where the write log is, from pass 1 ([`scan_store_with_log`]).
+#[derive(Debug)]
+pub struct WriteLog {
+    spans: Vec<LogSpan>,
+    ops: usize,
+}
+
+/// The part of one segment file that is in the write log: the records with
+/// sequence numbers `seq..end_seq`, the first at byte `pos`.
+#[derive(Debug)]
+struct LogSpan {
+    path: std::path::PathBuf,
+    pos: u64,
+    seq: u64,
+    end_seq: u64,
+}
+
+impl WriteLog {
+    /// Number of operation records that pass 1 found.
+    pub fn len(&self) -> usize {
+        self.ops
+    }
+
+    /// True if there is nothing to replay.
+    pub fn is_empty(&self) -> bool {
+        self.ops == 0
+    }
+
+    /// Pass 2: the operation records, in order, read from the files one at a
+    /// time. It reads exactly the records that pass 1 saw: none after them
+    /// (records added since), and an error if one of them is not there any
+    /// more (the file changed between the passes).
+    pub fn records(&self) -> WriteLogRecords<'_> {
+        WriteLogRecords { spans: &self.spans, next: 0, reader: None, end_seq: 0, ops: 0, want: self.ops, done: false }
+    }
+}
+
+/// Iterator of [`WriteLog::records`].
+pub struct WriteLogRecords<'a> {
+    spans: &'a [LogSpan],
+    /// Index of the next span to open.
+    next: usize,
+    reader: Option<SegmentReader>,
+    /// End (exclusive sequence number) of the span of `reader`.
+    end_seq: u64,
+    /// Operation records returned so far, and the number pass 1 found.
+    ops: usize,
+    want: usize,
+    done: bool,
+}
+
+impl WriteLogRecords<'_> {
+    fn changed(&mut self, what: &str) -> Option<Result<Vec<u8>, SegmentError>> {
+        self.done = true;
+        Some(Err(SegmentError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("the write log changed while it was read: {what}"),
+        ))))
+    }
+}
+
+impl Iterator for WriteLogRecords<'_> {
+    type Item = Result<Vec<u8>, SegmentError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        loop {
+            let reader = match &mut self.reader {
+                Some(r) if r.cursor().1 < self.end_seq => r,
+                _ => {
+                    self.reader = None;
+                    let Some(span) = self.spans.get(self.next) else {
+                        if self.ops != self.want {
+                            return self.changed("it has other records");
+                        }
+                        self.done = true;
+                        return None;
+                    };
+                    self.next += 1;
+                    match SegmentReader::open_at(&span.path, span.pos, span.seq) {
+                        Ok(r) => {
+                            self.end_seq = span.end_seq;
+                            self.reader = Some(r);
+                            continue;
+                        }
+                        Err(e) => {
+                            self.done = true;
+                            return Some(Err(e.into()));
+                        }
+                    }
+                }
+            };
+            match reader.next() {
+                Some(SegmentEntry::Op { bytes }) => {
+                    self.ops += 1;
+                    return Some(Ok(bytes));
+                }
+                Some(SegmentEntry::SnapshotRecord { .. }) => {}
+                Some(SegmentEntry::RootUpdate { .. }) => return self.changed("a root after the last root"),
+                // A record that pass 1 also read as the end of the segment
+                // (an EOF marker, a bad root): the span ends here.
+                None if reader.cursor().1 == self.end_seq => {}
+                None => return self.changed("a record is cut or changed"),
             }
         }
     }
-    Ok((last_root, snapshots, ops))
 }
 
 /// Segment files of `segments_dir` with at least a header, in id order.

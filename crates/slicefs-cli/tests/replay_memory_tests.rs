@@ -75,9 +75,9 @@ const MIB: usize = 1 << 20;
 const PIECE: usize = MIB;
 /// Bound on the peak heap of the replay above the baseline: well below the
 /// smaller log.
-const PEAK_BOUND: usize = 12 << 20;
+const PEAK_BOUND: usize = 6 << 20;
 /// Most the peak may differ between the small and the large log.
-const SIZE_SLACK: usize = 2 << 20;
+const SIZE_SLACK: usize = 1 << 20;
 
 const S_IFREG: u32 = 0o100_000;
 
@@ -162,7 +162,7 @@ fn reload_and_replay(store: &Path, pieces: usize) -> usize {
 fn replay_memory_is_bounded_by_a_record_not_by_the_log() {
     let mut peaks = Vec::new();
     for config in [WalConfig::PerOp, WalConfig::FlushOnFsync] {
-        for pieces in [16usize, 48] {
+        for pieces in [8usize, 24] {
             let dir = tempfile::tempdir().unwrap();
             let t = std::time::Instant::now();
             write_and_crash(dir.path(), config.clone(), pieces);

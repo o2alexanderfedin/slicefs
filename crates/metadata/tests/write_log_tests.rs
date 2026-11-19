@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use metadata::segment::load_store_with_log;
+use metadata::segment::{load_store_with_log, scan_store_with_log};
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use metadata::wal::{create_wal, WalConfig};
@@ -92,4 +92,86 @@ fn a_commit_makes_its_objects_durable_before_the_root() {
     let io = io.lock().unwrap();
     assert_eq!(io.unsynced_count(), 0, "every object written by the commit is synced");
     assert!(io.sync_count() > before, "the commit synced its objects");
+}
+
+// #106: the mount reads the log in two passes. Pass 2 returns exactly the
+// records that pass 1 found: not the records added after pass 1, and an
+// error (not a shorter log) if a record that pass 1 saw is gone.
+
+fn only_segment(dir: &TempDir) -> std::path::PathBuf {
+    let names = segment_files(dir);
+    assert_eq!(names.len(), 1, "{names:?}");
+    dir.path().join("segments").join(&names[0])
+}
+
+fn cut_tail(path: &std::path::Path, n: u64) {
+    let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.set_len(f.metadata().unwrap().len() - n).unwrap();
+}
+
+#[test]
+fn records_added_after_the_scan_are_not_read() {
+    let dir = TempDir::new().unwrap();
+    let meta = store(&dir, WalConfig::PerOp);
+    let root = meta.commit().unwrap();
+    meta.log_op(b"one".to_vec());
+    meta.log_op(b"two".to_vec());
+    meta.flush_wal().unwrap();
+    let (last, _, log) = scan_store_with_log(&dir.path().join("segments")).unwrap();
+    assert_eq!(last, Some(root));
+    assert_eq!(log.len(), 2);
+    meta.log_op(b"late".to_vec());
+    meta.flush_wal().unwrap();
+    let ops: Vec<Vec<u8>> = log.records().collect::<Result<_, _>>().unwrap();
+    assert_eq!(ops, vec![b"one".to_vec(), b"two".to_vec()]);
+}
+
+#[test]
+fn a_record_cut_after_the_scan_is_an_error() {
+    let dir = TempDir::new().unwrap();
+    let meta = store(&dir, WalConfig::PerOp);
+    meta.commit().unwrap();
+    meta.log_op(b"one".to_vec());
+    meta.log_op(b"two".to_vec());
+    meta.flush_wal().unwrap();
+    let (_, _, log) = scan_store_with_log(&dir.path().join("segments")).unwrap();
+    cut_tail(&only_segment(&dir), 3);
+    let got: Vec<_> = log.records().collect();
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!(got[0].as_ref().unwrap(), b"one");
+    assert!(got[1].is_err(), "the cut record must be an error, not the end of the log");
+}
+
+#[test]
+fn a_torn_record_at_the_scan_ends_both_passes() {
+    let dir = TempDir::new().unwrap();
+    let meta = store(&dir, WalConfig::PerOp);
+    meta.commit().unwrap();
+    meta.log_op(b"one".to_vec());
+    meta.log_op(b"two".to_vec());
+    meta.flush_wal().unwrap();
+    cut_tail(&only_segment(&dir), 3);
+    let (_, _, log) = scan_store_with_log(&dir.path().join("segments")).unwrap();
+    assert_eq!(log.len(), 1);
+    let ops: Vec<Vec<u8>> = log.records().collect::<Result<_, _>>().unwrap();
+    assert_eq!(ops, vec![b"one".to_vec()]);
+}
+
+#[test]
+fn the_log_continues_into_later_segments() {
+    let dir = TempDir::new().unwrap();
+    let meta = store(&dir, WalConfig::PerOp);
+    meta.log_op(b"old".to_vec());
+    let root = meta.commit().unwrap();
+    meta.log_op(b"one".to_vec());
+    meta.flush_wal().unwrap();
+    // A later daemon logs into a new segment (and crashes before a commit).
+    let next = create_wal(WalConfig::PerOp, dir.path(), 1000).unwrap();
+    next.log_mutation(&metadata::wal::WalEntry::Op { bytes: b"two".to_vec() }).unwrap();
+    next.flush_and_sync().unwrap();
+    let (last, _, log) = scan_store_with_log(&dir.path().join("segments")).unwrap();
+    assert_eq!(last, Some(root));
+    assert_eq!(log.len(), 2);
+    let ops: Vec<Vec<u8>> = log.records().collect::<Result<_, _>>().unwrap();
+    assert_eq!(ops, vec![b"one".to_vec(), b"two".to_vec()]);
 }

@@ -211,10 +211,17 @@ pub struct ReplayStats {
 
 /// Replay the write log of the store at `segments_dir` on `fs` (which holds
 /// the last committed root): what a mount does before it commits.
+///
+/// Two passes over the segment files (#106): the first finds where the log
+/// starts and ends; the second reads one record at a time and applies it
+/// before it reads the next. Memory does not grow with the log.
 pub fn replay_log(fs: &SliceFsFilesystem, segments_dir: &std::path::Path) -> Result<ReplayStats, String> {
-    let (_, _, pending) = metadata::segment::load_store_with_log(segments_dir)
+    let (_, _, log) = metadata::segment::scan_store_with_log(segments_dir)
         .map_err(|e| format!("failed to read the write log: {}", e))?;
-    replay(fs, &pending)
+    if log.is_empty() {
+        return Ok(ReplayStats::default());
+    }
+    replay_stream(fs, log.records().map(|r| r.map_err(|e| format!("failed to read the write log: {}", e))))
 }
 
 /// Replay `records` (encoded) on `fs`, which holds the last committed root.
@@ -224,11 +231,22 @@ pub fn replay_log(fs: &SliceFsFilesystem, segments_dir: &std::path::Path) -> Res
 /// Errors name the position of the record that did not apply: such a
 /// mismatch means the log and the root do not belong together.
 pub fn replay(fs: &SliceFsFilesystem, records: &[Vec<u8>]) -> Result<ReplayStats, String> {
+    replay_stream(fs, records.iter().map(|r| Ok(r.as_slice())))
+}
+
+/// [`replay`] of records that come one at a time; the first error of
+/// `records` stops the replay.
+pub fn replay_stream<B: AsRef<[u8]>>(
+    fs: &SliceFsFilesystem,
+    records: impl IntoIterator<Item = Result<B, String>>,
+) -> Result<ReplayStats, String> {
     let _quiet = fs.replay_guard();
     let mut stats = ReplayStats::default();
     let mut handles: HashMap<u64, u64> = HashMap::new(); // ino -> fh
-    for (i, bytes) in records.iter().enumerate() {
-        let rec = Record::decode(bytes).ok_or_else(|| format!("write log record {i}: cannot decode"))?;
+    for (i, bytes) in records.into_iter().enumerate() {
+        let bytes = bytes?;
+        let rec = Record::decode(bytes.as_ref()).ok_or_else(|| format!("write log record {i}: cannot decode"))?;
+        drop(bytes); // the decoded record has its own copy
         let _clock = Clock::freeze_at(rec.time);
         let bad = |what: &str| format!("write log record {i} ({what}) did not replay: {:?}", rec.op);
         // A create logged the inode it got: take the same one, skipping any
