@@ -1087,12 +1087,15 @@ default): after 4 index hits in a row in one pack, it reads that pack's
   writes the trust floor (the `TRUST` file in `packs/`: magic `SFTR`, the
   next pack number, CRC) durably: no pack below it is cached, in this
   process or a later one. If that write fails, the put fails and writes
-  nothing. A damaged or unreadable `TRUST` file trusts no pack.
+  nothing. A damaged or unreadable `TRUST` file trusts no pack, and the
+  next failed lookup writes it again.
 - In the process: under the store lock, before its install, the GC also
   drops the packs it changes from the cache and moves an epoch, so that a
   fill running at that time is dropped. A cache hit takes the same path as
   an index hit: it is touched for a running GC and checked again under the
   lock (`Index::gen`).
+- A fill never tries the active pack (no `.idx` yet), and after a failed
+  read it waits for a new streak.
 - A fill reads a `.idx` only if its length allows at most 65,536 entries
   (`PackIo::file_len`); a `.idx` that is not exact, damaged or too big is
   not read again by this process.

@@ -116,6 +116,9 @@ struct State {
     epoch: u64,
     /// No pack below this number is filled (see the module doc).
     floor: u64,
+    /// No pack at or above this number is filled: it has no `.idx` yet
+    /// (the active pack). `None`: not told (tests of the cache alone).
+    unsealed: Option<u64>,
     /// Packs that are never filled again in this process: a GC selected
     /// them, or their `.idx` was not exact, damaged or too big.
     never: HashSet<u64>,
@@ -183,6 +186,7 @@ impl LocalityCache {
         if st.streak.1 < FILL_STREAK
             || st.filling.is_some()
             || pack < st.floor
+            || st.unsealed.is_some_and(|u| pack >= u)
             || st.never.contains(&pack)
             || st.lru.iter().any(|p| p.0 == pack)
         {
@@ -238,7 +242,11 @@ impl LocalityCache {
     /// A fill that could not read the `.idx` (a later one may: a seal that
     /// has not written it yet, a transient error).
     pub(crate) fn fill_failed(&self) {
-        self.state().filling = None;
+        let mut st = self.state();
+        st.filling = None;
+        // A new streak before the next try.
+        st.streak = (0, 0);
+        drop(st);
         self.fills_dropped.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -273,6 +281,13 @@ impl LocalityCache {
         st.lru.clear();
         st.map = IdMap::default();
         st.total = 0;
+    }
+
+    /// Every pack below `num` is sealed: its `.idx` is written (or is
+    /// being written by the seal).
+    pub(crate) fn sealed_below(&self, num: u64) {
+        let mut st = self.state();
+        st.unsealed = Some(st.unsealed.map_or(num, |u| u.max(num)));
     }
 
     pub(crate) fn stats(&self) -> LocalityStats {

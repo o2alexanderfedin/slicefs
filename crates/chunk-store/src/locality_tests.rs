@@ -254,7 +254,7 @@ fn packs_of_an_earlier_process_are_cached_from_their_exact_idx() {
 /// Every `.idx` that is marked exact, of a pack at or above the trust
 /// floor, lists only current index entries (the rule of `locality.rs`).
 fn exact_idx_files_match_the_index(mem: &MemIo, s: &ChunkStore) -> usize {
-    let floor = crate::read_trust_floor(mem);
+    let floor = crate::read_trust_floor(mem).unwrap_or(u64::MAX);
     let mut exact = 0;
     for num in mem.list().unwrap() {
         let Ok(b) = mem.read(num, Kind::Idx) else { continue };
@@ -350,8 +350,7 @@ fn a_crash_at_each_step_of_a_gc_never_leaves_a_stale_exact_idx() {
 }
 
 /// A GC whose pack removals fail leaves the deleted and compacted packs
-/// with their `.idx` (it lists the removed objects), and a punch that is
-/// not supported leaves the punched pack as it was; their `.idx` files are
+/// with their `.idx` (it lists the removed objects); their `.idx` files are
 /// no longer exact.
 #[test]
 fn a_gc_that_cannot_change_its_packs_leaves_no_exact_idx_of_them() {
@@ -431,7 +430,7 @@ fn the_trust_floor_of_a_failed_lookup_outlives_a_crash() {
     assert_eq!(s.put(&data(xi)).unwrap(), x);
     mem.clear_fail_reads_after();
     assert_ne!(s.index.get(&x).unwrap().unwrap().pack, p, "the failed lookup wrote X again");
-    assert!(crate::read_trust_floor(&mem) > p);
+    assert!(crate::read_trust_floor(&mem).unwrap() > p);
     s.sync().unwrap();
     drop(s);
     mem.crash();
@@ -500,4 +499,51 @@ fn a_failed_lookup_ends_the_trust_in_the_packs_so_far() {
     assert_eq!(s.locality_stats().fills, 0);
     assert_eq!(s.put(&data(xi)).unwrap(), x);
     assert_eq!(s.get(&x), Some(data(xi)), "X is readable");
+}
+
+// Objects that are still in the active pack (no `.idx` yet) are written
+// again: no fill tries to read a `.idx` that does not exist.
+#[test]
+fn a_rewrite_in_the_active_pack_tries_no_fill() {
+    let mem = MemIo::new();
+    let s = store(&mem, true);
+    let n = PER_PACK / 2;
+    for _ in 0..2 {
+        for i in 0..n {
+            s.put(&data(i)).unwrap();
+        }
+    }
+    let st = s.locality_stats();
+    assert_eq!((st.fills, st.fills_dropped), (0, 0), "{st:?}");
+    assert_eq!(mem.reads(Kind::Idx), 0);
+}
+
+// The open cannot read the `TRUST` file (here: damaged). It trusts no pack,
+// and the next failed lookup still writes a new floor durably (a floor
+// that is not known on disk is never taken as high enough).
+#[test]
+fn an_unreadable_trust_floor_is_written_again_at_the_next_failed_lookup() {
+    let mem = MemIo::new();
+    let s = store(&mem, true);
+    let ids = fill(&s, 3 * PER_PACK);
+    mem.fail_read_once_after(0);
+    s.put(&data(XI)).unwrap();
+    mem.clear_fail_reads_after();
+    s.close().unwrap();
+    drop(s);
+    mem.flip(0, Kind::Trust, 5);
+    assert_eq!(crate::read_trust_floor(&mem), None);
+    let s = store(&mem, true);
+    for i in 0..3 * PER_PACK {
+        s.put(&data(i)).unwrap();
+    }
+    assert_eq!(s.locality_stats().fills, 0, "no pack is trusted");
+    let y = ids[(2 * PER_PACK + 3) as usize];
+    s.gc_begin().unwrap(); // seal: the put of Y makes a new pack
+    s.gc_abort();
+    let next = s.inner.lock().unwrap().next_pack;
+    mem.fail_read_once_after(0);
+    assert_eq!(s.put(&data(2 * PER_PACK + 3)).unwrap(), y);
+    mem.clear_fail_reads_after();
+    assert_eq!(crate::read_trust_floor(&mem), Some(next), "the floor is on disk again");
 }

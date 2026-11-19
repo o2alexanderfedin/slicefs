@@ -509,17 +509,17 @@ fn idx_without_exact(b: &[u8]) -> Vec<u8> {
 }
 
 /// The trust floor of the store (see `locality.rs`): 0 if there is no
-/// `TRUST` file, `u64::MAX` (trust nothing) if it is damaged or cannot be
-/// read.
-fn read_trust_floor(io: &dyn PackIo) -> u64 {
+/// `TRUST` file, `None` (unknown: trust nothing, and write it at the next
+/// raise) if it is damaged or cannot be read.
+fn read_trust_floor(io: &dyn PackIo) -> Option<u64> {
     match io.read(0, Kind::Trust) {
         Ok(b) if b.len() == 16 && &b[..4] == TRUST_MAGIC
             && crc32c::crc32c(&b[..12]) == u32::from_le_bytes(b[12..].try_into().unwrap()) =>
         {
-            u64::from_le_bytes(b[4..12].try_into().unwrap())
+            Some(u64::from_le_bytes(b[4..12].try_into().unwrap()))
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => 0,
-        _ => u64::MAX,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Some(0),
+        _ => None,
     }
 }
 
@@ -586,8 +586,9 @@ struct Inner {
     tick: u64,
     active: Option<Active>,
     next_pack: u64,
-    /// The durable trust floor (the `TRUST` file, see `locality.rs`).
-    trust_floor: u64,
+    /// The durable trust floor (the `TRUST` file, see `locality.rs`);
+    /// `None` if the open could not read it.
+    trust_floor: Option<u64>,
     stats: Stats,
     /// A pack file was created since the last directory sync.
     dir_dirty: bool,
@@ -1008,7 +1009,9 @@ type PassHook = Box<dyn FnMut(&ChunkStore, u32) + Send>;
 
 impl ChunkStore {
     fn new(io: Arc<dyn PackIo>, punches: bool, opts: Options, inner: Inner) -> Self {
-        let floor = inner.trust_floor;
+        let floor = inner.trust_floor.unwrap_or(u64::MAX);
+        // Packs from here on have no `.idx` yet (the active pack).
+        let unsealed = inner.active.as_ref().map_or(inner.next_pack, |a| a.num);
         let s = ChunkStore {
             io,
             punches,
@@ -1029,6 +1032,7 @@ impl ChunkStore {
             gc_pass_hook: Mutex::new(None),
         };
         s.locality.forget_below(floor);
+        s.locality.sealed_below(unsealed);
         if !s.opts.read_only && s.opts.index_background_merge {
             s.start_merges();
         }
@@ -1444,9 +1448,9 @@ impl ChunkStore {
     fn raise_trust_floor(&self, inner: &mut Inner) -> Result<()> {
         let floor = inner.next_pack;
         self.locality.forget_below(floor);
-        if floor > inner.trust_floor {
+        if inner.trust_floor.is_none_or(|f| floor > f) {
             self.io.write_durable(0, Kind::Trust, &encode_trust_floor(floor))?;
-            inner.trust_floor = floor;
+            inner.trust_floor = Some(floor);
         }
         Ok(())
     }
@@ -2613,6 +2617,7 @@ impl ChunkStore {
         let Some(a) = inner.active.take() else { return Ok(()) };
         // The directory is not marked clean: a pack made after this starts
         // may not be in the directory sync of the `.idx` write.
+        let num = a.num;
         let job = SealJob { io: Arc::clone(&self.io), num: a.num, file: a.file, idx: encode_index(&a.entries, true), dirty: a.dirty };
         let slot = Arc::new(Mutex::new(Some(job)));
         let theirs = Arc::clone(&slot);
@@ -2639,6 +2644,7 @@ impl ChunkStore {
         // Its `.idx` is exact (see `locality.rs`): it lists the records of
         // the pack, each one the current entry of its ID. A fill before the
         // seal wrote it finds no file and counts as a dropped fill.
+        self.locality.sealed_below(num + 1);
         Ok(())
     }
 }
@@ -2816,7 +2822,7 @@ impl Inner {
             tick: 0,
             active: None,
             next_pack: 1,
-            trust_floor: 0,
+            trust_floor: Some(0),
             stats: Stats::default(),
             dir_dirty: false,
             touched: None,
