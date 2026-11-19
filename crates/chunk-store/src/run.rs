@@ -1097,7 +1097,7 @@ mod tests {
     use crate::mem::MemIo;
     use crate::pack_io::{FileIo, Kind};
     use crate::retry::RetryingIo;
-    use crate::DIGEST_LEN;
+    use crate::{DIGEST_LEN, ID_LEN};
     use std::sync::Mutex;
 
     /// A read handle that records the offset and length of every read.
@@ -1596,39 +1596,85 @@ mod tests {
         assert_eq!((s.pack, s.offset, s.stored, s.raw), (1, 2, 2, 3));
     }
 
-    /// IDs whose digests differ only in their last byte, or share the first
-    /// 8 bytes with the fence of the next page: each one is found, and IDs
-    /// near them are misses.
+    /// IDs whose digests differ only in their last byte, in groups that
+    /// differ only in digest byte 0: each one is found with its own place,
+    /// and IDs near them are misses.
     #[test]
     fn ids_that_share_most_of_their_bytes_are_kept_apart() {
+        let last = ID_LEN - 1; // the last digest byte in `ObjectId.0`
         let mut entries = Vec::new();
         for g in 0..4u8 {
-            for last in 0..=255u8 {
+            for b in 0..=255u8 {
                 let mut d = [0x5au8; DIGEST_LEN];
                 d[0] = g;
-                d[DIGEST_LEN - 1] = last;
-                entries.push((ObjectId::new(0x1e, d), put(last as u64 + 1)));
+                d[DIGEST_LEN - 1] = b;
+                let i = g as u64 * 256 + b as u64;
+                entries.push((ObjectId::new(0x1e, d), put(i + 1)));
             }
         }
         entries.sort_by_key(|(id, _)| *id);
-        let (_io, run, _) = mem_run(&entries);
-        check_run(&run, &entries);
-        for (id, _) in entries.iter().step_by(17) {
-            let mut near = *id;
-            near.0[DIGEST_LEN - 1] ^= 0x5a; // another key of the same group: may exist
-            let want = entries.binary_search_by_key(&near, |(k, _)| *k).ok().map(|i| entries[i].1);
-            assert_eq!(run.get(&near).unwrap(), want);
-            let mut absent = *id;
-            absent.0[DIGEST_LEN - 2] ^= 1;
-            assert_eq!(run.get(&absent).unwrap(), None);
-            assert_eq!(run.get_verified(&absent).unwrap(), None);
+        for bits in [10, 0] {
+            let io = MemIo::new();
+            let info = write_run_bits(&io, 1, &entries, bits);
+            let run = Run::open(io.open_run(1).unwrap(), io.map_run(1).unwrap(), 1, info.len).unwrap();
+            check_run(&run, &entries);
+            for (k, (id, _)) in entries.iter().enumerate().step_by(17) {
+                let mut near = *id;
+                near.0[last] ^= 0x5a; // another key of the same group
+                let want = entries.binary_search_by_key(&near, |(k, _)| *k).ok().map(|i| entries[i].1);
+                assert!(want.is_some() && want != Some(entries[k].1));
+                assert_eq!(run.get(&near).unwrap(), want);
+                let mut absent = *id;
+                absent.0[last - 1] ^= 1;
+                assert_eq!(run.get(&absent).unwrap(), None);
+                assert_eq!(run.get_verified(&absent).unwrap(), None);
+            }
         }
     }
 
-    /// Bytes for each entry of a run with real places: about 41 bytes
+    /// A page leaves out the digest bytes that all its keys share. An ID
+    /// whose stored part equals that of an entry, but whose left-out bytes
+    /// differ, is a miss, never the place of that entry (no filter, so each
+    /// lookup reaches the page).
+    #[test]
+    fn an_id_that_differs_only_in_the_shared_bytes_is_a_miss() {
+        // One entry (shared 8), and one page of keys with equal digest bytes 0..8.
+        let one = vec![(hashed(5, 1), put(1))];
+        let mut many: Vec<(ObjectId, Entry)> = (0..100u64)
+            .map(|i| {
+                let mut id = hashed(6, i);
+                id.0[1..9].copy_from_slice(&[0x33; 8]);
+                (id, put(i + 1))
+            })
+            .collect();
+        many.sort_by_key(|(id, _)| *id);
+        for entries in [one, many] {
+            let io = MemIo::new();
+            let info = write_run_bits(&io, 1, &entries, 0);
+            let run = Run::open(io.open_run(1).unwrap(), io.map_run(1).unwrap(), 1, info.len).unwrap();
+            let b = io.read(1, Kind::Run).unwrap();
+            for p in 0..run.fences.len() {
+                assert_eq!(layout(&b, p).3.shared as usize, SHARE_MAX, "page {p}");
+            }
+            check_run(&run, &entries);
+            for (id, _) in &entries {
+                // Digest byte 7 one higher: the prefix is above the fence,
+                // so the search lands on the same page, and the stored part
+                // (digest bytes 8..32) is that of the entry.
+                for up in [1u8, 0x80] {
+                    let mut other = *id;
+                    other.0[8] = other.0[8].wrapping_add(up);
+                    assert_eq!(run.get(&other).unwrap(), None, "{other:?}");
+                    assert_eq!(run.get_verified(&other).unwrap(), None, "{other:?}");
+                }
+            }
+        }
+    }
+
+    /// Bytes for each entry of a run with real places: about 42 bytes
     /// (58 with the fixed fields of run version 1).
     #[test]
-    fn a_run_of_real_places_needs_about_41_bytes_for_each_entry() {
+    fn a_run_of_real_places_needs_about_42_bytes_for_each_entry() {
         let n = 200_000u64;
         let mut x = 0x2545_F491_4F6C_DD1Du64;
         let mut next = move || {

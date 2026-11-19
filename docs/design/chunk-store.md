@@ -709,7 +709,9 @@ content identity; option A shortens it only inside the local index.
   the page fence, which is in RAM and checked at open.
 
 Kept: B and C (run format version 2). A was measured with a throwaway
-spike only and is not kept (see below).
+spike only and is not kept (see below). A run file of version 1 is
+damage for this version (`Corrupt`), so the next writable open of an old
+store builds the index again from the packs (slow on a large store).
 
 Method: `benchmarks/index-bench` (`create`, then `lookup`), macOS on the
 host of "Index results (#85)", base commit `a9a51ce`, B and C at
@@ -719,7 +721,7 @@ for each variant, interleaved (base, B, B+C, A, then again), with a
 first-pass times (each lookup is a new process, so the first pass takes
 the page faults of the mapped runs). The objects are 8 bytes, so the
 stored lengths are 1 byte and the raw field is empty: the bench favours B.
-The unit test `a_run_of_real_places_needs_about_41_bytes_for_each_entry`
+The unit test `a_run_of_real_places_needs_about_42_bytes_for_each_entry`
 (`run.rs`) gives the value for real places: 1,000 packs of 64 MiB, chunks
 of 2 to 32 KiB, half of them compressed.
 
@@ -735,18 +737,22 @@ Disk (index bytes for each object; `index_bytes_per_object` of `create`):
 At 1M, about 213,000 entries are still in the memtable (above the
 high-water mark) and are not in the runs, so the 1M values are lower.
 
-Lookups (ns, median of 3 first passes; the second, warm pass gave the
-same order):
+Lookups (ns, median of 3 runs; pass 1 takes the page faults of the
+mapped runs, pass 2 is warm):
 
-| Variant | Objects | contains hit | contains miss | put dedup-hit |
-|---|---|---|---|---|
-| #85 (base) | 1M | 797 | 449 | 1,134 |
-| B | 1M | 731 | 446 | 1,131 |
-| B + C | 1M | 754 | 458 | 1,140 |
-| A + B + C | 1M | 2,080 | 459 | 2,566 |
-| #85 (base) | 10M | 1,295 | 496 | 1,358 |
-| B | 10M | 1,065 | 485 | 1,238 |
-| B + C | 10M | 1,153 | 497 | 1,299 |
+| Variant | Objects | contains hit | miss | put dedup-hit | pass 2: contains hit | miss | put dedup-hit |
+|---|---|---|---|---|---|---|---|
+| #85 (base) | 1M | 797 | 449 | 1,134 | 702 | 411 | 1,138 |
+| B | 1M | 731 | 446 | 1,131 | 753 | 469 | 1,131 |
+| B + C | 1M | 754 | 458 | 1,140 | 766 | 437 | 1,160 |
+| A + B + C | 1M | 2,080 | 459 | 2,566 | 2,117 | 453 | 2,578 |
+| #85 (base) | 10M | 1,295 | 496 | 1,358 | 1,021 | 497 | 1,305 |
+| B | 10M | 1,065 | 485 | 1,238 | 911 | 464 | 1,306 |
+| B + C | 10M | 1,153 | 497 | 1,299 | 987 | 457 | 1,244 |
+
+The A spike was timed at 1M only (see below for 10M). Its extra read
+takes the store lock to get the pack handle; an implementation without
+that lock would cost less, but still one more read.
 
 Create of 10M objects, base and B + C, twice each, interleaved (base, B +
 C, base, B + C; 1-minute load 5 to 8). The wall times vary much with the

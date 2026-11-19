@@ -1085,7 +1085,7 @@ fn a_cold_open_reads_no_entry_page() {
 }
 
 // The RAM of the index: Bloom filters (about 1.25 B per object at 10 bits
-// per key) and fence tables (8 bytes per 70 entries), at most 2 B per
+// per key) and fence tables (8 bytes per page), at most 2 B per
 // object. This is anonymous memory of the process. The run pages that
 // lookups read are file-backed (mapped page cache pages on files) and are
 // not counted here.
