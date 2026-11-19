@@ -103,6 +103,32 @@ fn a_full_gc_frees_what_a_filter_gc_and_punching_left() {
     exactly_live(&mem, &s, &objs, &live, "after a reopen");
 }
 
+/// An exact normal GC punches mostly live packs: the index then lists no
+/// dead object, but the holes and the parts of the removed records outside
+/// whole blocks stay in the packs. A full GC compacts those packs too.
+#[test]
+fn a_full_gc_compacts_punched_packs_with_no_dead_entry_left() {
+    let tmp = TempDir::new().unwrap();
+    let o = opts(tmp.path());
+    let mem = MemIo::new();
+    let s = open(&mem, &o);
+    // Chunk-sized objects (8,000 bytes), runs of 3 dead among 7 live.
+    let objs: Vec<Obj> = (0..120).map(|i| { let d = random(8000, 500 + i); (s.put(&d).unwrap(), d) }).collect();
+    let live: HashSet<ObjectId> = objs.iter().enumerate().filter(|(i, _)| i % 10 >= 3).map(|(_, (id, _))| *id).collect();
+    let b = s.gc_begin().unwrap();
+    let st = s.gc_finish(&live, b).unwrap();
+    assert!(st.packs_punched > 0, "{st:?}");
+    let left: Vec<usize> = objs.iter().enumerate().filter(|(_, (id, _))| !live.contains(id) && s.contains(id)).map(|(i, _)| i).collect();
+    // At most one dead record (at the end of a pack) has no whole block.
+    assert!(left.len() <= 1, "the exact normal GC left dead objects {left:?}: {st:?}");
+
+    let st = full_gc(&s, &live);
+    assert_eq!(st.removed_objects, left.len() as u64, "{st:?}");
+    // Also the punched packs with no dead entry.
+    assert!(st.packs_compacted >= 5, "{st:?}");
+    exactly_live(&mem, &s, &objs, &live, "punched packs");
+}
+
 #[test]
 fn tiny_sort_chunks_force_several_merge_passes() {
     let tmp = TempDir::new().unwrap();

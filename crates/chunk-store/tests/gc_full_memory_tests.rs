@@ -117,8 +117,8 @@ fn full_gc_ram_does_not_grow_with_the_object_count() {
     println!("full GC peak heap: 12,000 objects {small} bytes ({p1} merge passes), 48,000 objects {large} bytes ({p2} merge passes)");
     assert!(p2 >= 2, "{p2} merge passes");
     // 4x the objects: an exact set of the live IDs in RAM would add at
-    // least 18,000 x 33 bytes (594 KB). Allow half of that for the index
-    // tables that do grow with the objects (run filters and fences, about
-    // 3 bytes an object).
+    // least 18,000 x 33 bytes (594 KB). Allow half of that for what does
+    // grow (index run filters and fences, the GC tables of the packs).
+    // Measured: 530 KB and 753 KB.
     assert!(large < small + 297_000, "peak {large} at 48,000 objects vs {small} at 12,000");
 }

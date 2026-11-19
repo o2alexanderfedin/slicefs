@@ -1655,6 +1655,15 @@ impl ChunkStore {
             } else {
                 Some(GcAct::Delete)
             };
+            // A full GC also compacts a pack with dead bytes that the index
+            // no longer lists: a punched pack (the holes and the parts of
+            // its removed records outside whole blocks), or a pack with
+            // more records than current entries (an older copy of an
+            // object). A read error ends the GC before any change.
+            let act = match act {
+                None if full && self.has_unlisted_bytes(num, t.entries)? => Some(GcAct::Compact),
+                a => a,
+            };
             match act {
                 Some(a) => todo.push((num, a, t.entries)),
                 None => st.kept_objects += t.entries,
@@ -1668,6 +1677,14 @@ impl ChunkStore {
             io.list()?.into_iter().filter(|&n| n <= boundary && Some(n) != active && !totals.contains_key(&n)).collect();
         unused.sort_unstable();
         Ok((todo, unused))
+    }
+
+    /// True if the sealed pack `num` with `entries` current entries holds
+    /// bytes that are not in a current record (see `gc_select`).
+    fn has_unlisted_bytes(&self, num: u64, entries: u64) -> Result<bool> {
+        let mut head = [0u8; PACK_HEADER];
+        self.io.open_read(num)?.read_at(&mut head, 0)?;
+        Ok(is_punched(&head) || self.pack_entries(num)?.len() as u64 != entries)
     }
 
     /// Step 4 of `gc_finish` for one group of selected packs: the plans
