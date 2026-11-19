@@ -27,6 +27,10 @@ pub enum Kind {
     /// The list of live runs of the store index. There is one; callers
     /// pass the number 0.
     Manifest,
+    /// The trust floor of the `.idx` marks (see `locality.rs`): no pack
+    /// below it has an exact `.idx`. There is one, in the pack directory;
+    /// callers pass the number 0.
+    Trust,
 }
 
 impl Kind {
@@ -44,6 +48,7 @@ pub fn pack_name(num: u64, kind: Kind) -> String {
         Kind::Idx => format!("{num:016x}.idx"),
         Kind::Run => format!("{num:016x}.run"),
         Kind::Manifest => "MANIFEST".to_string(),
+        Kind::Trust => "TRUST".to_string(),
     }
 }
 
@@ -112,6 +117,11 @@ pub trait PackIo: Send + Sync {
     fn exists(&self, num: u64, kind: Kind) -> bool;
     /// The whole file.
     fn read(&self, num: u64, kind: Kind) -> io::Result<Vec<u8>>;
+    /// The length of the file, without a read of it (a strategy that has no
+    /// cheaper way reads it).
+    fn file_len(&self, num: u64, kind: Kind) -> io::Result<u64> {
+        self.read(num, kind).map(|b| b.len() as u64)
+    }
     /// Replace the file atomically and durably (also syncs the directory).
     fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> io::Result<()>;
     fn remove(&self, num: u64, kind: Kind) -> io::Result<()>;
@@ -338,6 +348,10 @@ impl PackIo for FileIo {
 
     fn read(&self, num: u64, kind: Kind) -> io::Result<Vec<u8>> {
         fs::read(self.path(num, kind))
+    }
+
+    fn file_len(&self, num: u64, kind: Kind) -> io::Result<u64> {
+        Ok(fs::metadata(self.path(num, kind))?.len())
     }
 
     fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> io::Result<()> {

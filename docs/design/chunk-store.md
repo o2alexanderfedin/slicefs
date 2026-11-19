@@ -198,6 +198,7 @@ store/
     00000001.pack      sealed (immutable)
     00000001.idx       index of a sealed pack
     00000002.pack      active (append-only)
+    TRUST              trust floor of the locality cache (#112)
   index/               on-disk index (#85), next to packs/
     MANIFEST           live runs, high-water mark, counts
     0000000000000007.run   sorted run (immutable)
@@ -206,6 +207,9 @@ store/
 
 Pack header: magic `SFPK`, format version u16 (2: tagged 33-byte IDs; a
 pack or index of another version is refused at open), pack number u64.
+Flag bits in the version field: `0x8000` in a pack header (GC punched the
+pack), `0x4000` in a `.idx` header (the `.idx` is exact, see "Locality
+cache").
 
 Record:
 
@@ -1056,19 +1060,48 @@ default): after 4 index hits in a row in one pack, it reads that pack's
   never cached). The table is at most about 9.1 MiB.
 - GC safety: a `.idx` is not the index. A GC writes its tombstones first
   and can leave an `.idx` stale (a skipped punch, a failed removal, a
-  crash). So the cache takes only packs that this process sealed (their
-  `.idx` is exact) and that no GC has selected since. Under the store
-  lock, before its install, the GC removes the packs it changes or deletes
-  from the trusted set and from the cache, and moves an epoch so that a
+  crash). So the cache takes only an *exact* `.idx`: each entry is the
+  current index entry of its ID. Bit `0x4000` of the version field of the
+  `.idx` header marks it on disk, so packs of an earlier mount are cached
+  too. The writers:
+  - The seal writes the `.idx` of a new pack as exact.
+  - A GC, for each group of selected packs (and the unused packs), before
+    its first change (the copies of a compaction, the pending runs), writes
+    each exact `.idx` of the group again without the bit
+    (`write_durable`), and drops those packs from the cache for the rest of
+    the process. A failure there ends the group before any change.
+  - The punch writes the new `.idx` of the pack as exact: it lists only the
+    entries that the index has at that place after the install.
+  - The scans at open (a pack with no `.idx`) write it as not exact.
+- Crash order: a pack becomes exact only at its seal, when it is new and
+  no GC has selected it. A GC clears the bit durably before it copies,
+  writes a tombstone, punches or removes anything of the pack, so a crash
+  at any later point finds the bit clear. A crash before the clear changed
+  nothing. The punch sets the bit again only after the install, with the
+  entries that the index has. The copies of a compaction must come after
+  the clear too: after a failed install the source pack still lists the
+  copied objects, whose current entries are the copies.
+- A failed index lookup in `put` writes the object again, so the pack of
+  the older copy keeps it in its `.idx`, and a later GC that removes the
+  new copy does not select that pack. So before that write the store
+  writes the trust floor (the `TRUST` file in `packs/`: magic `SFTR`, the
+  next pack number, CRC) durably: no pack below it is cached, in this
+  process or a later one. If that write fails, the put fails and writes
+  nothing. A damaged or unreadable `TRUST` file trusts no pack.
+- In the process: under the store lock, before its install, the GC also
+  drops the packs it changes from the cache and moves an epoch, so that a
   fill running at that time is dropped. A cache hit takes the same path as
   an index hit: it is touched for a running GC and checked again under the
-  lock (`Index::gen`). A failed index lookup in `put` writes the object
-  again, so an older copy can stay in a trusted pack that a later GC does
-  not select; after such a failure no pack sealed so far is trusted.
-- Limit: packs of an earlier process are never cached, because nothing on
-  disk shows whether a GC left their `.idx` stale. A re-write of data from
-  an earlier mount gets no gain until a durable marker (for example a pack
-  header flag set before the GC install) exists.
+  lock (`Index::gen`).
+- A fill reads a `.idx` only if its length allows at most 65,536 entries
+  (`PackIo::file_len`); a `.idx` that is not exact, damaged or too big is
+  not read again by this process.
+- Cost: a GC writes each exact `.idx` of its selected packs one more time
+  (one durable write each; after the first GC most of them are already
+  clear). Tests: `crates/chunk-store/src/locality_tests.rs` (a power loss
+  at each sync of a GC that punches, deletes and compacts; failed
+  removals; a failed install after the copies; a failed clear; the trust
+  floor across a crash).
 
 Results (2026-11-19, macOS, warm cache, `index-bench rewrite`, 8-byte
 objects, `--pack-limit 442368` so a pack has about 8K entries as with
@@ -1243,7 +1276,9 @@ and it holds the store lock only for short steps:
 2. Pass 1 (no store lock): one merged pass over the snapshot gives, for
    each pack, its bytes, its live bytes and its entries. Then the same
    rules as above choose: delete, compact, punch or keep.
-3. Pass 2 (no store lock), one selected pack at a time: the entries come
+3. Pass 2 (no store lock), one selected pack at a time: first each `.idx`
+   of the group that is marked exact is written again without the mark,
+   durably (see "Locality cache"). Then the entries come
    from the pack's `.idx` (or a scan of the pack). An entry is current
    only if the snapshot points to this pack and offset. The dead entries
    go as tombstones (ID, pack) into a pending run file that no MANIFEST

@@ -465,6 +465,11 @@ impl PackIo for MemIo {
         Ok(data)
     }
 
+    fn file_len(&self, num: u64, kind: Kind) -> io::Result<u64> {
+        let s = self.s.lock().unwrap();
+        s.files.get(&(num, kind)).map(|f| f.lock().unwrap().data.len() as u64).ok_or_else(not_found)
+    }
+
     fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> io::Result<()> {
         let mut s = self.s.lock().unwrap();
         if s.write_durable_fails(kind) || s.sync_fails() {

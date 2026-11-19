@@ -236,19 +236,237 @@ fn a_cache_hit_during_a_gc_keeps_the_object() {
 }
 
 #[test]
-fn packs_of_an_earlier_process_are_never_cached() {
+fn packs_of_an_earlier_process_are_cached_from_their_exact_idx() {
     let mem = MemIo::new();
     let s = store(&mem, true);
-    fill(&s, 3 * PER_PACK);
+    let ids = fill(&s, 3 * PER_PACK);
     s.close().unwrap();
     drop(s);
     let s = store(&mem, true);
     for i in 0..3 * PER_PACK {
-        s.put(&data(i)).unwrap();
+        assert_eq!(s.put(&data(i)).unwrap(), ids[i as usize]);
     }
     let st = s.locality_stats();
-    assert_eq!((st.fills, st.hits), (0, 0), "{st:?}");
-    assert!(st.misses >= 3 * PER_PACK - u64::from(FILL_STREAK));
+    assert!(st.fills >= 2 && st.hits * 10 >= 3 * PER_PACK * 6, "{st:?}");
+    assert!(cache_matches_index(&s) > 0);
+}
+
+/// Every `.idx` that is marked exact, of a pack at or above the trust
+/// floor, lists only current index entries (the rule of `locality.rs`).
+fn exact_idx_files_match_the_index(mem: &MemIo, s: &ChunkStore) -> usize {
+    let floor = crate::read_trust_floor(mem);
+    let mut exact = 0;
+    for num in mem.list().unwrap() {
+        let Ok(b) = mem.read(num, Kind::Idx) else { continue };
+        if num < floor || !crate::idx_exact(&b) {
+            continue;
+        }
+        exact += 1;
+        for (id, l) in crate::decode_index(&b, num).unwrap().unwrap() {
+            assert_eq!(s.index.get(&id).unwrap(), Some(l), "the exact .idx of pack {num} lists an object that is not there");
+        }
+    }
+    exact
+}
+
+/// Put every object of `0..n` again with the cache on, in pack order, then
+/// check that each one is readable: a cache hit on an object that a GC
+/// removed would skip its write and lose it.
+fn rewrite_and_read_all(s: &ChunkStore, n: u64) {
+    for i in 0..n {
+        s.put(&data(i)).unwrap();
+    }
+    for i in 0..n {
+        let id = s.opts.hasher.id(&data(i));
+        assert_eq!(s.get(&id), Some(data(i)), "object {i} is lost");
+    }
+}
+
+const SWEEP_PACKS: u64 = 6;
+
+/// A store for the GC crash tests, and the IDs that the GC keeps: it
+/// punches X out of the first pack, deletes the second pack (all dead) and
+/// compacts the third (mostly dead, so its live objects are copied).
+fn sweep_store(mem: &MemIo) -> (ChunkStore, HashSet<ObjectId>) {
+    let s = store(mem, true);
+    let n = SWEEP_PACKS * PER_PACK;
+    let ids = fill(&s, n);
+    let pack_of = |i: u64| s.index.get(&ids[i as usize]).unwrap().unwrap().pack;
+    let (p1, p2, p3) = (pack_of(0), pack_of(PER_PACK + PER_PACK / 2), pack_of(2 * PER_PACK + PER_PACK / 2));
+    assert!(p1 < p2 && p2 < p3, "{p1} {p2} {p3}");
+    let mut kept_in_p3 = 0;
+    let live: HashSet<ObjectId> = (0..n)
+        .filter(|&i| {
+            let p = pack_of(i);
+            if i == XI || p == p2 {
+                return false;
+            }
+            if p == p3 {
+                kept_in_p3 += 1;
+                return kept_in_p3 <= 3;
+            }
+            true
+        })
+        .map(|i| ids[i as usize])
+        .collect();
+    (s, live)
+}
+
+/// A power loss at each sync of a GC (pack syncs, directory syncs and
+/// durable writes: the `.idx` clears, the pending runs, the MANIFEST, the
+/// punch). After the reopen, no exact `.idx` lists a removed or moved
+/// object, and a re-write of everything in pack order loses nothing.
+#[test]
+fn a_crash_at_each_step_of_a_gc_never_leaves_a_stale_exact_idx() {
+    let n = SWEEP_PACKS * PER_PACK;
+    let mut done = false;
+    for k in 0..400 {
+        let mem = MemIo::new();
+        let (s, live) = sweep_store(&mem);
+        s.sync().unwrap();
+        let b = s.gc_begin().unwrap();
+        mem.fail_sync_after(k);
+        let r = s.gc_finish(&live, b);
+        mem.fail_sync_after(u32::MAX);
+        if let Ok(st) = &r {
+            assert!(st.packs_deleted >= 1 && st.packs_compacted >= 1 && st.packs_punched >= 1, "{st:?}");
+        }
+        drop(s);
+        mem.crash();
+        let s = store(&mem, true);
+        exact_idx_files_match_the_index(&mem, &s);
+        rewrite_and_read_all(&s, n);
+        exact_idx_files_match_the_index(&mem, &s);
+        if r.is_ok() {
+            // Past the last sync: the packs that the GC did not change are
+            // still trusted, and so is the punched pack (its new `.idx`).
+            let st = s.locality_stats();
+            assert!(st.fills >= 2, "k={k}: {st:?}");
+            done = true;
+            break;
+        }
+    }
+    assert!(done, "the GC never ended without a fault");
+}
+
+/// A GC whose pack removals fail leaves the deleted and compacted packs
+/// with their `.idx` (it lists the removed objects), and a punch that is
+/// not supported leaves the punched pack as it was; their `.idx` files are
+/// no longer exact.
+#[test]
+fn a_gc_that_cannot_change_its_packs_leaves_no_exact_idx_of_them() {
+    let n = SWEEP_PACKS * PER_PACK;
+    let mem = MemIo::new();
+    let (s, live) = sweep_store(&mem);
+    let exact_before = exact_idx_files_match_the_index(&mem, &s);
+    let b = s.gc_begin().unwrap();
+    mem.set_fail_removes(true);
+    assert!(s.gc_finish(&live, b).is_err());
+    mem.set_fail_removes(false);
+    drop(s);
+    mem.crash();
+    let s = store(&mem, true);
+    let exact_after = exact_idx_files_match_the_index(&mem, &s);
+    assert!(exact_after < exact_before, "{exact_after} of {exact_before}");
+    rewrite_and_read_all(&s, n);
+}
+
+// The copies of a compaction are made before the install. A failed install
+// (the MANIFEST write) then leaves the source pack with its records and the
+// copies with newer entries: its `.idx` must not be exact, or a later GC
+// that removes a copy would leave the old place in the cache of a later
+// mount.
+#[test]
+fn a_failed_install_after_the_copies_leaves_the_source_pack_untrusted() {
+    let n = SWEEP_PACKS * PER_PACK;
+    let mem = MemIo::new();
+    let (s, live) = sweep_store(&mem);
+    let b = s.gc_begin().unwrap();
+    mem.fail_next_write_durable(Kind::Manifest, 1);
+    assert!(s.gc_finish(&live, b).is_err());
+    drop(s);
+    mem.crash();
+    let s = store(&mem, true);
+    exact_idx_files_match_the_index(&mem, &s);
+    // A later GC removes everything that the first one did not keep.
+    let b = s.gc_begin().unwrap();
+    s.gc_finish(&live, b).unwrap();
+    drop(s);
+    let s = store(&mem, true);
+    exact_idx_files_match_the_index(&mem, &s);
+    rewrite_and_read_all(&s, n);
+}
+
+// The clear of the exact marks fails: the GC ends before any change.
+#[test]
+fn a_failed_clear_ends_the_gc_before_any_change() {
+    let mem = MemIo::new();
+    let (s, live) = sweep_store(&mem);
+    let objects = s.stats().objects;
+    let b = s.gc_begin().unwrap();
+    mem.fail_write_durable_after(Kind::Idx, 1);
+    assert!(s.gc_finish(&live, b).is_err());
+    assert_eq!(s.stats().objects, objects, "nothing removed");
+    exact_idx_files_match_the_index(&mem, &s);
+    drop(s);
+    mem.crash();
+    let s = store(&mem, true);
+    exact_idx_files_match_the_index(&mem, &s);
+    rewrite_and_read_all(&s, SWEEP_PACKS * PER_PACK);
+}
+
+// A failed lookup writes X again; the trust floor that it moves is durable
+// before that write. After a power loss and a reopen, a GC removes X (it
+// selects only the pack of the new copy); the pack of the first copy is
+// below the floor, so a streak in it does not cache X.
+#[test]
+fn the_trust_floor_of_a_failed_lookup_outlives_a_crash() {
+    let mem = MemIo::new();
+    let s = store(&mem, true);
+    let ids = fill(&s, 3 * PER_PACK);
+    let xi = XI;
+    let x = ids[xi as usize];
+    let p = s.index.get(&x).unwrap().unwrap().pack;
+    mem.fail_read_once_after(0);
+    assert_eq!(s.put(&data(xi)).unwrap(), x);
+    mem.clear_fail_reads_after();
+    assert_ne!(s.index.get(&x).unwrap().unwrap().pack, p, "the failed lookup wrote X again");
+    assert!(crate::read_trust_floor(&mem) > p);
+    s.sync().unwrap();
+    drop(s);
+    mem.crash();
+    let s = store(&mem, true);
+    let live: HashSet<ObjectId> = ids.iter().copied().filter(|&i| i != x).collect();
+    let b = s.gc_begin().unwrap();
+    s.gc_finish(&live, b).unwrap();
+    assert!(!s.contains(&x));
+    exact_idx_files_match_the_index(&mem, &s);
+    drop(s);
+    let s = store(&mem, true);
+    for i in 0..3 * PER_PACK {
+        if i != xi {
+            s.put(&data(i)).unwrap();
+        }
+    }
+    assert_eq!(s.put(&data(xi)).unwrap(), x);
+    assert_eq!(s.get(&x), Some(data(xi)), "X is readable");
+}
+
+// The trust floor cannot be written: the put fails and writes nothing.
+#[test]
+fn a_put_whose_trust_floor_fails_writes_nothing() {
+    let mem = MemIo::new();
+    let s = store(&mem, true);
+    let ids = fill(&s, 3 * PER_PACK);
+    let x = ids[XI as usize];
+    let at = s.index.get(&x).unwrap();
+    let objects = s.stats().objects;
+    mem.fail_read_once_after(0);
+    mem.fail_next_write_durable(Kind::Trust, 1);
+    assert!(s.put(&data(XI)).is_err());
+    mem.clear_fail_reads_after();
+    assert_eq!(s.index.get(&x).unwrap(), at, "no second copy");
+    assert_eq!(s.stats().objects, objects);
 }
 
 // A failed index lookup makes put write X again (into the active pack), so

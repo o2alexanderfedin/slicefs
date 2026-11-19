@@ -17,28 +17,40 @@
 //! was: a punch that is skipped (no whole block to punch, a read error), a
 //! pack removal that fails, a crash between the install and the change. That
 //! `.idx` then lists removed objects, and a dedup hit on one of them would
-//! lose the object. So the cache takes the entries of a *trusted* pack only:
-//! a pack that this process sealed (its `.idx` is the list of its records,
-//! all with a current index entry or a newer copy), and that no GC install
-//! has selected since. The GC calls [`LocalityCache::untrust`] under the
-//! store lock, before its install: the packs that it changes (or deletes)
-//! leave the trusted set and the cache for the rest of the process. Packs of
-//! an earlier process are never trusted (no trace on disk says whether a GC
-//! left their `.idx` stale).
+//! lose the object. So the cache takes the entries of an *exact* `.idx`
+//! only: one where every listed object has its current index entry at the
+//! listed place. A bit in the header of the `.idx` (`IDX_EXACT`) says so on
+//! disk, so a later process can trust the packs of an earlier one:
 //!
-//! A failed index lookup in `put` writes the object again, so a trusted pack
-//! can then hold an older copy that a GC does not select when it removes
-//! the new one; [`LocalityCache::forget_all`] then drops the whole trusted
-//! set.
+//! - The seal writes the `.idx` of a new pack as exact: it lists the records
+//!   of the pack, each one the current entry of its ID.
+//! - Before a GC changes anything of a group of packs (its copies, its
+//!   tombstones), it writes the `.idx` of each of them again without the
+//!   bit, durably (`ChunkStore::gc_distrust`), and calls
+//!   [`LocalityCache::untrust`]. A crash after that leaves the bit clear;
+//!   a crash before it changed nothing. The GC also calls `untrust` again
+//!   under the store lock before its install.
+//! - The punch of a GC writes the new `.idx` of the pack as exact: it lists
+//!   only the entries that the index has at that place after the install.
+//! - Every other `.idx` writer (the scans at open) writes it as not exact.
+//!
+//! A failed index lookup in `put` writes the object again, so the pack of
+//! the older copy keeps it in its `.idx` although a later GC that removes
+//! the new copy does not select that pack. Before that write, the store
+//! moves the *trust floor* (the `TRUST` file, durable) to the next pack
+//! number: no pack below the floor is trusted, in this process
+//! ([`LocalityCache::forget_below`]) or a later one. The put fails if the
+//! floor cannot be written.
 //!
 //! A fill reads the `.idx` outside every lock. It records the epoch first;
-//! `untrust` moves the epoch, so a fill that overlaps a GC install is
-//! dropped.
+//! `untrust` moves the epoch, so a fill that overlaps a GC is dropped.
 //!
 //! ## RAM
 //!
 //! At most [`MAX_PACKS`] packs and [`MAX_ENTRIES`] entries in all (a pack
-//! with more entries is never cached). A table slot is an ID and a `Loc`
+//! with more entries is never cached; the store checks the length of a
+//! `.idx` before it reads it, see [`max_idx_len`]). The set of packs that
+//! are never filled again has one number per refused pack. A table slot is an ID and a `Loc`
 //! (72 bytes) and a control byte, so the table is at most about 9.1 MiB
 //! (131,072 slots); a fill holds one `.idx` file and its decoded entries
 //! (at most `MAX_ENTRIES`) for a moment.
@@ -99,11 +111,14 @@ pub struct LocalityStats {
 
 #[derive(Default)]
 struct State {
-    /// Moves at each `untrust`: a fill that started before is dropped.
+    /// Moves at each `untrust` and `forget_below`: a fill that started
+    /// before is dropped.
     epoch: u64,
-    /// Packs that this process sealed, with their entry counts, minus the
-    /// packs that a GC selected since.
-    trusted: HashMap<u64, usize>,
+    /// No pack below this number is filled (see the module doc).
+    floor: u64,
+    /// Packs that are never filled again in this process: a GC selected
+    /// them, or their `.idx` was not exact, damaged or too big.
+    never: HashSet<u64>,
     /// The cached packs and their entry counts, the most recent first.
     lru: VecDeque<(u64, usize)>,
     map: IdMap,
@@ -122,6 +137,12 @@ pub(crate) struct LocalityCache {
     misses: AtomicU64,
     fills: AtomicU64,
     fills_dropped: AtomicU64,
+}
+
+/// The longest `.idx` that a fill reads: one with [`MAX_ENTRIES`] entries
+/// of `entry` bytes, a header of `header` bytes and a CRC.
+pub(crate) const fn max_idx_len(header: usize, entry: usize) -> u64 {
+    (header + MAX_ENTRIES * entry + 4) as u64
 }
 
 impl LocalityCache {
@@ -154,33 +175,38 @@ impl LocalityCache {
 
     /// An index hit in `pack` (a cache miss before it). Returns the epoch
     /// for a fill of `pack` if the caller should read its `.idx` now (then
-    /// it must call [`LocalityCache::fill`] or [`LocalityCache::fill_failed`]).
+    /// it must call [`LocalityCache::fill`], [`LocalityCache::refuse`] or
+    /// [`LocalityCache::fill_failed`]).
     pub(crate) fn index_hit(&self, pack: u64) -> Option<u64> {
         let mut st = self.state();
         st.streak = if st.streak.0 == pack { (pack, st.streak.1.saturating_add(1)) } else { (pack, 1) };
-        if st.streak.1 < FILL_STREAK || st.filling.is_some() || st.lru.iter().any(|p| p.0 == pack) {
+        if st.streak.1 < FILL_STREAK
+            || st.filling.is_some()
+            || pack < st.floor
+            || st.never.contains(&pack)
+            || st.lru.iter().any(|p| p.0 == pack)
+        {
             return None;
         }
-        match st.trusted.get(&pack) {
-            Some(&n) if n <= MAX_ENTRIES => {
-                st.filling = Some(pack);
-                Some(st.epoch)
-            }
-            _ => None,
-        }
+        st.filling = Some(pack);
+        Some(st.epoch)
     }
 
-    /// The entries of the `.idx` of `pack`, read after
+    /// The entries of the exact `.idx` of `pack`, read after
     /// [`LocalityCache::index_hit`] gave `epoch`.
     pub(crate) fn fill(&self, pack: u64, epoch: u64, entries: Vec<(ObjectId, Loc)>) {
         let mut st = self.state();
         st.filling = None;
         let n = entries.len();
-        let ok = st.epoch == epoch
-            && st.trusted.get(&pack) == Some(&n)
-            && n <= MAX_ENTRIES
-            && !st.lru.iter().any(|p| p.0 == pack)
-            && entries.iter().all(|(_, l)| l.pack == pack);
+        let fits = n <= MAX_ENTRIES && entries.iter().all(|(_, l)| l.pack == pack);
+        if !fits {
+            st.never.insert(pack);
+        }
+        let ok = fits
+            && st.epoch == epoch
+            && pack >= st.floor
+            && !st.never.contains(&pack)
+            && !st.lru.iter().any(|p| p.0 == pack);
         if !ok {
             drop(st);
             self.fills_dropped.fetch_add(1, Ordering::Relaxed);
@@ -199,28 +225,29 @@ impl LocalityCache {
         self.fills.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A fill that could not read the `.idx`.
+    /// The `.idx` of `pack` is not exact, damaged or too big: this process
+    /// never reads it again.
+    pub(crate) fn refuse(&self, pack: u64) {
+        let mut st = self.state();
+        st.filling = None;
+        st.never.insert(pack);
+        drop(st);
+        self.fills_dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A fill that could not read the `.idx` (a later one may: a seal that
+    /// has not written it yet, a transient error).
     pub(crate) fn fill_failed(&self) {
         self.state().filling = None;
         self.fills_dropped.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// This process sealed `pack` with `entries` records: its `.idx` is
-    /// exact. The caller holds the store lock.
-    pub(crate) fn trust(&self, pack: u64, entries: usize) {
-        self.state().trusted.insert(pack, entries);
-    }
-
     /// A GC is about to change (or delete) `packs`: never cache them again,
-    /// drop what is cached of them, and drop the fills that run now. The
-    /// caller holds the store lock and calls this before the install.
+    /// drop what is cached of them, and drop the fills that run now.
     pub(crate) fn untrust(&self, packs: impl IntoIterator<Item = u64>) {
         let mut st = self.state();
         st.epoch += 1;
         let gone: HashSet<u64> = packs.into_iter().collect();
-        for p in &gone {
-            st.trusted.remove(p);
-        }
         if st.lru.iter().any(|p| gone.contains(&p.0)) {
             let mut dropped = 0;
             st.lru.retain(|p| {
@@ -233,16 +260,16 @@ impl LocalityCache {
             st.total -= dropped;
             st.map.retain(|_, l| !gone.contains(&l.pack));
         }
+        st.never.extend(gone);
     }
 
-    /// A dedup lookup of `put` failed: the object is written again, and the
-    /// pack of its older copy keeps it in its `.idx` although a GC may
-    /// remove the new copy without selecting that pack. So no pack sealed
-    /// so far is trusted again, and the cache is emptied.
-    pub(crate) fn forget_all(&self) {
+    /// No pack below `floor` is trusted (the trust floor of the store, at
+    /// open or after a failed lookup in `put`, see the module doc). Empties
+    /// the cache and drops the fills that run now.
+    pub(crate) fn forget_below(&self, floor: u64) {
         let mut st = self.state();
         st.epoch += 1;
-        st.trusted.clear();
+        st.floor = st.floor.max(floor);
         st.lru.clear();
         st.map = IdMap::default();
         st.total = 0;
@@ -289,9 +316,8 @@ mod tests {
     }
 
     #[test]
-    fn a_streak_of_hits_in_a_trusted_pack_fills_it() {
+    fn a_streak_of_hits_fills_the_pack() {
         let c = LocalityCache::default();
-        c.trust(1, 10);
         for _ in 1..FILL_STREAK {
             assert_eq!(c.index_hit(1), None);
         }
@@ -307,41 +333,54 @@ mod tests {
     }
 
     #[test]
-    fn an_untrusted_pack_is_never_filled() {
+    fn a_refused_untrusted_or_low_pack_is_never_filled() {
         let c = LocalityCache::default();
-        assert_eq!(streak(&c, 1), None, "not sealed by this process");
-        c.trust(2, MAX_ENTRIES + 1);
+        streak(&c, 1).unwrap();
+        c.refuse(1);
+        assert_eq!(streak(&c, 1), None, "refused (not exact)");
+        let e = streak(&c, 2).unwrap();
+        c.fill(2, e, entries(2, MAX_ENTRIES + 1));
         assert_eq!(streak(&c, 2), None, "too many entries");
-        c.trust(3, 10);
         c.untrust([3]);
         assert_eq!(streak(&c, 3), None, "selected by a GC");
+        c.forget_below(10);
+        assert_eq!(streak(&c, 9), None, "below the floor");
+        assert!(streak(&c, 10).is_some());
     }
 
     #[test]
-    fn a_gc_install_during_a_fill_drops_it_and_the_cached_pack() {
+    fn a_gc_during_a_fill_drops_it_and_the_cached_pack() {
         let c = LocalityCache::default();
-        c.trust(1, 10);
-        c.trust(2, 10);
         let e = streak(&c, 1).unwrap();
         c.fill(1, e, entries(1, 10));
         let e = streak(&c, 2).unwrap();
-        c.untrust([1]); // a GC install selects pack 1 while pack 2 fills
+        c.untrust([1]); // a GC selects pack 1 while pack 2 fills
         c.fill(2, e, entries(2, 10));
         let s = c.stats();
         assert_eq!((s.entries, s.packs, s.fills_dropped), (0, 0, 1));
         assert!(entries(1, 10).iter().all(|(i, _)| c.get(i).is_none()));
-        // Pack 2 is still trusted: the next streak fills it.
+        // Pack 2 was not selected: the next streak fills it.
         let e = streak(&c, 2).unwrap();
         c.fill(2, e, entries(2, 10));
         assert_eq!(c.stats().entries, 10);
     }
 
     #[test]
-    fn a_fill_with_other_entries_than_the_seal_is_dropped() {
+    fn a_floor_during_a_fill_drops_it_and_empties_the_cache() {
         let c = LocalityCache::default();
-        c.trust(1, 10);
+        let e = streak(&c, 5).unwrap();
+        c.fill(5, e, entries(5, 10));
+        let e = streak(&c, 7).unwrap();
+        c.forget_below(3);
+        c.fill(7, e, entries(7, 10));
+        assert_eq!(c.stats().entries, 0);
+    }
+
+    #[test]
+    fn a_fill_with_entries_of_another_pack_is_dropped() {
+        let c = LocalityCache::default();
         let e = streak(&c, 1).unwrap();
-        c.fill(1, e, entries(1, 9));
+        c.fill(1, e, entries(2, 9));
         assert_eq!(c.stats().entries, 0);
     }
 
@@ -351,7 +390,6 @@ mod tests {
         let per = MAX_ENTRIES / 4 + 1;
         for p in 1..=40u64 {
             let n = if p % 2 == 0 { per } else { 100 };
-            c.trust(p, n);
             let e = streak(&c, p).unwrap();
             c.fill(p, e, entries(p, n));
             let s = c.stats();
