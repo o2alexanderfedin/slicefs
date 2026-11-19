@@ -599,7 +599,10 @@ this change, each pending GC run kept its file open until the
 install, so a GC over more packs with dead objects than the limit of open
 files stopped with `EMFILE` and changed nothing. A test store of 330
 packs (every fourth object dead) showed this at `ulimit -n 256`; after
-the fix, the same GC completes at 256 and at 128.
+the change, the same GC completes at 256 and at 128. A GC now holds at
+most 32 pending run files open, plus one merged run for each group done,
+until the background merges take them into larger runs. This was shown
+up to 330 packs.
 
 Notes:
 
@@ -636,15 +639,17 @@ Notes:
   and 141 s for #66), 0.04 s at 10M on Linux (10.4 s). The 100M open is
   slower than the 10M open mostly because its replay is larger (see
   above); the filters are about 1.25 B for each object.
-- Lookups are slower than with the map in RAM: a hit costs 0.9 to 1.4 µs
-  at 1M and 10M and 3.2 µs at 100M (0.7 to 1.3 µs for #66), a miss 0.5 to
-  1.2 µs (0.3 to 0.7 µs). A miss checks the memtable and the filter of
-  each run (5 runs at 10M, 9 at 100M). A hit also reads one page of the
-  mapping. Each lookup step is a new process, so the first touch of each
-  page is a page fault; at 100M the 1M hits touch most of the 6 GB of
-  runs. A long-running mount takes that fault only at the first touch of
-  each page. The dedup-hit `put` is 1.1 to 2.1 µs (0.8 to 1.3 µs for
-  #66).
+- Lookups are slower than with the map in RAM at 10M and 100M (at 1M on
+  macOS they are not): a hit costs 0.9 to 1.4 µs at 1M and 10M and
+  3.2 µs at 100M (0.7 to 1.3 µs for #66; 3.9 times slower at 100M), a
+  miss 0.5 to 1.2 µs (0.3 to 0.7 µs). A miss checks the memtable and the
+  filter of each run (5 runs at 10M, 9 at 100M). A hit also reads one page
+  of the mapping. A probable cause of the slow hits, not measured: each
+  lookup step is a new process, so the first touch of each page is a page
+  fault, and at 100M the lookups mapped 3.2 GB of the 6 GB of runs (the
+  file-backed RSS grew by 31.5 B for each object). A long-running mount
+  takes that fault only at the first touch of each page. The dedup-hit
+  `put` is 1.1 to 2.1 µs (0.8 to 1.3 µs for #66).
 - Disk: the index adds 59.8 B for each object at 100M (58-byte entries,
   the filter, the fences, page padding). The store needs 164 B for each
   object in place of 104 B.
@@ -846,8 +851,11 @@ in a removed pack. Steps 3 to 5 run for groups of at most 32 packs
 (`GC_GROUP_PACKS`): each pending run keeps its file open until the merge
 after its install, so a GC over many packs must not hold one file for
 each pack (with more packs than the limit of open files, it would stop
-with `EMFILE`). The packs of objects that are touched during an earlier
-group stay unchanged in the later groups too.
+with `EMFILE`). A GC thus holds at most 32 pending run files open, plus
+one merged run for each group done, until the background merges take
+those into larger runs. The packs of objects that are touched during an
+earlier group stay unchanged in the later groups too, and the touched set
+records again after each install.
 
 A read error or a damaged run page in the passes or at the install ends
 the GC with the error: the pending runs of that group are removed, and

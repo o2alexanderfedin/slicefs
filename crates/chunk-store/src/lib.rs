@@ -224,8 +224,10 @@ const FLAG_ZSTD: u8 = 1;
 pub const MAX_OPEN_PACKS: usize = 64;
 /// `gc_finish` changes the selected packs in groups of at most this many
 /// packs. Each pending GC run keeps its file open until the group is
-/// installed and merged, so a GC holds at most about this many run files
-/// open, also over more packs than the limit of open files.
+/// installed and merged into one run. So a GC holds at most this many
+/// pending run files open, plus one merged run for each group done (open
+/// until the background merges take it into a larger run), not one file
+/// for each pack.
 pub const GC_GROUP_PACKS: usize = 32;
 /// GC copies at most this many records of a compacted pack per hold of the
 /// store lock (a 64 MiB pack of small objects has some 100,000 records).

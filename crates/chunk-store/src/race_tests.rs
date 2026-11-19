@@ -508,6 +508,42 @@ fn an_object_put_in_an_early_group_keeps_its_pack_in_a_later_group() {
     assert_eq!(s.stats().objects, objs.len() as u64 - removed, "after a reopen");
 }
 
+// An object put during the pass of the second group (after the install of
+// the first group): the touched set records again after each install, so
+// the pack of that object does not change.
+#[test]
+fn an_object_put_in_a_later_group_keeps_its_pack() {
+    let mem = MemIo::new();
+    let (s, objs) = many_packs_store(&mem);
+    let live = one_in_four(&objs);
+    let pack_of = |id: &crate::ObjectId| s.index.get(id).unwrap().unwrap().pack;
+    let packs: Vec<u64> = objs.iter().map(|(id, _)| pack_of(id)).collect();
+    let xi = (0..objs.len()).filter(|&i| !live.contains(&objs[i].0)).max_by_key(|&i| packs[i]).unwrap();
+    let (x, dx) = objs[xi].clone();
+    let x_pack = packs[xi];
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let c = Arc::clone(&calls);
+    *s.gc_pass_hook.lock().unwrap() = Some(Box::new(move |s: &ChunkStore, pass: u32| {
+        if pass == 2 && c.fetch_add(1, Ordering::SeqCst) == 1 {
+            assert_eq!(s.put(&dx).unwrap(), x);
+        }
+    }));
+    let b = s.gc_begin().unwrap();
+    let st = s.gc_finish(&live, b).unwrap();
+    *s.gc_pass_hook.lock().unwrap() = None;
+    assert!(calls.load(Ordering::SeqCst) >= 3, "more than two groups");
+    let kept = |i: usize| live.contains(&objs[i].0) || packs[i] == x_pack;
+    for (i, (id, d)) in objs.iter().enumerate() {
+        assert_eq!(s.get(id).as_ref() == Some(d), kept(i), "object {i} in pack {}", packs[i]);
+    }
+    let removed = (0..objs.len()).filter(|&i| !kept(i)).count() as u64;
+    assert_eq!(st.removed_objects, removed, "{st:?}");
+    drop(s);
+    let s = ChunkStore::open_with(Arc::new(mem.clone()), many_opts()).unwrap();
+    assert_eq!(s.get(&objs[xi].0).as_ref(), Some(&objs[xi].1), "after a reopen");
+    assert_eq!(s.stats().objects, objs.len() as u64 - removed, "after a reopen");
+}
+
 // A read error in the pass of the second group: the GC ends with the error.
 // The first group is done (some victims are gone), the later groups did not
 // change (some victims are still there), the store is not failed, and the
