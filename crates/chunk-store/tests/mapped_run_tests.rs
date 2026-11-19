@@ -45,6 +45,8 @@ fn sorted(mut v: Vec<u64>) -> Vec<u64> {
 struct Seen {
     /// Run numbers that were mapped and not removed since.
     mapped: HashSet<u64>,
+    /// Mappings made in all.
+    maps: u64,
     /// Writes, cuts or replacements of a run file that may be mapped.
     violations: Vec<String>,
 }
@@ -155,7 +157,9 @@ impl PackIo for Guard {
     fn map_run(&self, num: u64) -> io::Result<Option<RunMap>> {
         let m = self.inner.map_run(num)?;
         if m.is_some() {
-            self.seen.lock().unwrap().mapped.insert(num);
+            let mut s = self.seen.lock().unwrap();
+            s.mapped.insert(num);
+            s.maps += 1;
         }
         Ok(m)
     }
@@ -182,8 +186,8 @@ fn lookups_on_files_stay_right_while_merges_and_gc_replace_the_runs() {
     let seen = Arc::new(Mutex::new(Seen::default()));
     let removed = Arc::new(AtomicU64::new(0));
     let io = Arc::new(Guard { inner: files(dir.path()), seen: Arc::clone(&seen), removed_runs: Arc::clone(&removed) });
-    // About 25 flushes in all: each one syncs (F_FULLFSYNC on macOS).
-    let o = Options { pack_limit: 128 << 10, index_memtable_limit: 150, ..Options::default() };
+    // About 12 flushes in all: each one syncs (F_FULLFSYNC on macOS).
+    let o = Options { pack_limit: 128 << 10, index_memtable_limit: 300, index_merge_fan_in: 2, ..Options::default() };
     let s = ChunkStore::open_with(io, o.clone()).unwrap();
 
     let put = |from: u64, n: u64| -> Vec<(ObjectId, Vec<u8>)> {
@@ -202,6 +206,9 @@ fn lookups_on_files_stay_right_while_merges_and_gc_replace_the_runs() {
     s.gc_abort();
     // Looked up with `contains` (not a use), so the GC can change their packs.
     let first = put(100_000, 1200);
+    // Seal again, so that every pack with GC victims is one third live.
+    s.gc_begin().unwrap();
+    s.gc_abort();
     s.wait_index_idle();
     let runs_before = sorted(files(dir.path()).list_runs().unwrap());
     assert!(runs_before.len() >= 2, "runs: {runs_before:?}");
@@ -256,6 +263,7 @@ fn lookups_on_files_stay_right_while_merges_and_gc_replace_the_runs() {
             let st = s.gc_finish(&keep, b).unwrap();
             assert_eq!(st.removed_objects, victims.len() as u64);
             gc_done.store(true, Ordering::SeqCst);
+            s.wait_index_idle();
             assert!(s.merge_index_all().unwrap(), "a full merge replaces every run");
             put(20_000, 300);
             s.wait_index_idle();
@@ -271,14 +279,16 @@ fn lookups_on_files_stay_right_while_merges_and_gc_replace_the_runs() {
 
     let seen = seen.lock().unwrap();
     assert!(seen.violations.is_empty(), "{:?}", seen.violations);
+    assert!(seen.maps > 0, "the store mapped no run through the guard");
     assert!(removed.load(Ordering::SeqCst) > 0, "no run file was removed");
     let runs_after = sorted(files(dir.path()).list_runs().unwrap());
     let total = removed.load(Ordering::SeqCst);
     let seen_counts = removals_seen.into_inner().unwrap();
     eprintln!(
-        "runs {runs_before:?} -> {runs_after:?}, {total} removed, {} lookups, removal counts seen: {}",
+        "runs {runs_before:?} -> {runs_after:?}, {total} removed, {} lookups, removal counts seen: {}, punches holes: {}",
         lookups.load(Ordering::SeqCst),
-        seen_counts.len()
+        seen_counts.len(),
+        s.punches_holes()
     );
     assert!(
         seen_counts.iter().any(|&c| c > 0 && c < total),
