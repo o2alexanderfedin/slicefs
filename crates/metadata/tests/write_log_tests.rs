@@ -67,7 +67,8 @@ fn each_commit_rotates_the_log_to_one_segment_and_keeps_snapshots() {
         let root = meta.commit().unwrap();
         meta.log_op(b"after".to_vec());
         meta.flush_wal().unwrap();
-        assert_eq!(segment_files(&dir).len(), 1, "{:?}", segment_files(&dir));
+        // The root segment and the segment the log goes on in (#108).
+        assert_eq!(segment_files(&dir).len(), 2, "{:?}", segment_files(&dir));
         let (last, snaps, ops) = load_store_with_log(&dir.path().join("segments")).unwrap();
         assert_eq!(last, Some(root));
         assert_eq!(ops, vec![b"after".to_vec()]);
@@ -98,10 +99,12 @@ fn a_commit_makes_its_objects_durable_before_the_root() {
 // records that pass 1 found: not the records added after pass 1, and an
 // error (not a shorter log) if a record that pass 1 saw is gone.
 
+/// The segment the log goes on in after a commit: the last of the two (the
+/// first is the root segment, #108).
 fn only_segment(dir: &TempDir) -> std::path::PathBuf {
     let names = segment_files(dir);
-    assert_eq!(names.len(), 1, "{names:?}");
-    dir.path().join("segments").join(&names[0])
+    assert_eq!(names.len(), 2, "{names:?}");
+    dir.path().join("segments").join(&names[1])
 }
 
 fn cut_tail(path: &std::path::Path, n: u64) {
@@ -169,7 +172,7 @@ fn an_op_after_an_unknown_last_record_is_not_read() {
     use metadata::segment::frame_record;
     let dir = TempDir::new().unwrap();
     let meta = store(&dir, WalConfig::PerOp);
-    meta.commit().unwrap(); // seq 0: the root
+    meta.commit().unwrap(); // seq 0: the Cut record of the new segment
     meta.log_op(b"one".to_vec()); // seq 1
     meta.flush_wal().unwrap();
     let seg = only_segment(&dir);

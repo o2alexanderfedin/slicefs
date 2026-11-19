@@ -68,7 +68,7 @@ pub fn compact_segment(
                 writer.write_entry(&entry)?;
                 result.entries_kept += 1;
             }
-            SegmentEntry::Op { .. } => {
+            SegmentEntry::Op { .. } | SegmentEntry::Cut { .. } => {
                 // Write-log records (#20): the ones after the last root are
                 // not in any root yet; dropping them would lose fsynced data.
                 writer.write_entry(&entry)?;

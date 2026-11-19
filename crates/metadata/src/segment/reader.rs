@@ -16,6 +16,8 @@ pub struct SegmentReader {
     next_seq: u64,
     /// Byte offset in the file of the next record.
     pos: u64,
+    /// Segment id from the header.
+    id: u64,
 }
 
 impl SegmentReader {
@@ -27,10 +29,10 @@ impl SegmentReader {
         let mut header_buf = [0u8; 16];
         reader.read_exact(&mut header_buf)?;
 
-        SegmentHeader::from_bytes(&header_buf)
+        let header = SegmentHeader::from_bytes(&header_buf)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid segment header"))?;
 
-        Ok(SegmentReader { inner: reader, next_seq: 0, pos: 16 })
+        Ok(SegmentReader { inner: reader, next_seq: 0, pos: 16, id: header.segment_id })
     }
 
     /// Open a segment file, validate its header, and go to the record at
@@ -42,6 +44,11 @@ impl SegmentReader {
         r.pos = pos;
         r.next_seq = seq;
         Ok(r)
+    }
+
+    /// The segment id in the file header.
+    pub fn segment_id(&self) -> u64 {
+        self.id
     }
 
     /// Byte offset and sequence number of the next record: after a record
@@ -92,6 +99,7 @@ impl Iterator for SegmentReader {
                 Some(RecordType::RootUpdate) => return SegmentEntry::parse_root_update(&payload),
                 Some(RecordType::SnapshotRecord) => return SegmentEntry::parse_snapshot_record(&payload),
                 Some(RecordType::Op) => return Some(SegmentEntry::Op { bytes: payload }),
+                Some(RecordType::Cut) => return SegmentEntry::parse_cut(&payload),
                 None => continue, // a type this version does not know
             }
         }

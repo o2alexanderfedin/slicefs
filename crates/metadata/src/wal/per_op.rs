@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::segment::{SegmentEntry, SegmentWriter};
-use super::{WalEntry, WalError, WalStrategy};
+use super::{Behind, WalCut, WalEntry, WalError, WalStrategy};
 
 /// WAL that calls `sync_all` after each root and snapshot record.
 ///
@@ -20,6 +20,8 @@ pub struct PerOpWal {
     writer: Mutex<SegmentWriter>,
     /// Path and id of the current segment (for rotation).
     loc: Mutex<(std::path::PathBuf, u64)>,
+    /// Segments before the last cut that are not synced yet (#108).
+    behind: Mutex<Behind>,
 }
 
 impl PerOpWal {
@@ -29,6 +31,7 @@ impl PerOpWal {
         Ok(PerOpWal {
             writer: Mutex::new(writer),
             loc: Mutex::new((path.to_path_buf(), segment_id)),
+            behind: Mutex::new(Behind::default()),
         })
     }
 }
@@ -40,7 +43,22 @@ impl WalStrategy for PerOpWal {
         let (new_writer, new_path, new_id) = super::rotate_segment(&loc.0, loc.1, seed)?;
         *writer = new_writer;
         *loc = (new_path, new_id);
+        *self.behind.lock().unwrap() = Behind::default();
         Ok(())
+    }
+    fn cut(&self) -> Result<Option<WalCut>, WalError> {
+        let mut writer = self.writer.lock().unwrap();
+        let mut loc = self.loc.lock().unwrap();
+        super::cut_segment(&mut writer, &mut loc, &self.behind).map(Some)
+    }
+    fn install_root(&self, cut: &WalCut, seed: &[WalEntry]) -> Result<(), WalError> {
+        let (file, path) = {
+            let mut writer = self.writer.lock().unwrap();
+            (writer.file_for_sync()?, self.loc.lock().unwrap().0.clone())
+        };
+        // The disk sync runs with no lock held: requests log meanwhile.
+        file.sync_all()?;
+        super::write_root_segment(&path, cut, seed, &self.behind)
     }
     fn log_mutation(&self, entry: &WalEntry) -> Result<(), WalError> {
         let seg_entry = wal_entry_to_segment(entry);
@@ -58,6 +76,8 @@ impl WalStrategy for PerOpWal {
     }
 
     fn flush_and_sync(&self) -> Result<(), WalError> {
+        // The records after a cut count only on top of the ones before it.
+        self.behind.lock().unwrap().settle()?;
         self.writer.lock().unwrap().sync()?;
         Ok(())
     }

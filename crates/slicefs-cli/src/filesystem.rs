@@ -189,6 +189,12 @@ struct OpenFileState {
 ///
 /// Raw bytes flow directly into the Merkle tree (v3 store format — no compression header).
 /// ObjectKey is computed on raw bytes, enabling content-addressed deduplication.
+/// A commit after its generation switch (`SliceFsFilesystem::commit_cut_begin`),
+/// to be finished with the commit gate released (#108).
+pub struct CommitCut<'a> {
+    prepared: metadata::store::PreparedCommit<'a>,
+}
+
 pub struct SliceFsFilesystem {
     pub(crate) meta: Arc<DictMetadataStore>,
     pub(crate) io: Arc<Mutex<StoreIo>>,
@@ -667,6 +673,10 @@ impl SliceFsFilesystem {
         if !Arc::ptr_eq(self.io.lock().unwrap().store(), &self.content) {
             return Err("metadata and file content do not share one chunk store".into());
         }
+        // A timed commit may still be writing its root with the gate released
+        // (#108). The commit below waits for it in any case; waiting here,
+        // before the gate, keeps requests from waiting for it too.
+        self.meta.wait_for_commit();
         let gate = self.commit_gate.write().unwrap_or_else(|e| e.into_inner());
         // From here the chunk store keeps each object put or read (nodes and
         // file content), and the GC changes only packs up to `boundary`.
@@ -1537,6 +1547,32 @@ impl SliceFsFilesystem {
     /// No content is hashed in full here. The caller holds the commit gate
     /// exclusively (no request is in flight).
     pub fn commit_cut(&self) -> Result<ObjectKey, MetaError> {
+        // As the commit timer does: sync the objects so far first. The chunk
+        // store keeps the bytes written since its last sync in RAM, and the
+        // relog of the cut would add its pieces on top of them. An error
+        // here is seen again by the sync of the commit, which then fails.
+        let _ = self.content.sync();
+        let cut = self.commit_cut_begin()?;
+        self.commit_cut_finish(cut)
+    }
+
+    /// Second half of [`Self::commit_cut`] (#108): write the metadata, sync,
+    /// log the root. Needs no gate: requests after the cut go to the next
+    /// generation of the log and of the store.
+    pub fn commit_cut_finish(&self, cut: CommitCut<'_>) -> Result<ObjectKey, MetaError> {
+        let t = std::time::Instant::now();
+        let root = self.meta.finish_commit(cut.prepared)?;
+        eprintln!("[t={}][commit-cut] finish_ms={}", crate::util::epoch(), t.elapsed().as_millis());
+        Ok(root)
+    }
+
+    /// First half of [`Self::commit_cut`] (#108), under the exclusive commit
+    /// gate: the generation switch. Puts the streamed prefixes into the
+    /// manifests, takes the metadata state (`begin_commit`, which cuts the
+    /// write log), and logs again what is only in RAM, into the new
+    /// generation of the log. No node of the root is written and nothing is
+    /// synced here; [`Self::commit_cut_finish`] does that with the gate released.
+    pub fn commit_cut_begin(&self) -> Result<CommitCut<'_>, MetaError> {
         use crate::oplog::{Op, Record};
         let handles: Vec<(u64, u64)> = self.open_files.lock().unwrap()
             .iter().map(|(&fh, s)| (s.ino, fh)).collect();
@@ -1583,14 +1619,16 @@ impl SliceFsFilesystem {
             }
         }
         let t_commit = std::time::Instant::now();
-        let root = self.meta.commit()?;
+        let prepared = self.meta.begin_commit()?;
         let commit_ms = t_commit.elapsed().as_millis();
         let t_relog = std::time::Instant::now();
-        // The commit deleted the old log segments, so these records are now
-        // the only copy of bytes an fsync may already have made durable:
-        // sync them before the commit returns (a buffered log keeps them in RAM).
+        // These records go into the new generation of the log, after the cut
+        // and before any later request. When the root is logged, the old
+        // segments are deleted, so they are then the only copy of bytes an
+        // fsync may already have made durable: `finish_commit` syncs them
+        // before it logs the root. A crash before that replays them on top
+        // of the old root and the old log, where they change nothing.
         let mut relog_bytes = 0u64;
-        let relogged = !items.is_empty();
         for Item { ino, time, ctime, what } in items {
             match what {
                 Relog::Pending(recs) => {
@@ -1623,6 +1661,7 @@ impl SliceFsFilesystem {
                                 _ => Vec::new(),
                             };
                             if data.len() as u64 != n {
+                                // `prepared` drops: the commit is not made.
                                 return Err(MetaError::Corrupted(format!("cut: extent of open file {ino} changed during the cut")));
                             }
                             relog_bytes += n;
@@ -1640,14 +1679,9 @@ impl SliceFsFilesystem {
         }
         self.last_relog_bytes.store(relog_bytes, Ordering::Relaxed);
         let relog_ms = t_relog.elapsed().as_millis();
-        let t_flush = std::time::Instant::now();
-        if relogged {
-            self.meta.flush_wal()
-                .map_err(|e| MetaError::Corrupted(format!("cut: sync of the write log failed: {e}")))?;
-        }
-        eprintln!("[t={}][commit-cut] commit_ms={commit_ms} relog_bytes={relog_bytes} relog_ms={relog_ms} flush_ms={}",
-            crate::util::epoch(), t_flush.elapsed().as_millis());
-        Ok(root)
+        eprintln!("[t={}][commit-cut] begin_ms={commit_ms} relog_bytes={relog_bytes} relog_ms={relog_ms}",
+            crate::util::epoch());
+        Ok(CommitCut { prepared })
     }
 
     /// Write the streamed content of handle `fh` into the manifest of `ino`.
