@@ -30,12 +30,12 @@ Each step is a subcommand. Every step takes `--dir D` and `--backend NAME` (defa
 | Step | Flags | What it does |
 |---|---|---|
 | `create` | `--objects N`, `--pack-limit BYTES` and `--memtable-limit ENTRIES` (both only for tests) | Makes a store of N objects in an empty directory, waits until the background merges of the index stop, closes it (every pack is sealed and has an `.idx`), and writes the marker file `D/index-bench.txt`. `--memtable-limit` sets `Options::index_memtable_limit`, so that a small store has several index runs. |
-| `open` | `--cache warm\|cold` | Opens the store one time and measures the time and the RSS (resident set size). `--cache` is only a label in the output. It does not change the cache. |
-| `lookup` | `--hits K`, `--misses K`, `--seed S` | Opens the store and times `contains` for K IDs in the store (hits) and K IDs not in the store (misses), and `put` of K objects that are in the store (the dedup-hit path, with the hash). K is 1,000,000 by default, or N if N is smaller. The seed is 66 by default. It times two passes over the same sample in one process: the first pass takes the page faults of the mapped index runs, the second pass is warm. |
+| `open` | `--cache warm\|cold`, `--drop-caches` | Opens the store one time and measures the time and the RSS (resident set size). `--cache` is only a label in the output. It does not change the cache. `--drop-caches` drops the page cache before the open (see "Cache state") and sets the label to `cold`. |
+| `lookup` | `--hits K`, `--misses K`, `--seed S` | Opens the store and times `contains` for K IDs in the store (hits) and K IDs not in the store (misses), and `put` of K objects that are in the store (the dedup-hit path, with the hash). K is 1,000,000 by default, or N if N is smaller. The seed is 66 by default. It times two passes over the same sample in one process: the first pass takes the page faults of the mapped index runs, the second pass is warm. `--only hit\|miss\|put` times only that phase in each pass. `--drop-caches` drops the page cache after the open and before the first pass. |
 | `settle` | `--timeout-s S` (default 900) | Opens the store with the default background work of the index, so the idle merge (#111) runs after the idle delay, waits at most S seconds until it is done, and reports the runs before and after and the bytes that the merges wrote. Fails if the index did not settle in time. |
 | `recover` | `--packs 1\|all`, `--read-only` | Moves the `.idx` of one pack or of all packs to `D/bench-saved`, times an open that must scan those packs, and then restores the `.idx` files. |
 | `gc` | `--live-every K` (default 4), `--dead-run R` (default 1) | Opens the store and runs one complete GC (`gc_begin`, then `gc_finish`). Object `i` is dead when `(i / R) mod K` is 0, so (K-1)/K of the objects stay live, and the dead objects lie in runs of R objects. Reports what the GC removed, its wall time, and the longest and the total hold of the store lock (`ChunkStore::last_gc_timing`). |
-| `run` | `--objects N`, `--reps R` (default 3), `--pack-limit`, `--memtable-limit`, `--hits`, `--misses`, `--drop-caches` | Runs create (if necessary), one warm-up open, R opens, lookup, R recovery opens for each scope (one, all) and mode (rw, ro), and a last open as a check. Then it prints the summary tables with the median of the R runs. |
+| `run` | `--objects N`, `--reps R` (default 3), `--pack-limit`, `--memtable-limit`, `--hits`, `--misses`, `--drop-caches` | Runs create (if necessary), one warm-up open, R opens, lookup (with `--drop-caches`, the opens and the lookup get the flag), R recovery opens for each scope (one, all) and mode (rw, ro), and a last open as a check. Then it prints the summary tables with the median of the R runs. |
 
 Every step except `create` refuses a directory without the marker file. Thus the tool cannot change a real store.
 
@@ -78,6 +78,7 @@ Each step prints `key=value` lines, one key on each line, in a fixed order. The 
 | open | `rss_anon_before_bytes`, `rss_anon_after_bytes` | Anonymous resident memory (heap, stacks) before and after the open: `RssAnon` of `/proc/self/status` on Linux, the `internal` value of `task_info(TASK_VM_INFO)` on macOS |
 | open | `rss_file_before_bytes`, `rss_file_after_bytes` | Resident pages of mapped files (the mapped index runs, the binary) before and after the open: `RssFile` on Linux, the `external` value of `task_info(TASK_VM_INFO)` on macOS |
 | open | `steady_anon_bytes_per_object`, `steady_file_bytes_per_object` | The growth of each part during the open / objects |
+| open | `major_faults`, `read_bytes` | Major page faults and bytes read from the storage layer during the open (`read_bytes` is `n/a` on macOS) |
 | create | `index_runs` | Run files of the index after the write load (before the close) |
 | create | `merge_bytes`, `merge_bytes_per_index_byte` | Bytes that the index merges wrote during the create, in total and for each byte of `index_bytes` |
 | lookup | `objects`, `hits`, `misses` | Objects in the store and the sample sizes |
@@ -88,6 +89,9 @@ Each step prints `key=value` lines, one key on each line, in a fixed order. The 
 | lookup | `lookups_anon_bytes_per_object`, `lookups_file_bytes_per_object` | The growth of each part during the lookups / objects |
 | lookup | `contains_hit_ns_2`, `contains_miss_ns_2`, `put_hit_ns_2` | The same times in the second (warm) pass |
 | lookup | `index_runs` | Run files of the index during the lookups |
+| lookup | `cache`, `only` | `cold` with `--drop-caches`, else `warm`; the `--only` phase, or `all` |
+| lookup | `hit_major_faults`, `miss_major_faults`, `put_major_faults` | Major page faults (`ru_majflt`: faults that read from the disk) of each phase of the first pass; `n/a` for a phase that `--only` left out |
+| lookup | `hit_read_bytes`, `miss_read_bytes`, `put_read_bytes` | Bytes that each phase of the first pass read from the storage layer (`read_bytes` of `/proc/self/io`); `n/a` on macOS |
 | settle | `objects`, `settled`, `wait_s` | Objects in the store; 1 if the index settled; time of the open and the wait |
 | settle | `index_runs_before`, `index_runs_after` | Run files after the open and after the idle merge |
 | settle | `index_bytes_before`, `index_bytes_after` | Size of the files in `D/index` before and after |
@@ -125,8 +129,10 @@ Peak RSS (`ru_maxrss`) has no split into anonymous and file-backed pages.
 
 By default, all numbers are for a warm page cache: `run` does one warm-up open before it measures, and the store files stay in the cache.
 
-- Linux: `run --drop-caches` writes `3` to `/proc/sys/vm/drop_caches` before each measured open and each recovery open. This needs root in a privileged container.
+- Linux: `--drop-caches` calls `sync` and writes `3` to `/proc/sys/vm/drop_caches`: `open` before the open, `lookup` after the open and before the first pass, `run` in each measured open, the lookup and before each recovery open. This needs root in a privileged container (`docker run --privileged`; without it `/proc/sys` is read-only). If the write fails, the step fails; it never reports a warm cache as cold.
 - macOS: `--drop-caches` is refused. Run `sudo purge` by hand, then `$B open --dir "$D/N" --cache cold`. Run `sudo purge` again before each cold open.
+- A drop does not remove pages that a process has mapped. So in one lookup process the put phase finds the run pages that the hit phase read. For a cold put, use `--only put` in a new process.
+- With the default sample (1M hits) the first pass reads nearly every page of the runs at 1M and 10M objects, so its mean is mostly warm. For the cost of one cold hit, use a small sample (for example `--hits` N/1000), and read `hit_major_faults` for the pages it read.
 
 Record the cache state with every number.
 
@@ -150,7 +156,9 @@ Record the cache state with every number.
 scripts/docker-linux-test/run.sh index-bench 1000000 10000000
 ```
 
-This runs the tool in the Docker image of `scripts/docker-linux-test`, without a mount and without the FUSE device. The stores are on the Docker volume `slicefs-index-bench`. The mode prints the free memory of the VM and the free disk of the volume first, and the load average before and after each size. When you do not need the stores, remove the volume:
+This runs the tool in the Docker image of `scripts/docker-linux-test`, without a mount and without the FUSE device.
+
+`scripts/docker-linux-test/run.sh index-bench-cold 1000000 10000000` measures with a cold page cache. It runs a privileged container (for `drop_caches`) and, for each size, the steps create, settle, warm opens and lookup, cold opens and lookup, and cold lookups of a small sample (one phase for each process). The drop empties the cache of the whole VM, so do not run other Docker work at the same time. The stores are in `/bench/cold/N` on the same volume. The stores are on the Docker volume `slicefs-index-bench`. The mode prints the free memory of the VM and the free disk of the volume first, and the load average before and after each size. When you do not need the stores, remove the volume:
 
 ```sh
 docker volume rm slicefs-index-bench

@@ -3,8 +3,8 @@
 //!
 //! ```text
 //! index-bench create --dir D --objects N [--pack-limit BYTES] [--memtable-limit ENTRIES]
-//! index-bench open   --dir D [--cache warm|cold]
-//! index-bench lookup --dir D [--hits K] [--misses K] [--seed S]
+//! index-bench open   --dir D [--cache warm|cold] [--drop-caches]
+//! index-bench lookup --dir D [--hits K] [--misses K] [--seed S] [--only hit|miss|put] [--drop-caches]
 //! index-bench settle --dir D [--timeout-s S]
 //! index-bench recover --dir D [--packs 1|all] [--read-only]
 //! index-bench gc     --dir D [--live-every K] [--dead-run R]
@@ -16,7 +16,11 @@
 //!
 //! `lookup` times two passes over the same sample in one process: the
 //! first pass takes the page faults of the mapped index, the second
-//! (`*_2` keys) is warm. `settle` opens the store with the default
+//! (`*_2` keys) is warm. `--drop-caches` (Linux, root) drops the page cache
+//! before the timed part: in `open` before the open, in `lookup` after the
+//! open and before the first pass. `--only` times one phase of the lookup
+//! pass, so that a cold put does not find the pages that the hits read.
+//! `settle` opens the store with the default
 //! background work (the idle merge of the index, #111), waits until it is
 //! done, and reports the runs and the bytes that the merges wrote; every
 //! other step opens with no idle merge, so it measures the index as the
@@ -85,8 +89,8 @@ struct Flags {
 fn spec(cmd: &str) -> Option<(&'static [&'static str], &'static [&'static str])> {
     Some(match cmd {
         "create" => (&["dir", "backend", "objects", "pack-limit", "memtable-limit"], &[]),
-        "open" => (&["dir", "backend", "cache"], &[]),
-        "lookup" => (&["dir", "backend", "hits", "misses", "seed"], &[]),
+        "open" => (&["dir", "backend", "cache"], &["drop-caches"]),
+        "lookup" => (&["dir", "backend", "hits", "misses", "seed", "only"], &["drop-caches"]),
         "settle" => (&["dir", "backend", "timeout-s"], &[]),
         "recover" => (&["dir", "backend", "packs"], &["read-only"]),
         "gc" => (&["dir", "backend", "live-every", "dead-run"], &[]),
@@ -293,6 +297,49 @@ fn drop_caches_unsupported() -> String {
         .to_string()
 }
 
+/// Major page faults of this process so far (faults that needed a read).
+fn major_faults() -> u64 {
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+    ru.ru_majflt.max(0) as u64
+}
+
+/// Bytes that this process caused to be read from the storage layer so far
+/// (`read_bytes` of `/proc/self/io`); `None` where there is no such file.
+fn io_read_bytes() -> Option<u64> {
+    let io = std::fs::read_to_string("/proc/self/io").ok()?;
+    io.lines().find_map(|l| l.strip_prefix("read_bytes:"))?.trim().parse().ok()
+}
+
+/// The major faults and the read bytes of a part of a step.
+#[derive(Clone, Copy)]
+struct Io {
+    faults: u64,
+    read: Option<u64>,
+}
+
+impl Io {
+    fn now() -> Io {
+        Io { faults: major_faults(), read: io_read_bytes() }
+    }
+
+    /// The growth since `self`.
+    fn since(self) -> Io {
+        let now = Io::now();
+        Io {
+            faults: now.faults.saturating_sub(self.faults),
+            read: match (self.read, now.read) {
+                (Some(b), Some(a)) => Some(a.saturating_sub(b)),
+                _ => None,
+            },
+        }
+    }
+
+    fn read_text(self) -> String {
+        self.read.map_or("n/a".into(), |r| r.to_string())
+    }
+}
+
 /// The bytes of synthetic object `i`.
 fn object(i: u64) -> [u8; 8] {
     i.to_le_bytes()
@@ -479,12 +526,20 @@ fn step_create(f: &Flags) -> Result<(), Fail> {
 fn step_open(f: &Flags) -> Result<(), Fail> {
     let dir = f.dir()?;
     let backend = f.backend()?;
-    let cache = f.get("cache").unwrap_or("warm");
+    let drop = f.has("drop-caches");
+    let cache = f.get("cache").unwrap_or(if drop { "cold" } else { "warm" });
     if cache != "warm" && cache != "cold" {
         return Err(Fail::Usage(format!("--cache is warm or cold, not {cache}")));
     }
+    if drop && cache != "cold" {
+        return Err(Fail::Usage("--drop-caches makes a cold open; do not give --cache warm with it".into()));
+    }
     let n = marker_objects(&read_marker(&dir, &*backend)?)?;
+    if drop {
+        drop_caches()?;
+    }
 
+    let io = Io::now();
     let split_before = rss_split_bytes();
     let rss_before = current_rss_bytes();
     let max_before = max_rss_bytes();
@@ -493,6 +548,7 @@ fn step_open(f: &Flags) -> Result<(), Fail> {
     let store = backend.open(&dir, false)?;
     let wall = t0.elapsed().as_secs_f64();
     let cpu = cpu_secs() - c0;
+    let io = io.since();
     let max_after = max_rss_bytes();
     let rss_after = current_rss_bytes();
     let split_after = rss_split_bytes();
@@ -524,6 +580,7 @@ fn step_open(f: &Flags) -> Result<(), Fail> {
     ];
     kv.extend(store.index_keys());
     kv.extend(split_keys(OPEN_SPLIT, split_before, split_after, objects));
+    kv.extend([("major_faults", io.faults.to_string()), ("read_bytes", io.read_text())]);
     finish(&kv_text(&kv));
 }
 
@@ -585,6 +642,17 @@ fn step_lookup(f: &Flags) -> Result<(), Fail> {
     let hits = f.u64("hits")?.unwrap_or(default_k);
     let misses = f.u64("misses")?.unwrap_or(default_k);
     let mut seed = f.u64("seed")?.unwrap_or(LOOKUP_SEED);
+    let only = f.get("only");
+    if let Some(o) = only {
+        if !["hit", "miss", "put"].contains(&o) {
+            return Err(Fail::Usage(format!("--only is hit, miss or put, not {o}")));
+        }
+    }
+    let phase = |p: &str| only.is_none_or(|o| o == p);
+    let drop = f.has("drop-caches");
+    if drop && !cfg!(target_os = "linux") {
+        return Err(drop_caches_unsupported().into());
+    }
     if n == 0 && hits > 0 {
         return Err("the store has no objects, so there are no hits to look up".into());
     }
@@ -601,60 +669,105 @@ fn step_lookup(f: &Flags) -> Result<(), Fail> {
     if objects != n {
         return Err(format!("the store has {objects} objects, the marker says {n}").into());
     }
+    // A cold first pass: the open has read what it keeps in memory, the
+    // pages of the mapped runs are not in the cache.
+    if drop {
+        drop_caches()?;
+    }
 
+    // One timed phase: seconds, and the major faults and read bytes.
+    let timed = |run: &dyn Fn() -> Result<(), Fail>| -> Result<(f64, Io), Fail> {
+        let io = Io::now();
+        let t0 = Instant::now();
+        run()?;
+        Ok((t0.elapsed().as_secs_f64(), io.since()))
+    };
     // One pass: the hits, the misses, then the dedup-hit path of put (its
-    // time includes the hash of the data). Seconds of each.
-    let pass = || -> Result<(f64, f64, f64), Fail> {
-        let t0 = Instant::now();
-        let found = hit_ids.iter().filter(|id| store.contains(id)).count() as u64;
-        let hit_s = t0.elapsed().as_secs_f64();
-        if found != hits {
-            return Err(format!("contains found {found} of {hits} objects that are in the store").into());
-        }
-        let t0 = Instant::now();
-        let found = miss_ids.iter().filter(|id| store.contains(id)).count() as u64;
-        let miss_s = t0.elapsed().as_secs_f64();
-        if found != 0 {
-            return Err(format!("contains found {found} of {misses} objects that are not in the store").into());
-        }
-        let t0 = Instant::now();
-        for &i in &hit_vals {
-            store.put(&object(i))?;
-        }
-        let put_s = t0.elapsed().as_secs_f64();
+    // time includes the hash of the data); with --only, one of them.
+    let pass = || -> Result<[Option<(f64, Io)>; 3], Fail> {
+        let hit = phase("hit")
+            .then(|| {
+                timed(&|| {
+                    let found = hit_ids.iter().filter(|id| store.contains(id)).count() as u64;
+                    if found != hits {
+                        return Err(format!("contains found {found} of {hits} objects that are in the store").into());
+                    }
+                    Ok(())
+                })
+            })
+            .transpose()?;
+        let miss = phase("miss")
+            .then(|| {
+                timed(&|| {
+                    let found = miss_ids.iter().filter(|id| store.contains(id)).count() as u64;
+                    if found != 0 {
+                        return Err(
+                            format!("contains found {found} of {misses} objects that are not in the store").into()
+                        );
+                    }
+                    Ok(())
+                })
+            })
+            .transpose()?;
+        let put = phase("put")
+            .then(|| {
+                timed(&|| {
+                    for &i in &hit_vals {
+                        store.put(&object(i))?;
+                    }
+                    Ok(())
+                })
+            })
+            .transpose()?;
         if store.objects() != n {
             return Err(format!("put of objects in the store changed the count from {n} to {}", store.objects()).into());
         }
-        Ok((hit_s, miss_s, put_s))
+        Ok([hit, miss, put])
     };
     let split_before = rss_split_bytes();
-    let (hit_s, miss_s, put_s) = pass()?;
+    let [hit1, miss1, put1] = pass()?;
     let split_after = rss_split_bytes();
     // The second pass: the same sample, the pages now mapped.
-    let (hit2_s, miss2_s, put2_s) = pass()?;
+    let [hit2, miss2, put2] = pass()?;
 
-    let ns = |s: f64, k: u64| if k > 0 { fmt_f(s * 1e9 / k as f64) } else { "n/a".into() };
-    let per_s = |s: f64, k: u64| if k > 0 && s > 0.0 { fmt_f(k as f64 / s) } else { "n/a".into() };
+    let ns = |p: Option<(f64, Io)>, k: u64| match p {
+        Some((s, _)) if k > 0 => fmt_f(s * 1e9 / k as f64),
+        _ => "n/a".into(),
+    };
+    let per_s = |p: Option<(f64, Io)>, k: u64| match p {
+        Some((s, _)) if k > 0 && s > 0.0 => fmt_f(k as f64 / s),
+        _ => "n/a".into(),
+    };
+    let faults = |p: Option<(f64, Io)>| p.map_or("n/a".into(), |(_, io)| io.faults.to_string());
+    let read = |p: Option<(f64, Io)>| p.map_or("n/a".into(), |(_, io)| io.read_text());
     let mut kv = vec![
         ("step", "lookup".into()),
         ("backend", backend.name().into()),
         ("objects", objects.to_string()),
         ("hits", hits.to_string()),
         ("misses", misses.to_string()),
-        ("contains_hit_ns", ns(hit_s, hits)),
-        ("contains_hit_per_s", per_s(hit_s, hits)),
-        ("contains_miss_ns", ns(miss_s, misses)),
-        ("contains_miss_per_s", per_s(miss_s, misses)),
-        ("put_hit_ns", ns(put_s, hits)),
-        ("put_hit_per_s", per_s(put_s, hits)),
+        ("contains_hit_ns", ns(hit1, hits)),
+        ("contains_hit_per_s", per_s(hit1, hits)),
+        ("contains_miss_ns", ns(miss1, misses)),
+        ("contains_miss_per_s", per_s(miss1, misses)),
+        ("put_hit_ns", ns(put1, hits)),
+        ("put_hit_per_s", per_s(put1, hits)),
     ];
     kv.extend(split_keys(LOOKUP_SPLIT, split_before, split_after, objects));
     let runs = store.index_keys().into_iter().find(|(k, _)| *k == "index_runs").map_or("n/a".into(), |(_, v)| v);
     kv.extend([
-        ("contains_hit_ns_2", ns(hit2_s, hits)),
-        ("contains_miss_ns_2", ns(miss2_s, misses)),
-        ("put_hit_ns_2", ns(put2_s, hits)),
+        ("contains_hit_ns_2", ns(hit2, hits)),
+        ("contains_miss_ns_2", ns(miss2, misses)),
+        ("put_hit_ns_2", ns(put2, hits)),
         ("index_runs", runs),
+        ("cache", if drop { "cold" } else { "warm" }.into()),
+        ("only", only.unwrap_or("all").into()),
+        ("hit_major_faults", faults(hit1)),
+        ("miss_major_faults", faults(miss1)),
+        ("put_major_faults", faults(put1)),
+        ("hit_read_bytes", read(hit1)),
+        ("miss_read_bytes", read(miss1)),
+        ("put_read_bytes", read(put1)),
     ]);
     finish(&kv_text(&kv));
 }
@@ -1052,8 +1165,7 @@ fn step_run(f: &Flags) -> Result<(), Fail> {
     for rep in 1..=reps {
         let mut args = common("open");
         if cold {
-            drop_caches()?;
-            args.extend(["--cache".into(), "cold".into()]);
+            args.push("--drop-caches".into());
         }
         let out = child(&args)?;
         println!("# open rep {rep}");
@@ -1066,6 +1178,9 @@ fn step_run(f: &Flags) -> Result<(), Fail> {
         if let Some(v) = f.get(k) {
             args.extend([format!("--{k}"), v.into()]);
         }
+    }
+    if cold {
+        args.push("--drop-caches".into());
     }
     let out = child(&args)?;
     println!("# lookup");
