@@ -20,7 +20,7 @@ fn random(n: usize, seed: u64) -> Vec<u8> {
 }
 
 fn opts() -> Options {
-    Options { pack_limit: 256 * 1024, ..Options::default() }
+    Options { pack_limit: 256 * 1024, index_background_merge: false, ..Options::default() }
 }
 
 fn put_many(s: &ChunkStore, n: u64, seed: u64) -> Vec<(ObjectId, Vec<u8>)> {

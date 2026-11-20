@@ -93,6 +93,44 @@ impl NodeRead for NodeReader {
     }
 }
 
+/// Node writes on a shared chunk store, without the `StoreIo` lock (for a
+/// commit that runs beside requests, #108). Keeps the first put error.
+pub struct NodeWriter {
+    cs: Arc<ChunkStore>,
+    failed: Option<io::Error>,
+}
+
+impl NodeWriter {
+    pub fn new(cs: Arc<ChunkStore>) -> Self {
+        Self { cs, failed: None }
+    }
+
+    /// The first put error, if any.
+    pub fn result(&mut self) -> io::Result<()> {
+        self.failed.take().map_or(Ok(()), Err)
+    }
+}
+
+impl NodeRead for NodeWriter {
+    fn get_node(&mut self, key: &ObjectKey) -> chunk_store::Result<Vec<u8>> {
+        get_value(&self.cs, key)
+    }
+}
+
+impl NodeWrite for NodeWriter {
+    fn put_node(&mut self, bytes: &[u8]) -> ObjectKey {
+        match put_value(&self.cs, bytes) {
+            Ok(k) => k,
+            Err(e) => {
+                if self.failed.is_none() {
+                    self.failed = Some(io::Error::other(e));
+                }
+                ObjectKey::ZERO
+            }
+        }
+    }
+}
+
 /// The node store of a mounted (or opened) store directory.
 pub struct StoreIo {
     root: PathBuf,
@@ -151,6 +189,20 @@ impl StoreIo {
             return Ok(());
         }
         self.cs.sync().map_err(io::Error::other)?;
+        self.unsynced = 0;
+        self.syncs += 1;
+        Ok(())
+    }
+}
+
+impl StoreIo {
+    /// For a commit that syncs the chunk store itself, with this lock
+    /// released (#108): returns the put error kept since the last sync, else
+    /// counts the sync the caller makes next (the unsynced count goes to 0).
+    pub fn begin_commit_sync(&mut self) -> io::Result<()> {
+        if let Some(e) = self.failed.take() {
+            return Err(e);
+        }
         self.unsynced = 0;
         self.syncs += 1;
         Ok(())

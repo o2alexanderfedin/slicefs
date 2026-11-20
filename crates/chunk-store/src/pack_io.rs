@@ -1,7 +1,12 @@
 //! Storage strategies: every file operation of the store goes through
 //! [`PackIo`], so the store can run on real files ([`FileIo`]), on an
 //! in-memory mock with faults ([`crate::mem::MemIo`]), or later on other
-//! read and write paths (for example mmap) without changes in the store.
+//! read and write paths without changes in the store.
+//!
+//! Index lookups read sealed run files through a read-only mapping
+//! ([`PackIo::map_run`], [`RunMap`]) where the strategy has one (files);
+//! other strategies give no mapping, and the lookups read the run pages
+//! with `read_at`, so the mock still counts them and can fail them.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -9,27 +14,42 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-/// The two kinds of file of one pack.
+/// The kinds of file of the store: the two files of one pack, and the
+/// files of the store index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
     /// The records.
     Pack,
     /// The index of a sealed pack.
     Idx,
+    /// A sorted run of the store index (see `run.rs`).
+    Run,
+    /// The list of live runs of the store index. There is one; callers
+    /// pass the number 0.
+    Manifest,
+    /// The trust floor of the `.idx` marks (see `locality.rs`): no pack
+    /// below it has an exact `.idx`. There is one, in the pack directory;
+    /// callers pass the number 0.
+    Trust,
 }
 
 impl Kind {
-    fn ext(self) -> &'static str {
-        match self {
-            Kind::Pack => "pack",
-            Kind::Idx => "idx",
-        }
+    /// True for the files of the store index. They live in their own
+    /// directory, next to the pack directory.
+    pub fn is_index(self) -> bool {
+        matches!(self, Kind::Run | Kind::Manifest)
     }
 }
 
-/// File name of a pack file.
+/// File name of a store file.
 pub fn pack_name(num: u64, kind: Kind) -> String {
-    format!("{num:016x}.{}", kind.ext())
+    match kind {
+        Kind::Pack => format!("{num:016x}.pack"),
+        Kind::Idx => format!("{num:016x}.idx"),
+        Kind::Run => format!("{num:016x}.run"),
+        Kind::Manifest => "MANIFEST".to_string(),
+        Kind::Trust => "TRUST".to_string(),
+    }
 }
 
 /// Punched ranges must start and end on a multiple of this.
@@ -47,22 +67,65 @@ pub trait PackFile: PackRead {
     fn set_len(&mut self, len: u64) -> io::Result<()>;
     /// Make every write so far durable (F_FULLFSYNC on macOS).
     fn sync(&mut self) -> io::Result<()>;
+    /// A handle that syncs this file from another thread while writes go
+    /// on (#108). A sync through it makes durable at least every write that
+    /// returned before the sync started. `None`: no such handle; the caller
+    /// then syncs with `sync`.
+    fn sync_handle(&self) -> Option<Arc<dyn PackSync>> {
+        None
+    }
+    /// Start a sync of every write so far in the background, if this file
+    /// can, and return a wait for its end. It only shortens a later `sync`
+    /// (which the caller still calls: only that one reports the outcome).
+    fn sync_soon(&mut self) -> Option<SyncWait> {
+        None
+    }
 }
 
-/// The directory of pack files.
+/// Syncs one file from any thread (see [`PackFile::sync_handle`]).
+pub trait PackSync: Send + Sync {
+    fn sync(&self) -> io::Result<()>;
+}
+
+/// The end of a background sync (see [`PackFile::sync_soon`]).
+#[derive(Clone, Default)]
+pub struct SyncWait(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+
+impl SyncWait {
+    /// Mark the sync as ended.
+    pub fn done(&self) {
+        *self.0 .0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.0 .1.notify_all();
+    }
+
+    /// Wait until the sync has ended.
+    pub fn wait(&self) {
+        let mut d = self.0 .0.lock().unwrap_or_else(|e| e.into_inner());
+        while !*d {
+            d = self.0 .1.wait(d).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+/// The directory of pack files, and the files of the store index.
 pub trait PackIo: Send + Sync {
-    /// Make the directory if needed. With `read_only`, make nothing and
-    /// return whether the directory exists.
+    /// Make the directories if needed. With `read_only`, make nothing and
+    /// return whether the pack directory exists.
     fn prepare(&self, read_only: bool) -> io::Result<bool>;
     /// Numbers of every `.pack` file.
     fn list(&self) -> io::Result<Vec<u64>>;
     fn exists(&self, num: u64, kind: Kind) -> bool;
     /// The whole file.
     fn read(&self, num: u64, kind: Kind) -> io::Result<Vec<u8>>;
+    /// The length of the file, without a read of it (a strategy that has no
+    /// cheaper way reads it).
+    fn file_len(&self, num: u64, kind: Kind) -> io::Result<u64> {
+        self.read(num, kind).map(|b| b.len() as u64)
+    }
     /// Replace the file atomically and durably (also syncs the directory).
     fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> io::Result<()>;
     fn remove(&self, num: u64, kind: Kind) -> io::Result<()>;
-    /// Make creations and removals durable.
+    /// Make creations and removals durable (of packs and of index files).
     fn sync_dir(&self) -> io::Result<()>;
     /// Make a new, empty pack; it must not exist.
     fn create(&self, num: u64) -> io::Result<Box<dyn PackFile>>;
@@ -79,20 +142,125 @@ pub trait PackIo: Send + Sync {
     /// Each range is aligned to [`PUNCH_BLOCK`]. An error of kind
     /// `Unsupported` means the file system cannot punch holes.
     fn punch(&self, num: u64, ranges: &[(u64, u64)]) -> io::Result<()>;
+    /// Numbers of every `.run` file (empty if there is no index directory).
+    fn list_runs(&self) -> io::Result<Vec<u64>>;
+    /// Make a new, empty run file; it must not exist. It is written like a
+    /// pack: `write_at`, then `sync`, then `sync_dir` for its name.
+    fn create_run(&self, num: u64) -> io::Result<Box<dyn PackFile>>;
+    /// Open a run file for reads.
+    fn open_run(&self, num: u64) -> io::Result<Arc<dyn PackRead>>;
+    /// Map a sealed run file read-only for lookups, or `None` if this
+    /// strategy has no mapping (then lookups use `open_run` and `read_at`).
+    /// Required, with no default: a wrapper that forgot to pass it on would
+    /// silently put lookups back on `read_at`.
+    fn map_run(&self, num: u64) -> io::Result<Option<RunMap>>;
+}
+
+/// Runs of at least this many bytes are mapped with `MADV_RANDOM`: a lookup
+/// touches one random page, and readahead around a cold page fault of a
+/// large run reads far more than that page (the 17-05 mmap spike, Linux,
+/// cold page cache: 7.6 times less data read and 1.7 times faster per hit
+/// at 585 MB; at 58 MB the default readahead was 2.1 times faster). The
+/// limit lies between those two sizes; it is a first value that needs its
+/// own measurement.
+pub const MADV_RANDOM_MIN: u64 = 256 << 20;
+
+/// A read-only shared mapping (`PROT_READ`, `MAP_SHARED`) of a whole run
+/// file. It is unmapped when it is dropped. A run owns its mapping, and
+/// readers hold the run through an `Arc`, so a merge or GC that removes the
+/// run file never takes the bytes away from a reader: the file system keeps
+/// a removed file while a mapping of it exists.
+///
+/// Accepted risk: a read error of the disk inside the mapping raises
+/// SIGBUS, which stops the process, instead of an error value. Run files
+/// are sealed (never written or cut after their sync), so only a disk error
+/// or a change from outside SliceFS can cause it; scrub, merge and rebuild
+/// read runs with `read_at`, where a read error is a normal error.
+pub struct RunMap {
+    ptr: *const u8,
+    len: usize,
+}
+
+// SAFETY: the mapping is read-only and is never changed through this
+// pointer; reads of shared read-only memory are safe from any thread.
+unsafe impl Send for RunMap {}
+unsafe impl Sync for RunMap {}
+
+impl RunMap {
+    /// The bytes of the file as they were mapped.
+    pub fn bytes(&self) -> &[u8] {
+        if self.len == 0 {
+            return &[];
+        }
+        // SAFETY: `ptr` is a live mapping of `len` readable bytes until drop.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Map all of `file` read-only.
+    fn new(file: &File) -> io::Result<RunMap> {
+        use std::os::fd::AsRawFd;
+        let len = usize::try_from(file.metadata()?.len()).map_err(|_| io::Error::other("run file too large to map"))?;
+        if len == 0 {
+            return Ok(RunMap { ptr: std::ptr::null(), len: 0 });
+        }
+        // SAFETY: a new read-only shared mapping of a valid fd; the result
+        // is checked before use.
+        let p = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, file.as_raw_fd(), 0) };
+        if p == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        if len as u64 >= MADV_RANDOM_MIN {
+            // Only advice: a failure changes nothing that is correct.
+            // SAFETY: `p` is the mapping of `len` bytes made above.
+            unsafe { libc::madvise(p, len, libc::MADV_RANDOM) };
+        }
+        Ok(RunMap { ptr: p as *const u8, len })
+    }
+}
+
+impl Drop for RunMap {
+    fn drop(&mut self) {
+        if self.len != 0 {
+            // SAFETY: the mapping made in `new`, unmapped once.
+            unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.len) };
+        }
+    }
 }
 
 // ── Files ─────────────────────────────────────────────────────────────────────
 
-/// Packs as files in a directory, with pread and pwrite.
+/// Packs as files in a directory, with pread and pwrite. The files of the
+/// store index go in the directory `index` next to it (`STORE/packs` and
+/// `STORE/index`).
 pub struct FileIo {
     dir: PathBuf,
+    index: PathBuf,
     /// Result of the hole probe (see `can_punch`).
     punches: OnceLock<bool>,
+    /// False: no sync at all (see [`FileIo::unsynced`]).
+    sync: bool,
 }
 
 impl FileIo {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        FileIo { dir: dir.into(), punches: OnceLock::new() }
+        let dir = dir.into();
+        let index = dir.with_file_name("index");
+        FileIo { dir, index, punches: OnceLock::new(), sync: true }
+    }
+
+    /// As [`FileIo::new`], but no sync of files or directories: nothing is
+    /// durable at a power loss. Only for tests and benchmarks that measure
+    /// something else than the disk syncs.
+    pub fn unsynced(dir: impl Into<PathBuf>) -> Self {
+        FileIo { sync: false, ..Self::new(dir) }
     }
 
     /// Punch a hole in a small probe file in the pack directory.
@@ -109,11 +277,13 @@ impl FileIo {
     }
 
     fn path(&self, num: u64, kind: Kind) -> PathBuf {
-        self.dir.join(pack_name(num, kind))
+        let dir = if kind.is_index() { &self.index } else { &self.dir };
+        dir.join(pack_name(num, kind))
     }
 }
 
-struct FilePack(File);
+/// A file, and whether `sync` syncs it.
+struct FilePack(File, bool);
 
 impl PackRead for FilePack {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
@@ -129,7 +299,25 @@ impl PackFile for FilePack {
         self.0.set_len(len)
     }
     fn sync(&mut self) -> io::Result<()> {
-        full_sync(&self.0)
+        if self.1 {
+            full_sync(&self.0)?;
+        }
+        Ok(())
+    }
+    fn sync_handle(&self) -> Option<Arc<dyn PackSync>> {
+        // A second descriptor of the same open file: its fsync flushes the
+        // dirty pages of the file, whoever wrote them.
+        let f = self.0.try_clone().ok()?;
+        Some(Arc::new(FilePack(f, self.1)))
+    }
+}
+
+impl PackSync for FilePack {
+    fn sync(&self) -> io::Result<()> {
+        if self.1 {
+            full_sync(&self.0)?;
+        }
+        Ok(())
     }
 }
 
@@ -139,6 +327,7 @@ impl PackIo for FileIo {
             return Ok(self.dir.is_dir());
         }
         fs::create_dir_all(&self.dir)?;
+        fs::create_dir_all(&self.index)?;
         Ok(true)
     }
 
@@ -161,8 +350,12 @@ impl PackIo for FileIo {
         fs::read(self.path(num, kind))
     }
 
+    fn file_len(&self, num: u64, kind: Kind) -> io::Result<u64> {
+        Ok(fs::metadata(self.path(num, kind))?.len())
+    }
+
     fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> io::Result<()> {
-        write_durable(&self.path(num, kind), data)
+        write_durable(&self.path(num, kind), data, self.sync)
     }
 
     fn remove(&self, num: u64, kind: Kind) -> io::Result<()> {
@@ -170,21 +363,28 @@ impl PackIo for FileIo {
     }
 
     fn sync_dir(&self) -> io::Result<()> {
-        sync_dir(&self.dir)
+        if !self.sync {
+            return Ok(());
+        }
+        sync_dir(&self.dir)?;
+        if self.index.is_dir() {
+            sync_dir(&self.index)?;
+        }
+        Ok(())
     }
 
     fn create(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
         let f = OpenOptions::new().read(true).write(true).create_new(true).open(self.path(num, Kind::Pack))?;
-        Ok(Box::new(FilePack(f)))
+        Ok(Box::new(FilePack(f, self.sync)))
     }
 
     fn open_rw(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
         let f = OpenOptions::new().read(true).write(true).open(self.path(num, Kind::Pack))?;
-        Ok(Box::new(FilePack(f)))
+        Ok(Box::new(FilePack(f, self.sync)))
     }
 
     fn open_read(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
-        Ok(Arc::new(FilePack(File::open(self.path(num, Kind::Pack))?)))
+        Ok(Arc::new(FilePack(File::open(self.path(num, Kind::Pack))?, self.sync)))
     }
 
     fn can_punch(&self) -> bool {
@@ -197,6 +397,35 @@ impl PackIo for FileIo {
             punch_hole(&f, offset, len)?;
         }
         Ok(())
+    }
+
+    fn list_runs(&self) -> io::Result<Vec<u64>> {
+        let dir = match fs::read_dir(&self.index) {
+            Ok(d) => d,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        Ok(dir
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                let hex = n.strip_suffix(".run")?;
+                u64::from_str_radix(hex, 16).ok()
+            })
+            .collect())
+    }
+
+    fn create_run(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
+        let f = OpenOptions::new().read(true).write(true).create_new(true).open(self.path(num, Kind::Run))?;
+        Ok(Box::new(FilePack(f, self.sync)))
+    }
+
+    fn open_run(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
+        Ok(Arc::new(FilePack(File::open(self.path(num, Kind::Run))?, self.sync)))
+    }
+
+    fn map_run(&self, num: u64) -> io::Result<Option<RunMap>> {
+        RunMap::new(&File::open(self.path(num, Kind::Run))?).map(Some)
     }
 }
 
@@ -253,11 +482,16 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
 }
 
 /// Write `data` to `path` atomically and durably.
-fn write_durable(path: &Path, data: &[u8]) -> io::Result<()> {
+fn write_durable(path: &Path, data: &[u8], sync: bool) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
     let mut f = File::create(&tmp)?;
     f.write_all(data)?;
-    full_sync(&f)?;
+    if sync {
+        full_sync(&f)?;
+    }
     fs::rename(&tmp, path)?;
-    sync_dir(path.parent().unwrap())
+    if sync {
+        sync_dir(path.parent().unwrap())?;
+    }
+    Ok(())
 }

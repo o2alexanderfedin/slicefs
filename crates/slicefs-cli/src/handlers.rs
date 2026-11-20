@@ -320,6 +320,7 @@ pub fn handle_write(
     offset: u64,
     data: &[u8],
 ) -> WriteResult {
+    fs.note_write();
     let l = logged();
     match fs.test_write(fh, offset, data) {
         Ok(n) => {
@@ -343,6 +344,7 @@ pub fn handle_create(
     gid: u32,
     flags: i32,
 ) -> CreateResult {
+    fs.note_write();
     let l = logged();
     match fs.test_create_full(parent, name, mode, umask, uid, gid, flags) {
         Ok((ino, fh, meta)) => {
@@ -503,6 +505,7 @@ pub fn handle_setattr(
     atime: Option<(i64, u32)>,
     mtime: Option<(i64, u32)>,
 ) -> AttrResult {
+    fs.note_write();
     let l = logged();
     match fs.test_setattr_full(ino, mode, uid, gid, size, fh, atime, mtime) {
         Ok(inode) => {

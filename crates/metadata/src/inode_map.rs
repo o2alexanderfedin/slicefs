@@ -13,6 +13,7 @@ use slicefs_traits::metadata::MetaError;
 ///
 /// Inode 1 is reserved for the root directory and is never allocated by
 /// `allocate_ino`. Allocation starts at 2 and increases monotonically.
+#[derive(Clone)]
 pub struct InodeMap {
     map: BTreeMap<u64, ObjectKey>,
     next_ino: u64,

@@ -145,6 +145,10 @@ pub fn check_format(store: &Path) -> std::io::Result<()> {
     }
 }
 
+/// The temp files of a full GC (`<store>/gc-tmp`; a writable open removes
+/// what a crash left).
+pub const GC_TMP_DIR: &str = "gc-tmp";
+
 /// Open the content store of `store` (creating it and the format marker if
 /// needed).
 pub fn open(store: &Path) -> std::io::Result<Content> {
@@ -153,7 +157,7 @@ pub fn open(store: &Path) -> std::io::Result<Content> {
     if !path.exists() {
         write_marker(store, DEFAULT_HASHER)?;
     }
-    let opts = Options { hasher: write_hasher(store)?, ..Options::default() };
+    let opts = Options { hasher: write_hasher(store)?, gc_tmp_dir: Some(store.join(GC_TMP_DIR)), ..Options::default() };
     let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
     Ok(Arc::new(cs))
 }
@@ -235,11 +239,50 @@ impl Stream {
     }
 }
 
+/// A new content from the content `base`: the bytes of `src` in the
+/// `changed` ranges, the base bytes below `keep`, zeros up to `new_len`
+/// (`chunk_store::file::splice`). Only the chunks near the changed bytes are
+/// cut and hashed again; the key is the key of a full write of the same bytes.
+pub fn splice(
+    cs: &ChunkStore,
+    base: Option<&ObjectKey>,
+    keep: u64,
+    changed: &[std::ops::Range<u64>],
+    new_len: u64,
+    src: &mut dyn chunk_store::file::SpliceSource,
+) -> std::io::Result<(ObjectKey, chunk_store::file::SpliceStats)> {
+    chunk_store::file::splice(cs, base.map(to_id), keep, changed, new_len, src)
+        .map(|(id, stats)| (to_key(id), stats))
+        .map_err(std::io::Error::other)
+}
+
 /// Store `data` as one file content and return its key.
 pub fn put_all(cs: &ChunkStore, data: &[u8]) -> std::io::Result<ObjectKey> {
     let mut s = Stream::default();
     s.push(cs, data)?;
     s.finish(cs)
+}
+
+/// The read size of [`put_reader`].
+pub const READ_BUF: usize = 1 << 20;
+
+/// Store all bytes of `r` as one file content, in reads of [`READ_BUF`]
+/// bytes; return its key and length. The memory does not depend on the
+/// length of the content. The key is the same as of [`put_all`] for the
+/// same bytes.
+pub fn put_reader(cs: &ChunkStore, r: &mut impl std::io::Read) -> std::io::Result<(ObjectKey, u64)> {
+    let mut s = Stream::default();
+    let mut buf = vec![0u8; READ_BUF];
+    loop {
+        match r.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => s.push(cs, &buf[..n])?,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let len = s.len();
+    Ok((s.finish(cs)?, len))
 }
 
 /// All bytes of the content `key`, or `None` if an object is missing or
@@ -276,7 +319,7 @@ impl Reader {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -318,6 +361,40 @@ mod tests {
         std::fs::write(d.path().join(FORMAT_FILE), "slicefs-store 5 (metadata and file content in packs)\n").unwrap();
         let err = check_format(d.path()).err().unwrap().to_string();
         assert!(err.contains("older SliceFS (224-bit object IDs)"), "{err}");
+    }
+
+    /// Pseudo-random bytes (xorshift64): no FastCDC cut is at a fixed place.
+    pub(crate) fn random_bytes(n: usize, mut seed: u64) -> Vec<u8> {
+        (0..n)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as u8
+            })
+            .collect()
+    }
+
+    /// A reader gives the same key as `put_all` for the same bytes, also
+    /// across chunk and read-buffer boundaries.
+    #[test]
+    fn put_reader_key_equals_put_all_key() {
+        let d = tempfile::TempDir::new().unwrap();
+        let cs = open(d.path()).unwrap();
+        let max = chunk_store::CHUNK_MAX as usize;
+        let cases: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            vec![7],
+            random_bytes(max, 1),
+            random_bytes(2 * max + 1, 2),
+            random_bytes(3 * READ_BUF + 12_345, 3),
+        ];
+        for data in cases {
+            let (key, len) = put_reader(&cs, &mut data.as_slice()).unwrap();
+            assert_eq!(len, data.len() as u64);
+            assert_eq!(key, put_all(&cs, &data).unwrap(), "key differs for {} bytes", data.len());
+            assert_eq!(get_all(&cs, &key).unwrap(), data);
+        }
     }
 
     #[test]

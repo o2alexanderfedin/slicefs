@@ -47,11 +47,15 @@ fn test_wal_logs_root_update_on_commit() {
     let _root = meta.commit().unwrap();
     meta.shutdown_wal().unwrap();
 
-    // Read back the segment (after a commit the log rotates: one segment
-    // that starts with the new root).
-    let segs: Vec<_> = std::fs::read_dir(store_dir.path().join("segments")).unwrap()
+    // Read back the segments. After a commit (#108) there are two: the root
+    // segment (2), and the segment the log goes on in (3), which starts
+    // with a Cut record that names segment 1.
+    let mut segs: Vec<_> = std::fs::read_dir(store_dir.path().join("segments")).unwrap()
         .filter_map(|e| e.ok()).map(|e| e.path()).collect();
-    assert_eq!(segs.len(), 1, "one segment after a commit: {segs:?}");
+    segs.sort();
+    assert_eq!(segs.len(), 2, "two segments after a commit: {segs:?}");
+    let next: Vec<_> = SegmentReader::open(&segs[1]).unwrap().collect();
+    assert!(matches!(next.first(), Some(SegmentEntry::Cut { prev_id: 1, .. })), "log segment: {next:?}");
     let seg_path = segs[0].clone();
     let reader = SegmentReader::open(&seg_path).unwrap();
     let entries: Vec<_> = reader.collect();

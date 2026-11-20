@@ -1,7 +1,7 @@
 //! Crash-tolerant segment file reader.
 
 use std::fs::File;
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use super::{RecordType, SegmentEntry, SegmentHeader};
@@ -14,6 +14,10 @@ pub struct SegmentReader {
     inner: BufReader<File>,
     /// Sequence number that the next record must have.
     next_seq: u64,
+    /// Byte offset in the file of the next record.
+    pos: u64,
+    /// Segment id from the header.
+    id: u64,
 }
 
 impl SegmentReader {
@@ -25,10 +29,32 @@ impl SegmentReader {
         let mut header_buf = [0u8; 16];
         reader.read_exact(&mut header_buf)?;
 
-        SegmentHeader::from_bytes(&header_buf)
+        let header = SegmentHeader::from_bytes(&header_buf)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid segment header"))?;
 
-        Ok(SegmentReader { inner: reader, next_seq: 0 })
+        Ok(SegmentReader { inner: reader, next_seq: 0, pos: 16, id: header.segment_id })
+    }
+
+    /// Open a segment file, validate its header, and go to the record at
+    /// byte `pos` with sequence number `seq` (a position that
+    /// [`cursor`](Self::cursor) gave on an earlier read of the file).
+    pub fn open_at(path: &Path, pos: u64, seq: u64) -> io::Result<Self> {
+        let mut r = Self::open(path)?;
+        r.inner.seek(SeekFrom::Start(pos))?;
+        r.pos = pos;
+        r.next_seq = seq;
+        Ok(r)
+    }
+
+    /// The segment id in the file header.
+    pub fn segment_id(&self) -> u64 {
+        self.id
+    }
+
+    /// Byte offset and sequence number of the next record: after a record
+    /// that `next` returned, the end of that record.
+    pub fn cursor(&self) -> (u64, u64) {
+        (self.pos, self.next_seq)
     }
 }
 
@@ -67,11 +93,13 @@ impl Iterator for SegmentReader {
                 return None;
             }
             self.next_seq += 1;
+            self.pos += (super::FRAME_HEAD + payload_len + 4) as u64;
             match RecordType::from_u8(record_type) {
                 Some(RecordType::EofMarker) => return None,
                 Some(RecordType::RootUpdate) => return SegmentEntry::parse_root_update(&payload),
                 Some(RecordType::SnapshotRecord) => return SegmentEntry::parse_snapshot_record(&payload),
                 Some(RecordType::Op) => return Some(SegmentEntry::Op { bytes: payload }),
+                Some(RecordType::Cut) => return SegmentEntry::parse_cut(&payload),
                 None => continue, // a type this version does not know
             }
         }

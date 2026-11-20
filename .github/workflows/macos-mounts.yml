@@ -1,7 +1,7 @@
 name: macOS mounts
 
-# Real FUSE-T mounts on a fresh macOS VM: the Boost round trip through SliceFS
-# on FSKit (the only backend). The job first enables the FUSE-T FSKit module
+# Real FUSE-T mounts on a fresh macOS VM: a 1 GiB large copy (large-copy.sh)
+# and the Boost round trip through SliceFS on FSKit (the only backend). The job first enables the FUSE-T FSKit module
 # without the System Settings GUI (enable-fskit.sh).
 # Long (80-110 min), so it runs only on special occasions: by hand
 # (workflow_dispatch), on main (a release), or on a ci/** branch (push a
@@ -51,9 +51,22 @@ jobs:
         run: scripts/macos-mount-test/fetch-boost.sh ~/boost ${{ inputs.versions || '1_85_0' }}
 
       - name: Build slicefs (release)
+        id: build
         run: cargo build --release -p slicefs-cli
 
+      # #20 (WLOG-02): 1 GiB copy, peak daemon RSS <= 512 MiB, cmp after the
+      # copy and after a remount. Independent of the Boost round trip: each
+      # runs when the build passed, so each failure is visible.
+      - name: Large copy (${{ matrix.backend }})
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 60
+        env:
+          SLICEFS: target/release/slicefs
+          WORK: ${{ runner.temp }}/work
+        run: scripts/macos-mount-test/large-copy.sh ${{ matrix.backend }}
+
       - name: Boost round trip (${{ matrix.backend }})
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           SLICEFS: target/release/slicefs
           BOOST_DIR: ~/boost

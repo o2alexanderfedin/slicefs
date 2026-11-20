@@ -3,7 +3,8 @@
 ## Milestones
 
 - ✅ **v1.0 Foundation** - Phases 1-7 (shipped 2026-03-29)
-- 🚧 **v2.0 Streaming Writes & Hardening** - Phases 8-11 (in progress)
+- ✅ **v2.0 Streaming Writes & Hardening** - Phases 7.1-12 (shipped 2026-11-17, tag `milestone-v2.0`)
+- ✅ **v2.1 Store Index & Measurements** - Phases 13-17 (shipped 2026-11-20, release `v2.2.0`)
 
 ## Phases
 
@@ -134,122 +135,37 @@ Plans:
 
 </details>
 
-### v2.0 — Streaming Writes & Hardening
+<details>
+<summary>✅ v2.0 Streaming Writes & Hardening (Phases 7.1-12) - SHIPPED 2026-11-17</summary>
 
-**Milestone Goal:** Remove the file size = RAM limitation via incremental Merkle streaming writes; remove write-path compression so dedup hashes raw content; fix known correctness bugs from v1.0 operation.
+- [x] Phase 7.1: FileStorage Migration (INSERTED) (3/3 plans)
+- [x] Phase 8: Correctness Fixes (1/1 plan) - completed 2026-03-30
+- [x] Phase 9: Compression Removal (2/2 plans)
+- [x] Phase 10: Streaming Writes Core (3/3 plans) - completed 2026-03-30
+- [x] Phase 11: Non-Sequential Write Handling (2/2 plans) - completed 2026-03-30
+- [x] Phase 12: FUSE-T Backend Selection (2/2 plans) - completed 2026-04-01
 
-### Phase 07.1: FileStorage Migration (INSERTED)
+Full details: `.planning/milestones/v2.0-ROADMAP.md`. Audit: `.planning/milestones/v2.0-MILESTONE-AUDIT.md`.
 
-**Goal**: Switch DictMetadataStore from in-memory Dictionary (BTreeMap) to file-backed FileStorageAdd/file_storage_get from data-id — eliminates ~67 GB RAM for 1 TB stores by using the host filesystem as a hash table; structurally solves FIX-03/FIX-04 (snapshot O(1) lookup)
-**Depends on:** Phase 7
-**Requirements**: FIX-03, FIX-04 (solved structurally)
-**Success Criteria** (what must be TRUE):
-  1. DictMetadataStore uses file-backed storage (FileStorageAdd/file_storage_get via Io trait) instead of in-memory BTreeMap<Digest224, Branches>
-  2. Memory usage for the Merkle tree is O(1) regardless of store size — hot nodes served by OS page cache, not application heap
-  3. Snapshot lookup by version or name is O(1) via filesystem path resolution
-  4. All existing tests pass with no regression — seed, mount, read, write, GC, scrub, stats, snapshots all work identically
-  5. Segment replay on mount populates file-backed storage instead of in-memory Dictionary
-**Plans**: 3 plans
+</details>
 
-Plans:
-- [x] 07.1-01-PLAN.md — Export blockset FileStorage API, generalize intern/load helpers, O(1) snapshot indexes (FIX-03/FIX-04)
-- [x] 07.1-02-PLAN.md — Replace Dictionary with StoreIo in DictMetadataStore, remove DictEntry from WAL/segments
-- [x] 07.1-03-PLAN.md — Update all CLI consumers (filesystem, mount, seed, GC, scrub, stats) to use file-backed storage
+<details>
+<summary>✅ v2.1 Store Index & Measurements (Phases 13-17) - SHIPPED 2026-11-20</summary>
 
-#### Phase 8: Correctness Fixes
-**Goal**: Known v1.0 correctness bugs are eliminated before the invasive write-path restructuring begins — refcount overflow risk is closed and statfs reports real numbers with three-tier space reporting (logical, CAS, host disk)
-**Depends on**: Phase 7.1
-**Requirements**: FIX-01, FIX-02, FIX-03, FIX-04
-**Success Criteria** (what must be TRUE):
-  1. Incrementing a block's refcount at u64::MAX produces u64::MAX (saturating), not 0 — no silent data loss under extreme dedup load
-  2. `df` on a mounted SliceFS volume reports the actual number of inodes in use, not a hardcoded 1,000,000
-  3. Physical bytes reported by statfs reflect the real store occupancy, not an arithmetic approximation based on dict entry count
-  4. Looking up a snapshot by version number or name executes in O(1) time regardless of how many snapshots exist
-**Plans**: 1 plan
+- [x] Phase 13: Write log close-out (#20) (3/3 plans)
+- [x] Phase 14: Bounded-memory random writes (#98, #93) (9/9 plans)
+- [x] Phase 15: Pack-file measurements (#8) (3/3 plans)
+- [x] Phase 16: Chunk index benchmark (#66) (3/3 plans)
+- [x] Phase 17: On-disk chunk index (#85) (9/9 plans)
 
-Plans:
-- [ ] 08-01-PLAN.md — Saturating refcount fix, inode_count AtomicU64, three-tier statfs, scrub saturated reporting, FIX-03/FIX-04 verification
+Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/milestones/v2.1-MILESTONE-AUDIT.md`.
 
-#### Phase 9: Compression Removal
-**Goal**: The write path pushes raw bytes directly into the Merkle tree with no compression header; compression infrastructure is fully removed (clean break — no v1/v2 backward compatibility; no production stores exist); raw content dedup works naturally
-**Depends on**: Phase 8
-**Requirements**: DECOMP-01, DECOMP-02, DECOMP-03, DECOMP-04
-**Success Criteria** (what must be TRUE):
-  1. Writing a file to a mounted store produces no compression header bytes — raw content is stored in the Merkle tree verbatim
-  2. Two files with identical raw content deduplicate correctly via same Digest224 on raw bytes
-  3. Reading a stored file returns raw bytes unchanged — no decompress call in the read path
-  4. Stats reports compressor as "none (v3 raw)"; CLI has no --compressor flags
-**Plans**: 2 plans
-
-Plans:
-- [ ] 09-01-PLAN.md — Remove compression from production code (filesystem.rs, mount.rs, cli.rs, stats.rs, Cargo.toml)
-- [ ] 09-02-PLAN.md — Update test files, delete compression_tests.rs, create v3 store validation tests
-
-#### Phase 10: Streaming Writes Core
-**Goal**: Sequential file writes use the incremental push_bytes API so that open file handle memory is O(log N) in file size — arbitrarily large files can be written without hitting a RAM ceiling; fsync mid-stream and truncate on an open handle both work correctly
-**Depends on**: Phase 9
-**Requirements**: STRM-01, STRM-03, STRM-04, STRM-05
-**Success Criteria** (what must be TRUE):
-  1. Writing a 10 GB file sequentially through the mount point completes successfully on a machine with 512 MB of RAM available to the FUSE process — no OOM kill
-  2. Reading a file while it is still open for writing (before release) returns the bytes written so far, consistent with what a second process would see after the write completes
-  3. Calling fsync mid-stream commits all bytes written up to that point durably; subsequent writes to the same file handle continue correctly and produce a consistent final file
-  4. Truncating an open file handle to a smaller size atomically resets the streaming state and adjusts inode size — the file is correct after release with no leftover bytes beyond the truncation point
-**Plans**: 3 plans
-
-Plans:
-- [ ] 10-01-PLAN.md — OpenFileState: replace Vec<u8> buf with blockset::State + byte_count tracking
-- [ ] 10-02-PLAN.md — flush_buffer_to_cas rewritten to use state.end(); fsync mid-stream; read-after-write materialisation
-- [ ] 10-03-PLAN.md — Truncate with in-progress streaming State; cas_committed guard update; integration tests
-
-#### Phase 11: Non-Sequential Write Handling
-**Goal**: pwrite at arbitrary offsets, memory-mapped writes, and writeback_cache out-of-order delivery all produce correct results — the streaming path handles sequential writes and falls back to the v1.0 buffer model for non-sequential writes with no regression
-**Depends on**: Phase 10
-**Requirements**: STRM-02
-**Success Criteria** (what must be TRUE):
-  1. pwrite(2) at a non-sequential offset on an open file handle produces a correct file after release — no corruption, no silent data loss
-  2. Enabling writeback_cache on a mount with in-flight writes produces correct files — out-of-order FUSE write callbacks do not corrupt the Merkle root
-  3. A file written via a tool that uses non-sequential access patterns (vim, sqlite, cp --sparse) is byte-identical to the source after release
-**Plans**: 2 plans
-
-Plans:
-- [ ] 11-01-PLAN.md — WriteMode enum + dual dispatch across 5 write-path methods in filesystem.rs
-- [ ] 11-02-PLAN.md — Non-sequential write integration tests + un-ignore Phase 10 deferred tests
-
-### Phase 12: Add SMB/FSKit backend support for FUSE-T
-
-**Goal**: Configure FUSE-T to use the SMB or FSKit backend instead of the broken NFS backend on macOS -- auto-detect best backend at mount time (FSKit > SMB > NFS), add CLI override, block NFS by default, add mount protection (signal handler + watchdog), and enhance unmount with multi-step cleanup
-**Depends on:** Phase 11
-**Requirements**: FUSET-01, FUSET-02, FUSET-03, FUSET-04, FUSET-05, FUSET-06, FUSET-07, FUSET-08
-**Success Criteria** (what must be TRUE):
-  1. `slicefs mount` on macOS auto-selects SMB backend (or FSKit when available) without user intervention
-  2. `--backend=nfs` without `--force` is rejected with a clear error explaining the macOS kernel bug
-  3. FUSE-T version < 1.0.35 is rejected with a clear upgrade message
-  4. Mount startup log shows backend name and FUSE-T version
-  5. Signal handler + watchdog protect against stuck mounts and daemon crashes
-  6. `slicefs unmount` reliably cleans up stuck mounts via soft -> kill -> force -> mount.lock sequence
-**Plans**: 2 plans
-
-Plans:
-- [ ] 12-01-PLAN.md — Backend detection module, CLI flags (--backend, --force, --store), enhanced unmount
-- [ ] 12-02-PLAN.md — Wire backend into mount lifecycle: signal handler, watchdog, startup logging, fuse-t.ini fallback
+</details>
 
 ## Progress
 
-**Execution Order:**
-Phases execute in numeric order: 7.1 -> 8 -> 9 -> 10 -> 11 -> 12
-
-| Phase | Milestone | Plans Complete | Status | Completed |
-|-------|-----------|----------------|--------|-----------|
-| 1. CAS Foundation | v1.0 | 3/3 | Complete | 2026-03-28 |
-| 2. Metadata Engine | v1.0 | 3/3 | Complete | 2026-03-28 |
-| 3. Read-Only FUSE | v1.0 | 3/3 | Complete | 2026-03-28 |
-| 4. Full POSIX Write Path | v1.0 | 4/4 | Complete | 2026-03-28 |
-| 5. Crash Safety and GC | v1.0 | 4/4 | Complete | 2026-03-29 |
-| 6. Compression and Snapshots | v1.0 | 4/4 | Complete | 2026-03-29 |
-| 7. Cross-Platform and Production Hardening | v1.0 | 3/3 | Complete | 2026-03-29 |
-| 7.1. FileStorage Migration (INSERTED) | 3/3 | Complete |  | - |
-| 8. Correctness Fixes | 1/1 | Complete   | 2026-03-30 | - |
-| 9. Compression Removal | 1/2 | In Progress|  | - |
-| 10. Streaming Writes Core | 3/3 | Complete    | 2026-03-30 | - |
-| 11. Non-Sequential Write Handling | 2/2 | Complete    | 2026-03-30 | - |
-| 12. SMB/FSKit Backend Support | 2/2 | Complete    | 2026-04-01 | - |
+| Milestone | Phases | Plans | Status | Shipped |
+|-----------|--------|-------|--------|---------|
+| v1.0 Foundation | 1-7 | 24 | Complete | 2026-03-29 |
+| v2.0 Streaming Writes & Hardening | 7.1-12 | 13 | Complete | 2026-11-17 |
+| v2.1 Store Index & Measurements | 13-17 | 27 | Complete | 2026-11-20 |

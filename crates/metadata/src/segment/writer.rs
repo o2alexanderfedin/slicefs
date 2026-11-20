@@ -20,6 +20,9 @@ pub struct SegmentWriter {
     unsynced: bool,
     /// Number of `sync_all` calls made (for tests).
     disk_syncs: u64,
+    /// Test fault hook: the next `write_entry`, `flush` or `sync` fails.
+    #[cfg(test)]
+    fail_next: bool,
 }
 
 impl SegmentWriter {
@@ -36,6 +39,8 @@ impl SegmentWriter {
             seq: 0,
             unsynced: true,
             disk_syncs: 0,
+            #[cfg(test)]
+            fail_next: false,
         };
         let header = SegmentHeader::new(segment_id);
         writer.inner.write_all(&header.to_bytes())?;
@@ -45,6 +50,7 @@ impl SegmentWriter {
     /// Write a single entry (see the frame in the type docs). Returns its
     /// sequence number.
     pub fn write_entry(&mut self, entry: &SegmentEntry) -> io::Result<u64> {
+        self.injected_fault()?;
         let payload = entry.payload_bytes();
         let frame = super::frame_record(entry.record_type() as u8, self.seq, &payload);
         self.unsynced = true;
@@ -59,6 +65,7 @@ impl SegmentWriter {
     /// `sync_all` is a full disk flush (F_FULLFSYNC on macOS, ~10-20 ms), and
     /// FUSE fsync calls this on every file close over NFS.
     pub fn sync(&mut self) -> io::Result<()> {
+        self.injected_fault()?;
         if !self.unsynced {
             return Ok(());
         }
@@ -67,6 +74,49 @@ impl SegmentWriter {
         self.disk_syncs += 1;
         self.unsynced = false;
         Ok(())
+    }
+
+    /// Write the records in the user-space buffer into the file (one
+    /// `write()` into the kernel), with no disk sync. After this, a crash of
+    /// the process does not lose them; a power loss can. A later `sync` still
+    /// syncs them.
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.injected_fault()?;
+        self.inner.flush()
+    }
+
+    /// Make the next `write_entry`, `flush` or `sync` fail (test fault hook).
+    #[cfg(test)]
+    pub(crate) fn fail_next_io(&mut self) {
+        self.fail_next = true;
+    }
+
+    #[cfg(test)]
+    fn injected_fault(&mut self) -> io::Result<()> {
+        if std::mem::take(&mut self.fail_next) {
+            return Err(io::Error::other("injected write-log fault"));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    #[inline(always)]
+    fn injected_fault(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Number of records written so far (the sequence number of the next).
+    pub fn records(&self) -> u64 {
+        self.seq
+    }
+
+    /// Write the user-space buffer into the file and return a second handle
+    /// of the file, so a caller can sync it without holding this writer
+    /// (`sync_all` on the clone syncs the same file).
+    pub fn file_for_sync(&mut self) -> io::Result<File> {
+        self.injected_fault()?;
+        self.inner.flush()?;
+        self.inner.get_ref().try_clone()
     }
 
     /// Number of real disk syncs so far.

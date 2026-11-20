@@ -14,7 +14,7 @@
 //!   7. `refcounts`
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, Ordering}};
+use std::sync::{Arc, Mutex, MutexGuard, atomic::{AtomicU64, Ordering}};
 
 use slicefs_traits::key::{ObjectKey, KEY_BYTES};
 use crate::store_io::{NodeRead, NodeWrite};
@@ -22,7 +22,7 @@ use slicefs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, Metadata
 
 use crate::snapshot::SnapshotEntry;
 use crate::store_io::StoreIo;
-use crate::wal::{WalEntry, WalError, WalStrategy};
+use crate::wal::{WalCut, WalEntry, WalError, WalStrategy};
 
 use crate::inode::{intern_inode, load_inode};
 use crate::inode_map::{InodeMap, intern_inode_map, load_inode_map};
@@ -80,11 +80,16 @@ const DIRTY_FLUSH: usize = 8;
 struct Live<T> {
     map: HashMap<u64, T>,
     dirty: std::collections::HashSet<u64>,
+    /// Entries that a commit took at its cut (#108) and writes with the gate
+    /// released. Until it installs their digests, the digest maps hold an
+    /// older one, so these stay in the cache. A change after the cut takes
+    /// the entry out (it is dirty again, and newer).
+    flushing: std::collections::HashSet<u64>,
 }
 
 impl<T> Default for Live<T> {
     fn default() -> Self {
-        Live { map: HashMap::new(), dirty: Default::default() }
+        Live { map: HashMap::new(), dirty: Default::default(), flushing: Default::default() }
     }
 }
 
@@ -92,12 +97,88 @@ impl<T> Live<T> {
     fn remove(&mut self, ino: u64) {
         self.map.remove(&ino);
         self.dirty.remove(&ino);
+        self.flushing.remove(&ino);
+    }
+
+    fn mark_dirty(&mut self, ino: u64) {
+        self.dirty.insert(ino);
+        self.flushing.remove(&ino);
     }
 
     /// Drop the entries that are already written.
     fn evict_clean(&mut self) {
-        let dirty = &self.dirty;
-        self.map.retain(|ino, _| dirty.contains(ino));
+        let (dirty, flushing) = (&self.dirty, &self.flushing);
+        self.map.retain(|ino, _| dirty.contains(ino) || flushing.contains(ino));
+    }
+}
+
+impl<T: Clone> Live<T> {
+    /// The dirty entries, for a commit: they move to `flushing`.
+    fn take_dirty(&mut self) -> Vec<(u64, T)> {
+        let dirty: Vec<u64> = self.dirty.drain().collect();
+        let mut out = Vec::with_capacity(dirty.len());
+        for ino in dirty {
+            if let Some(v) = self.map.get(&ino) {
+                out.push((ino, v.clone()));
+                self.flushing.insert(ino);
+            }
+        }
+        out
+    }
+
+    /// A commit failed: what it took is dirty again.
+    fn requeue(&mut self) {
+        let flushing: Vec<u64> = self.flushing.drain().collect();
+        self.dirty.extend(flushing);
+    }
+}
+
+/// Points in `finish_commit` for `DictMetadataStore::test_fail_next_commit_at`.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CommitFault {
+    /// The nodes are written, nothing is synced.
+    BeforeSync = 1,
+    /// The nodes and the content are synced, the root is not logged.
+    BeforeRoot = 2,
+}
+
+/// What a commit took at its cut (`DictMetadataStore::begin_commit`): the
+/// whole state that its root record holds. `finish_commit` writes it with the
+/// gate released and reads no live map, so the root never has half of an
+/// operation that came after the cut (#108).
+pub struct PreparedCommit<'a> {
+    /// One commit at a time, from the cut to the root: roots stay in order.
+    _serial: MutexGuard<'a, ()>,
+    store: &'a DictMetadataStore,
+    /// The root is logged. Else (an error, or dropped unfinished) the inodes
+    /// and directories it took are dirty again.
+    done: bool,
+    changes: u64,
+    /// `wal_fail_seq` at the cut: failures up to it end with this root.
+    fail_seq: u64,
+    inodes: Vec<(u64, InodeMeta)>,
+    dirs: Vec<(u64, DirList)>,
+    inode_map: InodeMap,
+    inode_data: BTreeMap<u64, ObjectKey>,
+    dir_data: BTreeMap<u64, ObjectKey>,
+    manifest_data: BTreeMap<u64, ObjectKey>,
+    xattr_data: BTreeMap<u64, ObjectKey>,
+    refcounts: BTreeMap<ObjectKey, u64>,
+    logical_bytes: u64,
+    inode_count: u64,
+    snapshots: Vec<SnapshotEntry>,
+    wal: Option<Arc<dyn WalStrategy>>,
+    cut: Option<WalCut>,
+}
+
+impl Drop for PreparedCommit<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            self.store.inode_live.lock().unwrap().requeue();
+            self.store.dir_live.lock().unwrap().requeue();
+        }
     }
 }
 
@@ -171,12 +252,21 @@ pub struct DictMetadataStore {
     /// Optional WAL strategy — routes all Dictionary mutations to durable storage.
     ///
     /// Set via `set_wal()` after construction. When None, mutations are not logged.
-    wal: Mutex<Option<Box<dyn WalStrategy>>>,
-    /// An append to the write log failed since the last log rotation: the
-    /// log may have a torn record, and records after it cannot be read. Until
-    /// the next commit (which starts a new segment from the root), every
-    /// `flush_wal` fails, so an fsync never reports durable what is not.
-    wal_failed: AtomicBool,
+    wal: Mutex<Option<Arc<dyn WalStrategy>>>,
+    /// Count of failed appends to the write log, and the count that the last
+    /// root covers. While they differ, the log may have a torn record, and
+    /// records after it cannot be read. Until the next commit (which starts
+    /// a new segment from the root), every `flush_wal` fails, so an fsync
+    /// never reports durable what is not. A commit clears only the failures
+    /// before its cut (#108).
+    wal_fail_seq: AtomicU64,
+    wal_fail_cleared: AtomicU64,
+    /// One commit at a time (see `PreparedCommit`). Lock order: the commit
+    /// gate of the file system, then this.
+    commit_lock: Mutex<()>,
+    /// Test fault: the next `finish_commit` stops with an error at this
+    /// point (see `test_fail_next_commit_at`); 0: none.
+    commit_fault: std::sync::atomic::AtomicU8,
     /// Last committed root digest — updated by `commit()`, used by GC to determine live roots.
     last_root: Mutex<Option<ObjectKey>>,
     /// Snapshot index by version number — O(1) lookup (FIX-03).
@@ -240,7 +330,10 @@ impl DictMetadataStore {
             logical_bytes: AtomicU64::new(0),
             inode_count: AtomicU64::new(1),
             wal: Mutex::new(None),
-            wal_failed: AtomicBool::new(false),
+            wal_fail_seq: AtomicU64::new(0),
+            wal_fail_cleared: AtomicU64::new(0),
+            commit_lock: Mutex::new(()),
+            commit_fault: std::sync::atomic::AtomicU8::new(0),
             last_root: Mutex::new(None),
             snapshots_by_version: Mutex::new(HashMap::new()),
             snapshots_by_name: Mutex::new(HashMap::new()),
@@ -344,7 +437,7 @@ impl DictMetadataStore {
     ///
     /// Replaces any previously set WAL (the old one is dropped; not flushed).
     pub fn set_wal(&mut self, wal: Box<dyn WalStrategy>) {
-        *self.wal.lock().unwrap() = Some(wal);
+        *self.wal.lock().unwrap() = Some(Arc::from(wal));
     }
 
     /// Set the sync that `commit()` runs before it logs a root (see
@@ -358,12 +451,12 @@ impl DictMetadataStore {
     /// This is called by the fsync FUSE callback to ensure durability.
     /// Returns Ok(()) when no WAL is configured.
     pub fn flush_wal(&self) -> Result<(), WalError> {
-        if self.wal_failed.load(Ordering::SeqCst) {
+        if self.wal_fail_seq.load(Ordering::SeqCst) != self.wal_fail_cleared.load(Ordering::SeqCst) {
             return Err(WalError::Io(std::io::Error::other(
                 "an earlier write-log append failed; nothing is durable until the next commit",
             )));
         }
-        if let Some(ref w) = *self.wal.lock().unwrap() {
+        if let Some(w) = self.wal_handle() {
             w.flush_and_sync()?;
         }
         Ok(())
@@ -387,14 +480,15 @@ impl DictMetadataStore {
     /// snapshot record, and delete the older segments (#20). A failure leaves
     /// the current segment in use, which is still correct (only larger).
     fn rotate_wal(&self, root: ObjectKey) {
-        if let Some(ref w) = *self.wal.lock().unwrap() {
+        if let Some(w) = self.wal_handle() {
+            let fails = self.wal_fail_seq.load(Ordering::SeqCst);
             let mut seed = vec![WalEntry::RootUpdate { root }];
             for s in self.list_snapshots() {
                 seed.push(WalEntry::Snapshot { version: s.version, root: s.root, created_at: s.created_at, name: s.name });
             }
             match w.rotate(&seed) {
                 // A new segment that starts with the root: the log is whole.
-                Ok(()) => self.wal_failed.store(false, Ordering::SeqCst),
+                Ok(()) => { self.wal_fail_cleared.fetch_max(fails, Ordering::SeqCst); }
                 Err(e) => eprintln!("WAL rotation failed (the log keeps growing in the current segment): {e}"),
             }
         }
@@ -424,7 +518,7 @@ impl DictMetadataStore {
             // commit rotates the log (#20).
             if let Err(e) = w.log_mutation(entry) {
                 eprintln!("write log append failed (fsync fails until the next commit): {e}");
-                self.wal_failed.store(true, Ordering::SeqCst);
+                self.wal_fail_seq.fetch_add(1, Ordering::SeqCst);
             }
         }
     }
@@ -461,7 +555,7 @@ impl DictMetadataStore {
         }
         let (r, changed) = f(live.map.get_mut(&ino).expect("inserted above"))?;
         if changed {
-            live.dirty.insert(ino);
+            live.mark_dirty(ino);
         }
         let (flush, full) = (live.dirty.len() >= DIRTY_FLUSH, live.map.len() > DIR_CACHE_MAX);
         drop(live);
@@ -503,7 +597,7 @@ impl DictMetadataStore {
         let (flush, full) = {
             let mut live = self.inode_live.lock().unwrap();
             live.map.insert(meta.ino, meta.clone());
-            live.dirty.insert(meta.ino);
+            live.mark_dirty(meta.ino);
             (live.dirty.len() >= DIRTY_FLUSH, live.map.len() > INODE_CACHE_MAX)
         };
         if flush || full {
@@ -555,6 +649,209 @@ impl DictMetadataStore {
                 dir_data.insert(ino, list.intern(&mut fsa));
             }
         }
+    }
+
+    /// The write log, if any (a clone: no lock is held while it works).
+    fn wal_handle(&self) -> Option<Arc<dyn WalStrategy>> {
+        self.wal.lock().unwrap().as_ref().map(Arc::clone)
+    }
+
+    /// Make the next `finish_commit` stop with an error at `at`, as a crash
+    /// there would (for crash tests: nothing after that point reaches disk).
+    #[doc(hidden)]
+    pub fn test_fail_next_commit_at(&self, at: CommitFault) {
+        self.commit_fault.store(at as u8, Ordering::SeqCst);
+    }
+
+    fn injected_fault(&self, at: CommitFault) -> Result<(), MetaError> {
+        if self.commit_fault.compare_exchange(at as u8, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            return Err(MetaError::Corrupted(format!("injected commit fault {at:?}")));
+        }
+        Ok(())
+    }
+
+    /// Wait until no commit is between `begin_commit` and the end of
+    /// `finish_commit`.
+    pub fn wait_for_commit(&self) {
+        drop(self.commit_lock.lock().unwrap());
+    }
+
+    /// First half of a commit (#108), run while no request changes the store
+    /// (the file system holds its commit gate exclusively): take the dirty
+    /// inodes and directories and a copy of every map, and cut the write log
+    /// (`WalStrategy::cut`), so requests after this go to the next
+    /// generation. Fast: no node is written and nothing is synced. Waits for
+    /// a commit still in `finish_commit`.
+    pub fn begin_commit(&self) -> Result<PreparedCommit<'_>, MetaError> {
+        let serial = self.commit_lock.lock().unwrap();
+        let wal = self.wal_handle();
+        // The log first: if it cannot cut, nothing has changed.
+        let cut = match &wal {
+            Some(w) => w.cut().map_err(|e| MetaError::Corrupted(format!("commit: write-log cut failed: {e}")))?,
+            None => None,
+        };
+        if cut.is_some_and(|c| c.old_failed) {
+            self.wal_fail_seq.fetch_add(1, Ordering::SeqCst);
+        }
+        // Failures up to here are of records before the cut: the root of
+        // this commit holds their requests. Later ones are not cleared by it.
+        let fail_seq = self.wal_fail_seq.load(Ordering::SeqCst);
+        let changes = self.changes.load(Ordering::Relaxed);
+        let dirs = self.dir_live.lock().unwrap().take_dirty();
+        let inode_map = self.inode_map.lock().unwrap().clone();
+        let inodes = self.inode_live.lock().unwrap().take_dirty();
+        let inode_data = self.inode_data.lock().unwrap().clone();
+        let dir_data = self.dir_data.lock().unwrap().clone();
+        let manifest_data = self.manifest_data.lock().unwrap().clone();
+        let xattr_data = self.xattr_data.lock().unwrap().clone();
+        let refcounts = self.refcounts.lock().unwrap().clone();
+        Ok(PreparedCommit {
+            _serial: serial,
+            store: self,
+            done: false,
+            changes,
+            fail_seq,
+            inodes,
+            dirs,
+            inode_map,
+            inode_data,
+            dir_data,
+            manifest_data,
+            xattr_data,
+            refcounts,
+            logical_bytes: self.logical_bytes.load(Ordering::Relaxed),
+            inode_count: self.inode_count.load(Ordering::Relaxed),
+            snapshots: self.list_snapshots(),
+            wal,
+            cut,
+        })
+    }
+
+    /// Second half of a commit (#108); requests may run meanwhile. Writes
+    /// the nodes of `p`, syncs the chunk store, then logs the root
+    /// (`WalStrategy::install_root`). Takes no store lock across a write
+    /// or a sync of more than one node. On an error, the inodes and
+    /// directories that `p` took are dirty again.
+    pub fn finish_commit(&self, mut p: PreparedCommit<'_>) -> Result<ObjectKey, MetaError> {
+        let r = self.finish_inner(&mut p);
+        p.done = r.is_ok();
+        r
+    }
+
+    fn finish_inner(&self, p: &mut PreparedCommit<'_>) -> Result<ObjectKey, MetaError> {
+        let cs = Arc::clone(self.io.lock().unwrap().store());
+        let mut w = crate::store_io::NodeWriter::new(Arc::clone(&cs));
+        // Write the changed directories and inodes, so the digest maps are current.
+        let mut new_inodes = Vec::with_capacity(p.inodes.len());
+        for (ino, meta) in &p.inodes {
+            let d = intern_inode(&mut w, meta);
+            p.inode_data.insert(*ino, d);
+            p.inode_map.insert(*ino, d);
+            new_inodes.push((*ino, d));
+        }
+        let mut new_dirs = Vec::with_capacity(p.dirs.len());
+        for (ino, list) in &p.dirs {
+            let d = list.intern(&mut w);
+            p.dir_data.insert(*ino, d);
+            new_dirs.push((*ino, d));
+        }
+
+        // Serialize the state into a root record (layout: `root_rec`):
+        //   inode_map, root_dir_ino (u64), next_ino (u64), the keys of the
+        //   inode, dir, manifest, xattr and refcount maps, logical_bytes (u64)
+        //   and inode_count (u64).
+        let inode_map_digest = intern_inode_map(&mut w, &p.inode_map);
+        let next_ino = p.inode_map.next_ino();
+        let inode_data_digest = intern_u64_digest_map(&mut w, &p.inode_data);
+        let dir_data_digest = intern_u64_digest_map(&mut w, &p.dir_data);
+        let manifest_data_digest = intern_u64_digest_map(&mut w, &p.manifest_data);
+        let xattr_data_digest = intern_u64_digest_map(&mut w, &p.xattr_data);
+        let refcount_data_digest = intern_key_u64_map(&mut w, &p.refcounts);
+
+        let mut root_bytes = Vec::with_capacity(root_rec::SIZE);
+        put_digest(&mut root_bytes, &inode_map_digest);
+        // root_dir_ino: always 1
+        root_bytes.extend_from_slice(&1u64.to_le_bytes());
+        root_bytes.extend_from_slice(&next_ino.to_le_bytes());
+        for d in [&inode_data_digest, &dir_data_digest, &manifest_data_digest,
+                  &xattr_data_digest, &refcount_data_digest] {
+            put_digest(&mut root_bytes, d);
+        }
+        // logical_bytes + inode_count: without them, loading would read every
+        // inode object just to sum the sizes (O(files) reads).
+        root_bytes.extend_from_slice(&p.logical_bytes.to_le_bytes());
+        root_bytes.extend_from_slice(&p.inode_count.to_le_bytes());
+        assert_eq!(root_bytes.len(), root_rec::SIZE, "root record size");
+        let root_digest = w.put_node(&root_bytes);
+        w.result().map_err(|e| MetaError::Corrupted(format!("commit: node write failed: {e}")))?;
+        self.injected_fault(CommitFault::BeforeSync)?;
+
+        // The nodes are stored: the caches may forget the entries that were
+        // not changed again since the cut.
+        {
+            let mut inode_map = self.inode_map.lock().unwrap();
+            let mut live = self.inode_live.lock().unwrap();
+            let mut inode_data = self.inode_data.lock().unwrap();
+            for (ino, d) in new_inodes {
+                if live.flushing.remove(&ino) {
+                    inode_data.insert(ino, d);
+                    inode_map.insert(ino, d);
+                }
+            }
+        }
+        {
+            let mut live = self.dir_live.lock().unwrap();
+            let mut dir_data = self.dir_data.lock().unwrap();
+            for (ino, d) in new_dirs {
+                if live.flushing.remove(&ino) {
+                    dir_data.insert(ino, d);
+                }
+            }
+        }
+
+        // Make every object written since the last commit durable before the
+        // root that refers to them is logged: after that, log rotation deletes
+        // the segments whose records hold the same data (#20). A put error of
+        // a request since the last commit fails the commit too.
+        self.io.lock().unwrap().begin_commit_sync()
+            .map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
+        cs.sync().map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
+        // The file content that the root refers to must be durable too.
+        let pre = self.pre_root_sync.lock().unwrap().clone();
+        if let Some(f) = pre {
+            f().map_err(|e| MetaError::Corrupted(format!("commit: content sync failed: {e}")))?;
+        }
+
+        self.injected_fault(CommitFault::BeforeRoot)?;
+        // Log the root only now, after all nodes are durable (crash-safe
+        // ordering): a crash before it leaves the last root plus the log.
+        if let Some(wal) = &p.wal {
+            let mut seed = vec![WalEntry::RootUpdate { root: root_digest }];
+            for s in &p.snapshots {
+                seed.push(WalEntry::Snapshot { version: s.version, root: s.root, created_at: s.created_at, name: s.name.clone() });
+            }
+            match &p.cut {
+                Some(cut) => {
+                    wal.install_root(cut, &seed)
+                        .map_err(|e| MetaError::Corrupted(format!("commit: root write failed: {e}")))?;
+                    self.wal_fail_cleared.fetch_max(p.fail_seq, Ordering::SeqCst);
+                }
+                // A log with no generations (`cut` gave None): the root goes
+                // at its end, then the log rotates.
+                None => {
+                    self.log_wal_entry(&WalEntry::RootUpdate { root: root_digest });
+                    match wal.rotate(&seed) {
+                        Ok(()) => { self.wal_fail_cleared.fetch_max(p.fail_seq, Ordering::SeqCst); }
+                        Err(e) => eprintln!("WAL rotation failed (the log keeps growing in the current segment): {e}"),
+                    }
+                }
+            }
+        }
+
+        // Update last_root so background GC can use it
+        *self.last_root.lock().unwrap() = Some(root_digest);
+        self.committed_changes.store(p.changes, Ordering::Relaxed);
+        Ok(root_digest)
     }
 
     /// True if a mutation happened after the last `commit()`.
@@ -673,6 +970,7 @@ impl DictMetadataStore {
     ///
     /// Also updates `last_root` so `current_root()` reflects the change immediately.
     pub fn commit_root(&self, root: ObjectKey) -> Result<(), MetaError> {
+        let _serial = self.commit_lock.lock().unwrap();
         *self.last_root.lock().unwrap() = Some(root);
         self.log_wal_entry(&WalEntry::RootUpdate { root });
         self.rotate_wal(root);
@@ -792,7 +1090,7 @@ impl MetadataStore for DictMetadataStore {
         {
             let mut live = self.dir_live.lock().unwrap();
             live.map.insert(ino, DirList::new_dir(ino, parent_ino));
-            live.dirty.insert(ino);
+            live.mark_dirty(ino);
         }
 
         // Increment parent nlinks (for the .. backlink from new subdir)
@@ -936,81 +1234,9 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn commit(&self) -> Result<ObjectKey, MetaError> {
-        // Serialize full in-memory state into a root record (layout: `root_rec`):
-        //   inode_map, root_dir_ino (u64), next_ino (u64), the keys of the
-        //   inode, dir, manifest, xattr and refcount maps, logical_bytes (u64)
-        //   and inode_count (u64).
-        // Changes made after this point are left for the next commit.
-        let changes = self.changes.load(Ordering::Relaxed);
-        // Write changed directories and inodes first, so the digest maps are current.
-        self.flush_dirs();
-        self.flush_inodes();
-
-        let inode_map = self.inode_map.lock().unwrap();
-        let mut io_guard = self.io.lock().unwrap();
-        let mut fsa = &mut *io_guard;
-
-        let inode_map_digest = intern_inode_map(&mut fsa, &inode_map);
-        let next_ino = inode_map.next_ino();
-        drop(inode_map);
-
-        let inode_data_digest = {
-            let map = self.inode_data.lock().unwrap();
-            intern_u64_digest_map(&mut fsa, &map)
-        };
-        let dir_data_digest = {
-            let map = self.dir_data.lock().unwrap();
-            intern_u64_digest_map(&mut fsa, &map)
-        };
-        let manifest_data_digest = {
-            let map = self.manifest_data.lock().unwrap();
-            intern_u64_digest_map(&mut fsa, &map)
-        };
-        let xattr_data_digest = {
-            let map = self.xattr_data.lock().unwrap();
-            intern_u64_digest_map(&mut fsa, &map)
-        };
-        let refcount_data_digest = {
-            let rc = self.refcounts.lock().unwrap();
-            intern_key_u64_map(&mut fsa, &rc)
-        };
-
-        let mut root_bytes = Vec::with_capacity(root_rec::SIZE);
-        put_digest(&mut root_bytes, &inode_map_digest);
-        // root_dir_ino: always 1
-        root_bytes.extend_from_slice(&1u64.to_le_bytes());
-        root_bytes.extend_from_slice(&next_ino.to_le_bytes());
-        for d in [&inode_data_digest, &dir_data_digest, &manifest_data_digest,
-                  &xattr_data_digest, &refcount_data_digest] {
-            put_digest(&mut root_bytes, d);
-        }
-        // logical_bytes + inode_count: without them, loading would read every
-        // inode object just to sum the sizes (O(files) reads).
-        root_bytes.extend_from_slice(&self.logical_bytes.load(Ordering::Relaxed).to_le_bytes());
-        root_bytes.extend_from_slice(&self.inode_count.load(Ordering::Relaxed).to_le_bytes());
-        assert_eq!(root_bytes.len(), root_rec::SIZE, "root record size");
-        let root_digest = (&mut fsa).put_node(&root_bytes);
-        // Make every object written since the last commit durable before the
-        // root that refers to them is logged: after that, log rotation deletes
-        // the segments whose records hold the same data (#20).
-        io_guard.sync_written().map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
-        // Drop io_guard to release the lock before WAL logging
-        drop(io_guard);
-        // The file content that the root refers to must be durable too.
-        if let Some(f) = self.pre_root_sync.lock().unwrap().as_ref() {
-            f().map_err(|e| MetaError::Corrupted(format!("commit: content sync failed: {e}")))?;
-        }
-
-        // Update last_root so background GC can use it
-        *self.last_root.lock().unwrap() = Some(root_digest);
-
-        // Log RootUpdate to WAL AFTER all nodes are flushed to disk (crash-safe ordering).
-        // If we crash between flush and WAL write, the next mount will just re-commit.
-        self.log_wal_entry(&WalEntry::RootUpdate { root: root_digest });
-        self.rotate_wal(root_digest);
-
-        self.committed_changes.store(changes, Ordering::Relaxed);
-        Ok(root_digest)
+        // Changes made after the cut are left for the next commit.
+        let p = self.begin_commit()?;
+        self.finish_commit(p)
     }
 }
 
@@ -1196,7 +1422,10 @@ impl DictMetadataStore {
             logical_bytes: AtomicU64::new(initial_logical_bytes),
             inode_count: AtomicU64::new(initial_inode_count),
             wal: Mutex::new(None),
-            wal_failed: AtomicBool::new(false),
+            wal_fail_seq: AtomicU64::new(0),
+            wal_fail_cleared: AtomicU64::new(0),
+            commit_lock: Mutex::new(()),
+            commit_fault: std::sync::atomic::AtomicU8::new(0),
             last_root: Mutex::new(Some(*root)),
             snapshots_by_version: Mutex::new(HashMap::new()),
             snapshots_by_name: Mutex::new(HashMap::new()),

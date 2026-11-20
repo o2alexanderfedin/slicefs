@@ -9,7 +9,9 @@ mod fuse_callbacks;
 #[doc(hidden)]
 pub mod handlers;
 pub mod oplog;
+pub mod overlay;
 pub mod gc;
+pub mod gc_pacing;
 pub mod online_gc;
 #[cfg(target_os = "macos")]
 pub mod fuset_watch;

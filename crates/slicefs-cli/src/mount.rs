@@ -99,6 +99,7 @@ pub fn load_store(
     // Step 4: Reconstruct the metadata store on the chunk store (StoreIo), with the
     // write hash of `--hash` (recorded now, under the lock).
     crate::content::select_hash(store_path, hash)?;
+    chunk_store::retry::LOG_SYNCS.store(true, std::sync::atomic::Ordering::Relaxed);
     let io = Arc::new(Mutex::new(crate::content::store_io(store_path)?));
     let mut meta = DictMetadataStore::load_from_root(io.clone(), &root)
         .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;
@@ -356,11 +357,9 @@ pub fn run_mount(
     // by fsync before a crash. Then commit, which cuts the log. Not on a
     // snapshot mount (read-only; the log stays for the next normal mount).
     if snapshot_ref.is_none() {
-        let (_, _, pending) = metadata::segment::load_store_with_log(&store_path.join("segments"))
-            .map_err(|e| format!("failed to read the write log: {}", e))?;
-        if !pending.is_empty() {
-            let stats = crate::oplog::replay(&fs, &pending)
-                .map_err(|e| format!("write log replay failed: {}", e))?;
+        let stats = crate::oplog::replay_log(&fs, &store_path.join("segments"))
+            .map_err(|e| format!("write log replay failed: {}", e))?;
+        if stats.applied + stats.skipped > 0 {
             slicefs_traits::metadata::MetadataStore::commit(fs.meta().as_ref())
                 .map_err(|e| format!("commit after replay failed: {}", e))?;
             fs.meta().flush_wal().map_err(|e| format!("sync after replay failed: {}", e))?;

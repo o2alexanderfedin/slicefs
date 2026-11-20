@@ -46,10 +46,17 @@ pub enum Cmd {
         allow_other: bool,
         /// WAL durability strategy: per-op, periodic, flush-on-fsync, or no-wal.
         ///
-        /// - per-op (default): sync to disk after every mutation (strongest durability)
-        /// - flush-on-fsync: buffer mutations; flush on explicit fsync
-        /// - periodic: buffer mutations; flush on background timer or shutdown
+        /// - per-op (default): each completed request is written to the log file
+        ///   at once, so it survives a crash of the daemon; fsync, fsyncdir or a
+        ///   commit makes it survive a power loss (POSIX rules)
+        /// - flush-on-fsync: keep up to 4 MiB of records in RAM; write them to
+        ///   the log at fsync, at a commit, or when they pass 4 MiB
+        /// - periodic: as flush-on-fsync, and also sync the log every 5 s
         /// - no-wal: no write-ahead log (testing only; data loss on crash)
+        ///
+        /// After a crash with no fsync, flush-on-fsync and periodic can lose up
+        /// to the last 4 MiB of records, and a file can come back shorter: a
+        /// correct first part of the data that was written.
         #[arg(long, value_name = "STRATEGY")]
         wal_strategy: Option<String>,
         /// Mount a specific snapshot read-only (by version number or name).
@@ -72,7 +79,9 @@ pub enum Cmd {
         /// GC the stored objects while mounted: at most every SECS seconds,
         /// only when something was committed since the last GC, and with a
         /// gap of at least 10 times the last GC's duration
-        /// (0 = only when `slicefs gc` asks for one).
+        /// (0 = only when `slicefs gc` asks for one). With less than 5 % free
+        /// disk space, a GC starts at once, without this wait, while GCs free
+        /// at least 1 MiB. A failed GC backs off (1 s, 2 s, 4 s, ... up to SECS).
         #[arg(long, value_name = "SECS", default_value_t = crate::online_gc::DEFAULT_GC_INTERVAL_SECS)]
         gc_interval: u64,
         /// Compression of new file data in this mount: `zstd`, `zstd:LEVEL`
@@ -116,6 +125,11 @@ pub enum Cmd {
     Gc {
         /// Path to the SliceFS block store directory.
         store: PathBuf,
+        /// Full GC: an exact mark (sorted temp files in the store, bounded
+        /// RAM) and no holes, so every dead object goes. Slower than the
+        /// normal GC, which can keep a few dead objects.
+        #[arg(long)]
+        full: bool,
     },
 
     /// Manage snapshots for a SliceFS block store.

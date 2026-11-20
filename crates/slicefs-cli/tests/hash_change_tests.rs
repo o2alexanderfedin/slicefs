@@ -124,6 +124,14 @@ fn a_new_write_hash_keeps_old_files_and_lookups() {
     fs.meta().commit().unwrap();
     let stats = fs.gc_online(&AtomicBool::new(false)).unwrap().expect("not stopped");
     assert!(stats.removed_objects > 40, "{stats:?}");
+    // The live mark is a salted Bloom filter (#113): a false positive can keep
+    // a dead object for one GC. A later GC has a new salt and frees it.
+    for _ in 0..3 {
+        if [old_garbage_key, new_garbage_key].iter().all(|k| !fs.content().contains(&content::to_id(k))) {
+            break;
+        }
+        fs.gc_online(&AtomicBool::new(false)).unwrap().expect("not stopped");
+    }
     for k in [old_garbage_key, new_garbage_key] {
         assert!(!fs.content().contains(&content::to_id(&k)), "dead root of tag {:#04x} is freed", k.tag());
     }
