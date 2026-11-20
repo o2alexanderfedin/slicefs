@@ -10,30 +10,23 @@ High-ratio data deduplication that works transparently as a real, daily-driver f
 
 ## Current State
 
-**Shipped:** v2.0 Streaming Writes & Hardening (2026-11-17, tag `milestone-v2.0`). Public releases so far: v2.0.0, v2.0.1, v2.1.0.
+**Shipped:** v2.1 Store Index & Measurements (2026-11-20, release `v2.2.0`). Earlier: v2.0 (2026-11-17, tag `milestone-v2.0`). Public releases: v2.0.0, v2.0.1, v2.1.0, v2.2.0.
 
-- Chunk store: FastCDC v2020 (4/8/32 KiB) and BLAKE3-256, append-only packs, zstd per object, in-memory index.
-- Streaming writes for sequential writes; Buffered fallback for out-of-order writes.
-- Write log (#20) with replay after a crash and a clean cut at each commit; reachability GC, online at mount.
-- macOS: FUSE-T 1.2+ with FSKit only. Linux: libfuse.
+- Chunk store: FastCDC v2020 (4/8/32 KiB) and BLAKE3-256, append-only packs, zstd per object, on-disk chunk index (sorted runs, MANIFEST, Bloom filters, background merge): 2.2-3.3 B of RAM per object, a 100M-object store opens in 0.49 s.
+- Writes: streaming for sequential writes; random writes use per-file overlays with a fixed dirty limit and a shared dirty budget, so daemon memory does not grow with the file size.
+- Write log (#20) with replay after a crash, three modes (per-op, flush on fsync, periodic) and a clean generation switch at each commit; reachability GC, online at mount.
+- macOS: FUSE-T 1.2+ with FSKit only. Linux: libfuse. FUSE requests run on one thread.
 
-## Current Milestone: v2.1 Store Index & Measurements
+## Next Milestone
 
-**Goal:** Record the missing measurements, close the finished issues, and replace the in-memory chunk index with an on-disk index that does not need much RAM per object.
-
-**Target features:**
-- Close-out of the write log (#20): check its acceptance list against the tests and restate the FUSE-T NFS item for FSKit or Linux.
-- Pack-file measurements (#8): `slicefs seed` throughput and store size, before and after packs.
-- Index benchmark (#66): cold-open time, peak RSS and missing-index recovery at 1M/10M/100M objects.
-- On-disk chunk index (#85): sorted runs, a memtable and an in-memory filter, measured against the #66 baseline.
-- Commit cost of open Buffered files (#93): the write log gets only the bytes changed since the last commit.
-
-**Later candidates:** several roots, commits and refs (#86, with #87-#92; waits on the naming decision), prolly trees for metadata (#19), `slicefs rehash` (#62; needs a second hash algorithm first).
+Not defined yet. Candidates: multithreaded request handling (#22, #127; research note on file), idle-merge control (#141), several roots, commits and refs (#86, with #87-#92), prolly trees (#19, #110), `slicefs rehash` (#62), GC tuning (#121).
 
 <details>
-<summary>v2.0 milestone goal (archived)</summary>
+<summary>Earlier milestone goals (archived)</summary>
 
-**Goal:** Remove the file size limitation by streaming writes through data-id's incremental push API, remove write-path compression (dedup on raw content), and fix known v1.0 bugs.
+**v2.1:** Record the missing measurements, close the finished issues, and replace the in-memory chunk index with an on-disk index that does not need much RAM per object.
+
+**v2.0:** Remove the file size limitation by streaming writes through data-id's incremental push API, remove write-path compression (dedup on raw content), and fix known v1.0 bugs.
 
 </details>
 
@@ -62,13 +55,17 @@ High-ratio data deduplication that works transparently as a real, daily-driver f
 - ✓ Clean shutdown on SIGTERM/SIGINT/SIGHUP (final commit) — v2.0
 - ✓ Refcount overflow — superseded: refcounts replaced by reachability GC — v2.0
 
+### Validated (v2.1)
+
+- ✓ Write log close-out: every #20 acceptance item maps to a test or a follow-up issue — v2.1
+- ✓ Bounded memory for random writes; a commit re-logs only changed bytes (#98, #93) — v2.1
+- ✓ Pack-file measurements (#8) — v2.1
+- ✓ Chunk index benchmark (#66) — v2.1
+- ✓ On-disk chunk index (#85) — v2.1 (106-196 B -> 2.2-3.3 B of RAM per object)
+
 ### Active
 
-- [ ] Write log close-out (#20)
-- [ ] Pack-file measurements (#8)
-- [ ] Chunk index benchmark (#66)
-- [ ] On-disk chunk index (#85)
-- [ ] Commit re-logs only changed Buffered bytes (#93)
+(None: next milestone not defined yet; see Next Milestone)
 
 ### Out of Scope
 
@@ -77,14 +74,14 @@ High-ratio data deduplication that works transparently as a real, daily-driver f
 - Network protocol design — depends on distributed topology decisions
 - GUI or management UI — CLI-first
 - Windows support — winfsp-rs GPL-3 license issue, deferred
-- Segment-level compression (Option C) — deferred to v2.1 after streaming writes land
+- Segment-level compression (Option C) — not needed: zstd per stored object covers it
 
 ## Context
 
 - The owner has an existing technology repository with chunking/block-splitting work that will be integrated later
 - FUSE-T is the macOS FUSE implementation (kext-free, uses NFS under the hood)
 - The `fuser` Rust crate provides cross-platform FUSE bindings
-- This is a greenfield Rust project
+- Rust workspace with a vendored, patched fuser; CI runs Linux tests in Docker (with pjdfstest) and macOS tests with FSKit mounts
 - The architecture should anticipate distributed use but not build for it yet — clean interfaces at storage and metadata boundaries are the preparation
 
 ## Constraints
@@ -104,6 +101,9 @@ High-ratio data deduplication that works transparently as a real, daily-driver f
 | Pluggable storage backend | Enables future distributed backends without core changes | — Pending |
 | Block-level CAS deduplication | Proven approach, works across file types and workloads | ✓ Good; content-defined chunks (FastCDC) with full BLAKE3-256 IDs |
 | Defer distributed/decentralized to future milestone | Focus on solid local foundation first | — Pending |
+| Custom sorted-run chunk index, not fjall (v2.1) | 1.37 vs 2.12 B/object, 9 ms vs 0.65 s open at 10M; fjall refuses a second-process open | ✓ Good |
+| Never hold a whole file in RAM (v2.1) | 1 GiB files must not cost 1 GiB of daemon memory | ✓ Good (VmHWM 165 MiB for a 4 GiB file) |
+| FastCDC stays 4/8/32 KiB (v2.1) | Size-class ideas parked until measured | — Pending |
 
 ## Evolution
 
@@ -124,4 +124,4 @@ This document evolves at phase transitions and milestone boundaries.
 
 ---
 
-*Last updated: 2026-11-17 after start of milestone v2.1*
+*Last updated: 2026-11-20 after v2.1 milestone*
