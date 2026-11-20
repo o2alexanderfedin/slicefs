@@ -1,8 +1,8 @@
 ---
-status: awaiting_human_verify
+status: resolved
 trigger: "slowest single FUSE write in bigwrite is 5-8 s (1 GiB and 4 GiB, DIRTY_LIMIT 32 or 16 MiB); find the root cause"
 created: 2026-11-18T21:53:57Z
-updated: 2026-11-18T23:15:00Z
+updated: 2026-11-20T00:00:00Z
 ---
 
 ## Current Focus
@@ -278,3 +278,9 @@ verification:
   docker: bigwrite 1024/4096 PASS at e43a607 (probed, 3 runs), 1fe93b9 and 18f22ee (stock)
   guardrail_verdict: accepted
 files_changed: [crates/chunk-store/src/file.rs]
+
+## Owner check (2026-11-20)
+
+- `scripts/docker-linux-test/run.sh bigwrite` on develop e5e55e1: PASS. 1 GiB: max write 124 ms, max fsync 189 ms, VmHWM 106 MiB. 4 GiB: max write 709 ms, max fsync 190 ms, VmHWM 165 MiB (cap 256 MiB).
+- The 5-8 s writes are gone. The session is closed.
+- The not-done design options stay open in #22 and #127 (rebase off the FUSE thread, multithreaded requests) and #141 (idle merge).

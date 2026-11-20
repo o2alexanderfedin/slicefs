@@ -1561,8 +1561,8 @@ c447551 store allocates 1.00 bytes for each byte (290.0 MB for 288.6 MB).
 Store files after the FSKit Boost round trip (`scripts/macos-mount-test/boost-test.sh`,
 macOS CI run 44484947311, 2026-11-19, commit c921a11, Boost 1.85 tar and tree
 copied through an FSKit mount): 48 (packs/ 41, index/ 4, segments/ 1). The run
-passed (`RESULT fskit: 0 failure(s)`, `gc-freed: ok`). The time per step and
-the `fsync` and `write` time per call on FSKit are not measured yet.
+passed (`RESULT fskit: 0 failure(s)`, `gc-freed: ok`). The `fsync` and `write`
+time per call on FSKit are not measured yet.
 
 Time per step in that run (Boost 1.85: one tar and a tree of 77,655
 files; GitHub macOS runner, release build):

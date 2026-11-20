@@ -1,20 +1,27 @@
 ---
 phase: 16-chunk-index-benchmark
-verified: 2026-11-19T07:22:22Z
+verified: 2026-11-20T09:38:49Z
 status: passed
 score: 3/3 must-haves verified
 covered_files: [".planning/phases/16-chunk-index-benchmark/16-01-PLAN.md", ".planning/phases/16-chunk-index-benchmark/16-01-SUMMARY.md", ".planning/phases/16-chunk-index-benchmark/16-02-PLAN.md", ".planning/phases/16-chunk-index-benchmark/16-02-SUMMARY.md", ".planning/phases/16-chunk-index-benchmark/16-03-PLAN.md", ".planning/phases/16-chunk-index-benchmark/16-03-SUMMARY.md", "benchmarks/index-bench/Cargo.toml", "benchmarks/index-bench/README.md", "benchmarks/index-bench/src/backend.rs", "benchmarks/index-bench/src/main.rs", "benchmarks/index-bench/tests/cli_tests.rs", "docs/design/chunk-store.md", "scripts/docker-linux-test/run.sh"]
-covered_digest: "v4:sha256:6124587e53c532fcce56b5c7f22fd07c1064e9523b0aad598c0796ac36102e4e"
+covered_digest: "v4:sha256:0b9075a3fc3dc8bc9634d5599bc1767c9bdab2afb04b931eb0c84b332b29c877"
 behavior_unverified: 0
 overrides_applied: 0
+re_verification:
+  previous_status: passed
+  previous_score: 3/3
+  reason: "stale fingerprint: covered files changed after b4b5494 (index-bench, chunk-store.md, run.sh: #108, #111, #112, #113, cold-cache work)"
+  gaps_closed: []
+  gaps_remaining: []
+  regressions: []
 ---
 
 # Phase 16: Chunk index benchmark Verification Report
 
 **Phase Goal:** A baseline of the current in-memory index at 1M, 10M and 100M objects exists for #85
-**Verified:** 2026-11-19T07:22:22Z (retroactive, at develop b4b5494)
+**Verified:** 2026-11-20T09:38:49Z (on branch docs/v2.1-close-items = develop a7b29a2 plus planning-doc edits)
 **Status:** passed
-**Re-verification:** No (initial verification)
+**Re-verification:** Yes. The earlier report (2026-11-19, at b4b5494) was passed with no gaps. Its fingerprint was stale because later work changed the covered files: `git diff --stat b4b5494..HEAD` gives +1200/-77 lines in index-bench (main.rs, backend.rs, cli_tests.rs, README), `docs/design/chunk-store.md` and `run.sh`. Every truth was checked again against the current tree, not only for regressions.
 
 ## Goal Achievement
 
@@ -22,103 +29,114 @@ overrides_applied: 0
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| 1 | The benchmark reports cold-open time and peak RSS at 1M, 10M and 100M objects | VERIFIED (by an autonomous decision) | `step_open` (main.rs:456) reads `max_rss_bytes()` (ru_maxrss) and the current RSS before and after the timed `backend.open`. It prints wall and CPU time, and peak and steady B/object. `run` starts each step as a new process (`current_exe`, main.rs:758). `ChunkStoreBackend::open` calls `ChunkStore::open`, and that calls `open_with` (lib.rs:845-847). The doc "Open" table has macOS rows at 1M, 10M and 100M (0.964 / 12.844 / 141.241 s; peak 390 / 256 / 154 B/object). Here "cold open" means an open in a new process, with a warm page cache that is labelled. This is the decision [cold vs warm cache] in 16-CONTEXT.md line 23, under "Decided autonomously", and 16-02-PLAN line 216 repeats it. Every row is labelled `warm`. |
-| 2 | It reports hit and miss lookup throughput and the recovery time of a pack without an index file | VERIFIED | `step_lookup` (main.rs:557) makes a fixed-seed sample before any timing. It times `contains` on hits and on misses, and `put` on dedup hits. It fails if a hit is missing, if a miss is found, or if the count changes. `step_recover` (main.rs:625) calls `drop_index` (which renames the `.idx` files into `bench-saved`, backend.rs:229, rename at line 258) before the timed open. Then it calls `restore_index` on both the success and the error path. The doc "Lookups" and "Recovery" tables have rows for macOS 1M/10M/100M and Linux 1M/10M, with the scopes one and all and the modes rw and ro. |
-| 3 | The results and the RAM per object are documented | VERIFIED | `docs/design/chunk-store.md` line 307 has `### Index baseline (#66)`: the method, the machine, commit 321a443, the load, and the Store, Open, Lookups and Recovery tables. Peak and steady RSS B/object are given (at 100M on macOS: 154 and 106). The scan MB/s comes from the tool and from CPU time, with notes. `### Index results (#85)` (line 461) compares Phase 17 with this baseline. #66 is CLOSED as COMPLETED (2026-11-18T20:44:19Z) with a results comment. #85 has a comment that links to it (2026-11-18T20:44:21Z). |
+| 1 | The benchmark reports cold-open time and peak RSS at 1M, 10M and 100M objects | VERIFIED | `step_open` (main.rs:526) reads `max_rss_bytes()` before (545) and after (552) the timed `backend.open`. It prints `wall_s`, `cpu_s`, `peak_bytes_per_object` and `steady_bytes_per_object`, and checks that the object count equals the marker. `run` starts each step as a new process (`child`, `current_exe`, main.rs:1072-1073). `ChunkStoreBackend::open` calls `ChunkStore::open` (backend.rs:266-275), and that calls `Self::open_with` (crates/chunk-store/src/lib.rs:1135-1141). The doc "Open" table (chunk-store.md, in `### Index baseline (#66)` at line 330) has macOS rows at 1M/10M/100M (0.964 / 12.844 / 141.241 s; peak 390 / 256 / 154 B/object) and Linux rows at 1M/10M. "Cold open" = an open in a new process. The page cache is warm and labelled `warm` in each row. This is the decision in 16-CONTEXT.md, "Decided autonomously". The tool can now also do a real cold-cache open (`--drop-caches` on Linux, `--cache cold` after `sudo purge` on macOS, main.rs:528-541). |
+| 2 | It reports hit and miss lookup throughput and the recovery time of a pack without an index file | VERIFIED | `step_lookup` (main.rs:637) makes the fixed-seed hit and miss IDs before any timing (662-664). It times `contains` on hits and misses and the dedup-hit `put`, and it fails if a hit is not found. `step_recover` (main.rs:926) calls `drop_index` (backend.rs:278; moves the `.idx` files to `bench-saved` with `rename`, and puts them back if a move fails) before the timed open (947-951). Then it calls `restore_index` (backend.rs:321) on the success path and on the error path (959). After #112, `restore_index` also checks that a rebuilt `.idx` has the same entries as the saved copy, then puts the exact saved copy back. The doc has "Lookups" and "Recovery" tables: macOS 1M/10M/100M and Linux 1M/10M; scope one/all; mode rw/ro. |
+| 3 | The results and the RAM per object are documented | VERIFIED | `docs/design/chunk-store.md:330` `### Index baseline (#66)`: method, machines, commit `321a443`, load, and the Store, Open, Lookups and Recovery tables. It gives peak and steady RSS B/object (100M macOS: 154 / 106) and the scan MB/s from the tool and from CPU time. `### Index on disk (#85)` (line 233) says "about 100 to 150 bytes of RAM" and points to "Index baseline (#66)". `### Index results (#85)` (line 484) compares with the baseline. GitHub: #66 is CLOSED, stateReason COMPLETED (2026-11-18T20:44:19Z). #85 has a comment that names #66, at 2026-11-18T20:44:21Z. |
 
-**Score:** 3/3 roadmap truths verified (0 present, behavior-unverified). Plan truths: 16/16 verified (one is now in reworded text, see below).
+**Score:** 3/3 roadmap truths verified (0 present, behavior-unverified). Plan truths: 16/16 verified.
 
 ### Plan must-haves
 
-`query verify.artifacts`: 16-01 4/4, 16-02 3/3. `query verify.key-links`: 16-01 4/4, 16-02 2/2. 16-03 has no artifacts and no key links.
+`query verify.artifacts`: 16-01 4/4 (exit 0), 16-02 3/3 (exit 0), 16-03 exit 66 (no artifacts declared). `query verify.key-links`: 16-01 4/4 (exit 0), 16-02 2/2 (exit 0), 16-03 exit 66 (no key links declared).
 
-| Plan | Truth (short) | Status | Evidence |
+| Plan | Truth (short) | Status | Evidence (current tree) |
 |------|---------------|--------|----------|
-| 16-01 | `create` makes N unique 8-byte objects through the public API, closes the store, writes the marker | VERIFIED | `object(i) = i.to_le_bytes()` (main.rs:285); `step_create` at 403; test `create_refuses_a_non_empty_dir` |
-| 16-01 | `open` in its own process reports wall/CPU time, peak RSS (ru_maxrss after - before), current RSS, per object, objects=N | VERIFIED | main.rs:456-500 |
-| 16-01 | `lookup` reports contains hit/miss and put dedup-hit throughput; the store is unchanged | VERIFIED | main.rs:557-623; test `lookup_finds_hits_not_misses_and_does_not_change_the_store` |
-| 16-01 | `recover --packs 1\|all [--read-only]` removes .idx, times the scan open, names sealed/active, restores every .idx | VERIFIED | main.rs:625-700; tests `recover_on_a_multi_pack_store_restores_every_idx` and `recover_on_a_one_pack_store_takes_the_active_pack_path` |
-| 16-01 | `run` starts itself once per step and prints markdown tables with an OS column | VERIFIED | `current_exe` (758); `table()` (808) with an "OS" column (923, 946, 980, 1036); `os_label()` |
-| 16-01 | Every store call goes through the Backend and Store traits | VERIFIED | key link `backend_by_name` found; `trait Backend` (backend.rs:91); Phase 17 added a backend option without changing the step structure |
-| 16-01 | Every subcommand except create refuses a dir without the marker; create refuses a non-empty dir | VERIFIED | tests `open_refuses_...`, `lookup_refuses_...`, `recover_refuses_a_dir_without_the_marker`, `create_refuses_a_non_empty_dir` |
-| 16-02 | README covers build, 1M/10M/100M stores outside the repo, each step, each key, cold-cache numbers | VERIFIED | README line 15 ("D is a directory OUTSIDE the repo"), line 18 (100M run), "## Cache state" (lines 112-119) |
-| 16-02 | `run.sh index-bench SIZES...` builds and runs on a container volume, with no FUSE device and no mount | VERIFIED | run.sh:27-39: a plain `docker run` without `--device /dev/fuse`, SYS_ADMIN or `RUN`; volume `slicefs-index-bench` |
-| 16-02 | `### Index baseline (#66)` with the open, RSS, lookup, recovery and scan numbers at 1M/10M/100M (macOS) and 1M/10M (Linux) | VERIFIED | Lines 307-460 |
-| 16-02 | The "Index in memory" text gives the measured RAM per object, not the old estimate | VERIFIED (text reworded later) | The "57 bytes" estimate is gone (0 hits). Phase 17 renamed the section to `### Index on disk (#85)` (line 229). It says "about 100 to 150 bytes of RAM for each object" and points to "Index baseline (#66)" |
-| 16-02 | Each table names the machine, OS, commit, file system and cache state; no home path | VERIFIED | Method and machine lines; Cache column; grep for `/Users/` and `~/`: 0 hits |
-| 16-03 | Nothing posted before the phase PR is merged and the CI of the merge commit is green | VERIFIED | PR #99 was merged into develop at 2026-11-18T20:36:17Z, and CI on 6296eb6 succeeded at 20:43:47Z. The posts are at 20:44:17Z (#66) and 20:44:21Z (#85). The plan text says "merged into main", but the project merges phase PRs into develop |
-| 16-03 | #66 has a results comment with a pointer to the doc, and is closed as completed | VERIFIED | stateReason COMPLETED; the comment names "Index baseline" |
-| 16-03 | #85 has a comment that links the #66 results as its baseline | VERIFIED | Comment at 2026-11-18T20:44:21Z |
-| 16-03 | No home path and no words about licenses in the public text | VERIFIED | grep of both comments: 0 hits |
+| 16-01 | `create` makes N unique 8-byte objects through the public API, closes the store, writes the marker | VERIFIED | `object(i)` = 8 bytes of `i` (main.rs:344); `step_create` 462; tests `create_refuses_a_non_empty_dir`, `create_counts_the_whole_store` |
+| 16-01 | `open` in its own process reports wall/CPU time, peak RSS (ru_maxrss after - before), current RSS, per object, objects=N | VERIFIED | main.rs:526-597; test `open_reports_rss_per_object` |
+| 16-01 | `lookup` reports contains hit/miss and put dedup-hit throughput; the store is unchanged | VERIFIED | main.rs:637-; test `lookup_finds_hits_not_misses_and_does_not_change_the_store` |
+| 16-01 | `recover --packs 1\|all [--read-only]` removes .idx, times the scan open, names sealed/active, restores every .idx | VERIFIED | main.rs:926-1000; tests `recover_on_a_multi_pack_store_restores_every_idx` (checks `assert_unchanged` after each of the four modes) and `recover_on_a_one_pack_store_takes_the_active_pack_path`; green in CI on a7b29a2 |
+| 16-01 | `run` starts itself once per step and prints markdown tables with an OS column | VERIFIED | `child` / `current_exe` (1072-1073); `table()` (1123); "OS" column (1240, 1263, 1297, 1361); `os_label()` (1106); test `run_creates_and_opens_a_small_store` |
+| 16-01 | Every store call goes through the Backend and Store traits | VERIFIED | `trait Backend` (backend.rs:106), `impl Backend for ChunkStoreBackend` (247), `backend_by_name` (385, used at main.rs:150) |
+| 16-01 | Every subcommand except create refuses a dir without the marker; create refuses a non-empty dir | VERIFIED | tests `open_refuses_a_dir_without_the_marker`, `lookup_refuses_...`, `recover_refuses_a_dir_without_the_marker`, `create_refuses_a_non_empty_dir` |
+| 16-02 | README covers build, 1M/10M/100M stores outside the repo, each step, each key, cold-cache numbers | VERIFIED | README "## Run" (line 9; line 15 "D is a directory OUTSIDE the repo"; line 18 the 100M run), "## Steps", "## Output", "## Cache state" (line 128: Linux `--drop-caches`, macOS `sudo purge` + `--cache cold`) |
+| 16-02 | `run.sh index-bench SIZES...` builds and runs on a container volume, with no FUSE device and no mount | VERIFIED | run.sh:28-40: a plain `docker run` with no `--device /dev/fuse`, no SYS_ADMIN, no `RUN`; volume `slicefs-index-bench`. A separate `index-bench-cold` mode (41-69) was added later for the privileged cold run. |
+| 16-02 | `### Index baseline (#66)` with open, RSS, lookup, recovery and scan numbers at 1M/10M/100M (macOS) and 1M/10M (Linux) | VERIFIED | chunk-store.md:330-483 |
+| 16-02 | The "Index in memory" text gives the measured RAM per object, not the old estimate | VERIFIED (section renamed later) | "57 bytes": 0 hits. Phase 17 renamed the section to `### Index on disk (#85)` (line 233). It says "about 100 to 150 bytes of RAM" and points to "Index baseline (#66)" |
+| 16-02 | Each table names machine, OS, commit, file system and cache state; no home path | VERIFIED | Method and machine lines (340-347); Cache column; grep for `/Users/` and `~/` in chunk-store.md: 0 hits |
+| 16-03 | Nothing posted before the phase PR is merged and the CI of the merge commit is green | VERIFIED | Unchanged since the earlier report: PR #99 merged into develop at 2026-11-18T20:36:17Z, CI of 6296eb6 green at 20:43:47Z, posts at 20:44:17Z / 20:44:21Z. (The plan says "main"; the project merges phase PRs into develop.) |
+| 16-03 | #66 has a results comment with a pointer to the doc, and is closed as completed | VERIFIED | `gh issue view 66`: CLOSED, COMPLETED, 2026-11-18T20:44:19Z |
+| 16-03 | #85 has a comment that links the #66 results as its baseline | VERIFIED | `gh issue view 85`: comments that name #66 at 2026-11-18T20:44:21Z and 2026-11-19T07:06:51Z |
+| 16-03 | No home path and no words about licenses in the public text | VERIFIED | Unchanged since the earlier report (0 hits in both comments) |
 
 ### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `benchmarks/index-bench/src/main.rs` | create/open/lookup/recover/run steps | VERIFIED | 1086 lines; subcommand table at line 77; `step_create` 403, `step_open` 456, `step_lookup` 557, `step_recover` 625, `step_run` 817 |
-| `benchmarks/index-bench/src/backend.rs` | Backend trait (seam for Phase 17) | VERIFIED | `trait Backend` line 91, `impl Backend for ChunkStoreBackend` line 208 |
-| `benchmarks/index-bench/tests/cli_tests.rs` | CI-size tests | VERIFIED | 365 lines; tests for run, the open RSS keys, lookup hit/miss, recover (the idx files come back), and the refusals |
-| `benchmarks/index-bench/Cargo.toml` | `publish = false` bin crate | VERIFIED | gsd verify.artifacts |
+| `benchmarks/index-bench/src/main.rs` | create/open/lookup/recover/run steps | VERIFIED | 1413 lines; `step_create` 462, `step_open` 526, `step_lookup` 637, `step_recover` 926, `step_run` 1132; later steps `settle`, `rewrite`, `gc` were added by later phases |
+| `benchmarks/index-bench/src/backend.rs` | Backend trait (seam for Phase 17) | VERIFIED | 390 lines; `trait Backend` 106, `impl Backend for ChunkStoreBackend` 247 |
+| `benchmarks/index-bench/tests/cli_tests.rs` | CI-size tests | VERIFIED | 442 lines, 18 tests |
+| `benchmarks/index-bench/Cargo.toml` | `publish = false` bin crate | VERIFIED | gsd verify.artifacts; workspace member (Cargo.toml:9) |
 | `benchmarks/index-bench/README.md` | Run, output keys, cache state | VERIFIED | Sections Run, Steps, Output, Cache state, Disk and memory, Recovery paths, Linux, Other backends |
-| `scripts/docker-linux-test/run.sh` `index-bench)` | Linux run mode, no mount | VERIFIED | Lines 27-39 |
-| `docs/design/chunk-store.md` `### Index baseline (#66)` | Baseline tables | VERIFIED | Lines 307-460 |
+| `scripts/docker-linux-test/run.sh` `index-bench)` | Linux run mode, no mount | VERIFIED | Lines 28-40 |
+| `docs/design/chunk-store.md` `### Index baseline (#66)` | Baseline tables | VERIFIED | Lines 330-483 |
 
 ### Key Link Verification
 
 | From | To | Via | Status | Details |
 |------|----|----|--------|---------|
-| workspace `Cargo.toml` | index-bench crate | members entry | WIRED | gsd verify.key-links |
-| main.rs | backend.rs | `backend_by_name` | WIRED | gsd verify.key-links |
-| backend.rs | `ChunkStore::open_with` | `ChunkStore::open` -> `open_with` | WIRED | gsd verify.key-links; lib.rs:845-847 |
-| main.rs | chunk-store hash | `DEFAULT_HASHER` for the hit and miss IDs | WIRED | gsd verify.key-links; main.rs:291-292 |
-| design note | index-bench README | names the tool | WIRED | gsd verify.key-links |
-| run.sh | index-bench `run` | `index-bench run --dir` | WIRED | gsd verify.key-links |
-| index-bench tests | CI | `cargo test --workspace` (Linux Docker `run.sh all`; macOS job) | WIRED | PR #114: Linux pass (8m11s), macOS pass (2m9s). Develop CI for b4b5494 (run 44478418274): success |
+| workspace `Cargo.toml` | index-bench crate | members entry | WIRED | gsd verify.key-links; Cargo.toml:9 |
+| main.rs | backend.rs | `backend_by_name` | WIRED | gsd verify.key-links; main.rs:53, 150 |
+| backend.rs | `ChunkStore::open_with` | `ChunkStore::open` -> `open_with` | WIRED | gsd verify.key-links; lib.rs:1135-1141 |
+| main.rs | chunk-store hash | `DEFAULT_HASHER.id` for the hit and miss IDs | WIRED | gsd verify.key-links; main.rs:350-351 |
+| design note | index-bench README | names the tool | WIRED | gsd verify.key-links; chunk-store.md:332-333 |
+| run.sh | index-bench `run` | `index-bench run --dir` | WIRED | gsd verify.key-links; run.sh:38 |
+| index-bench tests | CI | `cargo test --workspace` (Linux Docker `run.sh all`, run.sh:24; macOS job, ci.yml:44-45) | WIRED | CI run 44704112946 on a7b29a2 (push to develop): Linux job success, macOS job success |
 | #85 | #66 baseline | issue comment | WIRED | Comment at 2026-11-18T20:44:21Z |
+
+### Data-Flow Trace (Level 4)
+
+| Artifact | Data Variable | Source | Produces Real Data | Status |
+|----------|---------------|--------|--------------------|--------|
+| `step_open` | `peak_bytes_per_object`, `wall_s` | `getrusage` ru_maxrss and `Instant` around a real `ChunkStore::open` | Yes (object count checked against the marker) | FLOWING |
+| `step_recover` | `wall_s`, `scanned_bytes` | timed `backend.open` after real `.idx` renames | Yes | FLOWING |
+| chunk-store.md baseline tables | numbers | tool output at commit 321a443 (per the doc's method lines) | Yes (static doc of a past run) | FLOWING |
 
 ### Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 |----------|---------|--------|--------|
-| The bench steps run and leave the store intact | `cargo test --workspace` in CI (includes `-p index-bench`) | PR #114 and develop b4b5494: green on Linux and macOS | PASS (CI) |
-| 1M/10M/100M runs | not run again (long; static evidence is enough for this audit) | - | SKIP |
+| The bench steps run and leave the store whole (incl. the recover restore invariant) | `cargo test --workspace` in CI (includes `-p index-bench`) | CI run 44704112946 on a7b29a2: Linux and macOS jobs success | PASS (CI) |
+| 1M/10M/100M runs | not run again (long; needs no mount but much disk and RAM; static doc evidence is enough) | - | SKIP |
 | Phase commits are merged | `git merge-base --is-ancestor` for 51ab6e3 4715e94 554e5a4 988f766 a184284 2f6710a 00931b6 | all are ancestors of HEAD | PASS |
+
+No test was run locally (other verifiers share the tree; CI on the same commit is green).
+
+### Probe Execution
+
+Not applicable: the phase declares no `probe-*.sh`.
 
 ### Requirements Coverage
 
 | Requirement | Source Plan | Description | Status | Evidence |
 |-------------|-------------|-------------|--------|----------|
-| BNCH-01 | 16-01, 16-02 | Stores with 1M, 10M, 100M small synthetic objects; cold-open time and peak RSS of `ChunkStore::open_with` | SATISFIED | 8-byte objects (104 B/object on disk; 1, 9 and 81 packs). Open time and peak RSS at all three sizes on macOS; on Linux only 1M and 10M (VM memory). "Cold open" = a new process with a warm, labelled cache (an autonomous CONTEXT decision) |
-| BNCH-02 | 16-01, 16-02 | Lookup throughput for a dedup hit and miss; recovery time of a pack without a valid index file | SATISFIED | Lookups table (contains hit/miss ns and per s; put dedup-hit ns). Recovery table (one/all x rw/ro; recovery open s; scan MB/s from the tool and from CPU time) |
-| BNCH-03 | 16-02, 16-03 | Results (RAM per object, scan throughput) documented as the baseline for #85 | SATISFIED | `### Index baseline (#66)`; #66 closed as completed with a results comment; #85 links to it; Phase 17 `### Index results (#85)` uses it |
+| BNCH-01 | 16-01, 16-02 | 1M, 10M, 100M small synthetic objects; cold-open time and peak RSS of `ChunkStore::open_with` | SATISFIED | 8-byte objects (104 B/object on disk; 1, 9 and 81 packs). Open time and peak RSS at all three sizes on macOS, 1M and 10M on Linux. "Cold open" = new process, warm labelled cache (CONTEXT decision) |
+| BNCH-02 | 16-01, 16-02 | Lookup throughput for dedup hit and miss; recovery time of a pack without a valid index file | SATISFIED | Lookups and Recovery tables |
+| BNCH-03 | 16-02, 16-03 | Results (RAM per object, scan throughput) documented as the baseline for #85 | SATISFIED | `### Index baseline (#66)`; #66 closed as completed; #85 links to it; `### Index results (#85)` uses it |
 
-No orphaned requirements. REQUIREMENTS.md maps only BNCH-01..03 to Phase 16, and plans claim all three.
+No orphaned requirements: REQUIREMENTS.md maps only BNCH-01..03 to Phase 16, and the plans claim all three. The milestone audit (`.planning/v2.1-MILESTONE-AUDIT.md`) also lists BNCH-01..03 as satisfied.
 
 ### Anti-Patterns Found
 
-None. There is no TBD, FIXME, XXX, TODO, HACK, `todo!` or `unimplemented!` in `benchmarks/index-bench/**` or `scripts/docker-linux-test/run.sh`.
+None. No TBD, FIXME, XXX, TODO, HACK, `todo!` or `unimplemented!` in `benchmarks/index-bench/**` or `scripts/docker-linux-test/run.sh`.
 
 ### Human Verification Required
 
-None. The plans have no `<human-check>` block. The 16-03 checkpoints (post on #66 and close it) are done, and #66 is closed.
+None. The plans have no `<human-check>` block. The 16-03 checkpoints (post on #66, close it) are done.
 
-### Non-critical gaps / tech debt
+### Non-critical notes / tech debt
 
-1. **No cold-page-cache numbers.** All rows are warm cache. The tool can do a cold run (`run --drop-caches` on Linux as root in a privileged container; on macOS, `sudo purge` and then `open --cache cold` by hand), but nobody ran it. The 16-CONTEXT decision accepts this, and the cache state is labelled.
-2. **Linux 100M was not run.** The OrbStack VM had 12.6 GB available, and the run needs about 25 GB. 100M exists only for macOS.
-3. **The timings were taken under heavy host load.** The load average was 80-140 on macOS, and the host swap grew during the 100M run. The wall-time "Extra s" is negative in 5 of 12 macOS and 3 of 8 Linux recovery rows, so the tool prints `n/a` there. Several "one" rows are within the noise.
-4. **The CPU-based scan columns were added to the doc by hand** ("Extra CPU s", "Scan MB/s (CPU)"). The tool does not print them, so a comparison must compute them the same way by hand.
-5. **Create and lookup ran one time only.** Open and recovery are the median of 3 runs. The macOS 1M lookup row is slow because of the load (a later run at lower load gave 430-756 ns per hit).
-6. **The baseline is tied to commit 321a443.** The `index-bench` at HEAD includes Phase 17 changes (on-disk index, `--memtable-limit`, index keys, a GC step). A run at HEAD measures the new index, not the in-memory baseline.
-7. **The raw output is outside the repo** (per SUMMARY; not checked): a scratch directory and the Docker volume `slicefs-index-bench`. Only the doc tables are versioned.
-8. **At 321a443, `disk_bytes` counted only `D/packs`** (a known limit in 16-01). Phase 17 fixed it (commit 0eb63bb, test `create_counts_the_whole_store`). This does not change the in-memory baseline, which had no index outside `packs/`.
-9. **Judgement call to note:** the verdict on SC1 and BNCH-01 rests on a CONTEXT decision marked "Decided autonomously". That decision defines "cold open" as a new process with a warm, labelled cache. The user can reverse it if a cold page cache was meant.
+1. **Warm-cache baseline only.** All baseline rows are warm cache. The tool now supports a real cold run, and the doc has a separate `### Index with a cold page cache` section (line 901), but it measures the on-disk index (#85), not the in-memory baseline. The doc says this (last note of the baseline section).
+2. **No Linux 100M.** The VM had 12.6 GB available and the run needs about 25 GB. Stated in the doc.
+3. **Noisy timings.** The load average was 80-140 on macOS. "Extra s" is negative in several recovery rows, so the tool prints `n/a`; the CPU-based columns were added by hand.
+4. **The baseline is tied to commit 321a443.** The index-bench at HEAD drives the on-disk index (Phase 17, #111, #112): a run at HEAD measures the new index, and `recover` now scans only packs at or above the index high-water mark. The baseline numbers cannot be reproduced at HEAD without checking out 321a443.
+5. **Raw output is outside the repo** (scratch dir and the Docker volume); only the doc tables are versioned.
+6. **SC1 rests on an autonomous CONTEXT decision** that defines "cold open" as a new process with a warm, labelled cache. The user can reverse it.
 
 ### Gaps Summary
 
-There are no blocking gaps. The tool exists, it is wired to `ChunkStore::open_with`, and CI tests it. The baseline is in the design note: 1M/10M/100M on macOS, 1M/10M on Linux. #66 is closed after the merge and green CI, #85 links to it, and Phase 17 has already used it. The open items are about the quality of the measurement (load, warm cache only, no Linux 100M), not about a missing deliverable.
+No gaps. Since the last report, later phases (#108, #111, #112, #113 and the cold-cache work) changed the tool and the doc a lot. The Phase 16 deliverables are all still there and wired: the create/open/lookup/recover/run steps, the Backend seam to `ChunkStore::open` -> `open_with`, the refusal and restore tests, the Linux run mode with no mount, and the `### Index baseline (#66)` section with the 1M/10M/100M numbers. CI on a7b29a2 is green on Linux and macOS. #66 is closed as completed and #85 links to it.
 
 ---
 
-_Verified: 2026-11-19T07:22:22Z_
+_Verified: 2026-11-20T09:38:49Z_
 _Verifier: Claude (gsd-verifier)_
