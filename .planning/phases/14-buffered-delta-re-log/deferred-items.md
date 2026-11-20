@@ -4,6 +4,8 @@
 
 ### Chunk store keeps unsynced pack bytes in RAM (up to one pack, 64 MiB)
 
+- **Status:** resolved
+
 **Resolved by 0285b2a** ("fix(chunk-store): bound the RAM copy of unsynced pack writes (#98)"): `RetryingPack` keeps at most `KEEP_LIMIT` unsynced bytes and syncs when it passes that limit (test in `crates/chunk-store/tests/retry_tests.rs`). The text below is the original record.
 
 - **Where:** `crates/chunk-store/src/retry.rs`, `RetryingPack::write_at`: `self.unsynced.push((offset, data.to_vec()))`. `ChunkStore::open` wraps every pack in this retry layer (`crates/chunk-store/src/lib.rs:452`). The list is cleared only by a sync: a commit (`pre_root_sync` -> `ChunkStore::sync`) or a pack seal (`lib.rs:899`, at `pack_limit` = 64 MiB).

@@ -27,8 +27,8 @@ const S_IFDIR: u32 = 0o040_000;
 /// Import a directory tree rooted at `source_dir` into a CAS store at `store_path`.
 ///
 /// Creates:
-/// - `<store_path>/packs/` — file content (chunk store)
-/// - `<store_path>/packs/` — metadata nodes and file content
+/// - `<store_path>/packs/` — metadata nodes and file content (chunk store)
+/// - `<store_path>/index/` — the on-disk chunk index
 /// - `<store_path>/segments/segment-000001.seg` — root update segment
 ///
 /// `hash` is `--hash`: the write hash of the new objects (`None`: the
