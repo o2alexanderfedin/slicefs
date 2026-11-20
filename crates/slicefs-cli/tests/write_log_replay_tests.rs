@@ -922,6 +922,12 @@ enum Window {
     AfterSyncs,
     /// The root segment is durable, the old segments are not deleted yet.
     AfterRoot,
+    /// A power loss while the root segment is written (before its sync): the
+    /// old segments are all there, and the root segment lost its last 3
+    /// bytes, has only its header, or is empty.
+    RootTorn,
+    RootHeaderOnly,
+    RootEmpty,
     /// The commit is done.
     Done,
     /// The commit is done, and an online GC ran beside its finish.
@@ -1050,16 +1056,27 @@ fn cut_window_scenario(fs: &SliceFsFilesystem, store: &Path, w: Window) {
             fs.meta().test_fail_next_commit_at(CommitFault::BeforeRoot);
             assert!(fs.commit_cut_finish(cut).is_err());
         }
-        Window::AfterRoot => {
+        Window::AfterRoot | Window::RootTorn | Window::RootHeaderOnly | Window::RootEmpty => {
             // The old segments are final at the cut: keep a copy, and put back
             // the ones the commit deletes, as a crash before the delete leaves them.
             let saved: Vec<(PathBuf, Vec<u8>)> = segment_paths(store).into_iter()
                 .map(|p| { let b = std::fs::read(&p).unwrap(); (p, b) }).collect();
             fs.commit_cut_finish(cut).unwrap();
+            let root_seg = segment_paths(store).into_iter()
+                .find(|p| !saved.iter().any(|(q, _)| q == p))
+                .expect("the commit wrote a root segment");
             for (p, b) in saved {
                 if !p.exists() {
                     std::fs::write(&p, b).unwrap();
                 }
+            }
+            let f = std::fs::OpenOptions::new().write(true).open(&root_seg).unwrap();
+            let len = f.metadata().unwrap().len();
+            match w {
+                Window::RootTorn => f.set_len(len - 3).unwrap(),
+                Window::RootHeaderOnly => f.set_len(16).unwrap(),
+                Window::RootEmpty => f.set_len(0).unwrap(),
+                _ => {}
             }
         }
         Window::Done => {
@@ -1088,8 +1105,10 @@ fn cut_window_scenario(fs: &SliceFsFilesystem, store: &Path, w: Window) {
 // root plus the replayed log: the same file system as before the crash.
 #[test]
 fn a_crash_between_the_cut_and_the_root_replays() {
-    for config in [WalConfig::PerOp, WalConfig::FlushOnFsync] {
-        for w in [Window::AfterCut, Window::AfterNodes, Window::AfterSyncs, Window::AfterRoot, Window::Done,
+    // Periodic with a 1 s timer: its syncs run beside the cut and the root install.
+    for config in [WalConfig::PerOp, WalConfig::FlushOnFsync, WalConfig::Periodic { interval_secs: 1 }] {
+        for w in [Window::AfterCut, Window::AfterNodes, Window::AfterSyncs, Window::AfterRoot,
+                  Window::RootTorn, Window::RootHeaderOnly, Window::RootEmpty, Window::Done,
                   Window::GcDuringFinish] {
             let dir = TempDir::new().unwrap();
             let live = {
