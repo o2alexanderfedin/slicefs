@@ -159,6 +159,23 @@ if mnt $R/s5d $R/m5d --commit-interval 0; then
   fi
 fi
 
+echo "== Phase 05e: periodic mode keeps a write with no fsync after its 5 s sync (write log, #133)"
+$B seed $R/s5e $R/src >/dev/null 2>&1
+# No commit: only the timer sync can keep these (below the 4 MiB cap, the
+# records stay in RAM until a sync, as in 05c2, where they are lost).
+if mnt $R/s5e $R/m5e --commit-interval 0 --wal-strategy periodic; then
+  head -c 300000 /dev/urandom > $R/g.bin
+  for i in 1 2 3; do cp $R/g.bin $R/m5e/g$i.bin; mv $R/m5e/g$i.bin $R/m5e/h$i.bin; sleep 1; done
+  sleep 6   # more than the 5 s timer after the last request; no fsync, no sync
+  kill -9 $MP; sleep 0.5
+  fusermount -uz $R/m5e 2>/dev/null || umount -l $R/m5e 2>/dev/null
+  if mnt $R/s5e $R/m5e --wal-strategy periodic; then
+    step periodic-write-survives-kill 30 bash -c "for i in 1 2 3; do cmp $R/g.bin $R/m5e/h\$i.bin && [ ! -e $R/m5e/g\$i.bin ] || exit 1; done"
+    umnt $R/m5e
+    step scrub-after-periodic-kill 120 $B scrub $R/s5e
+  fi
+fi
+
 echo "== FUSET-05: SIGTERM, SIGINT (Ctrl+C) and SIGHUP end the mount cleanly (final commit, no mount.lock)"
 # A background job ignores SIGINT; env --default-signal gives the mount the
 # default action, as a terminal does for Ctrl+C.
