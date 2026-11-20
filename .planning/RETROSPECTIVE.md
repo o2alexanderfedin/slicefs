@@ -29,9 +29,40 @@
 
 ---
 
+## Milestone: v2.1 — Store Index & Measurements
+
+**Shipped:** 2026-11-20
+**Phases:** 5 (13-17) | **Plans:** 27
+
+### What Was Built
+- On-disk chunk index (#85): sorted runs, MANIFEST, Bloom filters, mapped lookups, background merge, GC by tombstones. RAM per object 106-196 B -> 2.2-3.3 B; 100M-object open 141 s -> 0.49 s.
+- Bounded-memory random writes (#98, #93): per-file dirty limit and shared budget; 4 GiB file at VmHWM 165 MiB.
+- Measurements: pack files (#8) and index baseline (#66); write log close-out (#20) with crash tests per window and per WAL mode.
+
+### What Worked
+- A benchmark before the build (Phase 16) gave fixed targets for Phase 17 and settled custom runs against fjall with numbers.
+- Mutation checks on new crash tests (break the Cut-link check, see every case fail) proved the tests see the bug.
+- Docker bigwrite with a VmHWM cap turned the "no whole file in RAM" rule into a pass/fail check.
+
+### What Was Inefficient
+- Phase verifications went stale as later PRs touched covered files; all 5 had to be re-run at close.
+- One slow-write debug session spent many runs on host stalls (page-cache drops, fsync noise) that single runs cannot rank.
+- Plan wording (column lists, "manual run" notes) aged as later work improved the scripts.
+
+### Patterns Established
+- macOS FSKit mount checks run in CI (workflow_dispatch), never on the local Mac.
+- Close-out: re-run verifiers and the open-artifact audit before the milestone close.
+
+### Key Lessons
+- Keep a deferred item's status in its file current when a later commit fixes it.
+- Single timing runs on a shared VM host are noise for maxima; compare medians or counters.
+
+---
+
 ## Cross-Milestone Trends
 
 | Milestone | Phases | Plans | Requirements superseded |
 |-----------|--------|-------|-------------------------|
 | v1.0 | 7 | 24 | - |
 | v2.0 | 6 | 13 | 12/21 |
+| v2.1 | 5 | 27 | 0/19 |

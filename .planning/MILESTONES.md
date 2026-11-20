@@ -1,5 +1,23 @@
 # Milestones
 
+## v2.1 Store Index & Measurements (Shipped: 2026-11-20)
+
+**Phases completed:** 5 phases (13-17), 27 plans
+**Requirements:** 19/19 satisfied
+**Audit:** `.planning/milestones/v2.1-MILESTONE-AUDIT.md` (status passed; all 5 phase verifications passed on a7b29a2)
+**Release:** `v2.2.0` (git-flow; `v2.1.0` was already used by the FUSE-T 1.2 release)
+
+**What shipped (state at close):**
+- Write log close-out (#20): each acceptance item maps to a passing test or a follow-up issue; crash tests for every window of the generation switch, in all three WAL modes (PerOp, FlushOnFsync, Periodic).
+- Bounded-memory random writes (#98, #93): no whole-file buffer; per-file memory has a fixed limit and a shared dirty budget; a commit logs only the changed bytes. Docker bigwrite: VmHWM 106 MiB (1 GiB file), 165 MiB (4 GiB file), max write 124 / 709 ms. macOS FSKit 1 GiB copy: peak RSS 65 MiB.
+- Pack-file measurements (#8): seed throughput and store size before and after packs, in `docs/design/chunk-store.md`.
+- Chunk index benchmark (#66): `benchmarks/index-bench`, baseline at 1M/10M/100M objects.
+- On-disk chunk index (#85): sorted runs with a MANIFEST, Bloom filters, mapped page lookups, background size-tiered merge, GC by durable tombstones. 2.2-3.3 B of RAM per object (was 106-196 B); a 100M store opens in 0.49 s (was 141 s).
+
+**Known tech debt:** see the audit file (commit sync under the gate, timing `eprintln` lines, Phase 16 baseline warm-cache only). Open follow-ups: #22/#127 (multithreaded requests, rebase off the FUSE thread), #141 (idle merge).
+
+---
+
 ## v2.0 Streaming Writes & Hardening (Shipped: 2026-11-17)
 
 **Phases completed:** 6 phases (07.1, 8-12), 13 plans, 21 tasks
