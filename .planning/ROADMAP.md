@@ -236,7 +236,9 @@ Plans:
   6. With several handles on one inode in different modes (read-only, read-write, `O_APPEND`), the harness shows the POSIX.1 2.9.7 rules: a completed write through one handle is visible through every other handle, a read sees all or none of a concurrent write, and concurrent appends never overlap and lose no bytes. The research for this phase checks how the kernel FUSE client computes the append offset in the SliceFS mount mode
 **Plans**: 11 plans
 
-Plans (one plan per wave; executors run them in order):
+One plan per wave; executors run them in order.
+
+Plans:
 - [ ] 19-01-PLAN.md — Lock shim `chunk_store::sync` over parking_lot 0.12, rank checker, `deadlock-detect`, all hot-path locks migrated
 - [ ] 19-02-PLAN.md — Chunk-store lock tails (pack create, seal join, run write, KEEP_CAP wait, trust floor, pack open) off the store lock
 - [ ] 19-03-PLAN.md — Metadata hot path: `modify_inode`, sharded caches, cold loads and flushes off the locks, `create_inode_at`
