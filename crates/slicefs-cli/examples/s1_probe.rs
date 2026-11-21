@@ -100,7 +100,9 @@ impl Probe {
         let n = self.st.inflight.fetch_add(1, SeqCst) + 1;
         self.st.max_inflight.fetch_max(n, SeqCst);
         let unique = req.unique().0;
-        eprintln!("ARR seq={seq} unique={unique} inflight={n} t_ms={}", self.t0.elapsed().as_millis());
+        // The client script waits for `slow_read` before it starts its stats.
+        let tag = if matches!(kind, Kind::Read(_, true)) { " slow_read" } else { "" };
+        eprintln!("ARR seq={seq} unique={unique} inflight={n} t_ms={}{tag}", self.t0.elapsed().as_millis());
         self.tx.lock().unwrap().send(Job { seq, unique, kind }).unwrap();
     }
 }

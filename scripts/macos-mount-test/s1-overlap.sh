@@ -64,10 +64,21 @@ do_unmount() {
   fi
 }
 
-# One round: slow read in the background, 50 stats of new names after 50 ms.
+# One round: slow read in the background; the 50 stats of new names start only
+# after the probe logged the slow READ (`slow_read` on its ARR line), so the
+# READ is in flight when the stats run. `during` counts stats that ended before
+# dd ended. `first_stat_after_arr_ms` is the gap from the READ arrival log to
+# the first stat; it is a client-side bound (polling and python start-up).
 ROUND_PY='
 import os, sys, subprocess, threading, time
-m, i = sys.argv[1], sys.argv[2]
+m, i, errp = sys.argv[1], sys.argv[2], sys.argv[3]
+def seen():
+    try:
+        with open(errp) as f:
+            return sum(1 for l in f if "slow_read" in l)
+    except OSError:
+        return 0
+base = seen()
 t0 = time.monotonic()
 p = subprocess.Popen(["dd", "if=%s/slow%s" % (m, i), "of=/dev/null", "bs=4096", "count=1"],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -77,10 +88,19 @@ def waiter():
     done["t"] = time.monotonic()
 th = threading.Thread(target=waiter, daemon=True)
 th.start()
-time.sleep(0.05)
+while seen() <= base:
+    if time.monotonic() - t0 > 5:
+        p.kill()
+        print("  probe never logged the slow READ in 5 s")
+        sys.exit(5)
+    time.sleep(0.005)
+t_seen = time.monotonic()
 ends, lat = [], []
+first = None
 for j in range(50):
     s = time.monotonic()
+    if first is None:
+        first = (s - t_seen) * 1000.0
     try:
         os.stat("%s/f%s-%d" % (m, i, j))
     except OSError as e:
@@ -95,7 +115,8 @@ if "t" not in done:
     sys.exit(3)
 dd_ms = (done["t"] - t0) * 1000.0
 during = sum(1 for e in ends if e < done["t"])
-print("round=%s dd_ms=%.0f fast_stats_during_slow=%d max_stat_ms=%.0f" % (i, dd_ms, during, max(lat)))
+print("round=%s dd_ms=%.0f fast_stats_during_slow=%d max_stat_ms=%.0f first_stat_after_arr_ms=%.0f"
+      % (i, dd_ms, during, max(lat), first))
 sys.exit(0 if done["rc"] == 0 else 4)
 '
 
@@ -105,7 +126,7 @@ FAILS=0
 if waitmnt; then
   for i in 0 1 2 3 4; do
     # The python round has its own 10 s dd limit; this limit covers the stats.
-    runlim 60 python3 -c "$ROUND_PY" "$M" "$i" || FAILS=$((FAILS+1))
+    runlim 60 python3 -c "$ROUND_PY" "$M" "$i" "$W/probe.err" || FAILS=$((FAILS+1))
   done
   do_unmount || FAILS=$((FAILS+1))
 else
