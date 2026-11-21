@@ -68,6 +68,14 @@ fn lock_stats_report() {
     release(&fs, ino, fh);
     assert!(matches!(h::handle_readdir(&fs, ROOT, 0), ReaddirResult::Ok(_)), "readdir");
 
+    // Buffered log: requests wait in the `pending` buffer until the fsync.
+    let dir2 = TempDir::new().unwrap();
+    let fs2 = new_fs(dir2.path(), WalConfig::FlushOnFsync);
+    let (ino2, fh2) = create(&fs2, "b");
+    assert!(matches!(h::handle_write(&fs2, fh2, 0, &data[..4096]), h::WriteResult::Ok(_)), "write");
+    assert!(matches!(h::handle_fsync(&fs2, ino2, fh2), EmptyResult::Ok), "fsync");
+    release(&fs2, ino2, fh2);
+
     let snap = lock_stats::snapshot();
     for s in &snap {
         println!(
@@ -79,7 +87,7 @@ fn lock_stats_report() {
         );
     }
     let n = |label: &str| snap.iter().find(|s| s.label == label).map_or(0, |s| s.count);
-    for label in ["store", "io", "wal"] {
+    for label in ["store", "io", "wal", "wal_writer", "wal_pending", "open_files", "readers"] {
         assert!(n(label) > 0, "no samples for lock site {label}");
     }
 }
