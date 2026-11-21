@@ -1,6 +1,6 @@
 # docker host (OrbStack): Kernel Version: 7.2.12-orbstack-00394-gbecdd6130068;Operating System: OrbStack;CPUs: 32;Total Memory: 15.68GiB;
 # date 2026-11-21, scripts/docker-linux-test/run.sh s6, release build, container without --privileged
-# limit: pass 1 per-op ran first on a fresh container (cold caches); read it with pass 2
+# limit: pass 1 per-op was the first run in a fresh container and was slower than pass 2; the cause was not established (cold caches are a guess)
 # S6 small files, commit 98e3522, kernel 7.2.12-orbstack-00394-gbecdd6130068, store_fs=overlayfs
 # files per run 2000, 4096 bytes each, write then timed fsync then close; GC off
 # note: no WAL flusher yet: PerOp is compared with the buffered strategies
