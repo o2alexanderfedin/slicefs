@@ -17,9 +17,19 @@ High-ratio data deduplication that works transparently as a real, daily-driver f
 - Write log (#20) with replay after a crash, three modes (per-op, flush on fsync, periodic) and a clean generation switch at each commit; reachability GC, online at mount.
 - macOS: FUSE-T 1.2+ with FSKit only. Linux: libfuse. FUSE requests run on one thread.
 
-## Next Milestone
+## Current Milestone: v2.2 Concurrency & Store Evolution
 
-Not defined yet. Candidates: multithreaded request handling (#22, #127; research note on file), idle-merge control (#141), several roots, commits and refs (#86, with #87-#92), prolly trees (#19, #110), `slicefs rehash` (#62), GC tuning (#121).
+**Goal:** Handle FUSE requests on more than one thread with fine-grained locks, add `slicefs rehash`, and measure two store-format options (prolly trees, larger FastCDC profiles) before any default changes.
+
+**Target features:**
+- Spikes S1-S7 for multithreaded requests (#127); their results decide each migration step.
+- Fine-grained locks, no global lock on the hot path, read while write (#21).
+- FUSE session with more than one worker thread, on Linux and macOS FSKit (#22).
+- `slicefs rehash --to <algorithm>`: convert all objects to one hash algorithm, crash-safe (#62).
+- Configurable FastCDC min/avg/max per store, with a benchmark of the profiles; the default stays 4/8/32 KiB unless the user decides otherwise (#67).
+- Prolly-tree evaluation for metadata maps and file manifests: prototype for one map and a benchmark against full re-serialization (#19).
+
+Other candidates (not in v2.2): idle-merge control (#141), several roots, commits and refs (#86, with #87-#92), index layout again (#110), GC tuning (#121).
 
 <details>
 <summary>Earlier milestone goals (archived)</summary>
@@ -65,7 +75,10 @@ Not defined yet. Candidates: multithreaded request handling (#22, #127; research
 
 ### Active
 
-(None: next milestone not defined yet; see Next Milestone)
+- [ ] Multithreaded request handling: spikes (#127), fine-grained locks (#21), worker pool (#22)
+- [ ] `slicefs rehash` (#62)
+- [ ] Configurable FastCDC profiles and benchmark (#67)
+- [ ] Prolly-tree evaluation (#19)
 
 ### Out of Scope
 
@@ -124,4 +137,4 @@ This document evolves at phase transitions and milestone boundaries.
 
 ---
 
-*Last updated: 2026-11-20 after v2.1 milestone*
+*Last updated: 2026-11-20 after start of milestone v2.2*

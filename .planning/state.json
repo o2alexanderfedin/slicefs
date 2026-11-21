@@ -1,38 +1,12 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v2.1 — Store Index & Measurements",
-  "phases": [
-    {
-      "number": "13",
-      "name": "Write log close-out",
-      "status": "complete"
-    },
-    {
-      "number": "14",
-      "name": "Bounded-memory random writes",
-      "status": "complete"
-    },
-    {
-      "number": "15",
-      "name": "Pack-file measurements",
-      "status": "complete"
-    },
-    {
-      "number": "16",
-      "name": "Chunk index benchmark",
-      "status": "complete"
-    },
-    {
-      "number": "17",
-      "name": "On-disk chunk index",
-      "status": "complete"
-    }
-  ],
+  "milestone": "v2.2",
+  "phases": [],
   "next": {
-    "command": "/gsd-progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd-discuss-phase",
+    "label": "Discuss the first phase",
+    "reason": "Project initialized — plan your first phase"
   },
-  "updated_at": "2026-11-20T09:56:20.912Z"
+  "updated_at": "2026-11-21T01:52:41.529Z"
 }
