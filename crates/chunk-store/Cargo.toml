@@ -12,11 +12,16 @@ crc32c = "0.6"
 thiserror.workspace = true
 libc.workspace = true
 tracing.workspace = true
+# Lock timing recorder, only with the `lock-stats` feature (see `lock_stats`).
+hdrhistogram = { version = "7.6", default-features = false, optional = true }
 
 [features]
 # A second, test-only hasher (`hash::TestKeyedBlake3`) in the registry, for
 # tests of hash changes in the crates that use the store.
 test-hasher = []
+# Hold and wait times of the store lock and other locks, as hdrhistogram
+# histograms (`lock_stats::snapshot`). Off by default: no timing, no dependency.
+lock-stats = ["dep:hdrhistogram"]
 
 [dev-dependencies]
 tempfile.workspace = true

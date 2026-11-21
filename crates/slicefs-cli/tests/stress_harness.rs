@@ -316,6 +316,7 @@ struct Report {
 }
 
 fn run_one_file(cfg: Config) -> Report {
+    chunk_store::lock_stats::reset();
     let dir = TempDir::new().unwrap();
     let fs = new_fs(dir.path(), cfg.wal.clone());
     let ino = match h::handle_create(&fs, ROOT, "one-file", S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR) {
@@ -398,7 +399,23 @@ fn print_report(r: &Report) {
             us(h.max())
         );
     }
-    println!("lock-stats off");
+    if chunk_store::lock_stats::ENABLED {
+        for st in chunk_store::lock_stats::snapshot().iter().filter(|s| s.count > 0) {
+            println!(
+                "lock site={} n={} wait_p50_us={:.1} wait_p99_us={:.1} wait_max_us={:.1} hold_p50_us={:.1} hold_p99_us={:.1} hold_max_us={:.1}",
+                st.label,
+                st.count,
+                us(st.wait_p50_ns),
+                us(st.wait_p99_ns),
+                us(st.wait_max_ns),
+                us(st.hold_p50_ns),
+                us(st.hold_p99_ns),
+                us(st.hold_max_ns)
+            );
+        }
+    } else {
+        println!("lock-stats off (build with --features lock-stats)");
+    }
 }
 
 fn assert_clean(seed: u64, r: &Report) {

@@ -30,6 +30,7 @@ pub mod file;
 pub mod hash;
 mod index;
 mod locality;
+pub mod lock_stats;
 #[cfg(test)]
 mod locality_tests;
 mod mark;
@@ -40,6 +41,7 @@ pub mod retry;
 mod run;
 pub mod mem;
 
+use crate::lock_stats::Site;
 use crate::index::{Counts, Hwm, Index, MergeOut, Snapshot};
 use crate::run::Run;
 use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK, SyncWait};
@@ -856,7 +858,7 @@ impl Merger {
         let (io, index) = (&*self.io, &*self.index);
         let _one = self.ctl.step.lock().unwrap();
         let plan = {
-            let inner = self.inner.lock().unwrap();
+            let inner = lock_stats::lock(&self.inner, Site::Store);
             if inner.failed {
                 return Ok(false);
             }
@@ -875,7 +877,7 @@ impl Merger {
             Ok(None) => return Ok(false),
             Err(e) => {
                 if let Error::Corrupt(m) = &e {
-                    let _inner = self.inner.lock().unwrap();
+                    let _inner = lock_stats::lock(&self.inner, Site::Store);
                     if !index.rebuild_requested() {
                         if let Err(e) = index.request_rebuild(io, m) {
                             tracing::warn!("chunk store: cannot ask for a rebuild of the index: {e}");
@@ -887,7 +889,7 @@ impl Merger {
         };
         between();
         let gone = {
-            let inner = self.inner.lock().unwrap();
+            let inner = lock_stats::lock(&self.inner, Site::Store);
             if inner.failed {
                 drop(inner);
                 if let MergeOut::Run(r) = out {
@@ -1337,7 +1339,7 @@ impl ChunkStore {
         let found = self.dedup_lookup(&id)?;
         self.after_lookup();
         if found {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = lock_stats::lock(&self.inner, Site::Store);
             inner.touch(id);
             if self.unchanged(gen, &id) || self.locked_lookup(&mut inner, &id)? {
                 return Ok(id);
@@ -1357,7 +1359,7 @@ impl ChunkStore {
             let stored = payload.len() as u32;
 
             let r = (|| {
-                let mut inner = self.inner.lock().unwrap();
+                let mut inner = lock_stats::lock(&self.inner, Site::Store);
                 inner.touch(id);
                 // Another put of the same bytes, or a flush, merge or GC,
                 // since the lookup: look up again.
@@ -1393,7 +1395,7 @@ impl ChunkStore {
             Ok(Some(loc)) => loc,
             Ok(None) => return Ok(false),
             Err(_) => {
-                self.raise_trust_floor(&mut self.inner.lock().unwrap())?;
+                self.raise_trust_floor(&mut lock_stats::lock(&self.inner, Site::Store))?;
                 return Ok(false);
             }
         };
@@ -1490,7 +1492,7 @@ impl ChunkStore {
     /// Returns the last pack number that the GC may change.
     pub fn gc_begin(&self) -> Result<u64> {
         let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = lock_stats::lock(&self.inner, Site::Store);
         inner.check()?;
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
             self.seal(&mut inner)?;
@@ -1507,7 +1509,7 @@ impl ChunkStore {
     pub fn gc_begin_full(&self) -> Result<u64> {
         let dir = self.gc_tmp()?;
         let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = lock_stats::lock(&self.inner, Site::Store);
         inner.check()?;
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
             self.seal(&mut inner)?;
@@ -1537,7 +1539,7 @@ impl ChunkStore {
     /// End a GC without deleting anything (for example after a failed mark).
     pub fn gc_abort(&self) {
         let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
-        self.inner.lock().unwrap().touched = None;
+        lock_stats::lock(&self.inner, Site::Store).touched = None;
     }
 
     /// End a GC: remove every object of the packs up to `boundary` that is
@@ -1658,7 +1660,7 @@ impl ChunkStore {
 
     /// The store lock, with the time it is held added to `holds`.
     fn held<'a>(&'a self, holds: &'a Holds) -> Held<'a> {
-        let g = self.inner.lock().unwrap();
+        let g = lock_stats::lock(&self.inner, Site::Store);
         Held { g, at: Instant::now(), holds }
     }
 
@@ -2354,7 +2356,7 @@ impl ChunkStore {
         self.after_lookup();
         let loc = looked?.ok_or(Error::Missing(*id))?;
         let (loc, file) = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = lock_stats::lock(&self.inner, Site::Store);
             let loc = if self.unchanged(gen, id) { loc } else { inner.index.get(id)?.ok_or(Error::Missing(*id))? };
             inner.touch(*id);
             match inner.reader(&*self.io, loc.pack) {
@@ -2406,7 +2408,7 @@ impl ChunkStore {
         if !suspect {
             return err;
         }
-        let inner = self.inner.lock().unwrap();
+        let inner = lock_stats::lock(&self.inner, Site::Store);
         match inner.index.get_verified(id) {
             Err(Error::Corrupt(m)) => {
                 if !self.opts.read_only && !inner.index.rebuild_requested() {
@@ -2439,7 +2441,7 @@ impl ChunkStore {
 
     /// The shape of the index now.
     pub fn index_info(&self) -> IndexInfo {
-        let _inner = self.inner.lock().unwrap();
+        let _inner = lock_stats::lock(&self.inner, Site::Store);
         let ix = &self.index;
         let hwm = ix.hwm();
         let runs = ix.runs();
@@ -2520,7 +2522,7 @@ impl ChunkStore {
         if self.opts.read_only {
             return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
         }
-        let inner = self.inner.lock().unwrap();
+        let inner = lock_stats::lock(&self.inner, Site::Store);
         inner.index.request_rebuild(&*self.io, "a caller asked for a rebuild")
     }
 
@@ -2540,7 +2542,7 @@ impl ChunkStore {
         // the lock, then has only the bytes put since, and gives the outcome.
         // The same for a background seal.
         let (seal, wait) = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = lock_stats::lock(&self.inner, Site::Store);
             inner.check()?;
             let seal = inner.sealing.as_ref().map(|s| s.done.clone());
             (seal, inner.active.as_mut().filter(|a| a.dirty).and_then(|a| a.file.sync_soon()))
@@ -2548,7 +2550,7 @@ impl ChunkStore {
         for w in seal.iter().chain(&wait) {
             w.wait();
         }
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = lock_stats::lock(&self.inner, Site::Store);
         inner.check()?;
         inner.sync_active()?;
         if inner.dir_dirty {
@@ -2562,7 +2564,7 @@ impl ChunkStore {
     /// not flush the memtable: an open replays the records above the hwm.
     pub fn close(&self) -> Result<()> {
         self.stop_merges();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = lock_stats::lock(&self.inner, Site::Store);
         inner.check()?;
         if inner.active.is_some() {
             self.seal(&mut inner)?;
@@ -2594,7 +2596,7 @@ impl ChunkStore {
 
     /// Current counts.
     pub fn stats(&self) -> Stats {
-        self.inner.lock().unwrap().stats
+        lock_stats::lock(&self.inner, Site::Store).stats
     }
 
     /// An empty GC mark for this store: a [`LiveFilter`] for as many keys
@@ -2656,6 +2658,7 @@ impl Drop for ChunkStore {
     fn drop(&mut self) {
         self.stop_merges();
         // Let a background seal end; its error is lost (nothing was promised).
+        // A drop must not panic on a poisoned lock, so this site is not timed.
         if let Ok(mut inner) = self.inner.lock() {
             let _ = inner.join_seal();
         }
@@ -2744,7 +2747,7 @@ struct Holds {
 
 /// The store lock, held for a GC: its hold time goes into `Holds`.
 struct Held<'a> {
-    g: std::sync::MutexGuard<'a, Inner>,
+    g: lock_stats::Guard<'a, Inner>,
     at: Instant,
     holds: &'a Holds,
 }

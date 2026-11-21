@@ -10,6 +10,11 @@ description = "SliceFS FUSE binary — mounts, seeds, and manages SliceFS volume
 name = "slicefs"
 path = "src/main.rs"
 
+[features]
+# Lock hold and wait times in the stress harness report (Plan 02 adds the
+# `metadata` entry).
+lock-stats = ["chunk-store/lock-stats"]
+
 [dependencies]
 slicefs-traits       = { path = "../slicefs-traits" }
 metadata             = { path = "../metadata" }
