@@ -40,6 +40,15 @@ Out of scope: the dirty budget flusher and `keep_budget` (Phase 20), the worker 
 - [Tests] Q: "How are LOCK-05 and the POSIX rules shown?" → Selected: "Extend the Phase 18 harness: several handles per inode with read-only, read-write and `O_APPEND` modes; checks for visibility across handles, all-or-none reads, and appends that never overlap; lock wait rows show that readers do not wait for writer I/O; many-files runs show no cross-file contention" — test code.
 - [Research] Q: "Append offset?" → Selected: "The phase research checks how the kernel FUSE client computes the `O_APPEND` offset in the SliceFS mount mode; the daemon takes the end-of-file offset from the current size under the file lock" — research item.
 
+### Answers to the research open questions (decided autonomously, 2026-11-21)
+- [Scope] `keep_budget` cannot stay as written once state no longer leaves `open_files`. This phase adapts it to per-cell dirty atomics and a global total (each writer steps only its own file inline). The background flusher and the throttle stay in Phase 20 (LOCK-02, LOCK-06) — the research shows the old take-out path cannot survive the cell change.
+- [LOCK-01] A page-cache `pwrite` (no fsync) under `ChunkStore::inner` does not count as disk I/O. Pack create, seal join, index flush, fsync and the `KEEP_CAP` wait do count, and must leave the lock.
+- [LOCK-03] Ascending stripe order is the way to get "two inodes in increasing inode order": it gives the same deadlock freedom and also covers two inodes in one stripe. The plan that adds the stripes updates the LOCK-03 text and ROADMAP criterion 4 to say "in ascending stripe order (inode number hashed to a stripe)".
+- [Rank checker] Model the std commit gate in the rank checker through helper methods (rank 1), so a test fails when a cell or stripe is taken without a shared gate hold.
+- [O_APPEND] No extra macOS CI probe. The daemon keeps a per-handle append flag, takes EOF under the cell lock, and logs the effective offset; this is correct whatever offset the kernel sends.
+- [Deferred] The ancestor check for cross-directory rename is not in this phase (see Deferred Ideas).
+- [Std types kept] `Arc<Mutex<StoreIo>>` (about 115 construction sites) and the std commit gate stay std types in this phase, as the research recommends.
+
 ### Claude's Discretion
 - Shard counts, stripe count, and the exact shim API, inside the rules above.
 
@@ -75,6 +84,6 @@ Out of scope: the dirty budget flusher and `keep_budget` (Phase 20), the worker 
 <deferred>
 ## Deferred Ideas
 
-None — discussion stayed within phase scope.
+- Ancestor check for cross-directory rename (a directory must not move into its own subtree under concurrency). It does not exist today; add it as a follow-up issue or a later phase.
 
 </deferred>
