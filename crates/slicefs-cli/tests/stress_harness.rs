@@ -1177,7 +1177,7 @@ fn serialize_off_target() {
 //
 // The lock recorder is process-global, so each spike test runs alone
 // (`-- --ignored --exact <name>`) and calls `lock_stats::reset()` before it
-// measures. All of them are `#[ignore]`, so the suite and CI never run them.
+// measures. All of them are ignored tests, so the suite and CI never run them.
 
 const MIB: usize = 1 << 20;
 const MIB_BLOCKS: usize = MIB / BLOCK;
