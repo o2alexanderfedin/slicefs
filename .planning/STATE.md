@@ -1,19 +1,16 @@
 ---
 gsd_state_version: "1.0"
-milestone: v2.1
-milestone_name: Store Index & Measurements
-status: Awaiting next milestone
-stopped_at: milestone v2.1 closed (2026-11-20)
-last_updated: "2026-11-20T09:56:20.879Z"
+milestone: v2.2
+milestone_name: Concurrency & Store Evolution
+status: planning
+last_updated: "2026-11-21T01:52:41.522Z"
 last_activity: 2026-11-20
-last_activity_desc: Milestone v2.1 completed and archived
-state_head: 461340b76efb656e597b938b0602485a45551078
 progress:
-  total_phases: 5
-  completed_phases: 5
-  total_plans: 27
-  completed_plans: 27
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -27,10 +24,11 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Phase: Milestone v2.1 complete (phases 13-17, 27 plans)
+Phase: Not started (defining requirements)
 Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-11-20 — Milestone v2.1 completed and archived; release v2.2.0
+Status: Defining requirements
+Last activity: 2026-11-20 — Milestone v2.2 started
+
 
 ## Accumulated Context
 
