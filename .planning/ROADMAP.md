@@ -239,16 +239,37 @@ Plans:
 One plan per wave; executors run them in order.
 
 Plans:
+**Wave 1**
 - [ ] 19-01-PLAN.md — Lock shim `chunk_store::sync` over parking_lot 0.12, rank checker, `deadlock-detect`, all hot-path locks migrated
+
+**Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 19-02-PLAN.md — Chunk-store lock tails (pack create, seal join, run write, KEEP_CAP wait, trust floor, pack open) off the store lock
+
+**Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 19-03-PLAN.md — Metadata hot path: `modify_inode`, sharded caches, cold loads and flushes off the locks, `create_inode_at`
+
+**Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 19-04-PLAN.md — WAL append (LSN, memory only) and write-out split; fsync outside the WAL mutexes
+
+**Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 19-05-PLAN.md — `FileCell` per inode, handle table with modes, per-inode readers, `keep_budget` on atomics
+
+**Wave 6** *(blocked on Wave 5 completion)*
 - [ ] 19-06-PLAN.md — Overlay rebase through copy, I/O without lock, publish if the generation is unchanged
+
+**Wave 7** *(blocked on Wave 6 completion)*
 - [ ] 19-07-PLAN.md — Streaming, read, fsync, finalize and truncate through the same protocol; no cross-file wait
+
+**Wave 8** *(blocked on Wave 7 completion)*
 - [ ] 19-08-PLAN.md — Write-path records logged under the cell lock; `O_APPEND` handles; POSIX multi-handle tests
+
+**Wave 9** *(blocked on Wave 8 completion)*
 - [ ] 19-09-PLAN.md — Namespace stripes and rename mutex, gate at rank 1, `serialize_off_target` in the suite
+
+**Wave 10** *(blocked on Wave 9 completion)*
 - [ ] 19-10-PLAN.md — Namespace records logged under their stripes, replay by logged inode, crash replay of the harness
+
+**Wave 11** *(blocked on Wave 10 completion)*
 - [ ] 19-11-PLAN.md — Harness multi-handle mode, lock wait rows, #21 body, Phase 19 note in the research doc
 
 ### Phase 20: Dirty budget and rebase flusher

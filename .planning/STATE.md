@@ -4,16 +4,16 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: 19
 current_phase_name: Fine-grained locks
-status: planning
+status: executing
 stopped_at: Phase 18 complete, ready to plan Phase 19
-last_updated: "2026-11-21T09:32:07.059Z"
+last_updated: "2026-11-21T23:50:04.037Z"
 last_activity: 2026-11-21
-last_activity_desc: Phase 18 complete, transitioned to Phase 19
-state_head: 3f46839d8e341a43b8ecf80d9e70ef668700eb52
+last_activity_desc: Phase 19 execution started
+state_head: 8d064afe1c3f91b095468a5964fc36c670929e8f
 progress:
   total_phases: 7
   completed_phases: 1
-  total_plans: 7
+  total_plans: 18
   completed_plans: 7
   percent: 14
 ---
@@ -25,14 +25,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-20)
 
 **Core value:** High-ratio data deduplication that works transparently as a real, daily-driver POSIX filesystem
-**Current focus:** Phase 18 — Spikes, baseline and stress harness
+**Current focus:** Phase 19 — Fine-grained locks
 
 ## Current Position
 
-Phase: 19 — Fine-grained locks
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-11-21 — Phase 18 complete, transitioned to Phase 19
+Phase: 19 (Fine-grained locks) — EXECUTING
+Plan: 1 of 11
+Status: Executing Phase 19
+Last activity: 2026-11-21 — Phase 19 execution started
 
 Progress: [█░░░░░░░░░] 14%
 
