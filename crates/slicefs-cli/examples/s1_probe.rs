@@ -129,28 +129,42 @@ impl Filesystem for Probe {
     }
 }
 
+/// Record that request `seq` is done. This runs BEFORE the reply is sent: a
+/// client that waits for the reply can then only see `inflight` too low, never
+/// too high, so a serial transport cannot show `max_inflight` of 2.
+fn finish(st: &Stats, seq: u64) {
+    // A reply whose seq is lower than one already sent is an inversion.
+    if seq < st.last_replied.fetch_max(seq, SeqCst) {
+        st.inversions.fetch_add(1, SeqCst);
+    }
+    st.inflight.fetch_sub(1, SeqCst);
+}
+
 fn worker(rx: Arc<Mutex<Receiver<Job>>>, st: Arc<Stats>, t0: Instant) {
     loop {
         let Ok(job) = rx.lock().unwrap().recv() else { return };
+        let (seq, unique) = (job.seq, job.unique);
         match job.kind {
             Kind::Read(reply, slow) => {
                 if slow {
                     std::thread::sleep(Duration::from_millis(200));
                 }
+                finish(&st, seq);
                 reply.data(&[0u8; 4096]);
             }
-            Kind::Lookup(reply, ino) => reply.entry(&Duration::ZERO, &attr(ino, FileType::RegularFile), Generation(0)),
-            Kind::Attr(reply, ino) => reply.attr(
-                &Duration::ZERO,
-                &attr(ino, if ino == 1 { FileType::Directory } else { FileType::RegularFile }),
-            ),
+            Kind::Lookup(reply, ino) => {
+                finish(&st, seq);
+                reply.entry(&Duration::ZERO, &attr(ino, FileType::RegularFile), Generation(0))
+            }
+            Kind::Attr(reply, ino) => {
+                finish(&st, seq);
+                reply.attr(
+                    &Duration::ZERO,
+                    &attr(ino, if ino == 1 { FileType::Directory } else { FileType::RegularFile }),
+                )
+            }
         }
-        // A reply whose seq is lower than one already sent is an inversion.
-        if job.seq < st.last_replied.fetch_max(job.seq, SeqCst) {
-            st.inversions.fetch_add(1, SeqCst);
-        }
-        st.inflight.fetch_sub(1, SeqCst);
-        eprintln!("REP seq={} unique={} t_ms={}", job.seq, job.unique, t0.elapsed().as_millis());
+        eprintln!("REP seq={seq} unique={unique} t_ms={}", t0.elapsed().as_millis());
     }
 }
 
