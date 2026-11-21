@@ -148,6 +148,7 @@ for S in "${SIZES[@]}"; do
   echo "== bigwrite $S MiB: cp, $VOL_MIB MiB of random 1 MiB and 4 KiB writes, cmp, remount, cmp"
   ST=$R/s$S; M=$R/m$S
   if ! $B seed $ST $R/empty >$R/step.out 2>&1; then bad "bw-seed-$S" "($(head -c 200 $R/step.out))"; continue; fi
+  echo "    store_fs=$(stat -f -c %T $ST)"
   head -c $((S * 1048576)) /dev/urandom > $R/ref.bin
   [ -n "${BW_QUIET_REF:-}" ] && sync
   if mnt $ST $M; then   # default commit interval
