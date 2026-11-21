@@ -1699,12 +1699,18 @@ fn s7_budget_baseline() {
                             ver[b] += 1;
                             buf.extend_from_slice(&block_bytes(seed, fid, b as u64, ver[b]));
                         }
-                        match ctx.gated(hs, Kind::Write, || h::handle_write(&ctx.fs, fh, (first * BLOCK) as u64, buf)) {
+                        // Sample inside `gated`, after the write, while the harness mutex is held:
+                        // no other write has a file's state taken out of `open_files` then.
+                        let r = ctx.gated(hs, Kind::Write, || {
+                            let r = h::handle_write(&ctx.fs, fh, (first * BLOCK) as u64, buf);
+                            max_dirty.fetch_max(ctx.fs.test_dirty_total(), Ordering::SeqCst);
+                            r
+                        });
+                        match r {
                             WriteResult::Ok(k) if k as usize == buf.len() => {}
                             WriteResult::Ok(k) => out.push(mm("write", format!("short write {k} of {}", buf.len()))),
                             WriteResult::Error(e) => out.push(errno_mismatch("write", e)),
                         }
-                        max_dirty.fetch_max(ctx.fs.test_dirty_total(), Ordering::SeqCst);
                     };
                     for i in 0..file_mib as usize {
                         put(i * MIB_BLOCKS, MIB_BLOCKS, &mut hs, &mut out, &mut buf, &mut ver);
