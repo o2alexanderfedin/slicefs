@@ -19,8 +19,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Barrier, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hdrhistogram::Histogram;
@@ -753,12 +753,17 @@ impl Ctx {
     /// The commit thread: `timed_commit` every `COMMIT_EVERY`, and once more
     /// after `stop` is set (the workers are done by then).
     fn commit_loop(&self, stop: &AtomicBool) -> (CommitHists, Vec<Mismatch>) {
+        self.commit_loop_every(stop, COMMIT_EVERY)
+    }
+
+    /// `commit_loop` with another interval (the S7 baseline uses the daemon's).
+    fn commit_loop_every(&self, stop: &AtomicBool, every: Duration) -> (CommitHists, Vec<Mismatch>) {
         let mut ch = CommitHists::new();
         let mut out = Vec::new();
         loop {
             let t0 = Instant::now();
             let mut stopped = false;
-            while t0.elapsed() < COMMIT_EVERY {
+            while t0.elapsed() < every {
                 if stop.load(Ordering::SeqCst) {
                     stopped = true;
                     break;
@@ -1166,4 +1171,629 @@ fn serialize_off_target() {
         assert!(o.report.dirty_total < DIRTY_BUDGET, "seed={}: dirty total {}", cfg.seed, o.report.dirty_total);
         assert!(o.report.max_inflight > 1, "seed={}: ops never overlapped", cfg.seed);
     }
+}
+
+// ---- spikes S3, S5, S6, S7 (Phase 18): by hand, one test alone per run ----------
+//
+// The lock recorder is process-global, so each spike test runs alone
+// (`-- --ignored --exact <name>`) and calls `lock_stats::reset()` before it
+// measures. All of them are `#[ignore]`, so the suite and CI never run them.
+
+const MIB: usize = 1 << 20;
+const MIB_BLOCKS: usize = MIB / BLOCK;
+
+/// A comma list from the environment, every value in `lo..=hi`.
+fn env_list(name: &str, default: &str, lo: u64, hi: u64) -> Vec<u64> {
+    let s = std::env::var(name).unwrap_or_else(|_| default.to_string());
+    let v: Vec<u64> = s
+        .split(',')
+        .map(|p| p.trim().parse().unwrap_or_else(|_| panic!("{name} must be numbers in {lo}..={hi}, comma separated")))
+        .collect();
+    assert!(!v.is_empty(), "{name} is empty");
+    for x in &v {
+        assert!((lo..=hi).contains(x), "{name} values must be in {lo}..={hi}, got {x}");
+    }
+    v
+}
+
+/// A context for the spike tests: no mode, no models; the file system, the
+/// gate and the harness mutex only.
+fn spike_ctx(serialize: bool, seed: u64, threads: usize, wal: WalConfig) -> Ctx {
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path(), wal.clone());
+    let gate = fs.commit_gate();
+    Ctx {
+        fs,
+        _dir: dir,
+        gate,
+        serial: Mutex::new(()),
+        cfg: Config {
+            mode: Mode::OneFile,
+            threads,
+            ops_per_thread: usize::MAX,
+            secs: None,
+            file_bytes: 0,
+            seed,
+            serialize,
+            wal,
+            watchdog: Duration::from_secs(60),
+        },
+        one: None,
+        dirs: None,
+        inflight: AtomicUsize::new(0),
+        max_inflight: AtomicUsize::new(0),
+        deadline: None,
+        halt: AtomicBool::new(false),
+        ops_done: AtomicUsize::new(0),
+    }
+}
+
+/// Create an empty file; the inode and the open handle.
+fn create_file(fs: &SliceFsFilesystem, parent: u64, name: &str, seed: u64) -> (u64, u64) {
+    match h::handle_create(fs, parent, name, S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR) {
+        CreateResult::Ok(ino, fh, _) => (ino, fh),
+        CreateResult::Error(e) => panic!("seed={seed} create {name} errno {e}"),
+    }
+}
+
+/// Peak resident set of this process in MiB. `ru_maxrss` is KiB on Linux and
+/// bytes on macOS; this is the one place that knows.
+fn peak_rss_mib() -> u64 {
+    // SAFETY: getrusage writes one rusage struct; zeroed is a valid value for it.
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+    assert_eq!(rc, 0, "getrusage failed");
+    let raw = ru.ru_maxrss as u64;
+    if cfg!(target_os = "macos") {
+        raw >> 20
+    } else {
+        raw >> 10
+    }
+}
+
+fn ms(v: u64) -> f64 {
+    v as f64 / 1_000_000.0
+}
+
+fn print_first(label: &str, seed: u64, found: &[Mismatch]) {
+    for m in found.iter().take(20) {
+        println!("{label} MISMATCH seed={seed} op={} block={:?} {}", m.op, m.block, m.detail);
+    }
+}
+
+// ---- S3: store lock contention ----------------------------------------------
+
+/// 1 MiB of seeded bytes for thread `t`, the base of every write of that thread.
+fn s3_base(seed: u64, t: usize) -> Vec<u8> {
+    let mut v = Vec::with_capacity(MIB);
+    for b in 0..MIB_BLOCKS as u64 {
+        v.extend_from_slice(&block_bytes(seed, t as u64 + 1, b, 1));
+    }
+    v
+}
+
+/// The 1 MiB of write `i` of thread `t`: the base with an 8-byte stamp in each
+/// 4 KiB, so every chunk of every write differs (no dedup shortcut) and the
+/// read phase can rebuild the expected bytes without holding the file.
+fn s3_fill(base: &[u8], seed: u64, t: usize, i: u64, buf: &mut Vec<u8>) {
+    buf.clear();
+    buf.extend_from_slice(base);
+    let k0 = splitmix(seed ^ splitmix(((t as u64) << 32) ^ i));
+    for k in 0..MIB_BLOCKS {
+        let stamp = splitmix(k0 ^ k as u64).to_le_bytes();
+        buf[k * BLOCK..k * BLOCK + 8].copy_from_slice(&stamp);
+    }
+}
+
+struct S3Out {
+    write_mb_s: f64,
+    read_mb_s: f64,
+    max_inflight: usize,
+    mismatches: Vec<Mismatch>,
+    gate_wait: Histogram<u64>,
+}
+
+/// One N of S3: a fresh file system, N files with one handle each, a write
+/// phase and a read phase. Throughput is the bytes of a phase over the
+/// longest time any thread spent inside the wrapped calls (the buffer fill and
+/// the compare are not counted).
+fn s3_one(n: usize, file_mib: u64, serialize: bool, seed: u64) -> S3Out {
+    // Safe subset: every file keeps at most 4 MiB dirty, and N x 4 MiB stays
+    // below the dirty budget, so no write takes another file's state out.
+    assert!(n * (4 << 20) < DIRTY_BUDGET, "S3 n={n} leaves the safe subset (dirty budget)");
+    let ctx = spike_ctx(serialize, seed, n, WalConfig::PerOp);
+    ctx.fs.test_set_dirty_limit(4 << 20);
+    let files: Vec<(u64, u64)> = (0..n).map(|t| create_file(&ctx.fs, ROOT, &format!("s3-{t}"), seed)).collect();
+    chunk_store::lock_stats::reset();
+    let barrier = Barrier::new(n);
+    let mut gate_wait = hist();
+    let mut mismatches = Vec::new();
+    let (mut w_max, mut r_max) = (Duration::ZERO, Duration::ZERO);
+    std::thread::scope(|s| {
+        let joins: Vec<_> = files
+            .iter()
+            .enumerate()
+            .map(|(t, &(ino, fh))| {
+                let (ctx, barrier) = (&ctx, &barrier);
+                s.spawn(move || {
+                    let base = s3_base(seed, t);
+                    let mut buf = Vec::with_capacity(MIB);
+                    let mut hs = Hists::new();
+                    let mut out: Vec<Mismatch> = Vec::new();
+                    let (mut w_busy, mut r_busy) = (Duration::ZERO, Duration::ZERO);
+                    barrier.wait();
+                    for i in 0..file_mib {
+                        s3_fill(&base, seed, t, i, &mut buf);
+                        let t0 = Instant::now();
+                        let r = ctx.gated(&mut hs, Kind::Write, || h::handle_write(&ctx.fs, fh, i * MIB as u64, &buf));
+                        w_busy += t0.elapsed();
+                        match r {
+                            WriteResult::Ok(k) if k as usize == MIB => {}
+                            WriteResult::Ok(k) => out.push(mm("write", format!("short write {k} of {MIB} at MiB {i}"))),
+                            WriteResult::Error(e) => out.push(errno_mismatch("write", e)),
+                        }
+                        if out.len() >= 20 {
+                            break;
+                        }
+                    }
+                    barrier.wait();
+                    for i in 0..file_mib {
+                        let t0 = Instant::now();
+                        let r = ctx.gated(&mut hs, Kind::Read, || h::handle_read(&ctx.fs, ino, i * MIB as u64, MIB as u32));
+                        r_busy += t0.elapsed();
+                        match r {
+                            DataResult::Ok(d) => {
+                                s3_fill(&base, seed, t, i, &mut buf);
+                                if d != buf {
+                                    out.push(Mismatch {
+                                        op: "read",
+                                        block: Some(i),
+                                        detail: format!("thread {t}: 1 MiB at MiB {i} differs from the model"),
+                                    });
+                                }
+                            }
+                            DataResult::Error(e) => out.push(errno_mismatch("read", e)),
+                        }
+                        if out.len() >= 20 {
+                            break;
+                        }
+                    }
+                    if let EmptyResult::Error(e) = ctx.gated(&mut hs, Kind::Release, || h::handle_release(&ctx.fs, ino, fh)) {
+                        out.push(errno_mismatch("release", e));
+                    }
+                    (hs, out, w_busy, r_busy)
+                })
+            })
+            .collect();
+        for j in joins {
+            let (hs, out, w, r) = j.join().expect("S3 worker panicked");
+            gate_wait.add(&hs.gate_wait).unwrap();
+            mismatches.extend(out);
+            w_max = w_max.max(w);
+            r_max = r_max.max(r);
+        }
+    });
+    let total_mib = (n as u64 * file_mib) as f64;
+    S3Out {
+        write_mb_s: total_mib / w_max.as_secs_f64().max(1e-9),
+        read_mb_s: total_mib / r_max.as_secs_f64().max(1e-9),
+        max_inflight: ctx.max_inflight.load(Ordering::SeqCst),
+        mismatches,
+        gate_wait,
+    }
+}
+
+/// S3 (D-08): N threads, each on its own file and handle, no namespace ops
+/// after setup. MB here are MiB. Run once without and once with
+/// `--features lock-stats`; the MB/s of the second pass include the cost of
+/// the recorder, so take MB/s from the first pass and lock rows from the second.
+#[test]
+#[ignore = "spike S3, by hand: S3_THREADS S3_FILE_MIB S3_SERIALIZE; use --release; run once without and once with --features lock-stats"]
+fn s3_store_lock() {
+    let threads = env_list("S3_THREADS", "1,2,4,8", 1, 15);
+    let file_mib = env_num("S3_FILE_MIB", 256, 1, 4096);
+    let serialize = env_num("S3_SERIALIZE", 0, 0, 1) == 1;
+    let seed = seed_from_env();
+    let _watchdog = watchdog(Duration::from_secs(30 * 60), seed);
+    let on = if chunk_store::lock_stats::ENABLED { "on" } else { "off" };
+    println!("S3 seed={seed} file_mib={file_mib} serialize={serialize} lock_stats={on} MB=MiB");
+    let mut bad = 0;
+    for &n in &threads {
+        let n = n as usize;
+        let o = s3_one(n, file_mib, serialize, seed);
+        println!(
+            "S3 n={n} lock_stats={on} write_mb_s={:.1} read_mb_s={:.1} max_inflight={} mismatches={} serialize={serialize}",
+            o.write_mb_s,
+            o.read_mb_s,
+            o.max_inflight,
+            o.mismatches.len()
+        );
+        print!("S3 n={n} ");
+        row("gate_wait", &o.gate_wait);
+        if chunk_store::lock_stats::ENABLED {
+            const SITES: [&str; 6] = ["store", "io", "readers", "open_files", "wal", "wal_writer"];
+            for st in chunk_store::lock_stats::snapshot().iter().filter(|s| s.count > 0 && SITES.contains(&s.label)) {
+                println!(
+                    "S3 n={n} lock site={} count={} wait_p50_us={:.1} wait_p99_us={:.1} wait_max_us={:.1} hold_p50_us={:.1} hold_p99_us={:.1} hold_max_us={:.1}",
+                    st.label,
+                    st.count,
+                    us(st.wait_p50_ns),
+                    us(st.wait_p99_ns),
+                    us(st.wait_max_ns),
+                    us(st.hold_p50_ns),
+                    us(st.hold_p99_ns),
+                    us(st.hold_max_ns)
+                );
+            }
+        }
+        print_first(&format!("S3 n={n}"), seed, &o.mismatches);
+        bad += o.mismatches.len();
+    }
+    assert_eq!(bad, 0, "seed={seed}: S3 found {bad} mismatches (with serialize={serialize})");
+}
+
+// ---- S5: commit gate fairness -------------------------------------------------
+
+/// The p50, p99 and max of a histogram in ms, as `max=<x> p99=<x> p50=<x> n=<n>`.
+fn tail_ms(h: &Histogram<u64>) -> String {
+    format!(
+        "max={:.1} p99={:.1} p50={:.1} n={}",
+        ms(h.max()),
+        ms(h.value_at_quantile(0.99)),
+        ms(h.value_at_quantile(0.50)),
+        h.len()
+    )
+}
+
+/// S5 (D-08), measured on the current code: a store with `S5_FILES` files, a
+/// commit every 1 s, and 4 threads that hold the gate shared for long times.
+/// What counts is the wait of a NEW shared holder while a commit is active: the
+/// std `RwLock` queues readers behind a waiting writer.
+#[test]
+#[ignore = "spike S5, by hand: S5_FILES S5_SECS S5_HOLD_MS; use --release"]
+fn s5_gate_fairness() {
+    let files = env_num("S5_FILES", 78_000, 1, 1_000_000) as usize;
+    let secs = env_num("S5_SECS", 30, 1, 600);
+    let holds = env_list("S5_HOLD_MS", "50,200,500", 1, 10_000);
+    let seed = seed_from_env();
+    let setup_wd = watchdog(Duration::from_secs(300 + files as u64 / 50), seed);
+    let ctx = spike_ctx(false, seed, 1, WalConfig::PerOp);
+    let setup = Instant::now();
+    let dirs: Vec<u64> = (0..100).map(|d| mkdir(&ctx.fs, ROOT, &format!("d{d}"), seed)).collect();
+    let work = mkdir(&ctx.fs, ROOT, "work", seed);
+    for i in 0..files {
+        let (ino, fh) = create_file(&ctx.fs, dirs[i % 100], &format!("f{i}"), seed);
+        assert!(matches!(h::handle_release(&ctx.fs, ino, fh), EmptyResult::Ok), "seed={seed} release");
+    }
+    timed_commit(&ctx.fs, &ctx.gate).expect("setup commit");
+    println!("S5 setup files={files} secs={:.1}", setup.elapsed().as_secs_f64());
+    drop(setup_wd);
+    let _watchdog = watchdog(Duration::from_secs(secs + 120), seed);
+
+    let stop = AtomicBool::new(false);
+    let commit_active = AtomicBool::new(false);
+    let longest_hold = AtomicU64::new(0);
+    let holds = &holds;
+    let (mut commit_h, mut commit_errs, mut active_h, mut idle_h) = (CommitHists::new(), Vec::new(), hist(), hist());
+    let mut op_errs = Vec::new();
+    std::thread::scope(|s| {
+        let (ctx, stop, commit_active, longest_hold) = (&ctx, &stop, &commit_active, &longest_hold);
+        // Holders: the gate shared for a long time, then a short pause.
+        for k in 0..4usize {
+            s.spawn(move || {
+                let mut i = k;
+                while !stop.load(Ordering::SeqCst) {
+                    let hold = Duration::from_millis(holds[i % holds.len()]);
+                    i += 1;
+                    let g = ctx.gate.read().unwrap_or_else(|e| e.into_inner());
+                    let t = Instant::now();
+                    std::thread::sleep(hold);
+                    longest_hold.fetch_max(ns(t.elapsed()), Ordering::SeqCst);
+                    drop(g);
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            });
+        }
+        // Real ops: small files through the wrapper, so each commit has work.
+        let ops = s.spawn(move || {
+            let mut hs = Hists::new();
+            let mut errs: Vec<Mismatch> = Vec::new();
+            let data = block_bytes(seed, 1, 0, 1);
+            let mut i = 0u64;
+            while !stop.load(Ordering::SeqCst) {
+                let name = format!("w{i}");
+                i += 1;
+                let r = ctx.gated(&mut hs, Kind::Create, || {
+                    h::handle_create(&ctx.fs, work, &name, S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR)
+                });
+                let (ino, fh) = match r {
+                    CreateResult::Ok(ino, fh, _) => (ino, fh),
+                    CreateResult::Error(e) => {
+                        errs.push(errno_mismatch("create", e));
+                        break;
+                    }
+                };
+                if !matches!(ctx.gated(&mut hs, Kind::Write, || h::handle_write(&ctx.fs, fh, 0, &data)), WriteResult::Ok(_)) {
+                    errs.push(mm("write", format!("{name} failed")));
+                }
+                if !matches!(ctx.gated(&mut hs, Kind::Release, || h::handle_release(&ctx.fs, ino, fh)), EmptyResult::Ok) {
+                    errs.push(mm("release", format!("{name} failed")));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            errs
+        });
+        // The commit thread: every 1 s, a sync first, then the timed commit.
+        let committer = s.spawn(move || {
+            let mut ch = CommitHists::new();
+            let mut errs: Vec<Mismatch> = Vec::new();
+            'outer: loop {
+                let t0 = Instant::now();
+                while t0.elapsed() < Duration::from_secs(1) {
+                    if stop.load(Ordering::SeqCst) {
+                        break 'outer;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let _ = ctx.fs.content().sync();
+                commit_active.store(true, Ordering::SeqCst);
+                let r = timed_commit(&ctx.fs, &ctx.gate);
+                commit_active.store(false, Ordering::SeqCst);
+                match r {
+                    Ok(t) => {
+                        ch.gate_wait.saturating_record(ns(t.gate_wait));
+                        ch.hold.saturating_record(ns(t.hold));
+                        ch.total.saturating_record(ns(t.total));
+                    }
+                    Err(e) => errs.push(mm("commit", format!("{e:?}"))),
+                }
+            }
+            (ch, errs)
+        });
+        // The probe: a new shared acquire every 10 ms, tagged by the flag at its start.
+        let probe = s.spawn(move || {
+            let (mut active, mut idle) = (hist(), hist());
+            while !stop.load(Ordering::SeqCst) {
+                let was_active = commit_active.load(Ordering::SeqCst);
+                let t = Instant::now();
+                let g = ctx.gate.read().unwrap_or_else(|e| e.into_inner());
+                let waited = ns(t.elapsed());
+                drop(g);
+                if was_active { &mut active } else { &mut idle }.saturating_record(waited);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            (active, idle)
+        });
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(secs) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        stop.store(true, Ordering::SeqCst);
+        (commit_h, commit_errs) = committer.join().expect("commit thread panicked");
+        (active_h, idle_h) = probe.join().expect("probe thread panicked");
+        op_errs = ops.join().expect("ops thread panicked");
+    });
+    println!(
+        "S5 platform={} files={files} commits={} commit_gate_wait_ms p50={:.1} max={:.1} commit_hold_ms p50={:.1} max={:.1} commit_total_ms p50={:.1} max={:.1}",
+        std::env::consts::OS,
+        commit_h.total.len(),
+        ms(commit_h.gate_wait.value_at_quantile(0.5)),
+        ms(commit_h.gate_wait.max()),
+        ms(commit_h.hold.value_at_quantile(0.5)),
+        ms(commit_h.hold.max()),
+        ms(commit_h.total.value_at_quantile(0.5)),
+        ms(commit_h.total.max())
+    );
+    println!(
+        "S5 new_reader_wait_ms commit_active {} idle {} longest_hold_ms={:.1}",
+        tail_ms(&active_h),
+        tail_ms(&idle_h),
+        ms(longest_hold.load(Ordering::SeqCst))
+    );
+    println!("S5 note: use the commit_active max; p50/p99 include time after the gate is released");
+    commit_errs.extend(op_errs);
+    print_first("S5", seed, &commit_errs);
+    assert!(commit_errs.is_empty(), "seed={seed}: S5 had {} errors", commit_errs.len());
+    assert!(commit_h.total.len() > 0, "seed={seed}: no commit ran in {secs} s");
+}
+
+// ---- S6 in process (macOS numbers, no mount) ------------------------------------
+
+/// S6 in process (D-09, macOS): small files with a timed fsync per file, for
+/// the three WAL strategies, two interleaved passes. No FUSE: the cost of
+/// SliceFS only.
+#[test]
+#[ignore = "spike S6 in process (macOS numbers, no mount), by hand: S6_FILES; use --release"]
+fn s6_small_fsync() {
+    let files = env_num("S6_FILES", 2000, 10, 20_000) as usize;
+    let seed = seed_from_env();
+    let _watchdog = watchdog(Duration::from_secs(30 * 60), seed);
+    let strategies: [(&str, WalConfig); 3] = [
+        ("per-op", WalConfig::PerOp),
+        ("flush-on-fsync", WalConfig::FlushOnFsync),
+        ("periodic", WalConfig::Periodic { interval_secs: 5 }),
+    ];
+    println!("S6 seed={seed} files={files} bytes=4096 note: in process, no FUSE: SliceFS cost only");
+    for pass in 1..=2 {
+        for (name, wal) in &strategies {
+            let ctx = spike_ctx(false, seed, 1, wal.clone());
+            let dir = mkdir(&ctx.fs, ROOT, "s6", seed);
+            let mut hs = Hists::new();
+            let t0 = Instant::now();
+            for i in 0..files {
+                let data = block_bytes(seed, 1, i as u64, 1);
+                let (ino, fh) = match ctx.gated(&mut hs, Kind::Create, || {
+                    h::handle_create(&ctx.fs, dir, &format!("f{i}"), S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR)
+                }) {
+                    CreateResult::Ok(ino, fh, _) => (ino, fh),
+                    CreateResult::Error(e) => panic!("seed={seed} create errno {e}"),
+                };
+                assert!(matches!(ctx.gated(&mut hs, Kind::Write, || h::handle_write(&ctx.fs, fh, 0, &data)), WriteResult::Ok(_)));
+                assert!(matches!(ctx.gated(&mut hs, Kind::Fsync, || h::handle_fsync(&ctx.fs, ino, fh)), EmptyResult::Ok));
+                assert!(matches!(ctx.gated(&mut hs, Kind::Release, || h::handle_release(&ctx.fs, ino, fh)), EmptyResult::Ok));
+            }
+            let wall = t0.elapsed().as_secs_f64();
+            let f = &hs.ops[Kind::Fsync as usize];
+            println!(
+                "S6 wal={name} pass={pass} files={files} fsyncs_per_s={:.1} fsync_p50_ms={:.2} fsync_p99_ms={:.2} fsync_max_ms={:.2} wall_s={wall:.1}",
+                files as f64 / wall,
+                ms(f.value_at_quantile(0.5)),
+                ms(f.value_at_quantile(0.99)),
+                ms(f.max())
+            );
+        }
+    }
+    println!("S6 note: in process, no FUSE: SliceFS cost only");
+}
+
+// ---- S7: dirty-budget baseline, serialized ----------------------------------------
+
+/// S7 (D-08), a serialized baseline until Phase 20: 4 threads, each with its
+/// own big file, the bigwrite random-write mix, peak RSS against the 256 MiB
+/// cap. The cap is NOT asserted (a baseline); the model check is. The model is
+/// one version per 4 KiB block, so no file bytes are held.
+#[test]
+#[ignore = "spike S7 baseline, serialized until Phase 20: S7_FILE_MIB S7_WRITE_MIB S7_COMMIT_SECS; use --release"]
+fn s7_budget_baseline() {
+    const THREADS: usize = 4;
+    const CAP_MIB: u64 = 256;
+    let file_mib = env_num("S7_FILE_MIB", 1024, 4, 8192);
+    let write_mib = env_num("S7_WRITE_MIB", 128, 2, 4096);
+    let commit_secs = env_num("S7_COMMIT_SECS", 30, 1, 600);
+    let seed = seed_from_env();
+    let _watchdog = watchdog(Duration::from_secs(60 * 60), seed);
+    // serialize on: `keep_budget` takes another file's state out.
+    let ctx = spike_ctx(true, seed, THREADS, WalConfig::PerOp);
+    let files: Vec<(u64, u64)> = (0..THREADS).map(|t| create_file(&ctx.fs, ROOT, &format!("s7-{t}"), seed)).collect();
+    let blocks = file_mib as usize * MIB_BLOCKS;
+    let rss_start = peak_rss_mib();
+    let max_dirty = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let mut slowest = 0u64;
+    let mut mismatches: Vec<Mismatch> = Vec::new();
+    let mut commits = CommitHists::new();
+    let mut rss_writes = 0;
+    let mut models: Vec<Vec<u32>> = Vec::new();
+    std::thread::scope(|s| {
+        let (ctx, max_dirty) = (&ctx, &max_dirty);
+        let committer = s.spawn(|| ctx.commit_loop_every(&stop, Duration::from_secs(commit_secs)));
+        // Write phase: the whole file in 1 MiB writes, then the random mix.
+        let writers: Vec<_> = files
+            .iter()
+            .enumerate()
+            .map(|(t, &(ino, fh))| {
+                s.spawn(move || {
+                    let fid = t as u64 + 1;
+                    let mut hs = Hists::new();
+                    let mut out: Vec<Mismatch> = Vec::new();
+                    let mut ver = vec![0u32; blocks];
+                    let mut rng = Rng(seed ^ ((t as u64 + 1) << 40));
+                    let mut buf = Vec::with_capacity(MIB);
+                    // One write of `n` blocks from block `first`: bump the versions, fill, write.
+                    let put = |first: usize, n: usize, hs: &mut Hists, out: &mut Vec<Mismatch>, buf: &mut Vec<u8>, ver: &mut Vec<u32>| {
+                        buf.clear();
+                        for b in first..first + n {
+                            ver[b] += 1;
+                            buf.extend_from_slice(&block_bytes(seed, fid, b as u64, ver[b]));
+                        }
+                        match ctx.gated(hs, Kind::Write, || h::handle_write(&ctx.fs, fh, (first * BLOCK) as u64, buf)) {
+                            WriteResult::Ok(k) if k as usize == buf.len() => {}
+                            WriteResult::Ok(k) => out.push(mm("write", format!("short write {k} of {}", buf.len()))),
+                            WriteResult::Error(e) => out.push(errno_mismatch("write", e)),
+                        }
+                        max_dirty.fetch_max(ctx.fs.test_dirty_total(), Ordering::SeqCst);
+                    };
+                    for i in 0..file_mib as usize {
+                        put(i * MIB_BLOCKS, MIB_BLOCKS, &mut hs, &mut out, &mut buf, &mut ver);
+                    }
+                    // One round: a 1 MiB write and 256 writes of 4 KiB, at random 4 KiB-aligned
+                    // offsets; an fsync every 64 MiB of the mix (2 MiB per round).
+                    for round in 0..write_mib / 2 {
+                        if out.len() >= 20 {
+                            break;
+                        }
+                        put(rng.below(blocks - MIB_BLOCKS + 1), MIB_BLOCKS, &mut hs, &mut out, &mut buf, &mut ver);
+                        for _ in 0..MIB_BLOCKS {
+                            put(rng.below(blocks), 1, &mut hs, &mut out, &mut buf, &mut ver);
+                        }
+                        if round % 32 == 31 {
+                            if let EmptyResult::Error(e) = ctx.gated(&mut hs, Kind::Fsync, || h::handle_fsync(&ctx.fs, ino, fh)) {
+                                out.push(errno_mismatch("fsync", e));
+                            }
+                        }
+                    }
+                    (hs.ops[Kind::Write as usize].max(), out, ver)
+                })
+            })
+            .collect();
+        for j in writers {
+            let (slow, out, ver) = j.join().expect("S7 writer panicked");
+            slowest = slowest.max(slow);
+            mismatches.extend(out);
+            models.push(ver);
+        }
+        rss_writes = peak_rss_mib();
+        // Check phase: every block of every file against its version.
+        let checkers: Vec<_> = files
+            .iter()
+            .zip(models.iter())
+            .enumerate()
+            .map(|(t, (&(ino, fh), ver))| {
+                s.spawn(move || {
+                    let mut hs = Hists::new();
+                    let mut out: Vec<Mismatch> = Vec::new();
+                    for i in 0..file_mib as usize {
+                        let r = ctx.gated(&mut hs, Kind::Read, || h::handle_read(&ctx.fs, ino, (i * MIB) as u64, MIB as u32));
+                        let d = match r {
+                            DataResult::Ok(d) if d.len() == MIB => d,
+                            DataResult::Ok(d) => {
+                                out.push(mm("read", format!("thread {t}: short read {} at MiB {i}", d.len())));
+                                continue;
+                            }
+                            DataResult::Error(e) => {
+                                out.push(errno_mismatch("read", e));
+                                continue;
+                            }
+                        };
+                        for j in 0..MIB_BLOCKS {
+                            let b = i * MIB_BLOCKS + j;
+                            if d[j * BLOCK..(j + 1) * BLOCK] != block_bytes(seed, t as u64 + 1, b as u64, ver[b])[..] {
+                                out.push(Mismatch { op: "read", block: Some(b as u64), detail: format!("thread {t}: block differs from version {}", ver[b]) });
+                                break;
+                            }
+                        }
+                        if out.len() >= 20 {
+                            break;
+                        }
+                    }
+                    if let EmptyResult::Error(e) = ctx.gated(&mut hs, Kind::Release, || h::handle_release(&ctx.fs, ino, fh)) {
+                        out.push(errno_mismatch("release", e));
+                    }
+                    out
+                })
+            })
+            .collect();
+        for j in checkers {
+            mismatches.extend(j.join().expect("S7 checker panicked"));
+        }
+        stop.store(true, Ordering::SeqCst);
+        let (ch, cm) = committer.join().expect("commit thread panicked");
+        commits = ch;
+        mismatches.extend(cm);
+    });
+    let peak = peak_rss_mib();
+    println!(
+        "S7 threads={THREADS} file_mib={file_mib} write_mib={write_mib} peak_rss_mib={peak} cap_mib={CAP_MIB} within_cap={} slowest_write_ms={:.1} rebase_steps={} max_dirty_mib={} rss_start_mib={rss_start} rss_after_writes_mib={rss_writes} commit_every_s={commit_secs} commits={} commit_hold_max_ms={:.1} commit_total_max_ms={:.1}",
+        peak <= CAP_MIB,
+        ms(slowest),
+        ctx.fs.test_rebase_count(),
+        max_dirty.load(Ordering::SeqCst) >> 20,
+        commits.total.len(),
+        ms(commits.hold.max()),
+        ms(commits.total.max())
+    );
+    println!("S7 peak_rss_mib is the whole test process (getrusage), also the model and the check buffers");
+    println!("baseline only: flusher lag and pause curve need Phase 20");
+    print_first("S7", seed, &mismatches);
+    assert!(mismatches.is_empty(), "seed={seed}: S7 found {} mismatches", mismatches.len());
 }

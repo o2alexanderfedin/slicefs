@@ -11,6 +11,7 @@
 #        scripts/docker-linux-test/run.sh s1   (spike S1 control: the probe shows request overlap on Linux; by hand)
 #        scripts/docker-linux-test/run.sh s4   (spike S4: FUSE queue depth during random writes and readahead; by hand, not in CI)
 #        scripts/docker-linux-test/run.sh s6 [files]   (spike S6: small fsynced files per WAL strategy; by hand, not in CI)
+#        scripts/docker-linux-test/run.sh harness <test-name>   (one ignored test of the stress harness in release, no mount: s3_store_lock, s5_gate_fairness, s7_budget_baseline; HARNESS_FEATURES=lock-stats for lock rows; by hand, not in CI)
 #        scripts/docker-linux-test/run.sh index-bench [SIZES...]   (default sizes: 1000000 10000000)
 #        scripts/docker-linux-test/run.sh index-bench-cold [SIZES...]   (cold page cache; privileged; by hand)
 # SLICEFS_TARGET_VOL names the cargo target volume (default slicefs-target), so
@@ -33,6 +34,21 @@ case "${1:-all}" in
     # --privileged only if the fusectl mount fails with SYS_ADMIN alone (see s4-waiting.sh).
     shift; "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/s4-waiting.sh /target/release/slicefs "$@"' _ ${@+"$@"} ;;
   s6) shift; "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/s6-smallfsync.sh /target/release/slicefs "$@"' _ ${@+"$@"} ;;
+  harness)
+    # One ignored test of the stress harness (spikes S3, S5, S6, S7), in release.
+    # This mode does not mount anything: no FUSE device, no SYS_ADMIN, no unshare.
+    # HARNESS_FEATURES (for example lock-stats) is passed to cargo only when set;
+    # the STRESS_*, S3_*, S5_*, S6_* and S7_* variables pass through from the host.
+    # The recorder is process-global, so run one test per call, nothing else beside it.
+    shift
+    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry \
+      -e CARGO_TARGET_DIR=/target -e HARNESS_FEATURES \
+      -e STRESS_SEED -e STRESS_THREADS -e STRESS_SECS -e STRESS_FILE_MIB -e STRESS_SERIALIZE -e STRESS_MODE \
+      -e S3_THREADS -e S3_FILE_MIB -e S3_SERIALIZE -e S5_FILES -e S5_SECS -e S5_HOLD_MS \
+      -e S6_FILES -e S7_FILE_MIB -e S7_WRITE_MIB -e S7_COMMIT_SECS \
+      slicefs-fusetest bash -c '
+        rustc -V
+        cargo test -q --release -p slicefs-cli ${HARNESS_FEATURES:+--features "$HARNESS_FEATURES"} --test stress_harness -- --ignored --exact --nocapture "$@"' harness ${@+"$@"} ;;
   index-bench)
     # The chunk index benchmark (#66). This mode does not mount anything: it needs
     # no FUSE device, no SYS_ADMIN and no unshare, so it does not use RUN.
@@ -75,5 +91,5 @@ case "${1:-all}" in
           done; done
           echo "# size $n, load after: $(cat /proc/loadavg)"
         done' index-bench ${*:-1000000 10000000} ;;
-  *) echo "usage: $0 [smoke|test|all|verify|pjdfstest] | bigwrite [size-MiB ...] (by hand; not in CI) | s1 (by hand) | s4 (by hand; not in CI) | s6 [files] (by hand; not in CI) | index-bench [SIZES...] | index-bench-cold [SIZES...]"; exit 2 ;;
+  *) echo "usage: $0 [smoke|test|all|verify|pjdfstest] | bigwrite [size-MiB ...] (by hand; not in CI) | s1 (by hand) | s4 (by hand; not in CI) | s6 [files] (by hand; not in CI) | harness <test-name> (by hand; not in CI; HARNESS_FEATURES=lock-stats for lock rows) | index-bench [SIZES...] | index-bench-cold [SIZES...]"; exit 2 ;;
 esac
