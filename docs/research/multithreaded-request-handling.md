@@ -102,7 +102,24 @@ The spikes below are short scenarios. Each one settles a question that the sourc
 
 ## Spike results (Phase 18)
 
-This section gives the results of the seven spikes. Each result names the commit and the platform of its runs. The runs used four set-ups. One set-up is a Linux mount in a Docker container (OrbStack host, kernel 7.2.12, 32 CPUs, 15.68 GiB of memory). The second is a test in one process on Linux, in the same container, with no mount. The third is a test in one process on macOS, with no mount. The fourth is a macOS FSKit mount in a continuous integration (CI) job. The steps are the steps 0 to 7 of the migration table above. Each result ends with one **Decides:** line. Percentiles are written p50, p99 and so on. A p99 value is the value that 99 of 100 samples do not exceed. Every number below comes from a saved run log, and it is written as the run printed it.
+This section gives the results of the seven spikes. Each result names the commit and the platform of its runs. The runs used four set-ups. One set-up is a Linux mount in a Docker container (OrbStack host, kernel 7.2.12, 32 CPUs, 15.68 GiB of memory). The second is a test in one process on Linux, in the same container, with no mount. The third is a test in one process on macOS, with no mount. The fourth is a macOS FSKit mount (FSKit is the Apple framework for file systems in user space) in a continuous integration (CI) job. The steps are the steps 0 to 7 of the migration table above. Each result ends with one **Decides:** line. Percentiles are written p50, p99 and so on. A p99 value is the value that 99 of 100 samples do not exceed. Every number below comes from a saved run log, and it is written as the run printed it.
+
+### S1 result
+
+S1 used a small test server (a "probe") that was built on the vendored fuser. The probe has one reader thread and a pool of 4 worker threads. It answers every READ at once, except one READ of a special file, which it delays by 200 ms. A client starts a `dd` on that file. 50 ms later, the client calls `stat` on 50 new names, one after the other. A new name forces a LOOKUP request each time. The probe counts the largest number of requests in flight (`max_inflight`) and the number of times a later request got its reply before an earlier one (`reply_order_inversions`). One run has 5 rounds of this test.
+
+| Run | Platform | max_inflight | reply_order_inversions | Requests received | `stat` calls done during the slow READ | Slowest `stat`, ms | Slow `dd`, ms |
+|---|---|---|---|---|---|---|---|
+| Linux control, 1 run, commit 86f9e8c plus the S1 files | Docker mount, kernel 7.2.12 | 3 | 16 | 510 | 50 of 50 in each of 5 rounds | 0 or 1 | 203 to 204 |
+| macOS FSKit, 1 run, commit 97086b2d6a45337a0f2469472f2ad492483945ea | macOS 26.7.2 (Darwin 25.6.0), FUSE-T 1.2.9 | 2 | 5 | 548 | 50 of 50 in each of 5 rounds | 2 | 211 to 298 |
+
+The macOS run is the CI run [actions/runs/44882009650](https://github.com/o2alexanderfedin/slicefs/actions/runs/44882009650). The Linux control shows that the probe can see overlap, so the macOS number 2 is not a fault of the probe. Neither run had a client error or a hang. The macOS `dd` took 297 and 298 ms in rounds 0 and 1, and 211 to 248 ms in the later rounds. On Linux it took 203 to 204 ms in every round. The extra time on macOS is not explained.
+
+The macOS default can be more than one worker. FUSE-T 1.2.9 on macOS 26.7.2 gave the probe 2 requests at the same time, it accepted 5 replies out of order, and all 250 `stat` calls finished while the 200 ms READ was still open.
+
+The limits are these. The test is one slow READ against a loop of `stat` calls, so a maximum of 2 in flight is a small sample, and it does not show a gain in throughput. The run was one CI run on one macOS version. Phase 21 must show the throughput gain on macOS before the default goes above 1.
+
+**Decides:** step 6 (the macOS default may be raised above 1 after Phase 21 shows a throughput gain; the pool needs no special case for out-of-order replies on FUSE-T 1.2.9)
 
 ### S2 result
 
@@ -119,8 +136,129 @@ What is left in the tail is a disk effect, as far as these runs show. The second
 
 **Decides:** step 1 (the pack sync is already off the store lock since #131, and the median slowest write is under 500 ms at both sizes, so #108 does not need threads for the typical case; the bound was missed in 1 of 6 runs, so close #108 only after the 4 GiB tail is repeated on btrfs or a disk stall is shown as the cause)
 
+### S3 result
+
+S3 ran in one process, with no mount, on commit d24da49. It ran 4 values of N (1, 2, 4 and 8 threads). Each thread has its own file and its own handle, and writes 256 MiB in 1 MiB writes with a dirty limit of 4 MiB per file. This is the safe subset: no thread touches the state of another file, and the total dirty size stays under the budget. The data check found 0 mismatches at every N on both platforms. The test ran twice on each platform, 1 run per N each time. The first pass has the lock recorder off, and it gives the throughput. The second pass has the recorder on, and it gives the lock rows. The recorder adds a shared mutex for each lock event, so it changes the timing, and the two passes must not be mixed. The throughput is the bytes of a phase divided by the longest time that any thread spent in the wrapped calls (MB means MiB). Linux ran in the container (rustc 1.100.0, store on overlayfs, 32 CPUs). macOS ran in the test process (rustc 1.95.0-nightly, 32 CPUs). The log of the macOS runs does not name the file system type of the store.
+
+| N | Linux write MB/s | Linux read MB/s | macOS write MB/s | macOS read MB/s |
+|---|---|---|---|---|
+| 1 | 117.9 | 854.3 | 79.7 | 689.8 |
+| 2 | 160.4 | 918.5 | 102.4 | 786.2 |
+| 4 | 132.9 | 319.5 | 110.3 | 766.8 |
+| 8 | 120.4 | 762.1 | 112.1 | 783.3 |
+
+The Linux read value at N = 4 (319.5) is one run, and it is lower than the three other values. The lock pass at N = 4 had 813.4 MB/s, and the dip was not examined. Write throughput does not scale with N. On Linux it rises 1.36 times at N = 2 and is 2% above N = 1 at N = 8. On macOS it rises about 1.4 times from N = 1 to N = 8, and it is flat from N = 4 (110.3 and 112.1).
+
+The lock rows come from the second pass. All times are in microseconds (us). The `store` lock is the lock of the chunk store, and the `readers` lock is the lock of the reader cache. The `wal` lock is the log append lock. The `gate_wait` p99 is 0.7 us or less in both passes, so the commit gate costs nothing here.
+
+Linux, lock pass:
+
+| N | store wait p99 | store wait max | wal wait p99 | readers wait p50 | readers wait p99 | readers hold p50 |
+|---|---|---|---|---|---|---|
+| 1 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 887.3 |
+| 2 | 145.9 | 3506.2 | 4976.6 | 814.1 | 1417.2 | 1045.0 |
+| 4 | 1234.9 | 11485.2 | 2730.0 | 3596.3 | 4579.3 | 1215.5 |
+| 8 | 3381.2 | 20611.1 | 3741.7 | 8716.3 | 12492.8 | 1187.8 |
+
+macOS, lock pass:
+
+| N | store wait p99 | store wait max | wal wait p99 | readers wait p50 | readers wait p99 | readers hold p50 |
+|---|---|---|---|---|---|---|
+| 1 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 1223.7 |
+| 2 | 58.7 | 39878.7 | 1233.9 | 989.2 | 1997.8 | 1352.7 |
+| 4 | 344.1 | 42958.8 | 1991.7 | 3842.0 | 6135.8 | 1397.8 |
+| 8 | 1831.9 | 47480.8 | 2601.0 | 8994.8 | 12746.8 | 1322.0 |
+
+The `readers` lock is the one that grows with N. Its wait p50 goes from 0.0 to 8716.3 us (Linux) and 8994.8 us (macOS), while its hold p50 stays between 887.3 and 1397.8 us. The cause is the guard that is held across the whole `Reader::read`. The `store` lock has a wait p50 of 0.0 at every N. It waits only in the tail: the p99 is 3381.2 us (Linux) and 1831.9 us (macOS) at N = 8. The p50 hold of the `store` lock is 0.6 to 1.2 us. The `wal` mutex is held for 1176.6 us (macOS) to 2437.1 us (Linux) at p50 with N = 1, and the writer lock of the strategy (`wal_writer`) for 841.2 and 1909.8 us. So the `wal` mutex, and not only the `store` lock, makes threads wait. This is the part of the old text about `flush_wal` that holds. The `open_files` lock waits at most 752.6 us in all runs, and the `io` lock waits 0.0 us at p50, p99 and maximum.
+
+The limits are these. S3 is a baseline of the lock layout of today. It used one file per thread, so it does not test per-inode contention. It ran with no mount, so the FUSE cost is not in it. It is one run per N and pass. The reader cache lock must be narrowed first (step 1), and S3 must run again after that change.
+
+**Decides:** step 6 (no evidence for per-worker packs, because the `store` lock waits 0.0 us at p50 and 3381.2 us at p99 at N = 8; the data gives no support for a default N above 2 on today's locks, because write throughput grows little past N = 2 (on Linux it falls back to 120.4 MB/s at N = 8, and on macOS N = 8 is about 9% above N = 2) and the `readers` lock queues the reads; the number is a baseline, and Phase 21 sets the default after the `readers` lock is narrowed)
+
+### S4 result
+
+S4 ran on the Linux mount, on commit 49f5a21, with a release build and kernel 7.2.12. It sampled the `waiting` counter of the FUSE connection about every 2 ms, in three passes of 60 s each. The file is one file of 256 MiB. The pass "write" does random writes. The pass "readahead" reads the file with `dd` after the page cache of the file is dropped (`fadvise`), so that the reads reach the daemon. The pass "both" does both on the same file. A sanity check stopped the daemon and called `stat` once. The counter was 1, so the counter does count a request that waits.
+
+| Pass | Samples | waiting max | p50 | p99 | Histogram (value:count) |
+|---|---|---|---|---|---|
+| write | 25523 | 1 | 1 | 1 | 0:5012, 1:20511 |
+| readahead | 26030 | 2 | 2 | 2 | 0:1783, 1:6961, 2:17286 |
+| both | 25753 | 7 | 3 | 5 | 0:456, 1:1407, 2:5617, 3:15382, 4:2597, 5:271, 6:22, 7:1 |
+
+Random writes alone keep at most 1 request waiting. This agrees with the rule that the kernel sends WRITEs of one inode one at a time in write-through mode. Reads alone reach 2. Reads and writes on one file together reach 7, with p50 3. So the per-inode mutex will see overlap mainly between reads and writes, and not between writes.
+
+The limits are these. `waiting` counts the whole connection and not one inode. The test used one active file, so the count is the count of that file in practice. SliceFS has one dispatch thread, so the test shows only the queue in the kernel, and it does not show how many requests a pool would run at the same time. The writeback cache was not tried. The mount used the current options.
+
+**Decides:** step 2 (the per-inode mutex sees overlap of reads and writes of one file, up to 7 waiting requests, and no overlap of writes alone, so a plain mutex is enough and range locks stay out; the writeback-cache trial is not shown to be needed, because the write pass reached only 1, and it stays open until someone measures it)
+
+### S5 result
+
+S5 ran in one process, with no mount, on commit d24da49. The store has 78000 empty files in 100 directories. Four threads take the commit gate shared and hold it for 50, 200 and 500 ms. One thread does real operations. A probe thread takes the gate shared every 10 ms. A commit runs every second for 30 s. The run was done once on each platform. Linux ran in the container (rustc 1.100.0, 32 CPUs, store on overlayfs). macOS ran in the test process (rustc 1.95.0-nightly, 32 CPUs). The log of the macOS run does not name the file system type of the store.
+
+The source of the standard library says that `std::sync::RwLock` is writer-preferring on both platforms. A new reader waits when a writer waits. On Linux the check is `is_read_lockable`, and on macOS the code is the queue lock in `queue.rs`. This source was read on the macOS toolchain (rustc 1.95.0-nightly). The Linux run used a newer rustc (1.100.0), so the measurement below shows the behavior on that version.
+
+| Platform | Commits | Gate wait p50 / max, ms | Hold (the cut) p50 / max, ms | Commit total p50 / max, ms | New-reader wait while a commit is active, max, ms | Same, idle, max, ms | Longest hold, ms |
+|---|---|---|---|---|---|---|---|
+| Linux | 19 | 450.1 / 484.4 | 9.2 / 146.5 | 524.0 / 713.6 | 597.7 | 0.0 | 505.8 |
+| macOS | 19 | 386.7 / 501.0 | 10.8 / 14.1 | 563.6 / 675.3 | 508.3 | 0.0 | 510.0 |
+
+The longest wait of a new shared holder while a commit waits for the gate is 597.7 ms on Linux and 508.3 ms on macOS. These values are the maximum of the window "commit active". The p50 and p99 of that window also include time after the gate is released, so they are not used. The longest wait is about as long as the longest hold (505.8 and 510.0 ms). On Linux it is 91.9 ms longer, and the cause of that difference was not examined. When no commit is active, the longest wait is 0.0 ms. So a waiting commit blocks every new request for up to the length of the longest shared hold. The cut itself is short: its p50 is 9.2 ms on Linux and 10.8 ms on macOS, against the 1.3 s of the old measurement.
+
+The limits are these. The holds of 50 to 500 ms are set by the test, and they are longer than the holds of real requests. So the maximum is a bound that the test sets. It is one 30 s run on each platform, with 19 commits. The two platforms used two versions of the standard library.
+
+**Decides:** step 7 (keep the `std::sync::RwLock` for the gate in steps 5 and 6, because the generation switch already shipped as #133 and the remaining stall is the wait for holders, which is as long as the longest hold; a lock that lets new readers pass would remove that stall but could starve the commit, and this was not measured; the rule "release the gate before any wait for budget or durability" is required for steps 5 and 6, because a new reader waits behind a waiting commit on both platforms)
+
+### S6 result
+
+S6 made 2000 files of 4096 bytes each. For each file it did a write, a timed fsync and a close. It ran the three write-log (WAL) strategies, two passes each, with the passes interleaved, and with GC and the commit timer off. No WAL flusher exists yet, so the test compares PerOp (a sync for each operation) with the two buffered strategies, flush-on-fsync and periodic. The arm with a flusher is not measured. Group commit is deferred in the project requirements.
+
+Linux mount, commit 98e3522, release build, container without `--privileged`, store on overlayfs:
+
+| Strategy | Pass | fsyncs/s | fsync p50 ms | fsync p99 ms | fsync max ms | Wall time, s |
+|---|---|---|---|---|---|---|
+| per-op | 1 | 71.0 | 4.84 | 143.52 | 437.24 | 29.7 |
+| flush-on-fsync | 1 | 237.7 | 3.11 | 27.18 | 121.90 | 9.7 |
+| periodic | 1 | 280.1 | 2.87 | 18.41 | 109.55 | 8.3 |
+| per-op | 2 | 252.4 | 2.47 | 31.78 | 179.80 | 8.9 |
+| flush-on-fsync | 2 | 358.4 | 2.09 | 16.36 | 168.93 | 6.4 |
+| periodic | 2 | 320.1 | 2.04 | 15.21 | 402.36 | 7.0 |
+
+In process on macOS (macOS 26.2, rustc 1.95.0-nightly, release build, store in the system temp directory, no FUSE, so only the SliceFS cost is in the numbers). The log does not name the file system type of the store.
+
+| Strategy | Pass | fsyncs/s | fsync p50 ms | fsync p99 ms | fsync max ms | Wall time, s |
+|---|---|---|---|---|---|---|
+| per-op | 1 | 48.1 | 20.00 | 36.80 | 65.40 | 41.6 |
+| flush-on-fsync | 1 | 44.3 | 20.91 | 41.75 | 64.65 | 45.2 |
+| periodic | 1 | 45.0 | 20.81 | 41.91 | 115.61 | 44.4 |
+| per-op | 2 | 47.1 | 20.25 | 36.96 | 73.33 | 42.5 |
+| flush-on-fsync | 2 | 43.1 | 21.02 | 41.71 | 136.84 | 46.4 |
+| periodic | 2 | 44.7 | 20.91 | 41.48 | 67.96 | 44.8 |
+
+On Linux the buffered strategies are faster than PerOp: in pass 2, 358.4 and 320.1 fsyncs/s against 252.4, and the p99 is 15.21 to 16.36 ms against 31.78 ms. The PerOp run of pass 1 is much slower (71.0 fsyncs/s) than in pass 2. The cause was not established. The gap between the strategies is therefore not a stable number, because there are only two passes. On macOS the three strategies are within 10% of each other (43.1 to 48.1 fsyncs/s), and the fsync p50 is about 20 ms for all of them. So on macOS a buffered strategy does not help, and the cost of one fsync is the cost of the device sync. A wall time of 41.6 to 46.4 s for 2000 files is the result of that cost. A flusher that lets many fsyncs share one device sync is the only change that could lower it, and this was not measured. Fsyncs can share a sync only if they are in flight at the same time, and that needs the pool of step 6. This is an inference from the design, not a measured result.
+
+**Decides:** step 7 (group commit has the higher priority on macOS, where one fsync costs about 20 ms and the buffered strategies do not help, and a lower priority on Linux, where one fsync costs 2.04 to 4.84 ms at p50; the gain of a flusher is not measured and needs the pool)
+
+### S7 result
+
+S7 ran in one process, with no mount, on commit d24da49, in the container (rustc 1.100.0, store on overlayfs, 32 CPUs). The writes are serialized, because `keep_budget` takes the state of another file, and that is not safe with free threads. There are 4 threads. Each thread has its own 1 GiB file, written in 1 MiB writes. Then each thread writes 128 MiB of the bigwrite mix (1 MiB and 4 KiB random writes, half of the bytes each). Each thread does an fsync every 64 MiB. A commit runs every 30 s. This is one run. The data check, which compares every block with its version, passed.
+
+| Value | Result |
+|---|---|
+| Peak RSS (resident set size) of the test process | 234 MiB, against the cap of 256 MiB (`within_cap=true`) |
+| RSS at the start / after the writes | 42 MiB / 214 MiB |
+| Slowest write | 347.1 ms |
+| Rebase steps | 449 |
+| Largest dirty size | 64 MiB (the dirty budget was reached) |
+| Commits | 3 (gate hold max 171.8 ms, commit total max 299.9 ms) |
+
+The margin to the cap is 22 MiB. The peak RSS is the value of the whole test process, so it also contains the model and the check buffers. It is not the same measurement as the VmHWM of the daemon in S2 (112 MiB for one 1 GiB file). The cap is reported and the test does not assert it.
+
+This is a baseline for the serialized code. The flusher lag and the pause curve cannot be measured before Phase 20 adds the rebase flusher, so the soft and hard thresholds are only partly open. The number that it gives to step 5 is the margin. The dirty budget of 64 MiB with 4 writers already gives 234 MiB. The dispatch queue and the kept pack copies must fit in the 22 MiB that remain, or the budget must be lower.
+
+**Decides:** step 5 (the thresholds stay open until Phase 20 measures the flusher lag and the pause curve; the baseline sets the limit that the new buffers must fit in: 22 MiB of margin at 4 writers)
+
 ## Conclusion
 
 Adding threads does not solve SliceFS's latency problem by itself. Two other changes do most of the work. The first takes the inline 8 MiB pack fsync out of the store lock, so a thread-pool design does not hit that tail on every worker. The second replaces the take-out-of-map ownership trick with a real per-inode lock. That trick is the hidden reason SliceFS needs one thread, and replacing it also makes the log order, the dirty budget and the rebase-off-thread fix (#108 option 1) simple to state. The kernel file systems point to the same design: per-inode locks taken in a fixed rank, commits that never wait while a lock is held, and writers that pay by sleeping instead of doing other files' work.
 
-The open question is macOS. Every source about FSKit and FUSE-T is silent or unofficial on concurrency. So the macOS value of a worker pool is an empirical result that the short spike S1 can settle, and the design is planned so that it is still worth building if the answer is "no overlap". Steps 1-5 make the daemon correct under any concurrency and lower its tail latency even at N=1. That makes them low-risk work no matter what the spikes show.
+The open question is macOS. Every source about FSKit and FUSE-T is silent or unofficial on concurrency. So the macOS value of a worker pool is an empirical result that the short spike S1 can settle, and the design is planned so that it is still worth building if the answer is "no overlap". Phase 18 settled the overlap part: FUSE-T 1.2.9 on macOS 26.7.2 handed the probe 2 requests at once and accepted replies out of order (see the S1 result). The throughput gain on macOS is still open. Steps 1-5 make the daemon correct under any concurrency and lower its tail latency even at N=1. That makes them low-risk work no matter what the spikes show.
