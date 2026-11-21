@@ -1635,7 +1635,10 @@ fn s6_small_fsync() {
             let wall = t0.elapsed().as_secs_f64();
             let f = &hs.ops[Kind::Fsync as usize];
             println!(
-                "S6 wal={name} pass={pass} files={files} fsyncs_per_s={:.1} fsync_p50_ms={:.2} fsync_p99_ms={:.2} fsync_max_ms={:.2} wall_s={wall:.1}",
+                "S6 wal={name} pass={pass} files={files} fsyncs_per_s_fsync_only={:.1} files_per_s_wall={:.1} fsync_p50_ms={:.2} fsync_p99_ms={:.2} fsync_max_ms={:.2} wall_s={wall:.1}",
+                // fsync_only = n / sum(fsync times); wall = n / (create+write+fsync+release).
+                // Same two definitions as scripts/docker-linux-test/s6-smallfsync.sh.
+                files as f64 / (f.mean() * f.len() as f64 / 1e9),
                 files as f64 / wall,
                 ms(f.value_at_quantile(0.5)),
                 ms(f.value_at_quantile(0.99)),

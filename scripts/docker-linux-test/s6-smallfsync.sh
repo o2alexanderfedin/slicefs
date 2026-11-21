@@ -47,7 +47,8 @@ for i in range(n):
 wall = time.perf_counter() - t_all
 def pct(v, q):
     v = sorted(v); return v[min(len(v) - 1, int(len(v) * q))]
-print(f"S6 strategy={strat} pass={p} files={n} fsyncs_per_s={n / sum(fs) * 1000:.1f} "
+print(f"S6 strategy={strat} pass={p} files={n} "
+      f"fsyncs_per_s_fsync_only={n / sum(fs) * 1000:.1f} files_per_s_wall={n / wall:.1f} "
       f"fsync_p50_ms={pct(fs, 0.50):.2f} fsync_p99_ms={pct(fs, 0.99):.2f} fsync_max_ms={max(fs):.2f} "
       f"op_p99_ms={pct(ops, 0.99):.2f} wall_s={wall:.1f}")
 PY
