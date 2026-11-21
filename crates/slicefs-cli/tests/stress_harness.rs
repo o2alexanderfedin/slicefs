@@ -19,7 +19,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -263,6 +263,9 @@ struct Ctx {
     cfg: Config,
     one: Option<OneFile>,
     dirs: Option<Dirs>,
+    /// Handler calls running now, and the most seen at once (inside the gate).
+    inflight: AtomicUsize,
+    max_inflight: AtomicUsize,
 }
 
 /// What `run` returns: the context, the many-files models, the mismatches and
@@ -332,7 +335,10 @@ impl Ctx {
         let g = self.gate.read().unwrap_or_else(|e| e.into_inner());
         let acquired = Instant::now();
         hs.gate_wait.saturating_record(ns(acquired - w));
+        let n = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_inflight.fetch_max(n, Ordering::SeqCst);
         let r = f();
+        self.inflight.fetch_sub(1, Ordering::SeqCst);
         let op_ns = ns(acquired.elapsed());
         drop(g);
         let hold = ns(acquired.elapsed());
@@ -788,6 +794,7 @@ struct Report {
     hists: Hists,
     commit: CommitHists,
     ops: usize,
+    max_inflight: usize,
 }
 
 fn run(cfg: Config) -> Outcome {
@@ -822,7 +829,17 @@ fn run(cfg: Config) -> Outcome {
             (None, Some(Dirs { shared, per_thread }))
         }
     };
-    let ctx = Ctx { fs, _dir: dir, gate, serial: Mutex::new(()), cfg: cfg.clone(), one, dirs };
+    let ctx = Ctx {
+        fs,
+        _dir: dir,
+        gate,
+        serial: Mutex::new(()),
+        cfg: cfg.clone(),
+        one,
+        dirs,
+        inflight: AtomicUsize::new(0),
+        max_inflight: AtomicUsize::new(0),
+    };
     println!(
         "STRESS seed={} mode={} threads={} serialize={} ops={}",
         cfg.seed,
@@ -872,7 +889,13 @@ fn run(cfg: Config) -> Outcome {
         Mode::ManyFiles => mismatches.extend(verify_namespace(&ctx, &models)),
     }
     let ops = cfg.threads * cfg.ops_per_thread;
-    Outcome { ctx, models, mismatches, report: Report { mode: cfg.mode, dirty_total, hists: total, commit, ops } }
+    let max_inflight = ctx.max_inflight.load(Ordering::SeqCst);
+    Outcome {
+        ctx,
+        models,
+        mismatches,
+        report: Report { mode: cfg.mode, dirty_total, hists: total, commit, ops, max_inflight },
+    }
 }
 
 // ---- report ----------------------------------------------------------------
@@ -903,6 +926,7 @@ fn print_report(r: &Report) {
     row("commit_gate_wait", &r.commit.gate_wait);
     row("commit_hold", &r.commit.hold);
     row("commit_total", &r.commit.total);
+    println!("max_inflight={}", r.max_inflight);
     if chunk_store::lock_stats::ENABLED {
         for st in chunk_store::lock_stats::snapshot().iter().filter(|s| s.count > 0) {
             println!(
@@ -949,6 +973,8 @@ fn check_short(cfg: &Config, o: &Outcome) {
     print_report(&o.report);
     assert_clean(cfg.seed, o);
     assert!(o.report.ops > 0);
+    // Serialize on means one operation at a time: this proves the mode works.
+    assert_eq!(o.report.max_inflight, 1, "seed={}: serialize is on, but ops overlapped", cfg.seed);
     assert!(
         o.report.dirty_total < DIRTY_BUDGET / 4,
         "seed={}: dirty total {} is near the budget",
@@ -969,4 +995,59 @@ fn short_many_files() {
     let cfg = short_cfg(Mode::ManyFiles);
     let o = run(cfg.clone());
     check_short(&cfg, &o);
+}
+
+/// The harness must be able to fail: a write and an unlink behind the model's
+/// back are both reported.
+#[test]
+fn model_detects_planted_bug() {
+    // File part: one thread, a short run, then one block changes behind the model.
+    let mut cfg = short_cfg(Mode::OneFile);
+    cfg.threads = 1;
+    cfg.ops_per_thread = 30;
+    let o = run(cfg.clone());
+    assert_clean(cfg.seed, &o);
+    let one = o.ctx.one.as_ref().unwrap();
+    let block = 0usize;
+    let v = one.model.committed[block].load(Ordering::SeqCst) + 7;
+    let fh = match h::handle_open(&o.ctx.fs, one.ino, libc::O_RDWR) {
+        OpenResult::Ok(fh, _) => fh,
+        OpenResult::Error(e) => panic!("seed={} open errno {e}", cfg.seed),
+    };
+    let planted = block_bytes(cfg.seed, FILE_ID, block as u64, v);
+    assert!(matches!(h::handle_write(&o.ctx.fs, fh, 0, &planted), WriteResult::Ok(_)));
+    assert!(matches!(h::handle_release(&o.ctx.fs, one.ino, fh), EmptyResult::Ok));
+    let found = verify_files(&o.ctx);
+    assert_eq!(found.len(), 1, "seed={}: want one mismatch, got {found:?}", cfg.seed);
+    assert_eq!(found[0].block, Some(block as u64), "seed={}: {found:?}", cfg.seed);
+
+    // Namespace part: a live file is unlinked behind the model's back.
+    let mut cfg = short_cfg(Mode::ManyFiles);
+    cfg.threads = 1;
+    cfg.ops_per_thread = 30;
+    let mut o = run(cfg.clone());
+    assert_clean(cfg.seed, &o);
+    let dirs = o.ctx.dirs.as_ref().unwrap();
+    let own = dirs.per_thread[0];
+    if o.models[0].files.is_empty() {
+        // Make sure one live file exists: create it and add it to the model.
+        let name = "t0-planted".to_string();
+        let ino = match h::handle_create(&o.ctx.fs, own, &name, S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR) {
+            CreateResult::Ok(ino, fh, _) => {
+                assert!(matches!(h::handle_release(&o.ctx.fs, ino, fh), EmptyResult::Ok));
+                ino
+            }
+            CreateResult::Error(e) => panic!("seed={} create errno {e}", cfg.seed),
+        };
+        o.models[0].files.insert((own, name), Ent { ino, ver: [0; MAX_BLOCKS], len: 0, fh: None });
+        assert!(verify_namespace(&o.ctx, &o.models).is_empty(), "seed={}", cfg.seed);
+    }
+    let (dir, name) = o.models[0].files.keys().next().unwrap().clone();
+    assert!(matches!(h::handle_unlink(&o.ctx.fs, dir, &name), EmptyResult::Ok));
+    let found = verify_namespace(&o.ctx, &o.models);
+    assert!(
+        found.iter().any(|m| m.detail.contains(&name)),
+        "seed={}: no mismatch names {name}: {found:?}",
+        cfg.seed
+    );
 }
