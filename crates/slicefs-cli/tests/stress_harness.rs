@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hdrhistogram::Histogram;
@@ -110,11 +110,69 @@ impl Mode {
 struct Config {
     mode: Mode,
     threads: usize,
+    /// Ops per thread in a counted run (use `usize::MAX` with `secs`).
     ops_per_thread: usize,
+    /// A timed run: every worker stops at this deadline.
+    secs: Option<u64>,
     file_bytes: u64,
     seed: u64,
     serialize: bool,
     wal: WalConfig,
+    /// The watchdog aborts the process if the run takes longer than this.
+    watchdog: Duration,
+}
+
+/// A number from the environment, with a range. Out of range panics with the
+/// variable name; the value is only ever used as a number (never a path or a
+/// command).
+fn env_num(name: &str, default: u64, lo: u64, hi: u64) -> u64 {
+    let Ok(s) = std::env::var(name) else { return default };
+    let v: u64 = s.trim().parse().unwrap_or_else(|_| panic!("{name} must be a number in {lo}..={hi}"));
+    assert!((lo..=hi).contains(&v), "{name} must be in {lo}..={hi}, got {v}");
+    v
+}
+
+impl Config {
+    /// The long run (by hand): `STRESS_THREADS` (1..=64, default 8),
+    /// `STRESS_SECS` (1..=3600, default 60), `STRESS_FILE_MIB` (1..=4096,
+    /// default 64), `STRESS_SEED`, `STRESS_SERIALIZE` (0 or 1, default 1).
+    /// `STRESS_MODE` is read by `modes_from_env`.
+    fn from_env(defaults: Config) -> Config {
+        let secs = env_num("STRESS_SECS", 60, 1, 3600);
+        Config {
+            threads: env_num("STRESS_THREADS", 8, 1, 64) as usize,
+            ops_per_thread: usize::MAX,
+            secs: Some(secs),
+            file_bytes: env_num("STRESS_FILE_MIB", 64, 1, 4096) << 20,
+            serialize: env_num("STRESS_SERIALIZE", 1, 0, 1) == 1,
+            watchdog: Duration::from_secs(secs + 60),
+            ..defaults
+        }
+    }
+}
+
+/// `STRESS_MODE`: `one-file`, `many-files` or `both` (default).
+fn modes_from_env() -> Vec<Mode> {
+    match std::env::var("STRESS_MODE").as_deref() {
+        Err(_) | Ok("both") => vec![Mode::OneFile, Mode::ManyFiles],
+        Ok("one-file") => vec![Mode::OneFile],
+        Ok("many-files") => vec![Mode::ManyFiles],
+        Ok(_) => panic!("STRESS_MODE must be one-file, many-files or both"),
+    }
+}
+
+/// No unbounded wait: if the run does not end in `limit`, print the seed and
+/// abort the process. Dropping the sender (the end of a run) stops the thread,
+/// so it never fires in a later test of the same binary.
+fn watchdog(limit: Duration, seed: u64) -> mpsc::Sender<()> {
+    let (tx, rx) = mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        if let Err(mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(limit) {
+            eprintln!("STRESS watchdog: no finish after {} s, seed={seed}", limit.as_secs());
+            std::process::abort();
+        }
+    });
+    tx
 }
 
 fn seed_from_env() -> u64 {
@@ -266,6 +324,10 @@ struct Ctx {
     /// Handler calls running now, and the most seen at once (inside the gate).
     inflight: AtomicUsize,
     max_inflight: AtomicUsize,
+    /// A timed run ends at this instant; `halt` ends it early (too many mismatches).
+    deadline: Option<Instant>,
+    halt: AtomicBool,
+    ops_done: AtomicUsize,
 }
 
 /// What `run` returns: the context, the many-files models, the mismatches and
@@ -326,6 +388,18 @@ fn pick_op(rng: &mut Rng) -> Op {
 }
 
 impl Ctx {
+    /// Checked by a worker before each op: false when the run is over.
+    fn keep_going(&self, found: usize) -> bool {
+        if found >= 50 {
+            self.halt.store(true, Ordering::SeqCst);
+        }
+        if self.halt.load(Ordering::SeqCst) || self.deadline.is_some_and(|d| Instant::now() >= d) {
+            return false;
+        }
+        self.ops_done.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
     /// One operation: the harness mutex (serialize mode), then the commit gate
     /// (as `fuse_callbacks.rs` does), then the handler. The latency is the
     /// handler call only; the gate wait and hold are timed apart.
@@ -420,7 +494,7 @@ impl Ctx {
             Err(m) => return WorkerOut { mismatches: vec![m], model: None },
         };
         for _ in 0..self.cfg.ops_per_thread {
-            if out.len() >= 50 {
+            if !self.keep_going(out.len()) {
                 break;
             }
             if rng.below(25) == 0 {
@@ -545,7 +619,7 @@ impl Ctx {
         };
 
         for _ in 0..self.cfg.ops_per_thread {
-            if out.len() >= 50 {
+            if !self.keep_going(out.len()) {
                 break;
             }
             let mut op = pick_op(&mut rng);
@@ -798,6 +872,7 @@ struct Report {
 }
 
 fn run(cfg: Config) -> Outcome {
+    let _watchdog = watchdog(cfg.watchdog, cfg.seed);
     chunk_store::lock_stats::reset();
     let dir = TempDir::new().unwrap();
     let fs = new_fs(dir.path(), cfg.wal.clone());
@@ -839,14 +914,18 @@ fn run(cfg: Config) -> Outcome {
         dirs,
         inflight: AtomicUsize::new(0),
         max_inflight: AtomicUsize::new(0),
+        deadline: cfg.secs.map(|s| Instant::now() + Duration::from_secs(s)),
+        halt: AtomicBool::new(false),
+        ops_done: AtomicUsize::new(0),
     };
     println!(
-        "STRESS seed={} mode={} threads={} serialize={} ops={}",
+        "STRESS seed={} mode={} threads={} serialize={} ops_per_thread={} secs={}",
         cfg.seed,
         cfg.mode.name(),
         cfg.threads,
         cfg.serialize,
-        cfg.threads * cfg.ops_per_thread
+        if cfg.secs.is_some() { "timed".to_string() } else { cfg.ops_per_thread.to_string() },
+        cfg.secs.map_or("-".to_string(), |s| s.to_string()),
     );
     let mut total = Hists::new();
     let mut mismatches = Vec::new();
@@ -888,7 +967,7 @@ fn run(cfg: Config) -> Outcome {
         Mode::OneFile => mismatches.extend(verify_files(&ctx)),
         Mode::ManyFiles => mismatches.extend(verify_namespace(&ctx, &models)),
     }
-    let ops = cfg.threads * cfg.ops_per_thread;
+    let ops = ctx.ops_done.load(Ordering::SeqCst);
     let max_inflight = ctx.max_inflight.load(Ordering::SeqCst);
     Outcome {
         ctx,
@@ -962,10 +1041,12 @@ fn short_cfg(mode: Mode) -> Config {
         // Calibrated so the whole binary runs in a few seconds: fsync and
         // release cost tens of ms each in many-files mode.
         ops_per_thread: if mode == Mode::OneFile { 150 } else { 40 },
+        secs: None,
         file_bytes: 4 << 20,
         seed: seed_from_env(),
         serialize: true,
         wal: WalConfig::PerOp,
+        watchdog: Duration::from_secs(60),
     }
 }
 
@@ -1050,4 +1131,39 @@ fn model_detects_planted_bug() {
         "seed={}: no mismatch names {name}: {found:?}",
         cfg.seed
     );
+}
+
+/// The long run, by hand (use `--release`). Env vars: see `Config::from_env`.
+#[test]
+#[ignore = "long run by hand: STRESS_THREADS STRESS_SECS STRESS_FILE_MIB STRESS_SEED STRESS_SERIALIZE STRESS_MODE; use --release"]
+fn long_run() {
+    for mode in modes_from_env() {
+        let cfg = Config::from_env(Config { mode, ..short_cfg(mode) });
+        let o = run(cfg.clone());
+        print_report(&o.report);
+        println!("ops={} dirty_total={}", o.report.ops, o.report.dirty_total);
+        assert_clean(cfg.seed, &o);
+    }
+}
+
+/// Serialize off: the target of Phases 19-21. Both modes, 4 threads, about 5 s
+/// each; the files are small, so the dirty total stays below the budget.
+#[test]
+#[ignore = "target for Phases 19-21: needs file state kept in open_files (LOCK-01) and no cross-file take-out (LOCK-02)"]
+fn serialize_off_target() {
+    for mode in [Mode::OneFile, Mode::ManyFiles] {
+        let cfg = Config {
+            threads: 4,
+            ops_per_thread: usize::MAX,
+            secs: Some(5),
+            serialize: false,
+            watchdog: Duration::from_secs(65),
+            ..short_cfg(mode)
+        };
+        let o = run(cfg.clone());
+        print_report(&o.report);
+        assert_clean(cfg.seed, &o);
+        assert!(o.report.dirty_total < DIRTY_BUDGET, "seed={}: dirty total {}", cfg.seed, o.report.dirty_total);
+        assert!(o.report.max_inflight > 1, "seed={}: ops never overlapped", cfg.seed);
+    }
 }
