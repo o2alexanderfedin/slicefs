@@ -6,7 +6,7 @@
     {
       "number": "18",
       "name": "Spikes, baseline and stress harness",
-      "status": "in_progress"
+      "status": "complete"
     },
     {
       "number": "19",
@@ -41,8 +41,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (verify)",
-    "reason": "Phase 1 of 7 · 0% · ready to verify"
+    "label": "Advance to the next step (plan phase 19)",
+    "reason": "Phase 2 of 7 — needs a plan"
   },
-  "updated_at": "2026-11-21T09:15:35.456Z"
+  "updated_at": "2026-11-21T09:32:07.112Z"
 }
