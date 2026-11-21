@@ -234,7 +234,20 @@ Plans:
   4. Locks have one fixed rank, with two inodes locked in increasing inode order; a test that breaks the rank fails in a debug build
   5. After a crash, replay of the log from the mixed-operation harness gives the same state as the apply, including creates by logged inode number, and the #21 body matches this rule
   6. With several handles on one inode in different modes (read-only, read-write, `O_APPEND`), the harness shows the POSIX.1 2.9.7 rules: a completed write through one handle is visible through every other handle, a read sees all or none of a concurrent write, and concurrent appends never overlap and lose no bytes. The research for this phase checks how the kernel FUSE client computes the append offset in the SliceFS mount mode
-**Plans**: TBD
+**Plans**: 11 plans
+
+Plans (one plan per wave; executors run them in order):
+- [ ] 19-01-PLAN.md — Lock shim `chunk_store::sync` over parking_lot 0.12, rank checker, `deadlock-detect`, all hot-path locks migrated
+- [ ] 19-02-PLAN.md — Chunk-store lock tails (pack create, seal join, run write, KEEP_CAP wait, trust floor, pack open) off the store lock
+- [ ] 19-03-PLAN.md — Metadata hot path: `modify_inode`, sharded caches, cold loads and flushes off the locks, `create_inode_at`
+- [ ] 19-04-PLAN.md — WAL append (LSN, memory only) and write-out split; fsync outside the WAL mutexes
+- [ ] 19-05-PLAN.md — `FileCell` per inode, handle table with modes, per-inode readers, `keep_budget` on atomics
+- [ ] 19-06-PLAN.md — Overlay rebase through copy, I/O without lock, publish if the generation is unchanged
+- [ ] 19-07-PLAN.md — Streaming, read, fsync, finalize and truncate through the same protocol; no cross-file wait
+- [ ] 19-08-PLAN.md — Write-path records logged under the cell lock; `O_APPEND` handles; POSIX multi-handle tests
+- [ ] 19-09-PLAN.md — Namespace stripes and rename mutex, gate at rank 1, `serialize_off_target` in the suite
+- [ ] 19-10-PLAN.md — Namespace records logged under their stripes, replay by logged inode, crash replay of the harness
+- [ ] 19-11-PLAN.md — Harness multi-handle mode, lock wait rows, #21 body, Phase 19 note in the research doc
 
 ### Phase 20: Dirty budget and rebase flusher
 

@@ -44,12 +44,15 @@ Filled in by the planner (`<automated>` + `<fails_when>` per task). Requirement 
 
 ## Wave 0 Requirements
 
-- [ ] `crates/slicefs-cli/tests/common/mod.rs` (shared `dump`, `reload_and_replay`)
-- [ ] `crates/slicefs-cli/tests/lock_free_io.rs`
-- [ ] `crates/slicefs-cli/tests/multi_handle_posix.rs`
-- [ ] `crates/slicefs-cli/tests/crash_replay_threads.rs`
-- [ ] slow-`PackIo` test wrapper; `sync.rs` rank unit tests; `Overlay` generation property test
-- [ ] `lock_stats_report.rs` label list update
+- [ ] `crates/slicefs-cli/tests/common/mod.rs` (shared `dump`, `reload_and_replay`) — Plan 10
+- [ ] `crates/slicefs-cli/tests/lock_free_io.rs` — Plans 06, 07
+- [ ] `crates/slicefs-cli/tests/multi_handle_posix.rs` — Plans 05, 08
+- [ ] Crash replay of the mixed-operation harness: `crash_replay_matches_apply` in `crates/slicefs-cli/tests/stress_harness.rs` (replaces the draft `crash_replay_threads.rs`; ROADMAP criterion 5 names the harness) — Plan 10
+- [ ] Slow-I/O test support: `MemIo` hold knobs (`hold_creates`, `hold_durable`, `hold_opens`, `hold_pack_reads`) and `crates/chunk-store/src/lock_tail_tests.rs` — Plans 02, 03
+- [ ] `sync.rs` rank unit tests — Plan 01; `Overlay` generation unit test — Plan 06
+- [ ] `lock_stats_report.rs` label list update — Plans 03, 04, 05, 09; `crates/slicefs-cli/tests/lock_wait_rows.rs` — Plan 11
+
+The per-task `<automated>` commands and `<fails_when>` signals are in each `19-NN-PLAN.md`.
 
 ---
 
