@@ -1,0 +1,11 @@
+# S1 macOS FSKit, run https://github.com/o2alexanderfedin/slicefs/actions/runs/44882009650, commit 97086b2d6a45337a0f2469472f2ad492483945ea, 2026-11-21
+sw_vers ProductVersion: 26.7.2
+fuse-t cask version: fuse-t 1.2.9
+round=0 dd_ms=298 fast_stats_during_slow=50 max_stat_ms=2
+round=1 dd_ms=297 fast_stats_during_slow=50 max_stat_ms=2
+round=2 dd_ms=248 fast_stats_during_slow=50 max_stat_ms=2
+round=3 dd_ms=211 fast_stats_during_slow=50 max_stat_ms=2
+round=4 dd_ms=221 fast_stats_during_slow=50 max_stat_ms=2
+uname: Darwin 25.6.0
+sw_vers: 26.7.2
+S1 RESULT arrived=548 max_inflight=2 reply_order_inversions=5
