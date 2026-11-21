@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 18
 current_phase_name: Spikes, baseline and stress harness
 status: executing
-stopped_at: v2.2 roadmap created (Phases 18-24)
-last_updated: "2026-11-21T07:32:06.263Z"
+stopped_at: Completed 18-01-PLAN.md
+last_updated: "2026-11-21T07:44:46.909Z"
 last_activity: 2026-11-20
-last_activity_desc: Roadmap created for milestone v2.2 (7 phases, 26 requirements)
-state_head: a5e0361cd19ccb91cfb9941f00f25fd2be66a065
+last_activity_desc: Phase 18 execution started
+state_head: 52744c47835981881bef07ab55e3d1534b44d5a5
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 7
-  completed_plans: 0
+  completed_plans: 1
   percent: 0
 ---
 
@@ -25,14 +25,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-20)
 
 **Core value:** High-ratio data deduplication that works transparently as a real, daily-driver POSIX filesystem
-**Current focus:** Phase 18 - Spikes, baseline and stress harness (#127)
+**Current focus:** Phase 18 — Spikes, baseline and stress harness
 
 ## Current Position
 
-Phase: 18 (Spikes, baseline and stress harness) — READY TO EXECUTE
-Plan: - of - in current phase
+Phase: 18 (Spikes, baseline and stress harness) — EXECUTING
+Plan: 2 of 7
 Status: Ready to execute
-Last activity: 2026-11-20 - Roadmap created for milestone v2.2 (7 phases, 26 requirements)
+Last activity: 2026-11-20 — Phase 18 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -42,6 +42,11 @@ Progress: [░░░░░░░░░░] 0%
 - Total plans completed: 0 (v2.2)
 
 *Updated after each plan completion*
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 18 P01 | 25min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -55,6 +60,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [v2.2]: Each log record is appended under the same locks as its apply (supersedes the #21 table)
 - [v2.2]: Chunk profile is fixed at seed; the default stays 4/8/32 KiB
 - [v2.2]: Prolly = prototype and written decision, no migration; macOS worker default is 1 until S1 is recorded
+- [Phase 18]: Plan 01: lock-stats uses optional hdrhistogram in chunk-store (D-02); lock_stats::Guard is the std guard when the feature is off
 
 ### Pending Todos
 
@@ -76,8 +82,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-20
-Stopped at: v2.2 roadmap created (Phases 18-24)
+Last session: 2026-11-21T07:44:46.873Z
+Stopped at: Completed 18-01-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
