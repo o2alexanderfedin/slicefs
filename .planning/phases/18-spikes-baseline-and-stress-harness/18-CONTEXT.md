@@ -20,7 +20,8 @@ Out of scope: fine-grained locks (Phase 19), the budget flusher (Phase 20), the 
 ## Implementation Decisions
 
 ### Harness dependencies
-- Latency and lock histograms use `hdrhistogram` 7.6 as a dev-dependency only (user choice, as in `.planning/research/STACK.md`) — **Reversibility:** costly — a new crate in `Cargo.lock`; removal means a rewrite of the harness report code.
+- Latency and lock histograms use `hdrhistogram` 7.6 (user choice, as in `.planning/research/STACK.md`) — **Reversibility:** costly — a new crate in `Cargo.lock`; removal means a rewrite of the harness report code.
+- The lock-stats recorder in `chunk-store` uses `hdrhistogram` as an optional normal dependency (`default-features = false`, `optional = true`), turned on only by the `lock-stats` feature (`lock-stats = ["dep:hdrhistogram"]`); `metadata` and `slicefs-cli` forward the feature. There is one histogram per lock site (hold and wait), and the report gives exact p50/p99/max; there are no power-of-two buckets. With the feature off, the crate is not in the product build (user decision, 2026-11-20, overrides the research note about log2 buckets) — **Reversibility:** costly — feature wiring in three Cargo.toml files.
 
 ### Decided autonomously
 - [Harness] Q: "Where does the harness run?" → Selected: "In process, against the `Filesystem` core API (no FUSE mount), as an integration test in `crates/slicefs-cli/tests/`" — test code only; it can move without effect on the product.
