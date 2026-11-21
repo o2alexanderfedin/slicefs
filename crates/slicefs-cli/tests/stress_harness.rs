@@ -139,13 +139,17 @@ impl Config {
     /// `STRESS_MODE` is read by `modes_from_env`.
     fn from_env(defaults: Config) -> Config {
         let secs = env_num("STRESS_SECS", 60, 1, 3600);
+        let file_bytes = env_num("STRESS_FILE_MIB", 64, 1, 4096) << 20;
+        // `run` also verifies every block of the file, one 4 KiB read at a time;
+        // allow about 5000 verify reads per second on top of the timed run.
+        let verify_secs = file_bytes / BLOCK as u64 / 5_000;
         Config {
             threads: env_num("STRESS_THREADS", 8, 1, 64) as usize,
             ops_per_thread: usize::MAX,
             secs: Some(secs),
-            file_bytes: env_num("STRESS_FILE_MIB", 64, 1, 4096) << 20,
+            file_bytes,
             serialize: env_num("STRESS_SERIALIZE", 1, 0, 1) == 1,
-            watchdog: Duration::from_secs(secs + 60),
+            watchdog: Duration::from_secs(secs + 60 + verify_secs),
             ..defaults
         }
     }
