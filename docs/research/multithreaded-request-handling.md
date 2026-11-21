@@ -257,6 +257,15 @@ This is a baseline for the serialized code. The flusher lag and the pause curve 
 
 **Decides:** step 5 (the thresholds stay open until Phase 20 measures the flusher lag and the pause curve; the baseline sets the limit that the new buffers must fit in: 22 MiB of margin at 4 writers)
 
+### Notes after the code review
+
+A code review after the runs (`.planning/phases/18-spikes-baseline-and-stress-harness/18-REVIEW.md`) found four points that affect how to read the recorded numbers. The code is now fixed. The spikes were not run again, so the numbers above come from the old code.
+
+- **S1.** The old probe lowered its in-flight count after it sent a reply, so `max_inflight` could show 1 more than the true value. The fixed probe lowers the count before the reply. The S1 decision does not change. A reply-order inversion is possible only when a later request arrives before an earlier request gets its reply, so 5 inversions prove that 2 requests were in flight at the same time. The old client also started the stat calls after a fixed 50 ms sleep, so `fast_stats_during_slow` is not proof of overlap by itself. The fixed client waits until the probe logs the slow READ.
+- **S6.** The Linux value is fsyncs per second of fsync time only. The macOS in-process value is files per second of wall time. Do not compare the two numbers directly. The fixed code reports both values, as `fsyncs_per_s_fsync_only` and `files_per_s_wall`.
+- **S7.** The old code took the sample of the largest dirty size outside the serialization. So the sample could miss the overlay of one file, and the true value can be higher than 64 MiB. The fixed code takes the sample inside the timed write.
+- The other fixes (the watchdog limit, and cleanup after a failed mount in the S4, S6 and bigwrite scripts) do not change a recorded number.
+
 ## Conclusion
 
 Adding threads does not solve SliceFS's latency problem by itself. Two other changes do most of the work. The first takes the inline 8 MiB pack fsync out of the store lock, so a thread-pool design does not hit that tail on every worker. The second replaces the take-out-of-map ownership trick with a real per-inode lock. That trick is the hidden reason SliceFS needs one thread, and replacing it also makes the log order, the dirty budget and the rebase-off-thread fix (#108 option 1) simple to state. The kernel file systems point to the same design: per-inode locks taken in a fixed rank, commits that never wait while a lock is held, and writers that pay by sleeping instead of doing other files' work.
