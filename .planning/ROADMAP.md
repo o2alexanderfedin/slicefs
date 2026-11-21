@@ -233,6 +233,7 @@ Plans:
   3. The store lock, `readers`, the WAL append mutex and `dir_live`/`inode_live` are not held during disk I/O, a hash calculation or a wait; the hold times in the harness report show it
   4. Locks have one fixed rank, with two inodes locked in increasing inode order; a test that breaks the rank fails in a debug build
   5. After a crash, replay of the log from the mixed-operation harness gives the same state as the apply, including creates by logged inode number, and the #21 body matches this rule
+  6. With several handles on one inode in different modes (read-only, read-write, `O_APPEND`), the harness shows the POSIX.1 2.9.7 rules: a completed write through one handle is visible through every other handle, a read sees all or none of a concurrent write, and concurrent appends never overlap and lose no bytes. The research for this phase checks how the kernel FUSE client computes the append offset in the SliceFS mount mode
 **Plans**: TBD
 
 ### Phase 20: Dirty budget and rebase flusher
