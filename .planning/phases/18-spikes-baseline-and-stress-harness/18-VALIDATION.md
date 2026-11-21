@@ -42,10 +42,24 @@ Filled in by the planner per task (`<automated>` + `<fails_when>`). Requirement 
 |-------------|----------|-----------|-------------------|-------------|--------|
 | SPIKE-02 | Mixed ops, one file and many files, data equals model | integration | `cargo test -p slicefs-cli --test stress_harness short_` | ❌ W0 | ⬜ pending |
 | SPIKE-02 | Model detects a planted divergence | integration | `cargo test -p slicefs-cli --test stress_harness model_detects_planted_bug` | ❌ W0 | ⬜ pending |
-| SPIKE-02 | Histograms and lock hold/wait report | integration | `cargo test -p slicefs-cli --features lock-stats --test stress_harness lock_stats_report` | ❌ W0 | ⬜ pending |
+| SPIKE-02 | Histograms and lock hold/wait report (all seven labels) | integration | `cargo test -p slicefs-cli --features lock-stats --test lock_stats_report` (own test binary, so the process-global recorder is not shared) | ❌ W0 | ⬜ pending |
+| SPIKE-02 | hdrhistogram not in the product build with the feature off | build | `cargo tree -p slicefs-cli -e normal \| grep -c hdrhistogram` prints 0 | ❌ W0 | ⬜ pending |
 | SPIKE-02 | Product build unchanged with the feature off | build | `cargo check --workspace --all-targets` | ✅ | ⬜ pending |
 | SPIKE-01 | S1-S7 result sections, each with `**Decides:** step N` | doc check | grep on `docs/research/multithreaded-request-handling.md` | ❌ W0 | ⬜ pending |
 | SPIKE-03 | S1 probe builds | build | `cargo build --release -p slicefs-cli --example s1_probe` | ❌ W0 | ⬜ pending |
+
+Per-task map (each `<automated>` has a `<fails_when>` in its PLAN.md):
+
+| Task | Requirement | Automated command (short) |
+|------|-------------|---------------------------|
+| 18-01 T1 | SPIKE-02 | `cargo test -p slicefs-cli --test stress_harness short_one_file -- --nocapture` |
+| 18-01 T2 | SPIKE-02 | same with `--features lock-stats` (row `lock site=store`); `cargo tree ... -e normal` gates |
+| 18-02 T1, T2 | SPIKE-02 | `cargo test -p slicefs-cli --features lock-stats --test lock_stats_report`; `cargo test --workspace` |
+| 18-03 T1-T3 | SPIKE-02 | `cargo test -p slicefs-cli --test stress_harness short_`; `model_detects_planted_bug --exact`; `-- --list --ignored` |
+| 18-04 T1, T2 | SPIKE-03 | `cargo build --release -p slicefs-cli --example s1_probe`; grep `S1 RESULT` in `runs/s1-*.log` |
+| 18-05 T1-T3 | SPIKE-01 | grep result lines in `runs/s6-smallfsync-linux.log`, `runs/s4-waiting-linux.log`, `runs/s2-bigwrite-linux.log` |
+| 18-06 T1-T3 | SPIKE-01 | grep result lines in `runs/s3-*.log`, `runs/s5-*.log`, `runs/s6-inproc-macos.log`, `runs/s7-budget-linux.log`; suite still 3 passed, 6 ignored |
+| 18-07 T1, T2 | SPIKE-01, SPIKE-03 | doc greps: 7 `### S<n> result`, 7 `**Decides:** step`, >= 5 `SUPERSEDED`, the macOS default sentence |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
