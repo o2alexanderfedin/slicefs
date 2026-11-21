@@ -1,0 +1,20 @@
+# docker host (OrbStack): Kernel Version: 7.2.12-orbstack-00394-gbecdd6130068;Operating System: OrbStack;CPUs: 32;Total Memory: 15.68GiB;
+# date 2026-11-21, scripts/docker-linux-test/run.sh s6, release build, container without --privileged
+# limit: pass 1 per-op ran first on a fresh container (cold caches); read it with pass 2
+# S6 small files, commit 98e3522, kernel 7.2.12-orbstack-00394-gbecdd6130068, store_fs=overlayfs
+# files per run 2000, 4096 bytes each, write then timed fsync then close; GC off
+# note: no WAL flusher yet: PerOp is compared with the buffered strategies
+  s6-run-per-op-1: ok
+S6 strategy=per-op pass=1 files=2000 fsyncs_per_s=71.0 fsync_p50_ms=4.84 fsync_p99_ms=143.52 fsync_max_ms=437.24 op_p99_ms=144.23 wall_s=29.7
+  s6-run-flush-on-fsync-1: ok
+S6 strategy=flush-on-fsync pass=1 files=2000 fsyncs_per_s=237.7 fsync_p50_ms=3.11 fsync_p99_ms=27.18 fsync_max_ms=121.90 op_p99_ms=27.88 wall_s=9.7
+  s6-run-periodic-1: ok
+S6 strategy=periodic pass=1 files=2000 fsyncs_per_s=280.1 fsync_p50_ms=2.87 fsync_p99_ms=18.41 fsync_max_ms=109.55 op_p99_ms=19.09 wall_s=8.3
+  s6-run-per-op-2: ok
+S6 strategy=per-op pass=2 files=2000 fsyncs_per_s=252.4 fsync_p50_ms=2.47 fsync_p99_ms=31.78 fsync_max_ms=179.80 op_p99_ms=32.56 wall_s=8.9
+  s6-run-flush-on-fsync-2: ok
+S6 strategy=flush-on-fsync pass=2 files=2000 fsyncs_per_s=358.4 fsync_p50_ms=2.09 fsync_p99_ms=16.36 fsync_max_ms=168.93 op_p99_ms=16.77 wall_s=6.4
+  s6-run-periodic-2: ok
+S6 strategy=periodic pass=2 files=2000 fsyncs_per_s=320.1 fsync_p50_ms=2.04 fsync_p99_ms=15.21 fsync_max_ms=402.36 op_p99_ms=15.58 wall_s=7.0
+    run time: 78 s
+RESULT s6: PASS

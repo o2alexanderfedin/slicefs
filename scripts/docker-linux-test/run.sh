@@ -9,6 +9,7 @@
 # Usage: scripts/docker-linux-test/run.sh [smoke|test|all|verify|pjdfstest]   (default: all)
 #        scripts/docker-linux-test/run.sh bigwrite [size-MiB ...]   (#98 memory check; by hand, not in CI)
 #        scripts/docker-linux-test/run.sh s1   (spike S1 control: the probe shows request overlap on Linux; by hand)
+#        scripts/docker-linux-test/run.sh s6 [files]   (spike S6: small fsynced files per WAL strategy; by hand, not in CI)
 #        scripts/docker-linux-test/run.sh index-bench [SIZES...]   (default sizes: 1000000 10000000)
 #        scripts/docker-linux-test/run.sh index-bench-cold [SIZES...]   (cold page cache; privileged; by hand)
 # SLICEFS_TARGET_VOL names the cargo target volume (default slicefs-target), so
@@ -27,6 +28,7 @@ case "${1:-all}" in
   pjdfstest) "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/pjdfstest.sh /target/release/slicefs' ;;
   bigwrite) shift; "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/bigwrite.sh /target/release/slicefs "$@"' _ ${@+"$@"} ;;
   s1) "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli --example s1_probe && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && WORK=/tmp/s1 /src/scripts/macos-mount-test/s1-overlap.sh /target/release/examples/s1_probe' ;;
+  s6) shift; "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/s6-smallfsync.sh /target/release/slicefs "$@"' _ ${@+"$@"} ;;
   index-bench)
     # The chunk index benchmark (#66). This mode does not mount anything: it needs
     # no FUSE device, no SYS_ADMIN and no unshare, so it does not use RUN.
@@ -69,5 +71,5 @@ case "${1:-all}" in
           done; done
           echo "# size $n, load after: $(cat /proc/loadavg)"
         done' index-bench ${*:-1000000 10000000} ;;
-  *) echo "usage: $0 [smoke|test|all|verify|pjdfstest] | bigwrite [size-MiB ...] (by hand; not in CI) | s1 (by hand) | index-bench [SIZES...] | index-bench-cold [SIZES...]"; exit 2 ;;
+  *) echo "usage: $0 [smoke|test|all|verify|pjdfstest] | bigwrite [size-MiB ...] (by hand; not in CI) | s1 (by hand) | s6 [files] (by hand; not in CI) | index-bench [SIZES...] | index-bench-cold [SIZES...]"; exit 2 ;;
 esac
