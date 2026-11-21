@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 18
 current_phase_name: Spikes, baseline and stress harness
 status: executing
-stopped_at: Completed 18-05-PLAN.md
-last_updated: "2026-11-21T08:50:50.410Z"
+stopped_at: Completed 18-06-PLAN.md
+last_updated: "2026-11-21T09:10:21.692Z"
 last_activity: 2026-11-20
 last_activity_desc: Phase 18 execution started
-state_head: 34d75755ba82a59e229e2f6e191412f9f6d4ff9a
+state_head: 6f4290292dc7e2d97a9e439776936b0f44c05509
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 7
-  completed_plans: 5
+  completed_plans: 6
   percent: 0
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 18 (Spikes, baseline and stress harness) — EXECUTING
-Plan: 6 of 7
+Plan: 7 of 7
 Status: Ready to execute
 Last activity: 2026-11-20 — Phase 18 execution started
 
@@ -51,6 +51,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 18 P02 | 35min | 2 tasks | 7 files |
 | Phase 18 P03 | 45min | 3 tasks | 1 files |
 | Phase 18 P05 | 60min | 3 tasks | 7 files |
+| Phase 18 P06 | 75min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -70,6 +71,9 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 18]: 18-03: short stress runs sized 4x150 ops (one-file) and 4x40 ops (many-files) to fit the 5 s budget; fsync and release cost 20-40 ms each in debug
 - [Phase 18]: 18-03: serialize-off target fails today on the shared file (reads match no allowed version); many-files with one owner per file passed with serialize off
 - [Phase 18]: 18-05: S4 fusectl mounts with SYS_ADMIN alone (no --privileged); S6/S4/S2 numbers saved in runs/ for Plan 07; S2 on overlayfs, 4 GiB max write 1353 ms in one of three runs
+- [Phase 18]: S3 MB/s comes from a feature-off pass and lock rows from a feature-on pass; throughput counts time inside the wrapped calls only
+- [Phase 18]: S7 runs a 30 s commit thread like the daemon and reports the 256 MiB cap without asserting it
+- [Phase 18]: S3 safe subset (own file per thread, 4 MiB dirty limit, N x 4 MiB below the budget) ran clean with serialize off on macOS and Linux
 
 ### Pending Todos
 
@@ -91,8 +95,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-21T08:50:50.349Z
-Stopped at: Completed 18-05-PLAN.md
+Last session: 2026-11-21T09:10:21.652Z
+Stopped at: Completed 18-06-PLAN.md
 Resume file: None
 
 ## Operator Next Steps

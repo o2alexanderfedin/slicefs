@@ -202,7 +202,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
   2. A harness runs N threads of mixed operations (read, write, fsync, create, rename, unlink) on one file and on many files, checks the data against a model, and reports latency histograms and lock hold and wait times
   3. The harness has a short run for the test suite and a longer run that is started by hand
   4. S1 is run on a macOS FSKit mount (by hand or in macOS CI), with the maximum number of requests in flight and the reply order recorded, and the doc states whether the macOS default can be more than one worker
-**Plans**: 5/7 plans executed
+**Plans**: 6/7 plans executed
 
 Plans:
 **Wave 1**
@@ -217,7 +217,7 @@ Plans:
 - [x] 18-05-PLAN.md — Linux mount spikes: S6, S4 scripts and runs; S2 measured again (3 runs per size)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 18-06-PLAN.md — Harness spikes S3, S5 (macOS and Linux), S6 in process (macOS), S7 baseline (Linux)
+- [x] 18-06-PLAN.md — Harness spikes S3, S5 (macOS and Linux), S6 in process (macOS), S7 baseline (Linux)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 18-07-PLAN.md — Spike results S1-S7 in the threading research doc, decided steps, SUPERSEDED marks
@@ -310,7 +310,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 18. Spikes, baseline and stress harness | 5/7 | In Progress | - |
+| 18. Spikes, baseline and stress harness | 6/7 | In Progress | - |
 | 19. Fine-grained locks | 0/0 | Not started | - |
 | 20. Dirty budget and rebase flusher | 0/0 | Not started | - |
 | 21. Worker pool | 0/0 | Not started | - |

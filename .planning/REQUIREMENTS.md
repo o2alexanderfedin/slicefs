@@ -10,7 +10,7 @@
 ### Spikes and baseline (#127)
 
 - [ ] **SPIKE-01**: Spike results S1-S7 are recorded in the threading research doc, and each result names the migration step it decides. S2 and S5 are measured again on the current code (after #108).
-- [ ] **SPIKE-02**: An in-process stress harness runs N threads of mixed operations (read, write, fsync, create, rename, unlink) on one file and on many files. It checks the data against a model, and it reports latency histograms and lock hold/wait times.
+- [x] **SPIKE-02**: An in-process stress harness runs N threads of mixed operations (read, write, fsync, create, rename, unlink) on one file and on many files. It checks the data against a model, and it reports latency histograms and lock hold/wait times.
 - [x] **SPIKE-03**: S1 (FUSE-T overlap and reply order) is run by hand on a macOS FSKit mount and recorded. The result decides whether the macOS default can be more than one worker.
 
 ### Fine-grained locks (#21)
@@ -79,7 +79,7 @@ Deferred; tracked, not in this roadmap.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | SPIKE-01 | Phase 18 | Pending |
-| SPIKE-02 | Phase 18 | Pending |
+| SPIKE-02 | Phase 18 | Complete |
 | SPIKE-03 | Phase 18 | Complete |
 | LOCK-01 | Phase 19 | Pending |
 | LOCK-02 | Phase 20 | Pending |
