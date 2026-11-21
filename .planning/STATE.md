@@ -4,17 +4,17 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: 18
 current_phase_name: Spikes, baseline and stress harness
-status: executing
-stopped_at: Completed 18-06-PLAN.md
-last_updated: "2026-11-21T09:10:21.692Z"
+status: verifying
+stopped_at: Completed 18-07-PLAN.md
+last_updated: "2026-11-21T09:15:41.743Z"
 last_activity: 2026-11-20
 last_activity_desc: Phase 18 execution started
-state_head: 6f4290292dc7e2d97a9e439776936b0f44c05509
+state_head: e8dba178e57bc9c4ec19a3aea44681e8d9911b77
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 7
-  completed_plans: 6
+  completed_plans: 7
   percent: 0
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 Phase: 18 (Spikes, baseline and stress harness) — EXECUTING
 Plan: 7 of 7
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-11-20 — Phase 18 execution started
 
 Progress: [░░░░░░░░░░] 0%
@@ -52,6 +52,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 18 P03 | 45min | 3 tasks | 1 files |
 | Phase 18 P05 | 60min | 3 tasks | 7 files |
 | Phase 18 P06 | 75min | 3 tasks | 8 files |
+| Phase 18 P07 | 35 min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -74,6 +75,9 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 18]: S3 MB/s comes from a feature-off pass and lock rows from a feature-on pass; throughput counts time inside the wrapped calls only
 - [Phase 18]: S7 runs a 30 s commit thread like the daemon and reports the 256 MiB cap without asserting it
 - [Phase 18]: S3 safe subset (own file per thread, 4 MiB dirty limit, N x 4 MiB below the budget) ran clean with serialize off on macOS and Linux
+- [Phase 18]: S1: the macOS default can be more than one worker (FUSE-T 1.2.9 overlaps requests and accepts out-of-order replies); throughput still to be shown in Phase 21
+- [Phase 18]: S5: keep std RwLock for the commit gate; release the gate before any wait is required for steps 5 and 6
+- [Phase 18]: S2: #108 closes without threads for the typical case; 1 of 6 runs missed the 500 ms bound (1353 ms at 4 GiB), repeat on btrfs before closing
 
 ### Pending Todos
 
@@ -95,8 +99,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-21T09:10:21.652Z
-Stopped at: Completed 18-06-PLAN.md
+Last session: 2026-11-21T09:15:41.508Z
+Stopped at: Completed 18-07-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
