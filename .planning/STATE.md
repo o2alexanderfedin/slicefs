@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 18
 current_phase_name: Spikes, baseline and stress harness
 status: executing
-stopped_at: Completed 18-01-PLAN.md
-last_updated: "2026-11-21T07:44:46.909Z"
+stopped_at: Completed 18-04-PLAN.md
+last_updated: "2026-11-21T07:52:06.775Z"
 last_activity: 2026-11-20
 last_activity_desc: Phase 18 execution started
-state_head: 52744c47835981881bef07ab55e3d1534b44d5a5
+state_head: c8c75387d22b70c475f1fa5e4c57cbecd6044dab
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 7
-  completed_plans: 1
+  completed_plans: 2
   percent: 0
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 18 (Spikes, baseline and stress harness) — EXECUTING
-Plan: 2 of 7
+Plan: 3 of 7
 Status: Ready to execute
 Last activity: 2026-11-20 — Phase 18 execution started
 
@@ -47,6 +47,7 @@ Progress: [░░░░░░░░░░] 0%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 18 P01 | 25min | 2 tasks | 6 files |
+| Phase 18 P04 | 45min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -61,6 +62,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [v2.2]: Chunk profile is fixed at seed; the default stays 4/8/32 KiB
 - [v2.2]: Prolly = prototype and written decision, no migration; macOS worker default is 1 until S1 is recorded
 - [Phase 18]: Plan 01: lock-stats uses optional hdrhistogram in chunk-store (D-02); lock_stats::Guard is the std guard when the feature is off
+- [Phase 18]: S1: FUSE-T 1.2.9 on macOS FSKit overlaps requests (max_inflight=2) and accepts out-of-order replies; macOS worker default may exceed 1 (Phase 21 to show throughput)
 
 ### Pending Todos
 
@@ -82,8 +84,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-21T07:44:46.873Z
-Stopped at: Completed 18-01-PLAN.md
+Last session: 2026-11-21T07:52:06.701Z
+Stopped at: Completed 18-04-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
