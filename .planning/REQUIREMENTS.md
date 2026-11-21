@@ -78,10 +78,37 @@ Deferred; tracked, not in this roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
+| SPIKE-01 | Phase 18 | Pending |
+| SPIKE-02 | Phase 18 | Pending |
+| SPIKE-03 | Phase 18 | Pending |
+| LOCK-01 | Phase 19 | Pending |
+| LOCK-02 | Phase 20 | Pending |
+| LOCK-03 | Phase 19 | Pending |
+| LOCK-04 | Phase 19 | Pending |
+| LOCK-05 | Phase 19 | Pending |
+| LOCK-06 | Phase 20 | Pending |
+| POOL-01 | Phase 21 | Pending |
+| POOL-02 | Phase 21 | Pending |
+| POOL-03 | Phase 21 | Pending |
+| POOL-04 | Phase 21 | Pending |
+| POOL-05 | Phase 21 | Pending |
+| PROF-01 | Phase 22 | Pending |
+| PROF-02 | Phase 22 | Pending |
+| PROF-03 | Phase 22 | Pending |
+| HASH-01 | Phase 23 | Pending |
+| HASH-02 | Phase 23 | Pending |
+| HASH-03 | Phase 23 | Pending |
+| HASH-04 | Phase 23 | Pending |
+| HASH-05 | Phase 23 | Pending |
+| HASH-06 | Phase 23 | Pending |
+| PROLLY-01 | Phase 24 | Pending |
+| PROLLY-02 | Phase 24 | Pending |
+| PROLLY-03 | Phase 24 | Pending |
 
 **Coverage:**
 - v2.2 requirements: 26 total
-- Mapped to phases: 0 (filled by the roadmap)
+- Mapped to phases: 26
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-11-20*

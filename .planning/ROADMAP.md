@@ -5,6 +5,7 @@
 - ✅ **v1.0 Foundation** - Phases 1-7 (shipped 2026-03-29)
 - ✅ **v2.0 Streaming Writes & Hardening** - Phases 7.1-12 (shipped 2026-11-17, tag `milestone-v2.0`)
 - ✅ **v2.1 Store Index & Measurements** - Phases 13-17 (shipped 2026-11-20, release `v2.2.0`)
+- 🚧 **v2.2 Concurrency & Store Evolution** - Phases 18-24 (in progress)
 
 ## Phases
 
@@ -162,10 +163,138 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
 
 </details>
 
+### 🚧 v2.2 Concurrency & Store Evolution (Phases 18-24)
+
+**Milestone goal:** Handle FUSE requests on more than one thread with fine-grained locks, add `slicefs rehash` with SHA-256 as a second production hash, and measure two store-format options (larger FastCDC profiles, prolly trees) before any default changes.
+
+**Tracks:** Phases 18-21 are one serial track (the concurrency work). Phases 22 and 23 are a second serial track (chunk profiles, then rehash), and Phase 24 follows Phase 22. Phases 22-24 touch other files than Phases 18-21, so they **can run in parallel** with the concurrency track on separate branches. Phase 22 comes before Phase 23 because both edit `file.rs` and the store FORMAT marker.
+
+**Owner decisions** (fixed for this milestone):
+- SHA-256 is a production second hash (HASH-01). BLAKE3-256 stays the default.
+- Rehash is offline only.
+- A worker panic aborts the daemon; the write log replays at the next mount.
+- Each log record is appended under the same locks as its apply. The older "append first" table in #21 is superseded and the issue body is updated (LOCK-04).
+- The chunk profile is fixed at `seed`. The default stays 4/8/32 KiB.
+- Prolly work is a prototype and a written decision. There is no migration.
+- The default worker count is 1 on macOS until spike S1 is recorded (SPIKE-03).
+
+**Boundaries between phases:**
+- SPIKE-01 covers S1-S7 and closes in Phase 18. S1, S3 and S4 need concurrent dispatch, so plan-phase may use a throwaway dispatcher behind one global handler mutex for them. POOL-01 stays in Phase 21. S7 gets a first baseline from the harness; Phase 20 sets the final thresholds.
+- LOCK-02 closes in Phase 20. Phase 19 stops write, settle and setattr from taking state out of `open_files`. `keep_budget` is the last cross-file take-out and goes away with the flusher. Phase 19 concurrency tests stay below the dirty budget.
+
+**Research flags** (run `/gsd-plan-phase <N> --research-phase`): Phase 18 (S5 gate fairness on both platforms), Phase 20 (budget, flusher and gate deadlock protocol), Phase 21 (FUSE-T and FSKit overlap, reply under load), Phase 23 (old-to-new map strategy, GC interaction, snapshot record supersession), Phase 24 (boundary rule details). Skip for Phases 19 and 22: standard patterns.
+
+- [ ] **Phase 18: Spikes, baseline and stress harness** (#127) - re-measure S1-S7 on the current code, build the N-thread harness, run S1 on macOS
+- [ ] **Phase 19: Fine-grained locks** (#21) - no global lock on the hot path, lock rank with a debug checker, log record under the same locks as its apply
+- [ ] **Phase 20: Dirty budget and rebase flusher** (#21) - no cross-file take-out, a background flusher, writers throttled before they take locks, no deadlock with a commit
+- [ ] **Phase 21: Worker pool** (#22) - N worker threads by mount option, drain before `destroy()`, abort on panic, 4 workers pass pjdfstest
+- [ ] **Phase 22: Chunk profiles** (#67) - FastCDC min/avg/max fixed per store at `seed`, benchmark of five profiles, default unchanged (parallel track)
+- [ ] **Phase 23: Hashes and rehash** (#62) - SHA-256 write hash and an offline, crash-safe `slicefs rehash` (parallel track)
+- [ ] **Phase 24: Prolly evaluation** (#19) - one-map prototype, benchmark on Boost trees, written decision (parallel track)
+
+### Phase 18: Spikes, baseline and stress harness
+
+**Goal**: The migration steps for multithreaded requests are decided by measurements on the current code, and an in-process stress harness exists that the lock phases must pass (#127)
+**Depends on**: Nothing (first phase)
+**Requirements**: SPIKE-01, SPIKE-02, SPIKE-03
+**Success Criteria** (what must be TRUE):
+  1. The threading research doc has a result for each of S1-S7, and each result names the migration step it decides; S2 and S5 are measured again on the current code (after #108), and old baselines that no longer hold are marked superseded
+  2. A harness runs N threads of mixed operations (read, write, fsync, create, rename, unlink) on one file and on many files, checks the data against a model, and reports latency histograms and lock hold and wait times
+  3. The harness has a short run for the test suite and a longer run that is started by hand
+  4. S1 is run on a macOS FSKit mount (by hand or in macOS CI), with the maximum number of requests in flight and the reply order recorded, and the doc states whether the macOS default can be more than one worker
+**Plans**: TBD
+
+### Phase 19: Fine-grained locks
+
+**Goal**: Requests can run in parallel on one file and on many files with correct data; no global lock is held during disk I/O, a hash calculation or a wait; and the write log replays to the same state as the apply (#21)
+**Depends on**: Phase 18
+**Requirements**: LOCK-01, LOCK-03, LOCK-04, LOCK-05
+**Success Criteria** (what must be TRUE):
+  1. A test with parallel readers and writers on one file returns correct data, and the lock wait times show that readers do not wait for the I/O of writers
+  2. A test with parallel I/O on different files shows no contention between them
+  3. The store lock, `readers`, the WAL append mutex and `dir_live`/`inode_live` are not held during disk I/O, a hash calculation or a wait; the hold times in the harness report show it
+  4. Locks have one fixed rank, with two inodes locked in increasing inode order; a test that breaks the rank fails in a debug build
+  5. After a crash, replay of the log from the mixed-operation harness gives the same state as the apply, including creates by logged inode number, and the #21 body matches this rule
+**Plans**: TBD
+
+### Phase 20: Dirty budget and rebase flusher
+
+**Goal**: With several writers, daemon memory stays under the set limit, a writer over the limit waits before it takes any lock, and a commit never deadlocks with throttled writers (#21)
+**Depends on**: Phase 19
+**Requirements**: LOCK-02, LOCK-06
+**Success Criteria** (what must be TRUE):
+  1. No request takes another file's state out of `open_files`; the dirty-budget path uses per-file cost counters and the flusher, and a check in the test suite finds no take-out site, including `keep_budget`
+  2. A background flusher lowers the shared dirty budget, a writer over the limit sleeps before it takes any lock, and every wait has a time limit
+  3. A test with all workers throttled while a commit waits finishes without deadlock
+  4. A Docker run with parallel random writers on large files keeps peak RSS (VmHWM) under one fixed cap
+**Plans**: TBD
+
+### Phase 21: Worker pool
+
+**Goal**: FUSE requests run on a pool of worker threads, with the number of workers set by a mount option, on Linux and on macOS FSKit (#22)
+**Depends on**: Phase 20 (the macOS default also needs SPIKE-03 from Phase 18)
+**Requirements**: POOL-01, POOL-02, POOL-03, POOL-04, POOL-05
+**Success Criteria** (what must be TRUE):
+  1. A mount option sets the number of workers; with 1 worker the handler runs inline as today, and the macOS default stays 1 unless SPIKE-03 shows that requests overlap
+  2. Unmount and SIGTERM drain the queue and join the workers before `destroy()`, and replies are sent after all locks are released
+  3. A worker panic aborts the daemon; the next mount replays the write log, and no request is served after a half-done update
+  4. All tests and pjdfstest pass with 4 workers on Linux (Docker CI), and the tests pass on macOS FSKit CI with the macOS default
+  5. Parallel I/O on different files scales with the number of workers on Linux, and the measured result is recorded
+**Plans**: TBD
+
+### Phase 22: Chunk profiles
+
+**Goal**: A store has one FastCDC profile, fixed when the store is seeded, and a benchmark shows what larger profiles cost and gain; the default stays 4/8/32 KiB (#67)
+**Depends on**: Nothing in this milestone (parallel with the concurrency track)
+**Requirements**: PROF-01, PROF-02, PROF-03
+**Success Criteria** (what must be TRUE):
+  1. `seed` accepts a profile (min/avg/max, powers of two, inside the crate limits) and keeps it in the store FORMAT marker; a store without a setting uses 4/8/32 KiB, and a mount with a different profile is refused
+  2. Two stores with different profiles work in one process: a file written under each profile reads back byte for byte, including files with zero runs and a spliced edit, and a golden cut-point test fails if a cut point moves
+  3. One reproducible script reports, for 4/8/32, 8/16/64, 8/32/128, 16/64/256 and 32/128/512 KiB: physical bytes after dedup and zstd, object count, index RAM, cold-open time, ingest throughput, read latency and rewrite bytes after small edits; it runs outside the test suite
+  4. The report recommends a default, and a store seeded without a profile setting is still 4/8/32 KiB after v2.2
+**Plans**: TBD
+
+### Phase 23: Hashes and rehash
+
+**Goal**: A store can use SHA-256 as its write hash, and `slicefs rehash` converts an offline store from one hash algorithm to another without data loss, even after a crash (#62)
+**Depends on**: Phase 22 (same `file.rs` and FORMAT marker; parallel with the concurrency track)
+**Requirements**: HASH-01, HASH-02, HASH-03, HASH-04, HASH-05, HASH-06
+**Success Criteria** (what must be TRUE):
+  1. A store can be seeded or mounted with `--hash sha256` (own algorithm tag, hardware-accelerated where the CPU has it), and BLAKE3-256 stays the default
+  2. `slicefs rehash --to <algorithm> <store>` converts a BLAKE3-256 store to SHA-256 and back, and a store with mixed algorithms ends with one; a rehashed file gets the same key as a fresh write of its bytes, files and snapshots do not change, and scrub passes
+  3. Rehash refuses while the store is mounted (OS file lock) and while the write log has records after the last root
+  4. A crash at any point leaves a store that mounts with the old or the new root; GC frees the old objects after the switch, and old objects are verified as they are read
+  5. Rehash reports progress, bytes rewritten and bytes freed; `--dry-run` changes nothing; and its memory stays bounded, with no in-RAM map of all objects
+**Plans**: TBD
+
+### Phase 24: Prolly evaluation
+
+**Goal**: The owner has measured numbers and a written decision on prolly trees for metadata maps (#19)
+**Depends on**: Phase 22 (the combined benchmark uses the profiles; parallel with the concurrency track)
+**Requirements**: PROLLY-01, PROLLY-02, PROLLY-03
+**Success Criteria** (what must be TRUE):
+  1. A prototype for one metadata map (for example the directory map) is a separate crate that is not wired into the root record; its nodes are chunk-store objects, and tests show that its node boundaries depend only on the keys
+  2. A benchmark on the Boost trees (about 78,000 files per version) compares the current commit path with the prototype for commit time, CPU, peak memory, bytes written per commit, and on-disk size after several small commits; it runs outside the test suite
+  3. A written decision (adopt, later, or drop) is in the design docs and on #19, and it states that file manifests are already content-cut trees
+**Plans**: TBD
+
 ## Progress
+
+**Execution order:** the concurrency track runs 18 → 19 → 20 → 21, and the store track runs 22 → 23. Phase 24 follows Phase 22. Phases 22-24 may run in parallel with Phases 18-21.
 
 | Milestone | Phases | Plans | Status | Shipped |
 |-----------|--------|-------|--------|---------|
 | v1.0 Foundation | 1-7 | 24 | Complete | 2026-03-29 |
 | v2.0 Streaming Writes & Hardening | 7.1-12 | 13 | Complete | 2026-11-17 |
 | v2.1 Store Index & Measurements | 13-17 | 27 | Complete | 2026-11-20 |
+| v2.2 Concurrency & Store Evolution | 18-24 | 0 | In progress | - |
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 18. Spikes, baseline and stress harness | 0/0 | Not started | - |
+| 19. Fine-grained locks | 0/0 | Not started | - |
+| 20. Dirty budget and rebase flusher | 0/0 | Not started | - |
+| 21. Worker pool | 0/0 | Not started | - |
+| 22. Chunk profiles | 0/0 | Not started | - |
+| 23. Hashes and rehash | 0/0 | Not started | - |
+| 24. Prolly evaluation | 0/0 | Not started | - |
