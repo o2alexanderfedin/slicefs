@@ -1,0 +1,51 @@
+# S3 macos, commit d24da49, 2026-11-21, CPUs 32
+# note: MB/s from the lock_stats=off pass; lock rows from the lock_stats=on pass (the recorder adds a shared mutex per lock event)
+# in process (no mount), release build, own file and handle per thread, serialize off, dirty limit 4 MiB per file, 256 MiB per file in 1 MiB writes; MB = MiB
+# MB/s: bytes of a phase over the longest time any thread spent in the wrapped calls (buffer fill and compare not counted)
+# cmd: cargo test --release -p slicefs-cli --test stress_harness -- --ignored --exact --nocapture s3_store_lock  (pass 1), same with --features lock-stats (pass 2)
+## pass 1: lock_stats=off
+S3 seed=1795251402107470000 file_mib=256 serialize=false lock_stats=off MB=MiB
+S3 n=1 lock_stats=off write_mb_s=79.7 read_mb_s=689.8 max_inflight=1 mismatches=0 serialize=false
+S3 n=1 op=gate_wait n=513 p50_us=0.2 p99_us=0.7 p999_us=4.1 max_us=4.1
+S3 n=2 lock_stats=off write_mb_s=102.4 read_mb_s=786.2 max_inflight=2 mismatches=0 serialize=false
+S3 n=2 op=gate_wait n=1026 p50_us=0.2 p99_us=0.5 p999_us=1.0 max_us=1.2
+S3 n=4 lock_stats=off write_mb_s=110.3 read_mb_s=766.8 max_inflight=4 mismatches=0 serialize=false
+S3 n=4 op=gate_wait n=2052 p50_us=0.2 p99_us=0.5 p999_us=0.8 max_us=3.1
+S3 n=8 lock_stats=off write_mb_s=112.1 read_mb_s=783.3 max_inflight=8 mismatches=0 serialize=false
+S3 n=8 op=gate_wait n=4104 p50_us=0.2 p99_us=0.5 p999_us=0.7 max_us=0.8
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 42.51s
+## pass 2: lock_stats=on
+S3 seed=1795251469073225000 file_mib=256 serialize=false lock_stats=on MB=MiB
+S3 n=1 lock_stats=on write_mb_s=82.6 read_mb_s=819.0 max_inflight=1 mismatches=0 serialize=false
+S3 n=1 op=gate_wait n=513 p50_us=0.2 p99_us=0.7 p999_us=0.9 max_us=0.9
+S3 n=1 lock site=store count=50228 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.9 hold_p99_us=62.8 hold_max_us=26198.0
+S3 n=1 lock site=io count=1 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=57.7 hold_p99_us=57.7 hold_max_us=57.7
+S3 n=1 lock site=wal count=257 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=1176.6 hold_p99_us=21151.7 hold_max_us=24051.7
+S3 n=1 lock site=wal_writer count=257 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=841.2 hold_p99_us=20676.6 hold_max_us=23494.7
+S3 n=1 lock site=open_files count=1541 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.5 hold_p99_us=4.5 hold_max_us=15.6
+S3 n=1 lock site=readers count=256 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=1223.7 hold_p99_us=1821.7 hold_max_us=1861.6
+S3 n=2 lock_stats=on write_mb_s=103.9 read_mb_s=782.9 max_inflight=2 mismatches=0 serialize=false
+S3 n=2 op=gate_wait n=1026 p50_us=0.2 p99_us=0.6 p999_us=0.7 max_us=0.7
+S3 n=2 lock site=store count=102046 wait_p50_us=0.0 wait_p99_us=58.7 wait_max_us=39878.7 hold_p50_us=1.1 hold_p99_us=69.1 hold_max_us=39911.4
+S3 n=2 lock site=io count=2 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=42.2 hold_p99_us=49.9 hold_max_us=49.9
+S3 n=2 lock site=wal count=514 wait_p50_us=0.0 wait_p99_us=1233.9 wait_max_us=2043.9 hold_p50_us=1201.2 hold_p99_us=2912.3 hold_max_us=21856.3
+S3 n=2 lock site=wal_writer count=514 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=835.6 hold_p99_us=2036.7 hold_max_us=21561.3
+S3 n=2 lock site=open_files count=3082 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=25.7 hold_p50_us=0.5 hold_p99_us=14.8 hold_max_us=28.0
+S3 n=2 lock site=readers count=512 wait_p50_us=989.2 wait_p99_us=1997.8 wait_max_us=2451.5 hold_p50_us=1352.7 hold_p99_us=2338.8 hold_max_us=2727.9
+S3 n=4 lock_stats=on write_mb_s=109.9 read_mb_s=710.2 max_inflight=4 mismatches=0 serialize=false
+S3 n=4 op=gate_wait n=2052 p50_us=0.2 p99_us=0.6 p999_us=0.8 max_us=13.3
+S3 n=4 lock site=store count=198418 wait_p50_us=0.0 wait_p99_us=344.1 wait_max_us=42958.8 hold_p50_us=1.1 hold_p99_us=74.5 hold_max_us=42795.0
+S3 n=4 lock site=io count=4 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=57.2 hold_p99_us=138.4 hold_max_us=138.4
+S3 n=4 lock site=wal count=1028 wait_p50_us=0.0 wait_p99_us=1991.7 wait_max_us=3895.3 hold_p50_us=1338.4 hold_p99_us=24330.2 hold_max_us=42270.7
+S3 n=4 lock site=wal_writer count=1028 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=909.8 hold_p99_us=23855.1 hold_max_us=42106.9
+S3 n=4 lock site=open_files count=6164 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=99.2 hold_p50_us=0.6 hold_p99_us=14.1 hold_max_us=84.5
+S3 n=4 lock site=readers count=1024 wait_p50_us=3842.0 wait_p99_us=6135.8 wait_max_us=11821.1 hold_p50_us=1397.8 hold_p99_us=2504.7 hold_max_us=3530.8
+S3 n=8 lock_stats=on write_mb_s=109.9 read_mb_s=738.1 max_inflight=8 mismatches=0 serialize=false
+S3 n=8 op=gate_wait n=4104 p50_us=0.2 p99_us=0.5 p999_us=0.8 max_us=12.2
+S3 n=8 lock site=store count=395380 wait_p50_us=0.0 wait_p99_us=1831.9 wait_max_us=47480.8 hold_p50_us=1.2 hold_p99_us=77.0 hold_max_us=42172.4
+S3 n=8 lock site=io count=8 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=52.8 hold_p99_us=67.3 hold_max_us=67.3
+S3 n=8 lock site=wal count=2056 wait_p50_us=0.0 wait_p99_us=2601.0 wait_max_us=24920.1 hold_p50_us=1316.9 hold_p99_us=23773.2 hold_max_us=38207.5
+S3 n=8 lock site=wal_writer count=2056 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=877.1 hold_p99_us=23412.7 hold_max_us=38076.4
+S3 n=8 lock site=open_files count=12328 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=101.2 hold_p50_us=0.6 hold_p99_us=13.3 hold_max_us=64.9
+S3 n=8 lock site=readers count=2048 wait_p50_us=8994.8 wait_p99_us=12746.8 wait_max_us=21725.2 hold_p50_us=1322.0 hold_p99_us=2347.0 hold_max_us=3446.8
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 42.88s
