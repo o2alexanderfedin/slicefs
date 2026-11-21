@@ -16,6 +16,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, atomic::{AtomicU64, Ordering}};
 
+use chunk_store::lock_stats::{self, Site};
 use slicefs_traits::key::{ObjectKey, KEY_BYTES};
 use crate::store_io::{NodeRead, NodeWrite};
 use slicefs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, MetadataStore};
@@ -282,7 +283,7 @@ impl DictMetadataStore {
 
         // Build root inode + dir entries via put_node, then flush
         let (root_inode_digest, root_dir_digest) = {
-            let mut io_guard = io.lock().unwrap();
+            let mut io_guard = lock_stats::lock(&io, Site::Io);
             let mut fsa = &mut *io_guard;
             // Use current process uid/gid so the mounting user can write to root.
             // On non-unix, falls back to 0/0 (callers like `seed` update root inode
@@ -437,7 +438,7 @@ impl DictMetadataStore {
     ///
     /// Replaces any previously set WAL (the old one is dropped; not flushed).
     pub fn set_wal(&mut self, wal: Box<dyn WalStrategy>) {
-        *self.wal.lock().unwrap() = Some(Arc::from(wal));
+        *lock_stats::lock(&self.wal, Site::Wal) = Some(Arc::from(wal));
     }
 
     /// Set the sync that `commit()` runs before it logs a root (see
@@ -466,7 +467,7 @@ impl DictMetadataStore {
     ///
     /// Should be called before dropping the store (e.g., in `destroy()`).
     pub fn shutdown_wal(&self) -> Result<(), WalError> {
-        if let Some(ref w) = *self.wal.lock().unwrap() {
+        if let Some(ref w) = *lock_stats::lock(&self.wal, Site::Wal) {
             w.shutdown()?;
         }
         Ok(())
@@ -512,7 +513,7 @@ impl DictMetadataStore {
     }
 
     fn log_wal_entry(&self, entry: &WalEntry) {
-        if let Some(ref w) = *self.wal.lock().unwrap() {
+        if let Some(ref w) = *lock_stats::lock(&self.wal, Site::Wal) {
             // The in-memory state is already correct. A failed append is
             // reported by every later flush_wal (fsync) until the next
             // commit rotates the log (#20).
@@ -548,7 +549,7 @@ impl DictMetadataStore {
             let digest = self.dir_data.lock().unwrap().get(&ino).copied()
                 .ok_or(MetaError::NotADirectory(ino))?;
             let list = {
-                let mut io_guard = self.io.lock().unwrap();
+                let mut io_guard = lock_stats::lock(&self.io, Site::Io);
                 DirList::load(&mut *io_guard, &digest)?
             };
             live.map.insert(ino, list);
@@ -576,7 +577,7 @@ impl DictMetadataStore {
         let digest = self.inode_data.lock().unwrap().get(&ino).copied()
             .ok_or(MetaError::NotFound(ino))?;
         let meta = {
-            let mut io_guard = self.io.lock().unwrap();
+            let mut io_guard = lock_stats::lock(&self.io, Site::Io);
             load_inode(&mut *io_guard, &digest)?
         };
         let full = {
@@ -615,7 +616,7 @@ impl DictMetadataStore {
         if live.dirty.is_empty() {
             return;
         }
-        let mut io_guard = self.io.lock().unwrap();
+        let mut io_guard = lock_stats::lock(&self.io, Site::Io);
         let mut fsa = &mut *io_guard;
         let mut inode_data = self.inode_data.lock().unwrap();
         let live = &mut *live;
@@ -640,7 +641,7 @@ impl DictMetadataStore {
         if live.dirty.is_empty() {
             return;
         }
-        let mut io_guard = self.io.lock().unwrap();
+        let mut io_guard = lock_stats::lock(&self.io, Site::Io);
         let mut fsa = &mut *io_guard;
         let mut dir_data = self.dir_data.lock().unwrap();
         let live = &mut *live;
@@ -653,7 +654,7 @@ impl DictMetadataStore {
 
     /// The write log, if any (a clone: no lock is held while it works).
     fn wal_handle(&self) -> Option<Arc<dyn WalStrategy>> {
-        self.wal.lock().unwrap().as_ref().map(Arc::clone)
+        lock_stats::lock(&self.wal, Site::Wal).as_ref().map(Arc::clone)
     }
 
     /// Make the next `finish_commit` stop with an error at `at`, as a crash
@@ -739,7 +740,7 @@ impl DictMetadataStore {
     }
 
     fn finish_inner(&self, p: &mut PreparedCommit<'_>) -> Result<ObjectKey, MetaError> {
-        let cs = Arc::clone(self.io.lock().unwrap().store());
+        let cs = Arc::clone(lock_stats::lock(&self.io, Site::Io).store());
         let mut w = crate::store_io::NodeWriter::new(Arc::clone(&cs));
         // Write the changed directories and inodes, so the digest maps are current.
         let mut new_inodes = Vec::with_capacity(p.inodes.len());
@@ -813,7 +814,7 @@ impl DictMetadataStore {
         // root that refers to them is logged: after that, log rotation deletes
         // the segments whose records hold the same data (#20). A put error of
         // a request since the last commit fails the commit too.
-        self.io.lock().unwrap().begin_commit_sync()
+        lock_stats::lock(&self.io, Site::Io).begin_commit_sync()
             .map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
         cs.sync().map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
         // The file content that the root refers to must be durable too.
@@ -1128,7 +1129,7 @@ impl MetadataStore for DictMetadataStore {
     fn set_manifest(&self, ino: InodeId, blocks: &[ObjectKey]) -> Result<(), MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
         let digest = {
-            let mut io_guard = self.io.lock().unwrap();
+            let mut io_guard = lock_stats::lock(&self.io, Site::Io);
             let mut fsa = &mut *io_guard;
             intern_manifest(&mut fsa, blocks)
         };
@@ -1141,7 +1142,7 @@ impl MetadataStore for DictMetadataStore {
         let digest = manifest_data.get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
         drop(manifest_data);
 
-        let mut io_guard = self.io.lock().unwrap();
+        let mut io_guard = lock_stats::lock(&self.io, Site::Io);
         load_manifest(&mut *io_guard, &digest)
     }
 
@@ -1152,7 +1153,7 @@ impl MetadataStore for DictMetadataStore {
             let xattr_data = self.xattr_data.lock().unwrap();
             if let Some(digest) = xattr_data.get(&ino).copied() {
                 drop(xattr_data);
-                let mut io_guard = self.io.lock().unwrap();
+                let mut io_guard = lock_stats::lock(&self.io, Site::Io);
                 load_xattrs(&mut *io_guard, &digest)?
             } else {
                 vec![]
@@ -1162,7 +1163,7 @@ impl MetadataStore for DictMetadataStore {
         set_xattr_entry(&mut xattrs, name, value);
 
         let new_digest = {
-            let mut io_guard = self.io.lock().unwrap();
+            let mut io_guard = lock_stats::lock(&self.io, Site::Io);
             let mut fsa = &mut *io_guard;
             intern_xattrs(&mut fsa, &xattrs)
         };
@@ -1179,7 +1180,7 @@ impl MetadataStore for DictMetadataStore {
         };
         drop(xattr_data);
 
-        let mut io_guard = self.io.lock().unwrap();
+        let mut io_guard = lock_stats::lock(&self.io, Site::Io);
         let xattrs = load_xattrs(&mut *io_guard, &digest)?;
         drop(io_guard);
 
@@ -1194,7 +1195,7 @@ impl MetadataStore for DictMetadataStore {
         };
         drop(xattr_data);
 
-        let mut io_guard = self.io.lock().unwrap();
+        let mut io_guard = lock_stats::lock(&self.io, Site::Io);
         let xattrs = load_xattrs(&mut *io_guard, &digest)?;
         drop(io_guard);
 
@@ -1211,7 +1212,7 @@ impl MetadataStore for DictMetadataStore {
         drop(xattr_data);
 
         let mut xattrs = {
-            let mut io_guard = self.io.lock().unwrap();
+            let mut io_guard = lock_stats::lock(&self.io, Site::Io);
             load_xattrs(&mut *io_guard, &digest)?
         };
 
@@ -1220,7 +1221,7 @@ impl MetadataStore for DictMetadataStore {
         }
 
         let new_digest = {
-            let mut io_guard = self.io.lock().unwrap();
+            let mut io_guard = lock_stats::lock(&self.io, Site::Io);
             let mut fsa = &mut *io_guard;
             intern_xattrs(&mut fsa, &xattrs)
         };
@@ -1365,7 +1366,7 @@ impl DictMetadataStore {
     /// Restores all in-memory maps (inode_data, dir_data, manifest_data, xattr_data)
     /// and inode numbering state so that subsequent operations continue seamlessly.
     pub fn load_from_root(io: Arc<Mutex<StoreIo>>, root: &ObjectKey) -> Result<Self, MetaError> {
-        let mut io_guard = io.lock().unwrap();
+        let mut io_guard = lock_stats::lock(&io, Site::Io);
 
         // Read root record bytes
         let bytes = (&mut *io_guard).get_node(root)

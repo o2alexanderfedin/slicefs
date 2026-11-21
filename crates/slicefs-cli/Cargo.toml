@@ -11,9 +11,8 @@ name = "slicefs"
 path = "src/main.rs"
 
 [features]
-# Lock hold and wait times in the stress harness report (Plan 02 adds the
-# `metadata` entry).
-lock-stats = ["chunk-store/lock-stats"]
+# Lock hold and wait times in the stress harness report.
+lock-stats = ["chunk-store/lock-stats", "metadata/lock-stats"]
 
 [dependencies]
 slicefs-traits       = { path = "../slicefs-traits" }
