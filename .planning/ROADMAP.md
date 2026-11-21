@@ -184,7 +184,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
 
 **Research flags** (run `/gsd-plan-phase <N> --research-phase`): Phase 18 (S5 gate fairness on both platforms), Phase 20 (budget, flusher and gate deadlock protocol), Phase 21 (FUSE-T and FSKit overlap, reply under load), Phase 23 (old-to-new map strategy, GC interaction, snapshot record supersession), Phase 24 (boundary rule details). Skip for Phases 19 and 22: standard patterns.
 
-- [ ] **Phase 18: Spikes, baseline and stress harness** (#127) - re-measure S1-S7 on the current code, build the N-thread harness, run S1 on macOS
+- [x] **Phase 18: Spikes, baseline and stress harness** (#127) - re-measure S1-S7 on the current code, build the N-thread harness, run S1 on macOS (completed 2026-11-21)
 - [ ] **Phase 19: Fine-grained locks** (#21) - no global lock on the hot path, lock rank with a debug checker, log record under the same locks as its apply
 - [ ] **Phase 20: Dirty budget and rebase flusher** (#21) - no cross-file take-out, a background flusher, writers throttled before they take locks, no deadlock with a commit
 - [ ] **Phase 21: Worker pool** (#22) - N worker threads by mount option, drain before `destroy()`, abort on panic, 4 workers pass pjdfstest
@@ -202,7 +202,25 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
   2. A harness runs N threads of mixed operations (read, write, fsync, create, rename, unlink) on one file and on many files, checks the data against a model, and reports latency histograms and lock hold and wait times
   3. The harness has a short run for the test suite and a longer run that is started by hand
   4. S1 is run on a macOS FSKit mount (by hand or in macOS CI), with the maximum number of requests in flight and the reply order recorded, and the doc states whether the macOS default can be more than one worker
-**Plans**: TBD
+**Plans**: 7/7 plans complete
+
+Plans:
+**Wave 1**
+- [x] 18-01-PLAN.md — Harness tracer (one file, serialize on, model, latency) and the store-lock recorder behind `lock-stats` (optional hdrhistogram)
+- [x] 18-04-PLAN.md — S1 probe, Linux control run, macOS FSKit CI workflow and run
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 18-02-PLAN.md — Remaining lock labels (io, wal, WAL strategy mutexes, open_files, readers) and the `lock_stats_report` test
+- [x] 18-03-PLAN.md — Full harness: all six op kinds, many-files mode, namespace model, planted-bug test, watchdog, ignored long and serialize-off runs
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 18-05-PLAN.md — Linux mount spikes: S6, S4 scripts and runs; S2 measured again (3 runs per size)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 18-06-PLAN.md — Harness spikes S3, S5 (macOS and Linux), S6 in process (macOS), S7 baseline (Linux)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 18-07-PLAN.md — Spike results S1-S7 in the threading research doc, decided steps, SUPERSEDED marks
 
 ### Phase 19: Fine-grained locks
 
@@ -215,6 +233,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
   3. The store lock, `readers`, the WAL append mutex and `dir_live`/`inode_live` are not held during disk I/O, a hash calculation or a wait; the hold times in the harness report show it
   4. Locks have one fixed rank, with two inodes locked in increasing inode order; a test that breaks the rank fails in a debug build
   5. After a crash, replay of the log from the mixed-operation harness gives the same state as the apply, including creates by logged inode number, and the #21 body matches this rule
+  6. With several handles on one inode in different modes (read-only, read-write, `O_APPEND`), the harness shows the POSIX.1 2.9.7 rules: a completed write through one handle is visible through every other handle, a read sees all or none of a concurrent write, and concurrent appends never overlap and lose no bytes. The research for this phase checks how the kernel FUSE client computes the append offset in the SliceFS mount mode
 **Plans**: TBD
 
 ### Phase 20: Dirty budget and rebase flusher
@@ -291,7 +310,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 18. Spikes, baseline and stress harness | 0/0 | Not started | - |
+| 18. Spikes, baseline and stress harness | 7/7 | Complete    | 2026-11-21 |
 | 19. Fine-grained locks | 0/0 | Not started | - |
 | 20. Dirty budget and rebase flusher | 0/0 | Not started | - |
 | 21. Worker pool | 0/0 | Not started | - |

@@ -2,15 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v2.2
 milestone_name: Concurrency & Store Evolution
+current_phase: 19
+current_phase_name: Fine-grained locks
 status: planning
-last_updated: "2026-11-21T05:32:25.000Z"
-last_activity: 2026-11-20
+stopped_at: Phase 18 complete, ready to plan Phase 19
+last_updated: "2026-11-21T09:32:07.059Z"
+last_activity: 2026-11-21
+last_activity_desc: Phase 18 complete, transitioned to Phase 19
+state_head: 3f46839d8e341a43b8ecf80d9e70ef668700eb52
 progress:
   total_phases: 7
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  completed_phases: 1
+  total_plans: 7
+  completed_plans: 7
+  percent: 14
 ---
 
 # Project State
@@ -20,16 +25,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-20)
 
 **Core value:** High-ratio data deduplication that works transparently as a real, daily-driver POSIX filesystem
-**Current focus:** Phase 18 - Spikes, baseline and stress harness (#127)
+**Current focus:** Phase 18 — Spikes, baseline and stress harness
 
 ## Current Position
 
-Phase: 18 of 24 (Spikes, baseline and stress harness)
-Plan: - of - in current phase
+Phase: 19 — Fine-grained locks
+Plan: Not started
 Status: Ready to plan
-Last activity: 2026-11-20 - Roadmap created for milestone v2.2 (7 phases, 26 requirements)
+Last activity: 2026-11-21 — Phase 18 complete, transitioned to Phase 19
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [█░░░░░░░░░] 14%
 
 ## Performance Metrics
 
@@ -37,6 +42,17 @@ Progress: [░░░░░░░░░░] 0%
 - Total plans completed: 0 (v2.2)
 
 *Updated after each plan completion*
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 18 P01 | 25min | 2 tasks | 6 files |
+| Phase 18 P04 | 45min | 2 tasks | 6 files |
+| Phase 18 P02 | 35min | 2 tasks | 7 files |
+| Phase 18 P03 | 45min | 3 tasks | 1 files |
+| Phase 18 P05 | 60min | 3 tasks | 7 files |
+| Phase 18 P06 | 75min | 3 tasks | 8 files |
+| Phase 18 P07 | 35 min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -50,6 +66,18 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [v2.2]: Each log record is appended under the same locks as its apply (supersedes the #21 table)
 - [v2.2]: Chunk profile is fixed at seed; the default stays 4/8/32 KiB
 - [v2.2]: Prolly = prototype and written decision, no migration; macOS worker default is 1 until S1 is recorded
+- [Phase 18]: Plan 01: lock-stats uses optional hdrhistogram in chunk-store (D-02); lock_stats::Guard is the std guard when the feature is off
+- [Phase 18]: S1: FUSE-T 1.2.9 on macOS FSKit overlaps requests (max_inflight=2) and accepts out-of-order replies; macOS worker default may exceed 1 (Phase 21 to show throughput)
+- [Phase 18]: 18-02: lock report test is its own binary (process-global recorder); read_root readers guard left as is for S3
+- [Phase 18]: 18-03: short stress runs sized 4x150 ops (one-file) and 4x40 ops (many-files) to fit the 5 s budget; fsync and release cost 20-40 ms each in debug
+- [Phase 18]: 18-03: serialize-off target fails today on the shared file (reads match no allowed version); many-files with one owner per file passed with serialize off
+- [Phase 18]: 18-05: S4 fusectl mounts with SYS_ADMIN alone (no --privileged); S6/S4/S2 numbers saved in runs/ for Plan 07; S2 on overlayfs, 4 GiB max write 1353 ms in one of three runs
+- [Phase 18]: S3 MB/s comes from a feature-off pass and lock rows from a feature-on pass; throughput counts time inside the wrapped calls only
+- [Phase 18]: S7 runs a 30 s commit thread like the daemon and reports the 256 MiB cap without asserting it
+- [Phase 18]: S3 safe subset (own file per thread, 4 MiB dirty limit, N x 4 MiB below the budget) ran clean with serialize off on macOS and Linux
+- [Phase 18]: S1: the macOS default can be more than one worker (FUSE-T 1.2.9 overlaps requests and accepts out-of-order replies); throughput still to be shown in Phase 21
+- [Phase 18]: S5: keep std RwLock for the commit gate; release the gate before any wait is required for steps 5 and 6
+- [Phase 18]: S2: #108 closes without threads for the typical case; 1 of 6 runs missed the 500 ms bound (1353 ms at 4 GiB), repeat on btrfs before closing
 
 ### Pending Todos
 
@@ -71,8 +99,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-20
-Stopped at: v2.2 roadmap created (Phases 18-24)
+Last session: 2026-11-21T09:15:41.508Z
+Stopped at: Phase 18 complete, ready to plan Phase 19
 Resume file: None
 
 ## Operator Next Steps

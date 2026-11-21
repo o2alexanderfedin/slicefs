@@ -9,9 +9,9 @@
 
 ### Spikes and baseline (#127)
 
-- [ ] **SPIKE-01**: Spike results S1-S7 are recorded in the threading research doc, and each result names the migration step it decides. S2 and S5 are measured again on the current code (after #108).
-- [ ] **SPIKE-02**: An in-process stress harness runs N threads of mixed operations (read, write, fsync, create, rename, unlink) on one file and on many files. It checks the data against a model, and it reports latency histograms and lock hold/wait times.
-- [ ] **SPIKE-03**: S1 (FUSE-T overlap and reply order) is run by hand on a macOS FSKit mount and recorded. The result decides whether the macOS default can be more than one worker.
+- [x] **SPIKE-01**: Spike results S1-S7 are recorded in the threading research doc, and each result names the migration step it decides. S2 and S5 are measured again on the current code (after #108).
+- [x] **SPIKE-02**: An in-process stress harness runs N threads of mixed operations (read, write, fsync, create, rename, unlink) on one file and on many files. It checks the data against a model, and it reports latency histograms and lock hold/wait times.
+- [x] **SPIKE-03**: S1 (FUSE-T overlap and reply order) is run by hand on a macOS FSKit mount and recorded. The result decides whether the macOS default can be more than one worker.
 
 ### Fine-grained locks (#21)
 
@@ -19,7 +19,7 @@
 - [ ] **LOCK-02**: Per-file state stays in its table behind its own lock; no request takes another file's state out of `open_files` (the take-out pattern is gone, including `keep_budget`).
 - [ ] **LOCK-03**: Locks have one fixed rank (gate, rename, namespace stripes, file cell, short maps, store internals; two inodes in increasing inode order). A debug-build checker fails a test on a rank violation.
 - [ ] **LOCK-04**: Each log record is appended under the same locks as its apply (the append is a memory copy plus an LSN; disk write and sync happen outside the locks). Replay gives the same state as the apply, including creates by logged inode number. The #21 body is updated to match.
-- [ ] **LOCK-05**: A test with parallel readers and writers on one file shows correct data, and that readers do not wait for the I/O of writers. A test with parallel I/O on different files shows no contention between them.
+- [ ] **LOCK-05**: A test with parallel readers and writers on one file shows correct data, and that readers do not wait for the I/O of writers. A test with parallel I/O on different files shows no contention between them. The one-file tests use several handles on the same inode with different modes (read-only, read-write, `O_APPEND`), and they show the POSIX rules (POSIX.1 2.9.7). A read through one handle sees a write that has completed through another handle. A read never sees part of a concurrent write: it sees all of the write or none of it. Concurrent `O_APPEND` writes through different handles never overlap and lose no bytes. The end-of-file offset of an append comes from the current size under the inode lock.
 - [ ] **LOCK-06**: The shared dirty budget is safe with N writers: a background flusher lowers it, a writer that is over the limit sleeps before it takes any lock, and every wait has a time limit. A test with all workers throttled while a commit waits does not deadlock, and peak RSS stays under the set limit.
 
 ### Worker pool (#22)
@@ -78,9 +78,9 @@ Deferred; tracked, not in this roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SPIKE-01 | Phase 18 | Pending |
-| SPIKE-02 | Phase 18 | Pending |
-| SPIKE-03 | Phase 18 | Pending |
+| SPIKE-01 | Phase 18 | Complete |
+| SPIKE-02 | Phase 18 | Complete |
+| SPIKE-03 | Phase 18 | Complete |
 | LOCK-01 | Phase 19 | Pending |
 | LOCK-02 | Phase 20 | Pending |
 | LOCK-03 | Phase 19 | Pending |

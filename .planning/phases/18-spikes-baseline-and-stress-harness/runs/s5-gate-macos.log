@@ -1,0 +1,9 @@
+# S5 macos, commit d24da49, 2026-11-21, CPUs 32
+# rustc 1.95.0-nightly (9e79395f9 2026-02-10) (the toolchain that built the test; the RwLock behaviour depends on the std version)
+# in process (no mount), release build, no lock-stats; 78000 empty files in 100 dirs, 4 holders (50,200,500 ms shared holds), 1 real-op thread, probe every 10 ms, commit every 1 s, 30 s
+# cmd: cargo test --release -p slicefs-cli --test stress_harness -- --ignored --exact --nocapture s5_gate_fairness
+S5 setup files=78000 secs=2.6
+S5 platform=macos files=78000 commits=19 commit_gate_wait_ms p50=386.7 max=501.0 commit_hold_ms p50=10.8 max=14.1 commit_total_ms p50=563.6 max=675.3
+S5 new_reader_wait_ms commit_active max=508.3 p99=407.4 p50=0.0 n=260 idle max=0.0 p99=0.0 p50=0.0 n=1537 longest_hold_ms=510.0
+S5 note: use the commit_active max; p50/p99 include time after the gate is released
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 32.85s

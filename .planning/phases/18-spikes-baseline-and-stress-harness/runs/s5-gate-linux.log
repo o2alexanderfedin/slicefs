@@ -1,0 +1,10 @@
+# S5 linux, commit d24da49, 2026-11-21, CPUs 32
+# rustc 1.100.0 (0ef1bc386 2026-11-09) (rustc -V inside the container; the RwLock behaviour depends on the std version)
+# docker host (OrbStack): Kernel 7.2.12-orbstack-00394-gbecdd6130068; store on overlayfs inside the container
+# in process (no mount), release build, no lock-stats; 78000 empty files in 100 dirs, 4 holders (50,200,500 ms shared holds), 1 real-op thread, probe every 10 ms, commit every 1 s, 30 s
+# cmd: scripts/docker-linux-test/run.sh harness s5_gate_fairness
+S5 setup files=78000 secs=2.0
+S5 platform=linux files=78000 commits=19 commit_gate_wait_ms p50=450.1 max=484.4 commit_hold_ms p50=9.2 max=146.5 commit_total_ms p50=524.0 max=713.6
+S5 new_reader_wait_ms commit_active max=597.7 p99=517.7 p50=0.0 n=130 idle max=0.0 p99=0.0 p50=0.0 n=1883 longest_hold_ms=505.8
+S5 note: use the commit_active max; p50/p99 include time after the gate is released
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 32.29s

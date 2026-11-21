@@ -1,0 +1,70 @@
+name: S1 FUSE-T overlap
+
+# Spike S1: does FUSE-T (FSKit backend) hand the server more than one request at
+# a time, and does it accept replies in a different order than the requests?
+# A small test server (crates/slicefs-cli/examples/s1_probe.rs) delays one READ
+# by 200 ms while another process stats new names; the client script prints the
+# maximum requests in flight and the reply-order inversions.
+#
+# Run by hand only. A manual dispatch needs this file on the default branch, so
+# the same run also starts on a push to a branch named ci-s1/<anything>. The
+# name is not ci/<anything>: that would also start the long macos-mounts.yml.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["ci-s1/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  s1:
+    name: S1 overlap (macOS FSKit)
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pkg-config and FUSE-T
+        run: |
+          brew install pkg-config
+          brew install --cask macos-fuse-t/cask/fuse-t
+          sw_vers
+          brew list --cask --versions fuse-t
+
+      - name: Enable the FUSE-T FSKit extension
+        run: scripts/macos-mount-test/enable-fskit.sh
+
+      - name: Build the S1 probe
+        run: cargo build --release -p slicefs-cli --example s1_probe
+
+      - name: S1 client
+        shell: bash
+        timeout-minutes: 10
+        env:
+          WORK: ${{ runner.temp }}/s1
+        run: |
+          mkdir -p "$WORK"
+          scripts/macos-mount-test/s1-overlap.sh target/release/examples/s1_probe 2>&1 | tee "$WORK/client.log"
+
+      - name: FSKit diagnostics
+        if: failure()
+        run: |
+          S="$HOME/Library/Group Containers/group.com.apple.fskit.settings"
+          ls -la "$S" || true
+          plutil -p "$S/enabledModules.plist" || true
+          pluginkit -m -v -p com.apple.fskit.fsmodule || true
+          /usr/bin/log show --last 30m --style compact --predicate \
+            'subsystem BEGINSWITH "com.apple.FSKit" OR process CONTAINS[c] "fskit" OR process == "go-nfsv4"' \
+            | tail -200 || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s1-overlap
+          path: |
+            ${{ runner.temp }}/s1/probe.out
+            ${{ runner.temp }}/s1/probe.err
+            ${{ runner.temp }}/s1/client.log
+          if-no-files-found: ignore

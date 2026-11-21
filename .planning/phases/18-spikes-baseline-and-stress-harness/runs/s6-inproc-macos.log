@@ -1,0 +1,13 @@
+# S6 in process macos, commit d24da49, 2026-11-21, CPUs 32
+# macOS 26.2, rustc 1.95.0-nightly (9e79395f9 2026-02-10); in process (no mount), release build, no lock-stats; store in the system temp dir
+# 2000 files of 4096 bytes per run: create, write, timed fsync, release; two interleaved passes; GC and commit timer off
+# cmd: cargo test --release -p slicefs-cli --test stress_harness -- --ignored --exact --nocapture s6_small_fsync
+S6 seed=1795251766926304000 files=2000 bytes=4096 note: in process, no FUSE: SliceFS cost only
+S6 wal=per-op pass=1 files=2000 fsyncs_per_s=48.1 fsync_p50_ms=20.00 fsync_p99_ms=36.80 fsync_max_ms=65.40 wall_s=41.6
+S6 wal=flush-on-fsync pass=1 files=2000 fsyncs_per_s=44.3 fsync_p50_ms=20.91 fsync_p99_ms=41.75 fsync_max_ms=64.65 wall_s=45.2
+S6 wal=periodic pass=1 files=2000 fsyncs_per_s=45.0 fsync_p50_ms=20.81 fsync_p99_ms=41.91 fsync_max_ms=115.61 wall_s=44.4
+S6 wal=per-op pass=2 files=2000 fsyncs_per_s=47.1 fsync_p50_ms=20.25 fsync_p99_ms=36.96 fsync_max_ms=73.33 wall_s=42.5
+S6 wal=flush-on-fsync pass=2 files=2000 fsyncs_per_s=43.1 fsync_p50_ms=21.02 fsync_p99_ms=41.71 fsync_max_ms=136.84 wall_s=46.4
+S6 wal=periodic pass=2 files=2000 fsyncs_per_s=44.7 fsync_p50_ms=20.91 fsync_p99_ms=41.48 fsync_max_ms=67.96 wall_s=44.8
+S6 note: in process, no FUSE: SliceFS cost only
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 265.94s

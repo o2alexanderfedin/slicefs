@@ -10,6 +10,10 @@ description = "SliceFS FUSE binary — mounts, seeds, and manages SliceFS volume
 name = "slicefs"
 path = "src/main.rs"
 
+[features]
+# Lock hold and wait times in the stress harness report.
+lock-stats = ["chunk-store/lock-stats", "metadata/lock-stats"]
+
 [dependencies]
 slicefs-traits       = { path = "../slicefs-traits" }
 metadata             = { path = "../metadata" }
@@ -29,3 +33,5 @@ sha2-compress  = { workspace = true }
 # of a change of the write hash.
 chunk-store = { path = "../chunk-store", features = ["test-hasher"] }
 tempfile = { workspace = true }
+# Latency histograms of the stress harness (`tests/stress_harness.rs`).
+hdrhistogram = { version = "7.6", default-features = false }

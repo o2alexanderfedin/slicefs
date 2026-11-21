@@ -75,7 +75,7 @@ Other candidates (not in v2.2): idle-merge control (#141), several roots, commit
 
 ### Active
 
-- [ ] Multithreaded request handling: spikes (#127), fine-grained locks (#21), worker pool (#22)
+- [ ] Multithreaded request handling: fine-grained locks (#21), worker pool (#22); spikes (#127) done in Phase 18
 - [ ] `slicefs rehash` (#62)
 - [ ] Configurable FastCDC profiles and benchmark (#67)
 - [ ] Prolly-tree evaluation (#19)
@@ -117,6 +117,9 @@ Other candidates (not in v2.2): idle-merge control (#141), several roots, commit
 | Custom sorted-run chunk index, not fjall (v2.1) | 1.37 vs 2.12 B/object, 9 ms vs 0.65 s open at 10M; fjall refuses a second-process open | ✓ Good |
 | Never hold a whole file in RAM (v2.1) | 1 GiB files must not cost 1 GiB of daemon memory | ✓ Good (VmHWM 165 MiB for a 4 GiB file) |
 | FastCDC stays 4/8/32 KiB (v2.1) | Size-class ideas parked until measured | — Pending |
+| macOS worker default may be more than 1 (v2.2, Phase 18) | Spike S1 on FSKit CI: 2 requests in flight, 5 reply-order inversions, no errors | — Pending (Phase 21 must show a throughput gain) |
+| Keep `std::sync::RwLock` for the commit gate; release the gate before any wait (v2.2, Phase 18) | Spike S5: a new reader waits as long as the longest hold while a commit waits | — Pending |
+| Stress harness with model check is the "done" test for the lock phases (v2.2, Phase 18) | Today's code fails it with free threads on one shared file | ✓ Good |
 
 ## Evolution
 
@@ -137,4 +140,4 @@ This document evolves at phase transitions and milestone boundaries.
 
 ---
 
-*Last updated: 2026-11-20 after start of milestone v2.2*
+*Last updated: 2026-11-21 after Phase 18*

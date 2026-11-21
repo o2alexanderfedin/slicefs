@@ -10,6 +10,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use chunk_store::lock_stats::{self, Site};
 use crate::segment::SegmentWriter;
 use super::{BUFFER_CAP_BYTES, Behind, WalCut, WalEntry, WalError, per_op::wal_entry_to_segment};
 
@@ -76,14 +77,14 @@ impl BufferedLog {
     /// After a failed write-out, the record is not kept (see `Pending::failed`):
     /// every fsync fails until the next commit puts the state into a root.
     pub(crate) fn log(&self, entry: &WalEntry) -> Result<(), WalError> {
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = lock_stats::lock(&self.pending, Site::WalPending);
         if pending.failed {
             return Ok(());
         }
         pending.bytes += record_len(entry);
         pending.entries.push(entry.clone());
         if pending.bytes > BUFFER_CAP_BYTES {
-            let mut writer = self.writer.lock().unwrap();
+            let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
             let result = write_out(&mut pending, &mut writer).and_then(|()| writer.flush());
             if let Err(e) = result {
                 pending.failed = true;
@@ -99,11 +100,11 @@ impl BufferedLog {
         // The records after a cut count only on top of the ones before it.
         self.behind.lock().unwrap().settle()?;
         // Lock order everywhere: pending, then writer.
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = lock_stats::lock(&self.pending, Site::WalPending);
         if pending.failed {
             return Err(write_failed());
         }
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
         if let Err(e) = write_out(&mut pending, &mut writer).and_then(|()| writer.sync()) {
             pending.failed = true;
             return Err(e.into());
@@ -112,8 +113,8 @@ impl BufferedLog {
     }
 
     pub(crate) fn rotate(&self, seed: &[WalEntry]) -> Result<(), WalError> {
-        let mut pending = self.pending.lock().unwrap();
-        let mut writer = self.writer.lock().unwrap();
+        let mut pending = lock_stats::lock(&self.pending, Site::WalPending);
+        let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
         let mut loc = self.loc.lock().unwrap();
         // If the new segment cannot be made, keep the records: they hold the
         // new root's record, and the next flush writes it to the current segment.
@@ -130,8 +131,8 @@ impl BufferedLog {
 
     /// See [`super::WalStrategy::cut`].
     pub(crate) fn cut(&self) -> Result<Option<WalCut>, WalError> {
-        let mut pending = self.pending.lock().unwrap();
-        let mut writer = self.writer.lock().unwrap();
+        let mut pending = lock_stats::lock(&self.pending, Site::WalPending);
+        let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
         let mut loc = self.loc.lock().unwrap();
         // A failed segment is cut too: the root of this commit holds every
         // record before the cut, and the new segment starts whole.
@@ -147,11 +148,11 @@ impl BufferedLog {
     /// See [`super::WalStrategy::install_root`].
     pub(crate) fn install_root(&self, cut: &WalCut, seed: &[WalEntry]) -> Result<(), WalError> {
         let (file, path) = {
-            let mut pending = self.pending.lock().unwrap();
+            let mut pending = lock_stats::lock(&self.pending, Site::WalPending);
             if pending.failed {
                 return Err(write_failed());
             }
-            let mut writer = self.writer.lock().unwrap();
+            let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
             let r = write_out(&mut pending, &mut writer).and_then(|()| writer.file_for_sync());
             match r {
                 Ok(f) => (f, self.loc.lock().unwrap().0.clone()),

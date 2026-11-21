@@ -9,6 +9,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Mutex;
 
+use chunk_store::lock_stats::{self, Site};
 use crate::segment::{SegmentEntry, SegmentWriter};
 use super::{Behind, WalCut, WalEntry, WalError, WalStrategy};
 
@@ -38,7 +39,7 @@ impl PerOpWal {
 
 impl WalStrategy for PerOpWal {
     fn rotate(&self, seed: &[WalEntry]) -> Result<(), WalError> {
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
         let mut loc = self.loc.lock().unwrap();
         let (new_writer, new_path, new_id) = super::rotate_segment(&loc.0, loc.1, seed)?;
         *writer = new_writer;
@@ -47,13 +48,13 @@ impl WalStrategy for PerOpWal {
         Ok(())
     }
     fn cut(&self) -> Result<Option<WalCut>, WalError> {
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
         let mut loc = self.loc.lock().unwrap();
         super::cut_segment(&mut writer, &mut loc, &self.behind).map(Some)
     }
     fn install_root(&self, cut: &WalCut, seed: &[WalEntry]) -> Result<(), WalError> {
         let (file, path) = {
-            let mut writer = self.writer.lock().unwrap();
+            let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
             (writer.file_for_sync()?, self.loc.lock().unwrap().0.clone())
         };
         // The disk sync runs with no lock held: requests log meanwhile.
@@ -62,7 +63,7 @@ impl WalStrategy for PerOpWal {
     }
     fn log_mutation(&self, entry: &WalEntry) -> Result<(), WalError> {
         let seg_entry = wal_entry_to_segment(entry);
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
         writer.write_entry(&seg_entry)?;
         if matches!(entry, WalEntry::Op { .. }) {
             // Into the kernel now, with no disk sync: a crash of the daemon
@@ -78,7 +79,7 @@ impl WalStrategy for PerOpWal {
     fn flush_and_sync(&self) -> Result<(), WalError> {
         // The records after a cut count only on top of the ones before it.
         self.behind.lock().unwrap().settle()?;
-        self.writer.lock().unwrap().sync()?;
+        lock_stats::lock(&self.writer, Site::WalWriter).sync()?;
         Ok(())
     }
 
@@ -89,7 +90,7 @@ impl WalStrategy for PerOpWal {
         // We'll replace the inner writer with a dummy by using unsafe or restructuring.
         // Simpler: just call sync; we can't call close() without consuming.
         // The close() writes an EOF marker — call flush then sync to simulate.
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
         writer.sync()?;
         Ok(())
     }
