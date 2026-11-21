@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 18
 current_phase_name: Spikes, baseline and stress harness
 status: executing
-stopped_at: Completed 18-03-PLAN.md
-last_updated: "2026-11-21T08:24:22.186Z"
+stopped_at: Completed 18-05-PLAN.md
+last_updated: "2026-11-21T08:50:50.410Z"
 last_activity: 2026-11-20
 last_activity_desc: Phase 18 execution started
-state_head: 1bdf13923a96637debf82525db6559a6a6377fa8
+state_head: 34d75755ba82a59e229e2f6e191412f9f6d4ff9a
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 7
-  completed_plans: 4
+  completed_plans: 5
   percent: 0
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 18 (Spikes, baseline and stress harness) — EXECUTING
-Plan: 5 of 7
+Plan: 6 of 7
 Status: Ready to execute
 Last activity: 2026-11-20 — Phase 18 execution started
 
@@ -50,6 +50,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 18 P04 | 45min | 2 tasks | 6 files |
 | Phase 18 P02 | 35min | 2 tasks | 7 files |
 | Phase 18 P03 | 45min | 3 tasks | 1 files |
+| Phase 18 P05 | 60min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -68,6 +69,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 18]: 18-02: lock report test is its own binary (process-global recorder); read_root readers guard left as is for S3
 - [Phase 18]: 18-03: short stress runs sized 4x150 ops (one-file) and 4x40 ops (many-files) to fit the 5 s budget; fsync and release cost 20-40 ms each in debug
 - [Phase 18]: 18-03: serialize-off target fails today on the shared file (reads match no allowed version); many-files with one owner per file passed with serialize off
+- [Phase 18]: 18-05: S4 fusectl mounts with SYS_ADMIN alone (no --privileged); S6/S4/S2 numbers saved in runs/ for Plan 07; S2 on overlayfs, 4 GiB max write 1353 ms in one of three runs
 
 ### Pending Todos
 
@@ -89,8 +91,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-21T08:24:22.144Z
-Stopped at: Completed 18-03-PLAN.md
+Last session: 2026-11-21T08:50:50.349Z
+Stopped at: Completed 18-05-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
