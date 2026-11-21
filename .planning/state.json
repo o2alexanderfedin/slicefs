@@ -6,7 +6,7 @@
     {
       "number": "18",
       "name": "Spikes, baseline and stress harness",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "19",
@@ -44,5 +44,5 @@
     "label": "Advance to the next step",
     "reason": "Phase 1 of 7 · 0% · executing"
   },
-  "updated_at": "2026-11-21T07:32:06.304Z"
+  "updated_at": "2026-11-21T07:44:45.099Z"
 }
