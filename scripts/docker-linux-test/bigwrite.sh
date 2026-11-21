@@ -23,7 +23,8 @@ mnt(){ # mnt <store> <mountpoint> [extra args...]: per-op write log, GC only on 
   local s=$1 m=$2; shift 2; mkdir -p $m
   "${PRE[@]}" $B mount --store $s --wal-strategy per-op --gc-interval 0 "$@" $m </dev/null >>$R/mount.log 2>&1 & MP=$!
   for i in $(seq 1 20); do mountpoint -q $m && return 0; sleep 0.5; done
-  echo "  NOT MOUNTED: $m"; tail -5 $R/mount.log; F=1; return 1; }
+  echo "  NOT MOUNTED: $m"; tail -5 $R/mount.log; F=1
+  kill -9 $MP 2>/dev/null; wait $MP 2>/dev/null; fusermount -uz $m 2>/dev/null; return 1; }
 umnt(){ # umnt <mountpoint>: unmount and require the daemon to exit
   timeout -s KILL 15 $B unmount $1 >/dev/null 2>&1 || fusermount -u $1 2>/dev/null
   for i in $(seq 20); do kill -0 $MP 2>/dev/null || return 0; sleep 0.5; done
