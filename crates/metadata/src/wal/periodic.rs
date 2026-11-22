@@ -89,11 +89,10 @@ impl WalStrategy for PeriodicWal {
         self.log.install_root(cut, seed)
     }
     fn append(&self, entry: &WalEntry) -> Result<super::Lsn, WalError> {
-        self.log.log(entry)?;
-        Ok(super::Lsn(0))
+        self.log.append(entry)
     }
-    fn write_out(&self, _upto: super::Lsn) -> Result<(), WalError> {
-        Ok(())
+    fn write_out(&self, upto: super::Lsn) -> Result<(), WalError> {
+        self.log.write_out(upto)
     }
 
     fn flush_and_sync(&self) -> Result<(), WalError> {

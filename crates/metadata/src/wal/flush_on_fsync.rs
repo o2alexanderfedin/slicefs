@@ -40,11 +40,10 @@ impl WalStrategy for FlushOnFsyncWal {
         self.log.install_root(cut, seed)
     }
     fn append(&self, entry: &WalEntry) -> Result<super::Lsn, WalError> {
-        self.log.log(entry)?;
-        Ok(super::Lsn(0))
+        self.log.append(entry)
     }
-    fn write_out(&self, _upto: super::Lsn) -> Result<(), WalError> {
-        Ok(())
+    fn write_out(&self, upto: super::Lsn) -> Result<(), WalError> {
+        self.log.write_out(upto)
     }
 
     fn flush_and_sync(&self) -> Result<(), WalError> {
@@ -66,6 +65,33 @@ mod tests {
         let path = dir.path().join("s.seg");
         let wal = FlushOnFsyncWal::new(&path, 1).unwrap();
         super::super::buffered::assert_cap_holds(&wal, &wal.log, &path);
+    }
+
+    /// LOCK-04: append only holds the record in RAM; write_out writes the
+    /// held records when they pass the cap, and not before.
+    #[test]
+    fn append_holds_records_until_a_write_out_past_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.seg");
+        let wal = FlushOnFsyncWal::new(&path, 1).unwrap();
+        let record = 64 * 1024;
+        let small = wal.append(&WalEntry::Op { bytes: vec![1; 10] }).unwrap();
+        wal.write_out(small).unwrap();
+        assert!(wal.log.buffered_bytes() > 0, "under the cap, write_out writes nothing");
+        let mut last = small;
+        for i in 0..(super::super::BUFFER_CAP_BYTES / record + 2) {
+            last = wal.append(&WalEntry::Op { bytes: vec![i as u8; record] }).unwrap();
+        }
+        assert!(
+            wal.log.buffered_bytes() > super::super::BUFFER_CAP_BYTES,
+            "append must only hold the records (memory only), held {}",
+            wal.log.buffered_bytes()
+        );
+        let on_disk = |p: &Path| crate::segment::SegmentReader::open(p).map(|r| r.count()).unwrap_or(0);
+        assert_eq!(on_disk(&path), 0, "append must not write the segment");
+        wal.write_out(last).unwrap();
+        assert_eq!(wal.log.buffered_bytes(), 0, "past the cap, write_out writes every held record");
+        assert_eq!(on_disk(&path), super::super::BUFFER_CAP_BYTES / record + 3);
     }
 
     /// A failed write-out at the cap makes every later fsync fail until the

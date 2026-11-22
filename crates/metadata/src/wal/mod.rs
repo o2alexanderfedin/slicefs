@@ -315,3 +315,136 @@ pub fn create_wal(
         WalConfig::NoWal => Ok(Box::new(NoWal)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::segment::{SegmentEntry, SegmentReader};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    fn op(i: u32) -> WalEntry {
+        WalEntry::Op { bytes: i.to_le_bytes().to_vec() }
+    }
+
+    fn entries(path: &Path) -> Vec<SegmentEntry> {
+        SegmentReader::open(path).map(|r| r.collect()).unwrap_or_default()
+    }
+
+    fn ops(path: &Path) -> Vec<Vec<u8>> {
+        entries(path)
+            .into_iter()
+            .filter_map(|e| match e { SegmentEntry::Op { bytes } => Some(bytes), _ => None })
+            .collect()
+    }
+
+    fn seg(dir: &Path, id: u64) -> std::path::PathBuf {
+        dir.join(format!("segment-{id:06}.seg"))
+    }
+
+    const KINDS: [&str; 3] = ["per_op", "flush_on_fsync", "periodic"];
+
+    /// A strategy that writes a segment, on segment 1 of `dir`.
+    fn make(kind: &str, dir: &Path) -> Arc<dyn WalStrategy> {
+        match kind {
+            "per_op" => Arc::new(PerOpWal::new(&seg(dir, 1), 1).unwrap()),
+            "flush_on_fsync" => Arc::new(FlushOnFsyncWal::new(&seg(dir, 1), 1).unwrap()),
+            _ => Arc::new(PeriodicWal::with_interval(&seg(dir, 1), 1, Duration::from_millis(20)).unwrap()),
+        }
+    }
+
+    /// Records appended and not written out are in the segment before the
+    /// cut, in LSN order; a record after the cut is not.
+    #[test]
+    fn cut_keeps_unwritten_appends_in_lsn_order() {
+        for kind in ["per_op", "flush_on_fsync"] {
+            let dir = tempfile::tempdir().unwrap();
+            let wal = make(kind, dir.path());
+            for i in 0..5 {
+                wal.append(&op(i)).unwrap();
+            }
+            let cut = wal.cut().unwrap().unwrap();
+            assert_eq!(cut.root_id, 2);
+            let after = wal.append(&op(99)).unwrap();
+            wal.write_out(after).unwrap();
+            wal.flush_and_sync().unwrap();
+            let want: Vec<Vec<u8>> = (0..5).map(|i: u32| i.to_le_bytes().to_vec()).collect();
+            assert_eq!(ops(&seg(dir.path(), 1)), want, "{kind}: every record before the cut, in order");
+        }
+    }
+
+    /// Records appended before a rotate never follow the seed of the new
+    /// segment (the new root holds them; replay would apply them twice).
+    #[test]
+    fn rotate_after_unwritten_appends_starts_with_the_seed_only() {
+        for kind in ["per_op", "flush_on_fsync"] {
+            let dir = tempfile::tempdir().unwrap();
+            let wal = make(kind, dir.path());
+            for i in 0..3 {
+                wal.append(&op(i)).unwrap();
+            }
+            let root = ObjectKey::example(3);
+            wal.rotate(&[WalEntry::RootUpdate { root }]).unwrap();
+            let after = wal.append(&op(7)).unwrap();
+            wal.write_out(after).unwrap();
+            wal.flush_and_sync().unwrap();
+            let got = entries(&seg(dir.path(), 2));
+            assert!(
+                matches!(got.as_slice(), [SegmentEntry::RootUpdate { root: r }, SegmentEntry::Op { bytes }]
+                    if *r == root && bytes == &7u32.to_le_bytes().to_vec()),
+                "{kind}: the new segment must hold the seed and the record after the rotate, got {} entries",
+                got.len()
+            );
+        }
+    }
+
+    /// One lock order in every path (T-19-13): append + write_out, fsync
+    /// (and the periodic timer), and cut/install_root/rotate run at once on
+    /// one strategy. A watchdog fails the test if they do not end in 5 s.
+    #[test]
+    fn no_deadlock_between_append_cut_and_sync() {
+        for kind in KINDS {
+            let dir = tempfile::tempdir().unwrap();
+            let wal = make(kind, dir.path());
+            let stop = Arc::new(AtomicBool::new(false));
+            let (done, finished) = mpsc::channel::<&'static str>();
+            let mut threads = Vec::new();
+            let spawn = |name: &'static str, f: Box<dyn Fn(&dyn WalStrategy, u32) + Send>| {
+                let (wal, stop, done) = (Arc::clone(&wal), Arc::clone(&stop), done.clone());
+                std::thread::spawn(move || {
+                    let mut n = 0;
+                    while !stop.load(Ordering::Relaxed) {
+                        f(&*wal, n);
+                        n += 1;
+                    }
+                    let _ = done.send(name);
+                })
+            };
+            threads.push(spawn("append", Box::new(|w, n| {
+                let lsn = w.append(&WalEntry::Op { bytes: vec![n as u8; 16 * 1024] }).unwrap();
+                w.write_out(lsn).unwrap();
+            })));
+            threads.push(spawn("sync", Box::new(|w, _| w.flush_and_sync().unwrap())));
+            threads.push(spawn("generation", Box::new(|w, n| {
+                let seed = [WalEntry::RootUpdate { root: ObjectKey::example(n) }];
+                if n % 2 == 0 {
+                    let cut = w.cut().unwrap().unwrap();
+                    w.install_root(&cut, &seed).unwrap();
+                } else {
+                    w.rotate(&seed).unwrap();
+                }
+            })));
+            std::thread::sleep(Duration::from_millis(400));
+            stop.store(true, Ordering::Relaxed);
+            for _ in 0..threads.len() {
+                if finished.recv_timeout(Duration::from_secs(5)).is_err() {
+                    panic!("{kind}: a WAL thread did not finish within 5 s (deadlock)");
+                }
+            }
+            for t in threads {
+                t.join().unwrap();
+            }
+        }
+    }
+}
