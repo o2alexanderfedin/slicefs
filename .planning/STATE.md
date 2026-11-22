@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 19
 current_phase_name: Fine-grained locks
 status: executing
-stopped_at: Completed 19-09-PLAN.md
-last_updated: "2026-11-22T09:05:46.389Z"
+stopped_at: Completed 19-10-PLAN.md
+last_updated: "2026-11-22T10:10:45.808Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 19 execution started
-state_head: 37b1119191e6609d8be2e43a7ce20b35f863e127
+state_head: f960da3557b22d33eb6cde7b9f0a5b37e589390a
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 18
-  completed_plans: 16
+  completed_plans: 17
   percent: 14
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 19 (Fine-grained locks) — EXECUTING
-Plan: 10 of 11
+Plan: 11 of 11
 Status: Ready to execute
 Last activity: 2026-11-21 — Phase 19 execution started
 
@@ -62,6 +62,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 19 P07 | 95min | 3 tasks | 4 files |
 | Phase 19 P08 | 45min | 3 tasks | 5 files |
 | Phase 19 P09 | 55min | 3 tasks | 11 files |
+| Phase 19 P10 | 55min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -118,6 +119,9 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: The setattr size change stays under the cell lock only (it can splice); the other setattr fields and xattr changes run under stripe then cell
 - [Phase 19]: Every request takes the commit gate through gate_shared (Rank::Gate entry); the harness runs with the strict-gate rule; serialize_off_target is in the default suite
 - [Phase 19]: Replay skips a Setxattr/Removexattr record of an inode it already reclaimed, as it skips a write of a gone inode
+- [Phase 19]: 19-10: the namespace log callback is &mut dyn FnMut(Op); the fs function builds the op in its apply hold, the handler appends it and writes out the LSN before the reply
+- [Phase 19]: 19-10: a setattr with a size logs a size-only Setattr in the cell hold of the size change, then the other fields in the stripe-and-cell hold
+- [Phase 19]: 19-10: the harness crash test (Config.crash) makes no commit in the last 250 ms and none at the end, so the log holds the end of the run
 
 ### Pending Todos
 
@@ -139,8 +143,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-22T08:50:40.374Z
-Stopped at: Completed 19-09-PLAN.md
+Last session: 2026-11-22T10:10:45.649Z
+Stopped at: Completed 19-10-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
