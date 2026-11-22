@@ -145,4 +145,41 @@ mod tests {
         assert_eq!(last, Some(root));
         assert_eq!(ops, vec![b"after".to_vec()]);
     }
+
+    /// T-19-50, buffered: after a failed write-out, a record logged before
+    /// the commit is dropped as lost and not waited for; the commit
+    /// succeeds, fsync works again, and the records after it replay.
+    #[test]
+    fn a_buffered_commit_after_a_failed_write_with_queued_records_succeeds() {
+        use crate::store::DictMetadataStore;
+        use crate::store_io::StoreIo;
+        use slicefs_traits::metadata::MetadataStore;
+        use std::sync::{mpsc, Arc, Mutex};
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+        let wal = FlushOnFsyncWal::new(&dir.path().join("segments").join("segment-000001.seg"), 1).unwrap();
+        wal.log.fail_next_io();
+        let mut meta = DictMetadataStore::new(Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap())));
+        meta.set_wal(Box::new(wal));
+        let record = 64 * 1024;
+        for i in 0..(super::super::BUFFER_CAP_BYTES / record + 2) {
+            meta.log_op(vec![i as u8; record]);
+        }
+        assert!(meta.log_append(b"queued".to_vec()).is_some());
+        let meta = Arc::new(meta);
+        let (tx, rx) = mpsc::channel();
+        let c = {
+            let meta = Arc::clone(&meta);
+            std::thread::spawn(move || tx.send(meta.commit().is_ok()).unwrap())
+        };
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(true), "the commit must succeed");
+        c.join().unwrap();
+        assert!(meta.flush_wal().is_ok(), "after the commit, fsync works again");
+        for r in [b"a".to_vec(), b"b".to_vec(), b"c".to_vec()] {
+            meta.log_op(r);
+        }
+        meta.flush_wal().unwrap();
+        let (_, _, ops) = crate::segment::load_store_with_log(&dir.path().join("segments")).unwrap();
+        assert_eq!(ops, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+    }
 }

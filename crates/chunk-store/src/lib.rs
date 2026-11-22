@@ -3135,8 +3135,9 @@ impl ChunkStore {
 
     ///
     /// The pack sync and the `.idx` write run in a background thread, so a
-    /// put that fills a pack does not wait for them (#108); `sync_active`
-    /// (so `sync`, a flush and GC) and the next seal wait for it. A crash
+    /// put that fills a pack does not wait for them (#108). `sync` and a
+    /// flush wait for it with no store lock (`lock_no_seal`), then join it
+    /// (`join_seal`); GC (`sync_active`) and the next seal wait for it. A crash
     /// before it ends leaves a pack with no `.idx` below the newest pack:
     /// the open scans it (`resync_scan`) and seals it then. Nothing durable
     /// refers to its objects yet, since every sync waits for the seal.

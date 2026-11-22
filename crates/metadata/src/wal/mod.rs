@@ -269,32 +269,75 @@ pub(crate) fn sync_current(
     Ok(())
 }
 
-/// The cut of [`WalStrategy::cut`] on `writer` (segment `loc`): the caller
-/// has written its held records into `writer`. Opens the new segment,
-/// moves the old writer to `behind` and returns the new location.
+/// The next segment of a cut: its writer and its location.
+pub(crate) type NextSegment = (crate::segment::SegmentWriter, (std::path::PathBuf, u64));
+
+/// Create the segment that a cut of segment `loc` goes on in, two ids on
+/// (the id between is kept for the root segment), with its header only. A
+/// strategy calls it before it takes `writer`, from a copy of `loc`: `loc`
+/// changes only under `writer`, in a cut or a rotate, and those never run at
+/// the same time (the exclusive commit gate, or offline).
+pub(crate) fn open_next_segment(loc: &(std::path::PathBuf, u64)) -> Result<NextSegment, WalError> {
+    let dir = loc.0.parent().ok_or_else(|| std::io::Error::other("segment has no directory"))?;
+    let new_id = loc.1 + 2;
+    let new_path = dir.join(format!("segment-{:06}.seg", new_id));
+    let writer = crate::segment::SegmentWriter::new(&new_path, new_id)?;
+    Ok((writer, (new_path, new_id)))
+}
+
+/// The swap of [`WalStrategy::cut`], under `writer` (segment `loc`), with
+/// no record write in flight and the caller's records before the cut
+/// written out or dropped: move the old writer to `behind`, install `next`
+/// and its location, and reserve the first record of the new segment for
+/// the Cut record. The caller writes it with no lock
+/// ([`write_cut_record`]); a write-out after the cut waits for that write by
+/// the one-write rule, so the Cut record stays first. Creates no file. If
+/// `loc` moved since `next` was made, `next` is removed and nothing changes.
 pub(crate) fn cut_segment(
     writer: &mut crate::segment::SegmentWriter,
+    next: NextSegment,
     loc: &mut (std::path::PathBuf, u64),
     behind: &chunk_store::sync::Mutex<Behind>,
-) -> Result<WalCut, WalError> {
+) -> Result<(WalCut, crate::segment::writer::WriteSlot, crate::segment::SegmentEntry), WalError> {
+    let (mut new_writer, new_loc) = next;
+    if new_loc.1 != loc.1 + 2 {
+        drop(new_writer);
+        let _ = std::fs::remove_file(&new_loc.0);
+        return Err(WalError::Io(std::io::Error::other("the write log moved to another segment during a cut")));
+    }
     // The old segment is not needed once the root is logged: a failure here
     // only makes fsync fail until then (and the Cut record below no longer
     // matches the segment, so replay stops before the new one).
     let old_failed = writer.flush().is_err();
     let dir = loc.0.parent().ok_or_else(|| std::io::Error::other("segment has no directory"))?.to_path_buf();
     let (old_id, records) = (loc.1, writer.records());
-    let new_id = old_id + 2;
-    let new_path = dir.join(format!("segment-{:06}.seg", new_id));
-    let mut new_writer = crate::segment::SegmentWriter::new(&new_path, new_id)?;
-    new_writer.write_entry(&crate::segment::SegmentEntry::Cut { prev_id: old_id, records })?;
-    new_writer.flush()?;
+    let slot = new_writer.begin_write(1)?;
     let old = std::mem::replace(writer, new_writer);
     let mut b = behind.lock();
     b.old.push(old);
     b.dir = Some(dir);
     b.cuts += 1;
-    *loc = (new_path, new_id);
-    Ok(WalCut { root_id: old_id + 1, old_failed })
+    *loc = new_loc;
+    Ok((WalCut { root_id: old_id + 1, old_failed }, slot, crate::segment::SegmentEntry::Cut { prev_id: old_id, records }))
+}
+
+/// Write the Cut record of a cut into its slot with no WAL lock held, then
+/// publish it under `writer`. On an error `failed` runs under `writer`
+/// (the strategy marks itself failed): the new segment is not trusted, and
+/// every write-out and fsync fails until the next cut. The cut itself still
+/// stands, since the root of its commit holds every record before it.
+pub(crate) fn write_cut_record(
+    writer: &chunk_store::sync::Mutex<crate::segment::SegmentWriter>,
+    slot: crate::segment::writer::WriteSlot,
+    record: &crate::segment::SegmentEntry,
+    failed: impl FnOnce(),
+) {
+    let r = slot.write([record]);
+    let mut w = writer.lock();
+    w.end_write(slot, &r);
+    if r.is_err() {
+        failed();
+    }
 }
 
 /// The second half of [`WalStrategy::install_root`], after the records of
@@ -334,7 +377,9 @@ fn remove_segments_before(dir: &Path, id: u64) -> std::io::Result<()> {
 }
 
 /// Start segment `id + 1` next to `path` with `seed`, sync it and the
-/// directory, then delete the older segment files. Returns the new writer,
+/// directory, then delete the older segment files. The caller holds
+/// `writer` across this (offline only: `snapshot switch`), with no record
+/// write in flight. Returns the new writer,
 /// its path and id. On error before the new segment is synced, nothing is
 /// deleted (the current segment stays valid).
 pub(crate) fn rotate_segment(

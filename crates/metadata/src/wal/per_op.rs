@@ -56,6 +56,9 @@ pub struct PerOpWal {
     behind: Mutex<Behind>,
     #[cfg(test)]
     park: super::Parker,
+    /// Test fault hook: the Cut record write of the next cut fails.
+    #[cfg(test)]
+    fail_cut_record: AtomicBool,
 }
 
 impl PerOpWal {
@@ -71,6 +74,8 @@ impl PerOpWal {
             behind: Mutex::new(Rank::Store, Behind::default()),
             #[cfg(test)]
             park: super::Parker::default(),
+            #[cfg(test)]
+            fail_cut_record: AtomicBool::new(false),
         })
     }
 
@@ -201,14 +206,35 @@ impl WalStrategy for PerOpWal {
         Ok(())
     }
     fn cut(&self) -> Result<Option<WalCut>, WalError> {
+        // The new segment file is made before `writer` is taken (G2).
+        let at = self.loc.lock().clone();
+        #[cfg(test)]
+        self.park.point("cut_create");
+        #[allow(unused_mut)]
+        let mut next = super::open_next_segment(&at)?;
+        #[cfg(test)]
+        if self.fail_cut_record.swap(false, Ordering::AcqRel) {
+            next.0.fail_next_io();
+        }
+        let new_path = next.1 .0.clone();
         // Every record appended before the cut goes into the old segment.
         // A failure is cut too: the commit is the way back. A failed
         // segment's queued records are dropped as lost, not waited for.
-        let (mut writer, lost) = self.settled()?;
+        let (mut writer, lost) = match self.settled() {
+            Ok(s) => s,
+            Err(e) => {
+                drop(next);
+                let _ = std::fs::remove_file(&new_path);
+                return Err(e);
+            }
+        };
         let mut loc = self.loc.lock();
-        let mut cut = super::cut_segment(&mut writer, &mut loc, &self.behind)?;
+        let (mut cut, slot, record) = super::cut_segment(&mut writer, next, &mut loc, &self.behind)?;
+        drop(loc);
         cut.old_failed |= lost;
         self.failed.store(false, Ordering::Release);
+        drop(writer);
+        super::write_cut_record(&self.writer, slot, &record, || self.failed.store(true, Ordering::Release));
         Ok(Some(cut))
     }
     fn install_root(&self, cut: &WalCut, seed: &[WalEntry]) -> Result<(), WalError> {
@@ -438,6 +464,62 @@ mod tests {
         wal.log_mutation(&op(1, 2)).unwrap();
         wal.flush_and_sync().unwrap();
         assert_eq!(ops_in(&dir.path().join("segment-000003.seg")), vec![vec![1, 2, 0, 0, 0]]);
+    }
+
+    /// G2: a cut creates its new segment file before it takes the writer:
+    /// while the cut is parked there, another thread takes the writer lock.
+    /// The new segment starts with the Cut record (seq 0) of the old one.
+    #[test]
+    fn cut_opens_the_new_segment_before_the_writer() {
+        use std::sync::{mpsc, Arc};
+        let dir = tempfile::tempdir().unwrap();
+        let wal = Arc::new(PerOpWal::new(&dir.path().join("segment-000001.seg"), 1).unwrap());
+        wal.log_mutation(&op(1, 0)).unwrap();
+        wal.log_mutation(&op(1, 1)).unwrap();
+        let (parked, release) = wal.park.arm("cut_create");
+        let a = {
+            let wal = Arc::clone(&wal);
+            std::thread::spawn(move || wal.cut())
+        };
+        parked.recv_timeout(LIMIT).expect("thread A must park in the cut");
+        let (tx, rx) = mpsc::channel();
+        let b = {
+            let wal = Arc::clone(&wal);
+            std::thread::spawn(move || {
+                drop(wal.writer.lock());
+                tx.send(()).unwrap();
+            })
+        };
+        let took = rx.recv_timeout(LIMIT);
+        let _ = release.send(());
+        assert!(took.is_ok(), "the writer lock was held while the cut created its segment");
+        a.join().unwrap().unwrap().unwrap();
+        b.join().unwrap();
+        wal.log_mutation(&op(1, 2)).unwrap();
+        let got: Vec<SegmentEntry> = SegmentReader::open(&dir.path().join("segment-000003.seg")).unwrap().collect();
+        assert_eq!(got.first(), Some(&SegmentEntry::Cut { prev_id: 1, records: 2 }), "the Cut record is first");
+        assert_eq!(got.len(), 2, "the record after the cut follows it");
+    }
+
+    /// T-19-50: a failed Cut record write leaves the cut in place, but every
+    /// write-out and fsync fails until the next cut; then both work again.
+    #[test]
+    fn a_failed_cut_record_write_fails_until_the_next_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = PerOpWal::new(&dir.path().join("segment-000001.seg"), 1).unwrap();
+        wal.log_mutation(&op(1, 0)).unwrap();
+        wal.fail_cut_record.store(true, Ordering::Release);
+        let cut = wal.cut().expect("the cut stands").unwrap();
+        assert!(!cut.old_failed);
+        assert!(wal.log_mutation(&op(1, 1)).is_err(), "a write-out after a failed Cut record fails");
+        assert!(wal.flush_and_sync().is_err(), "an fsync after a failed Cut record fails");
+        let cut = wal.cut().unwrap().unwrap();
+        assert!(cut.old_failed, "the next cut reports the lost records");
+        wal.log_mutation(&op(1, 2)).unwrap();
+        wal.flush_and_sync().unwrap();
+        let got: Vec<SegmentEntry> = SegmentReader::open(&dir.path().join("segment-000005.seg")).unwrap().collect();
+        assert_eq!(got.first(), Some(&SegmentEntry::Cut { prev_id: 3, records: 0 }));
+        assert_eq!(ops_in(&dir.path().join("segment-000005.seg")), vec![vec![1, 2, 0, 0, 0]]);
     }
 
     /// Two threads append and write out in parallel: the segment holds every
