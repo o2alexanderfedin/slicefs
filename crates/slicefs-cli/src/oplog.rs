@@ -8,8 +8,7 @@
 //!
 //! Determinism: while a request runs, [`Clock`] freezes "now" for the
 //! thread, so all times of one request are equal; replay freezes the logged
-//! time. Inode numbers follow from `next_ino` in the root plus the same
-//! sequence of requests; replay checks them.
+//! time. A create is replayed at the inode number it logged.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -249,34 +248,30 @@ pub fn replay_stream<B: AsRef<[u8]>>(
         drop(bytes); // the decoded record has its own copy
         let _clock = Clock::freeze_at(rec.time);
         let bad = |what: &str| format!("write log record {i} ({what}) did not replay: {:?}", rec.op);
-        // A create logged the inode it got: take the same one, skipping any
-        // number that a failed request used up without a record.
-        if let Op::Create { ino, .. } | Op::Mkdir { ino, .. } | Op::Mknod { ino, .. } | Op::Symlink { ino, .. } = &rec.op {
-            fs.meta().advance_next_ino(*ino);
-        }
         match &rec.op {
+            // A create takes the inode number it logged (D-08): records of
+            // creates in different directories can be in any inode order,
+            // and a number that a failed request used up has no record. An
+            // inode that exists already fails the create (AlreadyExists).
             Op::Create { parent, name, mode, umask, uid, gid, flags, ino } => {
-                match handlers::handle_create(fs, *parent, name, *mode, *umask, *uid, *gid, *flags) {
-                    handlers::CreateResult::Ok(got, fh, _) if got == *ino => { handles.insert(got, fh); }
+                match handlers::handle_create_at(fs, *parent, name, *mode, *umask, *uid, *gid, *flags, Some(*ino)) {
+                    handlers::CreateResult::Ok(_, fh, _) => { handles.insert(*ino, fh); }
                     _ => return Err(bad("create")),
                 }
             }
             Op::Mkdir { parent, name, mode, umask, uid, gid, ino } => {
-                match handlers::handle_mkdir(fs, *parent, name, *mode, *umask, *uid, *gid) {
-                    handlers::EntryResult::Ok(got, _) if got == *ino => {}
-                    _ => return Err(bad("mkdir")),
+                if !matches!(handlers::handle_mkdir_at(fs, *parent, name, *mode, *umask, *uid, *gid, Some(*ino)), handlers::EntryResult::Ok(..)) {
+                    return Err(bad("mkdir"));
                 }
             }
             Op::Mknod { parent, name, mode, umask, rdev, uid, gid, ino } => {
-                match handlers::handle_mknod(fs, *parent, name, *mode, *umask, *rdev, *uid, *gid) {
-                    handlers::EntryResult::Ok(got, _) if got == *ino => {}
-                    _ => return Err(bad("mknod")),
+                if !matches!(handlers::handle_mknod_at(fs, *parent, name, *mode, *umask, *rdev, *uid, *gid, Some(*ino)), handlers::EntryResult::Ok(..)) {
+                    return Err(bad("mknod"));
                 }
             }
             Op::Symlink { parent, name, target, uid, gid, ino } => {
-                match handlers::handle_symlink(fs, *parent, name, target, *uid, *gid) {
-                    handlers::EntryResult::Ok(got, _) if got == *ino => {}
-                    _ => return Err(bad("symlink")),
+                if !matches!(handlers::handle_symlink_at(fs, *parent, name, target, *uid, *gid, Some(*ino)), handlers::EntryResult::Ok(..)) {
+                    return Err(bad("symlink"));
                 }
             }
             Op::Link { ino, newparent, newname } => {

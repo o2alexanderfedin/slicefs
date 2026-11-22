@@ -1364,3 +1364,27 @@ fn an_xattr_change_of_an_open_orphan_replays() {
     let fs = reload_and_replay(dir.path());
     assert!(fs.meta().lookup(1, "f").is_err());
 }
+
+/// RESEARCH Pitfall 9: two creates in different stripes can append their
+/// records in reverse inode order. Replay creates each at its logged inode
+/// number, so the order does not matter, and a later create gets a number
+/// above both.
+#[test]
+fn reverse_order_creates_replay() {
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    let rec = |name: &str, ino: u64| oplog::Record {
+        time: (1_700_000_000, 0),
+        op: oplog::Op::Create {
+            parent: 1, name: name.into(), mode: S_IFREG | 0o644, umask: 0o022, uid: 501, gid: 20, flags: libc::O_RDWR, ino,
+        },
+    }
+    .encode();
+    let stats = oplog::replay(&fs, &[rec("b", 7), rec("a", 6)]).unwrap();
+    assert_eq!(stats.applied, 2);
+    assert_eq!(fs.meta().lookup(1, "a").unwrap(), 6);
+    assert_eq!(fs.meta().lookup(1, "b").unwrap(), 7);
+    let (c, fc) = create(&fs, 1, "c");
+    release(&fs, c, fc);
+    assert!(c > 7, "a later create got {c}");
+}

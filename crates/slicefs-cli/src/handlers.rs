@@ -14,6 +14,8 @@
 use fuser::FileAttr;
 
 use crate::filesystem::{inode_to_file_attr, SliceFsFilesystem};
+use metadata::wal::Lsn;
+use slicefs_traits::metadata::InodeMeta;
 
 // ── Result enums ─────────────────────────────────────────────────────────────
 
@@ -122,6 +124,18 @@ fn logged() -> Logged {
 impl Logged {
     fn log(&self, fs: &SliceFsFilesystem, op: crate::oplog::Op) {
         fs.log_record(crate::oplog::Record { time: self.time, op });
+    }
+
+    /// The log callback of a namespace request (D-08): the fs function
+    /// calls it in the lock hold of its apply; it appends the record and
+    /// keeps the LSN in `lsn`, which the handler writes out after the call,
+    /// before the reply. A no-op while the log is replayed.
+    fn sink<'a>(&'a self, fs: &'a SliceFsFilesystem, lsn: &'a mut Option<Lsn>) -> impl FnMut(crate::oplog::Op) + 'a {
+        move |op| {
+            if let Some(l) = fs.log_append(crate::oplog::Record { time: self.time, op }) {
+                *lsn = Some(l);
+            }
+        }
     }
 }
 
@@ -351,13 +365,31 @@ pub fn handle_create(
     gid: u32,
     flags: i32,
 ) -> CreateResult {
+    handle_create_at(fs, parent, name, mode, umask, uid, gid, flags, None)
+}
+
+/// `handle_create` at inode `ino` (replay: the logged number; `None`: the
+/// next free one). The `Create` record is appended in the parent-stripe
+/// hold that opens the handle, and written out before the reply (D-08).
+#[allow(clippy::too_many_arguments)]
+pub fn handle_create_at(
+    fs: &SliceFsFilesystem,
+    parent: u64,
+    name: &str,
+    mode: u32,
+    umask: u32,
+    uid: u32,
+    gid: u32,
+    flags: i32,
+    ino: Option<u64>,
+) -> CreateResult {
     fs.note_write();
     let l = logged();
-    match fs.test_create_full(parent, name, mode, umask, uid, gid, flags) {
-        Ok((ino, fh, meta)) => {
-            l.log(fs, crate::oplog::Op::Create { parent, name: name.to_string(), mode, umask, uid, gid, flags, ino });
-            CreateResult::Ok(ino, fh, inode_to_file_attr(&meta))
-        }
+    let mut lsn = None;
+    let r = fs.create_full_logged(parent, name, mode, umask, uid, gid, flags, ino, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    match r {
+        Ok((ino, fh, meta)) => CreateResult::Ok(ino, fh, inode_to_file_attr(&meta)),
         Err(errno) => CreateResult::Error(errno),
     }
 }
@@ -372,14 +404,26 @@ pub fn handle_mkdir(
     uid: u32,
     gid: u32,
 ) -> EntryResult {
+    handle_mkdir_at(fs, parent, name, mode, umask, uid, gid, None)
+}
+
+/// `handle_mkdir` at inode `ino` (replay); logged in the parent-stripe hold.
+#[allow(clippy::too_many_arguments)]
+pub fn handle_mkdir_at(
+    fs: &SliceFsFilesystem,
+    parent: u64,
+    name: &str,
+    mode: u32,
+    umask: u32,
+    uid: u32,
+    gid: u32,
+    ino: Option<u64>,
+) -> EntryResult {
     let l = logged();
-    match fs.test_mkdir_full(parent, name, mode, umask, uid, gid) {
-        Ok((ino, meta)) => {
-            l.log(fs, crate::oplog::Op::Mkdir { parent, name: name.to_string(), mode, umask, uid, gid, ino });
-            EntryResult::Ok(ino, inode_to_file_attr(&meta))
-        }
-        Err(errno) => EntryResult::Error(errno),
-    }
+    let mut lsn = None;
+    let r = fs.mkdir_logged(parent, name, mode, umask, uid, gid, ino, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    entry(r)
 }
 
 /// Handle `mknod`: create a new node (regular file) named `name` in `parent`.
@@ -393,14 +437,27 @@ pub fn handle_mknod(
     uid: u32,
     gid: u32,
 ) -> EntryResult {
+    handle_mknod_at(fs, parent, name, mode, umask, rdev, uid, gid, None)
+}
+
+/// `handle_mknod` at inode `ino` (replay); logged in the parent-stripe hold.
+#[allow(clippy::too_many_arguments)]
+pub fn handle_mknod_at(
+    fs: &SliceFsFilesystem,
+    parent: u64,
+    name: &str,
+    mode: u32,
+    umask: u32,
+    rdev: u32,
+    uid: u32,
+    gid: u32,
+    ino: Option<u64>,
+) -> EntryResult {
     let l = logged();
-    match fs.test_mknod_rdev(parent, name, mode, rdev, uid, gid, umask) {
-        Ok((ino, meta)) => {
-            l.log(fs, crate::oplog::Op::Mknod { parent, name: name.to_string(), mode, umask, rdev, uid, gid, ino });
-            EntryResult::Ok(ino, inode_to_file_attr(&meta))
-        }
-        Err(errno) => EntryResult::Error(errno),
-    }
+    let mut lsn = None;
+    let r = fs.mknod_logged(parent, name, mode, rdev, uid, gid, umask, ino, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    entry(r)
 }
 
 /// Handle `symlink`: create a symbolic link named `link_name` in `parent` pointing to `target`.
@@ -412,12 +469,30 @@ pub fn handle_symlink(
     uid: u32,
     gid: u32,
 ) -> EntryResult {
+    handle_symlink_at(fs, parent, link_name, target, uid, gid, None)
+}
+
+/// `handle_symlink` at inode `ino` (replay); logged in the parent-stripe hold.
+pub fn handle_symlink_at(
+    fs: &SliceFsFilesystem,
+    parent: u64,
+    link_name: &str,
+    target: &str,
+    uid: u32,
+    gid: u32,
+    ino: Option<u64>,
+) -> EntryResult {
     let l = logged();
-    match fs.test_symlink_full(parent, link_name, target, uid, gid) {
-        Ok((ino, meta)) => {
-            l.log(fs, crate::oplog::Op::Symlink { parent, name: link_name.to_string(), target: target.to_string(), uid, gid, ino });
-            EntryResult::Ok(ino, inode_to_file_attr(&meta))
-        }
+    let mut lsn = None;
+    let r = fs.symlink_logged(parent, link_name, target, uid, gid, ino, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    entry(r)
+}
+
+/// The reply of a request that gives an inode.
+fn entry(r: Result<(u64, InodeMeta), i32>) -> EntryResult {
+    match r {
+        Ok((ino, meta)) => EntryResult::Ok(ino, inode_to_file_attr(&meta)),
         Err(errno) => EntryResult::Error(errno),
     }
 }

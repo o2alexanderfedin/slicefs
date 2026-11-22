@@ -46,6 +46,22 @@ pub const MAX_FILE_SIZE: u64 = 1 << 40;
 /// for a gap to close. Beyond it the handle switches to an overlay.
 pub const REORDER_WINDOW: usize = 64 << 20;
 
+/// The log callback of a namespace function (D-08): the function calls it
+/// with the op of its record in the lock hold of its apply, once the apply
+/// succeeded. A handler appends the record there (`log_append`) and writes
+/// it out after the call, before the reply; a `test_*` wrapper passes
+/// `&mut |_| {}`.
+pub(crate) type LogOp<'a> = &'a mut dyn FnMut(crate::oplog::Op);
+
+/// The `create_inode` of a create: at the logged inode number in replay
+/// (`Some`), else the next free one.
+fn new_inode(meta: &DictMetadataStore, at: Option<u64>, m: &InodeMeta) -> Result<u64, MetaError> {
+    match at {
+        Some(ino) => meta.create_inode_at(ino, m),
+        None => meta.create_inode(m),
+    }
+}
+
 /// The new content of a splice over an overlay: reads go through
 /// `Overlay::view` (base bytes below `visible`, zeros, extents on top), so a
 /// read holds only the requested range.
@@ -1827,6 +1843,25 @@ impl SliceFsFilesystem {
         uid: u32,
         gid: u32,
     ) -> Result<(u64, u64), i32> {
+        self.create_logged(parent_ino, name, mode, umask, uid, gid, 0, None, &mut |_| {})
+    }
+
+    /// `test_create` at inode `at` (replay; `None`: the next free one) that
+    /// logs (D-08): the `Create` record (with `flags`) goes to `log` in the
+    /// parent-stripe hold that also opens the handle.
+    #[allow(clippy::too_many_arguments)]
+    fn create_logged(
+        &self,
+        parent_ino: u64,
+        name: &str,
+        mode: u32,
+        umask: u32,
+        uid: u32,
+        gid: u32,
+        flags: i32,
+        at: Option<u64>,
+        log: LogOp<'_>,
+    ) -> Result<(u64, u64), i32> {
         let file_mode = S_IFREG | (mode & !umask & 0o7777);
         let mut file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
         Self::stamp_new(&mut file_meta);
@@ -1836,7 +1871,7 @@ impl SliceFsFilesystem {
         // the link, and every change of the name needs the parent's stripe.
         let _ns = self.ns.lock(&[parent_ino]);
         self.live_dir(parent_ino)?;
-        let ino = self.meta.create_inode(&file_meta).map_err(|e| meta_error_to_errno(&e))?;
+        let ino = new_inode(&self.meta, at, &file_meta).map_err(|e| meta_error_to_errno(&e))?;
         if let Err(e) = self.meta.link(parent_ino, name, ino) {
             let _ = self.meta.delete_inode(ino);
             return Err(meta_error_to_errno(&e));
@@ -1844,6 +1879,7 @@ impl SliceFsFilesystem {
         self.touch_dir(parent_ino)?;
         let fh = self.open_handle(ino, true, false);
         self.open_write(ino, false, None)?;
+        log(crate::oplog::Op::Create { parent: parent_ino, name: name.to_string(), mode, umask, uid, gid, flags, ino });
         Ok((ino, fh))
     }
 
@@ -2751,6 +2787,16 @@ impl SliceFsFilesystem {
     pub fn test_mknod_rdev(
         &self, parent: u64, name: &str, mode: u32, rdev: u32, uid: u32, gid: u32, umask: u32,
     ) -> Result<(u64, InodeMeta), i32> {
+        self.mknod_logged(parent, name, mode, rdev, uid, gid, umask, None, &mut |_| {})
+    }
+
+    /// `test_mknod_rdev` at inode `at` (replay) that logs its `Mknod` record
+    /// in the parent-stripe hold (D-08).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn mknod_logged(
+        &self, parent: u64, name: &str, mode: u32, rdev: u32, uid: u32, gid: u32, umask: u32,
+        at: Option<u64>, log: LogOp<'_>,
+    ) -> Result<(u64, InodeMeta), i32> {
         let file_type = match mode & S_IFMT {
             0 | S_IFREG => S_IFREG,
             t @ (S_IFIFO | S_IFSOCK | S_IFCHR | S_IFBLK) => t,
@@ -2764,13 +2810,14 @@ impl SliceFsFilesystem {
         }
         let _ns = self.ns.lock(&[parent]);
         self.live_dir(parent)?;
-        let ino = self.meta.create_inode(&file_meta).map_err(|e| meta_error_to_errno(&e))?;
+        let ino = new_inode(&self.meta, at, &file_meta).map_err(|e| meta_error_to_errno(&e))?;
         if let Err(e) = self.meta.link(parent, name, ino) {
             let _ = self.meta.delete_inode(ino);
             return Err(meta_error_to_errno(&e));
         }
         self.touch_dir(parent)?;
         let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        log(crate::oplog::Op::Mknod { parent, name: name.to_string(), mode, umask, rdev, uid, gid, ino });
         Ok((ino, meta))
     }
 
@@ -2848,16 +2895,37 @@ impl SliceFsFilesystem {
         uid: u32,
         gid: u32,
     ) -> Result<u64, i32> {
+        self.mkdir_logged(parent_ino, name, mode, umask, uid, gid, None, &mut |_| {}).map(|(ino, _)| ino)
+    }
+
+    /// `simulate_mkdir` at inode `at` (replay) that logs its `Mkdir` record
+    /// in the parent-stripe hold (D-08). Returns `(ino, InodeMeta)`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn mkdir_logged(
+        &self,
+        parent_ino: u64,
+        name: &str,
+        mode: u32,
+        umask: u32,
+        uid: u32,
+        gid: u32,
+        at: Option<u64>,
+        log: LogOp<'_>,
+    ) -> Result<(u64, InodeMeta), i32> {
         let dir_mode = S_IFDIR | (mode & !umask & 0o7777);
         let mut dir_meta = InodeMeta::new_directory(0, uid, gid, dir_mode);
         Self::stamp_new(&mut dir_meta);
         let _ns = self.ns.lock(&[parent_ino]);
         self.live_dir(parent_ino)?;
-        let ino = self.meta
-            .create_directory(parent_ino, name, &dir_meta)
-            .map_err(|e| meta_error_to_errno(&e))?;
+        let ino = match at {
+            Some(at) => self.meta.create_directory_at(parent_ino, name, at, &dir_meta),
+            None => self.meta.create_directory(parent_ino, name, &dir_meta),
+        }
+        .map_err(|e| meta_error_to_errno(&e))?;
         self.touch_dir(parent_ino)?;
-        Ok(ino)
+        let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        log(crate::oplog::Op::Mkdir { parent: parent_ino, name: name.to_string(), mode, umask, uid, gid, ino });
+        Ok((ino, meta))
     }
 
     /// Remove empty directory `name` from `parent_ino`.
@@ -3090,6 +3158,22 @@ impl SliceFsFilesystem {
         uid: u32,
         gid: u32,
     ) -> Result<u64, i32> {
+        self.symlink_logged(parent_ino, link_name, target, uid, gid, None, &mut |_| {}).map(|(ino, _)| ino)
+    }
+
+    /// `simulate_symlink` at inode `at` (replay) that logs its `Symlink`
+    /// record in the parent-stripe hold (D-08). Returns `(ino, InodeMeta)`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn symlink_logged(
+        &self,
+        parent_ino: u64,
+        link_name: &str,
+        target: &str,
+        uid: u32,
+        gid: u32,
+        at: Option<u64>,
+        log: LogOp<'_>,
+    ) -> Result<(u64, InodeMeta), i32> {
         let target_bytes = target.as_bytes();
         let mut symlink_meta = InodeMeta {
             ino: 0,
@@ -3115,10 +3199,7 @@ impl SliceFsFilesystem {
         self.live_dir(parent_ino)?;
 
         // Create inode
-        let ino = self
-            .meta
-            .create_inode(&symlink_meta)
-            .map_err(|e| meta_error_to_errno(&e))?;
+        let ino = new_inode(&self.meta, at, &symlink_meta).map_err(|e| meta_error_to_errno(&e))?;
 
         // Link into parent directory
         if let Err(e) = self.meta.link(parent_ino, link_name, ino) {
@@ -3134,9 +3215,11 @@ impl SliceFsFilesystem {
 
         // Update inode size to raw target length (uncompressed)
         let len = target_bytes.len() as u64;
-        self.meta.modify_inode(ino, |m| m.size = len).map_err(|_| libc::EIO)?;
-
-        Ok(ino)
+        let meta = self.meta.modify_inode(ino, |m| { m.size = len; m.clone() }).map_err(|_| libc::EIO)?;
+        log(crate::oplog::Op::Symlink {
+            parent: parent_ino, name: link_name.to_string(), target: target.to_string(), uid, gid, ino,
+        });
+        Ok((ino, meta))
     }
 
     /// Read the target of a symbolic link inode.
@@ -3377,7 +3460,24 @@ impl SliceFsFilesystem {
         gid: u32,
         flags: i32,
     ) -> Result<(u64, u64, InodeMeta), i32> {
-        let (ino, fh) = self.test_create(parent, name, mode, umask, uid, gid)?;
+        self.create_full_logged(parent, name, mode, umask, uid, gid, flags, None, &mut |_| {})
+    }
+
+    /// `test_create_full` at inode `at` that logs (see `create_logged`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn create_full_logged(
+        &self,
+        parent: u64,
+        name: &str,
+        mode: u32,
+        umask: u32,
+        uid: u32,
+        gid: u32,
+        flags: i32,
+        at: Option<u64>,
+        log: LogOp<'_>,
+    ) -> Result<(u64, u64, InodeMeta), i32> {
+        let (ino, fh) = self.create_logged(parent, name, mode, umask, uid, gid, flags, at, log)?;
         if flags & libc::O_TRUNC != 0 {
             if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
                 if self.take_handle(fh).is_some() {
@@ -3406,9 +3506,7 @@ impl SliceFsFilesystem {
         uid: u32,
         gid: u32,
     ) -> Result<(u64, InodeMeta), i32> {
-        let ino = self.simulate_mkdir(parent, name, mode, umask, uid, gid)?;
-        let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-        Ok((ino, meta))
+        self.mkdir_logged(parent, name, mode, umask, uid, gid, None, &mut |_| {})
     }
 
     /// Create a node (mknod) and return `(ino, InodeMeta)`.
@@ -3433,9 +3531,7 @@ impl SliceFsFilesystem {
         uid: u32,
         gid: u32,
     ) -> Result<(u64, InodeMeta), i32> {
-        let ino = self.simulate_symlink(parent, link_name, target, uid, gid)?;
-        let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-        Ok((ino, meta))
+        self.symlink_logged(parent, link_name, target, uid, gid, None, &mut |_| {})
     }
 
     /// Create a hard link and return `(ino, InodeMeta)`.
