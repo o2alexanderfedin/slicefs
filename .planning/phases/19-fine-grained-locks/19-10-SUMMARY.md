@@ -22,13 +22,13 @@ estimate:
   tokens: 120000
   tasks: 3
 actuals:
-  tokens: 16993
+  tokens: 17719
   tasks: 3
-  commits: 3
+  commits: 5
 
 plan_head_before: b517f103f698ca302c84e6b5a8e64ef4bd77d7e5
-plan_head_after: f960da3557b22d33eb6cde7b9f0a5b37e589390a
-commits: 3
+plan_head_after: f1b752ca0e5fdb6c5e938f52bc814783a95d792c
+commits: 5
 
 tech-stack:
   added: []
@@ -50,6 +50,7 @@ key-files:
 key-decisions:
   - "The log callback is `&mut dyn FnMut(Op)`: the fs function builds the op (it has every argument and the allocated inode), and the handler's closure adds the frozen time, appends and keeps the LSN. Replay needs nothing more, because log_append returns None while replaying."
   - "A setattr with a size logs two records: a size-only Setattr in the cell hold of the size change (the open cell or the transient cell), and then a Setattr with the other fields (size None) in the stripe-and-cell hold. The second record is logged also when all other fields are None, because that hold sets the ctime. One record in the stripe hold would let a write land between the size change and its record."
+  - "create, mknod and symlink take the new inode number before the stripes and lock [parent, ino] (new_entry): a request that finds the new name and works on the inode by number waits until the create record is appended. mkdir keeps the parent stripe only (the store takes the number and adds the entry in one call; deferred)."
   - "A namespace record is appended at the end of the success path, inside the hold. A request that fails after a partial change logs nothing, as before this plan."
   - "The crash test stops the periodic commits in the last 250 ms of the run and makes no final commit (Config.crash), so the log is not empty at the crash."
 
@@ -58,7 +59,7 @@ patterns-established:
 
 requirements-completed: []
 
-duration: 55min
+duration: 85min
 completed: 2026-11-22
 ---
 
@@ -68,9 +69,9 @@ completed: 2026-11-22
 
 ## Performance
 
-- **Duration:** about 55 min
+- **Duration:** about 85 min (with the soak and the create-window fix after the review)
 - **Started:** 2026-11-22T09:15Z
-- **Completed:** 2026-11-22T10:10Z
+- **Completed:** 2026-11-22T10:40Z
 - **Tasks:** 3
 - **Files modified:** 7 (1 created)
 
@@ -95,6 +96,8 @@ completed: 2026-11-22
 1. **Task 1: Create logged under the parent stripe and replayed by logged inode** (tracer): `5fe95b2`
 2. **Task 2: Every other namespace record under its stripes; no after-apply logging** (TDD, with the flush mtime fix): `bd1ca60`
 3. **Task 3: Shared test helpers and crash replay of the harness** (TDD): `f960da3`
+4. **Fix: a new file is unreachable by number until its create record is appended** (deviation 3): `f1b752c`
+- Plan metadata: `6d7d2d9` (first SUMMARY), then the docs commit with this update
 
 ## TDD evidence
 
@@ -123,6 +126,9 @@ completed: 2026-11-22
   - Task 1: `advance_next_ino` in oplog.rs 0, `got == *ino` 0, `fn reverse_order_creates_replay` 1.
   - Task 2: `l.log(fs,` 0, `fn log(&self, fs` 0, `log_write_out` in handlers.rs 15.
   - Task 3: `pub fn reload_and_replay` in common 2, `fn reload_and_replay` in write_log_replay_tests 0, `mod common` 1, `fn crash_replay_matches_apply` 1.
+- Soak after the review: at `6d7d2d9`, `parallel_namespace_ops_replay` was green in 39 of 40 runs (deviation 3) and `crash_replay_matches_apply` in 15 of 15. After the fix (`f1b752c`): 60 of 60 and 15 of 15.
+- After the fix: `dir_link_tests` 31 passed, `write_log_replay_tests` 34 passed, the full suite command `FULL_EXIT=0` (66 ok, no FAILED, no rank violation), `lock_stats_report` `LSR_EXIT=0`.
+- `grep -rn 'log_record(' crates/slicefs-cli/src` shows only the definition and the commit relog (under the exclusive gate). Every other record is appended with `log_append` in an apply hold.
 - Requirements: LOCK-04 is not marked complete, because 19-11 still lists it.
 
 ## Decisions Made
@@ -146,6 +152,14 @@ See `key-decisions`. All of them can be changed later.
 - **Test:** `a_setattr_of_an_open_orphan_replays` (red before the fix).
 - **Commit:** `bd1ca60`
 
+**3. [Rule 1 - Bug] A request could reach a new file by its name before its `Create` record**
+- **Found during:** the soak after the plan (`parallel_namespace_ops_replay`, 1 of 40 runs red: "write log record 12480 (link) did not replay: Link { ino: 3357, .. }")
+- **Issue:** create, mknod and symlink held only the parent's stripe. Thread A linked the new name and appended its record later in the same hold. Thread B found the name and linked the inode under the inode's stripe, so B's `Link` record came first. Replay then had no such inode yet. The same window let an open, write, setattr or xattr change come before the create. With `O_TRUNC`, the truncate ran after the hold, so a write in between was truncated in the live run but kept in replay.
+- **Fix:** `new_entry` takes the inode number before the stripes (nothing can reach an inode with no name), locks `[parent, ino]` in ascending order, checks the parent and links. The create record is appended before that guard drops, and create does its `O_TRUNC` inside the hold. mkdir is not covered (see Plan facts).
+- **Test:** `parallel_namespace_ops_replay` (soak counts under Verification).
+- **Files modified:** `crates/slicefs-cli/src/filesystem.rs`
+- **Commit:** `f1b752c`
+
 ### Plan facts
 
 - **Setattr with a size is two records** (key-decisions). The must-have says setattr is appended "under the stripes (and cell) of its apply". The size record is appended under the cell only, because the size change itself runs under the cell only. This is the 19-09 size exception: rule 1, no stripe across a splice.
@@ -155,9 +169,10 @@ See `key-decisions`. All of them can be changed later.
 - **"Release every open handle as a client would":** the harness workers already release every handle at the end of a run (and before an unlink), so the test adds no release step. No orphans are left.
 - **`multi_handle_posix` `reload`** is now `common::reload_and_replay`. It sets a write log on the reloaded store, which the old copy did not. No test there depends on that.
 - **`advance_next_ino`** is still a public method of `DictMetadataStore`. Nothing calls it now. It was left in place (smallest change).
-- **O_TRUNC of a create:** the `Create` record (with its flags) is appended in the parent-stripe hold. The truncate of the new empty file runs after that hold, as before. A write through another handle that opened the new name in that window is applied before the truncate in the live run, but replays after it. This window is older than this plan, and no test or harness op creates with O_TRUNC beside a writer.
+- **mkdir and a request that finds the new directory before its `Mkdir` record** (recorded in `deferred-items.md`): deviation 3 closes this window for create, mknod and symlink, but not for mkdir, because the store takes the number and adds the entry in one call. The window is older than this plan. No test runs mkdir concurrently with requests in the new directory.
+- **Closed-file size change against a fields setattr** (recorded in `deferred-items.md`): if the fields call does not see the transient cell, the two share no lock, and their records can be in the opposite order of their inode writes. This has the same root as the 19-09 deferred item.
 
-**Total deviations:** 2 auto-fixes (Rule 1) and 8 notes. **Impact:** all plan truths hold. The setattr truth holds with the size exception from 19-09.
+**Total deviations:** 3 auto-fixes (Rule 1) and 9 notes (2 of them deferred). **Impact:** all plan truths hold. The setattr truth holds with the size exception from 19-09.
 
 ## For later plans
 
@@ -185,4 +200,4 @@ None. There is no new endpoint, file kind or trust boundary.
 ## Self-Check: PASSED
 
 - `crates/slicefs-cli/tests/common/mod.rs` and this SUMMARY: FOUND
-- Commits `5fe95b2`, `bd1ca60` and `f960da3`: FOUND on HEAD (`git rev-list --count b517f10..f960da3` prints 3)
+- Commits `5fe95b2`, `bd1ca60`, `f960da3`, `6d7d2d9` and `f1b752c`: FOUND on HEAD (`git rev-list --count b517f10..f1b752c` prints 5)
