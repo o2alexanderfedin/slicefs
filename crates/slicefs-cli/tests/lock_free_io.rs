@@ -189,13 +189,14 @@ fn a_dropped_step_is_retried_with_the_cell_locked() {
     let big = seeded(8, 128 * KIB);
     let patch = seeded(9, 4 * KIB);
     put(&mut model, 256 * KIB, &big);
-    put(&mut model, 768 * KIB, &patch);
+    // Inside the parked copy: the newer bytes must win over the dropped copy.
+    put(&mut model, 300 * KIB, &patch);
     let before = fs.test_rebase_count();
     std::thread::scope(|s| {
         let w = s.spawn(|| fs.test_write(fh, 256 * KIB as u64, &big));
         parked.recv_timeout(WAIT).expect("the rebase reached its I/O phase");
         // A change in the I/O phase: the parked result must be dropped.
-        let r = fs.test_write(other, 768 * KIB as u64, &patch);
+        let r = fs.test_write(other, 300 * KIB as u64, &patch);
         go.send(()).unwrap();
         assert_eq!(r, Ok(patch.len() as u32));
         assert_eq!(w.join().unwrap(), Ok(big.len() as u32));
@@ -207,6 +208,48 @@ fn a_dropped_step_is_retried_with_the_cell_locked() {
     fs.test_release(ino, other).unwrap();
     fs.test_release(ino, fh).unwrap();
     assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
+}
+
+/// The hard cap (#98, T-19-20): while one step is parked in its I/O phase,
+/// a second writer skips its steps only up to `limit + 2 * REBASE_STEP`;
+/// past it the writer stores a step with the cell locked.
+#[test]
+fn a_writer_past_the_hard_cap_steps_while_one_is_in_flight() {
+    use slicefs_cli::filesystem::REBASE_STEP;
+    let cap = 64 * KIB + 2 * REBASE_STEP;
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh, mut model) = overlay_file(&fs);
+    let (other, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    let (parked, go) = park_first(&fs);
+    let big = seeded(11, 128 * KIB);
+    put(&mut model, 256 * KIB, &big);
+    std::thread::scope(|s| {
+        let w = s.spawn(|| fs.test_write(fh, 256 * KIB as u64, &big));
+        parked.recv_timeout(WAIT).expect("the rebase reached its I/O phase");
+        let before = fs.test_rebase_count();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for i in 0..20u64 {
+                let piece = seeded(100 + i, 128 * KIB);
+                let off = (1 << 20) + i as usize * 128 * KIB;
+                assert_eq!(fs.test_write(other, off as u64, &piece), Ok(piece.len() as u32));
+                put(&mut model, off, &piece);
+                let cost = fs.test_dirty_cost(ino);
+                assert!(cost <= cap, "write {i}: dirty cost {cost} > cap {cap}");
+            }
+            assert!(fs.test_rebase_count() > before, "the second writer stored a locked step");
+        }));
+        go.send(()).ok();
+        if let Err(e) = r {
+            std::panic::resume_unwind(e);
+        }
+        assert_eq!(w.join().unwrap(), Ok(big.len() as u32));
+    });
+    fs.test_set_rebase_hook(None);
+    let size = model.len() as u32;
+    assert!(fs.test_read(ino, 0, size).unwrap() == model, "content with the handles open");
+    fs.test_release(ino, other).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert!(fs.test_read(ino, 0, size).unwrap() == model, "content after release");
 }
 
 /// RESEARCH Pitfall 1 (#98): 4 threads write one file at a dirty limit of
