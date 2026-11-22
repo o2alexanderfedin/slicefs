@@ -10,6 +10,9 @@
 //! The parked tests hold no commit gate and run no commit thread while a
 //! step is parked (RESEARCH Pitfall 8).
 
+mod common;
+
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -17,9 +20,13 @@ use std::time::Duration;
 
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
+use metadata::wal::WalConfig;
 use slicefs_cli::filesystem::{RebaseHook, SliceFsFilesystem};
+use slicefs_cli::handlers::{self as h, CreateResult, EmptyResult, OpenResult, WriteResult};
 use slicefs_traits::metadata::MetadataStore;
 use tempfile::TempDir;
+
+const S_IFREG: u32 = 0o100_000;
 
 const KIB: usize = 1 << 10;
 const WAIT: Duration = Duration::from_secs(5);
@@ -650,6 +657,152 @@ fn dirty_overlay(fs: &SliceFsFilesystem, ino_out: &mut u64) -> (u64, Vec<u8>) {
     }
     *ino_out = ino;
     (fh, model)
+}
+
+/// A file system with a write log; every request below goes through its
+/// handler, so a replay of the log gives the same tree.
+fn logged_fs(store: &Path) -> SliceFsFilesystem {
+    common::new_fs_with(store, WalConfig::PerOp)
+}
+
+fn h_create(fs: &SliceFsFilesystem, name: &str) -> (u64, u64) {
+    match h::handle_create(fs, 1, name, S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR) {
+        CreateResult::Ok(ino, fh, _) => (ino, fh),
+        CreateResult::Error(e) => panic!("create {name} errno {e}"),
+    }
+}
+
+fn h_write(fs: &SliceFsFilesystem, fh: u64, off: usize, data: &[u8]) {
+    match h::handle_write(fs, fh, off as u64, data) {
+        WriteResult::Ok(n) => assert_eq!(n as usize, data.len(), "short write"),
+        WriteResult::Error(e) => panic!("write errno {e}"),
+    }
+}
+
+fn h_open(fs: &SliceFsFilesystem, ino: u64) -> u64 {
+    match h::handle_open(fs, ino, libc::O_RDWR) {
+        OpenResult::Ok(fh, _) => fh,
+        OpenResult::Error(e) => panic!("open errno {e}"),
+    }
+}
+
+fn h_release(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> Result<(), i32> {
+    match h::handle_release(fs, ino, fh) {
+        EmptyResult::Ok => Ok(()),
+        EmptyResult::Error(e) => Err(e),
+    }
+}
+
+/// `dirty_overlay` with a write log (see `logged_fs`); the final step is
+/// left as it is. Returns the inode, the handle and the model.
+fn logged_dirty_overlay(fs: &SliceFsFilesystem) -> (u64, u64, Vec<u8>) {
+    let (ino, fh) = h_create(fs, "f");
+    let mut model = seeded(40, 1 << 20);
+    h_write(fs, fh, 0, &model);
+    h_release(fs, ino, fh).unwrap();
+    let fh = h_open(fs, ino);
+    for i in 0..8u64 {
+        let piece = seeded(41 + i, 32 * KIB);
+        let off = i as usize * 128 * KIB + 16 * KIB;
+        h_write(fs, fh, off, &piece);
+        put(&mut model, off, &piece);
+    }
+    (ino, fh, model)
+}
+
+/// A crash, then a replay of the log: the tree after the replay equals the
+/// tree now.
+fn assert_replays(fs: SliceFsFilesystem, store: &Path) {
+    fs.meta().flush_wal().unwrap();
+    let live = common::dump(&fs);
+    std::mem::forget(fs); // a crash: no commit, no destroy
+    assert_eq!(common::dump(&common::reload_and_replay(store)), live, "the replay gives the same tree");
+}
+
+/// The last release tries a dropped step again with the cell unlocked: a
+/// read passes while the retry is parked in its I/O phase, and the release
+/// ends with the cell retired and the content right.
+#[test]
+fn the_last_release_retries_dropped_steps_unlocked() {
+    let dir = TempDir::new().unwrap();
+    let fs = logged_fs(dir.path());
+    let (ino, fh, model) = logged_dirty_overlay(&fs);
+    fs.test_set_final_step(64 * KIB);
+    assert!(fs.test_dirty_cost(ino) > 3 * 64 * KIB);
+    // The first attempt and the first retry are dropped; the hook parks
+    // that retry (call 2).
+    fs.test_drop_steps(2);
+    let (hook, parked, go) = parker_at(&[2]);
+    fs.test_set_rebase_hook(Some(hook));
+    let before = fs.test_rebase_count();
+    std::thread::scope(|s| {
+        let rel = s.spawn(|| h_release(&fs, ino, fh));
+        let reached = parked.recv_timeout(WAIT);
+        let (tx, rx) = channel();
+        let fs = &fs;
+        s.spawn(move || tx.send(fs.test_read(ino, 144 * KIB as u64, 4096)).ok());
+        let read = rx.recv_timeout(Duration::from_millis(300));
+        go.send(()).ok();
+        reached.expect("the retry after a dropped step reached its I/O phase");
+        let got = read.expect("the read waited for the retry of the release").unwrap();
+        assert!(got == model[144 * KIB..148 * KIB], "the read sees the written bytes");
+        assert_eq!(rel.join().unwrap(), Ok(()));
+    });
+    fs.test_set_rebase_hook(None);
+    assert!(fs.test_rebase_count() - before > 3, "two dropped attempts, then the steps: {}", fs.test_rebase_count() - before);
+    assert_eq!(fs.test_dirty_cost(ino), 0, "the cell is retired");
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
+    assert_replays(fs, dir.path());
+}
+
+/// With every step forced to drop, the last release still ends: after
+/// `FINAL_TRIES` (8) drops in a row it stops consulting the hook, so the
+/// next step publishes, and the cell is retired.
+#[test]
+fn finalize_ends_under_forced_drops() {
+    let dir = TempDir::new().unwrap();
+    let fs = logged_fs(dir.path());
+    let (ino, fh, model) = logged_dirty_overlay(&fs);
+    // One final step holds the whole overlay.
+    fs.test_set_final_step(8 << 20);
+    fs.test_drop_every(1);
+    let before = fs.test_rebase_count();
+    let r = h_release(&fs, ino, fh);
+    fs.test_drop_every(0);
+    assert_eq!(r, Ok(()));
+    assert_eq!(fs.test_rebase_count() - before, 9, "8 dropped attempts, then the published one");
+    assert_eq!(fs.test_dirty_cost(ino), 0, "the cell is retired");
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
+    assert_replays(fs, dir.path());
+}
+
+/// The last release of a stream flushes it with the cell unlocked: a read
+/// passes while the flush is parked in its I/O phase.
+#[test]
+fn the_last_release_of_a_stream_flushes_unlocked() {
+    let dir = TempDir::new().unwrap();
+    let fs = logged_fs(dir.path());
+    let (ino, fh) = h_create(&fs, "s");
+    let model = seeded(45, 256 * KIB);
+    h_write(&fs, fh, 0, &model);
+    let (parked, go) = park_first_push(&fs);
+    std::thread::scope(|s| {
+        let rel = s.spawn(|| h_release(&fs, ino, fh));
+        let reached = parked.recv_timeout(WAIT);
+        let (tx, rx) = channel();
+        let fs = &fs;
+        s.spawn(move || tx.send(fs.test_read(ino, 0, 64 * KIB as u32)).ok());
+        let read = rx.recv_timeout(Duration::from_millis(300));
+        go.send(()).ok();
+        reached.expect("the flush of the release reached its I/O phase");
+        assert!(read.expect("the read waited for the flush").unwrap() == model[..64 * KIB], "the read sees the prefix");
+        assert_eq!(rel.join().unwrap(), Ok(()));
+    });
+    fs.test_set_push_hook(None);
+    assert_eq!(fs.test_dirty_cost(ino), 0, "the cell is retired");
+    assert_eq!(fs.test_getattr(ino).unwrap().size, model.len() as u64);
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content after release");
+    assert_replays(fs, dir.path());
 }
 
 /// The last release stores an overlay dirtier than the final step in
