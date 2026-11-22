@@ -303,3 +303,169 @@ fn a_write_request_with_o_append_appends() {
     assert_eq!(read(&fs, ino, 0, 64), b"0123456789ab");
     release(&fs, ino, fh);
 }
+
+/// POSIX.1 2.9.7 with a read-only, a read-write and an `O_APPEND` handle on
+/// one inode: a write completed through one handle is read through the
+/// others.
+#[test]
+fn visibility_across_ro_rw_append_handles() {
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    let (ino, fh) = create(&fs, 1, "f");
+    release(&fs, ino, fh);
+    let ro = open(&fs, ino, libc::O_RDONLY);
+    let rw = open(&fs, ino, libc::O_RDWR);
+    let ap = open(&fs, ino, libc::O_RDWR | libc::O_APPEND);
+    let a = data(10, BLOCK);
+    write(&fs, rw, 0, &a);
+    assert!(read(&fs, ino, 0, BLOCK as u32) == a, "the RW write, read through RO and through the append handle's inode");
+    let b = data(11, 1000);
+    assert_eq!(fs.test_write_at(ap, 0, &b), Ok((1000, BLOCK as u64)), "the append goes to the end of the RW write");
+    assert!(read(&fs, ino, BLOCK as u64, 4096) == b, "the append, read through RO");
+    write(&fs, rw, 10, b"patch");
+    assert_eq!(read(&fs, ino, 10, 5), b"patch", "a later RW write, read through RO");
+    for h in [ro, rw, ap] {
+        release(&fs, ino, h);
+    }
+    let mut model = [a, b].concat();
+    model[10..15].copy_from_slice(b"patch");
+    assert!(read(&fs, ino, 0, model.len() as u32 + 1) == model, "after the last release");
+}
+
+/// A 64 KiB unit in which every 8-byte word is `tag(writer, unit, version)`
+/// (writer 0: the initial content). A read of a unit that is not one write
+/// shows two tags.
+fn unit(writer: u64, u: u64, version: u64) -> Vec<u8> {
+    let tag = (writer << 48) | (u << 32) | version;
+    tag.to_le_bytes().repeat(BLOCK / 8)
+}
+
+/// POSIX.1 2.9.7: a read sees all of a concurrent write or none of it. Two
+/// writers write whole units of 4 ranges, two readers read them, about 1 s,
+/// with rebases (dirty limit 256 KiB) while they run. Each read unit must
+/// be exactly one write: one tag in every word, of this unit, from a known
+/// writer.
+#[test]
+fn all_or_none_reads() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+    const UNITS: u64 = 4;
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    fs.test_set_dirty_limit(256 << 10);
+    let (ino, fh) = create(&fs, 1, "f");
+    for u in 0..UNITS {
+        write(&fs, fh, u * BLOCK as u64, &unit(0, u, 0));
+    }
+    release(&fs, ino, fh);
+    let rebases = fs.test_rebase_count();
+    let deadline = Instant::now() + Duration::from_millis(1000);
+    let reads = AtomicU64::new(0);
+    let (fs, reads) = (&fs, &reads);
+    std::thread::scope(|sc| {
+        for w in 1..=2u64 {
+            sc.spawn(move || {
+                let fh = open(fs, ino, libc::O_RDWR);
+                let mut v = 0;
+                while Instant::now() < deadline {
+                    v += 1;
+                    let u = (v + w) % UNITS;
+                    write(fs, fh, u * BLOCK as u64, &unit(w, u, v));
+                }
+                release(fs, ino, fh);
+            });
+        }
+        for r in 0..2u64 {
+            sc.spawn(move || {
+                let mut i = r;
+                while Instant::now() < deadline {
+                    let u = i % UNITS;
+                    i += 1;
+                    let got = read(fs, ino, u * BLOCK as u64, BLOCK as u32);
+                    assert_eq!(got.len(), BLOCK, "unit {u}: whole");
+                    let first = &got[..8];
+                    assert!(got.chunks(8).all(|w| w == first), "unit {u}: a mix of writes");
+                    let tag = u64::from_le_bytes(first.try_into().unwrap());
+                    assert_eq!((tag >> 32) & 0xffff, u, "unit {u}: bytes of another unit");
+                    assert!(tag >> 48 <= 2, "unit {u}: unknown writer");
+                    reads.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        }
+    });
+    assert!(reads.load(Ordering::Relaxed) > 0, "the readers ran");
+    assert!(fs.test_rebase_count() > rebases, "rebases ran during the reads");
+}
+
+/// One 512-byte append record: `t`, `i`, filler from both, a check byte.
+fn record(t: u64, i: u64) -> Vec<u8> {
+    let mut r = vec![0u8; 512];
+    r[..8].copy_from_slice(&t.to_le_bytes());
+    r[8..16].copy_from_slice(&i.to_le_bytes());
+    for (k, b) in r[16..511].iter_mut().enumerate() {
+        *b = (t as usize * 31 + i as usize * 7 + k) as u8;
+    }
+    r[511] = r[..511].iter().fold(0, |x, b| x ^ b);
+    r
+}
+
+/// Check that the file `ino` is exactly `k * n` whole records, each once
+/// (read in 64 KiB pieces, a bit set for the records seen). Returns a
+/// fingerprint of the content.
+fn check_records(fs: &SliceFsFilesystem, ino: u64, k: u64, n: u64) -> u64 {
+    let size = k * n * 512;
+    assert_eq!(fs.test_getattr(ino).unwrap().size, size, "size");
+    let mut seen = vec![0u64; ((k * n) as usize).div_ceil(64)];
+    let mut fp = 0xcbf2_9ce4_8422_2325u64;
+    let mut off = 0;
+    while off < size {
+        let piece = read(fs, ino, off, BLOCK as u32);
+        assert_eq!(piece.len() as u64, (size - off).min(BLOCK as u64), "piece at {off}");
+        for r in piece.chunks(512) {
+            let t = u64::from_le_bytes(r[..8].try_into().unwrap());
+            let i = u64::from_le_bytes(r[8..16].try_into().unwrap());
+            assert!(t < k && i < n, "record at {off}: not a record");
+            assert!(r == record(t, i), "record ({t}, {i}) is not whole");
+            let bit = (t * n + i) as usize;
+            assert!(seen[bit / 64] & (1 << (bit % 64)) == 0, "record ({t}, {i}) twice");
+            seen[bit / 64] |= 1 << (bit % 64);
+        }
+        fp = piece.iter().fold(fp, |h, &b| (h ^ b as u64).wrapping_mul(0x1_0000_0001_b3));
+        off += piece.len() as u64;
+    }
+    fp
+}
+
+/// D-12: K append handles on K threads, N appends each, every request with
+/// a wrong offset. The file is exactly K*N records, each once and whole;
+/// after a crash, replay gives the same file.
+#[test]
+fn appends_never_overlap() {
+    const K: u64 = 4;
+    const N: u64 = 100;
+    let dir = TempDir::new().unwrap();
+    let live = {
+        let fs = new_fs(dir.path());
+        let (ino, fh) = create(&fs, 1, "log");
+        let fsr = &fs;
+        std::thread::scope(|sc| {
+            for t in 0..K {
+                let ap = open(fsr, ino, libc::O_WRONLY | libc::O_APPEND);
+                sc.spawn(move || {
+                    for i in 0..N {
+                        let wrong = if i % 2 == 0 { 0 } else { 999_999 + i };
+                        write(fsr, ap, wrong, &record(t, i));
+                    }
+                    release(fsr, ino, ap);
+                });
+            }
+        });
+        release(&fs, ino, fh);
+        let fp = check_records(&fs, ino, K, N);
+        fs.meta().flush_wal().unwrap();
+        std::mem::forget(fs); // a crash: no commit, no destroy
+        (ino, fp)
+    };
+    let fs = reload(dir.path());
+    assert_eq!(check_records(&fs, live.0, K, N), live.1, "replay gives the same file");
+}
