@@ -139,3 +139,123 @@ fn writer_does_not_wait_for_rebase_io() {
     fs.test_release(ino, fh).unwrap();
     assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "both writes after release");
 }
+
+/// One rebase per cell: a second writer over the limit while a step is in
+/// its I/O phase skips its own step and returns at once.
+#[test]
+fn a_second_writer_skips_its_step_while_one_is_in_flight() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh, mut model) = overlay_file(&fs);
+    let (other, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    let (parked, go) = park_first(&fs);
+    let big = seeded(6, 128 * KIB);
+    let more = seeded(7, 128 * KIB);
+    put(&mut model, 0, &big);
+    put(&mut model, 640 * KIB, &more);
+    std::thread::scope(|s| {
+        let w = s.spawn(|| fs.test_write(fh, 0, &big));
+        parked.recv_timeout(WAIT).expect("the rebase reached its I/O phase");
+        let before = fs.test_rebase_count();
+        let (tx, rx) = channel();
+        let (fs, more) = (&fs, &more);
+        s.spawn(move || tx.send(fs.test_write(other, 640 * KIB as u64, more)).ok());
+        let got = match rx.recv_timeout(WAIT) {
+            Ok(r) => r,
+            Err(e) => {
+                go.send(()).ok();
+                panic!("the second writer waited: {e:?}");
+            }
+        };
+        assert_eq!(got, Ok(more.len() as u32));
+        assert_eq!(fs.test_rebase_count(), before, "the second writer ran no step");
+        assert!(fs.test_dirty_cost(ino) > 64 * KIB, "the second writer stays over the limit for now");
+        go.send(()).unwrap();
+        assert_eq!(w.join().unwrap(), Ok(big.len() as u32));
+    });
+    fs.test_set_rebase_hook(None);
+    fs.test_release(ino, other).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
+}
+
+/// A dropped step (the overlay changed in its I/O phase) is tried again at
+/// once with the cell locked, and that attempt publishes.
+#[test]
+fn a_dropped_step_is_retried_with_the_cell_locked() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh, mut model) = overlay_file(&fs);
+    let (other, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    let (parked, go) = park_first(&fs);
+    let big = seeded(8, 128 * KIB);
+    let patch = seeded(9, 4 * KIB);
+    put(&mut model, 256 * KIB, &big);
+    put(&mut model, 768 * KIB, &patch);
+    let before = fs.test_rebase_count();
+    std::thread::scope(|s| {
+        let w = s.spawn(|| fs.test_write(fh, 256 * KIB as u64, &big));
+        parked.recv_timeout(WAIT).expect("the rebase reached its I/O phase");
+        // A change in the I/O phase: the parked result must be dropped.
+        let r = fs.test_write(other, 768 * KIB as u64, &patch);
+        go.send(()).unwrap();
+        assert_eq!(r, Ok(patch.len() as u32));
+        assert_eq!(w.join().unwrap(), Ok(big.len() as u32));
+    });
+    assert_eq!(fs.test_rebase_count(), before + 2, "the dropped attempt and the locked retry");
+    assert!(fs.test_dirty_cost(ino) <= 64 * KIB, "the retry published: cost {}", fs.test_dirty_cost(ino));
+    fs.test_set_rebase_hook(None);
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content with the handles open");
+    fs.test_release(ino, other).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
+}
+
+/// RESEARCH Pitfall 1 (#98): 4 threads write one file at a dirty limit of
+/// 256 KiB; the steps keep dropping each other's results, but the dirty
+/// cost of the file never passes `limit + 2 * REBASE_STEP`.
+#[test]
+fn dirty_cost_stays_under_the_hard_cap() {
+    use slicefs_cli::filesystem::REBASE_STEP;
+    const LIMIT: usize = 256 * KIB;
+    const BLOCK: usize = 4 * KIB;
+    const BLOCKS: usize = (2 << 20) / BLOCK;
+    let cap = LIMIT + 2 * REBASE_STEP;
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+    let mut model = seeded(10, BLOCKS * BLOCK);
+    fs.test_write(fh, 0, &model).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    fs.test_set_dirty_limit(LIMIT);
+    // A short sleep in each I/O phase widens the window for concurrent writes.
+    fs.test_set_rebase_hook(Some(Arc::new(|| std::thread::sleep(Duration::from_millis(2)))));
+    let handles: Vec<u64> = (0..4).map(|_| fs.test_open(ino, libc::O_RDWR).unwrap().0).collect();
+    let last: Vec<Vec<(usize, Vec<u8>)>> = std::thread::scope(|s| {
+        let fs = &fs;
+        let runs: Vec<_> = handles.iter().enumerate().map(|(t, &h)| s.spawn(move || {
+            // Thread t owns the blocks b with b % 4 == t.
+            let mut x = 0x9E37_79B9_7F4A_7C15u64 ^ t as u64;
+            let mut done = Vec::new();
+            for i in 0..200 {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let b = (x as usize % (BLOCKS / 4)) * 4 + t;
+                let data = seeded(1000 * t as u64 + i, BLOCK);
+                assert_eq!(fs.test_write(h, (b * BLOCK) as u64, &data), Ok(BLOCK as u32));
+                let cost = fs.test_dirty_cost(ino);
+                assert!(cost <= cap, "thread {t} write {i}: dirty cost {cost} > cap {cap}");
+                done.push((b, data));
+            }
+            done
+        })).collect();
+        runs.into_iter().map(|r| r.join().unwrap()).collect()
+    });
+    fs.test_set_rebase_hook(None);
+    for (b, data) in last.into_iter().flatten() {
+        model[b * BLOCK..(b + 1) * BLOCK].copy_from_slice(&data);
+    }
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content with the handles open");
+    for h in handles {
+        fs.test_release(ino, h).unwrap();
+    }
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
+}

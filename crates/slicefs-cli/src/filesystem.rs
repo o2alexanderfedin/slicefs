@@ -523,6 +523,12 @@ impl SliceFsFilesystem {
         self.dirty_total.load(Ordering::Relaxed)
     }
 
+    /// Test hook: the dirty cost of `ino` as its cell last synced it (0 if
+    /// it has no open write state).
+    pub fn test_dirty_cost(&self, ino: u64) -> usize {
+        self.cells.get(ino).map_or(0, |c| c.dirty.load(Ordering::Relaxed))
+    }
+
     /// Test hook: the `Write` payload bytes the last commit logged again.
     pub fn test_last_relog_bytes(&self) -> u64 {
         self.last_relog_bytes.load(Ordering::Relaxed)
@@ -1158,7 +1164,9 @@ impl SliceFsFilesystem {
     }
 
     /// Store the content of an overlay as a new root and start a clean
-    /// overlay on it (release, and the full rebase of a small dirty limit).
+    /// overlay on it (the last release: the three phases in one cell-lock
+    /// hold, because the release retires the cell in that hold; Plan 07
+    /// steps it).
     fn rebase_overlay(&self, ino: u64, s: &mut OpenFileState) -> Result<(), i32> {
         self.rebase_step(ino, s, usize::MAX)
     }
@@ -1188,6 +1196,35 @@ impl SliceFsFilesystem {
         }?;
         drop(part);
         self.step_publish(ino, s, plan, done).map(|_| ())
+    }
+
+    /// Most dirty cost of one file (#98, RESEARCH Pitfall 1): the limit plus
+    /// two rebase steps (Claude's discretion).
+    fn hard_cap(&self) -> usize {
+        self.dirty_limit.load(Ordering::Relaxed).saturating_add(2 * REBASE_STEP)
+    }
+
+    /// A rebase step of the writer's own locked cell `g` (D-02, D-13):
+    /// - another step of the cell is in its I/O phase: skip, unless the
+    ///   cost is past the hard cap; then store a step with the cell locked
+    ///   (the step in flight is then dropped);
+    /// - else a step with the I/O unlocked (`rebase_unlocked`); if its
+    ///   result is dropped, the next attempt runs at once with the cell
+    ///   locked, so a busy file always makes progress. Only this file waits.
+    fn rebase_cell(&self, g: &mut CellGuard<'_>, free: usize) -> Result<(), i32> {
+        if g.retired {
+            return Ok(());
+        }
+        let locked = if g.rebasing {
+            dirty_cost(&g.file) > self.hard_cap()
+        } else {
+            !self.rebase_unlocked(g, free)? && !g.retired
+        };
+        if locked {
+            let ino = g.file.ino;
+            self.rebase_step(ino, &mut g.file, free)?;
+        }
+        Ok(())
     }
 
     /// One rebase step of the locked cell `g` by the protocol of D-02:
@@ -1582,7 +1619,7 @@ impl SliceFsFilesystem {
         let result = match result {
             Ok(n) if over => {
                 let free = (cost - limit.saturating_sub(REBASE_STEP)).min(added.max(REBASE_STEP));
-                self.rebase_unlocked(&mut g, free).map(|_| n).map_err(|_| libc::EIO)
+                self.rebase_cell(&mut g, free).map(|_| n).map_err(|_| libc::EIO)
             }
             r => r,
         };
@@ -1622,8 +1659,11 @@ impl SliceFsFilesystem {
             if freed >= cap || total <= target {
                 return Ok(());
             }
+            if g.retired {
+                return Ok(());
+            }
             let before = dirty_cost(&g.file);
-            self.free_dirty(&mut g.file, cap - freed)?;
+            self.free_dirty(g, cap - freed)?;
             let step = before.saturating_sub(dirty_cost(&g.file));
             if step == 0 {
                 return Ok(());
@@ -1632,15 +1672,15 @@ impl SliceFsFilesystem {
         }
     }
 
-    /// Free about `want` bytes of dirty cost of `s`: a rebase step of its
-    /// overlay; a stream with pending writes becomes an overlay first (no
-    /// content is read or cut there).
-    fn free_dirty(&self, s: &mut OpenFileState, want: usize) -> Result<(), i32> {
-        if matches!(&s.write_mode, WriteMode::Streaming { pending, .. } if !pending.is_empty()) {
-            self.to_overlay(s)?;
+    /// Free about `want` bytes of dirty cost of the locked cell `g`: a
+    /// rebase step of its overlay (`rebase_cell`, D-02); a stream with
+    /// pending writes becomes an overlay first (no content is read or cut
+    /// there).
+    fn free_dirty(&self, g: &mut CellGuard<'_>, want: usize) -> Result<(), i32> {
+        if matches!(&g.file.write_mode, WriteMode::Streaming { pending, .. } if !pending.is_empty()) {
+            self.to_overlay(&mut g.file)?;
         }
-        let ino = s.ino;
-        self.rebase_step(ino, s, want).map_err(|_| libc::EIO)
+        self.rebase_cell(g, want).map_err(|_| libc::EIO)
     }
 
     /// pwrite into the overlay of `s` (no I/O, no allocation by offset).
