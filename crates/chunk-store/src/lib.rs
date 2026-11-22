@@ -311,7 +311,26 @@ const STORE_WAIT: Duration = Duration::from_secs(10);
 
 /// The error of a wait that reached `STORE_WAIT`.
 fn timed_out(what: &str) -> Error {
-    Error::Io(io::Error::new(io::ErrorKind::TimedOut, format!("the chunk store waited {} s for {what}", STORE_WAIT.as_secs())))
+    let msg = format!("the chunk store waited {} s for {what}", STORE_WAIT.as_secs());
+    Error::Io(io::Error::new(io::ErrorKind::TimedOut, StoreWaitTimeout(msg)))
+}
+
+/// The inner error of `timed_out`: a caller tells it from a disk error,
+/// which fails the store.
+#[derive(Debug)]
+struct StoreWaitTimeout(String);
+
+impl std::fmt::Display for StoreWaitTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StoreWaitTimeout {}
+
+/// True for an error of `timed_out`.
+fn is_store_wait(e: &Error) -> bool {
+    matches!(e, Error::Io(e) if e.get_ref().is_some_and(|r| r.is::<StoreWaitTimeout>()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1493,7 +1512,9 @@ impl ChunkStore {
                         Some(Before::Wait(w)) => {
                             drop(inner);
                             self.note_wait();
-                            w.wait();
+                            if !w.wait_timeout(STORE_WAIT) {
+                                return Err(timed_out("a pack create, a seal or a background sync"));
+                            }
                             inner = self.inner.lock();
                         }
                         Some(Before::Create(num, done)) => {
@@ -1713,7 +1734,7 @@ impl ChunkStore {
     /// Returns the last pack number that the GC may change.
     pub fn gc_begin(&self) -> Result<u64> {
         let _one = self.gc.lock();
-        let mut inner = self.lock_no_create();
+        let mut inner = self.lock_no_create()?;
         inner.check()?;
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
             self.seal(&mut inner)?;
@@ -1728,13 +1749,15 @@ impl ChunkStore {
     /// is taken but whose file is not installed yet would be at or below the
     /// boundary of `gc_begin` with no entries, so `gc_select` would take it
     /// as unused and remove it. The wait for the create runs without the
-    /// store lock.
-    fn lock_no_create(&self) -> MutexGuard<'_, Inner> {
+    /// store lock, at most `STORE_WAIT`.
+    fn lock_no_create(&self) -> Result<MutexGuard<'_, Inner>> {
         loop {
             let inner = self.inner.lock();
-            let Some(w) = inner.creating.as_ref().map(|c| c.1.clone()) else { return inner };
+            let Some(w) = inner.creating.as_ref().map(|c| c.1.clone()) else { return Ok(inner) };
             drop(inner);
-            w.wait();
+            if !w.wait_timeout(STORE_WAIT) {
+                return Err(timed_out("a pack create"));
+            }
         }
     }
 
@@ -1744,7 +1767,7 @@ impl ChunkStore {
     pub fn gc_begin_full(&self) -> Result<u64> {
         let dir = self.gc_tmp()?;
         let _one = self.gc.lock();
-        let mut inner = self.lock_no_create();
+        let mut inner = self.lock_no_create()?;
         inner.check()?;
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
             self.seal(&mut inner)?;
@@ -2794,12 +2817,14 @@ impl ChunkStore {
     /// first without the lock). The steps:
     /// 1. Without the lock, wait for the background seal and a background
     ///    sync of the active pack (started here), as `sync` does.
-    /// 2. Under the lock: join the ended seal, sync the rest of the active
-    ///    pack (the bytes put since step 1) and the directory, take the hwm
-    ///    and the counts, and freeze the memtable (`Index::freeze`): lookups
-    ///    still see it, new entries go to an empty memtable.
-    /// 3. Without the lock: write the run, then the MANIFEST
-    ///    (`Index::install_frozen`, under the MANIFEST lock).
+    /// 2. Under the lock: join the ended seal, take the sync handle of the
+    ///    active pack and the marks (as `sync` does), the hwm and the counts,
+    ///    and freeze the memtable (`Index::freeze`): lookups still see it,
+    ///    new entries go to an empty memtable. Without the lock: sync the
+    ///    rest of the active pack (the bytes put since step 1, so every
+    ///    record below the hwm) and the directory (LOCK-01).
+    /// 3. Without the lock, only after that sync: write the run, then the
+    ///    MANIFEST (`Index::install_frozen`, under the MANIFEST lock).
     ///
     /// A GC install waits for a flush in step 1 to 3, so the frozen run is
     /// installed before the tombstones of a GC. A failure is final.
@@ -2830,7 +2855,8 @@ impl ChunkStore {
         let mut inner = self.inner.lock();
         inner.flushing = None;
         done.done();
-        if r.is_err() {
+        // A timeout of a wait lost nothing: the memtable is not frozen yet.
+        if r.as_ref().is_err_and(|e| !is_store_wait(e)) {
             inner.failed = true;
         }
         r
@@ -2838,27 +2864,26 @@ impl ChunkStore {
 
     /// Steps 2 and 3 of `flush_if_full`.
     fn flush_frozen(&self) -> Result<()> {
-        let (entries, num, hwm, counts) = {
+        let (entries, num, hwm, counts, job) = {
             // A seal that started after step 1 is waited for without the lock.
-            let mut inner = loop {
-                let inner = self.inner.lock();
-                let Some(w) = inner.sealing.as_ref().filter(|s| !s.done.is_done()).map(|s| s.done.clone()) else {
-                    break inner;
-                };
-                drop(inner);
-                w.wait();
-            };
+            let mut inner = self.lock_no_seal()?;
             inner.check()?;
-            inner.sync_active()?;
-            if inner.dir_dirty {
-                inner.sync_dir(&*self.io)?;
-            }
+            inner.join_seal()?;
+            let job = match inner.sync_job() {
+                Some(job) => job,
+                None => {
+                    inner.sync_locked_fallback(&*self.io)?;
+                    SyncJob { pack: None, dir: None }
+                }
+            };
             let hwm = inner.hwm_end();
             let s = inner.stats;
             let counts = Counts { objects: s.objects, raw_bytes: s.raw_bytes, stored_bytes: s.stored_bytes };
             let (entries, num) = inner.index.freeze();
-            (entries, num, hwm, counts)
+            (entries, num, hwm, counts, job)
         };
+        // The run goes in only after the records below its hwm are durable.
+        self.run_sync(job)?;
         let run = self.index.write_frozen(&*self.io, num, &entries)?;
         self.index.install_frozen(&*self.io, run, hwm, counts)?;
         self.merge.notify();

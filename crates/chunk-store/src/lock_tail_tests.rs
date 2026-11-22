@@ -312,3 +312,47 @@ fn put_and_read_pass_a_held_phase_two_sync() {
 fn retrying_put_and_read_pass_a_held_phase_two_sync() {
     phase_two_sync(true);
 }
+
+// A's put fills the memtable (limit 1), and the flush that it starts parks
+// in the sync of the active pack (the records below its hwm). B's read, a
+// put of bytes that are stored already (a dedup hit starts no flush) and
+// `stats` must not wait for it. After a sync and a crash the open needs no
+// rebuild (the runs stay) and every object reads back.
+#[test]
+fn put_and_read_pass_a_held_index_flush_sync() {
+    use crate::pack_io::PackIo;
+    let mem = MemIo::new();
+    let o = Options { pack_limit: 1 << 20, index_memtable_limit: 1, ..small_packs() };
+    let s = store(&mem, o.clone());
+    let x = s.put(&data(1, 300)).unwrap();
+    assert_eq!(s.index_info().runs, 1, "x's own flush ran");
+    mem.hold_syncs(true);
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.put(&data(2, 300)).unwrap())
+    };
+    assert!(mem.wait_parked(Hold::Syncs, 1, LIMIT), "A's flush is in the held sync of the pack");
+    let b = {
+        let s = Arc::clone(&s);
+        spawn(move || (s.read(&x).unwrap(), s.put(&data(1, 300)).unwrap(), s.stats()))
+    }
+    .recv_timeout(LIMIT);
+    let a_waited = a.try_recv().is_err();
+    mem.hold_syncs(false);
+    let (got, again, _) = b.expect("B's read, dedup put and stats finished while A's flush synced");
+    assert!(a_waited, "A was still in its flush while B ran");
+    assert_eq!((got, again), (data(1, 300), x));
+    let y = a.recv_timeout(LIMIT).expect("A ends after the sync is released");
+    s.sync().unwrap();
+    let mut runs = mem.list_runs().unwrap();
+    runs.sort_unstable();
+    assert_eq!(runs.len(), 2);
+    drop(s);
+    mem.crash();
+    let s = store(&mem, o);
+    let mut after = mem.list_runs().unwrap();
+    after.sort_unstable();
+    assert_eq!(after, runs, "the open kept the runs (no rebuild)");
+    assert_eq!(s.read(&x).unwrap(), data(1, 300));
+    assert_eq!(s.read(&y).unwrap(), data(2, 300));
+}
