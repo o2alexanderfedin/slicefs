@@ -40,6 +40,8 @@ pub enum Site {
     DirLive,
     /// A shard of `inode_live`, the inode cache of the metadata store.
     InodeLive,
+    /// The handle table of the file system core.
+    Handles,
 }
 
 impl Site {
@@ -55,6 +57,7 @@ impl Site {
         Site::Readers,
         Site::DirLive,
         Site::InodeLive,
+        Site::Handles,
     ];
 
     pub fn label(self) -> &'static str {
@@ -69,6 +72,7 @@ impl Site {
             Site::Readers => "readers",
             Site::DirLive => "dir_live",
             Site::InodeLive => "inode_live",
+            Site::Handles => "handles",
         }
     }
 }

@@ -179,6 +179,28 @@ struct OpenFileState {
     modified: Option<(i64, u32)>,
 }
 
+/// An open file handle: its inode and its mode.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Handle {
+    pub(crate) ino: u64,
+    /// Opened for writing (`O_WRONLY` or `O_RDWR`).
+    pub(crate) write: bool,
+    /// Opened with `O_APPEND` (not set yet).
+    #[allow(dead_code)]
+    pub(crate) append: bool,
+}
+
+/// Every open handle (read-only too), with the open count of each inode, so
+/// the "is it open" check at unlink and close is O(1).
+#[derive(Default)]
+struct HandleTable {
+    by_fh: HashMap<u64, Handle>,
+    /// Open handles per inode (no entry: none).
+    open_count: HashMap<u64, u32>,
+    /// Inodes whose last link was removed while handles were still open.
+    orphans: HashSet<u64>,
+}
+
 /// FUSE filesystem adapter backed by a [`DictMetadataStore`].
 ///
 /// `meta` provides all inode/directory/manifest metadata.
@@ -211,11 +233,9 @@ pub struct SliceFsFilesystem {
     /// A content reader per inode (keeps its node and chunk caches). A reader
     /// whose key no longer matches the file content is replaced on use.
     readers: sync::Mutex<HashMap<u64, content::Reader>>,
-    /// Every open handle (read-only too): fh -> ino. Used to keep an unlinked
-    /// inode alive until its last handle closes.
-    handles: sync::Mutex<HashMap<u64, u64>>,
-    /// Inodes whose last link was removed while handles were still open.
-    orphans: sync::Mutex<HashSet<u64>>,
+    /// Every open handle (read-only too), the open count of each inode and
+    /// the orphans: keeps an unlinked inode alive until its last handle closes.
+    handles: sync::Mutex<HandleTable>,
     next_fh: AtomicU64,
     pub(crate) store_path: Option<PathBuf>,
     pub(crate) auto_snapshot: bool,
@@ -270,8 +290,7 @@ impl SliceFsFilesystem {
             open_files: sync::Mutex::new(Rank::Short, HashMap::new()).timed(Site::OpenFiles),
             write_alias: sync::Mutex::new(Rank::Short, HashMap::new()),
             readers: sync::Mutex::new(Rank::Short, HashMap::new()).timed(Site::Readers),
-            handles: sync::Mutex::new(Rank::Short, HashMap::new()),
-            orphans: sync::Mutex::new(Rank::Short, HashSet::new()),
+            handles: sync::Mutex::new(Rank::Short, HandleTable::default()).timed(Site::Handles),
             next_fh: AtomicU64::new(0),
             store_path,
             auto_snapshot: false,
@@ -368,10 +387,15 @@ impl SliceFsFilesystem {
         ReplayGuard(&self.replaying)
     }
 
-    /// The inode of an open handle.
+    /// The inode of an open write handle (`None` for a read-only or unknown
+    /// handle).
     pub(crate) fn ino_of_fh(&self, fh: u64) -> Option<u64> {
-        let fh = self.owner_fh(fh);
-        self.open_files.lock().get(&fh).map(|s| s.ino)
+        self.handle(fh).filter(|h| h.write).map(|h| h.ino)
+    }
+
+    /// The open handle `fh`, if any.
+    pub(crate) fn handle(&self, fh: u64) -> Option<Handle> {
+        self.handles.lock().by_fh.get(&fh).copied()
     }
 
     /// The handle that holds the write state of `fh`: `fh` itself, or the
@@ -573,22 +597,33 @@ impl SliceFsFilesystem {
         self.next_fh.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// Allocate a file handle and record it as open on `ino`.
-    fn open_handle(&self, ino: u64) -> u64 {
+    /// Allocate a file handle and record it as open on `ino` (for writing
+    /// if `write`).
+    fn open_handle(&self, ino: u64, write: bool) -> u64 {
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
-        self.handles.lock().insert(fh, ino);
+        let mut t = self.handles.lock();
+        t.by_fh.insert(fh, Handle { ino, write, append: false });
+        *t.open_count.entry(ino).or_insert(0) += 1;
         fh
     }
 
     /// Forget handle `fh`. If it was the last handle of an orphaned inode,
     /// reclaim the inode. A handle that is not open is ignored.
     fn close_handle(&self, fh: u64) {
-        let ino = match self.handles.lock().remove(&fh) {
-            Some(ino) => ino,
-            None => return,
+        let reclaim = {
+            let mut t = self.handles.lock();
+            let Some(h) = t.by_fh.remove(&fh) else { return };
+            let n = t.open_count.get_mut(&h.ino).expect("an open handle is counted");
+            *n -= 1;
+            if *n == 0 {
+                t.open_count.remove(&h.ino);
+                t.orphans.remove(&h.ino).then_some(h.ino)
+            } else {
+                None
+            }
         };
-        let still_open = self.handles.lock().values().any(|&i| i == ino);
-        if !still_open && self.orphans.lock().remove(&ino) {
+        // The store work runs after the table lock is released.
+        if let Some(ino) = reclaim {
             self.reclaim_inode(ino);
         }
     }
@@ -607,13 +642,17 @@ impl SliceFsFilesystem {
     /// The last link of a non-directory inode was removed: reclaim it now, or
     /// keep it as an orphan (nlink 0) while handles are still open.
     fn drop_last_link(&self, inode: InodeMeta) -> Result<(), i32> {
-        let open = self.handles.lock().values().any(|&i| i == inode.ino);
-        if open {
-            self.meta.modify_inode(inode.ino, |m| m.nlinks = 0).map_err(|e| meta_error_to_errno(&e))?;
-            self.orphans.lock().insert(inode.ino);
-        } else {
-            self.reclaim_inode(inode.ino);
+        let ino = inode.ino;
+        if self.handles.lock().open_count.contains_key(&ino) {
+            self.meta.modify_inode(ino, |m| m.nlinks = 0).map_err(|e| meta_error_to_errno(&e))?;
+            // The last handle may have closed meanwhile: then reclaim here.
+            let mut t = self.handles.lock();
+            if t.open_count.contains_key(&ino) {
+                t.orphans.insert(ino);
+                return Ok(());
+            }
         }
+        self.reclaim_inode(ino);
         Ok(())
     }
 
@@ -1065,7 +1104,7 @@ impl SliceFsFilesystem {
 
     /// Reclaim all orphans (used at unmount: no handle survives it).
     fn reclaim_all_orphans(&self) {
-        let orphans: Vec<u64> = self.orphans.lock().drain().collect();
+        let orphans: Vec<u64> = self.handles.lock().orphans.drain().collect();
         for ino in orphans {
             self.reclaim_inode(ino);
         }
@@ -1092,7 +1131,7 @@ impl SliceFsFilesystem {
             return Err(meta_error_to_errno(&e));
         }
         self.touch_dir(parent_ino)?;
-        let fh = self.open_handle(ino);
+        let fh = self.open_handle(ino, true);
         self.open_files.lock().insert(fh, OpenFileState {
             ino,
             write_mode: WriteMode::Streaming { state: Stream::default(), next_expected_offset: 0, pending: BTreeMap::new() },
@@ -2427,7 +2466,7 @@ impl SliceFsFilesystem {
         let acc_mode = flags & libc::O_ACCMODE;
         let is_write = acc_mode == libc::O_WRONLY || acc_mode == libc::O_RDWR;
 
-        let fh = self.open_handle(ino);
+        let fh = self.open_handle(ino, is_write);
 
         if is_write {
             // Another write handle of this inode is open: share its state.
@@ -2662,9 +2701,8 @@ impl SliceFsFilesystem {
 
     /// Release with read-only handle check (matches FUSE release behavior).
     pub fn test_release_full(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        let shared = self.write_alias.lock().contains_key(&fh);
-        if !shared && !self.open_files.lock().contains_key(&fh) {
-            self.close_handle(fh); // read-only handle, no write state
+        if !self.handle(fh).is_some_and(|h| h.write) {
+            self.close_handle(fh); // read-only (or unknown) handle, no write state
             return Ok(());
         }
         self.test_release(ino, fh)

@@ -87,7 +87,7 @@ fn lock_stats_report() {
         );
     }
     let n = |label: &str| snap.iter().find(|s| s.label == label).map_or(0, |s| s.count);
-    for label in ["store", "io", "wal", "wal_writer", "wal_pending", "wal_queue", "open_files", "readers", "dir_live", "inode_live"] {
+    for label in ["store", "io", "wal", "wal_writer", "wal_pending", "wal_queue", "open_files", "readers", "dir_live", "inode_live", "handles"] {
         assert!(n(label) > 0, "no samples for lock site {label}");
     }
 }
