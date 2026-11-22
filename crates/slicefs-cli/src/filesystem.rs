@@ -1716,6 +1716,26 @@ impl SliceFsFilesystem {
         }).map_err(|e| meta_error_to_errno(&e))
     }
 
+    /// With the parent's stripe held: the parent is still a live directory
+    /// (PITFALLS 6c: an rmdir of the parent that ran first).
+    fn live_dir(&self, ino: u64) -> Result<(), i32> {
+        let m = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        if m.mode & S_IFMT != S_IFDIR {
+            return Err(libc::ENOTDIR);
+        }
+        Ok(())
+    }
+
+    /// Run `f` with `stripe(ino)` held and then the inode's cell locked, if
+    /// it has a live one (RESEARCH Pattern 4 rule 5: stripe, then cell), so
+    /// a setattr or xattr change of the inode is ordered with its writes.
+    fn with_inode_locked<R>(&self, ino: u64, f: impl FnOnce(Option<&mut OpenFileState>) -> R) -> R {
+        let _ns = self.ns.lock(&[ino]);
+        let cell = self.cells.get(ino);
+        let mut g = cell.as_deref().map(|c| self.lock_cell(c)).filter(|g| !g.retired);
+        f(g.as_mut().map(|g| &mut g.file))
+    }
+
     /// Orphans kept for open handles (for tests).
     pub fn test_orphan_count(&self) -> usize {
         self.handles.lock().orphans.len()
@@ -1777,6 +1797,12 @@ impl SliceFsFilesystem {
         let file_mode = S_IFREG | (mode & !umask & 0o7777);
         let mut file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
         Self::stamp_new(&mut file_meta);
+        // The parent's stripe is held until the handle is counted, so an
+        // unlink of the new name cannot reclaim the inode before it is open.
+        // The new inode needs no stripe of its own: it has no name before
+        // the link, and every change of the name needs the parent's stripe.
+        let _ns = self.ns.lock(&[parent_ino]);
+        self.live_dir(parent_ino)?;
         let ino = self.meta.create_inode(&file_meta).map_err(|e| meta_error_to_errno(&e))?;
         if let Err(e) = self.meta.link(parent_ino, name, ino) {
             let _ = self.meta.delete_inode(ino);
@@ -2632,6 +2658,7 @@ impl SliceFsFilesystem {
 
     /// Update permission bits (preserving file type bits) for an inode.
     pub fn test_setattr_mode(&self, ino: u64, mode: u32) -> Result<(), i32> {
+        let _ns = self.ns.lock(&[ino]);
         let (now_sec, now_nsec) = now_pair();
         self.meta.modify_inode(ino, |inode| {
             inode.mode = (inode.mode & S_IFMT) | (mode & 0o7777);
@@ -2647,6 +2674,7 @@ impl SliceFsFilesystem {
         uid: Option<u32>,
         gid: Option<u32>,
     ) -> Result<(), i32> {
+        let _ns = self.ns.lock(&[ino]);
         let (now_sec, now_nsec) = now_pair();
         self.meta.modify_inode(ino, |inode| {
             if let Some(u) = uid {
@@ -2662,6 +2690,7 @@ impl SliceFsFilesystem {
 
     /// Update mtime for an inode to a specific (sec, nsec).
     pub fn test_setattr_mtime(&self, ino: u64, mtime_sec: i64, mtime_nsec: u32) -> Result<(), i32> {
+        let _ns = self.ns.lock(&[ino]);
         let (now_sec, now_nsec) = now_pair();
         self.meta.modify_inode(ino, |inode| {
             inode.mtime_sec = mtime_sec;
@@ -2700,6 +2729,8 @@ impl SliceFsFilesystem {
         if file_type == S_IFCHR || file_type == S_IFBLK {
             file_meta.rdev = rdev;
         }
+        let _ns = self.ns.lock(&[parent]);
+        self.live_dir(parent)?;
         let ino = self.meta.create_inode(&file_meta).map_err(|e| meta_error_to_errno(&e))?;
         if let Err(e) = self.meta.link(parent, name, ino) {
             let _ = self.meta.delete_inode(ino);
@@ -2787,6 +2818,8 @@ impl SliceFsFilesystem {
         let dir_mode = S_IFDIR | (mode & !umask & 0o7777);
         let mut dir_meta = InodeMeta::new_directory(0, uid, gid, dir_mode);
         Self::stamp_new(&mut dir_meta);
+        let _ns = self.ns.lock(&[parent_ino]);
+        self.live_dir(parent_ino)?;
         let ino = self.meta
             .create_directory(parent_ino, name, &dir_meta)
             .map_err(|e| meta_error_to_errno(&e))?;
@@ -2799,11 +2832,10 @@ impl SliceFsFilesystem {
     /// Returns ENOTEMPTY if the directory still has entries beyond . and ..
     /// Returns EISDIR if the target is not a directory (though lookup normally guards this).
     pub fn simulate_rmdir(&self, parent_ino: u64, name: &str) -> Result<(), i32> {
-        // Resolve name to inode
-        let ino = self
-            .meta
-            .lookup(parent_ino, name)
-            .map_err(|e| meta_error_to_errno(&e))?;
+        // Resolve name to inode, with the parent and child stripes held (a
+        // create in the child holds the child's stripe too).
+        let (_ns, found) = self.lock_namespace(false, &[parent_ino], &[(parent_ino, name)]);
+        let ino = found[0].as_ref().map_err(meta_error_to_errno).copied()?;
 
         // Verify it is a directory
         let inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
@@ -2874,8 +2906,15 @@ impl SliceFsFilesystem {
     /// POSIX disallows hard links to directories — returns EPERM.
     /// Returns the new inode number (same as `ino`).
     pub fn simulate_link(&self, ino: u64, newparent_ino: u64, newname: &str) -> Result<u64, i32> {
-        // Get source inode
+        // The inode and the new parent, under their stripes.
+        let (_ns, _) = self.lock_namespace(false, &[ino, newparent_ino], &[]);
         let inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        // An orphan (no link left, kept for open handles) gets no new name:
+        // its last close reclaims it.
+        if inode.nlinks == 0 {
+            return Err(libc::ENOENT);
+        }
+        self.live_dir(newparent_ino)?;
 
         // Disallow hard links to directories
         if inode.mode & S_IFMT == S_IFDIR {
@@ -2918,16 +2957,23 @@ impl SliceFsFilesystem {
             return Err(libc::ENOSYS);
         }
 
+        // Both parents, the source and the replaced target under their
+        // stripes; a cross-directory rename takes the rename mutex first.
+        let (_ns, found) = self.lock_namespace(
+            parent_ino != newparent_ino,
+            &[parent_ino, newparent_ino],
+            &[(parent_ino, name), (newparent_ino, newname)],
+        );
+        let mut found = found.into_iter();
+        let (src, dst) = (found.next().expect("two lookups"), found.next().expect("two lookups"));
+
         // Resolve source inode
-        let src_ino = self
-            .meta
-            .lookup(parent_ino, name)
-            .map_err(|e| meta_error_to_errno(&e))?;
+        let src_ino = src.map_err(|e| meta_error_to_errno(&e))?;
         let src_is_dir = self.meta.get_inode(src_ino).map_err(|e| meta_error_to_errno(&e))?
             .mode & S_IFMT == S_IFDIR;
 
         // RENAME_NOREPLACE: fail if target already exists
-        let target_ino = match self.meta.lookup(newparent_ino, newname) {
+        let target_ino = match dst {
             Ok(ino) => Some(ino),
             Err(MetaError::NameTooLong(n)) => return Err(meta_error_to_errno(&MetaError::NameTooLong(n))),
             Err(_) => None,
@@ -3027,6 +3073,14 @@ impl SliceFsFilesystem {
         };
         Self::stamp_new(&mut symlink_meta);
 
+        // Store target as CAS content (raw bytes — v3 format, no compression),
+        // before the parent's stripe: no stripe is held across content I/O.
+        // If the create fails, the object is garbage for the GC.
+        let content_digest = content::put_all(&self.content, target_bytes).map_err(|_| libc::EIO)?;
+
+        let _ns = self.ns.lock(&[parent_ino]);
+        self.live_dir(parent_ino)?;
+
         // Create inode
         let ino = self
             .meta
@@ -3040,8 +3094,6 @@ impl SliceFsFilesystem {
         }
         self.touch_dir(parent_ino)?;
 
-        // Store target as CAS content (raw bytes — v3 format, no compression)
-        let content_digest = content::put_all(&self.content, target_bytes).map_err(|_| libc::EIO)?;
         self.meta
             .set_manifest(ino, &[content_digest])
             .map_err(|_| libc::EIO)?;
@@ -3172,13 +3224,22 @@ impl SliceFsFilesystem {
     }
 
     /// Set an extended attribute.
+    /// Under `stripe(ino)` (then its cell): the inode must still exist, so
+    /// a set that loses the race with the delete of the inode leaves no
+    /// xattr entry behind.
     pub fn test_setxattr(&self, ino: u64, name: &str, value: &[u8]) -> Result<(), i32> {
-        self.meta.set_xattr(ino, name, value).map_err(|e| meta_error_to_errno(&e))
+        self.with_inode_locked(ino, |_| {
+            self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+            self.meta.set_xattr(ino, name, value).map_err(|e| meta_error_to_errno(&e))
+        })
     }
 
     /// Remove an extended attribute.
     pub fn test_removexattr(&self, ino: u64, name: &str) -> Result<(), i32> {
-        self.meta.remove_xattr(ino, name).map_err(|e| meta_error_to_errno(&e))
+        self.with_inode_locked(ino, |_| {
+            self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+            self.meta.remove_xattr(ino, name).map_err(|e| meta_error_to_errno(&e))
+        })
     }
 
     /// Combined setattr: apply mode, uid, gid, mtime, and size changes.
@@ -3220,10 +3281,16 @@ impl SliceFsFilesystem {
         mtime: Option<(i64, u32)>,
     ) -> Result<InodeMeta, i32> {
         // Size first: it rewrites the inode (size, mtime, ctime); the other
-        // fields of the same request are applied on top of the result.
+        // fields of the same request are applied on top of the result. The
+        // size change is ordered by the cell lock alone (the open cell, or
+        // the transient cell of a closed file), not under the stripe: it can
+        // run stream steps or a splice (RESEARCH Pattern 4 rule 1).
         if let Some(new_size) = size {
             self.test_setattr_size(ino, fh, new_size)?;
         }
+        // The other fields: stripe, then the cell (if open), so they are
+        // ordered with the writes of the inode.
+        self.with_inode_locked(ino, |cell| {
         // Always update ctime
         let (now_sec, now_nsec) = now_pair();
         let inode = self.meta.modify_inode(ino, |inode| {
@@ -3248,17 +3315,15 @@ impl SliceFsFilesystem {
             inode.ctime_nsec = now_nsec;
             inode.clone()
         }).map_err(|e| meta_error_to_errno(&e))?;
-        if let Some((sec, nsec)) = mtime {
+        if let (Some((sec, nsec)), Some(s)) = (mtime, cell) {
             // An explicit mtime (utimens) on a file with unflushed writes
             // wins over the time of those writes: the close stamps this one.
-            // (Outside the inode change: the store lock comes after this one.)
-            self.with_cell(ino, |s| {
-                if s.modified.is_some() {
-                    s.modified = Some((sec, nsec));
-                }
-            });
+            if s.modified.is_some() {
+                s.modified = Some((sec, nsec));
+            }
         }
         Ok(inode)
+        })
     }
 
     // ── Higher-level testable wrappers ───────────────────────────────────────

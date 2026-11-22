@@ -565,3 +565,120 @@ fn two_inodes_in_one_stripe_are_locked_once() {
     assert_eq!(fs.test_orphan_count(), 0);
     assert!(fs.test_getattr(ino).is_err());
 }
+
+/// A create in a directory that an rmdir removed fails with ENOENT and adds
+/// no entry (PITFALLS 6c: the parent is checked under its stripe).
+#[test]
+fn create_in_a_removed_directory_fails() {
+    let (fs, _dir) = fresh_fs();
+    let d = fs.simulate_mkdir(1, "d", 0o755, 0o022, 0, 0).unwrap();
+    fs.simulate_rmdir(1, "d").unwrap();
+    assert_eq!(fs.test_create(d, "x", 0o644, 0o022, 0, 0).unwrap_err(), libc::ENOENT);
+    assert_eq!(fs.simulate_mkdir(d, "y", 0o755, 0o022, 0, 0).unwrap_err(), libc::ENOENT);
+    assert_eq!(fs.test_mknod(d, "z", S_IFREG | 0o644, 0, 0, 0o022).unwrap_err(), libc::ENOENT);
+    assert_eq!(fs.simulate_symlink(d, "l", "t", 0, 0).unwrap_err(), libc::ENOENT);
+    for name in ["x", "y", "z", "l"] {
+        assert!(fs.meta().lookup(d, name).is_err(), "{name} was added to the removed directory");
+    }
+    assert_eq!(fs.test_orphan_count(), 0);
+}
+
+/// An xattr set that races with the delete of its inode leaves no xattr
+/// entry behind (both run under the inode's stripe; the set checks that the
+/// inode still exists).
+#[test]
+fn set_xattr_and_unlink_leave_no_xattr_behind() {
+    let (fs, _dir) = fresh_fs();
+    for i in 0..200 {
+        let name = format!("x{i}");
+        let ino = make_file(&fs, 1, &name);
+        let b = std::sync::Barrier::new(2);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                b.wait();
+                let _ = fs.test_setxattr(ino, "user.k", b"v");
+            });
+            s.spawn(|| {
+                b.wait();
+                fs.simulate_unlink(1, &name).unwrap();
+            });
+        });
+        assert!(fs.test_getattr(ino).is_err(), "round {i}");
+        assert!(fs.meta().list_xattrs(ino).unwrap().is_empty(), "round {i}: xattr of deleted inode {ino} left behind");
+    }
+}
+
+/// 4 threads for about 1 s create, unlink, link and rename names (shared by
+/// all threads, so lookups race with changes) within and between two
+/// directories. At the end every entry points to a live inode, each file's
+/// link count equals its number of entries, and no inode without entries
+/// is left.
+#[test]
+fn namespace_ops_in_parallel_keep_the_tree_consistent() {
+    use std::collections::HashMap;
+    let (fs, _dir) = fresh_fs();
+    let dirs = [
+        fs.simulate_mkdir(1, "a", 0o755, 0o022, 0, 0).unwrap(),
+        fs.simulate_mkdir(1, "b", 0o755, 0o022, 0, 0).unwrap(),
+    ];
+    let created = Mutex::new(Vec::new());
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    std::thread::scope(|s| {
+        for t in 0..4u64 {
+            let (fs, created) = (&fs, &created);
+            s.spawn(move || {
+                let mut x = t.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+                let mut next = |n: u64| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x % n
+                };
+                while std::time::Instant::now() < end {
+                    let (d1, d2) = (dirs[next(2) as usize], dirs[next(2) as usize]);
+                    let (n1, n2) = (format!("n{}", next(6)), format!("n{}", next(6)));
+                    match next(4) {
+                        0 => {
+                            if let Ok((ino, fh)) = fs.test_create(d1, &n1, 0o644, 0o022, 0, 0) {
+                                created.lock().unwrap().push(ino);
+                                fs.test_release(ino, fh).unwrap();
+                            }
+                        }
+                        1 => {
+                            let _ = fs.simulate_unlink(d1, &n1);
+                        }
+                        2 => {
+                            if let Ok(ino) = fs.meta().lookup(d1, &n1) {
+                                let _ = fs.simulate_link(ino, d2, &n2);
+                            }
+                        }
+                        _ => {
+                            let _ = fs.simulate_rename(d1, &n1, d2, &n2, 0);
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let mut entries: HashMap<u64, u32> = HashMap::new();
+    for d in dirs {
+        for e in fs.meta().list_directory(d).unwrap() {
+            if e.name == "." || e.name == ".." {
+                continue;
+            }
+            assert!(fs.meta().get_inode(e.ino).is_ok(), "entry {} points to deleted inode {}", e.name, e.ino);
+            *entries.entry(e.ino).or_insert(0) += 1;
+        }
+    }
+    let created = created.into_inner().unwrap();
+    assert!(created.len() > 10, "too few creates: {}", created.len());
+    for ino in created {
+        match (fs.meta().get_inode(ino), entries.get(&ino)) {
+            (Ok(m), Some(&n)) => assert_eq!(m.nlinks, n, "inode {ino}: nlinks {} but {n} entries", m.nlinks),
+            (Ok(m), None) => panic!("inode {ino} has no entry but is alive (nlinks {})", m.nlinks),
+            (Err(_), Some(_)) => unreachable!("checked above"),
+            (Err(_), None) => {}
+        }
+    }
+    assert_eq!(fs.test_orphan_count(), 0);
+}
