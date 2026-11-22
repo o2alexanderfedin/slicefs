@@ -99,3 +99,102 @@ fn a_read_only_release_logs_no_release_record() {
     release(&fs, ino, ro);
     assert_eq!(release_records(&fs, dir.path()), before, "a read-only release is not logged");
 }
+
+fn fsync(fs: &SliceFsFilesystem, ino: u64, fh: u64) {
+    assert!(matches!(h::handle_fsync(fs, ino, fh), EmptyResult::Ok), "fsync fh {fh}");
+}
+
+fn data(seed: u64, n: usize) -> Vec<u8> {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..n).map(|_| { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x as u8 }).collect()
+}
+
+/// The committed content of `ino` (its manifest root), or empty.
+fn committed(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
+    match fs.meta().get_manifest(ino).unwrap_or_default().first() {
+        Some(k) => fs.read_content(k).expect("manifest root readable"),
+        None => Vec::new(),
+    }
+}
+
+/// What a mount does: load the last root (and replay the log).
+fn reload(store: &Path) -> SliceFsFilesystem {
+    let (root, snaps) = metadata::segment::load_store_from_segments(&store.join("segments")).unwrap();
+    let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
+    let mut meta = DictMetadataStore::load_from_root(io.clone(), &root.unwrap()).unwrap();
+    meta.set_snapshots(snaps);
+    let fs = SliceFsFilesystem::new(meta, io, Some(store.to_path_buf()));
+    slicefs_cli::oplog::replay_log(&fs, &store.join("segments")).unwrap();
+    fs
+}
+
+const BLOCK: usize = 64 << 10;
+
+#[test]
+fn visibility_across_handles() {
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    let (ino, a) = create(&fs, 1, "f");
+    let b = open(&fs, ino, libc::O_RDONLY);
+    let bytes = data(1, BLOCK);
+    write(&fs, a, 0, &bytes);
+    assert!(read(&fs, ino, 0, BLOCK as u32) == bytes, "read-only handle opened before the write sees it before any fsync");
+    let c = open(&fs, ino, libc::O_RDWR);
+    assert!(read(&fs, ino, 0, BLOCK as u32) == bytes, "handle opened after the write sees it");
+    for fh in [a, b, c] {
+        release(&fs, ino, fh);
+    }
+    assert!(read(&fs, ino, 0, BLOCK as u32) == bytes, "after the last release");
+}
+
+#[test]
+fn fsync_through_any_write_handle_commits() {
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    let (ino, a) = create(&fs, 1, "f");
+    let b = open(&fs, ino, libc::O_RDWR);
+    let bytes = data(2, BLOCK);
+    write(&fs, a, 0, &bytes);
+    fsync(&fs, ino, b);
+    assert!(committed(&fs, ino) == bytes, "fsync through B writes A's bytes into the manifest");
+    release(&fs, ino, a);
+    release(&fs, ino, b);
+    fs.meta().commit().unwrap();
+    drop(fs);
+    let fs = reload(dir.path());
+    assert!(read(&fs, ino, 0, BLOCK as u32 + 1) == bytes, "after a reload of the store");
+}
+
+#[test]
+fn last_release_finalizes_once() {
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    let (ino, a) = create(&fs, 1, "f");
+    let b = open(&fs, ino, libc::O_RDWR);
+    let (b0, b1) = (data(3, BLOCK), data(4, BLOCK));
+    write(&fs, a, 0, &b0);
+    write(&fs, b, BLOCK as u64, &b1);
+    release(&fs, ino, a);
+    assert!(committed(&fs, ino).is_empty(), "the first release does not finalize");
+    release(&fs, ino, b);
+    let both = [b0, b1].concat();
+    assert!(committed(&fs, ino) == both, "the last release finalizes both blocks");
+    assert_eq!(fs.test_getattr(ino).unwrap().size, both.len() as u64);
+}
+
+#[test]
+fn open_after_last_release_gets_a_new_cell() {
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    let (ino, a) = create(&fs, 1, "f");
+    let first = data(5, BLOCK);
+    write(&fs, a, 0, &first);
+    release(&fs, ino, a);
+    let c = open(&fs, ino, libc::O_RDWR);
+    let patch = data(6, 4096);
+    write(&fs, c, 100, &patch);
+    release(&fs, ino, c);
+    let mut model = first;
+    model[100..100 + patch.len()].copy_from_slice(&patch);
+    assert!(committed(&fs, ino) == model, "the write of the new open is kept after its release");
+}

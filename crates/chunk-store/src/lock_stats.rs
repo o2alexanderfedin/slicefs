@@ -32,8 +32,6 @@ pub enum Site {
     /// The in-memory record queue of the per-operation WAL (append takes
     /// only this lock).
     WalQueue,
-    /// `open_files` of the file system core.
-    OpenFiles,
     /// `readers` of the file system core.
     Readers,
     /// A shard of `dir_live`, the directory cache of the metadata store.
@@ -42,6 +40,10 @@ pub enum Site {
     InodeLive,
     /// The handle table of the file system core.
     Handles,
+    /// The state lock of one open file (`FileCell`) of the file system core.
+    FileCell,
+    /// A shard of the cell map (`ino -> FileCell`) of the file system core.
+    CellMap,
 }
 
 impl Site {
@@ -53,11 +55,12 @@ impl Site {
         Site::WalWriter,
         Site::WalPending,
         Site::WalQueue,
-        Site::OpenFiles,
         Site::Readers,
         Site::DirLive,
         Site::InodeLive,
         Site::Handles,
+        Site::FileCell,
+        Site::CellMap,
     ];
 
     pub fn label(self) -> &'static str {
@@ -68,11 +71,12 @@ impl Site {
             Site::WalWriter => "wal_writer",
             Site::WalPending => "wal_pending",
             Site::WalQueue => "wal_queue",
-            Site::OpenFiles => "open_files",
             Site::Readers => "readers",
             Site::DirLive => "dir_live",
             Site::InodeLive => "inode_live",
             Site::Handles => "handles",
+            Site::FileCell => "file_cell",
+            Site::CellMap => "cell_map",
         }
     }
 }

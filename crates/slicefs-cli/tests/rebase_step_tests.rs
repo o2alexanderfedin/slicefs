@@ -201,12 +201,13 @@ fn a_switch_above_the_limit_comes_down_in_bounded_steps() {
     check_content(&fs, ino, &model, "after release");
 }
 
-/// The budget of all open files (#105) picks the file with the most dirty
-/// bytes, here a new file whose out-of-order writes wait in the reorder
-/// window. Writes to another file make the sum pass the budget: the stream
-/// becomes an overlay (its pending writes the extents) and stores a step.
-/// Then its gap is filled in order, and both files read back right before
-/// and after release.
+/// The budget of all open files (#105) with a new file A whose
+/// out-of-order writes wait in the reorder window. Phase 19 (D-13): a
+/// writer over the budget steps only its own file, so writes to another
+/// file B never touch A (moving work to other files is Phase 20). Then A's
+/// own in-order writes, still over the budget, turn its stream into an
+/// overlay (its pending writes the extents) and store steps. Both files read
+/// back right before and after release.
 #[test]
 fn the_budget_turns_a_stream_with_pending_writes_into_steps() {
     let (fs, _dir) = fresh_fs();
@@ -220,7 +221,7 @@ fn the_budget_turns_a_stream_with_pending_writes_into_steps() {
     }
     assert!(fs.test_is_streaming(fa), "A waits in the reorder window");
     // B: an existing file, random 4 KiB writes. The budget is set now, so
-    // a write to B (not A's own write) is the first to pass it.
+    // a write to B is the first to pass it.
     let (b, mut model_b) = random_file(&fs, "b", 8);
     fs.test_set_dirty_budget(2 << 20);
     let (fb, _) = fs.test_open(b, libc::O_RDWR).unwrap();
@@ -232,17 +233,24 @@ fn the_budget_turns_a_stream_with_pending_writes_into_steps() {
         model_b[off as usize..(off + 4 * KIB) as usize].copy_from_slice(&data);
         work.add(&fs);
     }
-    eprintln!("budget picks a stream: dirty total {} KiB; {work:?}", fs.test_dirty_total() >> 10);
-    assert!(!fs.test_is_streaming(fa), "the budget turned A into an overlay");
-    assert!(fs.test_dirty_total() <= 2 << 20, "dirty total {}", fs.test_dirty_total());
+    eprintln!("budget, writes to B: dirty total {} KiB; {work:?}", fs.test_dirty_total() >> 10);
+    assert!(fs.test_is_streaming(fa), "a write to B does not step A");
+    // A's 3 MiB pending, plus at most one write of B (B steps itself).
+    assert!(fs.test_dirty_total() <= (3 * MIB + 8 * KIB) as usize, "dirty total {}", fs.test_dirty_total());
     assert!(work.max_rechunk <= WORK_BOUND, "one write cut {} bytes again", work.max_rechunk);
-    check_content(&fs, a, &model_a, "A after the steps");
-    // Fill A's gap [0, 1 MiB) in order.
+    check_content(&fs, a, &model_a, "A pending");
+    // Fill A's gap [0, 1 MiB) in order: A's own writes pass the budget.
+    let mut work = Work::default();
     for i in 0..8u64 {
         let data = seeded(80 + i, 128 * KIB as usize);
         fs.test_write(fa, i * 128 * KIB, &data).unwrap();
         model_a[(i * 128 * KIB) as usize..((i + 1) * 128 * KIB) as usize].copy_from_slice(&data);
+        work.add(&fs);
     }
+    eprintln!("budget, writes to A: dirty total {} KiB; {work:?}", fs.test_dirty_total() >> 10);
+    assert!(!fs.test_is_streaming(fa), "the budget turned A into an overlay");
+    assert!(fs.test_dirty_total() <= 2 << 20, "dirty total {}", fs.test_dirty_total());
+    assert!(work.max_rechunk <= WORK_BOUND, "one write cut {} bytes again", work.max_rechunk);
     check_content(&fs, a, &model_a, "A with the gap filled");
     check_content(&fs, b, &model_b, "B");
     fs.test_release(a, fa).unwrap();
