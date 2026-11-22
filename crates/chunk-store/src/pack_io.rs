@@ -13,6 +13,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::sync::{Condvar, Mutex, Rank};
 
@@ -76,6 +77,11 @@ pub trait PackFile: PackRead {
     fn sync_handle(&self) -> Option<Arc<dyn PackSync>> {
         None
     }
+    /// A handle that writes to this file from another thread, with no
+    /// `&mut` access to it (a positional write). `None`: no such handle.
+    fn writer(&self) -> Option<Arc<dyn PackWrite>> {
+        None
+    }
     /// Start a sync of every write so far in the background, if this file
     /// can, and return a wait for its end. It only shortens a later `sync`
     /// (which the caller still calls: only that one reports the outcome).
@@ -93,6 +99,11 @@ pub trait PackFile: PackRead {
 /// Syncs one file from any thread (see [`PackFile::sync_handle`]).
 pub trait PackSync: Send + Sync {
     fn sync(&self) -> io::Result<()>;
+}
+
+/// Writes to one file from any thread (see [`PackFile::writer`]).
+pub trait PackWrite: Send + Sync {
+    fn write_at(&self, data: &[u8], offset: u64) -> io::Result<()>;
 }
 
 /// The end of a background sync (see [`PackFile::sync_soon`]).
@@ -123,6 +134,20 @@ impl SyncWait {
         while !*d {
             self.0 .1.wait(&mut d);
         }
+    }
+
+    /// Wait until the sync has ended, at most `limit`. True if it ended.
+    pub fn wait_timeout(&self, limit: Duration) -> bool {
+        let until = Instant::now() + limit;
+        let mut d = self.0 .0.lock();
+        while !*d {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            self.0 .1.wait_for(&mut d, left);
+        }
+        true
     }
 }
 
@@ -328,6 +353,16 @@ impl PackFile for FilePack {
         // dirty pages of the file, whoever wrote them.
         let f = self.0.try_clone().ok()?;
         Some(Arc::new(FilePack(f, self.1)))
+    }
+    fn writer(&self) -> Option<Arc<dyn PackWrite>> {
+        let f = self.0.try_clone().ok()?;
+        Some(Arc::new(FilePack(f, self.1)))
+    }
+}
+
+impl PackWrite for FilePack {
+    fn write_at(&self, data: &[u8], offset: u64) -> io::Result<()> {
+        self.0.write_all_at(data, offset)
     }
 }
 

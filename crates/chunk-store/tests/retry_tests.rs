@@ -388,3 +388,36 @@ fn puts_go_on_while_a_store_sync_waits_for_a_seal() {
         assert_eq!(&s.get(id).unwrap(), d);
     }
 }
+
+// One failed sync (of the background sync of phase 1) must not let the sync
+// with no store lock after it drop the copies before they are written again.
+#[test]
+fn a_single_sync_error_is_repaired_and_the_data_is_durable() {
+    let mem = MemIo::new();
+    let io = retrying(&mem);
+    let s = open(&io);
+    let objs = put_many(&s, 20, 900);
+    mem.fail_next_syncs(1);
+    s.sync().unwrap();
+    drop(s);
+    mem.crash();
+    let s = open(&io);
+    for (id, d) in &objs {
+        assert_eq!(&s.get(id).unwrap(), d, "data lost after a repaired sync");
+    }
+}
+
+// The sync handle reports an error only after its retries end; the store
+// then fails, and refuses later puts and syncs.
+#[test]
+fn a_failed_handle_sync_fails_the_store() {
+    let mem = MemIo::new();
+    let io = retrying(&mem);
+    let s = open(&io);
+    put_many(&s, 5, 1000);
+    mem.set_fail_syncs(true);
+    assert!(s.sync().is_err());
+    mem.set_fail_syncs(false);
+    assert!(s.put(&random(8000, 1100)).is_err(), "a put after the failure is refused");
+    assert!(s.sync().is_err(), "a sync after the failure is refused");
+}

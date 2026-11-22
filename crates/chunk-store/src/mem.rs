@@ -11,7 +11,7 @@
 //! Removals are durable at once (this is the order the store needs: it
 //! syncs copies before it removes originals).
 
-use crate::pack_io::{Kind, PackFile, PackIo, PackRead, PackSync, RunMap, PUNCH_BLOCK};
+use crate::pack_io::{Kind, PackFile, PackIo, PackRead, PackSync, PackWrite, RunMap, PUNCH_BLOCK};
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -514,18 +514,35 @@ impl PackRead for MemPack {
     }
 }
 
+/// A write of the model: the bytes change and their range is dirty.
+fn write_file(s: &Mutex<State>, f: &Mutex<MemFile>, data: &[u8], offset: u64) -> io::Result<()> {
+    let mut s = s.lock();
+    let mut f = f.lock();
+    let end = offset as usize + data.len();
+    s.grow(end.saturating_sub(f.data.len()) as u64)?;
+    if f.data.len() < end {
+        f.data.resize(end, 0);
+    }
+    f.data[offset as usize..end].copy_from_slice(data);
+    f.dirty.push((offset as usize, end));
+    Ok(())
+}
+
+/// A write handle of a [`MemPack`] (see [`PackFile::writer`]).
+struct MemWrite {
+    s: Arc<Mutex<State>>,
+    f: Arc<Mutex<MemFile>>,
+}
+
+impl PackWrite for MemWrite {
+    fn write_at(&self, data: &[u8], offset: u64) -> io::Result<()> {
+        write_file(&self.s, &self.f, data, offset)
+    }
+}
+
 impl PackFile for MemPack {
     fn write_at(&mut self, data: &[u8], offset: u64) -> io::Result<()> {
-        let mut s = self.s.lock();
-        let mut f = self.f.lock();
-        let end = offset as usize + data.len();
-        s.grow(end.saturating_sub(f.data.len()) as u64)?;
-        if f.data.len() < end {
-            f.data.resize(end, 0);
-        }
-        f.data[offset as usize..end].copy_from_slice(data);
-        f.dirty.push((offset as usize, end));
-        Ok(())
+        write_file(&self.s, &self.f, data, offset)
     }
 
     fn set_len(&mut self, len: u64) -> io::Result<()> {
@@ -543,6 +560,10 @@ impl PackFile for MemPack {
 
     fn sync_handle(&self) -> Option<Arc<dyn PackSync>> {
         Some(Arc::new(MemSync { s: Arc::clone(&self.s), f: Arc::clone(&self.f), hold: Arc::clone(&self.hold) }))
+    }
+
+    fn writer(&self) -> Option<Arc<dyn PackWrite>> {
+        Some(Arc::new(MemWrite { s: Arc::clone(&self.s), f: Arc::clone(&self.f) }))
     }
 }
 

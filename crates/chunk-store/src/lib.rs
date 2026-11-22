@@ -48,7 +48,7 @@ use crate::lock_stats::Site;
 use crate::sync::{Condvar, Mutex, MutexGuard, Rank};
 use crate::index::{Counts, Hwm, Index, MergeOut, Snapshot};
 use crate::run::Run;
-use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK, SyncWait};
+use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PackSync, PUNCH_BLOCK, SyncWait};
 pub use crate::locality::LocalityStats;
 use crate::locality::LocalityCache;
 pub use crate::mark::{LiveFilter, LiveSet, LIVE_FILTER_BITS};
@@ -302,6 +302,17 @@ impl GcPacer for NoPacer {
 const COPY_BATCH: usize = 1024;
 /// Objects smaller than this are not compressed.
 const MIN_COMPRESS: usize = 64;
+
+/// The longest wait of a store call for a slow job of another thread (a
+/// seal, a pack create, a background sync). At the limit the call fails
+/// with an I/O error of kind `TimedOut`; the store is not failed, since
+/// nothing was lost.
+const STORE_WAIT: Duration = Duration::from_secs(10);
+
+/// The error of a wait that reached `STORE_WAIT`.
+fn timed_out(what: &str) -> Error {
+    Error::Io(io::Error::new(io::ErrorKind::TimedOut, format!("the chunk store waited {} s for {what}", STORE_WAIT.as_secs())))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Loc {
@@ -579,6 +590,28 @@ struct Active {
     entries: Vec<(ObjectId, Loc)>,
     /// Bytes appended since the last sync.
     dirty: bool,
+    /// A handle that syncs the pack with no store lock held (`None`: the
+    /// file has none; then a sync runs under the lock).
+    sync: Option<Arc<dyn PackSync>>,
+    /// Appends so far: a sync with no lock clears `dirty` only if none came
+    /// after its start.
+    published: u64,
+}
+
+impl Active {
+    fn new(num: u64, file: Box<dyn PackFile>, len: u64, entries: Vec<(ObjectId, Loc)>, dirty: bool) -> Self {
+        let sync = file.sync_handle();
+        Active { num, file, len, entries, dirty, sync, published: 0 }
+    }
+}
+
+/// A sync that runs with no store lock (see `ChunkStore::sync`): what it
+/// syncs, and the marks that say which flags it may clear after.
+struct SyncJob {
+    /// The active pack: its number, its `published` count, its handle.
+    pack: Option<(u64, u64, Arc<dyn PackSync>)>,
+    /// The directory: `Inner::created` at the start.
+    dir: Option<u64>,
 }
 
 struct Inner {
@@ -599,6 +632,9 @@ struct Inner {
     stats: Stats,
     /// A pack file was created since the last directory sync.
     dir_dirty: bool,
+    /// Pack files created so far: a directory sync with no lock clears
+    /// `dir_dirty` only if none came after its start.
+    created: u64,
     /// While a GC runs: every object put or read since `gc_begin`. GC keeps
     /// them even if its mark did not find them.
     touched: Option<Touched>,
@@ -1280,6 +1316,7 @@ impl ChunkStore {
                 packs: nums.len() as u64,
             },
             dir_dirty: false,
+            created: 0,
             touched: None,
             failed: false,
             merge: Arc::new(MergeCtl::default()),
@@ -1354,7 +1391,7 @@ impl ChunkStore {
             if let Some((file, len)) = active {
                 // The pack keeps all its entries (for its `.idx` at seal);
                 // only the memtable skips those below the hwm.
-                inner.active = Some(Active { num, file, len, entries, dirty: false });
+                inner.active = Some(Active::new(num, file, len, entries, false));
                 continue;
             }
             if !opts.read_only && inner.index.mem_len() >= limit {
@@ -1632,9 +1669,10 @@ impl ChunkStore {
         if inner.active.is_some() {
             return Ok(Some(file));
         }
-        inner.active = Some(Active { num, file, len: PACK_HEADER as u64, entries: Vec::new(), dirty: true });
+        inner.active = Some(Active::new(num, file, PACK_HEADER as u64, Vec::new(), true));
         inner.stats.packs += 1;
         inner.dir_dirty = true;
+        inner.created += 1;
         Ok(None)
     }
 
@@ -1652,9 +1690,10 @@ impl ChunkStore {
             inner.next_pack += 1;
             let mut file = self.io.create(num)?;
             file.write_at(&pack_header(num), 0)?;
-            inner.active = Some(Active { num, file, len: PACK_HEADER as u64, entries: Vec::new(), dirty: true });
+            inner.active = Some(Active::new(num, file, PACK_HEADER as u64, Vec::new(), true));
             inner.stats.packs += 1;
             inner.dir_dirty = true;
+            inner.created += 1;
         }
         let a = inner.active.as_mut().unwrap();
         a.file.write_at(rec, a.len)?;
@@ -1662,6 +1701,7 @@ impl ChunkStore {
         a.len += rec.len() as u64;
         a.entries.push((*id, loc));
         a.dirty = true;
+        a.published += 1;
         if a.len >= self.opts.pack_limit {
             self.seal(inner)?;
         }
@@ -2827,11 +2867,21 @@ impl ChunkStore {
 
     /// Make every object put so far durable. Without new objects this does
     /// not touch the disk.
+    ///
+    /// No fsync runs under the store lock (LOCK-01), so puts and reads go
+    /// on meanwhile (#108):
+    /// 1. Start the sync of the active pack in the background, and wait for
+    ///    it and for a background seal with no lock.
+    /// 2. Wait (with no lock) for a seal that started since, and under the
+    ///    lock join it and take the handle of the active pack and the marks
+    ///    (see `SyncJob`). With no lock, sync the pack through the handle,
+    ///    then the directory. Under the lock again, set `failed` on an
+    ///    error, else clear the flags that nothing changed since the marks.
+    ///
+    /// A pack with no sync handle is synced under the lock (a rare
+    /// fallback, `Inner::sync_locked_fallback`). GC, `gc_begin` and `close`
+    /// still sync under the lock; they are not on the put and read paths.
     pub fn sync(&self) -> Result<()> {
-        // Start the sync of the active pack and wait for it without the
-        // store lock, so puts go on meanwhile (#108). The sync below, under
-        // the lock, then has only the bytes put since, and gives the outcome.
-        // The same for a background seal.
         let (seal, wait) = {
             let mut inner = self.inner.lock();
             inner.check()?;
@@ -2841,11 +2891,61 @@ impl ChunkStore {
         for w in seal.iter().chain(&wait) {
             w.wait();
         }
+        let job = {
+            let mut inner = self.lock_no_seal()?;
+            inner.check()?;
+            inner.join_seal()?;
+            match inner.sync_job() {
+                Some(job) => job,
+                None => return inner.sync_locked_fallback(&*self.io),
+            }
+        };
+        self.run_sync(job)
+    }
+
+    /// The store lock, with no background seal in flight: a seal that runs
+    /// is waited for with no lock (at most `STORE_WAIT`), so the join under
+    /// the lock then takes no time.
+    fn lock_no_seal(&self) -> Result<MutexGuard<'_, Inner>> {
+        loop {
+            let inner = self.inner.lock();
+            let Some(w) = inner.sealing.as_ref().filter(|s| !s.done.is_done()).map(|s| s.done.clone()) else {
+                return Ok(inner);
+            };
+            drop(inner);
+            if !w.wait_timeout(STORE_WAIT) {
+                return Err(timed_out("a pack seal"));
+            }
+        }
+    }
+
+    /// Run a `SyncJob` with no store lock; then, under the lock, set
+    /// `failed` on an error, or clear the flags by its marks.
+    fn run_sync(&self, job: SyncJob) -> Result<()> {
+        if job.pack.is_none() && job.dir.is_none() {
+            return Ok(());
+        }
+        let r = (|| -> io::Result<()> {
+            if let Some((_, _, h)) = &job.pack {
+                h.sync()?;
+            }
+            if job.dir.is_some() {
+                self.io.sync_dir()?;
+            }
+            Ok(())
+        })();
         let mut inner = self.inner.lock();
-        inner.check()?;
-        inner.sync_active()?;
-        if inner.dir_dirty {
-            inner.sync_dir(&*self.io)?;
+        if let Err(e) = r {
+            inner.failed = true;
+            return Err(e.into());
+        }
+        if let (Some((num, published, _)), Some(a)) = (&job.pack, inner.active.as_mut()) {
+            if a.num == *num && a.published == *published {
+                a.dirty = false;
+            }
+        }
+        if job.dir.is_some_and(|c| c == inner.created) {
+            inner.dir_dirty = false;
         }
         Ok(())
     }
@@ -3116,6 +3216,7 @@ impl Inner {
             trust_floor: Some(0),
             stats: Stats::default(),
             dir_dirty: false,
+            created: 0,
             touched: None,
             failed: false,
             merge: Arc::new(MergeCtl::default()),
@@ -3148,7 +3249,9 @@ impl Inner {
 
     /// Sync the active pack if it has new bytes, after the background seal
     /// of the pack before it: then every record so far is durable. A failure
-    /// is final.
+    /// is final. It syncs under the store lock: only GC, `gc_begin`, `close`
+    /// and the fallback below call it (`ChunkStore::sync` and the index
+    /// flush sync through a handle with no lock).
     fn sync_active(&mut self) -> Result<()> {
         self.join_seal()?;
         if let Some(a) = self.active.as_mut() {
@@ -3159,6 +3262,29 @@ impl Inner {
                 }
                 a.dirty = false;
             }
+        }
+        Ok(())
+    }
+
+    /// What a sync with no store lock must do now: the active pack through
+    /// its handle if it is dirty, and the directory if it is dirty. `None`
+    /// if the dirty active pack has no handle (then
+    /// `sync_locked_fallback`).
+    fn sync_job(&self) -> Option<SyncJob> {
+        let pack = match self.active.as_ref().filter(|a| a.dirty) {
+            Some(a) => Some((a.num, a.published, Arc::clone(a.sync.as_ref()?))),
+            None => None,
+        };
+        Some(SyncJob { pack, dir: self.dir_dirty.then_some(self.created) })
+    }
+
+    /// The rare fallback of a sync with no handle (`try_clone` failed): sync
+    /// the active pack and the directory under the store lock. A failure
+    /// is final.
+    fn sync_locked_fallback(&mut self, io: &dyn PackIo) -> Result<()> {
+        self.sync_active()?;
+        if self.dir_dirty {
+            self.sync_dir(io)?;
         }
         Ok(())
     }

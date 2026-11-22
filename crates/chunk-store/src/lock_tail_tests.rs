@@ -265,3 +265,50 @@ fn put_passes_a_held_pack_open() {
     assert_eq!(a.recv_timeout(LIMIT).expect("A ends after the open is released"), data(1, 3000));
     assert_eq!(s.read(&x5).unwrap(), small);
 }
+
+/// The store over `mem`, with the retry layer (zero waits) if `retrying`.
+fn io_of(mem: &MemIo, retrying: bool) -> Arc<dyn crate::pack_io::PackIo> {
+    if retrying {
+        Arc::new(crate::retry::RetryingIo::with_backoff(Arc::new(mem.clone()), Vec::new()))
+    } else {
+        Arc::new(mem.clone())
+    }
+}
+
+/// A's `sync` parks in its held fsync (with the retry layer, maybe first in
+/// the background sync of phase 1). B's put and read must not wait for it;
+/// after a crash every object put before the last sync reads back.
+fn phase_two_sync(retrying: bool) {
+    let mem = MemIo::new();
+    let s = Arc::new(ChunkStore::open_with(io_of(&mem, retrying), small_packs()).unwrap());
+    let x = s.put(&data(1, 300)).unwrap();
+    mem.hold_syncs(true);
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.sync())
+    };
+    assert!(mem.wait_parked(Hold::Syncs, 1, LIMIT), "A is in a held sync");
+    let b = put_and_read(&s, data(2, 300), x).recv_timeout(LIMIT);
+    let a_waited = a.try_recv().is_err();
+    mem.hold_syncs(false);
+    let (y, got) = b.expect("B's put and read finished while A synced");
+    assert!(a_waited, "A was still in its sync while B ran");
+    assert_eq!(got, data(1, 300));
+    a.recv_timeout(LIMIT).expect("A ends after the sync is released").unwrap();
+    s.sync().unwrap();
+    drop(s);
+    mem.crash();
+    let s = ChunkStore::open_with(io_of(&mem, retrying), small_packs()).unwrap();
+    assert_eq!(s.read(&x).unwrap(), data(1, 300));
+    assert_eq!(s.read(&y).unwrap(), data(2, 300));
+}
+
+#[test]
+fn put_and_read_pass_a_held_phase_two_sync() {
+    phase_two_sync(false);
+}
+
+#[test]
+fn retrying_put_and_read_pass_a_held_phase_two_sync() {
+    phase_two_sync(true);
+}
