@@ -211,6 +211,18 @@ impl OpenFileState {
     }
 }
 
+/// Phase A of a rebase step (see `SliceFsFilesystem::rebase_unlocked`).
+struct StepPlan {
+    /// The overlay generation the step starts from.
+    generation: u64,
+    /// Logical size of the overlay (and of the new root).
+    size: u64,
+    /// The stored pieces, as `(start, len)` heads of extents.
+    pieces: Vec<(u64, usize)>,
+    free: usize,
+    cost_before: usize,
+}
+
 /// The open write state of one inode, shared by every handle of it (D-03).
 /// Requests lock it in place; no request takes the state out.
 struct FileCell {
@@ -223,7 +235,7 @@ struct FileCell {
 
 impl FileCell {
     fn new(ino: u64) -> Self {
-        let state = CellState { file: OpenFileState::new(ino), write_handles: 0, retired: false };
+        let state = CellState { file: OpenFileState::new(ino), write_handles: 0, retired: false, rebasing: false };
         FileCell {
             ino,
             state: sync::Mutex::new_keyed(Rank::Cell, ino, state).timed(Site::FileCell),
@@ -240,6 +252,10 @@ struct CellState {
     /// cell leaves the map. A holder of an old `Arc` that finds it set must
     /// look the inode up again (or, if it only reads, use the manifest).
     retired: bool,
+    /// A rebase step of this cell is in its I/O phase with the cell
+    /// unlocked (D-02): at most one at a time, so another writer over the
+    /// limit skips its inline step.
+    rebasing: bool,
 }
 
 /// A locked cell. When it is dropped (and at `sync_dirty`), it moves
@@ -248,12 +264,25 @@ struct CellState {
 struct CellGuard<'a> {
     total: &'a AtomicUsize,
     cell: &'a FileCell,
-    state: sync::MutexGuard<'a, CellState>,
+    /// `None` only inside `unlocked`.
+    state: Option<sync::MutexGuard<'a, CellState>>,
 }
 
 impl CellGuard<'_> {
+    /// Run `f` with the cell unlocked (the dirty cost is synced first), then
+    /// lock it again. The state can change meanwhile, and the cell can be
+    /// retired: the caller checks again.
+    fn unlocked<R>(&mut self, f: impl FnOnce() -> R) -> R {
+        self.sync_dirty();
+        self.state = None;
+        let r = f();
+        self.state = Some(self.cell.state.lock());
+        r
+    }
+
     fn sync_dirty(&self) {
-        let cost = if self.state.retired { 0 } else { dirty_cost(&self.state.file) };
+        let Some(state) = &self.state else { return };
+        let cost = if state.retired { 0 } else { dirty_cost(&state.file) };
         let old = self.cell.dirty.swap(cost, Ordering::Relaxed);
         if cost >= old {
             self.total.fetch_add(cost - old, Ordering::Relaxed);
@@ -266,13 +295,13 @@ impl CellGuard<'_> {
 impl Deref for CellGuard<'_> {
     type Target = CellState;
     fn deref(&self) -> &CellState {
-        &self.state
+        self.state.as_ref().expect("cell locked")
     }
 }
 
 impl DerefMut for CellGuard<'_> {
     fn deref_mut(&mut self) -> &mut CellState {
-        &mut self.state
+        self.state.as_mut().expect("cell locked")
     }
 }
 
@@ -394,7 +423,8 @@ pub struct SliceFsFilesystem {
     /// `Write` payload bytes the last commit logged again (for tests).
     last_relog_bytes: AtomicU64,
     /// Run inside each rebase, after the new root is finished and before it
-    /// is installed (for tests: online GC during a rebase).
+    /// is installed, with the cell unlocked unless the step holds it (for
+    /// tests: online GC during a rebase, a parked rebase).
     rebase_hook: sync::Mutex<Option<RebaseHook>>,
     /// Run inside each read through the per-inode reader, with it locked
     /// (for tests: a reader parked in the middle of a read).
@@ -542,7 +572,7 @@ impl SliceFsFilesystem {
     }
 
     fn lock_cell<'a>(&'a self, cell: &'a FileCell) -> CellGuard<'a> {
-        CellGuard { total: &self.dirty_total, cell, state: cell.state.lock() }
+        CellGuard { total: &self.dirty_total, cell, state: Some(cell.state.lock()) }
     }
 
     /// Run `f` on the open write state of `ino` under its cell lock; `None`
@@ -1133,81 +1163,162 @@ impl SliceFsFilesystem {
         self.rebase_step(ino, s, usize::MAX)
     }
 
-    /// Store a part of an overlay as a new root (#108): take extents worth
-    /// `free` bytes of cost (`Overlay::take`; all of them for `usize::MAX`),
-    /// splice them onto the base, and go on with an overlay on the new root
-    /// that holds the extents not taken. The new root has the old bytes
-    /// under those extents; they stay on top of it, so the content does not
-    /// change. The first step also stores a cut or an extended tail.
+    /// Store a part of an overlay as a new root (#108), with the cell lock
+    /// held across the I/O: the three phases of `rebase_unlocked` in one
+    /// lock hold, so the publish always holds. For `usize::MAX` the splice
+    /// reads the live overlay (no copy, #98); a smaller step copies its
+    /// pieces (about `max(free, MIN_TAKE)` bytes).
     ///
-    /// The splice cuts again only the chunks near the taken extents; every
+    /// The splice cuts again only the chunks near the stored extents; every
     /// other chunk and whole old node is reused by ID. Fixed memory,
     /// canonical key, CPU in the change (on long repeating non-zero data the
     /// re-chunk can run to the end of the file). A clean overlay is kept.
     ///
-    /// GC: like a whole rebase, a step runs inside one callback under the
-    /// shared commit gate, and the old base stays in the manifest until the
-    /// new root is installed.
+    /// GC: a step runs inside one callback under the shared commit gate,
+    /// and the old base stays in the manifest until the new root is
+    /// installed.
     fn rebase_step(&self, ino: u64, s: &mut OpenFileState, free: usize) -> Result<(), i32> {
-        let modified = s.modified;
-        let WriteMode::Overlay(ov) = &mut s.write_mode else {
+        let Some((plan, part)) = Self::step_plan(s, free, free != usize::MAX) else {
             return Ok(());
         };
-        if ov.is_clean() {
-            return Ok(());
+        let done = match (&part, &s.write_mode) {
+            (Some(p), _) => self.step_io(ino, p, &plan),
+            (None, WriteMode::Overlay(ov)) => self.step_io(ino, ov, &plan),
+            (None, WriteMode::Streaming { .. }) => unreachable!("step_plan gives a plan for an overlay only"),
+        }?;
+        drop(part);
+        self.step_publish(ino, s, plan, done).map(|_| ())
+    }
+
+    /// One rebase step of the locked cell `g` by the protocol of D-02:
+    /// Phase A (cell locked, memory only) copies the pieces and reads the
+    /// generation; Phase B (cell unlocked) splices, hashes and puts them and
+    /// runs the rebase hook; Phase C (cell locked) publishes only if the
+    /// generation did not move. A dropped result is garbage until a GC. On
+    /// a Phase B error nothing is put back: the live overlay kept every byte
+    /// (RESEARCH Pitfall 2).
+    ///
+    /// `Ok(false)`: no step ran to the end (another one is in its I/O
+    /// phase, or the overlay changed meanwhile); `Ok(true)`: published, or
+    /// nothing to do (clean, or the cell was retired meanwhile).
+    fn rebase_unlocked(&self, g: &mut CellGuard<'_>, free: usize) -> Result<bool, i32> {
+        if g.rebasing {
+            return Ok(false);
         }
+        let Some((plan, Some(part))) = Self::step_plan(&g.file, free, true) else {
+            return Ok(true);
+        };
+        let ino = g.file.ino;
+        g.rebasing = true;
+        let done = g.unlocked(|| self.step_io(ino, &part, &plan));
+        drop(part);
+        g.rebasing = false;
+        if g.retired {
+            return Ok(true);
+        }
+        let done = done?;
+        self.step_publish(ino, &mut g.file, plan, done)
+    }
+
+    /// Phase A of a rebase step (memory only): the pieces to store, the
+    /// generation, and with `copy` a copy of the overlay with those pieces
+    /// only. `None` for a clean overlay or a stream.
+    fn step_plan(s: &OpenFileState, free: usize, copy: bool) -> Option<(StepPlan, Option<Overlay>)> {
+        let WriteMode::Overlay(ov) = &s.write_mode else { return None };
+        if ov.is_clean() {
+            return None;
+        }
+        let (pieces, part) = if copy {
+            let copied = ov.copy_step(free);
+            let pieces = copied.iter().map(|(o, v)| (*o, v.len())).collect();
+            let mut part = ov.empty_like();
+            for (o, v) in copied {
+                part.put(o, v);
+            }
+            (pieces, Some(part))
+        } else {
+            (ov.step_ranges(free), None)
+        };
+        let plan = StepPlan { generation: ov.generation(), size: ov.size, pieces, free, cost_before: ov.cost() };
+        Some((plan, part))
+    }
+
+    /// Phase B of a rebase step (no cell lock needed): splice the extents
+    /// of `src` (the copy, or the live overlay when every extent is stored)
+    /// onto its base, store the manifest node of the new root, count, and
+    /// run the rebase hook (after the new root is finished, before it is
+    /// installed). Returns the new root and its manifest digest.
+    fn step_io(&self, ino: u64, src: &Overlay, plan: &StepPlan) -> Result<(Option<ObjectKey>, Option<ObjectKey>), i32> {
         let cs = &*self.content;
         let store_err = |e: std::io::Error| {
             eprintln!("[{}][FUSE] rebase: content store error: {e}", ts());
             libc::EIO
         };
-        let size = ov.size;
+        let size = plan.size;
         let t0 = std::time::Instant::now();
-        let cost_before = ov.cost();
-        let mut part = ov.empty_like();
-        for (o, v) in ov.take(free) {
-            part.put(o, v);
-        }
-        let (taken_n, taken_bytes) = (part.extent_count(), part.extent_ranges().iter().map(|r| r.end - r.start).sum::<u64>());
-        let spliced = if size == 0 {
-            Ok((None, chunk_store::file::SpliceStats::default(), 0))
+        let ranges = src.extent_ranges();
+        let (taken_n, taken_bytes) = (ranges.len(), ranges.iter().map(|r| r.end - r.start).sum::<u64>());
+        let (root, stats, base_bytes) = if size == 0 {
+            (None, chunk_store::file::SpliceStats::default(), 0)
         } else {
-            OverlaySource::new(cs, &part).and_then(|mut src| {
-                let (k, stats) = content::splice(cs, part.base.as_ref(), part.visible, &part.extent_ranges(), size, &mut src)?;
-                Ok((Some(k), stats, src.base_bytes))
-            })
+            let mut src_io = OverlaySource::new(cs, src).map_err(store_err)?;
+            let (k, stats) = content::splice(cs, src.base.as_ref(), src.visible, &ranges, size, &mut src_io)
+                .map_err(store_err)?;
+            (Some(k), stats, src_io.base_bytes)
         };
         let splice_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        let installed = spliced.map_err(store_err).and_then(|(root, stats, base_bytes)| {
-            let rechunked = if root.is_some() { stats.rechunked } else { 0 };
-            let t1 = std::time::Instant::now();
-            self.rebase_count.fetch_add(1, Ordering::Relaxed);
-            LAST_REBASE_BYTES.with(|c| c.set(rechunked));
-            add_to(&WRITE_REBASE_BYTES, rechunked);
-            add_to(&WRITE_BASE_BYTES, base_bytes);
-            let hook = self.rebase_hook.lock().clone();
-            if let Some(hook) = hook {
-                hook();
-            }
-            let r = self.install_root(ino, root, size, modified).map(|_| root);
-            eprintln!("[t={}][rebase] ino={ino} size={size} free={} cost_before={cost_before} taken={taken_n}/{taken_bytes} \
-                rechunked={rechunked} base_read={base_bytes} reused_entries={} reused_nodes={} nodes_loaded={} splice_ms={splice_ms:.1} install_ms={:.1}",
-                crate::util::epoch(), if free == usize::MAX { "all".to_string() } else { free.to_string() },
-                stats.reused_entries, stats.reused_nodes, stats.nodes_loaded, t1.elapsed().as_secs_f64() * 1000.0);
-            r
-        });
-        let root = match installed {
-            Ok(root) => root,
-            Err(e) => {
-                // Put the taken extents back: no written byte is lost.
-                for (o, v) in part.into_extents() {
-                    ov.put(o, v);
-                }
-                return Err(e);
-            }
+        let digest = match root {
+            Some(k) => Some(self.meta.prepare_manifest(&[k]).map_err(|_| libc::EIO)?),
+            None => None,
         };
-        drop(part);
-        let mut next = Overlay::new(root, size, size);
+        let rechunked = if root.is_some() { stats.rechunked } else { 0 };
+        self.rebase_count.fetch_add(1, Ordering::Relaxed);
+        LAST_REBASE_BYTES.with(|c| c.set(rechunked));
+        add_to(&WRITE_REBASE_BYTES, rechunked);
+        add_to(&WRITE_BASE_BYTES, base_bytes);
+        eprintln!("[t={}][rebase] ino={ino} size={size} free={} cost_before={} taken={taken_n}/{taken_bytes} \
+            rechunked={rechunked} base_read={base_bytes} reused_entries={} reused_nodes={} nodes_loaded={} splice_ms={splice_ms:.1}",
+            crate::util::epoch(), if plan.free == usize::MAX { "all".to_string() } else { plan.free.to_string() },
+            plan.cost_before, stats.reused_entries, stats.reused_nodes, stats.nodes_loaded);
+        let hook = self.rebase_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+        Ok((root, digest))
+    }
+
+    /// Phase C of a rebase step (cell locked, memory only but for a size-0
+    /// root): if the overlay is still at the generation of `plan`, install
+    /// the new root (refcounts from `last_committed_root` as it is now),
+    /// remove the stored pieces, and go on with an overlay on the new root
+    /// that holds the rest. Else drop the result (`Ok(false)`).
+    fn step_publish(
+        &self,
+        ino: u64,
+        s: &mut OpenFileState,
+        plan: StepPlan,
+        (root, digest): (Option<ObjectKey>, Option<ObjectKey>),
+    ) -> Result<bool, i32> {
+        let WriteMode::Overlay(ov) = &mut s.write_mode else { return Ok(false) };
+        if ov.generation() != plan.generation {
+            return Ok(false);
+        }
+        let old = s.last_committed_root;
+        match (root, digest) {
+            (Some(k), Some(d)) if Some(k) != old => {
+                self.meta.set_manifest_digest(ino, d).map_err(|_| libc::EIO)?;
+                self.meta.increment_refcount(&k);
+                if let Some(o) = old {
+                    self.meta.decrement_refcount(&o);
+                }
+            }
+            (Some(_), _) => {}
+            (None, _) => self.clear_manifest(ino, None)?,
+        }
+        // The manifest names the new root now: the overlay follows it even
+        // if the stamp below fails.
+        ov.discard(&plan.pieces);
+        let mut next = Overlay::new(root, plan.size, plan.size);
         next.set_sweep(ov.sweep());
         let rest = std::mem::replace(ov, Overlay::new(None, 0, 0));
         for (o, v) in rest.into_extents() {
@@ -1215,8 +1326,8 @@ impl SliceFsFilesystem {
         }
         *ov = next;
         s.last_committed_root = root;
-        s.byte_count = size;
-        Ok(())
+        s.byte_count = plan.size;
+        self.stamp_content(ino, plan.size, s.modified).map(|_| true)
     }
 
     /// Read `size` bytes at `offset` of the content `root` of `ino` through
@@ -1365,7 +1476,8 @@ impl SliceFsFilesystem {
     ///   written bytes; nothing is allocated by offset or file size).
     ///
     /// The write runs under the cell lock of the inode, with the stream
-    /// pushes and rebase steps (Plans 06-07 move that I/O out of the lock).
+    /// pushes (Plan 07 moves that I/O out of the lock). The rebase step of
+    /// an overlay past its limit does its I/O with the cell unlocked.
     /// Only a write handle may write (else EBADF).
     pub fn test_write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, i32> {
         WRITE_REBASE_BYTES.with(|c| c.set(0));
@@ -1465,14 +1577,20 @@ impl SliceFsFilesystem {
         let cost = dirty_cost(file_state);
         let added = cost.saturating_sub(cost_before).min(data.len() + crate::overlay::EXTENT_OVERHEAD);
         let over = matches!(&file_state.write_mode, WriteMode::Overlay(_)) && cost > limit;
+        // The write is in the overlay already (a read sees all of it or
+        // none): the step does its I/O with the cell unlocked (D-02).
         let result = match result {
             Ok(n) if over => {
-                let ino = file_state.ino;
                 let free = (cost - limit.saturating_sub(REBASE_STEP)).min(added.max(REBASE_STEP));
-                self.rebase_step(ino, file_state, free).map(|_| n).map_err(|_| libc::EIO)
+                self.rebase_unlocked(&mut g, free).map(|_| n).map_err(|_| libc::EIO)
             }
             r => r,
         };
+        if g.retired {
+            // The last release finalized the file (with this write) while
+            // the step was unlocked.
+            return result;
+        }
         // Then the budget of all open files (#105), with the same bound.
         match result {
             Ok(n) => self.keep_budget(&mut g, added).map(|_| n),

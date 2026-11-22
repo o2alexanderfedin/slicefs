@@ -1334,6 +1334,24 @@ impl DictMetadataStore {
 }
 
 impl DictMetadataStore {
+    /// Store the manifest node of `blocks` and return its digest, with no
+    /// lock held (hash and put; the Phase B of a rebase step, D-02). A put
+    /// error is kept for the next commit, as for every node write.
+    pub fn prepare_manifest(&self, blocks: &[ObjectKey]) -> Result<ObjectKey, MetaError> {
+        let mut w = self.writer();
+        let digest = intern_manifest(&mut w, blocks);
+        self.kept(w);
+        Ok(digest)
+    }
+
+    /// Make `digest` (from `prepare_manifest`) the manifest of `ino`: memory
+    /// only, under the short manifest map lock.
+    pub fn set_manifest_digest(&self, ino: InodeId, digest: ObjectKey) -> Result<(), MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
+        self.manifest_data.lock().insert(ino, digest);
+        Ok(())
+    }
+
     /// Change the xattr set of `ino` with `f`: the set is read and stored
     /// with no lock held; the new digest goes in only if the old one is
     /// still current (else `f` runs again on the newer set), so a change
@@ -1464,12 +1482,8 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn set_manifest(&self, ino: InodeId, blocks: &[ObjectKey]) -> Result<(), MetaError> {
-        self.changes.fetch_add(1, Ordering::Relaxed);
-        let mut w = self.writer();
-        let digest = intern_manifest(&mut w, blocks);
-        self.kept(w);
-        self.manifest_data.lock().insert(ino, digest);
-        Ok(())
+        let digest = self.prepare_manifest(blocks)?;
+        self.set_manifest_digest(ino, digest)
     }
 
     fn get_manifest(&self, ino: InodeId) -> Result<Vec<ObjectKey>, MetaError> {
