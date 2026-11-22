@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 19
 current_phase_name: Fine-grained locks
 status: executing
-stopped_at: Completed 19-03-PLAN.md
-last_updated: "2026-11-22T02:48:47.645Z"
+stopped_at: Completed 19-04-PLAN.md
+last_updated: "2026-11-22T04:03:29.632Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 19 execution started
-state_head: bdeb0bfc5789b7d001246d82f98120373f7ac3b8
+state_head: 9d0d540ed96f3f19b25b86d3a03beaa005eca1fc
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 18
-  completed_plans: 10
+  completed_plans: 11
   percent: 14
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 19 (Fine-grained locks) — EXECUTING
-Plan: 4 of 11
+Plan: 5 of 11
 Status: Ready to execute
 Last activity: 2026-11-21 — Phase 19 execution started
 
@@ -56,6 +56,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 19 P01 | 60min | 3 tasks | 23 files |
 | Phase 19 P02 | 52min | 3 tasks | 6 files |
 | Phase 19 P03 | 50min | 3 tasks | 7 files |
+| Phase 19 P04 | 45min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -92,6 +93,9 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: 19-03: Live.flushing holds a ticket per take; install only on the same ticket (a commit and a cache flush can take one entry)
 - [Phase 19]: 19-03: create_*_at counts a number as taken if it is in inode_map, the cache or inode_data; reserve under inode_map
 - [Phase 19]: 19-03: hot path uses NodeReader/NodeWriter on the store's Arc<ChunkStore>; unsynced_puts and first put error kept in the store
+- [Phase 19]: 19-04: WAL append is a memory copy plus an LSN under one short queue lock; write_out drains in LSN order; one WAL lock order writer, queue or pending, loc, behind
+- [Phase 19]: 19-04: PerOp write-out failure is sticky until a cut or rotate, so a record dropped by another thread's failed write-out is still reported
+- [Phase 19]: 19-04: WAL fsync runs on a second file handle (begin_sync/end_sync with a SyncMark of segment id and write count); Behind::settle syncs with the behind lock released
 
 ### Pending Todos
 
@@ -113,8 +117,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-22T02:48:47.515Z
-Stopped at: Completed 19-03-PLAN.md
+Last session: 2026-11-22T04:03:29.494Z
+Stopped at: Completed 19-04-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
