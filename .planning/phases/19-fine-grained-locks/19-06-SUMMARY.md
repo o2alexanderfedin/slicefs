@@ -13,7 +13,7 @@ provides:
   - "Three-phase rebase step: Phase A copy under the cell lock, Phase B splice + manifest node + hook with no cell lock, Phase C publish if the generation did not move"
   - "CellState::rebasing (one step in its I/O phase per cell), CellGuard::unlocked"
   - "rebase_cell: skip while a step is in flight, locked retry after a drop, hard cap limit + 2 * REBASE_STEP"
-  - "test_dirty_cost(ino); crates/slicefs-cli/tests/lock_free_io.rs (5 tests)"
+  - "test_dirty_cost(ino); crates/slicefs-cli/tests/lock_free_io.rs (6 tests)"
 affects: [19-07, 19-08, 19-09, 19-10, 19-11, 20]
 
 estimate:
@@ -22,11 +22,11 @@ estimate:
 actuals:
   tokens: 11200
   tasks: 2
-  commits: 2
+  commits: 4
 
 plan_head_before: dd925c814c7abbd7674ade6f06ccbfa6cf391aa8
-plan_head_after: 9811c32ee2d68ae860b8325cabe7edee3c20e6c8
-commits: 2
+plan_head_after: 05a32e5e0a990e402f48eda48ac5af68fb38e21a
+commits: 4
 
 tech-stack:
   added: []
@@ -86,8 +86,9 @@ status: complete
 
 1. **Task 1: Overlay generation, copy_step and discard, three-phase rebase step** - `3a32c50` (feat)
 2. **Task 2: One rebase per cell, locked retry after a drop, hard cap, budget step through the protocol** - `9811c32` (feat)
+3. **Hard-cap test after the review** - `05a32e5` (test)
 
-**Plan metadata:** in the final docs commit.
+**Plan metadata:** `16a05db` (first docs commit) and the docs commit after `05a32e5`. `commits: 4` counts `dd925c8..05a32e5`, which includes `16a05db`.
 
 ## TDD record (red before green, no red commit)
 
@@ -96,15 +97,17 @@ status: complete
   - `a_dropped_step_is_retried_with_the_cell_locked`: **red**. The message was "the dropped attempt and the locked retry" (`rebase_count` moved by 1, not 2). It was green after `rebase_cell`.
   - `a_second_writer_skips_its_step_while_one_is_in_flight`: green before the fix. Task 1 has the `rebasing` skip already.
   - `dirty_cost_stays_under_the_hard_cap`: green before the fix. A fully dirty 2 MiB file costs about the cap, so this test cannot show a cap break (see Deviations). After Task 2 the run did 6 rebase steps for 800 writes.
+- After the plan tasks, `a_writer_past_the_hard_cap_steps_while_one_is_in_flight` was added (commit `05a32e5`). It is a deterministic test of the cap branch. With `hard_cap()` set to `usize::MAX` for one local run, it was **red**: "write 14: dirty cost 2261124 > cap 2162688". With the real cap it passed. In the same commit, the patch of `a_dropped_step_is_retried_with_the_cell_locked` moved to 300 KiB, inside the parked copy, so the content check shows that the newer bytes win over the dropped copy.
 
 ## Verification
 
 - `cargo test -p slicefs-cli --lib overlay::`: 8 passed, among them `every_change_moves_gen_and_a_copy_does_not` and `a_copy_then_discard_at_one_gen_equals_take`.
-- `cargo test -p slicefs-cli --test lock_free_io`: 5 passed (0.24 s).
+- `cargo test -p slicefs-cli --test lock_free_io`: 5 passed (0.24 s) after Task 2, and 6 passed after the hard-cap test.
 - `cargo test -p slicefs-cli --test gc_online_tests --test rebase_step_tests`: 15 and 4 passed. `online_gc_during_a_rebase_keeps_every_chunk` and `online_gc_inside_a_rebase_step_keeps_every_chunk` passed unchanged.
 - Tracer gate after Task 1: `lock_free_io` and `overlay::` ran again on the committed tree and passed.
 - Serialize-off one-file run (`STRESS_SERIALIZE=0 STRESS_MODE=one-file STRESS_SECS=3 STRESS_THREADS=4 STRESS_FILE_MIB=4`): exit 0. The result was `max_inflight=4`, `ops=2303 dirty_total=0`, `op=write n=1332 p99_us=25083.9`, `op=read n=2213 p99_us=665.6`, with no "mismatches" line.
-- Full suite command from 19-VALIDATION.md, on the final tree: exit 0. It printed 66 `test result: ok` lines, with no `FAILED` and no `lock rank violation`.
+- `cargo test --workspace` before the `05a32e5` commit: exit 0, 66 `test result: ok` lines, no `FAILED`.
+- Full suite command from 19-VALIDATION.md, on the Task 2 tree (`05a32e5` changed only `lock_free_io.rs`): exit 0. It printed 66 `test result: ok` lines, with no `FAILED` and no `lock rank violation`.
 - `cargo test -p slicefs-cli --features lock-stats --test lock_stats_report`: 1 passed.
 - Acceptance greps: `fn copy_step` 1, `fn discard` 1, `fn prepare_manifest` 1, `fn reader_does_not_wait_for_rebase_io` 1, `fn dirty_cost_stays_under_the_hard_cap` 1, `rebasing` in filesystem.rs 6.
 
@@ -143,6 +146,7 @@ See `key-decisions`. All of them can be changed later.
 
 - Plan 07: still under the cell lock: the stream `push` in `test_write`, `to_overlay` (`finish` of the stream clone, `has_content`, `get_manifest`), `settle_pending` (`fill_stream`), `flush_state` (`end_padded`) and `finalize_write` (with `rebase_overlay` in one hold). `CellGuard::unlocked`, `step_plan`, `step_io` and `step_publish` can be used again there.
 - `rebase_hook` now fires with the cell unlocked in `rebase_unlocked`. It fires with the cell locked in `rebase_step` (finalize, the locked retry, and the hard-cap step). A test hook that parks must park only once, or it can hold the cell lock.
+- `test_write` now has more than one cell-lock hold. A later plan that logs the `Write` record under the same lock as its apply must log it in the first hold, before `rebase_cell` unlocks the cell.
 - `keep_budget` stops when a step frees nothing. A skip (another step in flight) or a drop therefore ends the budget loop for that write.
 - The coarse rule drops a result on any change. Phase 20 can publish when the changes since Phase A do not touch the copied ranges (RESEARCH Pattern 1, optional).
 
@@ -159,11 +163,11 @@ None.
 None. There is no new endpoint, file kind or trust boundary.
 - T-19-SC: no new crate.
 - T-19-19: publish only at the same generation. Every change moves it (unit test per method), generations never repeat, and nothing is put back.
-- T-19-20: one step per cell, a locked retry after a drop, and the hard cap (`dirty_cost_stays_under_the_hard_cap`).
+- T-19-20: one step per cell, a locked retry after a drop, and the hard cap (`a_writer_past_the_hard_cap_steps_while_one_is_in_flight` tests the cap branch; `dirty_cost_stays_under_the_hard_cap` tests 4 writers).
 - T-19-21: refcounts use `last_committed_root` as read in Phase C.
 - T-19-22: Phase B runs on the request thread inside its gate hold. The GC-in-hook tests pass unchanged.
 
 ## Self-Check: PASSED
 
 - `crates/slicefs-cli/tests/lock_free_io.rs` and this SUMMARY: FOUND
-- Commits `3a32c50` and `9811c32`: FOUND on HEAD (`git rev-list --count dd925c8..HEAD` prints 2)
+- Commits `3a32c50`, `9811c32`, `16a05db` and `05a32e5`: FOUND on HEAD (`git rev-list --count dd925c8..05a32e5` prints 4)
