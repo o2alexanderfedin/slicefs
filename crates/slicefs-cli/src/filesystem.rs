@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chunk_store::lock_stats::{self, Site};
+use chunk_store::lock_stats::Site;
+use chunk_store::sync::{self, Rank};
 use crate::util::ts;
 
 use slicefs_traits::key::ObjectKey;
@@ -199,22 +200,22 @@ pub struct CommitCut<'a> {
 pub struct SliceFsFilesystem {
     pub(crate) meta: Arc<DictMetadataStore>,
     pub(crate) io: Arc<Mutex<StoreIo>>,
-    open_files: Mutex<HashMap<u64, OpenFileState>>,
+    open_files: sync::Mutex<HashMap<u64, OpenFileState>>,
     /// A second (third, ...) write handle of an inode shares the write state
     /// of the first: alias fh -> the fh that holds the state in `open_files`.
     /// POSIX: every handle writes the same file. With a state per handle,
     /// the last close won and the other handle's bytes were lost.
-    write_alias: Mutex<HashMap<u64, u64>>,
+    write_alias: sync::Mutex<HashMap<u64, u64>>,
     /// File content store (`<store>/packs/`).
     pub(crate) content: Content,
     /// A content reader per inode (keeps its node and chunk caches). A reader
     /// whose key no longer matches the file content is replaced on use.
-    readers: Mutex<HashMap<u64, content::Reader>>,
+    readers: sync::Mutex<HashMap<u64, content::Reader>>,
     /// Every open handle (read-only too): fh -> ino. Used to keep an unlinked
     /// inode alive until its last handle closes.
-    handles: Mutex<HashMap<u64, u64>>,
+    handles: sync::Mutex<HashMap<u64, u64>>,
     /// Inodes whose last link was removed while handles were still open.
-    orphans: Mutex<HashSet<u64>>,
+    orphans: sync::Mutex<HashSet<u64>>,
     next_fh: AtomicU64,
     pub(crate) store_path: Option<PathBuf>,
     pub(crate) auto_snapshot: bool,
@@ -238,7 +239,7 @@ pub struct SliceFsFilesystem {
     write_base_bytes: AtomicU64,
     /// Run inside each rebase, after the new root is finished and before it
     /// is installed (for tests: online GC during a rebase).
-    rebase_hook: Mutex<Option<RebaseHook>>,
+    rebase_hook: sync::Mutex<Option<RebaseHook>>,
     /// Write requests so far (write, create, setattr): the online GC gives
     /// way to writes by it (`gc_pacing`).
     write_activity: Arc<AtomicU64>,
@@ -266,11 +267,11 @@ impl SliceFsFilesystem {
             meta: Arc::new(meta),
             io,
             content,
-            open_files: Mutex::new(HashMap::new()),
-            write_alias: Mutex::new(HashMap::new()),
-            readers: Mutex::new(HashMap::new()),
-            handles: Mutex::new(HashMap::new()),
-            orphans: Mutex::new(HashSet::new()),
+            open_files: sync::Mutex::new(Rank::Short, HashMap::new()).timed(Site::OpenFiles),
+            write_alias: sync::Mutex::new(Rank::Short, HashMap::new()),
+            readers: sync::Mutex::new(Rank::Short, HashMap::new()).timed(Site::Readers),
+            handles: sync::Mutex::new(Rank::Short, HashMap::new()),
+            orphans: sync::Mutex::new(Rank::Short, HashSet::new()),
             next_fh: AtomicU64::new(0),
             store_path,
             auto_snapshot: false,
@@ -283,7 +284,7 @@ impl SliceFsFilesystem {
             last_relog_bytes: AtomicU64::new(0),
             write_rebase_bytes: AtomicU64::new(0),
             write_base_bytes: AtomicU64::new(0),
-            rebase_hook: Mutex::new(None),
+            rebase_hook: sync::Mutex::new(Rank::Short, None),
             write_activity: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -333,7 +334,7 @@ impl SliceFsFilesystem {
     /// Test hook: the dirty bytes of all open files (overlay costs and the
     /// pending out-of-order writes of streams).
     pub fn test_dirty_total(&self) -> usize {
-        lock_stats::lock(&self.open_files, Site::OpenFiles).values().map(dirty_cost).sum()
+        self.open_files.lock().values().map(dirty_cost).sum()
     }
 
     /// Test hook: the `Write` payload bytes the last commit logged again.
@@ -344,7 +345,7 @@ impl SliceFsFilesystem {
     /// Test hook: run `hook` inside each rebase, after the new root is
     /// finished and before it is installed (`None`: no hook).
     pub fn test_set_rebase_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
-        *self.rebase_hook.lock().unwrap() = hook;
+        *self.rebase_hook.lock() = hook;
     }
 
     /// Enable auto-snapshot on clean unmount.
@@ -370,13 +371,13 @@ impl SliceFsFilesystem {
     /// The inode of an open handle.
     pub(crate) fn ino_of_fh(&self, fh: u64) -> Option<u64> {
         let fh = self.owner_fh(fh);
-        lock_stats::lock(&self.open_files, Site::OpenFiles).get(&fh).map(|s| s.ino)
+        self.open_files.lock().get(&fh).map(|s| s.ino)
     }
 
     /// The handle that holds the write state of `fh`: `fh` itself, or the
     /// first write handle of the same inode (see `write_alias`).
     fn owner_fh(&self, fh: u64) -> u64 {
-        self.write_alias.lock().unwrap().get(&fh).copied().unwrap_or(fh)
+        self.write_alias.lock().get(&fh).copied().unwrap_or(fh)
     }
 
     pub fn commit_gate(&self) -> Arc<RwLock<()>> {
@@ -575,19 +576,19 @@ impl SliceFsFilesystem {
     /// Allocate a file handle and record it as open on `ino`.
     fn open_handle(&self, ino: u64) -> u64 {
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
-        self.handles.lock().unwrap().insert(fh, ino);
+        self.handles.lock().insert(fh, ino);
         fh
     }
 
     /// Forget handle `fh`. If it was the last handle of an orphaned inode,
     /// reclaim the inode. A handle that is not open is ignored.
     fn close_handle(&self, fh: u64) {
-        let ino = match self.handles.lock().unwrap().remove(&fh) {
+        let ino = match self.handles.lock().remove(&fh) {
             Some(ino) => ino,
             None => return,
         };
-        let still_open = self.handles.lock().unwrap().values().any(|&i| i == ino);
-        if !still_open && self.orphans.lock().unwrap().remove(&ino) {
+        let still_open = self.handles.lock().values().any(|&i| i == ino);
+        if !still_open && self.orphans.lock().remove(&ino) {
             self.reclaim_inode(ino);
         }
     }
@@ -599,18 +600,18 @@ impl SliceFsFilesystem {
                 self.meta.decrement_refcount(digest);
             }
         }
-        lock_stats::lock(&self.readers, Site::Readers).remove(&ino);
+        self.readers.lock().remove(&ino);
         let _ = self.meta.delete_inode(ino);
     }
 
     /// The last link of a non-directory inode was removed: reclaim it now, or
     /// keep it as an orphan (nlink 0) while handles are still open.
     fn drop_last_link(&self, mut inode: InodeMeta) -> Result<(), i32> {
-        let open = self.handles.lock().unwrap().values().any(|&i| i == inode.ino);
+        let open = self.handles.lock().values().any(|&i| i == inode.ino);
         if open {
             inode.nlinks = 0;
             self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
-            self.orphans.lock().unwrap().insert(inode.ino);
+            self.orphans.lock().insert(inode.ino);
         } else {
             self.reclaim_inode(inode.ino);
         }
@@ -685,7 +686,7 @@ impl SliceFsFilesystem {
         let boundary = begin.map_err(|e| format!("GC start: chunk store error: {e}"))?;
         let mut file_roots = Vec::new();
         let mut states: Vec<Stream> = Vec::new();
-        for s in lock_stats::lock(&self.open_files, Site::OpenFiles).values() {
+        for s in self.open_files.lock().values() {
             match &s.write_mode {
                 WriteMode::Streaming { state, .. } => states.push(state.clone()),
                 WriteMode::Overlay(ov) => file_roots.extend(ov.base),
@@ -812,7 +813,7 @@ impl SliceFsFilesystem {
     /// (FUSE-T may open a file O_RDWR only to read it; such an idle handle
     /// must not take a size change meant for the real writer.)
     fn write_handle_of(&self, ino: u64) -> Option<u64> {
-        lock_stats::lock(&self.open_files, Site::OpenFiles).iter()
+        self.open_files.lock().iter()
             .filter(|(_, s)| s.ino == ino)
             .max_by_key(|(fh, s)| (s.byte_count, **fh))
             .map(|(&fh, _)| fh)
@@ -942,7 +943,7 @@ impl SliceFsFilesystem {
             self.last_rebase_bytes.store(rechunked, Ordering::Relaxed);
             self.write_rebase_bytes.fetch_add(rechunked, Ordering::Relaxed);
             self.write_base_bytes.fetch_add(base_bytes, Ordering::Relaxed);
-            let hook = self.rebase_hook.lock().unwrap().clone();
+            let hook = self.rebase_hook.lock().clone();
             if let Some(hook) = hook {
                 hook();
             }
@@ -979,7 +980,7 @@ impl SliceFsFilesystem {
     /// Read `size` bytes at `offset` of the content `root` of `ino` through
     /// the per-inode reader cache (it keeps its node and chunk caches).
     fn read_root(&self, ino: u64, root: &ObjectKey, offset: u64, size: usize) -> std::io::Result<Vec<u8>> {
-        let mut readers = lock_stats::lock(&self.readers, Site::Readers);
+        let mut readers = self.readers.lock();
         if readers.len() >= 64 && !readers.contains_key(&ino) {
             readers.clear();
         }
@@ -994,7 +995,7 @@ impl SliceFsFilesystem {
     /// release need the whole picture; gaps become zero bytes).
     fn settle_pending(&self, fh: u64) {
         let fh = self.owner_fh(fh);
-        let mut file_state = match lock_stats::lock(&self.open_files, Site::OpenFiles).remove(&fh) {
+        let mut file_state = match self.open_files.lock().remove(&fh) {
             Some(s) => s,
             None => return,
         };
@@ -1010,13 +1011,13 @@ impl SliceFsFilesystem {
                 file_state.cas_committed = false;
             }
         }
-        lock_stats::lock(&self.open_files, Site::OpenFiles).insert(fh, file_state);
+        self.open_files.lock().insert(fh, file_state);
     }
 
     /// Test hook: true if handle `fh` is still in Streaming mode.
     pub fn test_is_streaming(&self, fh: u64) -> bool {
         let fh = self.owner_fh(fh);
-        matches!(lock_stats::lock(&self.open_files, Site::OpenFiles).get(&fh).map(|s| &s.write_mode), Some(WriteMode::Streaming { .. }))
+        matches!(self.open_files.lock().get(&fh).map(|s| &s.write_mode), Some(WriteMode::Streaming { .. }))
     }
 
     /// Set access, modification and change times of a new inode to now.
@@ -1050,7 +1051,7 @@ impl SliceFsFilesystem {
 
     /// Reclaim all orphans (used at unmount: no handle survives it).
     fn reclaim_all_orphans(&self) {
-        let orphans: Vec<u64> = self.orphans.lock().unwrap().drain().collect();
+        let orphans: Vec<u64> = self.orphans.lock().drain().collect();
         for ino in orphans {
             self.reclaim_inode(ino);
         }
@@ -1078,7 +1079,7 @@ impl SliceFsFilesystem {
         }
         self.touch_dir(parent_ino)?;
         let fh = self.open_handle(ino);
-        lock_stats::lock(&self.open_files, Site::OpenFiles).insert(fh, OpenFileState {
+        self.open_files.lock().insert(fh, OpenFileState {
             ino,
             write_mode: WriteMode::Streaming { state: Stream::default(), next_expected_offset: 0, pending: BTreeMap::new() },
             byte_count: 0,
@@ -1111,7 +1112,7 @@ impl SliceFsFilesystem {
             return Err(libc::EFBIG);
         }
         // Take the file state out of the map so we can release open_files before io.
-        let mut file_state = match lock_stats::lock(&self.open_files, Site::OpenFiles).remove(&fh) {
+        let mut file_state = match self.open_files.lock().remove(&fh) {
             Some(s) => s,
             None => return Err(libc::EBADF),
         };
@@ -1135,7 +1136,7 @@ impl SliceFsFilesystem {
                     let io_err = fill_stream(state, &self.content, next_expected_offset, pending, offset).err();
                     if let Some(e) = io_err {
                         eprintln!("[{}][FUSE] test_write: CAS I/O error while filling a gap: {}", ts(), e);
-                        lock_stats::lock(&self.open_files, Site::OpenFiles).insert(fh, file_state);
+                        self.open_files.lock().insert(fh, file_state);
                         return Err(libc::EIO);
                     }
                     pending_bytes = pending.values().map(Vec::len).sum();
@@ -1155,7 +1156,7 @@ impl SliceFsFilesystem {
                     if let Some(e) = io_err {
                         eprintln!("[{}][FUSE] test_write: CAS I/O error during push_bytes: {}", ts(), e);
                         // Re-insert state before returning error
-                        lock_stats::lock(&self.open_files, Site::OpenFiles).insert(fh, file_state);
+                        self.open_files.lock().insert(fh, file_state);
                         return Err(libc::EIO);
                     }
                     *next_expected_offset = next;
@@ -1219,7 +1220,7 @@ impl SliceFsFilesystem {
         };
 
         // Re-insert the file state back into the map.
-        lock_stats::lock(&self.open_files, Site::OpenFiles).insert(fh, file_state);
+        self.open_files.lock().insert(fh, file_state);
         result
     }
 
@@ -1248,7 +1249,7 @@ impl SliceFsFilesystem {
         loop {
             let own_cost = dirty_cost(own);
             let (others, largest) = {
-                let open_files = lock_stats::lock(&self.open_files, Site::OpenFiles);
+                let open_files = self.open_files.lock();
                 let others: usize = open_files.values().map(dirty_cost).sum();
                 let largest = open_files.iter().map(|(&fh, s)| (dirty_cost(s), fh)).max();
                 (others, largest)
@@ -1264,14 +1265,14 @@ impl SliceFsFilesystem {
             let want = cap - freed;
             let step = match largest {
                 Some((c, fh)) if c > own_cost => {
-                    let Some(mut other) = lock_stats::lock(&self.open_files, Site::OpenFiles).remove(&fh) else {
+                    let Some(mut other) = self.open_files.lock().remove(&fh) else {
                         return Ok(());
                     };
                     let before = dirty_cost(&other);
                     let r = self.free_dirty(&mut other, want);
                     let after = dirty_cost(&other);
                     let ino = other.ino;
-                    lock_stats::lock(&self.open_files, Site::OpenFiles).insert(fh, other);
+                    self.open_files.lock().insert(fh, other);
                     if r.is_err() {
                         eprintln!("[{}][FUSE] budget: step of ino {ino} failed", ts());
                         return Ok(());
@@ -1325,14 +1326,14 @@ impl SliceFsFilesystem {
     /// increments new digest. Empty files (byte_count==0) set empty manifest without CAS push.
     pub fn test_release(&self, ino: u64, fh: u64) -> Result<(), i32> {
         // A handle that shares another's write state: only the handle ends.
-        if self.write_alias.lock().unwrap().remove(&fh).is_some() {
+        if self.write_alias.lock().remove(&fh).is_some() {
             self.close_handle(fh);
             return Ok(());
         }
         // The holder of a shared state closes while other write handles are
         // open: one of them takes the state over (nothing is written yet).
         let heir = {
-            let mut alias = self.write_alias.lock().unwrap();
+            let mut alias = self.write_alias.lock();
             let heir = alias.iter().find(|(_, o)| **o == fh).map(|(a, _)| *a);
             if let Some(h) = heir {
                 alias.remove(&h);
@@ -1345,7 +1346,7 @@ impl SliceFsFilesystem {
             heir
         };
         if let Some(h) = heir {
-            let mut open_files = lock_stats::lock(&self.open_files, Site::OpenFiles);
+            let mut open_files = self.open_files.lock();
             if let Some(st) = open_files.remove(&fh) {
                 open_files.insert(h, st);
             }
@@ -1361,7 +1362,7 @@ impl SliceFsFilesystem {
     /// Commit the write state of `fh` (if any) to the inode's manifest.
     fn finalize_write(&self, ino: u64, fh: u64) -> Result<(), i32> {
         self.settle_pending(fh);
-        let mut s = match lock_stats::lock(&self.open_files, Site::OpenFiles).remove(&fh) {
+        let mut s = match self.open_files.lock().remove(&fh) {
             Some(s) => s,
             None => return Ok(()), // Already closed
         };
@@ -1454,7 +1455,7 @@ impl SliceFsFilesystem {
             Overlay(crate::overlay::RangeView),
         }
 
-        let pending_fh = lock_stats::lock(&self.open_files, Site::OpenFiles).iter()
+        let pending_fh = self.open_files.lock().iter()
             .find(|(_, s)| s.ino == ino && matches!(&s.write_mode, WriteMode::Streaming { pending, .. } if !pending.is_empty()))
             .map(|(&fh, _)| fh);
         if let Some(fh) = pending_fh {
@@ -1462,7 +1463,7 @@ impl SliceFsFilesystem {
         }
         let mut logical_size: Option<u64> = None;
         let writer_snapshot: Option<WriterSnapshot> = {
-            let open_files = lock_stats::lock(&self.open_files, Site::OpenFiles);
+            let open_files = self.open_files.lock();
             match open_files.values().find(|s| s.ino == ino && s.byte_count > 0) {
                 // Overlay: copy only the extent parts inside the range.
                 Some(OpenFileState { write_mode: WriteMode::Overlay(ov), .. }) => {
@@ -1575,7 +1576,7 @@ impl SliceFsFilesystem {
     /// synced here; [`Self::commit_cut_finish`] does that with the gate released.
     pub fn commit_cut_begin(&self) -> Result<CommitCut<'_>, MetaError> {
         use crate::oplog::{Op, Record};
-        let handles: Vec<(u64, u64)> = lock_stats::lock(&self.open_files, Site::OpenFiles)
+        let handles: Vec<(u64, u64)> = self.open_files.lock()
             .iter().map(|(&fh, s)| (s.ino, fh)).collect();
         // Streamed prefixes go into the manifests (cheap: an ended clone).
         for &(ino, fh) in &handles {
@@ -1599,7 +1600,7 @@ impl SliceFsFilesystem {
         struct Item { ino: u64, time: (i64, u32), ctime: Option<(i64, u32)>, what: Relog }
         let mut items: Vec<Item> = Vec::new();
         {
-            let open_files = lock_stats::lock(&self.open_files, Site::OpenFiles);
+            let open_files = self.open_files.lock();
             for &(_, fh) in &handles {
                 let Some(s) = open_files.get(&fh) else { continue };
                 let ino = s.ino;
@@ -1657,7 +1658,7 @@ impl SliceFsFilesystem {
                         let mut off = r.start;
                         while off < r.end {
                             let n = (r.end - off).min(RELOG_PIECE);
-                            let data = match lock_stats::lock(&self.open_files, Site::OpenFiles).get(&fh).map(|s| &s.write_mode) {
+                            let data = match self.open_files.lock().get(&fh).map(|s| &s.write_mode) {
                                 Some(WriteMode::Overlay(ov)) => ov.copy_out(off, n as usize),
                                 _ => Vec::new(),
                             };
@@ -1697,7 +1698,7 @@ impl SliceFsFilesystem {
         // pending bytes durable (#20), so the manifest takes the streamed prefix.
         // 1. Clone the stream under the open_files lock
         let (snapshot, byte_count, old_root, modified) = {
-            let mut open_files = lock_stats::lock(&self.open_files, Site::OpenFiles);
+            let mut open_files = self.open_files.lock();
             match open_files.get_mut(&fh) {
                 Some(s) => {
                     if s.byte_count == 0 {
@@ -1741,7 +1742,7 @@ impl SliceFsFilesystem {
 
         // 5. Update last_committed_root
         {
-            let mut open_files = lock_stats::lock(&self.open_files, Site::OpenFiles);
+            let mut open_files = self.open_files.lock();
             if let Some(s) = open_files.get_mut(&fh) {
                 s.last_committed_root = Some(new_digest);
             }
@@ -1769,12 +1770,12 @@ impl SliceFsFilesystem {
         }
         // A size change without a handle still belongs to an open write
         // handle of the file (the NFS SETATTR from cp carries no handle).
-        let fh = fh.map(|f| self.owner_fh(f)).filter(|f| lock_stats::lock(&self.open_files, Site::OpenFiles).contains_key(f))
+        let fh = fh.map(|f| self.owner_fh(f)).filter(|f| self.open_files.lock().contains_key(f))
             .or_else(|| self.write_handle_of(ino));
         if let Some(fh_val) = fh {
             // Extending a streaming handle: record the size, no materializing.
             let extended = {
-                let mut open_files = lock_stats::lock(&self.open_files, Site::OpenFiles);
+                let mut open_files = self.open_files.lock();
                 match open_files.get_mut(&fh_val) {
                     Some(s) if matches!(s.write_mode, WriteMode::Streaming { .. })
                         && new_size > 0 && new_size >= s.byte_count
@@ -1802,7 +1803,7 @@ impl SliceFsFilesystem {
         }
         // Case A: open file handle — truncate in-flight write state
         if let Some(fh_val) = fh {
-            let mut open_files = lock_stats::lock(&self.open_files, Site::OpenFiles);
+            let mut open_files = self.open_files.lock();
             if let Some(s) = open_files.get_mut(&fh_val) {
                 match &mut s.write_mode {
                     WriteMode::Overlay(ov) => {
@@ -1854,7 +1855,7 @@ impl SliceFsFilesystem {
                                 st.cas_committed = false;
                                 st.modified = Some(now_pair());
                             });
-                            lock_stats::lock(&self.open_files, Site::OpenFiles).insert(fh_val, st);
+                            self.open_files.lock().insert(fh_val, st);
                             switched?;
                         }
                     }
@@ -2407,7 +2408,7 @@ impl SliceFsFilesystem {
     /// Bytes written through an open handle stay in its write state until
     /// release; report that size so fstat/stat during a write are correct.
     fn overlay_open_size(&self, meta: &mut InodeMeta) {
-        let open_files = lock_stats::lock(&self.open_files, Site::OpenFiles);
+        let open_files = self.open_files.lock();
         if let Some(s) = open_files.values().find(|s| s.ino == meta.ino && s.byte_count > 0) {
             meta.size = s.byte_count;
         }
@@ -2455,11 +2456,11 @@ impl SliceFsFilesystem {
 
         if is_write {
             // Another write handle of this inode is open: share its state.
-            let owner = lock_stats::lock(&self.open_files, Site::OpenFiles).iter().find(|(_, st)| st.ino == ino).map(|(&f, _)| f);
+            let owner = self.open_files.lock().iter().find(|(_, st)| st.ino == ino).map(|(&f, _)| f);
             if let Some(owner) = owner {
-                self.write_alias.lock().unwrap().insert(fh, owner);
+                self.write_alias.lock().insert(fh, owner);
             } else {
-            lock_stats::lock(&self.open_files, Site::OpenFiles).insert(
+            self.open_files.lock().insert(
                 fh,
                 OpenFileState {
                     ino,
@@ -2475,8 +2476,8 @@ impl SliceFsFilesystem {
             // FUSE_ATOMIC_O_TRUNC
             if flags & libc::O_TRUNC != 0 {
                 if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
-                    if self.write_alias.lock().unwrap().remove(&fh).is_none() {
-                        lock_stats::lock(&self.open_files, Site::OpenFiles).remove(&fh);
+                    if self.write_alias.lock().remove(&fh).is_none() {
+                        self.open_files.lock().remove(&fh);
                     }
                     self.close_handle(fh);
                     return Err(e);
@@ -2577,7 +2578,7 @@ impl SliceFsFilesystem {
             inode.mtime_nsec = nsec;
             // An explicit mtime (utimens) on a file with unflushed writes
             // wins over the time of those writes: the close stamps this one.
-            for s in lock_stats::lock(&self.open_files, Site::OpenFiles).values_mut() {
+            for s in self.open_files.lock().values_mut() {
                 if s.ino == ino && s.modified.is_some() {
                     s.modified = Some((sec, nsec));
                 }
@@ -2614,7 +2615,7 @@ impl SliceFsFilesystem {
         let (ino, fh) = self.test_create(parent, name, mode, umask, uid, gid)?;
         if flags & libc::O_TRUNC != 0 {
             if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
-                lock_stats::lock(&self.open_files, Site::OpenFiles).remove(&fh);
+                self.open_files.lock().remove(&fh);
                 self.close_handle(fh);
                 return Err(e);
             }
@@ -2685,8 +2686,8 @@ impl SliceFsFilesystem {
 
     /// Release with read-only handle check (matches FUSE release behavior).
     pub fn test_release_full(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        let shared = self.write_alias.lock().unwrap().contains_key(&fh);
-        if !shared && !lock_stats::lock(&self.open_files, Site::OpenFiles).contains_key(&fh) {
+        let shared = self.write_alias.lock().contains_key(&fh);
+        if !shared && !self.open_files.lock().contains_key(&fh) {
             self.close_handle(fh); // read-only handle, no write state
             return Ok(());
         }
@@ -2698,7 +2699,7 @@ impl SliceFsFilesystem {
     pub fn test_destroy(&self) -> bool {
         // Write the content of handles that are still open (e.g. a forced
         // unmount), so the commit below keeps it.
-        let open: Vec<(u64, u64)> = lock_stats::lock(&self.open_files, Site::OpenFiles)
+        let open: Vec<(u64, u64)> = self.open_files.lock()
             .iter().map(|(&fh, st)| (fh, st.ino)).collect();
         for (fh, ino) in open {
             if let Err(e) = self.finalize_write(ino, fh) {
@@ -4188,7 +4189,7 @@ mod tests {
 
     /// RAM charged to the overlay of `fh` (0 if it streams).
     fn overlay_cost(fs: &SliceFsFilesystem, fh: u64) -> usize {
-        match fs.open_files.lock().unwrap().get(&fs.owner_fh(fh)).map(|s| &s.write_mode) {
+        match fs.open_files.lock().get(&fs.owner_fh(fh)).map(|s| &s.write_mode) {
             Some(WriteMode::Overlay(ov)) => ov.cost(),
             _ => 0,
         }

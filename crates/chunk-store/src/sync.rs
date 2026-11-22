@@ -37,7 +37,11 @@ pub use parking_lot::WaitTimeoutResult;
 pub enum Rank {
     /// The commit gate (std, modelled through [`rank::enter`]).
     Gate = 1,
-    /// The cross-directory rename mutex.
+    /// The cross-directory rename mutex, and the commit lock of the metadata
+    /// store (held from the commit cut to the root; the cut takes cell and map
+    /// locks with it held). One thread never holds both: the commit lock is
+    /// taken by the commit and GC threads, the rename mutex by requests, and
+    /// the checker refuses two locks of this rank at once.
     Rename = 2,
     /// A namespace stripe.
     Stripe = 3,

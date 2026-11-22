@@ -269,7 +269,9 @@ pub struct DictMetadataStore {
     wal_fail_seq: AtomicU64,
     wal_fail_cleared: AtomicU64,
     /// One commit at a time (see `PreparedCommit`). Lock order: the commit
-    /// gate of the file system, then this.
+    /// gate of the file system, then this. The cut runs with this lock held
+    /// and takes the file system's own locks (cells, short maps), so it has
+    /// `Rank::Rename` (rank 2: below them, above the gate), not the store rank.
     commit_lock: sync::Mutex<()>,
     /// Test fault: the next `finish_commit` stops with an error at this
     /// point (see `test_fail_next_commit_at`); 0: none.
@@ -339,7 +341,7 @@ impl DictMetadataStore {
             wal: lk(None).timed(Site::Wal),
             wal_fail_seq: AtomicU64::new(0),
             wal_fail_cleared: AtomicU64::new(0),
-            commit_lock: lk(()),
+            commit_lock: sync::Mutex::new(Rank::Rename, ()),
             commit_fault: std::sync::atomic::AtomicU8::new(0),
             last_root: lk(None),
             snapshots_by_version: lk(HashMap::new()),
@@ -1431,7 +1433,7 @@ impl DictMetadataStore {
             wal: lk(None).timed(Site::Wal),
             wal_fail_seq: AtomicU64::new(0),
             wal_fail_cleared: AtomicU64::new(0),
-            commit_lock: lk(()),
+            commit_lock: sync::Mutex::new(Rank::Rename, ()),
             commit_fault: std::sync::atomic::AtomicU8::new(0),
             last_root: lk(Some(*root)),
             snapshots_by_version: lk(HashMap::new()),

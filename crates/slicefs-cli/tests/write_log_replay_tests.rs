@@ -1110,17 +1110,25 @@ fn a_crash_between_the_cut_and_the_root_replays() {
         for w in [Window::AfterCut, Window::AfterNodes, Window::AfterSyncs, Window::AfterRoot,
                   Window::RootTorn, Window::RootHeaderOnly, Window::RootEmpty, Window::Done,
                   Window::GcDuringFinish] {
-            let dir = TempDir::new().unwrap();
-            let live = {
-                let fs = new_fs_with(dir.path(), config.clone());
-                cut_window_scenario(&fs, dir.path(), w);
-                fs.meta().flush_wal().unwrap();
-                let d = dump_open(&fs);
-                std::mem::forget(fs); // a crash with the handles open
-                d
-            };
-            let fs = reload_and_replay(dir.path());
-            assert_eq!(dump_open(&fs), live, "{config:?} {w:?}");
+            // One thread per run: a window that forgets the cut keeps its
+            // lock (a crash does), and so its entry in the thread's lock-order
+            // stack, which must not reach the next run.
+            let config = config.clone();
+            std::thread::spawn(move || {
+                let dir = TempDir::new().unwrap();
+                let live = {
+                    let fs = new_fs_with(dir.path(), config.clone());
+                    cut_window_scenario(&fs, dir.path(), w);
+                    fs.meta().flush_wal().unwrap();
+                    let d = dump_open(&fs);
+                    std::mem::forget(fs); // a crash with the handles open
+                    d
+                };
+                let fs = reload_and_replay(dir.path());
+                assert_eq!(dump_open(&fs), live, "{config:?} {w:?}");
+            })
+            .join()
+            .unwrap();
         }
     }
 }

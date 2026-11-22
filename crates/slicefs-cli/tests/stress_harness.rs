@@ -179,6 +179,34 @@ fn watchdog(limit: Duration, seed: u64) -> mpsc::Sender<()> {
     tx
 }
 
+/// Stress builds (`--features deadlock-detect`): one process-wide thread asks
+/// parking_lot for a lock cycle every second. On a cycle it prints each thread
+/// with its backtrace and aborts. It is a detached thread: it ends with the
+/// process, and nothing waits for it.
+#[cfg(feature = "deadlock-detect")]
+fn start_deadlock_watchdog() {
+    static START: std::sync::Once = std::sync::Once::new();
+    START.call_once(|| {
+        std::thread::spawn(|| loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let cycles = parking_lot::deadlock::check_deadlock();
+            if cycles.is_empty() {
+                continue;
+            }
+            eprintln!("STRESS deadlock detected: {} cycle(s)", cycles.len());
+            for (i, threads) in cycles.iter().enumerate() {
+                for t in threads {
+                    eprintln!("cycle {i} thread {:?}\n{:?}", t.thread_id(), t.backtrace());
+                }
+            }
+            std::process::abort();
+        });
+    });
+}
+
+#[cfg(not(feature = "deadlock-detect"))]
+fn start_deadlock_watchdog() {}
+
 fn seed_from_env() -> u64 {
     match std::env::var("STRESS_SEED") {
         Ok(s) => s.trim().parse().expect("STRESS_SEED must be a number"),
@@ -881,6 +909,7 @@ struct Report {
 }
 
 fn run(cfg: Config) -> Outcome {
+    start_deadlock_watchdog();
     let _watchdog = watchdog(cfg.watchdog, cfg.seed);
     chunk_store::lock_stats::reset();
     let dir = TempDir::new().unwrap();
