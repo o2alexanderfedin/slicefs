@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 19
 current_phase_name: Fine-grained locks
 status: executing
-stopped_at: Completed 19-06-PLAN.md
-last_updated: "2026-11-22T05:38:29.376Z"
+stopped_at: Completed 19-07-PLAN.md
+last_updated: "2026-11-22T06:47:30.166Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 19 execution started
-state_head: 9811c32ee2d68ae860b8325cabe7edee3c20e6c8
+state_head: cc1f24e28df47cc6da512fd6b254f64d4271a084
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 18
-  completed_plans: 13
+  completed_plans: 14
   percent: 14
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 19 (Fine-grained locks) — EXECUTING
-Plan: 7 of 11
+Plan: 8 of 11
 Status: Ready to execute
 Last activity: 2026-11-21 — Phase 19 execution started
 
@@ -59,6 +59,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 19 P04 | 45min | 3 tasks | 11 files |
 | Phase 19 P05 | 41min | 3 tasks | 5 files |
 | Phase 19 P06 | 25min | 2 tasks | 4 files |
+| Phase 19 P07 | 95min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -104,6 +105,10 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: 19-06: overlay generations come from one process-wide counter, so a new overlay never repeats one
 - [Phase 19]: 19-06: a dropped rebase result is retried at once with the cell locked; past the hard cap (limit + 2 * REBASE_STEP) a writer stores a locked step
 - [Phase 19]: 19-06: finalize keeps the three rebase phases in one cell-lock hold until Plan 07
+- [Phase 19]: Stream generations share the process-wide overlay counter; a stream step publishes only at the same generation
+- [Phase 19]: A flush installs only if last_published_gen is older than its snapshot; overlay switch and truncate to 0 also set it
+- [Phase 19]: The last release finalizes in steps of FINAL_STEP (8 MiB) and retires only when clean with no write handle
+- [Phase 19]: A closed-file truncate runs in a transient cell locked before it goes into the map
 
 ### Pending Todos
 
@@ -125,8 +130,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-22T05:38:29.233Z
-Stopped at: Completed 19-06-PLAN.md
+Last session: 2026-11-22T06:47:30.020Z
+Stopped at: Completed 19-07-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
