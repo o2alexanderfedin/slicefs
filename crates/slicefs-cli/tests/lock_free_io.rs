@@ -896,6 +896,140 @@ fn a_closed_file_truncate_runs_in_a_transient_cell() {
     assert_eq!(fs.test_dirty_cost(ino), 0, "no cell is left");
 }
 
+/// A size change of an open stream (a cut inside it) streams its pending
+/// writes and switches to an overlay as unlocked steps under the step
+/// token: a read passes while its first stream step is parked.
+#[test]
+fn a_size_change_of_an_open_stream_runs_its_steps_unlocked() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "s", 0o644, 0, 0, 0).unwrap();
+    let mut model = seeded(80, 64 * KIB);
+    fs.test_write(fh, 0, &model).unwrap();
+    let (x, y) = (seeded(81, 16 * KIB), seeded(82, 16 * KIB));
+    fs.test_write(fh, 128 * KIB as u64, &x).unwrap();
+    fs.test_write(fh, 192 * KIB as u64, &y).unwrap();
+    put(&mut model, 128 * KIB, &x);
+    put(&mut model, 192 * KIB, &y);
+    let prefix = model[..64 * KIB].to_vec();
+    let cut = 160 * KIB;
+    let (parked, go) = park_first_push(&fs);
+    std::thread::scope(|s| {
+        let t = s.spawn(|| fs.test_setattr_size(ino, Some(fh), cut as u64));
+        let reached = parked.recv_timeout(WAIT);
+        let (tx, rx) = channel();
+        let fs = &fs;
+        s.spawn(move || tx.send(fs.test_read(ino, 0, 64 * KIB as u32)).ok());
+        let read = rx.recv_timeout(Duration::from_millis(300));
+        go.send(()).ok();
+        reached.expect("a stream step of the size change reached its I/O phase");
+        assert!(read.expect("the read waited for the size change").unwrap() == prefix, "the read sees the prefix");
+        assert_eq!(t.join().unwrap(), Ok(()));
+    });
+    fs.test_set_push_hook(None);
+    model.truncate(cut);
+    assert_eq!(fs.test_getattr(ino).unwrap().size, cut as u64);
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content with the handle open");
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_getattr(ino).unwrap().size, cut as u64);
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content after release");
+}
+
+/// A read of a closed file whose size change is in its splice does not
+/// lock the transient cell: it reads the committed content (the old one),
+/// and after the change the new one.
+#[test]
+fn a_read_does_not_wait_for_a_closed_file_truncate() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "t", 0o644, 0, 0, 0).unwrap();
+    let model = seeded(83, 256 * KIB);
+    fs.test_write(fh, 0, &model).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    let (parked, go) = park_first(&fs);
+    let short = 100 * KIB;
+    std::thread::scope(|s| {
+        let t = s.spawn(|| fs.test_setattr_size(ino, None, short as u64));
+        let reached = parked.recv_timeout(WAIT);
+        let (tx, rx) = channel();
+        let fs = &fs;
+        s.spawn(move || tx.send(fs.test_read(ino, 0, 1 << 20)).ok());
+        let read = rx.recv_timeout(Duration::from_millis(300));
+        go.send(()).ok();
+        reached.expect("the truncate reached its splice");
+        assert!(read.expect("the read waited for the splice").unwrap() == model, "the read sees the old content");
+        assert_eq!(t.join().unwrap(), Ok(()));
+    });
+    fs.test_set_rebase_hook(None);
+    assert_eq!(fs.test_getattr(ino).unwrap().size, short as u64);
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model[..short], "the new content");
+    assert_eq!(fs.test_dirty_cost(ino), 0, "no cell is left");
+}
+
+/// A size change waits for a step of the last release with the cell
+/// released (a read passes meanwhile), so it does not drop that step. The
+/// release then retires the cell, and the size change applies to the
+/// closed file.
+#[test]
+fn a_size_change_waits_for_a_finalize_step_without_the_cell() {
+    let (fs, _dir) = fresh_fs();
+    let mut ino = 0;
+    let (fh, mut model) = dirty_overlay(&fs, &mut ino);
+    let (parked, go) = park_first(&fs);
+    let short = 600 * KIB;
+    std::thread::scope(|s| {
+        let rel = s.spawn(|| fs.test_release(ino, fh));
+        let reached = parked.recv_timeout(WAIT);
+        let fs = &fs;
+        let (stx, srx) = channel();
+        s.spawn(move || stx.send(fs.test_setattr_size(ino, None, short as u64)).ok());
+        let early = srx.recv_timeout(Duration::from_millis(300));
+        let (rtx, rrx) = channel();
+        s.spawn(move || rtx.send(fs.test_read(ino, 0, 4096)).ok());
+        let read = rrx.recv_timeout(Duration::from_millis(300));
+        go.send(()).ok();
+        reached.expect("the finalize reached a step's I/O phase");
+        assert!(early.is_err(), "the size change waited for the finalize step: {early:?}");
+        assert!(read.expect("the read waited for the finalize step").unwrap() == model[..4096], "the read");
+        assert_eq!(rel.join().unwrap(), Ok(()));
+        assert_eq!(srx.recv_timeout(WAIT).expect("the size change went on after the release"), Ok(()));
+    });
+    fs.test_set_rebase_hook(None);
+    assert_eq!(fs.test_dirty_cost(ino), 0, "the release retired the cell");
+    model.truncate(short);
+    assert_eq!(fs.test_getattr(ino).unwrap().size, short as u64);
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after the size change");
+}
+
+/// An O_TRUNC open waits for a step of the last release with its stripe
+/// held and the cell released; the step's holder takes no stripe, so both
+/// go on. The new handle stops the finalize, and the truncate applies.
+#[test]
+fn an_o_trunc_open_waits_for_a_finalize_step() {
+    let (fs, _dir) = fresh_fs();
+    let mut ino = 0;
+    let (fh, _model) = dirty_overlay(&fs, &mut ino);
+    let (parked, go) = park_first(&fs);
+    let fh2 = std::thread::scope(|s| {
+        let rel = s.spawn(|| fs.test_release(ino, fh));
+        let reached = parked.recv_timeout(WAIT);
+        let fs = &fs;
+        let (tx, rx) = channel();
+        s.spawn(move || tx.send(fs.test_open(ino, libc::O_RDWR | libc::O_TRUNC)).ok());
+        let early = rx.recv_timeout(Duration::from_millis(300));
+        go.send(()).ok();
+        reached.expect("the finalize reached a step's I/O phase");
+        assert!(early.is_err(), "the truncate waited for the finalize step: {early:?}");
+        let opened = rx.recv_timeout(WAIT).expect("the open went on after the step");
+        assert_eq!(rel.join().unwrap(), Ok(()));
+        opened.unwrap().0
+    });
+    fs.test_set_rebase_hook(None);
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 0, "truncated");
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap().is_empty());
+    fs.test_release(ino, fh2).unwrap();
+    assert_eq!(fs.test_dirty_cost(ino), 0, "the second release retired the cell");
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap().is_empty(), "empty after release");
+}
+
 /// ROADMAP criterion 2: a thread parked in the I/O phase of file X does not
 /// delay a write, a read or an fsync of file Y.
 #[test]

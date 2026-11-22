@@ -304,6 +304,10 @@ struct SwitchNote {
 /// Requests lock it in place; no request takes the state out.
 struct FileCell {
     ino: u64,
+    /// The cell of a closed-file size change (`FileCell::transient`): it
+    /// only orders an open or another size change after the splice. Readers
+    /// never lock it.
+    transient: bool,
     state: sync::Mutex<CellState>,
     /// `dirty_cost` of the state when its guard last synced (see
     /// `CellGuard`); `SliceFsFilesystem::dirty_total` is the sum.
@@ -312,9 +316,20 @@ struct FileCell {
 
 impl FileCell {
     fn new(ino: u64) -> Self {
+        Self::make(ino, false)
+    }
+
+    /// The cell of a size change of a closed file (case B of
+    /// `setattr_size_logged`).
+    fn transient(ino: u64) -> Self {
+        Self::make(ino, true)
+    }
+
+    fn make(ino: u64, transient: bool) -> Self {
         let state = CellState { file: OpenFileState::new(ino), write_handles: 0, retired: false, stepping: None, last_published_gen: 0 };
         FileCell {
             ino,
+            transient,
             state: sync::Mutex::new_keyed(Rank::Cell, ino, state).timed(Site::FileCell),
             dirty: AtomicUsize::new(0),
         }
@@ -813,9 +828,10 @@ impl SliceFsFilesystem {
     }
 
     /// Run `f` on the open write state of `ino` under its cell lock; `None`
-    /// if `ino` has none (no cell, or a retired one).
+    /// if `ino` has none (no cell, a retired one, or the transient cell of
+    /// a closed-file size change, which is not locked here).
     fn with_cell<R>(&self, ino: u64, f: impl FnOnce(&mut OpenFileState) -> R) -> Option<R> {
-        let cell = self.cells.get(ino)?;
+        let cell = self.cells.get(ino).filter(|c| !c.transient)?;
         let mut g = self.lock_cell(&cell);
         if g.retired {
             return None;
@@ -839,9 +855,18 @@ impl SliceFsFilesystem {
             if !trunc {
                 return Ok(None);
             }
-            if let Err(e) = self.setattr_size_open(&mut g, 0) {
-                let _ = self.leave(&cell, &mut g);
-                return Err(e);
+            // The truncate waits for a step in flight with the cell
+            // released and this stripe held: the step's holder takes no
+            // stripe, and the wait is limited (`STEP_WAIT`).
+            match self.setattr_size_open(&mut g, 0) {
+                Ok(true) => {}
+                // Retired while it waited (only destroy can do that: this
+                // handle is counted): look the inode up again.
+                Ok(false) => continue,
+                Err(e) => {
+                    let _ = self.leave(&cell, &mut g);
+                    return Err(e);
+                }
             }
             let rec = |time| crate::oplog::Record { time, op: crate::oplog::Op::Truncate { ino: cell.ino } };
             return Ok(time.and_then(|t| self.log_append(rec(t))));
@@ -1305,20 +1330,6 @@ impl SliceFsFilesystem {
         Ok(())
     }
 
-    /// ftruncate(fd, 0) takes effect at once: empty the committed manifest and
-    /// release its root, unless that root is `released` (already released by
-    /// the handle). Later writes on the handle then start from an empty file.
-    fn clear_manifest(&self, ino: u64, released: Option<ObjectKey>) -> Result<(), i32> {
-        if let Ok(m) = self.meta.get_manifest(ino) {
-            if let Some(root) = m.first() {
-                if Some(*root) != released {
-                    self.meta.decrement_refcount(root);
-                }
-            }
-        }
-        self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)
-    }
-
     /// End a clone of a streaming state as a stored root, first appending
     /// zeros from `streamed` up to `min_size` (an extension set by setattr).
     fn end_padded(&self, mut st: Stream, streamed: u64, min_size: u64) -> Result<ObjectKey, i32> {
@@ -1522,18 +1533,6 @@ impl SliceFsFilesystem {
     /// Phase B runs as the cell's step (`CellGuard::run_step`): the caller
     /// makes sure no step is in flight.
     fn to_overlay(&self, g: &mut CellGuard<'_>) -> Result<bool, i32> {
-        self.to_overlay_in(g, true)
-    }
-
-    /// `to_overlay` with Phase B in the cell hold: only for the size change
-    /// of an open stream (`setattr_size_open`; 19-15 removes it). Never on
-    /// the write or read path.
-    fn to_overlay_locked(&self, g: &mut CellGuard<'_>) -> Result<bool, i32> {
-        self.to_overlay_in(g, false)
-    }
-
-    /// The body of `to_overlay` (`as_step`) and `to_overlay_locked`.
-    fn to_overlay_in(&self, g: &mut CellGuard<'_>, as_step: bool) -> Result<bool, i32> {
         let s = &g.file;
         let WriteMode::Streaming { state, next_expected_offset, .. } = &s.write_mode else {
             return Ok(true);
@@ -1541,8 +1540,8 @@ impl SliceFsFilesystem {
         let (ino, next, generation, committed) = (s.ino, *next_expected_offset, s.generation, s.last_committed_root);
         let clone = (next > 0).then(|| state.clone());
         let io = move || self.overlay_base(ino, clone, next);
-        let (base, base_len, old, digest) = if as_step { g.run_step(io) } else { io() }?;
-        if g.retired || (as_step && self.forced_drop(g.no_drop_hook)) {
+        let (base, base_len, old, digest) = g.run_step(io)?;
+        if g.retired || self.forced_drop(g.no_drop_hook) {
             return Ok(false);
         }
         let s = &mut g.file;
@@ -1629,9 +1628,8 @@ impl SliceFsFilesystem {
     }
 
     /// `stream_step` with Phase B in the cell hold: only for the locked
-    /// settle of a size change of an open stream (19-15 Task 2 removes it)
-    /// and of `test_destroy`, where no request runs. Never on the write,
-    /// read or release path.
+    /// settle of `test_destroy` (`finalize_locked`), where no request runs.
+    /// Never on a request path.
     fn stream_step_locked(&self, g: &mut CellGuard<'_>, zeros_to: u64, bytes: &[u8], pending_key: Option<u64>) -> Result<bool, i32> {
         self.stream_step_in(g, zeros_to, bytes, pending_key, false)
     }
@@ -1698,9 +1696,9 @@ impl SliceFsFilesystem {
     /// Stream the pending (out-of-order) writes of the locked cell `g` in
     /// offset order, zeros in the gaps, one locked stream step per pending
     /// write. Pending writes exist only on a fresh stream, so the gaps are
-    /// zeros; no full-file buffer. Only for the rare size change of an open
-    /// stream and for `test_destroy` (19-15 changes the first); never on
-    /// the write or read path (a read composes pending writes from memory).
+    /// zeros; no full-file buffer. Only for `test_destroy`
+    /// (`finalize_locked`), where no request runs; never on a request path
+    /// (a read composes pending writes from memory).
     fn settle_locked(&self, g: &mut CellGuard<'_>) -> Result<(), i32> {
         loop {
             if g.retired {
@@ -2279,10 +2277,9 @@ impl SliceFsFilesystem {
             if drops >= STEP_TRIES {
                 // No other write changes the stream while a step is in flight
                 // (they wait for the token), so only a forced drop (a test
-                // hook), the retire of the cell, an fsync that installs a newer
-                // snapshot (at most once) or a storm of size changes of the
-                // open stream (until 19-15 they do not wait for the token) can
-                // drop this many steps in a row.
+                // hook), the retire of the cell, or an fsync that installs a
+                // newer snapshot (at most once) can drop this many steps in a
+                // row (a size change waits for the token too).
                 drop(g);
                 eprintln!("[{}][FUSE] write: fh={fh} ino={ino}: {STEP_TRIES} steps in a row were dropped", ts());
                 return Err(libc::EIO);
@@ -2595,6 +2592,11 @@ impl SliceFsFilesystem {
 
         let writer_snapshot: Option<WriterSnapshot> = match self.cells.get(ino) {
             None => None,
+            // A closed-file size change: not locked (its splice runs under
+            // it). The read uses the committed manifest, which the change
+            // replaces in one install: the old or the new content, never a
+            // mix, and no wait for the splice.
+            Some(cell) if cell.transient => None,
             Some(cell) => {
                 let g = self.lock_cell(&cell);
                 let s = &g.file;
@@ -2988,18 +2990,27 @@ impl SliceFsFilesystem {
                 if g.retired {
                     continue;
                 }
-                let r = self.setattr_size_open(&mut g, new_size);
-                if r.is_ok() {
-                    log(size_op());
+                match self.setattr_size_open(&mut g, new_size) {
+                    Ok(true) => {
+                        log(size_op());
+                        return Ok(());
+                    }
+                    // The last release retired the cell while this change
+                    // waited for its step: the file is closed now (case B).
+                    Ok(false) => continue,
+                    Err(e) => return Err(e),
                 }
-                return r;
             }
             // Case B: no open write state. A transient cell, locked before
             // it goes into the map, orders this change against an open or
-            // another size change of the inode; its lock is held across the
-            // splice (RESEARCH Pattern 1: the one accepted I/O under a cell
-            // lock beside the locked retry and the hard cap).
-            let cell = Arc::new(FileCell::new(ino));
+            // another size change of the inode: its lock is held across the
+            // splice. This is the one I/O under a cell lock on a request
+            // path, accepted (RESEARCH Pattern 1): the file is closed, so
+            // no writer and no reader waits for it (a read does not lock a
+            // transient cell; it reads the committed manifest, which this
+            // change replaces in one install). Only an open or a second
+            // size change of the inode waits (19-07 order).
+            let cell = Arc::new(FileCell::transient(ino));
             let mut g = self.lock_cell(&cell);
             if !self.cells.insert_new(&cell) {
                 continue;
@@ -3067,41 +3078,116 @@ impl SliceFsFilesystem {
         self.stamp_size(ino, new_size)
     }
 
-    /// The size change of `test_setattr_size` on the locked cell `g` (held
-    /// across the manifest and inode changes, and across the rare stream
-    /// steps of a cut of a stream).
-    fn setattr_size_open(&self, g: &mut CellGuard<'_>, new_size: u64) -> Result<(), i32> {
+    /// The size change of `test_setattr_size` on the locked cell `g`. A
+    /// size change is writer-side: each pass first waits for the step token
+    /// with the cell released (`wait_step`, `STEP_WAIT`, then EIO), also for
+    /// the memory-only changes, so it never drops a step in flight (of a
+    /// write or of the last release, see `finalize_steps`). Its own I/O
+    /// runs as unlocked steps under the token: the content check of a
+    /// stream extension, the manifest read and the empty manifest of a
+    /// truncate to 0, and for a cut of a stream the settle of the pending
+    /// writes and the switch to an overlay. A dropped step is tried again,
+    /// at most `STEP_TRIES` in a row, then EIO. The hold changes only
+    /// memory, the manifest digest and the inode.
+    ///
+    /// `Ok(false)`: the cell was retired while this change waited (the
+    /// caller looks the inode up again); nothing was changed.
+    fn setattr_size_open(&self, g: &mut CellGuard<'_>, new_size: u64) -> Result<bool, i32> {
         let ino = g.file.ino;
-        let s = &mut g.file;
-        // Extending a streaming handle: record the size, no materializing.
-        if matches!(s.write_mode, WriteMode::Streaming { .. })
-            && new_size > 0 && new_size >= s.byte_count
-            && (s.byte_count > 0 || !self.has_content(ino))
-        {
-            s.min_size = new_size;
-            s.byte_count = new_size;
-            s.cas_committed = false;
-            s.modified = Some(now_pair());
-            s.generation = next_gen();
-            return self.stamp_size(ino, new_size);
-        }
-        if new_size == 0 {
-            // Back to an empty stream (a new state: a new generation).
-            let old_root = s.last_committed_root.take();
-            *s = OpenFileState { modified: Some(now_pair()), ..OpenFileState::new(ino) };
-            // No flush snapshot of the old content installs after this.
-            g.last_published_gen = g.file.generation;
-            if let Some(old) = old_root {
-                self.meta.decrement_refcount(&old);
+        let mut drops = 0usize;
+        loop {
+            if drops >= STEP_TRIES {
+                g.notes.push(format!("[{}][FUSE] setattr size: ino={ino}: {STEP_TRIES} steps in a row were dropped", ts()));
+                return Err(libc::EIO);
             }
-            self.clear_manifest(ino, old_root)?;
-        } else {
-            // Pending writes are streamed first. A stream that is not purely
-            // extended switches to an overlay on the content so far and is
-            // cut or extended there. No file content is read. These steps
-            // keep the cell locked (a rare size change of an open stream).
-            self.settle_locked(g)?;
-            self.to_overlay_locked(g)?;
+            g.wait_step()?;
+            if g.retired {
+                return Ok(false);
+            }
+            let streaming = matches!(g.file.write_mode, WriteMode::Streaming { .. });
+            if streaming && new_size > 0 && new_size >= g.file.byte_count {
+                // Extending a stream: record the size, no materializing. A
+                // fresh stream on a file with stored bytes cannot (it would
+                // lose them): the check is a step with the cell unlocked.
+                let extend = if g.file.byte_count > 0 {
+                    true
+                } else {
+                    let generation = g.file.generation;
+                    let has = g.run_step(|| self.has_content(ino));
+                    if g.retired {
+                        return Ok(false);
+                    }
+                    if g.file.generation != generation {
+                        drops += 1;
+                        continue;
+                    }
+                    !has
+                };
+                if extend {
+                    let s = &mut g.file;
+                    s.min_size = new_size;
+                    s.byte_count = new_size;
+                    s.cas_committed = false;
+                    s.modified = Some(now_pair());
+                    s.generation = next_gen();
+                    return self.stamp_size(ino, new_size).map(|_| true);
+                }
+            }
+            if new_size == 0 {
+                // Back to an empty stream (a new state: a new generation).
+                // The committed root and the empty manifest node come from a
+                // step with the cell unlocked; they are still right if the
+                // state did not change (the manifest of an open inode
+                // changes only under its cell lock, with a new generation or
+                // a new `last_committed_root`).
+                let (generation, committed) = (g.file.generation, g.file.last_committed_root);
+                let (root, digest) = g.run_step(|| -> Result<(Option<ObjectKey>, ObjectKey), i32> {
+                    let root = self.meta.get_manifest(ino).ok().and_then(|m| m.first().copied());
+                    Ok((root, self.meta.prepare_manifest(&[]).map_err(|_| libc::EIO)?))
+                })?;
+                if g.retired {
+                    return Ok(false);
+                }
+                if g.file.generation != generation || g.file.last_committed_root != committed {
+                    drops += 1;
+                    continue;
+                }
+                g.file = OpenFileState { modified: Some(now_pair()), ..OpenFileState::new(ino) };
+                // No flush snapshot of the old content installs after this.
+                g.last_published_gen = g.file.generation;
+                if let Some(old) = &committed {
+                    self.meta.decrement_refcount(old);
+                }
+                if let Some(r) = root.filter(|r| Some(*r) != committed) {
+                    self.meta.decrement_refcount(&r);
+                }
+                self.meta.set_manifest_digest(ino, digest).map_err(|_| libc::EIO)?;
+                return self.stamp_size(ino, 0).map(|_| true);
+            }
+            if streaming {
+                // A stream that is not purely extended: stream its pending
+                // writes (one step each), then switch to an overlay on the
+                // content so far; the next pass cuts or extends there. No
+                // file content is read.
+                let first = match &g.file.write_mode {
+                    WriteMode::Streaming { pending, .. } => pending.first_key_value().map(|(&o, v)| (o, v.clone())),
+                    WriteMode::Overlay(_) => None,
+                };
+                let published = match first {
+                    Some((o, v)) => self.stream_step(g, o, &v, Some(o))?,
+                    None => self.to_overlay(g)?,
+                };
+                if g.retired {
+                    return Ok(false);
+                }
+                if published {
+                    drops = 0;
+                } else {
+                    drops += 1;
+                }
+                continue;
+            }
+            // An overlay: only the size and the extents change (memory).
             let s = &mut g.file;
             if let WriteMode::Overlay(ov) = &mut s.write_mode {
                 ov.truncate(new_size);
@@ -3110,8 +3196,8 @@ impl SliceFsFilesystem {
             s.min_size = 0;
             s.cas_committed = false;
             s.modified = Some(now_pair());
+            return self.stamp_size(ino, new_size).map(|_| true);
         }
-        self.stamp_size(ino, new_size)
     }
 
     /// A truncate or extend to `size`: it changes the content, so mtime and
