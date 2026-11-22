@@ -96,7 +96,8 @@ fn overlay_file() -> (TempDir, SliceFsFilesystem, u64, u64) {
 
 /// A rebase hook that parks its first call until `go` (at most `WAIT`),
 /// tells `parked` when it gets there, and sets `out` when it goes on. Later
-/// calls (finalize, with the cell locked) do not park.
+/// calls (more rebase steps of the write or of the finalize, which also run
+/// with the cell unlocked) do not park.
 fn held_hook() -> (RebaseHook, Receiver<()>, Sender<()>, Arc<AtomicBool>) {
     let (parked_tx, parked_rx) = channel();
     let (go_tx, go_rx) = channel::<()>();
