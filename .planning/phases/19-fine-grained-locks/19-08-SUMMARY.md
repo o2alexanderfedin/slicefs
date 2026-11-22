@@ -46,7 +46,7 @@ key-files:
     - crates/slicefs-cli/tests/write_log_replay_tests.rs
 
 key-decisions:
-  - "A Release record is appended only by the release that moved the cell to retired; a finalize stopped by a new writer logs none (the later last release does)"
+  - "A Release record is appended by a release that finds the cell retired after its finalize; a finalize stopped by a new writer logs none (the later last release does). In a rare interleave two releases both log one (see Plan facts)"
   - "A Flush record is appended only when flush_cell reached Phase C (it installed); an empty, clean or overlay flush logs none"
   - "Replay never appends: a Create logged with O_APPEND gives a replay handle that writes at the logged offsets"
   - "A write that applied and then failed (rebase or budget step) keeps its record; the LSN is returned beside the error and written out"
@@ -83,7 +83,7 @@ completed: 2026-11-22
   - Gap fills, dropped steps and `to_overlay` log nothing. The inode comes from the cell, so the after-apply lookup in `handle_write` is gone (RESEARCH dependency 15).
 - **The other write-path records:**
   - `Truncate` is appended after `setattr_size_open(0)` in `open_write`, in the same hold.
-  - `Release` is appended only when `release_write` moved the cell to `retired`.
+  - `Release` is appended only when the cell is `retired` after the finalize of `release_write` (see Plan facts for a rare second record).
   - `Flush` is appended only when `flush_cell` returned `Ok(true)`, that is, Phase C installed.
   - The handlers write each record out after the call.
 - **D-12 / D-17 (`O_APPEND`):**
@@ -119,7 +119,7 @@ completed: 2026-11-22
 
 - `cargo test -p slicefs-cli --test write_log_replay_tests`: 28 passed (about 28 s). These include `parallel_overlapping_writes_replay_to_the_same_content` (4 rounds, 0.75 s), `a_failed_write_appends_no_record`, `two_write_handles_release_replays`, `an_o_trunc_open_beside_a_write_handle_replays` and `a_file_created_with_o_append_replays_its_overwrites`.
 - `cargo test -p slicefs-cli --test multi_handle_posix`: 13 passed.
-  - The tests take 1.5-1.7 s. The warm debug binary takes 3.3 s and 5.8 s wall time in two runs, inside the 6 s budget. The first run of a new binary took 22 s, which is the macOS start-up cost of a new executable.
+  - Cargo reports 1.5-1.7 s for the tests. Two warm runs of the debug binary took 3.3 s and 5.8 s wall time, inside the 6 s budget. The first run of the new binary took 22 s wall time. The cause was not investigated (possibly the first-launch check of a new executable on macOS).
   - The new tests are `append_handle_ignores_the_request_offset`, `append_starts_at_the_committed_size_and_stops_at_the_max`, `a_write_request_with_o_append_appends`, `visibility_across_ro_rw_append_handles`, `all_or_none_reads` and `appends_never_overlap`.
 - `cargo test --workspace` exited 0 before each task commit (66 `test result: ok` lines, no `FAILED`, no `lock rank violation`). `cargo check -p slicefs-cli --all-targets --features lock-stats` exited 0 after the Task 2 lock-site changes.
 - The full suite command from 19-VALIDATION.md, on the Task 3 tree: `FULL_EXIT=0`, 66 `test result: ok` lines, no `FAILED`, no `error`, no `lock rank violation`.
@@ -155,15 +155,19 @@ See `key-decisions`. All of them can be changed later.
 
 - **EFBIG test:** the plan's case "an append past MAX_FILE_SIZE returns EFBIG" uses a stream that setattr extended to `MAX_FILE_SIZE - 10` (only the size is recorded). The first draft also wrote 10 bytes at that end. The run hung, because a fresh stream fills the gap up to the offset with streamed zeros (1 TiB). This was already the behavior for any write far past the stream end. The test now checks only the EFBIG case and truncates back to 0 before the release, so the finalize pads no zeros.
 - **Release in the hold of the retire:** the record is appended in the last hold of the finalize, so writes that were logged during the finalize's I/O phase can come before it. Replay gives the same content: those writes go to the replay handle, and the `Release` then finalizes it.
+- **Second `Release` record:** take this order. A releases the last write handle, and its finalize is in unlocked I/O. B opens and releases, and B's finalize retires the cell and logs `Release`. A then locks again, finds `retired`, and logs a second `Release`. In replay the second record is a no-op (the replay handle is already gone), or it finalizes the replay handle of a later writer early. The content is the same, so the code was not changed. An exact rule needs `finalize` to report that it set `retired` itself.
+- **Flush coverage:** no test pins "Flush only when it did work". `flush_logged` appends only on `flush_cell` = `Ok(true)` (Phase C ran). The existing fsync replay tests pass, but no test counts `Flush` records.
+- **Replay helper:** `appends_never_overlap` uses the existing `reload` of `multi_handle_posix.rs` (last root, then `replay_log`). It does not use copies of `new_fs_with` and `reload_and_replay`, because the file's `new_fs` already has a PerOp write log.
 - **Gate:** the FUSE callbacks hold the shared commit gate across the call and the write-out, as Plan 04 requires. The handler tests call the handlers with no gate, as before.
 
-**Total deviations:** 2 auto-fixes (Rule 1) and 3 notes. **Impact:** all plan truths hold.
+**Total deviations:** 2 auto-fixes (Rule 1) and 6 notes. **Impact:** all plan truths hold.
 
 ## For later plans
 
 - Plan 10: the namespace and setattr/xattr records still log after the apply (`l.log(fs, ..)`, 11 sites). Use the same shape: a `*_logged` fs method that appends in the apply's hold and returns the LSN, then `log_write_out` in the handler.
 - `Logged::log` (`log_record`) stays for those sites. `log_record` is now `log_append` plus `log_write_out`.
 - `flush_cell` returns `Ok(true)` when Phase C ran. `finalize_steps` and the commit relog ignore the value.
+- The Plan 10 harness can see two `Release` records for one inode in a rare release race (see Plan facts). Replay handles it. A count check must allow it, or `finalize` must report its own retire.
 - `open_handle` takes `append`. `test_create` opens with `append = false`, and `test_create_full` sets it from the flags.
 
 ## Issues Encountered
