@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 19
 current_phase_name: Fine-grained locks
 status: executing
-stopped_at: Completed 19-07-PLAN.md
-last_updated: "2026-11-22T06:47:30.166Z"
+stopped_at: Completed 19-08-PLAN.md
+last_updated: "2026-11-22T07:50:57.229Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 19 execution started
-state_head: cc1f24e28df47cc6da512fd6b254f64d4271a084
+state_head: 80b42c395615921ee51aad534c3474df2f6663d5
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 18
-  completed_plans: 14
+  completed_plans: 15
   percent: 14
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 19 (Fine-grained locks) — EXECUTING
-Plan: 8 of 11
+Plan: 9 of 11
 Status: Ready to execute
 Last activity: 2026-11-21 — Phase 19 execution started
 
@@ -60,6 +60,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 19 P05 | 41min | 3 tasks | 5 files |
 | Phase 19 P06 | 25min | 2 tasks | 4 files |
 | Phase 19 P07 | 95min | 3 tasks | 4 files |
+| Phase 19 P08 | 45min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -109,6 +110,8 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: A flush installs only if last_published_gen is older than its snapshot; overlay switch and truncate to 0 also set it
 - [Phase 19]: The last release finalizes in steps of FINAL_STEP (8 MiB) and retires only when clean with no write handle
 - [Phase 19]: A closed-file truncate runs in a transient cell locked before it goes into the map
+- [Phase 19]: 19-08: a Release record is appended only by the release that retired the cell; Flush only when its Phase C installed; replay never appends
+- [Phase 19]: 19-08: an O_APPEND write takes EOF under the cell lock in every write-loop turn; the Write record carries the effective offset
 
 ### Pending Todos
 
@@ -130,8 +133,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-22T06:47:30.020Z
-Stopped at: Completed 19-07-PLAN.md
+Last session: 2026-11-22T07:50:57.083Z
+Stopped at: Completed 19-08-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
