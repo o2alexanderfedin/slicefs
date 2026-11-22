@@ -418,6 +418,116 @@ fn dirty_cost_stays_under_the_hard_cap() {
     assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
 }
 
+/// With every third unlocked step forced to drop, 4 writers on one file
+/// (thread t owns the blocks b with b % 4 == t) and a reader keep the
+/// content right, and the dirty cost stays under the hard cap.
+#[test]
+fn forced_drops_keep_content_and_the_cap() {
+    use slicefs_cli::{filesystem::REBASE_STEP, overlay::GROW_DIV};
+    const LIMIT: usize = 256 * KIB;
+    const BLOCK: usize = 4 * KIB;
+    const BLOCKS: usize = (2 << 20) / BLOCK;
+    const PER_THREAD: usize = 2000;
+    let cap = LIMIT + LIMIT / GROW_DIV + 2 * REBASE_STEP;
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+    let base = seeded(90, BLOCKS * BLOCK);
+    fs.test_write(fh, 0, &base).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    fs.test_set_dirty_limit(LIMIT);
+    // A short sleep in each I/O phase widens the window for concurrent writes.
+    fs.test_set_rebase_hook(Some(Arc::new(|| std::thread::sleep(Duration::from_millis(2)))));
+    // The block of write i of thread t; its bytes are `version(t, i)`.
+    let plan: Vec<Vec<usize>> = (0..4)
+        .map(|t| {
+            let mut x = 0x9E37_79B9_7F4A_7C15u64 ^ t as u64;
+            (0..PER_THREAD)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    (x as usize % (BLOCKS / 4)) * 4 + t
+                })
+                .collect()
+        })
+        .collect();
+    let version = |t: usize, i: usize| seeded(((t as u64) << 32) | i as u64, BLOCK);
+    let handles: Vec<u64> = (0..4).map(|_| fs.test_open(ino, libc::O_RDWR).unwrap().0).collect();
+    fs.test_drop_every(3);
+    let deadline = std::time::Instant::now() + Duration::from_millis(400);
+    let stop = AtomicBool::new(false);
+    let counts: Vec<usize> = std::thread::scope(|s| {
+        let (fs, plan, version, stop, base) = (&fs, &plan, &version, &stop, &base);
+        let writers: Vec<_> = handles.iter().enumerate().map(|(t, &h)| s.spawn(move || {
+            let mut n = 0;
+            while n < PER_THREAD && std::time::Instant::now() < deadline {
+                let b = plan[t][n];
+                assert_eq!(fs.test_write(h, (b * BLOCK) as u64, &version(t, n)), Ok(BLOCK as u32), "thread {t} write {n}");
+                let cost = fs.test_dirty_cost(ino);
+                assert!(cost <= cap, "thread {t} write {n}: dirty cost {cost} > cap {cap}");
+                n += 1;
+            }
+            n
+        })).collect();
+        let reader = s.spawn(move || {
+            let mut x = 0x2545_F491_4F6C_DD1Du64;
+            let mut reads = 0;
+            while !stop.load(Ordering::SeqCst) {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let b = x as usize % BLOCKS;
+                let got = fs.test_read(ino, (b * BLOCK) as u64, BLOCK as u32).unwrap();
+                let t = b % 4;
+                let known = got == base[b * BLOCK..(b + 1) * BLOCK]
+                    || (0..PER_THREAD).any(|i| plan[t][i] == b && got == version(t, i));
+                assert!(known, "block {b}: the bytes of no single version");
+                reads += 1;
+            }
+            reads
+        });
+        let counts = writers.into_iter().map(|w| w.join().unwrap()).collect();
+        stop.store(true, Ordering::SeqCst);
+        assert!(reader.join().unwrap() > 0, "the reader ran");
+        counts
+    });
+    fs.test_drop_every(0);
+    fs.test_set_rebase_hook(None);
+    let mut model = base.clone();
+    for (t, &n) in counts.iter().enumerate() {
+        for i in 0..n {
+            let b = plan[t][i];
+            model[b * BLOCK..(b + 1) * BLOCK].copy_from_slice(&version(t, i));
+        }
+    }
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content with the handles open");
+    for h in handles {
+        fs.test_release(ino, h).unwrap();
+    }
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
+}
+
+/// `STEP_TRIES` (16) dropped steps in a row: a stream write returns EIO and
+/// changes nothing; with the hook off the same write goes in.
+#[test]
+fn sixteen_dropped_stream_steps_give_eio() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "s", 0o644, 0, 0, 0).unwrap();
+    let mut model = seeded(95, 16 * KIB);
+    fs.test_write(fh, 0, &model).unwrap();
+    let more = seeded(96, 16 * KIB);
+    fs.test_drop_every(1);
+    let r = fs.test_write(fh, 16 * KIB as u64, &more);
+    fs.test_drop_every(0);
+    assert_eq!(r, Err(libc::EIO));
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "the failed write changed nothing");
+    assert_eq!(fs.test_write(fh, 16 * KIB as u64, &more), Ok(more.len() as u32));
+    put(&mut model, 16 * KIB, &more);
+    assert!(fs.test_is_streaming(fh), "the write stayed in order");
+    fs.test_release(ino, fh).unwrap();
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content after release");
+}
+
 /// A streaming write parked in its push (Phase B, cell unlocked) does not
 /// block a read of the prefix that is streamed already.
 #[test]

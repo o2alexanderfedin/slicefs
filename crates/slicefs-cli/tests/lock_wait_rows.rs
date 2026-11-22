@@ -252,3 +252,130 @@ fn other_files_do_not_wait_rows() {
     release(&fs, x, fx);
     release(&fs, y, fy);
 }
+
+/// A rebase hook that parks its call number `n` (from 1) until `go` (at
+/// most `WAIT`), tells `parked` when it gets there, and sets `out` when it
+/// goes on. Other calls do not park.
+fn held_hook_at(n: usize) -> (RebaseHook, Receiver<()>, Sender<()>, Arc<AtomicBool>) {
+    let (parked_tx, parked_rx) = channel();
+    let (go_tx, go_rx) = channel::<()>();
+    let out = Arc::new(AtomicBool::new(false));
+    let (calls, go_rx, out2) = (std::sync::atomic::AtomicUsize::new(0), Mutex::new(go_rx), out.clone());
+    let hook: RebaseHook = Arc::new(move || {
+        if calls.fetch_add(1, Ordering::SeqCst) + 1 == n {
+            parked_tx.send(()).ok();
+            let _ = go_rx.lock().unwrap().recv_timeout(WAIT);
+            out2.store(true, Ordering::SeqCst);
+        }
+    });
+    (hook, parked_rx, go_tx, out)
+}
+
+/// Two readers of `ino` read 50 times each, in turn at the `(offset,
+/// bytes)` places of `want`; returns the slowest read.
+fn two_readers(fs: &SliceFsFilesystem, ino: u64, want: &[(usize, Vec<u8>)]) -> Duration {
+    std::thread::scope(|s| {
+        let readers: Vec<_> = (0..2)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut slowest = Duration::ZERO;
+                    for i in 0..50 {
+                        let (off, bytes) = &want[i % want.len()];
+                        let t0 = Instant::now();
+                        let got = read(fs, ino, *off, bytes.len());
+                        slowest = slowest.max(t0.elapsed());
+                        assert!(got == *bytes, "read at {off}");
+                    }
+                    slowest
+                })
+            })
+            .collect();
+        readers.into_iter().map(|r| r.join().expect("reader panicked")).max().unwrap()
+    })
+}
+
+/// The rows of a forced-drop test: readers and the cell waited less than
+/// `BOUND`, no site was held across the parked retry, and the retry ran.
+fn assert_drop_rows(test: &str, snap: &[SiteStats], slowest: Duration, steps: u64) {
+    print_rows(test, snap);
+    println!("slowest_read_us={:.1} rebase_steps={steps}", slowest.as_nanos() as f64 / 1000.0);
+    assert!(steps >= 2, "the dropped step and its retry: {steps}");
+    assert!(slowest < BOUND, "a read took {slowest:?} while the retry was parked");
+    for label in ["file_cell", "readers"] {
+        let s = site(snap, label);
+        assert!(s.count > 0, "no samples for lock site {label}");
+        assert!(s.wait_max_ns < BOUND.as_nanos() as u64, "lock site {label} waited {} us", s.wait_max_ns / 1000);
+    }
+    assert_no_hold_across(snap);
+}
+
+/// Criterion 1 in the forced-drop mode: the first rebase step of a write
+/// is dropped (`test_drop_steps(1)`), and its unlocked retry is parked for
+/// at least `HELD`; two readers of F do not wait for it.
+#[test]
+fn readers_do_not_wait_when_steps_drop_rows() {
+    let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+    let (_dir, fs, ino, fh) = overlay_file();
+    let base = seeded(1, 1 << 20);
+    let big = seeded(5, 128 * KIB);
+    let want = [(256 * KIB, big[..4 * KIB].to_vec()), (768 * KIB, base[768 * KIB..772 * KIB].to_vec())];
+    let (hook, parked, go, out) = held_hook_at(2);
+    fs.test_set_rebase_hook(Some(hook));
+    fs.test_drop_steps(1);
+    let before = fs.test_rebase_count();
+    lock_stats::reset();
+    let slowest = std::thread::scope(|s| {
+        let w = s.spawn(|| write(&fs, fh, 256 * KIB, &big));
+        let reached = parked.recv_timeout(WAIT);
+        let parked_at = Instant::now();
+        let slowest = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| two_readers(&fs, ino, &want)));
+        let parked_still = !out.load(Ordering::SeqCst);
+        go_after_held(parked_at, &go);
+        w.join().expect("writer panicked");
+        reached.expect("the retry after the dropped step reached its I/O phase");
+        let slowest = slowest.unwrap_or_else(|e| std::panic::resume_unwind(e));
+        assert!(parked_still, "the reads did not end while the retry was parked");
+        slowest
+    });
+    let snap = lock_stats::snapshot();
+    fs.test_set_rebase_hook(None);
+    assert_drop_rows("readers_do_not_wait_when_steps_drop", &snap, slowest, fs.test_rebase_count() - before);
+    release(&fs, ino, fh);
+}
+
+/// The same with the parked retry in the finalize of the last release.
+#[test]
+fn release_with_drops_does_not_block_readers_rows() {
+    let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+    let (_dir, fs, ino, fh) = overlay_file();
+    let base = seeded(1, 1 << 20);
+    let patch = seeded(2, 4 * KIB);
+    let want = [(512 * KIB, patch), (768 * KIB, base[768 * KIB..772 * KIB].to_vec())];
+    let (hook, parked, go, out) = held_hook_at(2);
+    fs.test_set_rebase_hook(Some(hook));
+    fs.test_drop_steps(1);
+    let before = fs.test_rebase_count();
+    lock_stats::reset();
+    let slowest = std::thread::scope(|s| {
+        let rel = s.spawn(|| release(&fs, ino, fh));
+        let reached = parked.recv_timeout(WAIT);
+        let parked_at = Instant::now();
+        let slowest = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| two_readers(&fs, ino, &want)));
+        let parked_still = !out.load(Ordering::SeqCst);
+        go_after_held(parked_at, &go);
+        rel.join().expect("release panicked");
+        reached.expect("the retry of the release reached its I/O phase");
+        let slowest = slowest.unwrap_or_else(|e| std::panic::resume_unwind(e));
+        assert!(parked_still, "the reads did not end while the retry was parked");
+        slowest
+    });
+    let snap = lock_stats::snapshot();
+    fs.test_set_rebase_hook(None);
+    assert_drop_rows("release_with_drops_does_not_block_readers", &snap, slowest, fs.test_rebase_count() - before);
+    assert_eq!(fs.test_dirty_cost(ino), 0, "the release retired the cell");
+    assert!(read(&fs, ino, 0, 1 << 20) == {
+        let mut m = base.clone();
+        m[512 * KIB..516 * KIB].copy_from_slice(&seeded(2, 4 * KIB));
+        m
+    }, "content after release");
+}

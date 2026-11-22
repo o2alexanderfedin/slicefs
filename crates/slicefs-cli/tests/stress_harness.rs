@@ -131,6 +131,10 @@ struct Config {
     /// last `COMMIT_EVERY` before the deadline and none at the end, so the
     /// log holds the end of the run.
     crash: bool,
+    /// Drop every k-th unlocked step (`test_drop_every`; 0: off).
+    drop_every: usize,
+    /// Dirty limit of each open file in KiB (`test_set_dirty_limit`; 0: unchanged).
+    dirty_limit_kib: usize,
 }
 
 /// A number from the environment, with a range. Out of range panics with the
@@ -146,8 +150,10 @@ fn env_num(name: &str, default: u64, lo: u64, hi: u64) -> u64 {
 impl Config {
     /// The long run (by hand): `STRESS_THREADS` (1..=64, default 8),
     /// `STRESS_SECS` (1..=3600, default 60), `STRESS_FILE_MIB` (1..=4096,
-    /// default 64), `STRESS_SEED`, `STRESS_SERIALIZE` (0 or 1, default 1).
-    /// `STRESS_MODE` is read by `modes_from_env`.
+    /// default 64), `STRESS_SEED`, `STRESS_SERIALIZE` (0 or 1, default 1),
+    /// `STRESS_DROP_EVERY` (0..=1000, default 0: drop every k-th unlocked
+    /// step) and `STRESS_DIRTY_LIMIT_KIB` (0..=1048576, default 0: the limit
+    /// is unchanged). `STRESS_MODE` is read by `modes_from_env`.
     fn from_env(defaults: Config) -> Config {
         let secs = env_num("STRESS_SECS", 60, 1, 3600);
         let file_bytes = env_num("STRESS_FILE_MIB", 64, 1, 4096) << 20;
@@ -161,6 +167,8 @@ impl Config {
             file_bytes,
             serialize: env_num("STRESS_SERIALIZE", 1, 0, 1) == 1,
             watchdog: Duration::from_secs(secs + 60 + verify_secs),
+            drop_every: env_num("STRESS_DROP_EVERY", 0, 0, 1000) as usize,
+            dirty_limit_kib: env_num("STRESS_DIRTY_LIMIT_KIB", 0, 0, 1 << 20) as usize,
             ..defaults
         }
     }
@@ -1073,6 +1081,13 @@ fn run(cfg: Config) -> Outcome {
     chunk_store::lock_stats::reset();
     let dir = TempDir::new().unwrap();
     let fs = new_fs(dir.path(), cfg.wal.clone());
+    // The forced-drop knobs of the long run (`Config::from_env`); off by default.
+    if cfg.drop_every > 0 {
+        fs.test_drop_every(cfg.drop_every);
+    }
+    if cfg.dirty_limit_kib > 0 {
+        fs.test_set_dirty_limit(cfg.dirty_limit_kib << 10);
+    }
     let gate = fs.commit_gate();
     let (one, dirs) = match cfg.mode {
         Mode::OneFile | Mode::MultiHandle => {
@@ -1258,6 +1273,8 @@ fn short_cfg(mode: Mode) -> Config {
         wal: WalConfig::PerOp,
         watchdog: Duration::from_secs(60),
         crash: false,
+        drop_every: 0,
+        dirty_limit_kib: 0,
     }
 }
 
@@ -1387,7 +1404,7 @@ fn strict_gate_catches_a_request_without_the_gate() {
 
 /// The long run, by hand (use `--release`). Env vars: see `Config::from_env`.
 #[test]
-#[ignore = "long run by hand: STRESS_THREADS STRESS_SECS STRESS_FILE_MIB STRESS_SEED STRESS_SERIALIZE STRESS_MODE; use --release"]
+#[ignore = "long run by hand: STRESS_THREADS STRESS_SECS STRESS_FILE_MIB STRESS_SEED STRESS_SERIALIZE STRESS_MODE STRESS_DROP_EVERY STRESS_DIRTY_LIMIT_KIB; use --release"]
 fn long_run() {
     for mode in modes_from_env() {
         let cfg = Config::from_env(Config { mode, ..short_cfg(mode) });
@@ -1503,6 +1520,8 @@ fn spike_ctx(serialize: bool, seed: u64, threads: usize, wal: WalConfig) -> Ctx 
             wal,
             watchdog: Duration::from_secs(60),
             crash: false,
+            drop_every: 0,
+            dirty_limit_kib: 0,
         },
         one: None,
         dirs: None,
