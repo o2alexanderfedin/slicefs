@@ -1,0 +1,118 @@
+# 19-16 extra probe (macOS), for the stripe and file_cell holds (not one of the six LOCK-01 sites).
+# The patches were local and reverted; git status -- crates/ was empty after each.
+
+## Probe 1: Timing::drop prints a backtrace for stripe/file_cell holds >= 3 ms (frames 9-16 kept; file paths removed)
+load before: 15:18  up 31 days, 19:39, 8 users, load averages: 24.73 28.85 24.18
+=== probe run 1
+PROBE hold site=file_cell ms=4.8
+   9: <slicefs_cli::filesystem::CellGuard as core::ops::drop::Drop>::drop
+  10: core::ptr::drop_in_place::<slicefs_cli::filesystem::CellGuard>
+  11: <slicefs_cli::filesystem::SliceFsFilesystem>::write_in_cell
+  12: <slicefs_cli::filesystem::SliceFsFilesystem>::write_logged
+  13: slicefs_cli::handlers::handle_write_flags
+  14: slicefs_cli::handlers::handle_write
+  15: <stress_harness::Ctx>::write_blocks::{closure#0}
+  16: <stress_harness::Ctx>::gated::<slicefs_cli::handlers::WriteResult, <stress_harness::Ctx>::write_blocks::{closure#0}>
+  ...
+load before: 15:19  up 31 days, 19:39, 8 users, load averages: 23.75 28.27 24.13
+=== probe run 2
+PROBE hold site=file_cell ms=3.2
+   9: <slicefs_cli::filesystem::CellGuard as core::ops::drop::Drop>::drop
+  10: core::ptr::drop_in_place::<slicefs_cli::filesystem::CellGuard>
+  11: <slicefs_cli::filesystem::SliceFsFilesystem>::write_in_cell
+  12: <slicefs_cli::filesystem::SliceFsFilesystem>::write_logged
+  13: slicefs_cli::handlers::handle_write_flags
+  14: slicefs_cli::handlers::handle_write
+  15: <stress_harness::Ctx>::write_blocks::{closure#0}
+  16: <stress_harness::Ctx>::gated::<slicefs_cli::handlers::WriteResult, <stress_harness::Ctx>::write_blocks::{closure#0}>
+  ...
+PROBE hold site=stripe ms=20.4
+   9: <alloc::vec::Vec<chunk_store::sync::MutexGuard<()>> as core::ops::drop::Drop>::drop
+  10: core::ptr::drop_in_place::<alloc::vec::Vec<chunk_store::sync::MutexGuard<()>>>
+  11: core::ptr::drop_in_place::<slicefs_cli::locks::NsGuard>
+  12: <slicefs_cli::filesystem::SliceFsFilesystem>::unlink_logged
+  13: slicefs_cli::handlers::handle_unlink
+  14: <stress_harness::Ctx>::worker_many_files::{closure#9}
+  15: <stress_harness::Ctx>::gated::<slicefs_cli::handlers::EmptyResult, <stress_harness::Ctx>::worker_many_files::{closure#9}>
+  16: <stress_harness::Ctx>::worker_many_files
+  ...
+PROBE hold site=stripe ms=41.4
+   9: <alloc::vec::Vec<chunk_store::sync::MutexGuard<()>> as core::ops::drop::Drop>::drop
+  10: core::ptr::drop_in_place::<alloc::vec::Vec<chunk_store::sync::MutexGuard<()>>>
+  11: core::ptr::drop_in_place::<slicefs_cli::locks::NsGuard>
+  12: <slicefs_cli::filesystem::SliceFsFilesystem>::unlink_logged
+  13: slicefs_cli::handlers::handle_unlink
+  14: <stress_harness::Ctx>::worker_many_files::{closure#9}
+  15: <stress_harness::Ctx>::gated::<slicefs_cli::handlers::EmptyResult, <stress_harness::Ctx>::worker_many_files::{closure#9}>
+  16: <stress_harness::Ctx>::worker_many_files
+  ...
+PROBE hold site=stripe ms=21.9
+   9: <alloc::vec::Vec<chunk_store::sync::MutexGuard<()>> as core::ops::drop::Drop>::drop
+  10: core::ptr::drop_in_place::<alloc::vec::Vec<chunk_store::sync::MutexGuard<()>>>
+  11: core::ptr::drop_in_place::<slicefs_cli::locks::NsGuard>
+  12: <slicefs_cli::filesystem::SliceFsFilesystem>::unlink_logged
+  13: slicefs_cli::handlers::handle_unlink
+  14: <stress_harness::Ctx>::worker_many_files::{closure#9}
+  15: <stress_harness::Ctx>::gated::<slicefs_cli::handlers::EmptyResult, <stress_harness::Ctx>::worker_many_files::{closure#9}>
+  16: <stress_harness::Ctx>::worker_many_files
+  ...
+PROBE hold site=stripe ms=45.0
+   9: <alloc::vec::Vec<chunk_store::sync::MutexGuard<()>> as core::ops::drop::Drop>::drop
+  10: core::ptr::drop_in_place::<alloc::vec::Vec<chunk_store::sync::MutexGuard<()>>>
+  11: core::ptr::drop_in_place::<slicefs_cli::locks::NsGuard>
+  12: <slicefs_cli::filesystem::SliceFsFilesystem>::unlink_logged
+  13: slicefs_cli::handlers::handle_unlink
+  14: <stress_harness::Ctx>::worker_many_files::{closure#9}
+  15: <stress_harness::Ctx>::gated::<slicefs_cli::handlers::EmptyResult, <stress_harness::Ctx>::worker_many_files::{closure#9}>
+  16: <stress_harness::Ctx>::worker_many_files
+  ...
+PROBE hold site=stripe ms=21.1
+   9: <alloc::vec::Vec<chunk_store::sync::MutexGuard<()>> as core::ops::drop::Drop>::drop
+  10: core::ptr::drop_in_place::<alloc::vec::Vec<chunk_store::sync::MutexGuard<()>>>
+  11: core::ptr::drop_in_place::<slicefs_cli::locks::NsGuard>
+  12: <slicefs_cli::filesystem::SliceFsFilesystem>::unlink_logged
+  13: slicefs_cli::handlers::handle_unlink
+  14: <stress_harness::Ctx>::worker_many_files::{closure#9}
+  15: <stress_harness::Ctx>::gated::<slicefs_cli::handlers::EmptyResult, <stress_harness::Ctx>::worker_many_files::{closure#9}>
+  16: <stress_harness::Ctx>::worker_many_files
+  ...
+PROBE hold site=stripe ms=63.1
+   9: <alloc::vec::Vec<chunk_store::sync::MutexGuard<()>> as core::ops::drop::Drop>::drop
+  10: core::ptr::drop_in_place::<alloc::vec::Vec<chunk_store::sync::MutexGuard<()>>>
+  11: core::ptr::drop_in_place::<slicefs_cli::locks::NsGuard>
+  12: <slicefs_cli::filesystem::SliceFsFilesystem>::unlink_logged
+  13: slicefs_cli::handlers::handle_unlink
+  14: <stress_harness::Ctx>::worker_many_files::{closure#9}
+  15: <stress_harness::Ctx>::gated::<slicefs_cli::handlers::EmptyResult, <stress_harness::Ctx>::worker_many_files::{closure#9}>
+  16: <stress_harness::Ctx>::worker_many_files
+  ...
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 7.34s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 7.54s
+
+## Probe 2: step times (ms since the start) in unlink_logged when it takes >= 5 ms
+probe 2: step times in unlink_logged when it takes >= 5 ms (local, not committed); get_manifest timed once more before drop_last_link, so the reclaim reads a warm manifest
+load before: 15:20  up 31 days, 19:40, 8 users, load averages: 19.27 26.07 23.60
+=== probe2 run 1
+report mode=one-file (closed loop: no coordinated-omission correction)
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=14.1 wait_max_us=14.1 hold_p50_us=15.3 hold_p99_us=473.3 hold_max_us=473.3
+PROBE unlink [("locked", 0.02419), ("get_inode", 0.028430999999999998), ("meta_unlink", 0.035105), ("drop_link", 0.038355), ("get_manifest", 21.610672), ("drop_last_link", 21.714173), ("touch_dir", 21.719672), ("log", 21.730804)]
+PROBE unlink [("locked", 0.105464), ("get_inode", 0.110358), ("meta_unlink", 0.11788), ("drop_link", 0.12269399999999998), ("get_manifest", 0.16185), ("drop_last_link", 20.381947), ("touch_dir", 20.391402), ("log", 20.404356)]
+PROBE unlink [("locked", 0.016594), ("get_inode", 0.019926), ("meta_unlink", 0.025191), ("drop_link", 0.046926999999999996), ("get_manifest", 20.173037), ("drop_last_link", 20.299595), ("touch_dir", 20.305441000000002), ("log", 20.315743)]
+PROBE unlink [("locked", 0.030118), ("get_inode", 0.035559), ("meta_unlink", 0.044349), ("drop_link", 0.049141000000000004), ("get_manifest", 21.460665), ("drop_last_link", 21.537319), ("touch_dir", 21.543072), ("log", 21.555011999999998)]
+report mode=many-files (closed loop: no coordinated-omission correction)
+lock site=stripe n=1208 wait_p50_us=0.0 wait_p99_us=1.0 wait_max_us=148.5 hold_p50_us=36.2 hold_p99_us=625.2 hold_max_us=21741.6
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=91.8 wait_max_us=91.8 hold_p50_us=8.2 hold_p99_us=255.7 hold_max_us=255.7
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.65s
+load before: 15:20  up 31 days, 19:41, 8 users, load averages: 20.51 25.60 23.53
+=== probe2 run 2
+report mode=one-file (closed loop: no coordinated-omission correction)
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=17.9 hold_p99_us=418.0 hold_max_us=418.0
+PROBE unlink [("locked", 0.023679000000000002), ("get_inode", 0.027758), ("meta_unlink", 0.034715), ("drop_link", 0.038479), ("get_manifest", 20.883392), ("drop_last_link", 21.030084000000002), ("touch_dir", 21.03707), ("log", 21.051195000000003)]
+PROBE unlink [("locked", 0.049404), ("get_inode", 0.053311), ("meta_unlink", 0.060215), ("drop_link", 0.063575), ("get_manifest", 20.03396), ("drop_last_link", 20.333244999999998), ("touch_dir", 20.338483), ("log", 20.34787)]
+PROBE unlink [("locked", 0.024649), ("get_inode", 0.028831), ("meta_unlink", 0.037328), ("drop_link", 0.041619), ("get_manifest", 20.933180999999998), ("drop_last_link", 21.147118), ("touch_dir", 21.154213000000002), ("log", 21.168383)]
+report mode=many-files (closed loop: no coordinated-omission correction)
+lock site=stripe n=1696 wait_p50_us=0.0 wait_p99_us=23.0 wait_max_us=215.2 hold_p50_us=32.4 hold_p99_us=296.2 hold_max_us=21184.5
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=12.1 wait_max_us=12.1 hold_p50_us=8.9 hold_p99_us=194.6 hold_max_us=194.6
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.55s

@@ -68,9 +68,9 @@ Option B (if a profile shows readers that wait): per inode, `ArcSwap<ExtentMap>`
 
 A debug build checks this order on each lock and fails the test on a violation.
 
-`fsync` releases all locks before it waits for `durable_lsn`. The committer uses the frozen overlays and holds no inode locks.
+`fsync` releases all locks before it waits for `durable_lsn`. The committer uses the frozen overlays; it locks a file cell only in the commit cut, under the exclusive gate.
 
-Some work off the read and write paths still does I/O under a lock: GC, the commit cut (under the exclusive gate, when no request runs) and offline log rotate. A size change of a closed file does its I/O under its own transient cell; reads do not wait for it.
+Some work off the read and write paths still does I/O under a lock: GC, the commit cut (under the exclusive gate, when no request runs) and offline log rotate. On a request path, two operations still do I/O under a lock: a size change of a closed file does its I/O under its own transient cell (reads do not wait for it), and an unlink of the last link reclaims the inode with the namespace stripes held.
 
 ## Acceptance criteria
 
