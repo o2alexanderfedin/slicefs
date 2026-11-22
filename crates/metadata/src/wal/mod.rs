@@ -101,7 +101,8 @@ pub trait WalStrategy: Send + Sync {
         let lsn = self.append(entry)?;
         self.write_out(lsn)
     }
-    /// Flush all buffered mutations to disk and call `sync_all`.
+    /// Flush all buffered mutations to disk and call `sync_all`. Holds no
+    /// lock of the log across a disk sync.
     fn flush_and_sync(&self) -> Result<(), WalError>;
     /// Flush remaining mutations and release all resources.
     fn shutdown(&self) -> Result<(), WalError>;
@@ -183,21 +184,72 @@ pub struct WalCut {
 pub(crate) struct Behind {
     old: Vec<crate::segment::SegmentWriter>,
     dir: Option<std::path::PathBuf>,
+    /// Number of cuts so far (never reset): a settle clears `dir` only if
+    /// no cut came while it synced.
+    cuts: u64,
 }
 
 impl Behind {
     /// Sync the segments left behind and the directory, then forget them.
-    pub(crate) fn settle(&mut self) -> std::io::Result<()> {
-        while let Some(w) = self.old.first_mut() {
-            w.sync()?;
-            self.old.remove(0);
+    /// The disk syncs run on second handles of the files with the `behind`
+    /// lock released (`between` runs at that point, for tests). The writers
+    /// stay in place until their sync succeeded, so a second fsync meanwhile
+    /// syncs them too, and a failed one is synced again next time.
+    pub(crate) fn settle(behind: &chunk_store::sync::Mutex<Behind>, between: impl FnOnce()) -> std::io::Result<()> {
+        let (files, ids, dir, cuts) = {
+            let mut b = behind.lock();
+            let mut files = Vec::new();
+            for w in b.old.iter_mut() {
+                if let Some((file, _)) = w.begin_sync()? {
+                    files.push(file);
+                }
+            }
+            let ids: Vec<u64> = b.old.iter().map(|w| w.id()).collect();
+            (files, ids, b.dir.clone(), b.cuts)
+        };
+        between();
+        for file in &files {
+            file.sync_all()?;
         }
-        if let Some(dir) = &self.dir {
+        if let Some(dir) = &dir {
             std::fs::File::open(dir)?.sync_all()?;
-            self.dir = None;
+        }
+        let mut b = behind.lock();
+        b.old.retain(|w| !ids.contains(&w.id()));
+        if b.cuts == cuts {
+            b.dir = None;
         }
         Ok(())
     }
+
+    /// Forget the segments left behind (a root or a rotate made them dead).
+    pub(crate) fn reset(&mut self) {
+        self.old.clear();
+        self.dir = None;
+    }
+}
+
+/// Sync the current segment with no lock held across the disk sync: under
+/// `writer`, run `prepare` (write the held records out) and take a second
+/// handle of the file; release `writer`; `sync_all` on the handle (`between`
+/// runs just before, for tests); then take `writer` again to note the sync.
+pub(crate) fn sync_current(
+    writer: &chunk_store::sync::Mutex<crate::segment::SegmentWriter>,
+    prepare: impl FnOnce(&mut crate::segment::SegmentWriter) -> Result<(), WalError>,
+    between: impl FnOnce(),
+) -> Result<(), WalError> {
+    let (file, mark) = {
+        let mut w = writer.lock();
+        prepare(&mut w)?;
+        match w.begin_sync()? {
+            Some(sync) => sync,
+            None => return Ok(()),
+        }
+    };
+    between();
+    file.sync_all()?;
+    writer.lock().end_sync(mark);
+    Ok(())
 }
 
 /// The cut of [`WalStrategy::cut`] on `writer` (segment `loc`): the caller
@@ -223,6 +275,7 @@ pub(crate) fn cut_segment(
     let mut b = behind.lock();
     b.old.push(old);
     b.dir = Some(dir);
+    b.cuts += 1;
     *loc = (new_path, new_id);
     Ok(WalCut { root_id: old_id + 1, old_failed })
 }
@@ -247,7 +300,7 @@ pub(crate) fn write_root_segment(
     std::fs::File::open(dir)?.sync_all()?;
     remove_segments_before(dir, cut.root_id)?;
     std::fs::File::open(dir)?.sync_all()?;
-    *behind.lock() = Behind::default();
+    behind.lock().reset();
     Ok(())
 }
 

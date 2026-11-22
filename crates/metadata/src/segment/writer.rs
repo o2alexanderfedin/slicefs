@@ -6,6 +6,14 @@ use std::path::Path;
 
 use super::{SegmentEntry, SegmentHeader, RecordType};
 
+/// What a [`SegmentWriter::begin_sync`] covered: the segment and the
+/// number of records written then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncMark {
+    id: u64,
+    writes: u64,
+}
+
 /// Writes records to a segment file in append-only fashion.
 ///
 /// Each record is framed as: record_type(u8) + payload_len(u32 LE) +
@@ -20,6 +28,10 @@ pub struct SegmentWriter {
     unsynced: bool,
     /// Number of `sync_all` calls made (for tests).
     disk_syncs: u64,
+    /// Id of this segment.
+    id: u64,
+    /// Number of records written (for `end_sync`).
+    writes: u64,
     /// Test fault hook: the next `write_entry`, `flush` or `sync` fails.
     #[cfg(test)]
     fail_next: bool,
@@ -39,6 +51,8 @@ impl SegmentWriter {
             seq: 0,
             unsynced: true,
             disk_syncs: 0,
+            id: segment_id,
+            writes: 0,
             #[cfg(test)]
             fail_next: false,
         };
@@ -54,6 +68,7 @@ impl SegmentWriter {
         let payload = entry.payload_bytes();
         let frame = super::frame_record(entry.record_type() as u8, self.seq, &payload);
         self.unsynced = true;
+        self.writes += 1;
         self.inner.write_all(&frame)?;
         self.seq += 1;
         Ok(self.seq - 1)
@@ -117,6 +132,39 @@ impl SegmentWriter {
         self.injected_fault()?;
         self.inner.flush()?;
         self.inner.get_ref().try_clone()
+    }
+
+    /// First half of a sync that runs with no lock held: write the
+    /// user-space buffer into the file and return a second handle of it for
+    /// `sync_all`, and a mark for [`Self::end_sync`]. `None`: nothing was
+    /// written since the last sync.
+    pub fn begin_sync(&mut self) -> io::Result<Option<(File, SyncMark)>> {
+        self.injected_fault()?;
+        if !self.unsynced {
+            return Ok(None);
+        }
+        self.inner.flush()?;
+        let file = self.inner.get_ref().try_clone()?;
+        Ok(Some((file, SyncMark { id: self.id, writes: self.writes })))
+    }
+
+    /// Second half of a sync, after `sync_all` on the handle of `mark`'s
+    /// `begin_sync` succeeded: count the disk sync, and mark the segment
+    /// synced if nothing was written since. Does nothing if this writer is
+    /// another segment (a cut or rotate replaced it meanwhile).
+    pub fn end_sync(&mut self, mark: SyncMark) {
+        if mark.id != self.id {
+            return;
+        }
+        self.disk_syncs += 1;
+        if mark.writes == self.writes {
+            self.unsynced = false;
+        }
+    }
+
+    /// Id of this segment.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// Number of real disk syncs so far.

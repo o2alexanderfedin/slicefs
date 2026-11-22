@@ -124,18 +124,22 @@ impl BufferedLog {
     /// failed write or sync, until the next `rotate` or `cut`.
     pub(crate) fn flush_and_sync(&self) -> Result<(), WalError> {
         // The records after a cut count only on top of the ones before it.
-        self.behind.lock().settle()?;
-        let mut writer = self.writer.lock();
-        let batch = {
-            let mut pending = self.pending.lock();
-            if pending.failed {
-                return Err(write_failed());
-            }
-            pending.take()
+        Behind::settle(&self.behind, || {})?;
+        // Under `writer`: write the held records out and take the file; the
+        // disk sync runs with no lock held.
+        let prepare = |writer: &mut SegmentWriter| {
+            let batch = {
+                let mut pending = self.pending.lock();
+                if pending.failed {
+                    return Err(write_failed());
+                }
+                pending.take()
+            };
+            write_all(&batch, writer).map_err(WalError::from)
         };
-        if let Err(e) = write_all(&batch, &mut writer).and_then(|()| writer.sync()) {
+        if let Err(e) = super::sync_current(&self.writer, prepare, || {}) {
             self.pending.lock().failed = true;
-            return Err(e.into());
+            return Err(e);
         }
         Ok(())
     }
@@ -154,7 +158,7 @@ impl BufferedLog {
         pending.take();
         pending.failed = false;
         *self.loc.lock() = (new_path, new_id);
-        *self.behind.lock() = Behind::default();
+        self.behind.lock().reset();
         Ok(())
     }
 

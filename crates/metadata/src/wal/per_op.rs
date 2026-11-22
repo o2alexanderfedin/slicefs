@@ -132,7 +132,7 @@ impl WalStrategy for PerOpWal {
         *writer = new_writer;
         *loc = (new_path, new_id);
         self.failed.store(false, Ordering::Release);
-        *self.behind.lock() = Behind::default();
+        self.behind.lock().reset();
         Ok(())
     }
     fn cut(&self) -> Result<Option<WalCut>, WalError> {
@@ -164,18 +164,23 @@ impl WalStrategy for PerOpWal {
         let lsn = self.append(entry)?;
         self.write_out(lsn)?;
         if !matches!(entry, WalEntry::Op { .. }) {
-            self.writer.lock().sync()?;
+            super::sync_current(&self.writer, |_| Ok(()), || {})?;
         }
         Ok(())
     }
 
     fn flush_and_sync(&self) -> Result<(), WalError> {
         // The records after a cut count only on top of the ones before it.
-        self.behind.lock().settle()?;
-        let mut writer = self.writer.lock();
-        self.drain(&mut writer)?;
-        writer.sync()?;
-        Ok(())
+        Behind::settle(&self.behind, || {
+            #[cfg(test)]
+            self.park.point("settle");
+        })?;
+        // Under `writer`: write the queue out and take the file; the disk
+        // sync runs with no lock held, so requests append and write out.
+        super::sync_current(&self.writer, |w| self.drain(w), || {
+            #[cfg(test)]
+            self.park.point("sync");
+        })
     }
 
     fn shutdown(&self) -> Result<(), WalError> {
@@ -259,7 +264,7 @@ mod tests {
             std::thread::spawn(move || tx.send(wal.append(&op(2, 0)).unwrap()).unwrap())
         };
         let second = rx.recv_timeout(LIMIT);
-        release.send(()).unwrap();
+        let _ = release.send(());
         let second = second.expect("append must return while another thread holds the writer");
         assert!(second > first, "LSNs grow: {second:?} after {first:?}");
         a.join().unwrap().unwrap();
@@ -311,6 +316,77 @@ mod tests {
         wal.write_out(b).unwrap();
         wal.write_out(a).unwrap();
         assert_eq!(ops_in(&path).len(), 2, "each record once");
+    }
+
+    /// No WAL lock is held across the fsync: while thread A is parked
+    /// between taking the file and `sync_all`, thread B appends and writes
+    /// out. The sync is counted once, and a later fsync with nothing new
+    /// does not sync again.
+    #[test]
+    fn append_and_write_out_pass_a_parked_fsync() {
+        use std::sync::{mpsc, Arc};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.seg");
+        let wal = Arc::new(PerOpWal::new(&path, 1).unwrap());
+        let first = wal.append(&op(1, 0)).unwrap();
+        wal.write_out(first).unwrap();
+        let syncs = wal.writer.lock().disk_syncs();
+        let (parked, release) = wal.park.arm("sync");
+        let a = {
+            let wal = Arc::clone(&wal);
+            std::thread::spawn(move || wal.flush_and_sync())
+        };
+        parked.recv_timeout(LIMIT).expect("thread A must park in the fsync");
+        let (tx, rx) = mpsc::channel();
+        let b = {
+            let wal = Arc::clone(&wal);
+            std::thread::spawn(move || {
+                let lsn = wal.append(&op(2, 0)).unwrap();
+                tx.send(wal.write_out(lsn).is_ok()).unwrap();
+            })
+        };
+        let wrote = rx.recv_timeout(LIMIT);
+        let _ = release.send(());
+        assert_eq!(wrote, Ok(true), "append and write_out must finish while an fsync is parked");
+        a.join().unwrap().unwrap();
+        b.join().unwrap();
+        assert_eq!(wal.writer.lock().disk_syncs(), syncs + 1, "the parked fsync counts one sync");
+        wal.flush_and_sync().unwrap();
+        assert_eq!(wal.writer.lock().disk_syncs(), syncs + 2, "B's record came after A took the file");
+        wal.flush_and_sync().unwrap();
+        assert_eq!(wal.writer.lock().disk_syncs(), syncs + 2, "nothing new: no second sync");
+        assert_eq!(ops_in(&path).len(), 2);
+    }
+
+    /// `Behind::settle` syncs the segments left by a cut with the `behind`
+    /// lock released: a cut (which takes `behind`) finishes meanwhile, and
+    /// the segment it leaves behind is synced by the next fsync.
+    #[test]
+    fn settle_syncs_the_old_segments_with_the_behind_lock_released() {
+        use std::sync::{mpsc, Arc};
+        let dir = tempfile::tempdir().unwrap();
+        let wal = Arc::new(PerOpWal::new(&dir.path().join("segment-000001.seg"), 1).unwrap());
+        wal.log_mutation(&op(1, 0)).unwrap();
+        wal.cut().unwrap().unwrap();
+        let (parked, release) = wal.park.arm("settle");
+        let a = {
+            let wal = Arc::clone(&wal);
+            std::thread::spawn(move || wal.flush_and_sync())
+        };
+        parked.recv_timeout(LIMIT).expect("thread A must park in settle");
+        let (tx, rx) = mpsc::channel();
+        let c = {
+            let wal = Arc::clone(&wal);
+            std::thread::spawn(move || tx.send(wal.cut().is_ok()).unwrap())
+        };
+        let cut = rx.recv_timeout(LIMIT);
+        let _ = release.send(());
+        assert_eq!(cut, Ok(true), "a cut must finish while settle syncs");
+        a.join().unwrap().unwrap();
+        c.join().unwrap();
+        assert_eq!(wal.behind.lock().old.len(), 1, "the segment of the second cut is still to sync");
+        wal.flush_and_sync().unwrap();
+        assert_eq!(wal.behind.lock().old.len(), 0);
     }
 
     /// The store logs one record per `log_op`; a failed write-out makes
