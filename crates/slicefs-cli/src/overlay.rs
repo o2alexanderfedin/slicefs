@@ -245,6 +245,28 @@ impl Overlay {
         self.size = n;
     }
 
+    /// The cost after `write(off, len bytes)`, with no change: the same
+    /// merge and growth rule as `put` (for the hard-cap gate of a write).
+    pub fn cost_after(&self, off: u64, len: usize) -> usize {
+        if len == 0 {
+            return self.cost;
+        }
+        let end = off + len as u64;
+        let mut freed = 0usize;
+        let (mut lo, mut lo_cap, mut last_end) = (None, 0usize, end);
+        for (&s, v) in self.extents.range(..=end).rev().take_while(|&(&s, v)| s + v.len() as u64 >= off) {
+            freed += v.capacity() + EXTENT_OVERHEAD;
+            (lo, lo_cap) = (Some(s), v.capacity());
+            last_end = last_end.max(s + v.len() as u64);
+        }
+        let Some(lo) = lo else { return self.cost + len + EXTENT_OVERHEAD };
+        let start = lo.min(off);
+        let cap = if lo == start { lo_cap } else { 0 };
+        let need = (last_end - start) as usize;
+        let grown = if need > cap { need.max(cap + cap / GROW_DIV) } else { cap };
+        self.cost - freed + grown + EXTENT_OVERHEAD
+    }
+
     /// RAM charged to this overlay: extent buffers plus `EXTENT_OVERHEAD` each.
     pub fn cost(&self) -> usize {
         self.cost
@@ -472,6 +494,18 @@ mod tests {
         let want: Vec<u8> = (0..1000u64).map(|i| i as u8).collect();
         assert_eq!(read(&run, &[], 0, 1000), want);
         assert_eq!(run.copy_out(10, 5), want[10..15].to_vec());
+    }
+
+    #[test]
+    fn cost_after_predicts_the_cost_of_a_write() {
+        let mut ov = Overlay::new(None, 0, 1 << 20);
+        let writes: [(u64, usize); 8] =
+            [(4096, 100), (0, 4096), (4196, 50_000), (200_000, 10), (54_196, 9000), (100, 200_000), (300_000, 1), (299_999, 3)];
+        for (off, len) in writes {
+            let want = ov.cost_after(off, len);
+            ov.write(off, &vec![7u8; len]);
+            assert_eq!(ov.cost(), want, "write at {off} of {len}");
+        }
     }
 
     #[test]

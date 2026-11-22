@@ -10,7 +10,7 @@
 //! The parked tests hold no commit gate and run no commit thread while a
 //! step is parked (RESEARCH Pitfall 8).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -202,14 +202,16 @@ fn a_second_writer_skips_its_step_while_one_is_in_flight() {
     assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
 }
 
-/// A dropped step (the overlay changed in its I/O phase) is tried again at
-/// once with the cell locked, and that attempt publishes.
+/// A dropped step (the overlay changed in its I/O phase) is tried again
+/// with the cell unlocked: a read passes while the retry is parked in its
+/// I/O phase, and the retry publishes.
 #[test]
-fn a_dropped_step_is_retried_with_the_cell_locked() {
+fn a_dropped_step_is_retried_unlocked() {
     let (fs, _dir) = fresh_fs();
     let (ino, fh, mut model) = overlay_file(&fs);
     let (other, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
-    let (parked, go) = park_first(&fs);
+    let (hook, parked, go) = parker_at(&[1, 2]);
+    fs.test_set_rebase_hook(Some(hook));
     let big = seeded(8, 128 * KIB);
     let patch = seeded(9, 4 * KIB);
     put(&mut model, 256 * KIB, &big);
@@ -222,10 +224,18 @@ fn a_dropped_step_is_retried_with_the_cell_locked() {
         // A change in the I/O phase: the parked result must be dropped.
         let r = fs.test_write(other, 300 * KIB as u64, &patch);
         go.send(()).unwrap();
+        let retry = parked.recv_timeout(WAIT);
+        let (tx, rx) = channel();
+        let fs = &fs;
+        s.spawn(move || tx.send(fs.test_read(ino, 300 * KIB as u64, 4096)).ok());
+        let read = rx.recv_timeout(Duration::from_millis(300));
+        go.send(()).ok();
+        retry.expect("the retry reached its I/O phase");
         assert_eq!(r, Ok(patch.len() as u32));
+        assert!(read.expect("the read waited for the retry").unwrap() == patch, "the read sees the newer bytes");
         assert_eq!(w.join().unwrap(), Ok(big.len() as u32));
     });
-    assert_eq!(fs.test_rebase_count(), before + 2, "the dropped attempt and the locked retry");
+    assert_eq!(fs.test_rebase_count(), before + 2, "the dropped attempt and the unlocked retry");
     assert!(fs.test_dirty_cost(ino) <= 64 * KIB, "the retry published: cost {}", fs.test_dirty_cost(ino));
     fs.test_set_rebase_hook(None);
     assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content with the handles open");
@@ -234,46 +244,120 @@ fn a_dropped_step_is_retried_with_the_cell_locked() {
     assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
 }
 
+/// A rebase hook that parks every call until `release` is set (at most
+/// 10 s each); `parked` gets a message at each call.
+fn park_all(fs: &SliceFsFilesystem) -> (Receiver<()>, Arc<AtomicBool>) {
+    let (parked_tx, parked_rx) = channel();
+    let release = Arc::new(AtomicBool::new(false));
+    let r = Arc::clone(&release);
+    fs.test_set_rebase_hook(Some(Arc::new(move || {
+        parked_tx.send(()).ok();
+        let t0 = std::time::Instant::now();
+        while !r.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    })));
+    (parked_rx, release)
+}
+
 /// The hard cap (#98, T-19-20): while one step is parked in its I/O phase,
-/// a second writer skips its steps only up to `limit + 2 * REBASE_STEP`;
-/// past it the writer stores a step with the cell locked.
+/// a second writer applies its writes only while the dirty cost stays under
+/// `limit + limit / GROW_DIV + 2 * REBASE_STEP`. The write that would pass it waits for the
+/// step in flight with the cell unlocked: a read passes meanwhile.
 #[test]
-fn a_writer_past_the_hard_cap_steps_while_one_is_in_flight() {
-    use slicefs_cli::filesystem::REBASE_STEP;
-    let cap = 64 * KIB + 2 * REBASE_STEP;
+fn a_writer_at_the_hard_cap_waits_without_the_cell() {
+    use slicefs_cli::{filesystem::REBASE_STEP, overlay::GROW_DIV};
+    // The hard cap: the limit, the spare of a growing extent, two steps.
+    let cap = 64 * KIB + 64 * KIB / GROW_DIV + 2 * REBASE_STEP;
     let (fs, _dir) = fresh_fs();
     let (ino, fh, mut model) = overlay_file(&fs);
     let (other, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
-    let (parked, go) = park_first(&fs);
+    let (parked, release) = park_all(&fs);
     let big = seeded(11, 128 * KIB);
     put(&mut model, 256 * KIB, &big);
+    let pieces: Vec<Vec<u8>> = (0..20u64).map(|i| seeded(100 + i, 128 * KIB)).collect();
     std::thread::scope(|s| {
         let w = s.spawn(|| fs.test_write(fh, 256 * KIB as u64, &big));
         parked.recv_timeout(WAIT).expect("the rebase reached its I/O phase");
-        let before = fs.test_rebase_count();
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            for i in 0..20u64 {
-                let piece = seeded(100 + i, 128 * KIB);
-                let off = (1 << 20) + i as usize * 128 * KIB;
-                assert_eq!(fs.test_write(other, off as u64, &piece), Ok(piece.len() as u32));
-                put(&mut model, off, &piece);
-                let cost = fs.test_dirty_cost(ino);
-                assert!(cost <= cap, "write {i}: dirty cost {cost} > cap {cap}");
+        let (fs, pieces) = (&fs, &pieces);
+        let (tx, rx) = channel();
+        let b = s.spawn(move || {
+            for (i, piece) in pieces.iter().enumerate() {
+                let off = (1 << 20) + i * 128 * KIB;
+                let r = fs.test_write(other, off as u64, piece);
+                tx.send((i, r, fs.test_dirty_cost(ino))).ok();
             }
-            assert!(fs.test_rebase_count() > before, "the second writer stored a locked step");
+        });
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut waiting = None;
+            for _ in 0..pieces.len() {
+                match rx.recv_timeout(Duration::from_millis(300)) {
+                    Ok((i, r, cost)) => {
+                        assert_eq!(r, Ok(128 * KIB as u32), "write {i}");
+                        assert!(cost <= cap, "write {i}: dirty cost {cost} > cap {cap}");
+                    }
+                    Err(_) => {
+                        waiting = Some(());
+                        break;
+                    }
+                }
+            }
+            assert!(waiting.is_some(), "a write at the hard cap waits for the step in flight");
+            let cost = fs.test_dirty_cost(ino);
+            assert!(cost <= cap, "while the writer waits: dirty cost {cost} > cap {cap}");
+            let (rtx, rrx) = channel();
+            s.spawn(move || rtx.send(fs.test_read(ino, 256 * KIB as u64, 4096)).ok());
+            let read = rrx.recv_timeout(WAIT).expect("the read waited for the writer at the cap");
+            assert!(read.unwrap() == big[..4096], "the read sees the first write");
         }));
-        go.send(()).ok();
+        release.store(true, Ordering::SeqCst);
         if let Err(e) = r {
             std::panic::resume_unwind(e);
         }
         assert_eq!(w.join().unwrap(), Ok(big.len() as u32));
+        b.join().unwrap();
+        for (i, r, cost) in rx.try_iter() {
+            assert_eq!(r, Ok(128 * KIB as u32), "write {i}");
+            assert!(cost <= cap, "write {i}: dirty cost {cost} > cap {cap}");
+        }
     });
     fs.test_set_rebase_hook(None);
+    for (i, piece) in pieces.iter().enumerate() {
+        put(&mut model, (1 << 20) + i * 128 * KIB, piece);
+    }
     let size = model.len() as u32;
     assert!(fs.test_read(ino, 0, size).unwrap() == model, "content with the handles open");
     fs.test_release(ino, other).unwrap();
     fs.test_release(ino, fh).unwrap();
     assert!(fs.test_read(ino, 0, size).unwrap() == model, "content after release");
+}
+
+/// D-02 "retries later": a write over the limit whose two unlocked steps
+/// are both dropped returns with the cost above the limit (but at most the
+/// cap); the step of the next write publishes.
+#[test]
+fn a_dropped_step_below_the_cap_retries_later() {
+    use slicefs_cli::{filesystem::REBASE_STEP, overlay::GROW_DIV};
+    // The hard cap: the limit, the spare of a growing extent, two steps.
+    let cap = 64 * KIB + 64 * KIB / GROW_DIV + 2 * REBASE_STEP;
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh, mut model) = overlay_file(&fs);
+    let big = seeded(12, 128 * KIB);
+    put(&mut model, 256 * KIB, &big);
+    fs.test_drop_steps(2);
+    let before = fs.test_rebase_count();
+    assert_eq!(fs.test_write(fh, 256 * KIB as u64, &big), Ok(big.len() as u32));
+    let cost = fs.test_dirty_cost(ino);
+    assert_eq!(fs.test_rebase_count(), before + 2, "two attempts, both dropped");
+    assert!(cost > 64 * KIB && cost <= cap, "cost {cost} after two dropped steps");
+    let patch = seeded(13, 4 * KIB);
+    put(&mut model, 600 * KIB, &patch);
+    assert_eq!(fs.test_write(fh, 600 * KIB as u64, &patch), Ok(patch.len() as u32));
+    assert_eq!(fs.test_rebase_count(), before + 3, "the next write's step");
+    assert!(fs.test_dirty_cost(ino) <= 64 * KIB, "the next step published: cost {}", fs.test_dirty_cost(ino));
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content with the handle open");
+    fs.test_release(ino, fh).unwrap();
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
 }
 
 /// RESEARCH Pitfall 1 (#98): 4 threads write one file at a dirty limit of

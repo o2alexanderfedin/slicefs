@@ -144,6 +144,12 @@ const STEP_WAIT: Duration = Duration::from_secs(15);
 /// unlocked), then EIO.
 const STEP_TRIES: usize = 16;
 
+/// Unlocked attempts of the rebase step of a write over the dirty limit. If
+/// all are dropped the write returns (its bytes are in the overlay, under
+/// the hard cap); the next write, the release or a budget step tries again
+/// (D-02 "retries later").
+const REBASE_TRIES: usize = 2;
+
 /// The RAM an open file holds in written bytes that are not in a stored
 /// root: the overlay cost, or the pending out-of-order writes of a stream.
 fn dirty_cost(s: &OpenFileState) -> usize {
@@ -264,6 +270,17 @@ struct StepPlan {
     cost_before: usize,
 }
 
+/// The fields of the debug line of a switch to an overlay: made in the
+/// write's cell hold, printed by `write_logged` after it.
+struct SwitchNote {
+    ino: u64,
+    offset: u64,
+    expected: u64,
+    pending: usize,
+    fresh: bool,
+    overlap: bool,
+}
+
 /// The open write state of one inode, shared by every handle of it (D-03).
 /// Requests lock it in place; no request takes the state out.
 struct FileCell {
@@ -315,6 +332,9 @@ struct CellGuard<'a> {
     cell: &'a FileCell,
     /// `None` only inside `unlocked`.
     state: Option<sync::MutexGuard<'a, CellState>>,
+    /// Debug lines made in the hold; printed when the guard is dropped,
+    /// after the cell lock is released (a stderr write can stall).
+    notes: Vec<String>,
 }
 
 impl CellGuard<'_> {
@@ -384,6 +404,10 @@ impl DerefMut for CellGuard<'_> {
 impl Drop for CellGuard<'_> {
     fn drop(&mut self) {
         self.sync_dirty();
+        self.state = None;
+        for line in self.notes.drain(..) {
+            eprintln!("{line}");
+        }
     }
 }
 
@@ -758,7 +782,7 @@ impl SliceFsFilesystem {
     }
 
     fn lock_cell<'a>(&'a self, cell: &'a FileCell) -> CellGuard<'a> {
-        CellGuard { total: &self.dirty_total, cell, state: Some(cell.state.lock()) }
+        CellGuard { total: &self.dirty_total, cell, state: Some(cell.state.lock()), notes: Vec::new() }
     }
 
     /// Run `f` on the open write state of `ino` under its cell lock; `None`
@@ -886,7 +910,9 @@ impl SliceFsFilesystem {
                         && !g.retired
                         && !(wait_for_writers && g.write_handles > 0)
                     {
-                        self.rebase_step(ino, &mut g.file, step)?;
+                        if let Some(line) = self.rebase_step(ino, &mut g.file, step)? {
+                            g.notes.push(line);
+                        }
                     }
                 }
                 Next::Flush => {
@@ -1635,44 +1661,61 @@ impl SliceFsFilesystem {
     /// GC: a step runs inside one callback under the shared commit gate,
     /// and the old base stays in the manifest until the new root is
     /// installed.
-    fn rebase_step(&self, ino: u64, s: &mut OpenFileState, free: usize) -> Result<(), i32> {
+    ///
+    /// Only for the finalize (19-15 removes it there) and `test_destroy`;
+    /// never on the write or read path. Returns the rebase trace line, for
+    /// the caller to print after its hold.
+    fn rebase_step(&self, ino: u64, s: &mut OpenFileState, free: usize) -> Result<Option<String>, i32> {
         let Some((plan, part)) = Self::step_plan(s, free, free != usize::MAX) else {
-            return Ok(());
+            return Ok(None);
         };
-        let done = match (&part, &s.write_mode) {
+        let (root, digest, line) = match (&part, &s.write_mode) {
             (Some(p), _) => self.step_io(ino, p, &plan),
             (None, WriteMode::Overlay(ov)) => self.step_io(ino, ov, &plan),
             (None, WriteMode::Streaming { .. }) => unreachable!("step_plan gives a plan for an overlay only"),
         }?;
         drop(part);
-        self.step_publish(ino, s, plan, done).map(|_| ())
+        self.step_publish(ino, s, plan, (root, digest)).map(|_| Some(line))
     }
 
-    /// Most dirty cost of one file (#98, RESEARCH Pitfall 1): the limit plus
-    /// two rebase steps (Claude's discretion).
+    /// Most dirty cost of one file (#98, RESEARCH Pitfall 1): the limit, the
+    /// spare capacity a growing extent can take (1/`GROW_DIV` of its
+    /// length: the regrowth of an extent near the limit after a step cut
+    /// it), and two rebase steps (Claude's discretion). The write path
+    /// gates its apply on it (`write_in_cell`).
     fn hard_cap(&self) -> usize {
-        self.dirty_limit.load(Ordering::Relaxed).saturating_add(2 * REBASE_STEP)
+        let limit = self.dirty_limit.load(Ordering::Relaxed);
+        limit.saturating_add(limit / crate::overlay::GROW_DIV).saturating_add(2 * REBASE_STEP)
     }
 
-    /// A rebase step of the writer's own locked cell `g` (D-02, D-13):
-    /// - another step of the cell is in its I/O phase: skip, unless the
-    ///   cost is past the hard cap; then store a step with the cell locked
-    ///   (the step in flight is then dropped);
-    /// - else a step with the I/O unlocked (`rebase_unlocked`); if its
-    ///   result is dropped, the next attempt runs at once with the cell
-    ///   locked, so a busy file always makes progress. Only this file waits.
+    /// A rebase step of the writer's own locked cell `g` (D-02, D-13), with
+    /// the I/O unlocked (`rebase_unlocked`): skipped if another step of the
+    /// cell is in flight; a dropped result is tried again, at most
+    /// `REBASE_TRIES` attempts. If all are dropped this returns Ok: the
+    /// write is in the overlay already and under the hard cap (the cap gate
+    /// of `write_in_cell`), and the next write, the release or a budget step
+    /// tries again. Only this file waits.
     fn rebase_cell(&self, g: &mut CellGuard<'_>, free: usize) -> Result<(), i32> {
-        if g.retired {
-            return Ok(());
+        for _ in 0..REBASE_TRIES {
+            if g.retired || g.stepping.is_some() || self.rebase_unlocked(g, free)? {
+                return Ok(());
+            }
         }
-        let locked = if g.stepping.is_some() {
-            dirty_cost(&g.file) > self.hard_cap()
+        Ok(())
+    }
+
+    /// At the hard cap: wait for the step in flight with the cell unlocked
+    /// (`wait_step`), or run an own unlocked rebase step that frees at least
+    /// `excess` (and at least `REBASE_STEP`). A dropped own step counts in
+    /// `drops`, a published one resets it. The caller looks at the cost again.
+    fn cap_step(&self, g: &mut CellGuard<'_>, excess: usize, drops: &mut usize) -> Result<(), i32> {
+        if g.stepping.is_some() {
+            return g.wait_step();
+        }
+        if self.rebase_unlocked(g, excess.max(REBASE_STEP))? {
+            *drops = 0;
         } else {
-            !self.rebase_unlocked(g, free)? && !g.retired
-        };
-        if locked {
-            let ino = g.file.ino;
-            self.rebase_step(ino, &mut g.file, free)?;
+            *drops += 1;
         }
         Ok(())
     }
@@ -1696,7 +1739,11 @@ impl SliceFsFilesystem {
             return Ok(true);
         };
         let ino = g.file.ino;
-        let done = g.run_step(|| self.step_io(ino, &part, &plan));
+        let done = g.run_step(|| -> Result<(Option<ObjectKey>, Option<ObjectKey>), i32> {
+            let (root, digest, line) = self.step_io(ino, &part, &plan)?;
+            eprintln!("{line}");
+            Ok((root, digest))
+        });
         drop(part);
         if g.retired {
             return Ok(true);
@@ -1735,8 +1782,10 @@ impl SliceFsFilesystem {
     /// of `src` (the copy, or the live overlay when every extent is stored)
     /// onto its base, store the manifest node of the new root, count, and
     /// run the rebase hook (after the new root is finished, before it is
-    /// installed). Returns the new root and its manifest digest.
-    fn step_io(&self, ino: u64, src: &Overlay, plan: &StepPlan) -> Result<(Option<ObjectKey>, Option<ObjectKey>), i32> {
+    /// installed). Returns the new root, its manifest digest and the
+    /// rebase trace line (the caller prints it with no cell lock held).
+    #[allow(clippy::type_complexity)]
+    fn step_io(&self, ino: u64, src: &Overlay, plan: &StepPlan) -> Result<(Option<ObjectKey>, Option<ObjectKey>, String), i32> {
         let cs = &*self.content;
         let store_err = |e: std::io::Error| {
             eprintln!("[{}][FUSE] rebase: content store error: {e}", ts());
@@ -1764,7 +1813,7 @@ impl SliceFsFilesystem {
         LAST_REBASE_BYTES.with(|c| c.set(rechunked));
         add_to(&WRITE_REBASE_BYTES, rechunked);
         add_to(&WRITE_BASE_BYTES, base_bytes);
-        eprintln!("[t={}][rebase] ino={ino} size={size} free={} cost_before={} taken={taken_n}/{taken_bytes} \
+        let line = format!("[t={}][rebase] ino={ino} size={size} free={} cost_before={} taken={taken_n}/{taken_bytes} \
             rechunked={rechunked} base_read={base_bytes} reused_entries={} reused_nodes={} nodes_loaded={} splice_ms={splice_ms:.1}",
             crate::util::epoch(), if plan.free == usize::MAX { "all".to_string() } else { plan.free.to_string() },
             plan.cost_before, stats.reused_entries, stats.reused_nodes, stats.nodes_loaded);
@@ -1772,7 +1821,7 @@ impl SliceFsFilesystem {
         if let Some(hook) = hook {
             hook();
         }
-        Ok((root, digest))
+        Ok((root, digest, line))
     }
 
     /// Phase C of a rebase step (cell locked, memory only but for a size-0
@@ -2078,11 +2127,19 @@ impl SliceFsFilesystem {
         time: Option<(i64, u32)>,
     ) -> (Result<(u32, u64), i32>, Option<Lsn>) {
         let mut lsn = None;
-        let r = self.write_in_cell(fh, offset, data, flags, time, &mut lsn);
+        let mut switch = None;
+        let r = self.write_in_cell(fh, offset, data, flags, time, &mut lsn, &mut switch);
+        // The cell guard is gone: print the debug line of a switch now.
+        if let Some(SwitchNote { ino, offset, expected, pending, fresh, overlap }) = switch {
+            eprintln!("[{}][FUSE] write: fh={} ino={} switches to overlay (offset={} len={} expected={} pending={} fresh={} overlap={})",
+                ts(), fh, ino, offset, data.len(), expected, pending, fresh, overlap);
+        }
         (r, lsn)
     }
 
-    /// The body of `write_logged`; `lsn` gets the LSN of the record.
+    /// The body of `write_logged`; `lsn` gets the LSN of the record, and
+    /// `switch` the fields of the debug line of a switch to an overlay.
+    #[allow(clippy::too_many_arguments)]
     fn write_in_cell(
         &self,
         fh: u64,
@@ -2091,6 +2148,7 @@ impl SliceFsFilesystem {
         flags: i32,
         time: Option<(i64, u32)>,
         lsn: &mut Option<Lsn>,
+        switch: &mut Option<SwitchNote>,
     ) -> Result<(u32, u64), i32> {
         WRITE_REBASE_BYTES.with(|c| c.set(0));
         WRITE_BASE_BYTES.with(|c| c.set(0));
@@ -2154,7 +2212,16 @@ impl SliceFsFilesystem {
                 };
             }
             cost_before = dirty_cost(&g.file);
-            if !streaming {
+            if let WriteMode::Overlay(ov) = &g.file.write_mode {
+                // The hard cap (#98): apply only if the dirty cost stays
+                // under it. Else wait for the step in flight, or run an own
+                // unlocked step, with no cell lock held, and look again. At
+                // the cap no writer changes the overlay, so a step publishes.
+                let (cap, after) = (self.hard_cap(), ov.cost_after(offset, data.len()));
+                if cost_before > 0 && after > cap {
+                    self.cap_step(&mut g, after - cap, &mut drops)?;
+                    continue;
+                }
                 let r = Self::overlay_write(&mut g.file, offset, data);
                 if r.is_ok() {
                     log(lsn, offset);
@@ -2232,9 +2299,9 @@ impl SliceFsFilesystem {
                 log(lsn, offset);
                 break Ok(data.len() as u32);
             }
-            // Random write: switch to an overlay on the stored content.
-            eprintln!("[{}][FUSE] write: fh={} ino={} switches to overlay (offset={} len={} expected={} pending={} fresh={} overlap={})",
-                ts(), fh, ino, offset, data.len(), next, pending_bytes, fresh, overlaps_pending);
+            // Random write: switch to an overlay on the stored content (the
+            // debug line is printed after the hold, by `write_logged`).
+            *switch = Some(SwitchNote { ino, offset, expected: next, pending: pending_bytes, fresh, overlap: overlaps_pending });
             // Older pending writes go in first; the next turn applies this
             // (newest) write to the overlay.
             if self.to_overlay(&mut g)? {
@@ -2257,8 +2324,21 @@ impl SliceFsFilesystem {
         // the spare capacity of a growing extent (up to 1/8 of its length)
         // is freed by the next steps, so a step does not grow with the limit.
         let limit = self.dirty_limit.load(Ordering::Relaxed);
+        let added = dirty_cost(&g.file).saturating_sub(cost_before).min(data.len() + crate::overlay::EXTENT_OVERHEAD);
+        // A write never returns with the cost above the hard cap: if the
+        // apply passed it after all (the gate predicts the extent growth),
+        // step or wait as at the gate until the cost is under it.
+        let cap = self.hard_cap();
+        while result.is_ok() && !g.retired && matches!(&g.file.write_mode, WriteMode::Overlay(_)) && dirty_cost(&g.file) > cap {
+            if drops >= STEP_TRIES {
+                drop(g);
+                eprintln!("[{}][FUSE] write: fh={fh} ino={ino}: {STEP_TRIES} steps in a row at the hard cap were dropped", ts());
+                return Err(libc::EIO);
+            }
+            let excess = dirty_cost(&g.file) - cap;
+            self.cap_step(&mut g, excess, &mut drops)?;
+        }
         let cost = dirty_cost(&g.file);
-        let added = cost.saturating_sub(cost_before).min(data.len() + crate::overlay::EXTENT_OVERHEAD);
         let over = matches!(&g.file.write_mode, WriteMode::Overlay(_)) && cost > limit;
         // The write is in the overlay already (a read sees all of it or
         // none): the step does its I/O with the cell unlocked (D-02).
