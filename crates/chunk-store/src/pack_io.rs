@@ -14,6 +14,8 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+use crate::sync::{Condvar, Mutex, Rank};
+
 /// The kinds of file of the store: the two files of one pack, and the
 /// files of the store index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -88,21 +90,27 @@ pub trait PackSync: Send + Sync {
 }
 
 /// The end of a background sync (see [`PackFile::sync_soon`]).
-#[derive(Clone, Default)]
-pub struct SyncWait(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+#[derive(Clone)]
+pub struct SyncWait(Arc<(Mutex<bool>, Condvar)>);
+
+impl Default for SyncWait {
+    fn default() -> Self {
+        SyncWait(Arc::new((Mutex::new(Rank::Store, false), Condvar::new())))
+    }
+}
 
 impl SyncWait {
     /// Mark the sync as ended.
     pub fn done(&self) {
-        *self.0 .0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        *self.0 .0.lock() = true;
         self.0 .1.notify_all();
     }
 
     /// Wait until the sync has ended.
     pub fn wait(&self) {
-        let mut d = self.0 .0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut d = self.0 .0.lock();
         while !*d {
-            d = self.0 .1.wait(d).unwrap_or_else(|e| e.into_inner());
+            self.0 .1.wait(&mut d);
         }
     }
 }

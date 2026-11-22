@@ -6,7 +6,9 @@
 use std::io;
 use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use chunk_store::sync::{Mutex, Rank};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -32,7 +34,7 @@ impl PeriodicWal {
     pub fn new(path: &Path, segment_id: u64) -> io::Result<Self> {
         Ok(PeriodicWal {
             log: Arc::new(BufferedLog::new(path, segment_id)?),
-            timer: Mutex::new(None),
+            timer: Mutex::new(Rank::Store, None),
         })
     }
 
@@ -54,7 +56,7 @@ impl PeriodicWal {
                         }
                     }
                 })?;
-            *wal.timer.lock().unwrap() = Some(Timer { stop, thread });
+            *wal.timer.lock() = Some(Timer { stop, thread });
         }
         Ok(wal)
     }
@@ -62,7 +64,7 @@ impl PeriodicWal {
     /// Stop the timer thread and wait for it to end. Does nothing if no
     /// thread runs.
     fn stop_timer(&self) {
-        let timer = self.timer.lock().unwrap().take();
+        let timer = self.timer.lock().take();
         if let Some(Timer { stop, thread }) = timer {
             drop(stop);
             let _ = thread.join();

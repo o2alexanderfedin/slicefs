@@ -15,7 +15,9 @@ use crate::pack_io::{Kind, PackFile, PackIo, PackRead, PackSync, RunMap, PUNCH_B
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
+
+use crate::sync::{Condvar, Mutex, Rank};
 
 #[derive(Default)]
 struct MemFile {
@@ -129,7 +131,7 @@ impl State {
 }
 
 /// The mock. Clones share the same files.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct MemIo {
     s: Arc<Mutex<State>>,
     /// Pack handles that are open now (like file descriptors).
@@ -140,6 +142,17 @@ pub struct MemIo {
     hold: Arc<(Mutex<bool>, Condvar)>,
 }
 
+impl Default for MemIo {
+    fn default() -> Self {
+        MemIo {
+            s: Arc::new(Mutex::new(Rank::Store, State::default())),
+            open: Arc::default(),
+            peak: Arc::default(),
+            hold: Arc::new((Mutex::new(Rank::Store, false), Condvar::new())),
+        }
+    }
+}
+
 impl MemIo {
     pub fn new() -> Self {
         Self::default()
@@ -148,88 +161,88 @@ impl MemIo {
     /// Writes may add at most `bytes` more; then they fail with ENOSPC and
     /// write nothing. `None` removes the limit.
     pub fn set_space_left(&self, bytes: Option<u64>) {
-        self.s.lock().unwrap().space_left = bytes;
+        self.s.lock().space_left = bytes;
     }
 
     /// Every read fails with EIO.
     pub fn set_fail_reads(&self, on: bool) {
-        self.s.lock().unwrap().fail_reads = on;
+        self.s.lock().fail_reads = on;
     }
 
     /// The next `n` reads work, then every read fails with EIO until
     /// `clear_fail_reads_after` (a failure in the middle of a long operation).
     pub fn fail_reads_after(&self, n: u32) {
-        self.s.lock().unwrap().fail_reads_after = Some(n);
+        self.s.lock().fail_reads_after = Some(n);
     }
 
     /// After `skip` more good reads, the next read fails once with EIO; the
     /// reads after it work (a transient read error).
     pub fn fail_read_once_after(&self, skip: u32) {
-        self.s.lock().unwrap().fail_read_once_after = Some(skip);
+        self.s.lock().fail_read_once_after = Some(skip);
     }
 
     /// End `fail_reads_after`.
     pub fn clear_fail_reads_after(&self) {
-        self.s.lock().unwrap().fail_reads_after = None;
+        self.s.lock().fail_reads_after = None;
     }
 
     /// Every sync (pack sync, directory sync, durable write) fails with EIO
     /// and makes nothing durable.
     pub fn set_fail_syncs(&self, on: bool) {
-        self.s.lock().unwrap().fail_syncs = on;
+        self.s.lock().fail_syncs = on;
     }
 
     /// The next `n` syncs fail with EIO; later syncs work.
     pub fn fail_next_syncs(&self, n: u32) {
-        self.s.lock().unwrap().fail_next_syncs = n;
+        self.s.lock().fail_next_syncs = n;
     }
 
     /// After `skip` more good syncs (pack sync, directory sync or durable
     /// write), the next one fails once with EIO. Unlike `fail_next_syncs`,
     /// this can let the first sync of an operation pass and fail a later one.
     pub fn fail_sync_after(&self, skip: u32) {
-        self.s.lock().unwrap().fail_sync_after = Some(skip);
+        self.s.lock().fail_sync_after = Some(skip);
     }
 
     /// The next `n` durable writes of `kind` fail with EIO and write nothing.
     pub fn fail_next_write_durable(&self, kind: Kind, n: u32) {
-        self.s.lock().unwrap().fail_next_write_durable.insert(kind, n);
+        self.s.lock().fail_next_write_durable.insert(kind, n);
     }
 
     /// After `skip` more good durable writes of `kind`, the next one fails
     /// once with EIO and writes nothing.
     pub fn fail_write_durable_after(&self, kind: Kind, skip: u32) {
-        self.s.lock().unwrap().fail_write_durable_after.insert(kind, skip);
+        self.s.lock().fail_write_durable_after.insert(kind, skip);
     }
 
     /// While on, every pack sync (through a handle or a sync handle) waits
     /// until it is turned off: a slow disk, with no timing in the test.
     pub fn hold_syncs(&self, on: bool) {
-        *self.hold.0.lock().unwrap() = on;
+        *self.hold.0.lock() = on;
         self.hold.1.notify_all();
     }
 
     /// Every removal fails with EIO and keeps the file.
     pub fn set_fail_removes(&self, on: bool) {
-        self.s.lock().unwrap().fail_removes = on;
+        self.s.lock().fail_removes = on;
     }
 
     /// Every punch fails with EIO (and punches nothing).
     pub fn set_fail_punch(&self, on: bool) {
-        self.s.lock().unwrap().fail_punch = on;
+        self.s.lock().fail_punch = on;
     }
 
     /// Punch is not supported (like a file system without holes).
     pub fn set_no_punch(&self, on: bool) {
-        self.s.lock().unwrap().no_punch = on;
+        self.s.lock().no_punch = on;
     }
 
     /// A power loss: keep only what is durable.
     pub fn crash(&self) {
-        let mut s = self.s.lock().unwrap();
-        s.files.retain(|_, f| f.lock().unwrap().linked);
+        let mut s = self.s.lock();
+        s.files.retain(|_, f| f.lock().linked);
         for f in s.files.values() {
-            let mut f = f.lock().unwrap();
+            let mut f = f.lock();
             f.data = f.durable.clone();
         }
     }
@@ -238,17 +251,17 @@ impl MemIo {
     /// `reset_read_counters`: whole-file reads plus `read_at` calls on
     /// handles (for runs: one per page that a lookup reads).
     pub fn reads(&self, kind: Kind) -> u64 {
-        self.s.lock().unwrap().reads.get(&kind).map_or(0, |r| r.0)
+        self.s.lock().reads.get(&kind).map_or(0, |r| r.0)
     }
 
     /// Bytes of the reads that `reads` counts.
     pub fn bytes_read(&self, kind: Kind) -> u64 {
-        self.s.lock().unwrap().reads.get(&kind).map_or(0, |r| r.1)
+        self.s.lock().reads.get(&kind).map_or(0, |r| r.1)
     }
 
     /// Set `reads` and `bytes_read` of every kind to zero.
     pub fn reset_read_counters(&self) {
-        self.s.lock().unwrap().reads.clear();
+        self.s.lock().reads.clear();
     }
 
     /// Pack handles that are open now (the file descriptors a real store
@@ -271,13 +284,13 @@ impl MemIo {
 
     /// Current length of a file, if it exists.
     pub fn len(&self, num: u64, kind: Kind) -> Option<usize> {
-        self.s.lock().unwrap().files.get(&(num, kind)).map(|f| f.lock().unwrap().data.len())
+        self.s.lock().files.get(&(num, kind)).map(|f| f.lock().data.len())
     }
 
     /// Change one byte of a file (to test damage detection).
     pub fn flip(&self, num: u64, kind: Kind, offset: usize) {
-        let s = self.s.lock().unwrap();
-        let mut f = s.files.get(&(num, kind)).expect("no such file").lock().unwrap();
+        let s = self.s.lock();
+        let mut f = s.files.get(&(num, kind)).expect("no such file").lock();
         f.data[offset] ^= 0xff;
         if offset < f.durable.len() {
             f.durable[offset] ^= 0xff;
@@ -287,7 +300,7 @@ impl MemIo {
     /// A handle holds the file itself, so (as with unlink on Unix) it stays
     /// usable after the name is removed.
     fn handle(&self, num: u64, kind: Kind) -> io::Result<MemPack> {
-        let f = self.s.lock().unwrap().files.get(&(num, kind)).cloned().ok_or_else(not_found)?;
+        let f = self.s.lock().files.get(&(num, kind)).cloned().ok_or_else(not_found)?;
         let now = self.open.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(now, Ordering::SeqCst);
         Ok(MemPack { s: Arc::clone(&self.s), f, kind, open: Arc::clone(&self.open), hold: Arc::clone(&self.hold) })
@@ -296,11 +309,11 @@ impl MemIo {
     /// A new, empty file that must not exist, and a handle to it. Its name
     /// is durable only after `sync_dir`.
     fn create_new(&self, num: u64, kind: Kind) -> io::Result<MemPack> {
-        let mut s = self.s.lock().unwrap();
+        let mut s = self.s.lock();
         if s.files.contains_key(&(num, kind)) {
             return Err(io::Error::from(io::ErrorKind::AlreadyExists));
         }
-        s.files.insert((num, kind), Arc::new(Mutex::new(MemFile::default())));
+        s.files.insert((num, kind), Arc::new(Mutex::new(Rank::Store, MemFile::default())));
         drop(s);
         self.handle(num, kind)
     }
@@ -324,16 +337,16 @@ struct MemPack {
 
 /// Wait while syncs are held.
 fn wait_hold(hold: &(Mutex<bool>, Condvar)) {
-    let mut held = hold.0.lock().unwrap();
+    let mut held = hold.0.lock();
     while *held {
-        held = hold.1.wait(held).unwrap();
+        hold.1.wait(&mut held);
     }
 }
 
 /// The pack sync of the model (see the module comment).
 fn sync_file(s: &Mutex<State>, f: &Mutex<MemFile>) -> io::Result<()> {
-    let mut s = s.lock().unwrap();
-    let mut f = f.lock().unwrap();
+    let mut s = s.lock();
+    let mut f = f.lock();
     if s.sync_fails() {
         // As on Linux: the dirty pages are marked clean without a save.
         f.dirty.clear();
@@ -362,10 +375,10 @@ impl PackSync for MemSync {
     /// made while it runs is not covered (a real fsync may or may not cover
     /// it, so the caller must not count on it).
     fn sync(&self) -> io::Result<()> {
-        let started = self.f.lock().unwrap().dirty.clone();
+        let started = self.f.lock().dirty.clone();
         wait_hold(&self.hold);
-        let mut s = self.s.lock().unwrap();
-        let mut f = self.f.lock().unwrap();
+        let mut s = self.s.lock();
+        let mut f = self.f.lock();
         if s.sync_fails() {
             f.dirty.clear();
             return Err(eio());
@@ -391,11 +404,11 @@ impl Drop for MemPack {
 
 impl PackRead for MemPack {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        let mut s = self.s.lock().unwrap();
+        let mut s = self.s.lock();
         if s.read_fails() {
             return Err(eio());
         }
-        let f = self.f.lock().unwrap();
+        let f = self.f.lock();
         let start = offset as usize;
         let end = start.checked_add(buf.len()).filter(|&e| e <= f.data.len());
         let end = end.ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
@@ -407,8 +420,8 @@ impl PackRead for MemPack {
 
 impl PackFile for MemPack {
     fn write_at(&mut self, data: &[u8], offset: u64) -> io::Result<()> {
-        let mut s = self.s.lock().unwrap();
-        let mut f = self.f.lock().unwrap();
+        let mut s = self.s.lock();
+        let mut f = self.f.lock();
         let end = offset as usize + data.len();
         s.grow(end.saturating_sub(f.data.len()) as u64)?;
         if f.data.len() < end {
@@ -420,8 +433,8 @@ impl PackFile for MemPack {
     }
 
     fn set_len(&mut self, len: u64) -> io::Result<()> {
-        let mut s = self.s.lock().unwrap();
-        let mut f = self.f.lock().unwrap();
+        let mut s = self.s.lock();
+        let mut f = self.f.lock();
         s.grow((len as usize).saturating_sub(f.data.len()) as u64)?;
         f.data.resize(len as usize, 0);
         Ok(())
@@ -439,7 +452,7 @@ impl PackFile for MemPack {
 
 impl PackIo for MemIo {
     fn prepare(&self, read_only: bool) -> io::Result<bool> {
-        let mut s = self.s.lock().unwrap();
+        let mut s = self.s.lock();
         if !read_only {
             s.dir = true;
         }
@@ -447,48 +460,48 @@ impl PackIo for MemIo {
     }
 
     fn list(&self) -> io::Result<Vec<u64>> {
-        let s = self.s.lock().unwrap();
+        let s = self.s.lock();
         Ok(s.files.keys().filter(|(_, k)| *k == Kind::Pack).map(|(n, _)| *n).collect())
     }
 
     fn exists(&self, num: u64, kind: Kind) -> bool {
-        self.s.lock().unwrap().files.contains_key(&(num, kind))
+        self.s.lock().files.contains_key(&(num, kind))
     }
 
     fn read(&self, num: u64, kind: Kind) -> io::Result<Vec<u8>> {
-        let mut s = self.s.lock().unwrap();
+        let mut s = self.s.lock();
         if s.read_fails() {
             return Err(eio());
         }
-        let data = s.files.get(&(num, kind)).map(|f| f.lock().unwrap().data.clone()).ok_or_else(not_found)?;
+        let data = s.files.get(&(num, kind)).map(|f| f.lock().data.clone()).ok_or_else(not_found)?;
         s.count_read(kind, data.len());
         Ok(data)
     }
 
     fn file_len(&self, num: u64, kind: Kind) -> io::Result<u64> {
-        let s = self.s.lock().unwrap();
-        s.files.get(&(num, kind)).map(|f| f.lock().unwrap().data.len() as u64).ok_or_else(not_found)
+        let s = self.s.lock();
+        s.files.get(&(num, kind)).map(|f| f.lock().data.len() as u64).ok_or_else(not_found)
     }
 
     fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> io::Result<()> {
-        let mut s = self.s.lock().unwrap();
+        let mut s = self.s.lock();
         if s.write_durable_fails(kind) || s.sync_fails() {
             return Err(eio());
         }
-        let cur = s.files.get(&(num, kind)).map_or(0, |f| f.lock().unwrap().data.len());
+        let cur = s.files.get(&(num, kind)).map_or(0, |f| f.lock().data.len());
         s.grow(data.len().saturating_sub(cur) as u64)?;
         // A new file under the name (rename of a temp file): old handles keep the old file.
         let f = MemFile { data: data.to_vec(), durable: data.to_vec(), dirty: Vec::new(), linked: true };
-        s.files.insert((num, kind), Arc::new(Mutex::new(f)));
+        s.files.insert((num, kind), Arc::new(Mutex::new(Rank::Store, f)));
         // A durable write syncs the directory too.
         for f in s.files.values() {
-            f.lock().unwrap().linked = true;
+            f.lock().linked = true;
         }
         Ok(())
     }
 
     fn remove(&self, num: u64, kind: Kind) -> io::Result<()> {
-        let mut s = self.s.lock().unwrap();
+        let mut s = self.s.lock();
         if s.fail_removes {
             return Err(eio());
         }
@@ -496,12 +509,12 @@ impl PackIo for MemIo {
     }
 
     fn sync_dir(&self) -> io::Result<()> {
-        let mut s = self.s.lock().unwrap();
+        let mut s = self.s.lock();
         if s.sync_fails() {
             return Err(eio());
         }
         for f in s.files.values() {
-            f.lock().unwrap().linked = true;
+            f.lock().linked = true;
         }
         Ok(())
     }
@@ -519,20 +532,20 @@ impl PackIo for MemIo {
     }
 
     fn can_punch(&self) -> bool {
-        !self.s.lock().unwrap().no_punch
+        !self.s.lock().no_punch
     }
 
     /// Zeros in the current bytes; like a real punch, it is durable only
     /// after a sync of the pack (a crash before that brings the bytes back).
     fn punch(&self, num: u64, ranges: &[(u64, u64)]) -> io::Result<()> {
-        let s = self.s.lock().unwrap();
+        let s = self.s.lock();
         if s.no_punch {
             return Err(io::Error::from(io::ErrorKind::Unsupported));
         }
         if s.fail_punch {
             return Err(eio());
         }
-        let mut f = s.files.get(&(num, Kind::Pack)).ok_or_else(not_found)?.lock().unwrap();
+        let mut f = s.files.get(&(num, Kind::Pack)).ok_or_else(not_found)?.lock();
         for &(offset, len) in ranges {
             if offset % PUNCH_BLOCK != 0 || len % PUNCH_BLOCK != 0 {
                 return Err(io::Error::from_raw_os_error(libc::EINVAL));
@@ -546,7 +559,7 @@ impl PackIo for MemIo {
     }
 
     fn list_runs(&self) -> io::Result<Vec<u64>> {
-        let s = self.s.lock().unwrap();
+        let s = self.s.lock();
         Ok(s.files.keys().filter(|(_, k)| *k == Kind::Run).map(|(n, _)| *n).collect())
     }
 

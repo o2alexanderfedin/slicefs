@@ -151,7 +151,7 @@ impl Behind {
 pub(crate) fn cut_segment(
     writer: &mut crate::segment::SegmentWriter,
     loc: &mut (std::path::PathBuf, u64),
-    behind: &std::sync::Mutex<Behind>,
+    behind: &chunk_store::sync::Mutex<Behind>,
 ) -> Result<WalCut, WalError> {
     // The old segment is not needed once the root is logged: a failure here
     // only makes fsync fail until then (and the Cut record below no longer
@@ -165,7 +165,7 @@ pub(crate) fn cut_segment(
     new_writer.write_entry(&crate::segment::SegmentEntry::Cut { prev_id: old_id, records })?;
     new_writer.flush()?;
     let old = std::mem::replace(writer, new_writer);
-    let mut b = behind.lock().unwrap();
+    let mut b = behind.lock();
     b.old.push(old);
     b.dir = Some(dir);
     *loc = (new_path, new_id);
@@ -180,7 +180,7 @@ pub(crate) fn write_root_segment(
     current: &Path,
     cut: &WalCut,
     seed: &[WalEntry],
-    behind: &std::sync::Mutex<Behind>,
+    behind: &chunk_store::sync::Mutex<Behind>,
 ) -> Result<(), WalError> {
     let dir = current.parent().ok_or_else(|| std::io::Error::other("segment has no directory"))?;
     let path = dir.join(format!("segment-{:06}.seg", cut.root_id));
@@ -192,7 +192,7 @@ pub(crate) fn write_root_segment(
     std::fs::File::open(dir)?.sync_all()?;
     remove_segments_before(dir, cut.root_id)?;
     std::fs::File::open(dir)?.sync_all()?;
-    *behind.lock().unwrap() = Behind::default();
+    *behind.lock() = Behind::default();
     Ok(())
 }
 

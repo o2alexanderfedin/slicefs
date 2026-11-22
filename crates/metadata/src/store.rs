@@ -14,9 +14,10 @@
 //!   7. `refcounts`
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex, MutexGuard, atomic::{AtomicU64, Ordering}};
+use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
 
 use chunk_store::lock_stats::{self, Site};
+use chunk_store::sync::{self, Rank};
 use slicefs_traits::key::{ObjectKey, KEY_BYTES};
 use crate::store_io::{NodeRead, NodeWrite};
 use slicefs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, MetadataStore};
@@ -151,7 +152,7 @@ pub enum CommitFault {
 /// operation that came after the cut (#108).
 pub struct PreparedCommit<'a> {
     /// One commit at a time, from the cut to the root: roots stay in order.
-    _serial: MutexGuard<'a, ()>,
+    _serial: sync::MutexGuard<'a, ()>,
     store: &'a DictMetadataStore,
     /// The root is logged. Else (an error, or dropped unfinished) the inodes
     /// and directories it took are dirty again.
@@ -177,8 +178,8 @@ pub struct PreparedCommit<'a> {
 impl Drop for PreparedCommit<'_> {
     fn drop(&mut self) {
         if !self.done {
-            self.store.inode_live.lock().unwrap().requeue();
-            self.store.dir_live.lock().unwrap().requeue();
+            self.store.inode_live.lock().requeue();
+            self.store.dir_live.lock().requeue();
         }
     }
 }
@@ -203,6 +204,11 @@ const S_IFDIR: u32 = 0o0040_000;
 ///   5. `manifest_data`
 ///   6. `xattr_data`
 ///   7. `refcounts`
+/// A lock of the store internals (rank 6, see `chunk_store::sync`).
+fn lk<T>(v: T) -> sync::Mutex<T> {
+    sync::Mutex::new(Rank::Store, v)
+}
+
 /// A sync run before a root is logged (see `DictMetadataStore::set_pre_root_sync`).
 pub type PreRootSync = Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>;
 
@@ -210,35 +216,35 @@ pub struct DictMetadataStore {
     /// Node store — used for all put_node/get_node calls.
     io: Arc<Mutex<StoreIo>>,
     /// Inode-number allocator + mapping table.
-    inode_map: Mutex<InodeMap>,
+    inode_map: sync::Mutex<InodeMap>,
     /// Maps inode number → current inode data `ObjectKey`.
-    inode_data: Mutex<BTreeMap<u64, ObjectKey>>,
+    inode_data: sync::Mutex<BTreeMap<u64, ObjectKey>>,
     /// Maps directory inode number → entry list `ObjectKey` as of the last flush.
     /// A directory in `dir_live` can be newer than its digest here.
-    dir_data: Mutex<BTreeMap<u64, ObjectKey>>,
+    dir_data: sync::Mutex<BTreeMap<u64, ObjectKey>>,
     /// Decoded entry lists of the directories in use, with a dirty flag.
     /// Changes go here; `commit()` writes the dirty ones and updates `dir_data`.
     /// Without this, each create re-wrote the whole entry list (O(n) per entry).
     /// Lock order: `dir_live` before `io`.
-    dir_live: Mutex<Live<DirList>>,
+    dir_live: sync::Mutex<Live<DirList>>,
     /// Inodes in use, with a dirty flag. `inode_data` (and `inode_map`) hold the
     /// digest as of the last flush; a dirty inode here is newer. `commit()`
     /// writes the dirty ones. Lock order: `inode_map`, `inode_live`, `io`, `inode_data`.
-    inode_live: Mutex<Live<InodeMeta>>,
+    inode_live: sync::Mutex<Live<InodeMeta>>,
     /// Count of mutations so far, and its value at the last commit: the
     /// commit timer commits only when they differ.
     changes: AtomicU64,
     committed_changes: AtomicU64,
     /// Maps file inode number → current manifest `ObjectKey`.
-    manifest_data: Mutex<BTreeMap<u64, ObjectKey>>,
+    manifest_data: sync::Mutex<BTreeMap<u64, ObjectKey>>,
     /// Maps inode number → xattr set `ObjectKey` (only for inodes with xattrs).
-    xattr_data: Mutex<BTreeMap<u64, ObjectKey>>,
+    xattr_data: sync::Mutex<BTreeMap<u64, ObjectKey>>,
     /// Called in `commit()` after the metadata objects are synced and before
     /// the root is logged: makes the file content (chunk store) durable.
-    pre_root_sync: Mutex<Option<PreRootSync>>,
+    pre_root_sync: sync::Mutex<Option<PreRootSync>>,
     /// Reference counts for content `ObjectKey`s.
     /// Incremented when a manifest references a block; decremented on manifest replacement or inode deletion.
-    refcounts: Mutex<BTreeMap<ObjectKey, u64>>,
+    refcounts: sync::Mutex<BTreeMap<ObjectKey, u64>>,
     /// Running total of logical bytes — sum of all inode `size` fields.
     ///
     /// Updated atomically in `create_inode` (+size), `update_inode` (delta),
@@ -253,7 +259,7 @@ pub struct DictMetadataStore {
     /// Optional WAL strategy — routes all Dictionary mutations to durable storage.
     ///
     /// Set via `set_wal()` after construction. When None, mutations are not logged.
-    wal: Mutex<Option<Arc<dyn WalStrategy>>>,
+    wal: sync::Mutex<Option<Arc<dyn WalStrategy>>>,
     /// Count of failed appends to the write log, and the count that the last
     /// root covers. While they differ, the log may have a torn record, and
     /// records after it cannot be read. Until the next commit (which starts
@@ -264,16 +270,16 @@ pub struct DictMetadataStore {
     wal_fail_cleared: AtomicU64,
     /// One commit at a time (see `PreparedCommit`). Lock order: the commit
     /// gate of the file system, then this.
-    commit_lock: Mutex<()>,
+    commit_lock: sync::Mutex<()>,
     /// Test fault: the next `finish_commit` stops with an error at this
     /// point (see `test_fail_next_commit_at`); 0: none.
     commit_fault: std::sync::atomic::AtomicU8,
     /// Last committed root digest — updated by `commit()`, used by GC to determine live roots.
-    last_root: Mutex<Option<ObjectKey>>,
+    last_root: sync::Mutex<Option<ObjectKey>>,
     /// Snapshot index by version number — O(1) lookup (FIX-03).
-    snapshots_by_version: Mutex<HashMap<u64, SnapshotEntry>>,
+    snapshots_by_version: sync::Mutex<HashMap<u64, SnapshotEntry>>,
     /// Snapshot name → version mapping — O(1) name lookup (FIX-04).
-    snapshots_by_name: Mutex<HashMap<String, u64>>,
+    snapshots_by_name: sync::Mutex<HashMap<String, u64>>,
 }
 
 impl DictMetadataStore {
@@ -317,27 +323,27 @@ impl DictMetadataStore {
 
         DictMetadataStore {
             io,
-            inode_map: Mutex::new(inode_map),
-            inode_data: Mutex::new(inode_data),
-            dir_data: Mutex::new(dir_data),
-            dir_live: Mutex::new(Live::default()),
-            inode_live: Mutex::new(Live::default()),
+            inode_map: lk(inode_map),
+            inode_data: lk(inode_data),
+            dir_data: lk(dir_data),
+            dir_live: lk(Live::default()),
+            inode_live: lk(Live::default()),
             changes: AtomicU64::new(0),
             committed_changes: AtomicU64::new(0),
-            manifest_data: Mutex::new(BTreeMap::new()),
-            xattr_data: Mutex::new(BTreeMap::new()),
-            pre_root_sync: Mutex::new(None),
-            refcounts: Mutex::new(BTreeMap::new()),
+            manifest_data: lk(BTreeMap::new()),
+            xattr_data: lk(BTreeMap::new()),
+            pre_root_sync: lk(None),
+            refcounts: lk(BTreeMap::new()),
             logical_bytes: AtomicU64::new(0),
             inode_count: AtomicU64::new(1),
-            wal: Mutex::new(None),
+            wal: lk(None).timed(Site::Wal),
             wal_fail_seq: AtomicU64::new(0),
             wal_fail_cleared: AtomicU64::new(0),
-            commit_lock: Mutex::new(()),
+            commit_lock: lk(()),
             commit_fault: std::sync::atomic::AtomicU8::new(0),
-            last_root: Mutex::new(None),
-            snapshots_by_version: Mutex::new(HashMap::new()),
-            snapshots_by_name: Mutex::new(HashMap::new()),
+            last_root: lk(None),
+            snapshots_by_version: lk(HashMap::new()),
+            snapshots_by_name: lk(HashMap::new()),
         }
     }
 }
@@ -364,7 +370,7 @@ impl DictMetadataStore {
     /// a block reaches saturation.
     pub fn increment_refcount(&self, digest: &ObjectKey) {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        let mut rc = self.refcounts.lock().unwrap();
+        let mut rc = self.refcounts.lock();
         let val = rc.entry(*digest).or_insert(0);
         if *val == u64::MAX {
             // Already saturated — no-op.
@@ -387,7 +393,7 @@ impl DictMetadataStore {
     /// no-op — immortal blocks are never freed.
     pub fn decrement_refcount(&self, digest: &ObjectKey) {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        let mut rc = self.refcounts.lock().unwrap();
+        let mut rc = self.refcounts.lock();
         if let Some(count) = rc.get_mut(digest) {
             // Saturated blocks are immortal — decrement is a no-op.
             if *count == u64::MAX {
@@ -403,7 +409,7 @@ impl DictMetadataStore {
 
     /// Return the current reference count for `digest`, or `0` if not tracked.
     pub fn get_refcount(&self, digest: &ObjectKey) -> u64 {
-        let rc = self.refcounts.lock().unwrap();
+        let rc = self.refcounts.lock();
         rc.get(digest).copied().unwrap_or(0)
     }
 
@@ -413,7 +419,7 @@ impl DictMetadataStore {
     /// A non-zero count here indicates the GC dead-letter queue has accumulated
     /// blocks; this is surfaced as a warning in `slicefs scrub`.
     pub fn saturated_refcount_count(&self) -> usize {
-        let rc = self.refcounts.lock().unwrap();
+        let rc = self.refcounts.lock();
         rc.values().filter(|&&v| v == u64::MAX).count()
     }
 
@@ -438,13 +444,13 @@ impl DictMetadataStore {
     ///
     /// Replaces any previously set WAL (the old one is dropped; not flushed).
     pub fn set_wal(&mut self, wal: Box<dyn WalStrategy>) {
-        *lock_stats::lock(&self.wal, Site::Wal) = Some(Arc::from(wal));
+        *self.wal.lock() = Some(Arc::from(wal));
     }
 
     /// Set the sync that `commit()` runs before it logs a root (see
     /// `pre_root_sync`).
     pub fn set_pre_root_sync(&self, f: PreRootSync) {
-        *self.pre_root_sync.lock().unwrap() = Some(f);
+        *self.pre_root_sync.lock() = Some(f);
     }
 
     /// Flush all buffered WAL mutations to disk and call sync_all.
@@ -467,7 +473,7 @@ impl DictMetadataStore {
     ///
     /// Should be called before dropping the store (e.g., in `destroy()`).
     pub fn shutdown_wal(&self) -> Result<(), WalError> {
-        if let Some(ref w) = *lock_stats::lock(&self.wal, Site::Wal) {
+        if let Some(ref w) = *self.wal.lock() {
             w.shutdown()?;
         }
         Ok(())
@@ -500,7 +506,7 @@ impl DictMetadataStore {
     /// after it took an inode number (for example EEXIST) logged nothing, so
     /// replay skips that number the same way the live mount did.
     pub fn advance_next_ino(&self, ino: InodeId) {
-        let mut m = self.inode_map.lock().unwrap();
+        let mut m = self.inode_map.lock();
         if m.next_ino() < ino {
             m.set_next_ino(ino);
         }
@@ -513,7 +519,7 @@ impl DictMetadataStore {
     }
 
     fn log_wal_entry(&self, entry: &WalEntry) {
-        if let Some(ref w) = *lock_stats::lock(&self.wal, Site::Wal) {
+        if let Some(ref w) = *self.wal.lock() {
             // The in-memory state is already correct. A failed append is
             // reported by every later flush_wal (fsync) until the next
             // commit rotates the log (#20).
@@ -544,9 +550,9 @@ impl DictMetadataStore {
         ino: InodeId,
         f: impl FnOnce(&mut DirList) -> Result<(R, bool), MetaError>,
     ) -> Result<R, MetaError> {
-        let mut live = self.dir_live.lock().unwrap();
+        let mut live = self.dir_live.lock();
         if !live.map.contains_key(&ino) {
-            let digest = self.dir_data.lock().unwrap().get(&ino).copied()
+            let digest = self.dir_data.lock().get(&ino).copied()
                 .ok_or(MetaError::NotADirectory(ino))?;
             let list = {
                 let mut io_guard = lock_stats::lock(&self.io, Site::Io);
@@ -564,31 +570,31 @@ impl DictMetadataStore {
             self.flush_dirs();
         }
         if full {
-            self.dir_live.lock().unwrap().evict_clean();
+            self.dir_live.lock().evict_clean();
         }
         Ok(r)
     }
 
     /// Current metadata of `ino`: the cached copy, or read from the store.
     fn load_meta(&self, ino: InodeId) -> Result<InodeMeta, MetaError> {
-        if let Some(m) = self.inode_live.lock().unwrap().map.get(&ino) {
+        if let Some(m) = self.inode_live.lock().map.get(&ino) {
             return Ok(m.clone());
         }
-        let digest = self.inode_data.lock().unwrap().get(&ino).copied()
+        let digest = self.inode_data.lock().get(&ino).copied()
             .ok_or(MetaError::NotFound(ino))?;
         let meta = {
             let mut io_guard = lock_stats::lock(&self.io, Site::Io);
             load_inode(&mut *io_guard, &digest)?
         };
         let full = {
-            let mut live = self.inode_live.lock().unwrap();
+            let mut live = self.inode_live.lock();
             // A concurrent update may have cached a newer copy meanwhile; keep it.
             live.map.entry(ino).or_insert_with(|| meta.clone());
             live.map.len() > INODE_CACHE_MAX
         };
         if full {
             self.flush_inodes();
-            self.inode_live.lock().unwrap().evict_clean();
+            self.inode_live.lock().evict_clean();
         }
         Ok(meta)
     }
@@ -596,7 +602,7 @@ impl DictMetadataStore {
     /// Cache `meta` as the new (dirty) state of its inode.
     fn store_meta(&self, meta: &InodeMeta) {
         let (flush, full) = {
-            let mut live = self.inode_live.lock().unwrap();
+            let mut live = self.inode_live.lock();
             live.map.insert(meta.ino, meta.clone());
             live.mark_dirty(meta.ino);
             (live.dirty.len() >= DIRTY_FLUSH, live.map.len() > INODE_CACHE_MAX)
@@ -605,20 +611,20 @@ impl DictMetadataStore {
             self.flush_inodes();
         }
         if full {
-            self.inode_live.lock().unwrap().evict_clean();
+            self.inode_live.lock().evict_clean();
         }
     }
 
     /// Write every dirty cached inode; record its digest in `inode_data` and `inode_map`.
     fn flush_inodes(&self) {
-        let mut inode_map = self.inode_map.lock().unwrap();
-        let mut live = self.inode_live.lock().unwrap();
+        let mut inode_map = self.inode_map.lock();
+        let mut live = self.inode_live.lock();
         if live.dirty.is_empty() {
             return;
         }
         let mut io_guard = lock_stats::lock(&self.io, Site::Io);
         let mut fsa = &mut *io_guard;
-        let mut inode_data = self.inode_data.lock().unwrap();
+        let mut inode_data = self.inode_data.lock();
         let live = &mut *live;
         for ino in live.dirty.drain() {
             if let Some(meta) = live.map.get(&ino) {
@@ -631,19 +637,19 @@ impl DictMetadataStore {
 
     /// True if `ino` is a directory known to the store.
     fn is_dir(&self, ino: InodeId) -> bool {
-        self.dir_live.lock().unwrap().map.contains_key(&ino)
-            || self.dir_data.lock().unwrap().contains_key(&ino)
+        self.dir_live.lock().map.contains_key(&ino)
+            || self.dir_data.lock().contains_key(&ino)
     }
 
     /// Write every dirty cached directory and record its digest in `dir_data`.
     fn flush_dirs(&self) {
-        let mut live = self.dir_live.lock().unwrap();
+        let mut live = self.dir_live.lock();
         if live.dirty.is_empty() {
             return;
         }
         let mut io_guard = lock_stats::lock(&self.io, Site::Io);
         let mut fsa = &mut *io_guard;
-        let mut dir_data = self.dir_data.lock().unwrap();
+        let mut dir_data = self.dir_data.lock();
         let live = &mut *live;
         for ino in live.dirty.drain() {
             if let Some(list) = live.map.get(&ino) {
@@ -654,7 +660,7 @@ impl DictMetadataStore {
 
     /// The write log, if any (a clone: no lock is held while it works).
     fn wal_handle(&self) -> Option<Arc<dyn WalStrategy>> {
-        lock_stats::lock(&self.wal, Site::Wal).as_ref().map(Arc::clone)
+        self.wal.lock().as_ref().map(Arc::clone)
     }
 
     /// Make the next `finish_commit` stop with an error at `at`, as a crash
@@ -674,7 +680,7 @@ impl DictMetadataStore {
     /// Wait until no commit is between `begin_commit` and the end of
     /// `finish_commit`.
     pub fn wait_for_commit(&self) {
-        drop(self.commit_lock.lock().unwrap());
+        drop(self.commit_lock.lock());
     }
 
     /// First half of a commit (#108), run while no request changes the store
@@ -684,7 +690,7 @@ impl DictMetadataStore {
     /// generation. Fast: no node is written and nothing is synced. Waits for
     /// a commit still in `finish_commit`.
     pub fn begin_commit(&self) -> Result<PreparedCommit<'_>, MetaError> {
-        let serial = self.commit_lock.lock().unwrap();
+        let serial = self.commit_lock.lock();
         let wal = self.wal_handle();
         // The log first: if it cannot cut, nothing has changed.
         let cut = match &wal {
@@ -698,14 +704,14 @@ impl DictMetadataStore {
         // this commit holds their requests. Later ones are not cleared by it.
         let fail_seq = self.wal_fail_seq.load(Ordering::SeqCst);
         let changes = self.changes.load(Ordering::Relaxed);
-        let dirs = self.dir_live.lock().unwrap().take_dirty();
-        let inode_map = self.inode_map.lock().unwrap().clone();
-        let inodes = self.inode_live.lock().unwrap().take_dirty();
-        let inode_data = self.inode_data.lock().unwrap().clone();
-        let dir_data = self.dir_data.lock().unwrap().clone();
-        let manifest_data = self.manifest_data.lock().unwrap().clone();
-        let xattr_data = self.xattr_data.lock().unwrap().clone();
-        let refcounts = self.refcounts.lock().unwrap().clone();
+        let dirs = self.dir_live.lock().take_dirty();
+        let inode_map = self.inode_map.lock().clone();
+        let inodes = self.inode_live.lock().take_dirty();
+        let inode_data = self.inode_data.lock().clone();
+        let dir_data = self.dir_data.lock().clone();
+        let manifest_data = self.manifest_data.lock().clone();
+        let xattr_data = self.xattr_data.lock().clone();
+        let refcounts = self.refcounts.lock().clone();
         Ok(PreparedCommit {
             _serial: serial,
             store: self,
@@ -790,9 +796,9 @@ impl DictMetadataStore {
         // The nodes are stored: the caches may forget the entries that were
         // not changed again since the cut.
         {
-            let mut inode_map = self.inode_map.lock().unwrap();
-            let mut live = self.inode_live.lock().unwrap();
-            let mut inode_data = self.inode_data.lock().unwrap();
+            let mut inode_map = self.inode_map.lock();
+            let mut live = self.inode_live.lock();
+            let mut inode_data = self.inode_data.lock();
             for (ino, d) in new_inodes {
                 if live.flushing.remove(&ino) {
                     inode_data.insert(ino, d);
@@ -801,8 +807,8 @@ impl DictMetadataStore {
             }
         }
         {
-            let mut live = self.dir_live.lock().unwrap();
-            let mut dir_data = self.dir_data.lock().unwrap();
+            let mut live = self.dir_live.lock();
+            let mut dir_data = self.dir_data.lock();
             for (ino, d) in new_dirs {
                 if live.flushing.remove(&ino) {
                     dir_data.insert(ino, d);
@@ -818,7 +824,7 @@ impl DictMetadataStore {
             .map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
         cs.sync().map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
         // The file content that the root refers to must be durable too.
-        let pre = self.pre_root_sync.lock().unwrap().clone();
+        let pre = self.pre_root_sync.lock().clone();
         if let Some(f) = pre {
             f().map_err(|e| MetaError::Corrupted(format!("commit: content sync failed: {e}")))?;
         }
@@ -850,7 +856,7 @@ impl DictMetadataStore {
         }
 
         // Update last_root so background GC can use it
-        *self.last_root.lock().unwrap() = Some(root_digest);
+        *self.last_root.lock() = Some(root_digest);
         self.committed_changes.store(p.changes, Ordering::Relaxed);
         Ok(root_digest)
     }
@@ -861,7 +867,7 @@ impl DictMetadataStore {
     }
 
     pub fn current_root(&self) -> Option<ObjectKey> {
-        *self.last_root.lock().unwrap()
+        *self.last_root.lock()
     }
 
     /// Load a snapshot list after store reconstruction from segment replay.
@@ -869,8 +875,8 @@ impl DictMetadataStore {
     /// Called by `mount.rs::load_store` after `load_store_from_segments` returns
     /// the snapshot list. Replaces whatever is in memory (typically empty).
     pub fn set_snapshots(&mut self, snapshots: Vec<SnapshotEntry>) {
-        let mut by_ver = self.snapshots_by_version.lock().unwrap();
-        let mut by_name = self.snapshots_by_name.lock().unwrap();
+        let mut by_ver = self.snapshots_by_version.lock();
+        let mut by_name = self.snapshots_by_name.lock();
         *by_ver = snapshots.iter().map(|s| (s.version, s.clone())).collect();
         *by_name = snapshots
             .iter()
@@ -890,7 +896,7 @@ impl DictMetadataStore {
 
         // Compute next version — O(1) from HashMap keys.
         let version = {
-            let by_ver = self.snapshots_by_version.lock().unwrap();
+            let by_ver = self.snapshots_by_version.lock();
             by_ver.keys().max().copied().unwrap_or(0) + 1
         };
 
@@ -912,11 +918,11 @@ impl DictMetadataStore {
 
         // Insert into both indexes.
         {
-            let mut by_ver = self.snapshots_by_version.lock().unwrap();
+            let mut by_ver = self.snapshots_by_version.lock();
             by_ver.insert(entry.version, entry.clone());
         }
         if let Some(ref n) = entry.name {
-            let mut by_name = self.snapshots_by_name.lock().unwrap();
+            let mut by_name = self.snapshots_by_name.lock();
             by_name.insert(n.clone(), entry.version);
         }
 
@@ -925,7 +931,7 @@ impl DictMetadataStore {
 
     /// Return all snapshots sorted by version ascending.
     pub fn list_snapshots(&self) -> Vec<SnapshotEntry> {
-        let by_ver = self.snapshots_by_version.lock().unwrap();
+        let by_ver = self.snapshots_by_version.lock();
         let mut snaps: Vec<SnapshotEntry> = by_ver.values().cloned().collect();
         snaps.sort_by_key(|s| s.version);
         snaps
@@ -939,12 +945,12 @@ impl DictMetadataStore {
     /// Returns the matching entry, or `None`.
     pub fn find_snapshot(&self, reference: &str) -> Option<SnapshotEntry> {
         if let Ok(version) = reference.parse::<u64>() {
-            self.snapshots_by_version.lock().unwrap().get(&version).cloned()
+            self.snapshots_by_version.lock().get(&version).cloned()
         } else {
-            let by_name = self.snapshots_by_name.lock().unwrap();
+            let by_name = self.snapshots_by_name.lock();
             let version = *by_name.get(reference)?;
             drop(by_name);
-            self.snapshots_by_version.lock().unwrap().get(&version).cloned()
+            self.snapshots_by_version.lock().get(&version).cloned()
         }
     }
 
@@ -953,7 +959,7 @@ impl DictMetadataStore {
     /// Includes every snapshot root plus the current committed root (if any).
     /// Used by both background GC and offline `slicefs gc`.
     pub fn snapshot_roots(&self) -> Vec<ObjectKey> {
-        let by_ver = self.snapshots_by_version.lock().unwrap();
+        let by_ver = self.snapshots_by_version.lock();
         let mut roots: Vec<ObjectKey> = by_ver.values().map(|s| s.root).collect();
         drop(by_ver);
         if let Some(root) = self.current_root() {
@@ -971,8 +977,8 @@ impl DictMetadataStore {
     ///
     /// Also updates `last_root` so `current_root()` reflects the change immediately.
     pub fn commit_root(&self, root: ObjectKey) -> Result<(), MetaError> {
-        let _serial = self.commit_lock.lock().unwrap();
-        *self.last_root.lock().unwrap() = Some(root);
+        let _serial = self.commit_lock.lock();
+        *self.last_root.lock() = Some(root);
         self.log_wal_entry(&WalEntry::RootUpdate { root });
         self.rotate_wal(root);
         Ok(())
@@ -982,7 +988,7 @@ impl DictMetadataStore {
 impl MetadataStore for DictMetadataStore {
     fn create_inode(&self, meta: &InodeMeta) -> Result<InodeId, MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        let mut inode_map = self.inode_map.lock().unwrap();
+        let mut inode_map = self.inode_map.lock();
         let ino = inode_map.allocate_ino();
         let mut full_meta = meta.clone();
         full_meta.ino = ino;
@@ -1031,15 +1037,15 @@ impl MetadataStore for DictMetadataStore {
         // Capture size before removing so we can decrement logical_bytes.
         let size = self.load_meta(ino)?.size;
 
-        self.inode_live.lock().unwrap().remove(ino);
-        self.inode_data.lock().unwrap().remove(&ino);
-        self.inode_map.lock().unwrap().remove(ino);
+        self.inode_live.lock().remove(ino);
+        self.inode_data.lock().remove(&ino);
+        self.inode_map.lock().remove(ino);
         // Drop every per-inode map entry: a leftover manifest/xattr/dir entry
         // would keep the deleted content reachable (never garbage-collected).
-        self.manifest_data.lock().unwrap().remove(&ino);
-        self.xattr_data.lock().unwrap().remove(&ino);
-        self.dir_live.lock().unwrap().remove(ino);
-        self.dir_data.lock().unwrap().remove(&ino);
+        self.manifest_data.lock().remove(&ino);
+        self.xattr_data.lock().remove(&ino);
+        self.dir_live.lock().remove(ino);
+        self.dir_data.lock().remove(&ino);
 
         // Decrement logical_bytes by the deleted inode's size.
         if size > 0 {
@@ -1074,7 +1080,7 @@ impl MetadataStore for DictMetadataStore {
         }
 
         // Allocate new inode number
-        let mut inode_map = self.inode_map.lock().unwrap();
+        let mut inode_map = self.inode_map.lock();
         let ino = inode_map.allocate_ino();
         let mut dir_meta = meta.clone();
         dir_meta.ino = ino;
@@ -1089,7 +1095,7 @@ impl MetadataStore for DictMetadataStore {
         drop(inode_map);
         self.store_meta(&dir_meta);
         {
-            let mut live = self.dir_live.lock().unwrap();
+            let mut live = self.dir_live.lock();
             live.map.insert(ino, DirList::new_dir(ino, parent_ino));
             live.mark_dirty(ino);
         }
@@ -1133,12 +1139,12 @@ impl MetadataStore for DictMetadataStore {
             let mut fsa = &mut *io_guard;
             intern_manifest(&mut fsa, blocks)
         };
-        self.manifest_data.lock().unwrap().insert(ino, digest);
+        self.manifest_data.lock().insert(ino, digest);
         Ok(())
     }
 
     fn get_manifest(&self, ino: InodeId) -> Result<Vec<ObjectKey>, MetaError> {
-        let manifest_data = self.manifest_data.lock().unwrap();
+        let manifest_data = self.manifest_data.lock();
         let digest = manifest_data.get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
         drop(manifest_data);
 
@@ -1150,7 +1156,7 @@ impl MetadataStore for DictMetadataStore {
         self.changes.fetch_add(1, Ordering::Relaxed);
         // Load existing xattrs for this inode (or empty vec if none yet)
         let mut xattrs = {
-            let xattr_data = self.xattr_data.lock().unwrap();
+            let xattr_data = self.xattr_data.lock();
             if let Some(digest) = xattr_data.get(&ino).copied() {
                 drop(xattr_data);
                 let mut io_guard = lock_stats::lock(&self.io, Site::Io);
@@ -1168,12 +1174,12 @@ impl MetadataStore for DictMetadataStore {
             intern_xattrs(&mut fsa, &xattrs)
         };
 
-        self.xattr_data.lock().unwrap().insert(ino, new_digest);
+        self.xattr_data.lock().insert(ino, new_digest);
         Ok(())
     }
 
     fn get_xattr(&self, ino: InodeId, name: &str) -> Result<Vec<u8>, MetaError> {
-        let xattr_data = self.xattr_data.lock().unwrap();
+        let xattr_data = self.xattr_data.lock();
         let digest = match xattr_data.get(&ino).copied() {
             Some(d) => d,
             None => return Err(MetaError::NotFound(ino)),
@@ -1188,7 +1194,7 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn list_xattrs(&self, ino: InodeId) -> Result<Vec<String>, MetaError> {
-        let xattr_data = self.xattr_data.lock().unwrap();
+        let xattr_data = self.xattr_data.lock();
         let digest = match xattr_data.get(&ino).copied() {
             Some(d) => d,
             None => return Ok(vec![]),
@@ -1204,7 +1210,7 @@ impl MetadataStore for DictMetadataStore {
 
     fn remove_xattr(&self, ino: InodeId, name: &str) -> Result<(), MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        let xattr_data = self.xattr_data.lock().unwrap();
+        let xattr_data = self.xattr_data.lock();
         let digest = match xattr_data.get(&ino).copied() {
             Some(d) => d,
             None => return Err(MetaError::NotFound(ino)),
@@ -1226,7 +1232,7 @@ impl MetadataStore for DictMetadataStore {
             intern_xattrs(&mut fsa, &xattrs)
         };
 
-        self.xattr_data.lock().unwrap().insert(ino, new_digest);
+        self.xattr_data.lock().insert(ino, new_digest);
         Ok(())
     }
 
@@ -1409,27 +1415,27 @@ impl DictMetadataStore {
 
         Ok(DictMetadataStore {
             io,
-            inode_map: Mutex::new(inode_map),
-            inode_data: Mutex::new(inode_data),
-            dir_data: Mutex::new(dir_data),
-            dir_live: Mutex::new(Live::default()),
-            inode_live: Mutex::new(Live::default()),
+            inode_map: lk(inode_map),
+            inode_data: lk(inode_data),
+            dir_data: lk(dir_data),
+            dir_live: lk(Live::default()),
+            inode_live: lk(Live::default()),
             changes: AtomicU64::new(0),
             committed_changes: AtomicU64::new(0),
-            manifest_data: Mutex::new(manifest_data),
-            xattr_data: Mutex::new(xattr_data),
-            pre_root_sync: Mutex::new(None),
-            refcounts: Mutex::new(refcounts),
+            manifest_data: lk(manifest_data),
+            xattr_data: lk(xattr_data),
+            pre_root_sync: lk(None),
+            refcounts: lk(refcounts),
             logical_bytes: AtomicU64::new(initial_logical_bytes),
             inode_count: AtomicU64::new(initial_inode_count),
-            wal: Mutex::new(None),
+            wal: lk(None).timed(Site::Wal),
             wal_fail_seq: AtomicU64::new(0),
             wal_fail_cleared: AtomicU64::new(0),
-            commit_lock: Mutex::new(()),
+            commit_lock: lk(()),
             commit_fault: std::sync::atomic::AtomicU8::new(0),
-            last_root: Mutex::new(Some(*root)),
-            snapshots_by_version: Mutex::new(HashMap::new()),
-            snapshots_by_name: Mutex::new(HashMap::new()),
+            last_root: lk(Some(*root)),
+            snapshots_by_version: lk(HashMap::new()),
+            snapshots_by_name: lk(HashMap::new()),
         })
     }
 }
@@ -1544,11 +1550,11 @@ mod tests {
             store.unlink(dir, "f0").unwrap();
         }
         // The caches stayed bounded, and every change is still visible.
-        assert!(store.inode_live.lock().unwrap().map.len() <= INODE_CACHE_MAX + 1);
-        assert!(store.dir_live.lock().unwrap().map.len() <= DIR_CACHE_MAX + 1);
+        assert!(store.inode_live.lock().map.len() <= INODE_CACHE_MAX + 1);
+        assert!(store.dir_live.lock().map.len() <= DIR_CACHE_MAX + 1);
         // Dirty entries are written in batches, so the final commit stays small.
-        assert!(store.inode_live.lock().unwrap().dirty.len() < DIRTY_FLUSH);
-        assert!(store.dir_live.lock().unwrap().dirty.len() < DIRTY_FLUSH);
+        assert!(store.inode_live.lock().dirty.len() < DIRTY_FLUSH);
+        assert!(store.dir_live.lock().dirty.len() < DIRTY_FLUSH);
         let check = |s: &DictMetadataStore| {
             for (dir, name, ino, size) in &expect {
                 if name == "f0" {
@@ -2400,7 +2406,7 @@ mod tests {
 
         // Manually set refcount to u64::MAX - 1
         {
-            let mut rc = store.refcounts.lock().unwrap();
+            let mut rc = store.refcounts.lock();
             rc.insert(digest, u64::MAX - 1);
         }
 
@@ -2422,7 +2428,7 @@ mod tests {
 
         // Set refcount to u64::MAX directly
         {
-            let mut rc = store.refcounts.lock().unwrap();
+            let mut rc = store.refcounts.lock();
             rc.insert(digest, u64::MAX);
         }
 
@@ -2442,7 +2448,7 @@ mod tests {
         let d5: ObjectKey = ObjectKey::example(0x05);
 
         {
-            let mut rc = store.refcounts.lock().unwrap();
+            let mut rc = store.refcounts.lock();
             rc.insert(d1, u64::MAX); // saturated
             rc.insert(d2, u64::MAX); // saturated
             rc.insert(d3, 5);        // normal

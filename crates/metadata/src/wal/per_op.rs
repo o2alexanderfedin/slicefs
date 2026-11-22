@@ -7,9 +7,9 @@
 
 use std::io;
 use std::path::Path;
-use std::sync::Mutex;
 
-use chunk_store::lock_stats::{self, Site};
+use chunk_store::lock_stats::Site;
+use chunk_store::sync::{Mutex, Rank};
 use crate::segment::{SegmentEntry, SegmentWriter};
 use super::{Behind, WalCut, WalEntry, WalError, WalStrategy};
 
@@ -30,32 +30,32 @@ impl PerOpWal {
     pub fn new(path: &Path, segment_id: u64) -> io::Result<Self> {
         let writer = SegmentWriter::new(path, segment_id)?;
         Ok(PerOpWal {
-            writer: Mutex::new(writer),
-            loc: Mutex::new((path.to_path_buf(), segment_id)),
-            behind: Mutex::new(Behind::default()),
+            writer: Mutex::new(Rank::Store, writer).timed(Site::WalWriter),
+            loc: Mutex::new(Rank::Store, (path.to_path_buf(), segment_id)),
+            behind: Mutex::new(Rank::Store, Behind::default()),
         })
     }
 }
 
 impl WalStrategy for PerOpWal {
     fn rotate(&self, seed: &[WalEntry]) -> Result<(), WalError> {
-        let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
-        let mut loc = self.loc.lock().unwrap();
+        let mut writer = self.writer.lock();
+        let mut loc = self.loc.lock();
         let (new_writer, new_path, new_id) = super::rotate_segment(&loc.0, loc.1, seed)?;
         *writer = new_writer;
         *loc = (new_path, new_id);
-        *self.behind.lock().unwrap() = Behind::default();
+        *self.behind.lock() = Behind::default();
         Ok(())
     }
     fn cut(&self) -> Result<Option<WalCut>, WalError> {
-        let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
-        let mut loc = self.loc.lock().unwrap();
+        let mut writer = self.writer.lock();
+        let mut loc = self.loc.lock();
         super::cut_segment(&mut writer, &mut loc, &self.behind).map(Some)
     }
     fn install_root(&self, cut: &WalCut, seed: &[WalEntry]) -> Result<(), WalError> {
         let (file, path) = {
-            let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
-            (writer.file_for_sync()?, self.loc.lock().unwrap().0.clone())
+            let mut writer = self.writer.lock();
+            (writer.file_for_sync()?, self.loc.lock().0.clone())
         };
         // The disk sync runs with no lock held: requests log meanwhile.
         file.sync_all()?;
@@ -63,7 +63,7 @@ impl WalStrategy for PerOpWal {
     }
     fn log_mutation(&self, entry: &WalEntry) -> Result<(), WalError> {
         let seg_entry = wal_entry_to_segment(entry);
-        let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
+        let mut writer = self.writer.lock();
         writer.write_entry(&seg_entry)?;
         if matches!(entry, WalEntry::Op { .. }) {
             // Into the kernel now, with no disk sync: a crash of the daemon
@@ -78,8 +78,8 @@ impl WalStrategy for PerOpWal {
 
     fn flush_and_sync(&self) -> Result<(), WalError> {
         // The records after a cut count only on top of the ones before it.
-        self.behind.lock().unwrap().settle()?;
-        lock_stats::lock(&self.writer, Site::WalWriter).sync()?;
+        self.behind.lock().settle()?;
+        self.writer.lock().sync()?;
         Ok(())
     }
 
@@ -90,7 +90,7 @@ impl WalStrategy for PerOpWal {
         // We'll replace the inner writer with a dummy by using unsafe or restructuring.
         // Simpler: just call sync; we can't call close() without consuming.
         // The close() writes an EOF marker — call flush then sync to simulate.
-        let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
+        let mut writer = self.writer.lock();
         writer.sync()?;
         Ok(())
     }
@@ -124,7 +124,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.seg");
         let wal = PerOpWal::new(&path, 1).unwrap();
-        let syncs = wal.writer.lock().unwrap().disk_syncs();
+        let syncs = wal.writer.lock().disk_syncs();
         wal.log_mutation(&WalEntry::Op { bytes: vec![7u8; 40] }).unwrap();
         let on_disk: Vec<SegmentEntry> = SegmentReader::open(&path)
             .map(|r| r.collect())
@@ -134,6 +134,6 @@ mod tests {
             "the Op record must be in the file before any sync, got {} records",
             on_disk.len()
         );
-        assert_eq!(wal.writer.lock().unwrap().disk_syncs(), syncs, "no disk sync for an Op record");
+        assert_eq!(wal.writer.lock().disk_syncs(), syncs, "no disk sync for an Op record");
     }
 }

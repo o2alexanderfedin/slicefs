@@ -8,9 +8,9 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
-use chunk_store::lock_stats::{self, Site};
+use chunk_store::lock_stats::Site;
+use chunk_store::sync::{Mutex, Rank};
 use crate::segment::SegmentWriter;
 use super::{BUFFER_CAP_BYTES, Behind, WalCut, WalEntry, WalError, per_op::wal_entry_to_segment};
 
@@ -64,10 +64,10 @@ pub(crate) struct BufferedLog {
 impl BufferedLog {
     pub(crate) fn new(path: &Path, segment_id: u64) -> io::Result<Self> {
         Ok(BufferedLog {
-            pending: Mutex::new(Pending::default()),
-            writer: Mutex::new(SegmentWriter::new(path, segment_id)?),
-            loc: Mutex::new((path.to_path_buf(), segment_id)),
-            behind: Mutex::new(Behind::default()),
+            pending: Mutex::new(Rank::Store, Pending::default()).timed(Site::WalPending),
+            writer: Mutex::new(Rank::Store, SegmentWriter::new(path, segment_id)?).timed(Site::WalWriter),
+            loc: Mutex::new(Rank::Store, (path.to_path_buf(), segment_id)),
+            behind: Mutex::new(Rank::Store, Behind::default()),
         })
     }
 
@@ -77,14 +77,14 @@ impl BufferedLog {
     /// After a failed write-out, the record is not kept (see `Pending::failed`):
     /// every fsync fails until the next commit puts the state into a root.
     pub(crate) fn log(&self, entry: &WalEntry) -> Result<(), WalError> {
-        let mut pending = lock_stats::lock(&self.pending, Site::WalPending);
+        let mut pending = self.pending.lock();
         if pending.failed {
             return Ok(());
         }
         pending.bytes += record_len(entry);
         pending.entries.push(entry.clone());
         if pending.bytes > BUFFER_CAP_BYTES {
-            let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
+            let mut writer = self.writer.lock();
             let result = write_out(&mut pending, &mut writer).and_then(|()| writer.flush());
             if let Err(e) = result {
                 pending.failed = true;
@@ -98,13 +98,13 @@ impl BufferedLog {
     /// failed write or sync, until the next `rotate`.
     pub(crate) fn flush_and_sync(&self) -> Result<(), WalError> {
         // The records after a cut count only on top of the ones before it.
-        self.behind.lock().unwrap().settle()?;
+        self.behind.lock().settle()?;
         // Lock order everywhere: pending, then writer.
-        let mut pending = lock_stats::lock(&self.pending, Site::WalPending);
+        let mut pending = self.pending.lock();
         if pending.failed {
             return Err(write_failed());
         }
-        let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
+        let mut writer = self.writer.lock();
         if let Err(e) = write_out(&mut pending, &mut writer).and_then(|()| writer.sync()) {
             pending.failed = true;
             return Err(e.into());
@@ -113,9 +113,9 @@ impl BufferedLog {
     }
 
     pub(crate) fn rotate(&self, seed: &[WalEntry]) -> Result<(), WalError> {
-        let mut pending = lock_stats::lock(&self.pending, Site::WalPending);
-        let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
-        let mut loc = self.loc.lock().unwrap();
+        let mut pending = self.pending.lock();
+        let mut writer = self.writer.lock();
+        let mut loc = self.loc.lock();
         // If the new segment cannot be made, keep the records: they hold the
         // new root's record, and the next flush writes it to the current segment.
         let (new_writer, new_path, new_id) = super::rotate_segment(&loc.0, loc.1, seed)?;
@@ -125,15 +125,15 @@ impl BufferedLog {
         pending.entries.clear();
         pending.bytes = 0;
         pending.failed = false;
-        *self.behind.lock().unwrap() = Behind::default();
+        *self.behind.lock() = Behind::default();
         Ok(())
     }
 
     /// See [`super::WalStrategy::cut`].
     pub(crate) fn cut(&self) -> Result<Option<WalCut>, WalError> {
-        let mut pending = lock_stats::lock(&self.pending, Site::WalPending);
-        let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
-        let mut loc = self.loc.lock().unwrap();
+        let mut pending = self.pending.lock();
+        let mut writer = self.writer.lock();
+        let mut loc = self.loc.lock();
         // A failed segment is cut too: the root of this commit holds every
         // record before the cut, and the new segment starts whole.
         let failed = pending.failed || write_out(&mut pending, &mut writer).is_err();
@@ -148,14 +148,14 @@ impl BufferedLog {
     /// See [`super::WalStrategy::install_root`].
     pub(crate) fn install_root(&self, cut: &WalCut, seed: &[WalEntry]) -> Result<(), WalError> {
         let (file, path) = {
-            let mut pending = lock_stats::lock(&self.pending, Site::WalPending);
+            let mut pending = self.pending.lock();
             if pending.failed {
                 return Err(write_failed());
             }
-            let mut writer = lock_stats::lock(&self.writer, Site::WalWriter);
+            let mut writer = self.writer.lock();
             let r = write_out(&mut pending, &mut writer).and_then(|()| writer.file_for_sync());
             match r {
-                Ok(f) => (f, self.loc.lock().unwrap().0.clone()),
+                Ok(f) => (f, self.loc.lock().0.clone()),
                 Err(e) => {
                     pending.failed = true;
                     return Err(e.into());
@@ -169,19 +169,19 @@ impl BufferedLog {
     /// Bytes of the records held in RAM (for tests).
     #[cfg(test)]
     pub(crate) fn buffered_bytes(&self) -> usize {
-        self.pending.lock().unwrap().bytes
+        self.pending.lock().bytes
     }
 
     /// Number of disk syncs of the current segment (for tests).
     #[cfg(test)]
     pub(crate) fn disk_syncs(&self) -> u64 {
-        self.writer.lock().unwrap().disk_syncs()
+        self.writer.lock().disk_syncs()
     }
 
     /// Make the next write or sync of the segment fail (test fault hook).
     #[cfg(test)]
     pub(crate) fn fail_next_io(&self) {
-        self.writer.lock().unwrap().fail_next_io();
+        self.writer.lock().fail_next_io();
     }
 }
 

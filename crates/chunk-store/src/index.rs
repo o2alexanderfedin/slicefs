@@ -38,7 +38,9 @@ use crate::{Error, Loc, ObjectId, Result};
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
+
+use crate::sync::{Mutex, Rank, RwLock};
 
 const MAGIC: &[u8; 4] = b"SFMF";
 /// Format version of the MANIFEST.
@@ -355,10 +357,10 @@ pub fn tier(entries: u64, limit: u64, fan_in: u64) -> u32 {
 impl Index {
     fn with(runs: Vec<Arc<Run>>, man: Manifest) -> Self {
         Index {
-            shards: std::array::from_fn(|_| Mutex::new(BTreeMap::new())),
+            shards: std::array::from_fn(|_| Mutex::new(Rank::Store, BTreeMap::new())),
             mem_len: AtomicUsize::new(0),
-            runs: RwLock::new(Arc::new(runs)),
-            man: Mutex::new(man),
+            runs: RwLock::new(Rank::Store, Arc::new(runs)),
+            man: Mutex::new(Rank::Store, man),
             gen: AtomicU64::new(0),
             bloom_bits: DEFAULT_BLOOM_BITS,
             merge_bytes: AtomicU64::new(0),
@@ -456,7 +458,7 @@ impl Index {
             return Ok(ix);
         }
         let on_disk = io.list_runs()?;
-        let man = ix.man.get_mut().unwrap();
+        let man = ix.man.get_mut();
         // A run file that a failed flush left behind must not block the next
         // flush with the same number (also if its removal below fails).
         if let Some(max) = on_disk.iter().max() {
@@ -493,7 +495,7 @@ impl Index {
         tracing::warn!("chunk store: the index cannot be used ({reason}); it is rebuilt from the packs");
         let on_disk = io.list_runs()?;
         let mut ix = Index::empty();
-        ix.man.get_mut().unwrap().next_run = on_disk.iter().max().map_or(1, |m| m.saturating_add(1));
+        ix.man.get_mut().next_run = on_disk.iter().max().map_or(1, |m| m.saturating_add(1));
         match io.remove(0, Kind::Manifest) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
             _ => {}
@@ -515,7 +517,7 @@ impl Index {
     /// The caller holds the store lock.
     pub fn request_rebuild(&self, io: &dyn PackIo, reason: &str) -> Result<()> {
         tracing::error!("chunk store: index damage ({reason}); the index is rebuilt from the packs at the next writable open");
-        let mut man = self.man.lock().unwrap();
+        let mut man = self.man.lock();
         man.flags |= FLAG_REBUILD;
         man.seq += 1;
         io.write_durable(0, Kind::Manifest, &man.encode())?;
@@ -524,7 +526,7 @@ impl Index {
 
     /// True if the MANIFEST asks for a rebuild at the next writable open.
     pub fn rebuild_requested(&self) -> bool {
-        self.man.lock().unwrap().flags & FLAG_REBUILD != 0
+        self.man.lock().flags & FLAG_REBUILD != 0
     }
 
     /// Bloom filter bits per key of the runs that this index writes from
@@ -534,12 +536,12 @@ impl Index {
     }
 
     pub fn hwm(&self) -> Hwm {
-        self.man.lock().unwrap().hwm
+        self.man.lock().hwm
     }
 
     /// The counts as of the last flush.
     pub fn counts(&self) -> Counts {
-        self.man.lock().unwrap().counts
+        self.man.lock().counts
     }
 
     pub fn mem_len(&self) -> usize {
@@ -554,7 +556,7 @@ impl Index {
 
     /// The live runs now, from the newest to the oldest.
     pub fn runs(&self) -> Arc<Vec<Arc<Run>>> {
-        Arc::clone(&self.runs.read().unwrap())
+        Arc::clone(&self.runs.read())
     }
 
     /// The generation: it goes up, under the store lock, after each run
@@ -579,7 +581,7 @@ impl Index {
 
     /// True if the memtable has an entry (put or tombstone) of `id`.
     pub fn mem_has(&self, id: &ObjectId) -> bool {
-        self.shard(id).lock().unwrap().contains_key(id)
+        self.shard(id).lock().contains_key(id)
     }
 
     /// The current place of `id`: the newest entry decides (a tombstone
@@ -591,7 +593,7 @@ impl Index {
     /// runs. A flush installs its run before it clears the shards, so an
     /// entry that moves from the memtable to a run is seen in one of them.
     pub fn get(&self, id: &ObjectId) -> Result<Option<Loc>> {
-        let e = self.shard(id).lock().unwrap().get(id).copied();
+        let e = self.shard(id).lock().get(id).copied();
         if let Some(e) = e {
             return Ok(put_loc(e));
         }
@@ -607,7 +609,7 @@ impl Index {
     /// page CRC checked, in the runs whose filter may have the ID): damage
     /// is always `Corrupt`.
     pub fn get_verified(&self, id: &ObjectId) -> Result<Option<Loc>> {
-        let e = self.shard(id).lock().unwrap().get(id).copied();
+        let e = self.shard(id).lock().get(id).copied();
         if let Some(e) = e {
             return Ok(put_loc(e));
         }
@@ -629,7 +631,7 @@ impl Index {
     }
 
     fn set(&self, id: ObjectId, e: Entry) {
-        if self.shard(&id).lock().unwrap().insert(id, e).is_none() {
+        if self.shard(&id).lock().insert(id, e).is_none() {
             self.mem_len.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -640,7 +642,7 @@ impl Index {
     /// [`Index::write_pending`]).
     #[cfg(test)]
     pub fn tombstone(&self, id: ObjectId, pack: u64) {
-        let newer = matches!(self.shard(&id).lock().unwrap().get(&id), Some(Entry::Put(l)) if l.pack != pack);
+        let newer = matches!(self.shard(&id).lock().get(&id), Some(Entry::Put(l)) if l.pack != pack);
         if !newer {
             self.set(id, Entry::Tomb(pack));
         }
@@ -651,7 +653,7 @@ impl Index {
     fn sorted_mem(&self) -> Vec<(ObjectId, Entry)> {
         let mut v = Vec::with_capacity(self.mem_len());
         for s in &self.shards {
-            v.extend(s.lock().unwrap().iter().map(|(id, e)| (*id, *e)));
+            v.extend(s.lock().iter().map(|(id, e)| (*id, *e)));
         }
         v.sort_unstable_by_key(|(id, _)| *id);
         v
@@ -682,7 +684,7 @@ impl Index {
             return Ok(());
         }
         let entries = self.sorted_mem();
-        let mut man = self.man.lock().unwrap();
+        let mut man = self.man.lock();
         let num = man.next_run;
         let run = match Self::write_run(io, num, &entries, self.bloom_bits) {
             Ok(r) => r,
@@ -702,14 +704,14 @@ impl Index {
         *man = new;
         drop(man);
         {
-            let mut runs = self.runs.write().unwrap();
+            let mut runs = self.runs.write();
             let mut v = Vec::with_capacity(runs.len() + 1);
             v.push(Arc::new(run));
             v.extend(runs.iter().cloned());
             *runs = Arc::new(v);
         }
         for s in &self.shards {
-            s.lock().unwrap().clear();
+            s.lock().clear();
         }
         self.mem_len.store(0, Ordering::SeqCst);
         self.bump_gen();
@@ -748,7 +750,7 @@ impl Index {
             let end = (f..=n).rev().find(|&end| tiers[end - f..end].iter().all(|&t| t == tiers[end - 1]))?;
             end - f..end
         };
-        let mut man = self.man.lock().unwrap();
+        let mut man = self.man.lock();
         let out = man.next_run;
         man.next_run += 1;
         Some(MergePlan { inputs: runs[window.clone()].to_vec(), out, drop_tombs: window.end == n })
@@ -777,7 +779,7 @@ impl Index {
     pub fn pick_idle_merge(&self) -> Option<MergePlan> {
         let window = self.idle_range()?;
         let runs = self.runs();
-        let mut man = self.man.lock().unwrap();
+        let mut man = self.man.lock();
         let out = man.next_run;
         man.next_run += 1;
         Some(MergePlan { inputs: runs[window.clone()].to_vec(), out, drop_tombs: window.end == runs.len() })
@@ -844,7 +846,7 @@ impl Index {
         let nums: Vec<u64> = plan.inputs.iter().map(|r| r.num()).collect();
         let k = nums.len();
         let cur = self.runs();
-        let mut man = self.man.lock().unwrap();
+        let mut man = self.man.lock();
         let same = |it: &mut dyn Iterator<Item = u64>| it.eq(nums.iter().copied());
         let at = cur.windows(k).position(|w| same(&mut w.iter().map(|r| r.num()))).filter(|&at| {
             man.runs.get(at..at + k).is_some_and(|m| same(&mut m.iter().map(|r| r.num)))
@@ -873,7 +875,7 @@ impl Index {
             self.merge_bytes.fetch_add(r.len(), Ordering::SeqCst);
         }
         {
-            let mut runs = self.runs.write().unwrap();
+            let mut runs = self.runs.write();
             let mut v: Vec<Arc<Run>> = runs.iter().cloned().collect();
             v.splice(at..at + k, run.map(Arc::new));
             *runs = Arc::new(v);
@@ -915,7 +917,7 @@ impl Index {
     /// RAM, so no flush or merge can take it). The caller holds the store
     /// lock.
     pub fn take_run_num(&self) -> u64 {
-        let mut man = self.man.lock().unwrap();
+        let mut man = self.man.lock();
         let num = man.next_run;
         man.next_run += 1;
         num
@@ -964,7 +966,7 @@ impl Index {
     ///
     /// Returns the numbers of the added runs, from the newest.
     pub fn install_gc(&self, io: &dyn PackIo, pending: Vec<Arc<Run>>, hwm: Hwm, counts: Counts) -> Result<Vec<u64>> {
-        let mut man = self.man.lock().unwrap();
+        let mut man = self.man.lock();
         let mem_run = if self.mem_len() > 0 {
             let num = man.next_run;
             let entries = self.sorted_mem();
@@ -998,13 +1000,13 @@ impl Index {
         drop(man);
         let nums = added.iter().map(|r| r.num()).collect();
         {
-            let mut runs = self.runs.write().unwrap();
+            let mut runs = self.runs.write();
             let mut v = added;
             v.extend(runs.iter().cloned());
             *runs = Arc::new(v);
         }
         for s in &self.shards {
-            s.lock().unwrap().clear();
+            s.lock().clear();
         }
         self.mem_len.store(0, Ordering::SeqCst);
         self.bump_gen();
@@ -1024,7 +1026,7 @@ impl Index {
         let runs = self.runs();
         let k = nums.len();
         let at = runs.windows(k).position(|w| w.iter().map(|r| r.num()).eq(nums.iter().copied()))?;
-        let mut man = self.man.lock().unwrap();
+        let mut man = self.man.lock();
         let out = man.next_run;
         man.next_run += 1;
         Some(MergePlan { inputs: runs[at..at + k].to_vec(), out, drop_tombs: false })

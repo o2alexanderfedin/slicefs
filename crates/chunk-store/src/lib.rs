@@ -20,7 +20,7 @@ use std::io;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -43,7 +43,7 @@ pub mod mem;
 pub mod sync;
 
 use crate::lock_stats::Site;
-use crate::sync::Rank;
+use crate::sync::{Condvar, Mutex, MutexGuard, Rank};
 use crate::index::{Counts, Hwm, Index, MergeOut, Snapshot};
 use crate::run::Run;
 use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK, SyncWait};
@@ -713,7 +713,7 @@ pub struct ChunkStore {
     opts: Options,
     /// The index, for lookups outside the store lock (also in `Inner`).
     index: Arc<Index>,
-    inner: Arc<sync::Mutex<Inner>>,
+    inner: Arc<Mutex<Inner>>,
     /// Shared with the merge thread (see `MergeCtl`).
     merge: Arc<MergeCtl>,
     /// The merge thread (a writable store with background merges), until
@@ -744,7 +744,6 @@ pub struct ChunkStore {
 }
 
 /// The merge state that the store shares with its merge thread.
-#[derive(Default)]
 struct MergeCtl {
     /// One merge at a time: held for a whole merge step. Lock order: this
     /// lock, then the store lock. `state` is a leaf lock: nothing else is
@@ -771,9 +770,20 @@ struct MergeState {
     idle_check: bool,
 }
 
+impl Default for MergeCtl {
+    fn default() -> Self {
+        MergeCtl {
+            step: Mutex::new(Rank::Store, ()),
+            stop: AtomicBool::new(false),
+            state: Mutex::new(Rank::Store, MergeState::default()),
+            cv: Condvar::new(),
+        }
+    }
+}
+
 impl MergeCtl {
-    fn state(&self) -> std::sync::MutexGuard<'_, MergeState> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    fn state(&self) -> MutexGuard<'_, MergeState> {
+        self.state.lock()
     }
 
     /// A flush wrote a run: the thread looks for a merge.
@@ -837,7 +847,7 @@ enum Policy {
 #[derive(Clone)]
 struct Merger {
     io: Arc<dyn PackIo>,
-    inner: Arc<sync::Mutex<Inner>>,
+    inner: Arc<Mutex<Inner>>,
     index: Arc<Index>,
     ctl: Arc<MergeCtl>,
     cfg: MergeCfg,
@@ -858,7 +868,7 @@ impl Merger {
     /// the runs are derived data.
     fn step(&self, policy: Policy, stop: &AtomicBool, between: &mut dyn FnMut()) -> Result<bool> {
         let (io, index) = (&*self.io, &*self.index);
-        let _one = self.ctl.step.lock().unwrap();
+        let _one = self.ctl.step.lock();
         let plan = {
             let inner = self.inner.lock();
             if inner.failed {
@@ -962,7 +972,7 @@ impl Merger {
             let delay = match self.cfg.idle_after {
                 Some(d) if s.idle_check => d,
                 _ => {
-                    s = ctl.cv.wait(s).unwrap_or_else(|e| e.into_inner());
+                    ctl.cv.wait(&mut s);
                     continue;
                 }
             };
@@ -988,7 +998,7 @@ impl Merger {
                 if left.is_zero() || s.pending || ctl.stop.load(Ordering::SeqCst) {
                     break;
                 }
-                s = ctl.cv.wait_timeout(s, left).unwrap_or_else(|e| e.into_inner()).0;
+                ctl.cv.wait_for(&mut s, left);
                 if (self.index.mem_len(), self.index.gen()) != mark {
                     idle = false;
                     break;
@@ -1022,18 +1032,18 @@ impl ChunkStore {
             zstd_level: AtomicI32::new(opts.zstd_level),
             index: Arc::clone(&inner.index),
             merge: Arc::clone(&inner.merge),
-            inner: Arc::new(sync::Mutex::new(Rank::Store, inner).timed(Site::Store)),
-            merge_thread: Mutex::new(None),
+            inner: Arc::new(Mutex::new(Rank::Store, inner).timed(Site::Store)),
+            merge_thread: Mutex::new(Rank::Store, None),
             opts,
             #[cfg(test)]
-            after_lookup: Mutex::new(None),
+            after_lookup: Mutex::new(Rank::Store, None),
             #[cfg(test)]
-            after_merge_write: Mutex::new(None),
-            gc: Mutex::new(()),
-            gc_timing: Mutex::new(GcTiming::default()),
+            after_merge_write: Mutex::new(Rank::Store, None),
+            gc: Mutex::new(Rank::Store, ()),
+            gc_timing: Mutex::new(Rank::Store, GcTiming::default()),
             locality: LocalityCache::default(),
             #[cfg(test)]
-            gc_pass_hook: Mutex::new(None),
+            gc_pass_hook: Mutex::new(Rank::Store, None),
         };
         s.locality.forget_below(floor);
         s.locality.sealed_below(unsealed);
@@ -1053,7 +1063,7 @@ impl ChunkStore {
         }
         let m = self.merger();
         match std::thread::Builder::new().name("chunk-store-merge".into()).spawn(move || m.run()) {
-            Ok(h) => *self.merge_thread.lock().unwrap() = Some(h),
+            Ok(h) => *self.merge_thread.lock() = Some(h),
             Err(e) => {
                 // The store works without it: the runs only stay more.
                 tracing::warn!("chunk store: cannot start the index merge thread: {e}");
@@ -1067,7 +1077,7 @@ impl ChunkStore {
     /// store lock: the thread may wait for it.
     fn stop_merges(&self) {
         self.merge.request_stop();
-        let h = self.merge_thread.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let h = self.merge_thread.lock().take();
         if let Some(h) = h {
             if h.join().is_err() {
                 tracing::warn!("chunk store: the index merge thread panicked");
@@ -1083,7 +1093,7 @@ impl ChunkStore {
     pub fn wait_index_idle(&self) {
         let mut s = self.merge.state();
         while s.running && (s.pending || s.busy) {
-            s = self.merge.cv.wait(s).unwrap_or_else(|e| e.into_inner());
+            self.merge.cv.wait(&mut s);
         }
     }
 
@@ -1100,7 +1110,7 @@ impl ChunkStore {
             if left.is_zero() {
                 return false;
             }
-            s = self.merge.cv.wait_timeout(s, left).unwrap_or_else(|e| e.into_inner()).0;
+            self.merge.cv.wait_for(&mut s, left);
         }
         true
     }
@@ -1109,7 +1119,7 @@ impl ChunkStore {
     fn after_merge_write(&self) {
         #[cfg(test)]
         {
-            let hook = self.after_merge_write.lock().unwrap().take();
+            let hook = self.after_merge_write.lock().take();
             if let Some(mut f) = hook {
                 f(self);
             }
@@ -1120,7 +1130,7 @@ impl ChunkStore {
     fn after_lookup(&self) {
         #[cfg(test)]
         {
-            let hook = self.after_lookup.lock().unwrap().take();
+            let hook = self.after_lookup.lock().take();
             if let Some(mut f) = hook {
                 f(self);
             }
@@ -1493,7 +1503,7 @@ impl ChunkStore {
     /// sealed pack, and record from now on each object that is put or read.
     /// Returns the last pack number that the GC may change.
     pub fn gc_begin(&self) -> Result<u64> {
-        let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
+        let _one = self.gc.lock();
         let mut inner = self.inner.lock();
         inner.check()?;
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
@@ -1510,7 +1520,7 @@ impl ChunkStore {
     /// to an exact set in temp files (bounded RAM), not to a Bloom filter.
     pub fn gc_begin_full(&self) -> Result<u64> {
         let dir = self.gc_tmp()?;
-        let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
+        let _one = self.gc.lock();
         let mut inner = self.inner.lock();
         inner.check()?;
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
@@ -1540,7 +1550,7 @@ impl ChunkStore {
 
     /// End a GC without deleting anything (for example after a failed mark).
     pub fn gc_abort(&self) {
-        let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
+        let _one = self.gc.lock();
         self.inner.lock().touched = None;
     }
 
@@ -1646,10 +1656,10 @@ impl ChunkStore {
 
     fn gc_finish_mark(&self, mark: Mark<'_>, boundary: u64, pacer: &dyn GcPacer) -> Result<GcStats> {
         let start = Instant::now();
-        let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
+        let _one = self.gc.lock();
         let holds = Holds::default();
         let r = self.gc_run(mark, boundary, &holds, pacer);
-        *self.gc_timing.lock().unwrap() =
+        *self.gc_timing.lock() =
             GcTiming { lock_hold_max: holds.max.get(), lock_hold_total: holds.total.get(), wall: start.elapsed() };
         r
     }
@@ -1657,7 +1667,7 @@ impl ChunkStore {
     /// The store-lock holds and the time of the last `gc_finish` (zero
     /// before the first one).
     pub fn last_gc_timing(&self) -> GcTiming {
-        *self.gc_timing.lock().unwrap()
+        *self.gc_timing.lock()
     }
 
     /// The store lock, with the time it is held added to `holds`.
@@ -1670,10 +1680,10 @@ impl ChunkStore {
     fn gc_pass(&self, pass: u32) {
         #[cfg(test)]
         {
-            let hook = self.gc_pass_hook.lock().unwrap().take();
+            let hook = self.gc_pass_hook.lock().take();
             if let Some(mut f) = hook {
                 f(self, pass);
-                let mut slot = self.gc_pass_hook.lock().unwrap();
+                let mut slot = self.gc_pass_hook.lock();
                 if slot.is_none() {
                     *slot = Some(f);
                 }
@@ -2623,12 +2633,12 @@ impl ChunkStore {
         // may not be in the directory sync of the `.idx` write.
         let num = a.num;
         let job = SealJob { io: Arc::clone(&self.io), num: a.num, file: a.file, idx: encode_index(&a.entries, true), dirty: a.dirty };
-        let slot = Arc::new(Mutex::new(Some(job)));
+        let slot = Arc::new(Mutex::new(Rank::Store, Some(job)));
         let theirs = Arc::clone(&slot);
         let done = SyncWait::default();
         let end = done.clone();
         let spawned = std::thread::Builder::new().name("pack-seal".into()).spawn(move || {
-            let job = theirs.lock().unwrap().take();
+            let job = theirs.lock().take();
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.map_or(Ok(()), SealJob::run)))
                 .unwrap_or_else(|_| Err(io::Error::other("the pack seal panicked")));
             end.done();
@@ -2638,7 +2648,7 @@ impl ChunkStore {
             Ok(thread) => inner.sealing = Some(Sealing { thread, done }),
             Err(_) => {
                 // No thread: seal here.
-                let job = slot.lock().unwrap().take();
+                let job = slot.lock().take();
                 if let Err(e) = job.map_or(Ok(()), SealJob::run) {
                     inner.failed = true;
                     return Err(e.into());
@@ -2746,7 +2756,7 @@ struct Holds {
 
 /// The store lock, held for a GC: its hold time goes into `Holds`.
 struct Held<'a> {
-    g: sync::MutexGuard<'a, Inner>,
+    g: MutexGuard<'a, Inner>,
     at: Instant,
     holds: &'a Holds,
 }

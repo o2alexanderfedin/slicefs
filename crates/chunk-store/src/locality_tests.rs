@@ -203,7 +203,7 @@ fn a_cache_hit_that_gc_removed_before_the_lock_writes_again() {
     {
         let ran = Arc::clone(&ran);
         let ids = ids.clone();
-        *s.after_lookup.lock().unwrap() = Some(Box::new(move |s: &ChunkStore| {
+        *s.after_lookup.lock() = Some(Box::new(move |s: &ChunkStore| {
             gc_remove(s, &ids, x);
             ran.store(true, Ordering::SeqCst);
         }));
