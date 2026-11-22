@@ -1337,3 +1337,30 @@ fn a_file_created_with_o_append_replays_its_overwrites() {
         assert_eq!(fs.test_read(ino, 0, 64).unwrap(), b"XXrst;second;");
     });
 }
+
+/// An xattr change of an orphan replays. The orphan was unlinked while a
+/// handle that the log does not show (a plain open) was open. In replay the
+/// unlink reclaims the inode, so its later xattr record is skipped, as a
+/// write of a gone inode is (19-09: the xattr calls refuse a missing inode).
+#[test]
+fn an_xattr_change_of_an_open_orphan_replays() {
+    let dir = TempDir::new().unwrap();
+    {
+        let fs = new_fs(dir.path());
+        let ino = match h::handle_create(&fs, 1, "f", S_IFREG | 0o644, 0o022, 0, 0, libc::O_RDWR) {
+            CreateResult::Ok(ino, fh, _) => {
+                assert!(matches!(h::handle_release(&fs, ino, fh), EmptyResult::Ok));
+                ino
+            }
+            CreateResult::Error(e) => panic!("create errno {e}"),
+        };
+        fs.commit_cut().unwrap();
+        assert!(matches!(h::handle_open(&fs, ino, libc::O_RDONLY), OpenResult::Ok(..)));
+        assert!(matches!(h::handle_unlink(&fs, 1, "f"), EmptyResult::Ok));
+        assert!(matches!(h::handle_setxattr(&fs, ino, "user.k", b"v"), EmptyResult::Ok));
+        assert!(matches!(h::handle_removexattr(&fs, ino, "user.k"), EmptyResult::Ok));
+        std::mem::forget(fs); // crash with the handle open
+    }
+    let fs = reload_and_replay(dir.path());
+    assert!(fs.meta().lookup(1, "f").is_err());
+}
