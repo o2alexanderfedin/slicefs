@@ -400,7 +400,8 @@ pub fn handle_mkdir(
     handle_mkdir_at(fs, parent, name, mode, umask, uid, gid, None)
 }
 
-/// `handle_mkdir` at inode `ino` (replay); logged in the parent-stripe hold.
+/// `handle_mkdir` at inode `ino` (replay); logged in the hold of the parent's
+/// and the new directory's stripes.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_mkdir_at(
     fs: &SliceFsFilesystem,

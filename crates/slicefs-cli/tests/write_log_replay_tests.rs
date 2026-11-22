@@ -1425,3 +1425,74 @@ fn a_utimens_during_the_close_io_is_kept() {
         assert_eq!((m.mtime_sec, m.mtime_nsec), when, "the explicit mtime");
     });
 }
+
+/// D-08, LOCK-04: mkdir locks the stripes of the parent and of the new
+/// directory before the directory is linked. A request that finds the new
+/// name while the mkdir is parked (linked, its record not yet appended)
+/// waits for the new directory's stripe, so its `Create` record comes after
+/// the `Mkdir` record, and replay of that order never stops.
+#[test]
+fn a_create_in_a_new_directory_waits_for_its_mkdir_record() {
+    use slicefs_cli::locks::stripe;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    const ROOT: u64 = 1;
+    const LIMIT: Duration = Duration::from_secs(5);
+    let dir = TempDir::new().unwrap();
+    let live = {
+        let fs = new_fs(dir.path());
+        // The red run needs "d" and the file in it on other stripes than
+        // the parent: else the old code already blocks on the parent's
+        // stripe. Numbers are given out in order in this one-thread setup.
+        let mut n = 0;
+        let next = loop {
+            let (ino, fh) = create(&fs, ROOT, &format!("filler{n}"));
+            release(&fs, ino, fh);
+            n += 1;
+            let next = ino + 1;
+            if stripe(next) != stripe(ROOT) && stripe(next + 1) != stripe(ROOT) {
+                break next;
+            }
+        };
+        let (parked_tx, parked) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let slot = Mutex::new(Some((parked_tx, release_rx)));
+        fs.test_set_mkdir_hook(Some(Arc::new(move || {
+            if let Some((parked, release)) = slot.lock().unwrap().take() {
+                let _ = parked.send(());
+                let _ = release.recv_timeout(LIMIT);
+            }
+        })));
+        let live = std::thread::scope(|sc| {
+            let fs = &fs;
+            let a = sc.spawn(move || match h::handle_mkdir(fs, ROOT, "d", S_IFDIR | 0o755, 0o022, 501, 20) {
+                EntryResult::Ok(i, _) => i,
+                _ => panic!("mkdir d"),
+            });
+            parked.recv_timeout(LIMIT).expect("the mkdir must park after the link");
+            let d = fs.test_lookup(ROOT, "d").expect("the new name is found during the park").0;
+            assert_eq!(d, next, "the mkdir took the next number");
+            assert_ne!(stripe(d), stripe(ROOT));
+            let (done_tx, done) = mpsc::channel();
+            let b = sc.spawn(move || {
+                let r = create(fs, d, "f");
+                done_tx.send(()).unwrap();
+                r
+            });
+            let early = done.recv_timeout(Duration::from_millis(300));
+            release_tx.send(()).unwrap();
+            assert_eq!(a.join().unwrap(), d);
+            let (f, fh) = b.join().unwrap();
+            release(fs, f, fh);
+            fs.test_set_mkdir_hook(None);
+            fs.meta().flush_wal().unwrap();
+            (dump(fs), early.is_err())
+        });
+        std::mem::forget(fs); // a crash: no commit, no destroy
+        live
+    };
+    let (live, waited) = live;
+    let replayed = dump(&reload_and_replay(dir.path()));
+    assert_eq!(replayed, live, "replay must give the live tree");
+    assert!(waited, "the create in the new directory must wait for the mkdir's stripe");
+}

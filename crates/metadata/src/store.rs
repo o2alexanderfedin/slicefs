@@ -635,6 +635,14 @@ impl DictMetadataStore {
         }
     }
 
+    /// Take the next new inode number and insert nothing, so a caller can
+    /// lock the number's stripe before the inode is linked (mkdir, D-08),
+    /// then create it with `create_directory_at`. A number reserved and not
+    /// used is skipped, as a failed create skips one; replay never sees it.
+    pub fn reserve_ino(&self) -> InodeId {
+        self.inode_map.lock().allocate_ino()
+    }
+
     /// Make the next new inode number at least `ino` (never lower). Replay
     /// of the write log calls this before each create: a request that failed
     /// after it took an inode number (for example EEXIST) logged nothing, so

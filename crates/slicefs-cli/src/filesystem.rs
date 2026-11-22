@@ -486,6 +486,10 @@ pub struct SliceFsFilesystem {
     /// of a flush snapshot), with the cell unlocked (for tests: a parked
     /// streaming write or fsync).
     push_hook: sync::Mutex<Option<RebaseHook>>,
+    /// Run in each mkdir after the directory is linked and before its
+    /// `Mkdir` record is appended, with its stripes held (for tests: a
+    /// parked mkdir).
+    mkdir_hook: sync::Mutex<Option<RebaseHook>>,
     /// Write requests so far (write, create, setattr): the online GC gives
     /// way to writes by it (`gc_pacing`).
     write_activity: Arc<AtomicU64>,
@@ -531,6 +535,7 @@ impl SliceFsFilesystem {
             rebase_hook: sync::Mutex::new(Rank::Short, None),
             read_hook: sync::Mutex::new(Rank::Short, None),
             push_hook: sync::Mutex::new(Rank::Short, None),
+            mkdir_hook: sync::Mutex::new(Rank::Short, None),
             write_activity: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -617,6 +622,12 @@ impl SliceFsFilesystem {
     /// cell unlocked (`None`: no hook).
     pub fn test_set_push_hook(&self, hook: Option<RebaseHook>) {
         *self.push_hook.lock() = hook;
+    }
+
+    /// Test hook: run `hook` in each mkdir after the directory is linked and
+    /// before its record is appended, with its stripes held (`None`: no hook).
+    pub fn test_set_mkdir_hook(&self, hook: Option<RebaseHook>) {
+        *self.mkdir_hook.lock() = hook;
     }
 
     /// Run the push hook, if one is set.
@@ -2928,7 +2939,11 @@ impl SliceFsFilesystem {
     }
 
     /// `simulate_mkdir` at inode `at` (replay) that logs its `Mkdir` record
-    /// in the parent-stripe hold (D-08). Returns `(ino, InodeMeta)`.
+    /// in the stripe hold (D-08). Returns `(ino, InodeMeta)`. As `new_entry`
+    /// does, it takes the number first and locks the stripes of the parent
+    /// and of the new directory before the directory is linked: a request
+    /// that finds the new name (a create in it, a setattr) waits for the new
+    /// directory's stripe, so its record comes after the `Mkdir` record.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn mkdir_logged(
         &self,
@@ -2944,13 +2959,14 @@ impl SliceFsFilesystem {
         let dir_mode = S_IFDIR | (mode & !umask & 0o7777);
         let mut dir_meta = InodeMeta::new_directory(0, uid, gid, dir_mode);
         Self::stamp_new(&mut dir_meta);
-        let _ns = self.ns.lock(&[parent_ino]);
+        let ino = at.unwrap_or_else(|| self.meta.reserve_ino());
+        let _ns = self.ns.lock(&[parent_ino, ino]);
         self.live_dir(parent_ino)?;
-        let ino = match at {
-            Some(at) => self.meta.create_directory_at(parent_ino, name, at, &dir_meta),
-            None => self.meta.create_directory(parent_ino, name, &dir_meta),
+        let ino = self.meta.create_directory_at(parent_ino, name, ino, &dir_meta).map_err(|e| meta_error_to_errno(&e))?;
+        let hook = self.mkdir_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
         }
-        .map_err(|e| meta_error_to_errno(&e))?;
         self.touch_dir(parent_ino)?;
         let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
         log(crate::oplog::Op::Mkdir { parent: parent_ino, name: name.to_string(), mode, umask, uid, gid, ino });
