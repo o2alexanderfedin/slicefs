@@ -15,11 +15,11 @@
 
 ### Fine-grained locks (#21)
 
-- [ ] **LOCK-01**: No global lock is held on the read or write path during disk I/O, a hash calculation, or a wait (store lock, `readers`, WAL append mutex, `dir_live`/`inode_live`).
+- [x] **LOCK-01**: No global lock is held on the read or write path during disk I/O, a hash calculation, or a wait (store lock, `readers`, WAL append mutex, `dir_live`/`inode_live`).
 - [ ] **LOCK-02**: Per-file state stays in its table behind its own lock; no request takes another file's state out of `open_files` (the take-out pattern is gone, including `keep_budget`).
 - [x] **LOCK-03**: Locks have one fixed rank (gate, rename, namespace stripes, file cell, short maps, store internals; two inodes in ascending stripe order (inode number hashed to a stripe)). A debug-build checker fails a test on a rank violation.
 - [ ] **LOCK-04**: Each log record is appended under the same locks as its apply (the append is a memory copy plus an LSN; disk write and sync happen outside the locks). Replay gives the same state as the apply, including creates by logged inode number. The #21 body is updated to match.
-- [ ] **LOCK-05**: A test with parallel readers and writers on one file shows correct data, and that readers do not wait for the I/O of writers. A test with parallel I/O on different files shows no contention between them. The one-file tests use several handles on the same inode with different modes (read-only, read-write, `O_APPEND`), and they show the POSIX rules (POSIX.1 2.9.7). A read through one handle sees a write that has completed through another handle. A read never sees part of a concurrent write: it sees all of the write or none of it. Concurrent `O_APPEND` writes through different handles never overlap and lose no bytes. The end-of-file offset of an append comes from the current size under the inode lock.
+- [x] **LOCK-05**: A test with parallel readers and writers on one file shows correct data, and that readers do not wait for the I/O of writers. A test with parallel I/O on different files shows no contention between them. The one-file tests use several handles on the same inode with different modes (read-only, read-write, `O_APPEND`), and they show the POSIX rules (POSIX.1 2.9.7). A read through one handle sees a write that has completed through another handle. A read never sees part of a concurrent write: it sees all of the write or none of it. Concurrent `O_APPEND` writes through different handles never overlap and lose no bytes. The end-of-file offset of an append comes from the current size under the inode lock.
 - [ ] **LOCK-06**: The shared dirty budget is safe with N writers: a background flusher lowers it, a writer that is over the limit sleeps before it takes any lock, and every wait has a time limit. A test with all workers throttled while a commit waits does not deadlock, and peak RSS stays under the set limit.
 
 ### Worker pool (#22)
@@ -81,11 +81,11 @@ Deferred; tracked, not in this roadmap.
 | SPIKE-01 | Phase 18 | Complete |
 | SPIKE-02 | Phase 18 | Complete |
 | SPIKE-03 | Phase 18 | Complete |
-| LOCK-01 | Phase 19 | Pending |
+| LOCK-01 | Phase 19 | Complete |
 | LOCK-02 | Phase 20 | Pending |
 | LOCK-03 | Phase 19 | Complete |
-| LOCK-04 | Phase 19 | Pending |
-| LOCK-05 | Phase 19 | Pending |
+| LOCK-04 | Phase 19 | Pending (code part complete; the orchestrator applies the #21 text) |
+| LOCK-05 | Phase 19 | Complete |
 | LOCK-06 | Phase 20 | Pending |
 | POOL-01 | Phase 21 | Pending |
 | POOL-02 | Phase 21 | Pending |
