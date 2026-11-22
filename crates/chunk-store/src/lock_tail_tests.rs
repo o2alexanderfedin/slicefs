@@ -7,6 +7,7 @@
 //! second one. Every wait has a time limit.
 
 use crate::mem::{Hold, MemIo};
+use crate::pack_io::Kind;
 use crate::{ChunkStore, ObjectId, Options};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -193,4 +194,74 @@ fn put_and_read_pass_a_held_run_write() {
         assert_eq!(s.read(&x).unwrap(), data(i, 300));
     }
     s.sync().unwrap();
+}
+
+// A's put of an object that is in a run fails its index lookup (one failed
+// read), so A raises the trust floor before it writes the object again; the
+// durable write of the floor is held. B's read of another object must not
+// wait for it, and A writes nothing before the floor is durable.
+#[test]
+fn put_passes_a_held_trust_floor_write() {
+    let mem = MemIo::new();
+    // Every put goes to a run at once.
+    let o = Options { pack_limit: 1 << 20, index_memtable_limit: 1, ..small_packs() };
+    let s = store(&mem, o);
+    let x1 = s.put(&data(1, 300)).unwrap();
+    let y = s.put(&data(2, 300)).unwrap();
+    assert_eq!(s.index_info().memtable_entries, 0);
+    let pack_len = mem.len(1, Kind::Pack).unwrap();
+    mem.hold_durable(true);
+    mem.fail_read_once_after(0);
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.put(&data(1, 300)).unwrap())
+    };
+    assert!(mem.wait_parked(Hold::Durable, 1, LIMIT), "A is in the held write of the trust floor");
+    let b = {
+        let s = Arc::clone(&s);
+        spawn(move || s.read(&y).unwrap())
+    }
+    .recv_timeout(LIMIT);
+    let a_waited = a.try_recv().is_err();
+    let len_while_held = mem.len(1, Kind::Pack).unwrap();
+    mem.hold_durable(false);
+    assert_eq!(b.expect("B's read finished while A wrote the trust floor"), data(2, 300));
+    assert!(a_waited, "A was still in the floor write while B ran");
+    assert_eq!(len_while_held, pack_len, "A wrote no record before its floor was durable");
+    assert_eq!(a.recv_timeout(LIMIT).expect("A ends after the write is released"), x1);
+    assert_eq!(crate::read_trust_floor(&mem), Some(2), "the floor covers pack 1, durable");
+    assert!(mem.len(1, Kind::Pack).unwrap() > pack_len, "A wrote the object again");
+    assert_eq!(s.read(&x1).unwrap(), data(1, 300));
+}
+
+// A reads an object in a pack that no read has opened yet; the open is
+// held. B's put must not wait for it.
+#[test]
+fn put_passes_a_held_pack_open() {
+    let mem = MemIo::new();
+    let s = store(&mem, small_packs());
+    let x1 = s.put(&data(1, 3000)).unwrap();
+    s.put(&data(2, 3000)).unwrap();
+    s.put(&data(3, 3000)).unwrap();
+    s.sync().unwrap();
+    assert_eq!(s.stats().packs, 2);
+    mem.hold_opens(true);
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.read(&x1).unwrap())
+    };
+    assert!(mem.wait_parked(Hold::Opens, 1, LIMIT), "A is in the held open of pack 1");
+    let small = data(5, 100);
+    let b = {
+        let s = Arc::clone(&s);
+        let small = small.clone();
+        spawn(move || s.put(&small).unwrap())
+    }
+    .recv_timeout(LIMIT);
+    let a_waited = a.try_recv().is_err();
+    mem.hold_opens(false);
+    let x5 = b.expect("B's put finished while A opened a pack");
+    assert!(a_waited, "A was still in the pack open while B ran");
+    assert_eq!(a.recv_timeout(LIMIT).expect("A ends after the open is released"), data(1, 3000));
+    assert_eq!(s.read(&x5).unwrap(), small);
 }

@@ -592,8 +592,9 @@ struct Inner {
     tick: u64,
     active: Option<Active>,
     next_pack: u64,
-    /// The durable trust floor (the `TRUST` file, see `locality.rs`);
-    /// `None` if the open could not read it.
+    /// The durable trust floor (the `TRUST` file, see `locality.rs`) read at
+    /// open; `None` if the open could not read it. After the open
+    /// `ChunkStore::trust` has it.
     trust_floor: Option<u64>,
     stats: Stats,
     /// A pack file was created since the last directory sync.
@@ -754,6 +755,10 @@ pub struct ChunkStore {
     gc_timing: Mutex<GcTiming>,
     /// The locality cache of `put` (see `locality.rs`).
     locality: LocalityCache,
+    /// The durable trust floor (`None`: unknown). Held across the write of
+    /// the `TRUST` file, with no store lock (LOCK-01): one writer at a time,
+    /// so the file never goes back to a lower floor.
+    trust: Mutex<Option<u64>>,
     /// Test hook: `gc_finish` calls it at the start of its pass 1 (with 1)
     /// and of its pass 2 (with 2), with no store lock held (see
     /// `race_tests.rs`).
@@ -1046,7 +1051,8 @@ type PassHook = Box<dyn FnMut(&ChunkStore, u32) + Send>;
 
 impl ChunkStore {
     fn new(io: Arc<dyn PackIo>, punches: bool, opts: Options, inner: Inner) -> Self {
-        let floor = inner.trust_floor.unwrap_or(u64::MAX);
+        let trust_floor = inner.trust_floor;
+        let floor = trust_floor.unwrap_or(u64::MAX);
         // Packs from here on have no `.idx` yet (the active pack).
         let unsealed = inner.active.as_ref().map_or(inner.next_pack, |a| a.num);
         let s = ChunkStore {
@@ -1065,6 +1071,7 @@ impl ChunkStore {
             gc: Mutex::new(Rank::Store, ()),
             gc_timing: Mutex::new(Rank::Store, GcTiming::default()),
             locality: LocalityCache::default(),
+            trust: Mutex::new(Rank::Store, trust_floor),
             #[cfg(test)]
             gc_pass_hook: Mutex::new(Rank::Store, None),
             #[cfg(test)]
@@ -1392,10 +1399,22 @@ impl ChunkStore {
         self.after_lookup();
         if found {
             let mut inner = self.inner.lock();
-            inner.touch(id);
-            if self.unchanged(gen, &id) || self.locked_lookup(&mut inner, &id)? {
-                return Ok(id);
+            loop {
+                inner.touch(id);
+                if self.unchanged(gen, &id) {
+                    return Ok(id);
+                }
+                match self.locked_lookup(&inner, &id) {
+                    Ok(true) => return Ok(id),
+                    Ok(false) => break,
+                    Err(floor) => {
+                        drop(inner);
+                        self.raise_trust_floor(floor)?;
+                        inner = self.inner.lock();
+                    }
+                }
             }
+            drop(inner);
             // GC removed the object after the lookup: write it again.
         }
         if data.len() > u32::MAX as usize - REC_HEADER {
@@ -1416,8 +1435,17 @@ impl ChunkStore {
                     inner.touch(id);
                     // Another put of the same bytes, or a flush, merge or GC,
                     // since the lookup: look up again.
-                    if !self.unchanged(gen, &id) && self.locked_lookup(&mut inner, &id)? {
-                        return Ok(id);
+                    if !self.unchanged(gen, &id) {
+                        match self.locked_lookup(&inner, &id) {
+                            Ok(true) => return Ok(id),
+                            Ok(false) => {}
+                            Err(floor) => {
+                                drop(inner);
+                                self.raise_trust_floor(floor)?;
+                                inner = self.inner.lock();
+                                continue;
+                            }
+                        }
                     }
                     inner.check()?;
                     // The append needs a slow operation (a pack create, or a
@@ -1475,7 +1503,8 @@ impl ChunkStore {
             Ok(Some(loc)) => loc,
             Ok(None) => return Ok(false),
             Err(_) => {
-                self.raise_trust_floor(&mut self.inner.lock())?;
+                let floor = self.inner.lock().next_pack;
+                self.raise_trust_floor(floor)?;
                 return Ok(false);
             }
         };
@@ -1509,30 +1538,36 @@ impl ChunkStore {
         }
     }
 
-    /// The index lookup of `put` under the store lock. A failed lookup
-    /// counts as "not found" after it moved the trust floor (an error if it
-    /// could not): the object is written again, so a pack may then hold an
-    /// older copy that a later GC does not select when it removes the new
-    /// copy, and its `.idx` would still list the object (see `locality.rs`).
-    fn locked_lookup(&self, inner: &mut Inner, id: &ObjectId) -> Result<bool> {
+    /// The index lookup of `put` under the store lock: `Ok(found)`. A failed
+    /// lookup counts as "not found" after the trust floor is at least
+    /// `next_pack` (durable): the object is written again, so a pack may then
+    /// hold an older copy that a later GC does not select when it removes
+    /// the new copy, and its `.idx` would still list the object (see
+    /// `locality.rs`). If the floor is lower, `Err(floor)`: the caller drops
+    /// the store lock, calls `raise_trust_floor(floor)` and looks again.
+    fn locked_lookup(&self, inner: &Inner, id: &ObjectId) -> std::result::Result<bool, u64> {
         match inner.index.get(id) {
             Ok(l) => Ok(l.is_some()),
             Err(_) => {
-                self.raise_trust_floor(inner)?;
-                Ok(false)
+                let floor = inner.next_pack;
+                // A busy lock is a floor write now: raise it after it.
+                let durable = self.trust.try_lock().is_some_and(|t| t.is_some_and(|f| f >= floor));
+                if durable { Ok(false) } else { Err(floor) }
             }
         }
     }
 
     /// Before `put` writes an object again after a failed lookup: no pack
-    /// that exists now is trusted again, in this process or a later one.
-    /// The new floor is durable before the caller writes (see `locality.rs`).
-    fn raise_trust_floor(&self, inner: &mut Inner) -> Result<()> {
-        let floor = inner.next_pack;
+    /// below `floor` (the `next_pack` of the store at the failure: every
+    /// pack that exists then) is trusted again, in this process or a later
+    /// one. The new floor is durable before the caller writes (see
+    /// `locality.rs`). The caller holds no store lock (LOCK-01).
+    fn raise_trust_floor(&self, floor: u64) -> Result<()> {
         self.locality.forget_below(floor);
-        if inner.trust_floor.is_none_or(|f| floor > f) {
+        let mut durable = self.trust.lock();
+        if durable.is_none_or(|f| floor > f) {
             self.io.write_durable(0, Kind::Trust, &encode_trust_floor(floor))?;
-            inner.trust_floor = Some(floor);
+            *durable = Some(floor);
         }
         Ok(())
     }
@@ -2512,7 +2547,10 @@ impl ChunkStore {
     /// Under the lock, the place is used only if the index generation is
     /// the same and the memtable has no entry of the ID; else it is looked
     /// up again (a GC may have moved the object and deleted its old pack).
-    /// The pack handle is taken under the lock, so the pack is still there.
+    /// A cached pack handle is taken under the lock. A pack that is not
+    /// cached is opened without the lock (LOCK-01); then, under the lock
+    /// again, the place must still be the current one (else the read starts
+    /// over at the new place), so the pack was still there.
     pub fn read(&self, id: &ObjectId) -> Result<Vec<u8>> {
         let hasher = hasher_by_tag(id.tag()).ok_or(Error::UnknownHash(*id))?;
         let gen = self.index.gen();
@@ -2522,13 +2560,31 @@ impl ChunkStore {
         let loc = looked?.ok_or(Error::Missing(*id))?;
         let (loc, file) = {
             let mut inner = self.inner.lock();
-            let loc = if self.unchanged(gen, id) { loc } else { inner.index.get(id)?.ok_or(Error::Missing(*id))? };
+            let mut loc = if self.unchanged(gen, id) { loc } else { inner.index.get(id)?.ok_or(Error::Missing(*id))? };
             inner.touch(*id);
-            match inner.reader(&*self.io, loc.pack) {
-                Ok(file) => (loc, file),
-                Err(e) => {
-                    drop(inner);
-                    return Err(self.check_entry(id, e.into()));
+            loop {
+                if let Some(file) = inner.cached_reader(loc.pack) {
+                    break (loc, file);
+                }
+                // Open the pack without the store lock (LOCK-01). Then the
+                // place must still be the current one: a GC may have moved
+                // the object and removed the pack meanwhile (it changes the
+                // index before it removes a pack).
+                let seen = self.index.gen();
+                drop(inner);
+                let opened = self.io.open_read(loc.pack);
+                inner = self.inner.lock();
+                let now = if self.unchanged(seen, id) { loc } else { inner.index.get(id)?.ok_or(Error::Missing(*id))? };
+                if now != loc {
+                    loc = now;
+                    continue;
+                }
+                match opened {
+                    Ok(file) => break (loc, inner.add_reader(loc.pack, file)),
+                    Err(e) => {
+                        drop(inner);
+                        return Err(self.check_entry(id, e.into()));
+                    }
                 }
             }
         };
@@ -3173,11 +3229,28 @@ impl Inner {
         Ok(())
     }
 
+    /// A pack for reads: the cached handle, or a new one (opened under the
+    /// store lock; for GC, which is not on the read path).
     fn reader(&mut self, io: &dyn PackIo, num: u64) -> io::Result<Arc<dyn PackRead>> {
+        if let Some(f) = self.cached_reader(num) {
+            return Ok(f);
+        }
+        Ok(self.add_reader(num, io.open_read(num)?))
+    }
+
+    /// The cached handle of pack `num`, if any (it counts as a use).
+    fn cached_reader(&mut self, num: u64) -> Option<Arc<dyn PackRead>> {
         self.tick += 1;
-        if let Some((f, used)) = self.readers.get_mut(&num) {
-            *used = self.tick;
-            return Ok(Arc::clone(f));
+        let (f, used) = self.readers.get_mut(&num)?;
+        *used = self.tick;
+        Some(Arc::clone(f))
+    }
+
+    /// Cache the new handle `f` of pack `num`, or keep the one that another
+    /// read cached meanwhile. Returns the cached handle.
+    fn add_reader(&mut self, num: u64, f: Arc<dyn PackRead>) -> Arc<dyn PackRead> {
+        if let Some(cached) = self.cached_reader(num) {
+            return cached;
         }
         if self.readers.len() >= MAX_OPEN_PACKS {
             // Close the least recently used pack. A read that holds its
@@ -3187,9 +3260,8 @@ impl Inner {
                 self.readers.remove(&n);
             }
         }
-        let f = io.open_read(num)?;
         self.readers.insert(num, (Arc::clone(&f), self.tick));
-        Ok(f)
+        f
     }
 }
 
