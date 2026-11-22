@@ -120,6 +120,21 @@ fn dirty_cost(s: &OpenFileState) -> usize {
     }
 }
 
+thread_local! {
+    /// Bytes the last splice of this thread cut again (for tests; D-10:
+    /// per thread, so writers on other threads do not change it).
+    static LAST_REBASE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Bytes the rebase steps of this thread's last write cut again (for tests).
+    static WRITE_REBASE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Base bytes the rebase steps of this thread's last write read (for tests).
+    static WRITE_BASE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Add `n` to a thread-local counter.
+fn add_to(counter: &'static std::thread::LocalKey<std::cell::Cell<u64>>, n: u64) {
+    counter.with(|c| c.set(c.get() + n));
+}
+
 /// A function the tests run inside a rebase (see `test_set_rebase_hook`).
 pub type RebaseHook = Arc<dyn Fn() + Send + Sync>;
 
@@ -356,9 +371,10 @@ pub struct SliceFsFilesystem {
     dirty_total: AtomicUsize,
     /// File content store (`<store>/packs/`).
     pub(crate) content: Content,
-    /// A content reader per inode (keeps its node and chunk caches). A reader
-    /// whose key no longer matches the file content is replaced on use.
-    readers: sync::Mutex<HashMap<u64, content::Reader>>,
+    /// A content reader per inode (keeps its node and chunk caches), each
+    /// behind its own lock; the map lock is held only to find or add one. A
+    /// reader whose key no longer matches the file content is replaced on use.
+    readers: sync::Mutex<HashMap<u64, Arc<sync::Mutex<content::Reader>>>>,
     /// Every open handle (read-only too), the open count of each inode and
     /// the orphans: keeps an unlinked inode alive until its last handle closes.
     handles: sync::Mutex<HandleTable>,
@@ -375,17 +391,14 @@ pub struct SliceFsFilesystem {
     dirty_budget: AtomicUsize,
     /// Rebases done so far (for tests).
     rebase_count: AtomicU64,
-    /// Bytes the last rebase fed to the chunker (for tests).
-    last_rebase_bytes: AtomicU64,
     /// `Write` payload bytes the last commit logged again (for tests).
     last_relog_bytes: AtomicU64,
-    /// Bytes the rebase steps of the last write cut again (for tests).
-    write_rebase_bytes: AtomicU64,
-    /// Base bytes the rebase steps of the last write read (for tests).
-    write_base_bytes: AtomicU64,
     /// Run inside each rebase, after the new root is finished and before it
     /// is installed (for tests: online GC during a rebase).
     rebase_hook: sync::Mutex<Option<RebaseHook>>,
+    /// Run inside each read through the per-inode reader, with it locked
+    /// (for tests: a reader parked in the middle of a read).
+    read_hook: sync::Mutex<Option<RebaseHook>>,
     /// Write requests so far (write, create, setattr): the online GC gives
     /// way to writes by it (`gc_pacing`).
     write_activity: Arc<AtomicU64>,
@@ -425,11 +438,9 @@ impl SliceFsFilesystem {
             dirty_limit: AtomicUsize::new(DIRTY_LIMIT),
             dirty_budget: AtomicUsize::new(DIRTY_BUDGET),
             rebase_count: AtomicU64::new(0),
-            last_rebase_bytes: AtomicU64::new(0),
             last_relog_bytes: AtomicU64::new(0),
-            write_rebase_bytes: AtomicU64::new(0),
-            write_base_bytes: AtomicU64::new(0),
             rebase_hook: sync::Mutex::new(Rank::Short, None),
+            read_hook: sync::Mutex::new(Rank::Short, None),
             write_activity: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -459,21 +470,21 @@ impl SliceFsFilesystem {
         self.rebase_count.load(Ordering::Relaxed)
     }
 
-    /// Test hook: the bytes the last splice cut again with FastCDC (a rebase,
+    /// Test hook: the bytes the last splice of this thread cut again with FastCDC (a rebase,
     /// or a size change with no open handle): `SpliceStats::rechunked`.
     pub fn test_last_rebase_bytes(&self) -> u64 {
-        self.last_rebase_bytes.load(Ordering::Relaxed)
+        LAST_REBASE_BYTES.with(std::cell::Cell::get)
     }
 
-    /// Test hook: the bytes that the rebase work of the last write cut again
+    /// Test hook: the bytes that the rebase work of this thread's last write cut again
     /// with FastCDC (0 if it ran no rebase).
     pub fn test_last_write_rebase_bytes(&self) -> u64 {
-        self.write_rebase_bytes.load(Ordering::Relaxed)
+        WRITE_REBASE_BYTES.with(std::cell::Cell::get)
     }
 
-    /// Test hook: the base bytes that the rebase work of the last write read.
+    /// Test hook: the base bytes that the rebase work of this thread's last write read.
     pub fn test_last_write_base_bytes(&self) -> u64 {
-        self.write_base_bytes.load(Ordering::Relaxed)
+        WRITE_BASE_BYTES.with(std::cell::Cell::get)
     }
 
     /// Test hook: the dirty bytes of all open files (overlay costs and the
@@ -491,6 +502,12 @@ impl SliceFsFilesystem {
     /// finished and before it is installed (`None`: no hook).
     pub fn test_set_rebase_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
         *self.rebase_hook.lock() = hook;
+    }
+
+    /// Test hook: run `hook` inside each read through the per-inode reader,
+    /// with that reader locked (`None`: no hook).
+    pub fn test_set_read_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self.read_hook.lock() = hook;
     }
 
     /// Enable auto-snapshot on clean unmount.
@@ -1165,9 +1182,9 @@ impl SliceFsFilesystem {
             let rechunked = if root.is_some() { stats.rechunked } else { 0 };
             let t1 = std::time::Instant::now();
             self.rebase_count.fetch_add(1, Ordering::Relaxed);
-            self.last_rebase_bytes.store(rechunked, Ordering::Relaxed);
-            self.write_rebase_bytes.fetch_add(rechunked, Ordering::Relaxed);
-            self.write_base_bytes.fetch_add(base_bytes, Ordering::Relaxed);
+            LAST_REBASE_BYTES.with(|c| c.set(rechunked));
+            add_to(&WRITE_REBASE_BYTES, rechunked);
+            add_to(&WRITE_BASE_BYTES, base_bytes);
             let hook = self.rebase_hook.lock().clone();
             if let Some(hook) = hook {
                 hook();
@@ -1203,16 +1220,34 @@ impl SliceFsFilesystem {
     }
 
     /// Read `size` bytes at `offset` of the content `root` of `ino` through
-    /// the per-inode reader cache (it keeps its node and chunk caches).
+    /// the per-inode reader cache (it keeps its node and chunk caches). The
+    /// map lock is held only to clone or add the `Arc`; the per-inode reader
+    /// is locked for the read only. If another read holds it, this read
+    /// opens a private reader instead of waiting (D-07).
     fn read_root(&self, ino: u64, root: &ObjectKey, offset: u64, size: usize) -> std::io::Result<Vec<u8>> {
-        let mut readers = self.readers.lock();
-        if readers.len() >= 64 && !readers.contains_key(&ino) {
-            readers.clear();
+        let shared = self.readers.lock().get(&ino).cloned();
+        let Some(shared) = shared else {
+            // The first read of `ino`: open with no lock, then keep it.
+            let mut r = content::Reader::open(&self.content, root)?;
+            let out = r.read(&self.content, offset, size);
+            let mut readers = self.readers.lock();
+            if readers.len() >= 64 && !readers.contains_key(&ino) {
+                readers.clear();
+            }
+            readers.entry(ino).or_insert_with(|| Arc::new(sync::Mutex::new(Rank::Short, r)));
+            return out;
+        };
+        let Some(mut r) = shared.try_lock() else {
+            return content::Reader::open(&self.content, root)?.read(&self.content, offset, size);
+        };
+        if r.key() != *root {
+            *r = content::Reader::open(&self.content, root)?;
         }
-        if readers.get(&ino).map_or(true, |r| r.key() != *root) {
-            readers.insert(ino, content::Reader::open(&self.content, root)?);
+        let hook = self.read_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
         }
-        readers.get_mut(&ino).expect("reader just inserted").read(&self.content, offset, size)
+        r.read(&self.content, offset, size)
     }
 
     /// If `file_state` streams with out-of-order writes still pending, stream
@@ -1333,8 +1368,8 @@ impl SliceFsFilesystem {
     /// pushes and rebase steps (Plans 06-07 move that I/O out of the lock).
     /// Only a write handle may write (else EBADF).
     pub fn test_write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, i32> {
-        self.write_rebase_bytes.store(0, Ordering::Relaxed);
-        self.write_base_bytes.store(0, Ordering::Relaxed);
+        WRITE_REBASE_BYTES.with(|c| c.set(0));
+        WRITE_BASE_BYTES.with(|c| c.set(0));
         if offset.checked_add(data.len() as u64).map_or(true, |end| end > MAX_FILE_SIZE) {
             return Err(libc::EFBIG);
         }
@@ -1969,7 +2004,7 @@ impl SliceFsFilesystem {
             let mut src = OverlaySource::new(cs, &ov).map_err(store_err)?;
             let (new_digest, stats) = content::splice(cs, old_root.as_ref(), ov.visible, &[], new_size, &mut src)
                 .map_err(store_err)?;
-            self.last_rebase_bytes.store(stats.rechunked, Ordering::Relaxed);
+            LAST_REBASE_BYTES.with(|c| c.set(stats.rechunked));
             self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
             self.meta.increment_refcount(&new_digest);
         }

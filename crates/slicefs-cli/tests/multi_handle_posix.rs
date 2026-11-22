@@ -198,3 +198,49 @@ fn open_after_last_release_gets_a_new_cell() {
     model[100..100 + patch.len()].copy_from_slice(&patch);
     assert!(committed(&fs, ino) == model, "the write of the new open is kept after its release");
 }
+
+/// Thread A holds the per-inode reader of a committed file, parked inside
+/// its read. Thread B reads the same file: it must not wait for A (it reads
+/// through a private reader), so it finishes within 5 s.
+#[test]
+fn two_readers_of_one_file_do_not_share_a_reader_wait() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    let (ino, fh) = create(&fs, 1, "f");
+    let bytes = data(7, 4 * BLOCK);
+    write(&fs, fh, 0, &bytes);
+    release(&fs, ino, fh);
+    assert!(read(&fs, ino, 0, BLOCK as u32) == bytes[..BLOCK], "warm read: the per-inode reader exists");
+
+    let (inside_tx, inside_rx) = channel::<()>();
+    let (go_tx, go_rx) = channel::<()>();
+    let (inside_tx, go_rx) = (Mutex::new(inside_tx), Mutex::new(go_rx));
+    let parked = AtomicBool::new(false);
+    fs.test_set_read_hook(Some(Arc::new(move || {
+        if !parked.swap(true, Ordering::SeqCst) {
+            let _ = inside_tx.lock().unwrap().send(());
+            let _ = go_rx.lock().unwrap().recv_timeout(Duration::from_secs(10));
+        }
+    })));
+    let fs = &fs;
+    let b_done = std::thread::scope(|sc| {
+        let a = sc.spawn(|| read(fs, ino, 0, BLOCK as u32));
+        inside_rx.recv_timeout(Duration::from_secs(5)).expect("A parked inside the read");
+        let (done_tx, done_rx) = channel::<Vec<u8>>();
+        let b = sc.spawn(move || {
+            let _ = done_tx.send(read(fs, ino, BLOCK as u64, BLOCK as u32));
+        });
+        let b_done = done_rx.recv_timeout(Duration::from_secs(5));
+        let _ = go_tx.send(());
+        assert!(a.join().unwrap() == bytes[..BLOCK], "A's read");
+        b.join().unwrap();
+        b_done
+    });
+    fs.test_set_read_hook(None);
+    let got = b_done.expect("B finished while A held the per-inode reader");
+    assert!(got == bytes[BLOCK..2 * BLOCK], "B's read");
+}
