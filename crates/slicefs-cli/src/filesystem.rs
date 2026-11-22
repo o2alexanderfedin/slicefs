@@ -18,7 +18,7 @@ use crate::util::ts;
 
 use slicefs_traits::key::ObjectKey;
 use crate::content::{self, Content, Stream};
-use crate::overlay::Overlay;
+use crate::overlay::{next_gen, Overlay};
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
@@ -194,6 +194,13 @@ struct OpenFileState {
     /// stamps it as the file's mtime, so a flush at fsync, release or commit
     /// (or at the end of a replay) does not move mtime to its own time.
     modified: Option<(i64, u32)>,
+    /// Generation of the stream (D-02): a new value (from the process-wide
+    /// counter of `overlay::next_gen`) at each change of the stream, its
+    /// pending writes, `min_size` or `byte_count`, and at the switch to an
+    /// overlay. A truncate to 0 makes a new state, so it gets a new value
+    /// too. A stream step publishes only if it is unchanged. (An overlay
+    /// keeps its own generation.)
+    generation: u64,
 }
 
 impl OpenFileState {
@@ -207,6 +214,7 @@ impl OpenFileState {
             last_committed_root: None,
             min_size: 0,
             modified: None,
+            generation: next_gen(),
         }
     }
 }
@@ -429,6 +437,10 @@ pub struct SliceFsFilesystem {
     /// Run inside each read through the per-inode reader, with it locked
     /// (for tests: a reader parked in the middle of a read).
     read_hook: sync::Mutex<Option<RebaseHook>>,
+    /// Run in the I/O phase of each stream step (a push, a settle, the end
+    /// of a flush snapshot), with the cell unlocked (for tests: a parked
+    /// streaming write or fsync).
+    push_hook: sync::Mutex<Option<RebaseHook>>,
     /// Write requests so far (write, create, setattr): the online GC gives
     /// way to writes by it (`gc_pacing`).
     write_activity: Arc<AtomicU64>,
@@ -471,6 +483,7 @@ impl SliceFsFilesystem {
             last_relog_bytes: AtomicU64::new(0),
             rebase_hook: sync::Mutex::new(Rank::Short, None),
             read_hook: sync::Mutex::new(Rank::Short, None),
+            push_hook: sync::Mutex::new(Rank::Short, None),
             write_activity: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -546,6 +559,21 @@ impl SliceFsFilesystem {
         *self.read_hook.lock() = hook;
     }
 
+    /// Test hook: run `hook` in the I/O phase of each stream step (a push,
+    /// a settle of pending writes, the end of a flush snapshot), with the
+    /// cell unlocked (`None`: no hook).
+    pub fn test_set_push_hook(&self, hook: Option<RebaseHook>) {
+        *self.push_hook.lock() = hook;
+    }
+
+    /// Run the push hook, if one is set.
+    fn run_push_hook(&self) {
+        let hook = self.push_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     /// Enable auto-snapshot on clean unmount.
     pub fn set_auto_snapshot(&mut self, enabled: bool) {
         self.auto_snapshot = enabled;
@@ -605,7 +633,7 @@ impl SliceFsFilesystem {
             }
             g.write_handles += 1;
             if trunc {
-                if let Err(e) = self.setattr_size_open(ino, &mut g.file, 0) {
+                if let Err(e) = self.setattr_size_open(&mut g, 0) {
                     let _ = self.leave(&cell, &mut g, false);
                     return Err(e);
                 }
@@ -1103,56 +1131,53 @@ impl SliceFsFilesystem {
             && self.meta.get_manifest(ino).map_or(false, |m| !m.is_empty())
     }
 
-    /// Make `new` the content root of `ino` (`None`: no content) and stamp
-    /// the inode with `size` and `modified`. The refcount of the new root goes
-    /// up and that of the root the manifest named before goes down. A root
-    /// that the manifest still names is never released. The inode size is
-    /// stamped too, so that a replayed write takes the overlay path on this
-    /// root (not a fresh stream that drops it).
-    fn install_root(&self, ino: u64, new: Option<ObjectKey>, size: u64, modified: Option<(i64, u32)>) -> Result<(), i32> {
-        let old = self.meta.get_manifest(ino).ok().and_then(|m| m.first().copied());
-        match new {
-            None => self.clear_manifest(ino, None)?,
-            Some(k) if Some(k) != old => {
-                self.meta.set_manifest(ino, &[k]).map_err(|_| libc::EIO)?;
-                self.meta.increment_refcount(&k);
-                if let Some(o) = old {
-                    self.meta.decrement_refcount(&o);
-                }
-            }
-            Some(_) => {}
+    /// Switch the stream of the locked cell `g` to an overlay (D-02). Phase
+    /// A clones the stream and reads its generation. Phase B (with the cell
+    /// unlocked if `unlocked`) ends the clone as the base (no zero padding),
+    /// or takes the committed content if nothing was streamed, and stores
+    /// the manifest node. Phase C installs the base in the manifest at once
+    /// (online GC keeps it, and replay starts from it) only if the stream
+    /// did not change, and moves the pending writes into the extents. The
+    /// caller then applies the write that caused the switch. No file
+    /// content is read.
+    ///
+    /// `Ok(true)`: switched (or not a stream); `Ok(false)`: dropped (the
+    /// stream changed, or the cell was retired meanwhile).
+    fn to_overlay(&self, g: &mut CellGuard<'_>, unlocked: bool) -> Result<bool, i32> {
+        let s = &g.file;
+        let WriteMode::Streaming { state, next_expected_offset, .. } = &s.write_mode else {
+            return Ok(true);
+        };
+        let (ino, next, generation, committed) = (s.ino, *next_expected_offset, s.generation, s.last_committed_root);
+        let clone = (next > 0).then(|| state.clone());
+        let io = move || self.overlay_base(ino, clone, next);
+        let (base, base_len, old, digest) = if unlocked { g.unlocked(io) } else { io() }?;
+        if g.retired {
+            return Ok(false);
         }
-        self.stamp_content(ino, size, modified)
-    }
-
-    /// Switch a streaming state to an overlay (the caller holds its cell
-    /// lock). The base is the stream so far (ended, no zero padding),
-    /// or the committed content if nothing was streamed. The base goes into
-    /// the manifest at once (online GC keeps it, and replay starts from it).
-    /// Pending writes move into the extents; the caller then applies the
-    /// write that caused the switch. No file content is read.
-    fn to_overlay(&self, s: &mut OpenFileState) -> Result<(), i32> {
-        let ino = s.ino;
-        let WriteMode::Streaming { state, next_expected_offset, pending } = &mut s.write_mode else {
-            return Ok(());
-        };
-        let cs = &*self.content;
-        let store_err = |e: std::io::Error| {
-            eprintln!("[{}][FUSE] overlay: content store error: {e}", ts());
-            libc::EIO
-        };
-        let (base, base_len) = if *next_expected_offset > 0 {
-            (Some(state.clone().finish(cs).map_err(store_err)?), *next_expected_offset)
-        } else if self.has_content(ino) {
-            let k = self.meta.get_manifest(ino).map_err(|_| libc::EIO)?[0];
-            (Some(k), content::Reader::open(cs, &k).map_err(store_err)?.len())
-        } else {
-            (None, 0)
-        };
+        let s = &mut g.file;
+        // The manifest of an open inode changes only under its cell lock,
+        // with a new generation or a new `last_committed_root` (a flush):
+        // if neither moved, `old` is still the root the manifest names.
+        if s.generation != generation || s.last_committed_root != committed {
+            return Ok(false);
+        }
+        let WriteMode::Streaming { pending, .. } = &mut s.write_mode else { return Ok(false) };
+        if base != old || base.is_none() {
+            self.meta.set_manifest_digest(ino, digest).map_err(|_| libc::EIO)?;
+        }
+        if base != old {
+            if let Some(k) = &base {
+                self.meta.increment_refcount(k);
+            }
+            if let Some(o) = &old {
+                self.meta.decrement_refcount(o);
+            }
+        }
+        let pending = std::mem::take(pending);
         let size = base_len.max(s.byte_count).max(s.min_size);
-        self.install_root(ino, base, size, s.modified)?;
         let mut ov = Overlay::new(base, base_len, size);
-        for (o, v) in std::mem::take(pending) {
+        for (o, v) in pending {
             ov.put(o, v);
         }
         s.byte_count = ov.size;
@@ -1160,7 +1185,140 @@ impl SliceFsFilesystem {
         s.last_committed_root = base;
         s.min_size = 0;
         s.cas_committed = false;
-        Ok(())
+        s.generation = next_gen();
+        self.stamp_content(ino, size, s.modified)?;
+        Ok(true)
+    }
+
+    /// Phase B of `to_overlay` (no cell lock needed): the base (the ended
+    /// `clone` of a stream of `next` bytes, the committed content, or none)
+    /// and its length, the root the manifest names now, and the digest of
+    /// the stored manifest node of the base.
+    #[allow(clippy::type_complexity)]
+    fn overlay_base(
+        &self,
+        ino: u64,
+        clone: Option<Stream>,
+        next: u64,
+    ) -> Result<(Option<ObjectKey>, u64, Option<ObjectKey>, ObjectKey), i32> {
+        let cs = &*self.content;
+        let store_err = |e: std::io::Error| {
+            eprintln!("[{}][FUSE] overlay: content store error: {e}", ts());
+            libc::EIO
+        };
+        let old = self.meta.get_manifest(ino).ok().and_then(|m| m.first().copied());
+        let (base, base_len) = match clone {
+            Some(st) => (Some(st.finish(cs).map_err(store_err)?), next),
+            None if self.has_content(ino) => {
+                let k = old.ok_or(libc::EIO)?;
+                (Some(k), content::Reader::open(cs, &k).map_err(store_err)?.len())
+            }
+            None => (None, 0),
+        };
+        let digest = self.meta.prepare_manifest(base.as_slice()).map_err(|_| libc::EIO)?;
+        Ok((base, base_len, old, digest))
+    }
+
+    /// One step of the stream of the locked cell `g` (D-02). Phase A clones
+    /// the stream (a buffer under 2 x CHUNK_MAX plus the level entries) and
+    /// reads its generation. Phase B pushes zeros from the stream end up to
+    /// `zeros_to`, then `bytes`, into the clone, with the cell unlocked if
+    /// `unlocked` (the push hook runs there). Phase C swaps the clone in
+    /// only if the stream did not change, and removes the pending entry
+    /// `pending_key` that `bytes` came from.
+    ///
+    /// `Ok(true)`: published; `Ok(false)`: dropped (the stream changed or is
+    /// gone, or the cell was retired). On an error nothing changes.
+    fn stream_step(
+        &self,
+        g: &mut CellGuard<'_>,
+        zeros_to: u64,
+        bytes: &[u8],
+        pending_key: Option<u64>,
+        unlocked: bool,
+    ) -> Result<bool, i32> {
+        let s = &g.file;
+        let WriteMode::Streaming { state, next_expected_offset, .. } = &s.write_mode else {
+            return Ok(false);
+        };
+        let (mut st, from, generation) = (state.clone(), *next_expected_offset, s.generation);
+        let cs = &*self.content;
+        let io = |st: &mut Stream| -> std::io::Result<()> {
+            if zeros_to > from {
+                st.push_zeros(cs, zeros_to - from)?;
+            }
+            if !bytes.is_empty() {
+                st.push(cs, bytes)?;
+            }
+            Ok(())
+        };
+        let r = if unlocked {
+            g.unlocked(|| {
+                let r = io(&mut st);
+                self.run_push_hook();
+                r
+            })
+        } else {
+            io(&mut st)
+        };
+        if let Err(e) = r {
+            eprintln!("[{}][FUSE] stream: content store error: {e}", ts());
+            return Err(libc::EIO);
+        }
+        if g.retired {
+            return Ok(false);
+        }
+        let s = &mut g.file;
+        if s.generation != generation {
+            return Ok(false);
+        }
+        let WriteMode::Streaming { state, next_expected_offset, pending } = &mut s.write_mode else {
+            return Ok(false);
+        };
+        let next = zeros_to.max(from) + bytes.len() as u64;
+        *state = st;
+        *next_expected_offset = next;
+        if let Some(k) = pending_key {
+            pending.remove(&k);
+        }
+        s.byte_count = s.byte_count.max(next);
+        s.cas_committed = false;
+        s.generation = next_gen();
+        Ok(true)
+    }
+
+    /// Stream the pending (out-of-order) writes of the locked cell `g` in
+    /// offset order, zeros in the gaps, one stream step per pending write
+    /// (read, truncate and release need the whole picture). Pending writes
+    /// exist only on a fresh stream, so the gaps are zeros; no full-file
+    /// buffer. The steps run unlocked if `unlocked`, and locked after a
+    /// drop, so this always ends.
+    fn settle(&self, g: &mut CellGuard<'_>, mut unlocked: bool) -> Result<(), i32> {
+        loop {
+            if g.retired {
+                return Ok(());
+            }
+            let WriteMode::Streaming { pending, .. } = &g.file.write_mode else { return Ok(()) };
+            let Some((&o, v)) = pending.first_key_value() else { return Ok(()) };
+            let v = v.clone();
+            unlocked &= self.stream_step(g, o, &v, Some(o), unlocked)?;
+        }
+    }
+
+    /// Push the pending writes of the stream of `g` that now start at its
+    /// end, one stream step each (see `settle`).
+    fn drain_lined_up(&self, g: &mut CellGuard<'_>, mut unlocked: bool) -> Result<(), i32> {
+        loop {
+            if g.retired {
+                return Ok(());
+            }
+            let WriteMode::Streaming { next_expected_offset, pending, .. } = &g.file.write_mode else {
+                return Ok(());
+            };
+            let o = *next_expected_offset;
+            let Some(v) = pending.get(&o).cloned() else { return Ok(()) };
+            unlocked &= self.stream_step(g, o, &v, Some(o), unlocked)?;
+        }
     }
 
     /// Store the content of an overlay as a new root and start a clean
@@ -1413,6 +1571,7 @@ impl SliceFsFilesystem {
                 }
                 file_state.byte_count = file_state.byte_count.max(*next_expected_offset);
                 file_state.cas_committed = false;
+                file_state.generation = next_gen();
             }
         }
     }
@@ -1512,9 +1671,12 @@ impl SliceFsFilesystem {
     /// - Overlay: pwrite semantics into the extents (memory follows the
     ///   written bytes; nothing is allocated by offset or file size).
     ///
-    /// The write runs under the cell lock of the inode, with the stream
-    /// pushes (Plan 07 moves that I/O out of the lock). The rebase step of
-    /// an overlay past its limit does its I/O with the cell unlocked.
+    /// The write runs under the cell lock of the inode, but each stream
+    /// step (push, zero gap, the switch to an overlay) and the rebase step
+    /// of an overlay past its limit do their I/O with the cell unlocked
+    /// (D-02): the stream is cloned, pushed with no cell lock, and swapped
+    /// in only if it did not change. After one dropped step the rest of the
+    /// write runs locked, so a busy stream always makes progress.
     /// Only a write handle may write (else EBADF).
     pub fn test_write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, i32> {
         WRITE_REBASE_BYTES.with(|c| c.set(0));
@@ -1528,74 +1690,92 @@ impl SliceFsFilesystem {
         if g.retired {
             return Err(libc::EBADF);
         }
-        let file_state = &mut g.file;
-
+        let end = offset + data.len() as u64;
+        let mut unlocked = true;
         // Dirty cost before this write (after a switch: of the new overlay).
-        let mut cost_before = dirty_cost(file_state);
-        let result = match &mut file_state.write_mode {
-            WriteMode::Streaming { state, next_expected_offset, pending } => {
-                let end = offset + data.len() as u64;
-                // Streaming from scratch is only right when the file starts
-                // empty; otherwise unwritten parts must keep the old bytes.
-                let fresh = *next_expected_offset > 0 || !pending.is_empty() || !self.has_content(file_state.ino);
-                let overlaps_pending = pending.range(..end).next_back()
-                    .map_or(false, |(&o, v)| o + v.len() as u64 > offset);
-                let mut pending_bytes: usize = pending.values().map(Vec::len).sum();
-
-                // A jump past the reorder window is a sparse write, not NFS
-                // reordering: stream the gap as zeros (O(1) memory) and go on.
-                if fresh && !overlaps_pending && offset > *next_expected_offset + REORDER_WINDOW as u64 {
-                    let io_err = fill_stream(state, &self.content, next_expected_offset, pending, offset).err();
-                    if let Some(e) = io_err {
-                        eprintln!("[{}][FUSE] test_write: CAS I/O error while filling a gap: {}", ts(), e);
-                        return Err(libc::EIO);
-                    }
-                    pending_bytes = pending.values().map(Vec::len).sum();
-                }
-
-                if fresh && offset == *next_expected_offset && !overlaps_pending {
-                    // In order: push, then drain pending writes that now line up.
-                    let mut chunks = vec![data.to_vec()];
-                    let mut next = end;
-                    while let Some((&o, _)) = pending.first_key_value() {
-                        if o != next { break; }
-                        let v = pending.remove(&o).unwrap();
-                        next += v.len() as u64;
-                        chunks.push(v);
-                    }
-                    let io_err = chunks.iter().try_for_each(|c| state.push(&self.content, c)).err();
-                    if let Some(e) = io_err {
-                        eprintln!("[{}][FUSE] test_write: CAS I/O error during push_bytes: {}", ts(), e);
-                        return Err(libc::EIO);
-                    }
-                    *next_expected_offset = next;
-                    file_state.byte_count = file_state.byte_count.max(next);
-                    file_state.cas_committed = false;                    file_state.modified = Some(now_pair());
-                    Ok(data.len() as u32)
-                } else if fresh && offset > *next_expected_offset && !overlaps_pending
-                    && pending_bytes + data.len() <= REORDER_WINDOW
-                {
-                    // Ahead of the stream: wait in the reorder window.
-                    pending.insert(offset, data.to_vec());
-                    file_state.byte_count = file_state.byte_count.max(end);
-                    file_state.cas_committed = false;                    file_state.modified = Some(now_pair());
-                    Ok(data.len() as u32)
-                } else {
-                    // Random write: switch to an overlay on the stored content.
-                    let ino = file_state.ino;
-                    eprintln!("[{}][FUSE] write: fh={} ino={} switches to overlay (offset={} len={} expected={} pending={} fresh={} overlap={})",
-                        ts(), fh, ino, offset, data.len(), *next_expected_offset, pending_bytes, fresh, overlaps_pending);
-                    // Older pending writes go in first, then this (newest) write.
-                    match self.to_overlay(file_state) {
-                        Ok(()) => {
-                            cost_before = dirty_cost(file_state);
-                            Self::overlay_write(file_state, offset, data)
-                        }
-                        Err(e) => Err(e),
-                    }
-                }
+        let mut cost_before;
+        let result = loop {
+            if g.retired {
+                // The handle was released while a step ran unlocked.
+                return Err(libc::EBADF);
             }
-            WriteMode::Overlay(_) => Self::overlay_write(file_state, offset, data),
+            cost_before = dirty_cost(&g.file);
+            if matches!(g.file.write_mode, WriteMode::Overlay(_)) {
+                break Self::overlay_write(&mut g.file, offset, data);
+            }
+            let WriteMode::Streaming { next_expected_offset, pending, .. } = &g.file.write_mode else { continue };
+            let next = *next_expected_offset;
+            // Streaming from scratch is only right when the file starts
+            // empty; otherwise unwritten parts must keep the old bytes. The
+            // first write reads the committed size and manifest with the
+            // cell unlocked, then checks that the stream did not change.
+            let fresh = if next > 0 || !pending.is_empty() {
+                true
+            } else {
+                let generation = g.file.generation;
+                let has = if unlocked { g.unlocked(|| self.has_content(ino)) } else { self.has_content(ino) };
+                if g.retired || g.file.generation != generation {
+                    unlocked = false;
+                    continue;
+                }
+                !has
+            };
+            let s = &mut g.file;
+            let WriteMode::Streaming { pending, .. } = &mut s.write_mode else { continue };
+            let overlaps_pending = pending.range(..end).next_back()
+                .map_or(false, |(&o, v)| o + v.len() as u64 > offset);
+            let pending_bytes: usize = pending.values().map(Vec::len).sum();
+
+            if fresh && !overlaps_pending && offset > next + REORDER_WINDOW as u64 {
+                // A jump past the reorder window is a sparse write, not NFS
+                // reordering: stream the pending writes and the gap as zeros
+                // (O(1) memory), one step at a time, and go on.
+                let piece = pending.first_key_value().filter(|(o, _)| **o < offset).map(|(&o, v)| (o, v.clone()));
+                let r = match &piece {
+                    Some((o, v)) => self.stream_step(&mut g, *o, v, Some(*o), unlocked),
+                    None => self.stream_step(&mut g, offset, &[], None, unlocked),
+                };
+                match r {
+                    Ok(ok) => unlocked &= ok,
+                    Err(e) => {
+                        eprintln!("[{}][FUSE] test_write: CAS I/O error while filling a gap", ts());
+                        return Err(e);
+                    }
+                }
+                continue;
+            }
+
+            if fresh && offset == next && !overlaps_pending {
+                // In order: push, then the pending writes that now line up.
+                if !self.stream_step(&mut g, next, data, None, unlocked)? {
+                    unlocked = false;
+                    continue;
+                }
+                g.file.modified = Some(now_pair());
+                // This write is in; a pending write that fails here stays
+                // pending (a read or the release streams it later).
+                if let Err(e) = self.drain_lined_up(&mut g, unlocked) {
+                    eprintln!("[{}][FUSE] test_write: CAS I/O error while draining pending writes: {e}", ts());
+                }
+                break Ok(data.len() as u32);
+            }
+            if fresh && offset > next && !overlaps_pending && pending_bytes + data.len() <= REORDER_WINDOW {
+                // Ahead of the stream: wait in the reorder window.
+                pending.insert(offset, data.to_vec());
+                s.byte_count = s.byte_count.max(end);
+                s.cas_committed = false;
+                s.modified = Some(now_pair());
+                s.generation = next_gen();
+                break Ok(data.len() as u32);
+            }
+            // Random write: switch to an overlay on the stored content.
+            eprintln!("[{}][FUSE] write: fh={} ino={} switches to overlay (offset={} len={} expected={} pending={} fresh={} overlap={})",
+                ts(), fh, ino, offset, data.len(), next, pending_bytes, fresh, overlaps_pending);
+            // Older pending writes go in first; the next turn applies this
+            // (newest) write to the overlay.
+            if !self.to_overlay(&mut g, unlocked)? {
+                unlocked = false;
+            }
         };
 
         // An overlay past the dirty limit (also right after a switch that
@@ -1611,9 +1791,9 @@ impl SliceFsFilesystem {
         // the spare capacity of a growing extent (up to 1/8 of its length)
         // is freed by the next steps, so a step does not grow with the limit.
         let limit = self.dirty_limit.load(Ordering::Relaxed);
-        let cost = dirty_cost(file_state);
+        let cost = dirty_cost(&g.file);
         let added = cost.saturating_sub(cost_before).min(data.len() + crate::overlay::EXTENT_OVERHEAD);
-        let over = matches!(&file_state.write_mode, WriteMode::Overlay(_)) && cost > limit;
+        let over = matches!(&g.file.write_mode, WriteMode::Overlay(_)) && cost > limit;
         // The write is in the overlay already (a read sees all of it or
         // none): the step does its I/O with the cell unlocked (D-02).
         let result = match result {
@@ -1677,8 +1857,11 @@ impl SliceFsFilesystem {
     /// pending writes becomes an overlay first (no content is read or cut
     /// there).
     fn free_dirty(&self, g: &mut CellGuard<'_>, want: usize) -> Result<(), i32> {
-        if matches!(&g.file.write_mode, WriteMode::Streaming { pending, .. } if !pending.is_empty()) {
-            self.to_overlay(&mut g.file)?;
+        if matches!(&g.file.write_mode, WriteMode::Streaming { pending, .. } if !pending.is_empty())
+            && !self.to_overlay(g, true)?
+            && !g.retired
+        {
+            self.to_overlay(g, false)?;
         }
         self.rebase_cell(g, want).map_err(|_| libc::EIO)
     }
@@ -1811,20 +1994,28 @@ impl SliceFsFilesystem {
         }
 
         let mut logical_size: Option<u64> = None;
-        let writer_snapshot: Option<WriterSnapshot> = self.with_cell(ino, |s| {
-            self.settle_pending(s);
-            if s.byte_count == 0 {
-                return None;
-            }
-            match &s.write_mode {
-                // Overlay: copy only the extent parts inside the range.
-                WriteMode::Overlay(ov) => Some(WriterSnapshot::Overlay(ov.view(offset, size as u64))),
-                WriteMode::Streaming { state, .. } => {
-                    logical_size = Some(s.byte_count);
-                    Some(WriterSnapshot::Streaming(state.clone()))
+        let writer_snapshot: Option<WriterSnapshot> = match self.cells.get(ino) {
+            None => None,
+            Some(cell) => {
+                let mut g = self.lock_cell(&cell);
+                // Pending writes are streamed first, by stream steps that do
+                // their I/O with the cell unlocked.
+                self.settle(&mut g, true)?;
+                let s = &g.file;
+                if g.retired || s.byte_count == 0 {
+                    None
+                } else {
+                    match &s.write_mode {
+                        // Overlay: copy only the extent parts inside the range.
+                        WriteMode::Overlay(ov) => Some(WriterSnapshot::Overlay(ov.view(offset, size as u64))),
+                        WriteMode::Streaming { state, .. } => {
+                            logical_size = Some(s.byte_count);
+                            Some(WriterSnapshot::Streaming(state.clone()))
+                        }
+                    }
                 }
             }
-        }).flatten();
+        };
         // cell lock released
 
         let root: ObjectKey = match writer_snapshot {
@@ -2122,8 +2313,11 @@ impl SliceFsFilesystem {
             return Err(libc::EFBIG);
         }
         // Case A: the inode has an open write state.
-        if let Some(r) = self.with_cell(ino, |s| self.setattr_size_open(ino, s, new_size)) {
-            return r;
+        if let Some(cell) = self.cells.get(ino) {
+            let mut g = self.lock_cell(&cell);
+            if !g.retired {
+                return self.setattr_size_open(&mut g, new_size);
+            }
         }
 
         // Case B: no open write handle — splice the committed content to the
@@ -2171,10 +2365,12 @@ impl SliceFsFilesystem {
         self.stamp_size(ino, new_size)
     }
 
-    /// The size change of `test_setattr_size` on the open write state `s` of
-    /// `ino` (the caller holds the cell lock, also across the manifest and
-    /// inode changes).
-    fn setattr_size_open(&self, ino: u64, s: &mut OpenFileState, new_size: u64) -> Result<(), i32> {
+    /// The size change of `test_setattr_size` on the locked cell `g` (held
+    /// across the manifest and inode changes, and across the rare stream
+    /// steps of a cut of a stream).
+    fn setattr_size_open(&self, g: &mut CellGuard<'_>, new_size: u64) -> Result<(), i32> {
+        let ino = g.file.ino;
+        let s = &mut g.file;
         // Extending a streaming handle: record the size, no materializing.
         if matches!(s.write_mode, WriteMode::Streaming { .. })
             && new_size > 0 && new_size >= s.byte_count
@@ -2184,11 +2380,11 @@ impl SliceFsFilesystem {
             s.byte_count = new_size;
             s.cas_committed = false;
             s.modified = Some(now_pair());
+            s.generation = next_gen();
             return self.stamp_size(ino, new_size);
         }
-        self.settle_pending(s);
         if new_size == 0 {
-            // Back to an empty stream.
+            // Back to an empty stream (a new state: a new generation).
             let old_root = s.last_committed_root.take();
             *s = OpenFileState { modified: Some(now_pair()), ..OpenFileState::new(ino) };
             if let Some(old) = old_root {
@@ -2196,12 +2392,13 @@ impl SliceFsFilesystem {
             }
             self.clear_manifest(ino, old_root)?;
         } else {
-            // A stream that is not purely extended switches to an overlay
-            // on the content so far and is cut or extended there. No file
-            // content is read.
-            if matches!(s.write_mode, WriteMode::Streaming { .. }) {
-                self.to_overlay(s)?;
-            }
+            // Pending writes are streamed first. A stream that is not purely
+            // extended switches to an overlay on the content so far and is
+            // cut or extended there. No file content is read. These steps
+            // keep the cell locked (a rare size change of an open stream).
+            self.settle(g, false)?;
+            self.to_overlay(g, false)?;
+            let s = &mut g.file;
             if let WriteMode::Overlay(ov) = &mut s.write_mode {
                 ov.truncate(new_size);
                 s.byte_count = ov.size;

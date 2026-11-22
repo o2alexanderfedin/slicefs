@@ -33,7 +33,7 @@ pub const MIN_TAKE: usize = 64 << 10;
 /// truncate to 0 cannot repeat the generation of the one it replaced.
 static NEXT_GEN: AtomicU64 = AtomicU64::new(1);
 
-fn next_gen() -> u64 {
+pub(crate) fn next_gen() -> u64 {
     NEXT_GEN.fetch_add(1, Ordering::Relaxed)
 }
 
