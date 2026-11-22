@@ -21,13 +21,13 @@ estimate:
   tokens: 140000
   tasks: 3
 actuals:
-  tokens: 20135
+  tokens: 20526
   tasks: 3
-  commits: 3
+  commits: 5
 
 plan_head_before: d4ebb2c9c310061aac9c43178a9182f058e96da5
-plan_head_after: cc1f24e28df47cc6da512fd6b254f64d4271a084
-commits: 3
+plan_head_after: 81e4d1eeec9d58231d474eae853a3ccdb33a0a52
+commits: 5
 
 tech-stack:
   added: []
@@ -101,8 +101,9 @@ status: complete
 1. **Task 1: streaming writes, overlay switch, settles and reads do their I/O unlocked** - `8d10747` (feat)
 2. **Task 2: fsync publishes in order, stepwise finalize, transient cell for closed truncate** - `eae0402` (feat)
 3. **Task 3: no cross-file wait, reads stay safe during rewrites and online GC** - `cc1f24e` (test)
+4. **Tests that pin the stream generation check and the truncate install rule (after the review)** - `81e4d1e` (test)
 
-`commits: 3` counts `d4ebb2c..cc1f24e`. The docs commit of this SUMMARY comes after it.
+**Plan metadata:** `47ede52` (first docs commit) and the docs commit after `81e4d1e`. `commits: 5` counts `d4ebb2c..81e4d1e`, which includes `47ede52`.
 
 ## TDD record (red before green, no red commit)
 
@@ -116,22 +117,26 @@ status: complete
   - `fsyncs_publish_in_order`, with `flush_cell` written first without the `last_published_gen` check: **red**, "the newer root stays" (the manifest held fsync 1's older root). Green after the check.
   - `the_last_release_finalizes_in_steps` and `a_writer_that_opens_during_the_finalize_keeps_the_cell` were run once with the old release shape restored for a moment (one locked `usize::MAX` step). Both were **red**: "more than one step: 1" and "the open and write waited for the finalize: Timeout". Both passed with the real code.
   - `a_closed_file_truncate_runs_in_a_transient_cell` was written together with the code. Its park point (the rebase hook after the closed splice) is new in this plan, so the old code could not reach it.
-- **Task 3:** both tests were green on their first run. They test the code of Tasks 1-2 and Plan 06, and showed no fault that needed a fix. One run of the GC test did 24 rewrites, 98 reads, 3 online GCs and 6 rebase steps in 2.2 s.
+- **Mutation checks after the review (commit `81e4d1e`):**
+  - Removing the generation compare in Phase C of `stream_step` left all 14 tests green. The old retry test let the second write only add a pending entry, so a stale swap gave the same bytes.
+  - The retry test now does a conflicting in-order write: 128 KiB at the parked write's offset. With the compare removed it is **red**, "both writes with the handles open" (the stale clone drops the tail of the second write). With the compare it is green, and the retry goes to an overlay on top of the second write.
+  - Removing the `last_published_gen` update at a truncate to 0 also left all 14 tests green. The new `a_parked_fsync_does_not_install_over_a_truncate` is **red** without it ("the truncate wins": the parked fsync put the old root back) and green with it.
+- **Task 3:** both tests were green on their first run. They test the code of Tasks 1-2 and Plan 06, and showed no fault that needed a fix. One run of the GC test did 24 rewrites, 98 reads, 3 online GCs and 6 rebase steps in 2.2 s. After the review the test also adds up `removed_objects` of the sweeps and asserts that it is above 0. Two runs removed 171 and 208 objects, so the sweeps deleted the objects of old roots while the reads ran.
 
 ## Verification
 
-- `cargo test -p slicefs-cli --test lock_free_io`: 14 passed (0.33 s). Among them are `reader_does_not_wait_for_streaming_push`, `fsyncs_publish_in_order` and `many_files_no_cross_file_wait`.
+- `cargo test -p slicefs-cli --test lock_free_io`: 15 passed (0.33 s). Among them are `reader_does_not_wait_for_streaming_push`, `fsyncs_publish_in_order` and `many_files_no_cross_file_wait`.
 - `cargo test -p slicefs-cli --test gc_online_tests`: 16 passed. `reads_during_rewrite_and_gc_never_fail` takes 2.2-2.4 s. The two GC-in-hook tests passed unchanged.
 - `streaming_tests` 25, `write_path_tests` 24, `fsync_tests` 7, `rebase_step_tests` 4, `multi_handle_posix` 7, `dirty_budget_tests` 1: all passed.
-- Serialize-off one-file run (`STRESS_SERIALIZE=0 STRESS_MODE=one-file STRESS_SECS=3 STRESS_THREADS=4 STRESS_FILE_MIB=4`): `test result: ok` with no "mismatches" line. The run reported:
+- Serialize-off one-file run (`STRESS_SERIALIZE=0 STRESS_MODE=one-file STRESS_SECS=3 STRESS_THREADS=4 STRESS_FILE_MIB=4`): `test result: ok. 1 passed` with no "mismatches" line. The exit code was not captured (the shell has no `PIPESTATUS`); the test result line is the evidence. The run reported:
   - `max_inflight=4`, `ops=2325 dirty_total=0`;
   - `op=read n=2242 p99_us=858.6`, `op=write n=1338 p99_us=40828.9`, `op=fsync n=83 p99_us=123666.4`.
 - By-hand many-files run (`STRESS_MODE=many-files`, same env): exit 0, `test result: ok`, no "mismatches" line. The run reported:
   - `max_inflight=4`, `ops=1351 dirty_total=0`;
   - `read n=850`, `write n=549`, `fsync n=82`, `create n=196`, `rename n=122`, `unlink n=124`.
   - This run showed no namespace race. Plan 09 still owns that area.
-- `cargo test --workspace` exited 0 before each task commit (66 `test result: ok` lines, no `FAILED`).
-- Full suite command from 19-VALIDATION.md, on `cc1f24e`: exit 0, 66 `test result: ok` lines, no `FAILED`, no `error`, no `lock rank violation`.
+- `cargo test --workspace` exited 0 before each task commit and before `81e4d1e` (66 `test result: ok` lines, no `FAILED`).
+- Full suite command from 19-VALIDATION.md, on `cc1f24e` (`81e4d1e` changes only two test files, and the workspace run before it was green): exit 0, 66 `test result: ok` lines, no `FAILED`, no `error`, no `lock rank violation`.
 - `cargo test -p slicefs-cli --features lock-stats --test lock_stats_report`: 1 passed.
 - Acceptance greps:
   - `fn test_set_push_hook` 1, `fn reader_does_not_wait_for_streaming_push` 1;
@@ -152,7 +157,7 @@ See `key-decisions`. All of them can be changed later.
   - After a truncate to 0, a parked older snapshot would bring back the old content. Release would not correct it, because `byte_count` is 0.
   - After `to_overlay`, the parked snapshot would break the rule that the manifest names the overlay base.
 - **Fix:** The truncate to 0 and the overlay switch also set `last_published_gen`, to the new generation. Phase C of a flush also needs the mode to still be `Streaming`.
-- **Commit:** `eae0402`
+- **Commit:** `eae0402`; test `a_parked_fsync_does_not_install_over_a_truncate` in `81e4d1e`
 
 **2. [Rule 1 - Bug] A finalize could retire a cell that has a new writer**
 - **Found during:** Task 2 review
@@ -198,12 +203,12 @@ None.
 
 None. There is no new endpoint, file kind or trust boundary.
 - T-19-SC: no new crate.
-- T-19-23: `last_published_gen` check and refcounts in Phase C under the cell lock; `fsyncs_publish_in_order`.
+- T-19-23: `last_published_gen` check and refcounts in Phase C under the cell lock; `fsyncs_publish_in_order`, `a_parked_fsync_does_not_install_over_a_truncate`.
 - T-19-24: reads and every Phase B stay inside the request's shared gate hold; `reads_during_rewrite_and_gc_never_fail`.
 - T-19-25: finalize steps of at most `FINAL_STEP`; a stream clone is at most about 64 KiB; one pending entry is copied per step.
 - T-19-26: retire only when clean and `write_handles == 0`, in one cell-lock hold with the map removal; `a_writer_that_opens_during_the_finalize_keeps_the_cell`.
 
 ## Self-Check: PASSED
 
-- `crates/slicefs-cli/tests/lock_free_io.rs` (14 tests), `crates/slicefs-cli/tests/gc_online_tests.rs` and this SUMMARY: FOUND
-- Commits `8d10747`, `eae0402` and `cc1f24e`: FOUND on HEAD (`git rev-list --count d4ebb2c..cc1f24e` prints 3)
+- `crates/slicefs-cli/tests/lock_free_io.rs` (15 tests), `crates/slicefs-cli/tests/gc_online_tests.rs` and this SUMMARY: FOUND
+- Commits `8d10747`, `eae0402`, `cc1f24e`, `47ede52` and `81e4d1e`: FOUND on HEAD (`git rev-list --count d4ebb2c..81e4d1e` prints 5)
