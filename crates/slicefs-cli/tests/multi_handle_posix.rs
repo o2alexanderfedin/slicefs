@@ -244,3 +244,62 @@ fn two_readers_of_one_file_do_not_share_a_reader_wait() {
     let got = b_done.expect("B finished while A held the per-inode reader");
     assert!(got == bytes[BLOCK..2 * BLOCK], "B's read");
 }
+
+/// D-12: an `O_APPEND` handle writes at the end of file taken under the
+/// cell lock; the offset in the request is ignored.
+#[test]
+fn append_handle_ignores_the_request_offset() {
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    let (ino, fh) = create(&fs, 1, "f");
+    release(&fs, ino, fh);
+    let ap = open(&fs, ino, libc::O_RDWR | libc::O_APPEND);
+    let rec = data(8, 300);
+    let len = rec.len() as u64;
+    for (i, off) in [0u64, 0, 999_999].into_iter().enumerate() {
+        assert_eq!(fs.test_write_at(ap, off, &rec), Ok((len as u32, i as u64 * len)), "append {i}");
+    }
+    assert!(read(&fs, ino, 0, 4 * len as u32) == [&rec[..], &rec[..], &rec[..]].concat());
+    release(&fs, ino, ap);
+}
+
+/// The end of file of a fresh cell on a file with committed content is the
+/// committed size; an append past MAX_FILE_SIZE is EFBIG.
+#[test]
+fn append_starts_at_the_committed_size_and_stops_at_the_max() {
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    let (ino, fh) = create(&fs, 1, "f");
+    let first = data(9, 5000);
+    write(&fs, fh, 0, &first);
+    release(&fs, ino, fh);
+    let ap = open(&fs, ino, libc::O_WRONLY | libc::O_APPEND);
+    assert_eq!(fs.test_write_at(ap, 0, b"xyz"), Ok((3, 5000)));
+    release(&fs, ino, ap);
+    assert!(read(&fs, ino, 0, 6000) == [&first[..], b"xyz"].concat());
+
+    // A stream extended by setattr records only the size. Nothing is
+    // written there: a write at the end would stream 1 TiB of zeros.
+    let max = slicefs_cli::filesystem::MAX_FILE_SIZE;
+    let (big, bfh) = create(&fs, 1, "big");
+    fs.test_setattr_size(big, Some(bfh), max - 10).unwrap();
+    let ap = open(&fs, big, libc::O_WRONLY | libc::O_APPEND);
+    assert_eq!(fs.test_write_at(ap, 0, &[1u8; 100]), Err(libc::EFBIG), "EOF + len past the max");
+    // Back to 0 before the release, so the finalize pads no zeros.
+    fs.test_setattr_size(big, Some(bfh), 0).unwrap();
+    release(&fs, big, ap);
+    release(&fs, big, bfh);
+}
+
+/// A write request whose flags carry O_APPEND appends, also on a handle
+/// opened without it.
+#[test]
+fn a_write_request_with_o_append_appends() {
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    let (ino, fh) = create(&fs, 1, "f");
+    write(&fs, fh, 0, b"0123456789");
+    assert!(matches!(h::handle_write_flags(&fs, fh, 0, b"ab", libc::O_APPEND), WriteResult::Ok(2)));
+    assert_eq!(read(&fs, ino, 0, 64), b"0123456789ab");
+    release(&fs, ino, fh);
+}

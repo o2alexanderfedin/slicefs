@@ -1262,3 +1262,78 @@ fn a_failed_write_appends_no_record() {
     assert!(matches!(h::handle_write(&fs, 9999, 0, b"xyz"), WriteResult::Error(e) if e == libc::EBADF));
     assert_eq!(writes(&logged_ops(&fs, dir.path())), before, "no record for a failed write");
 }
+
+fn releases(ops: &[oplog::Op]) -> usize {
+    ops.iter().filter(|op| matches!(op, oplog::Op::Release { .. })).count()
+}
+
+/// Run `scenario`, crash (no commit), replay, and compare `dump`; the
+/// scenario gets the store path to look at the log.
+fn check_in(scenario: impl FnOnce(&SliceFsFilesystem, &Path)) {
+    let dir = TempDir::new().unwrap();
+    let live = {
+        let fs = new_fs(dir.path());
+        scenario(&fs, dir.path());
+        fs.meta().flush_wal().unwrap();
+        let d = dump(&fs);
+        std::mem::forget(fs); // a crash: no commit, no destroy
+        d
+    };
+    assert_eq!(dump(&reload_and_replay(dir.path())), live);
+}
+
+/// RESEARCH Pattern 3: with two write handles only the last release
+/// finalizes, so only it logs a `Release`; replay gives the live file.
+#[test]
+fn two_write_handles_release_replays() {
+    check_in(|fs, store| {
+        let (ino, a) = create(fs, 1, "f");
+        let b = open_rw(fs, ino);
+        write(fs, a, 0, &data(1, 70_000));
+        write(fs, b, 4096, &data(2, 9000));
+        release(fs, ino, a);
+        assert_eq!(releases(&logged_ops(fs, store)), 0, "A was not the last write handle");
+        write(fs, b, 100_000, &data(3, 5000));
+        release(fs, ino, b);
+        assert_eq!(releases(&logged_ops(fs, store)), 1, "B's release finalized");
+    });
+}
+
+/// An open with O_TRUNC while another write handle is open truncates the
+/// shared cell; its `Truncate` is logged in that hold, and replay gives the
+/// live file.
+#[test]
+fn an_o_trunc_open_beside_a_write_handle_replays() {
+    check_in(|fs, store| {
+        let (ino, a) = create(fs, 1, "f");
+        write(fs, a, 0, &data(4, 50_000));
+        let b = match h::handle_open(fs, ino, libc::O_RDWR | libc::O_TRUNC) {
+            OpenResult::Ok(fh, true) => fh,
+            _ => panic!("open with O_TRUNC"),
+        };
+        assert!(logged_ops(fs, store).iter().any(|op| matches!(op, oplog::Op::Truncate { .. })));
+        write(fs, b, 0, &data(5, 3000));
+        write(fs, a, 2000, &data(6, 2000));
+        release(fs, ino, a);
+        release(fs, ino, b);
+    });
+}
+
+/// A file created with O_APPEND: its replay handle must not append, or the
+/// overwrite at 0 through a second handle would land at the end.
+#[test]
+fn a_file_created_with_o_append_replays_its_overwrites() {
+    check_in(|fs, _| {
+        let (ino, ap) = match h::handle_create(fs, 1, "log", S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR | libc::O_APPEND) {
+            CreateResult::Ok(ino, fh, _) => (ino, fh),
+            _ => panic!("create"),
+        };
+        write(fs, ap, 0, b"first;");
+        write(fs, ap, 0, b"second;");
+        let rw = open_rw(fs, ino);
+        write(fs, rw, 0, b"XX");
+        release(fs, ino, rw);
+        release(fs, ino, ap);
+        assert_eq!(fs.test_read(ino, 0, 64).unwrap(), b"XXrst;second;");
+    });
+}

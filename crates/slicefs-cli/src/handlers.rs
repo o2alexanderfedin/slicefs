@@ -167,45 +167,40 @@ pub fn handle_read(
 }
 
 /// Handle `open`: open inode `ino` with `flags`.
+/// A write open with `O_TRUNC` appends its `Truncate` record in the cell
+/// hold of the truncate (D-08); it is written out here, before the reply.
 pub fn handle_open(fs: &SliceFsFilesystem, ino: u64, flags: i32) -> OpenResult {
     let l = logged();
-    match fs.test_open(ino, flags) {
-        Ok((fh, is_write)) => {
-            if is_write && flags & libc::O_TRUNC != 0 {
-                l.log(fs, crate::oplog::Op::Truncate { ino });
-            }
-            OpenResult::Ok(fh, is_write)
-        }
+    let (r, lsn) = fs.open_logged(ino, flags, Some(l.time));
+    fs.log_write_out(lsn);
+    match r {
+        Ok((fh, is_write)) => OpenResult::Ok(fh, is_write),
         Err(errno) => OpenResult::Error(errno),
     }
 }
 
-/// Handle `release`: finalize write state for `fh` of inode `ino`.
+/// Handle `release`: finalize write state for `fh` of inode `ino`. Only the
+/// release that finalized the cell (the last write handle) appends a
+/// `Release` record, in its last cell hold; it is written out here.
 pub fn handle_release(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> EmptyResult {
     let l = logged();
-    let is_write = fs.ino_of_fh(fh).is_some();
-    match fs.test_release_full(ino, fh) {
-        Ok(()) => {
-            if is_write {
-                l.log(fs, crate::oplog::Op::Release { ino });
-            }
-            EmptyResult::Ok
-        }
+    let (r, lsn) = fs.release_logged(ino, fh, Some(l.time));
+    fs.log_write_out(lsn);
+    match r {
+        Ok(()) => EmptyResult::Ok,
         Err(_) => EmptyResult::Error(libc::EIO),
     }
 }
 
 /// Handle `flush`: flush write buffer for `fh` without closing the handle.
-pub fn handle_flush(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> EmptyResult {
+/// Only a flush that did work appends a `Flush` record, in the hold of its
+/// install; it is written out here.
+pub fn handle_flush(fs: &SliceFsFilesystem, _ino: u64, fh: u64) -> EmptyResult {
     let l = logged();
-    let is_write = fs.ino_of_fh(fh).is_some();
-    match fs.test_flush(ino, fh) {
-        Ok(()) => {
-            if is_write {
-                l.log(fs, crate::oplog::Op::Flush { ino });
-            }
-            EmptyResult::Ok
-        }
+    let (r, lsn) = fs.flush_logged(fh, Some(l.time));
+    fs.log_write_out(lsn);
+    match r {
+        Ok(()) => EmptyResult::Ok,
         Err(_) => EmptyResult::Error(libc::EIO),
     }
 }
@@ -320,11 +315,24 @@ pub fn handle_write(
     offset: u64,
     data: &[u8],
 ) -> WriteResult {
+    handle_write_flags(fs, fh, offset, data, 0)
+}
+
+/// `handle_write` with the open flags of the request: with `O_APPEND` (or
+/// on a handle opened with it) the write goes to the end of file and
+/// `offset` is ignored (D-12).
+pub fn handle_write_flags(
+    fs: &SliceFsFilesystem,
+    fh: u64,
+    offset: u64,
+    data: &[u8],
+    flags: i32,
+) -> WriteResult {
     fs.note_write();
     let l = logged();
     // The record is appended in the cell-lock hold of the apply (D-08); it
     // is written out here, with no cell lock held, before the reply.
-    let (r, lsn) = fs.write_logged(fh, offset, data, Some(l.time));
+    let (r, lsn) = fs.write_logged(fh, offset, data, flags, Some(l.time));
     fs.log_write_out(lsn);
     match r {
         Ok((n, _)) => WriteResult::Ok(n),

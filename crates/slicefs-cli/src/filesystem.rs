@@ -385,8 +385,8 @@ pub(crate) struct Handle {
     pub(crate) ino: u64,
     /// Opened for writing (`O_WRONLY` or `O_RDWR`).
     pub(crate) write: bool,
-    /// Opened with `O_APPEND` (not set yet).
-    #[allow(dead_code)]
+    /// Opened (or created) with `O_APPEND`: each write goes to the end of
+    /// file taken under the cell lock (D-12).
     pub(crate) append: bool,
 }
 
@@ -670,8 +670,9 @@ impl SliceFsFilesystem {
     }
 
     /// Count a new write handle of `ino` in its cell (made if needed). With
-    /// `trunc`, the file is truncated to 0 under the same cell lock.
-    fn open_write(&self, ino: u64, trunc: bool) -> Result<(), i32> {
+    /// `trunc`, the file is truncated to 0 under the same cell lock, and
+    /// with `time` its `Truncate` record is appended in that hold (D-08).
+    fn open_write(&self, ino: u64, trunc: bool, time: Option<(i64, u32)>) -> Result<Option<Lsn>, i32> {
         loop {
             let cell = self.cells.get_or_insert(ino);
             let mut g = self.lock_cell(&cell);
@@ -681,13 +682,15 @@ impl SliceFsFilesystem {
                 continue;
             }
             g.write_handles += 1;
-            if trunc {
-                if let Err(e) = self.setattr_size_open(&mut g, 0) {
-                    let _ = self.leave(&cell, &mut g);
-                    return Err(e);
-                }
+            if !trunc {
+                return Ok(None);
             }
-            return Ok(());
+            if let Err(e) = self.setattr_size_open(&mut g, 0) {
+                let _ = self.leave(&cell, &mut g);
+                return Err(e);
+            }
+            let rec = |time| crate::oplog::Record { time, op: crate::oplog::Op::Truncate { ino: cell.ino } };
+            return Ok(time.and_then(|t| self.log_append(rec(t))));
         }
     }
 
@@ -701,14 +704,20 @@ impl SliceFsFilesystem {
         self.finalize(cell, g, true)
     }
 
-    /// A write handle of `ino` ends (see `leave`).
-    fn release_write(&self, ino: u64) -> Result<(), i32> {
-        let Some(cell) = self.cells.get(ino) else { return Ok(()) };
+    /// A write handle of `ino` ends (see `leave`). With `time`, a release
+    /// that finalized and retired the cell appends its `Release` record in
+    /// that last hold (D-08): not the release of a write handle that was
+    /// not the last, nor one whose finalize a new writer stopped.
+    fn release_write(&self, ino: u64, time: Option<(i64, u32)>) -> (Result<(), i32>, Option<Lsn>) {
+        let Some(cell) = self.cells.get(ino) else { return (Ok(()), None) };
         let mut g = self.lock_cell(&cell);
         if g.retired {
-            return Ok(());
+            return (Ok(()), None);
         }
-        self.leave(&cell, &mut g)
+        let r = self.leave(&cell, &mut g);
+        let rec = |time| crate::oplog::Record { time, op: crate::oplog::Op::Release { ino: cell.ino } };
+        let lsn = if g.retired { time.and_then(|t| self.log_append(rec(t))) } else { None };
+        (r, lsn)
     }
 
     /// The last write handle of the cell `g` is gone (D-03): store its
@@ -951,11 +960,11 @@ impl SliceFsFilesystem {
     }
 
     /// Allocate a file handle and record it as open on `ino` (for writing
-    /// if `write`).
-    fn open_handle(&self, ino: u64, write: bool) -> u64 {
+    /// if `write`, at the end of file if `append`).
+    fn open_handle(&self, ino: u64, write: bool, append: bool) -> u64 {
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
         let mut t = self.handles.lock();
-        t.by_fh.insert(fh, Handle { ino, write, append: false });
+        t.by_fh.insert(fh, Handle { ino, write, append });
         *t.open_count.entry(ino).or_insert(0) += 1;
         fh
     }
@@ -1722,8 +1731,8 @@ impl SliceFsFilesystem {
             return Err(meta_error_to_errno(&e));
         }
         self.touch_dir(parent_ino)?;
-        let fh = self.open_handle(ino, true);
-        self.open_write(ino, false)?;
+        let fh = self.open_handle(ino, true, false);
+        self.open_write(ino, false, None)?;
         Ok((ino, fh))
     }
 
@@ -1744,7 +1753,13 @@ impl SliceFsFilesystem {
     /// write runs locked, so a busy stream always makes progress.
     /// Only a write handle may write (else EBADF).
     pub fn test_write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, i32> {
-        self.write_logged(fh, offset, data, None).0.map(|(n, _)| n)
+        self.write_logged(fh, offset, data, 0, None).0.map(|(n, _)| n)
+    }
+
+    /// `test_write` that also returns the effective offset (for an append:
+    /// the end of file it wrote at).
+    pub fn test_write_at(&self, fh: u64, offset: u64, data: &[u8]) -> Result<(u32, u64), i32> {
+        self.write_logged(fh, offset, data, 0, None).0
     }
 
     /// `test_write` that logs (D-08): with `time`, the `Write` record (the
@@ -1752,15 +1767,18 @@ impl SliceFsFilesystem {
     /// hold that applies the write, exactly once per applied write. Returns
     /// the bytes written and the effective offset, and the LSN of the record
     /// for `log_write_out` (also after an error that came after the apply).
+    /// `flags` are the open flags of the request: with `O_APPEND` (or on a
+    /// handle opened with it) the write goes to the end of file (D-12).
     pub(crate) fn write_logged(
         &self,
         fh: u64,
         offset: u64,
         data: &[u8],
+        flags: i32,
         time: Option<(i64, u32)>,
     ) -> (Result<(u32, u64), i32>, Option<Lsn>) {
         let mut lsn = None;
-        let r = self.write_in_cell(fh, offset, data, time, &mut lsn);
+        let r = self.write_in_cell(fh, offset, data, flags, time, &mut lsn);
         (r, lsn)
     }
 
@@ -1768,17 +1786,22 @@ impl SliceFsFilesystem {
     fn write_in_cell(
         &self,
         fh: u64,
-        offset: u64,
+        mut offset: u64,
         data: &[u8],
+        flags: i32,
         time: Option<(i64, u32)>,
         lsn: &mut Option<Lsn>,
     ) -> Result<(u32, u64), i32> {
         WRITE_REBASE_BYTES.with(|c| c.set(0));
         WRITE_BASE_BYTES.with(|c| c.set(0));
-        if offset.checked_add(data.len() as u64).map_or(true, |end| end > MAX_FILE_SIZE) {
+        let Some(h) = self.handle(fh).filter(|h| h.write) else { return Err(libc::EBADF) };
+        let ino = h.ino;
+        // An append ignores the request offset (D-12, D-17). Replay does not
+        // append: each record carries the offset the write used.
+        let append = (h.append || flags & libc::O_APPEND != 0) && !self.replaying.load(Ordering::Relaxed);
+        if !append && offset.checked_add(data.len() as u64).map_or(true, |end| end > MAX_FILE_SIZE) {
             return Err(libc::EFBIG);
         }
-        let Some(ino) = self.ino_of_fh(fh) else { return Err(libc::EBADF) };
         let Some(cell) = self.cells.get(ino) else { return Err(libc::EBADF) };
         let mut g = self.lock_cell(&cell);
         if g.retired {
@@ -1791,7 +1814,7 @@ impl SliceFsFilesystem {
                 *lsn = self.log_append(crate::oplog::Record { time, op });
             }
         };
-        let end = offset + data.len() as u64;
+        let mut end = offset.saturating_add(data.len() as u64);
         let mut unlocked = true;
         // Dirty cost before this write (after a switch: of the new overlay).
         let mut cost_before;
@@ -1799,6 +1822,17 @@ impl SliceFsFilesystem {
             if g.retired {
                 // The handle was released while a step ran unlocked.
                 return Err(libc::EBADF);
+            }
+            if append {
+                // The end of file now, under the cell lock. Each turn takes
+                // it again: an unlocked step can move it, and then its
+                // publish is dropped (the generation moved) and this turn
+                // runs again.
+                offset = self.append_eof(&g.file);
+                end = match offset.checked_add(data.len() as u64) {
+                    Some(e) if e <= MAX_FILE_SIZE => e,
+                    _ => return Err(libc::EFBIG),
+                };
             }
             cost_before = dirty_cost(&g.file);
             if matches!(g.file.write_mode, WriteMode::Overlay(_)) {
@@ -1924,6 +1958,16 @@ impl SliceFsFilesystem {
         }
     }
 
+    /// The end of file for an append to the open state `s` (with its cell
+    /// locked): the state's size if it has bytes or is an overlay, else the
+    /// committed size (a fresh cell on an existing file).
+    fn append_eof(&self, s: &OpenFileState) -> u64 {
+        if s.byte_count > 0 || matches!(s.write_mode, WriteMode::Overlay(_)) {
+            return s.byte_count;
+        }
+        self.meta.get_inode(s.ino).map_or(0, |m| m.size)
+    }
+
     /// Keep the dirty bytes of all open files within the budget (#105). `g`
     /// is the locked cell of the file being written, and `added` the dirty
     /// cost its write added. The check reads only the global total. If it
@@ -2000,9 +2044,15 @@ impl SliceFsFilesystem {
     /// The handle leaves the table first, so a write handle is counted out
     /// of its cell exactly once; only the last write handle of the inode
     /// finalizes. An unknown handle is ignored.
-    pub fn test_release(&self, _ino: u64, fh: u64) -> Result<(), i32> {
-        let Some(h) = self.take_handle(fh) else { return Ok(()) };
-        let result = if h.write { self.release_write(h.ino) } else { Ok(()) };
+    pub fn test_release(&self, ino: u64, fh: u64) -> Result<(), i32> {
+        self.release_logged(ino, fh, None).0
+    }
+
+    /// `test_release` that logs (see `release_write`); returns the LSN of
+    /// the `Release` record, if one was appended.
+    pub(crate) fn release_logged(&self, _ino: u64, fh: u64, time: Option<(i64, u32)>) -> (Result<(), i32>, Option<Lsn>) {
+        let Some(h) = self.take_handle(fh) else { return (Ok(()), None) };
+        let result = if h.write { self.release_write(h.ino, time) } else { (Ok(()), None) };
         self.uncount(h.ino);
         result
     }
@@ -2164,7 +2214,7 @@ impl SliceFsFilesystem {
         for cell in &cells {
             let r = {
                 let mut g = self.lock_cell(cell);
-                if g.retired { Ok(()) } else { self.flush_cell(&mut g, false) }
+                if g.retired { Ok(()) } else { self.flush_cell(&mut g, false).map(|_| ()) }
             };
             if let Err(e) = r {
                 return Err(MetaError::Corrupted(format!("cut: flush of open file {} failed: errno {e}", cell.ino)));
@@ -2286,13 +2336,26 @@ impl SliceFsFilesystem {
     /// or unknown handle does nothing. The end of the snapshot runs with
     /// the cell unlocked (see `flush_cell`).
     fn flush_handle(&self, fh: u64) -> Result<(), i32> {
-        let Some(ino) = self.ino_of_fh(fh) else { return Ok(()) };
-        let Some(cell) = self.cells.get(ino) else { return Ok(()) };
+        self.flush_logged(fh, None).0
+    }
+
+    /// `flush_handle` that logs: with `time`, a flush that installed (its
+    /// Phase C ran) appends its `Flush` record in that hold (D-08); a flush
+    /// with nothing to do appends none.
+    pub(crate) fn flush_logged(&self, fh: u64, time: Option<(i64, u32)>) -> (Result<(), i32>, Option<Lsn>) {
+        let Some(ino) = self.ino_of_fh(fh) else { return (Ok(()), None) };
+        let Some(cell) = self.cells.get(ino) else { return (Ok(()), None) };
         let mut g = self.lock_cell(&cell);
         if g.retired {
-            return Ok(());
+            return (Ok(()), None);
         }
-        self.flush_cell(&mut g, true)
+        match self.flush_cell(&mut g, true) {
+            Ok(true) => {
+                let rec = |time| crate::oplog::Record { time, op: crate::oplog::Op::Flush { ino: cell.ino } };
+                (Ok(()), time.and_then(|t| self.log_append(rec(t))))
+            }
+            r => (r.map(|_| ()), None),
+        }
     }
 
     /// Write the streamed content of the locked cell `g` into its manifest
@@ -2310,19 +2373,21 @@ impl SliceFsFilesystem {
     /// stream zeros for the gaps, and the late writes that fill the gaps
     /// would then force the handle into an overlay. The write log keeps
     /// pending bytes durable (#20), so the manifest takes the streamed prefix.
-    fn flush_cell(&self, g: &mut CellGuard<'_>, unlocked: bool) -> Result<(), i32> {
+    ///
+    /// `Ok(true)`: Phase C ran (the flush did work, with the cell locked).
+    fn flush_cell(&self, g: &mut CellGuard<'_>, unlocked: bool) -> Result<bool, i32> {
         let s = &g.file;
         if s.byte_count == 0 {
             // Empty file -- nothing to flush
-            return Ok(());
+            return Ok(false);
         }
         if s.cas_committed && s.last_committed_root.is_some() {
             // No write since the last fsync: the manifest is current.
             // (NFS sends a COMMIT per group of writes; skip the re-hash.)
-            return Ok(());
+            return Ok(false);
         }
         let WriteMode::Streaming { state, next_expected_offset, .. } = &s.write_mode else {
-            return Ok(());
+            return Ok(false);
         };
         let (ino, snap, streamed) = (s.ino, state.clone(), *next_expected_offset);
         let (min_size, byte_count, modified, generation) = (s.min_size, s.byte_count, s.modified, s.generation);
@@ -2341,7 +2406,7 @@ impl SliceFsFilesystem {
         }?;
         // Phase C: a newer snapshot, or another install, came first.
         if g.retired || g.last_published_gen >= generation || !matches!(g.file.write_mode, WriteMode::Streaming { .. }) {
-            return Ok(());
+            return Ok(false);
         }
         g.last_published_gen = generation;
         let s = &mut g.file;
@@ -2355,7 +2420,7 @@ impl SliceFsFilesystem {
             s.last_committed_root = Some(new);
         }
         s.cas_committed = s.generation == generation;
-        self.stamp_content(ino, byte_count, modified)
+        self.stamp_content(ino, byte_count, modified).map(|_| true)
     }
 
     /// Truncate/extend a file to `new_size` bytes. If `fh` is Some and open,
@@ -3006,21 +3071,31 @@ impl SliceFsFilesystem {
     /// Open a file. Returns `(fh, is_write)` on success.
     /// If `O_TRUNC` is set and the file is opened for writing, truncates to size 0.
     pub fn test_open(&self, ino: u64, flags: i32) -> Result<(u64, bool), i32> {
+        self.open_logged(ino, flags, None).0
+    }
+
+    /// `test_open` that logs: with `time`, a write open with `O_TRUNC`
+    /// appends its `Truncate` record in the cell-lock hold of the truncate.
+    pub(crate) fn open_logged(&self, ino: u64, flags: i32, time: Option<(i64, u32)>) -> (Result<(u64, bool), i32>, Option<Lsn>) {
         let acc_mode = flags & libc::O_ACCMODE;
         let is_write = acc_mode == libc::O_WRONLY || acc_mode == libc::O_RDWR;
 
-        let fh = self.open_handle(ino, is_write);
+        let fh = self.open_handle(ino, is_write, flags & libc::O_APPEND != 0);
 
+        let mut lsn = None;
         if is_write {
             // Every write handle of the inode shares its cell.
             // FUSE_ATOMIC_O_TRUNC: the truncate runs under the same cell lock.
-            if let Err(e) = self.open_write(ino, flags & libc::O_TRUNC != 0) {
-                self.close_handle(fh);
-                return Err(e);
+            match self.open_write(ino, flags & libc::O_TRUNC != 0, time) {
+                Ok(l) => lsn = l,
+                Err(e) => {
+                    self.close_handle(fh);
+                    return (Err(e), None);
+                }
             }
         }
 
-        Ok((fh, is_write))
+        (Ok((fh, is_write)), lsn)
     }
 
     /// Get an extended attribute value. Returns the raw bytes.
@@ -3152,10 +3227,15 @@ impl SliceFsFilesystem {
         if flags & libc::O_TRUNC != 0 {
             if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
                 if self.take_handle(fh).is_some() {
-                    let _ = self.release_write(ino);
+                    let _ = self.release_write(ino, None);
                     self.uncount(ino);
                 }
                 return Err(e);
+            }
+        }
+        if flags & libc::O_APPEND != 0 {
+            if let Some(h) = self.handles.lock().by_fh.get_mut(&fh) {
+                h.append = true;
             }
         }
         let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;

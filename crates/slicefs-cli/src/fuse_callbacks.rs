@@ -26,7 +26,7 @@ use crate::handlers::{
     handle_getxattr, handle_link, handle_listxattr, handle_lookup, handle_mkdir,
     handle_mknod, handle_open, handle_read, handle_readdir, handle_readlink,
     handle_release, handle_removexattr, handle_rename, handle_rmdir, handle_setattr,
-    handle_setxattr, handle_statfs, handle_symlink, handle_unlink, handle_write,
+    handle_setxattr, handle_statfs, handle_symlink, handle_unlink, handle_write_flags,
     AttrResult, CreateResult, DataResult, EmptyResult, EntryResult, LockResult,
     OpenResult, ReaddirResult, StatfsResult, WriteResult, XattrResult,
 };
@@ -457,7 +457,8 @@ impl Filesystem for MountedFs {
         let gate_wait = t_gate.elapsed();
         eprintln!("[{}][FUSE] write: ENTRY ino={}, fh={}, offset={}, data_len={}, write_flags={:#x}, flags={:#x}, lock_owner={:?}", ts(), ino.0, fh.0, offset, data.len(), _write_flags.bits(), _flags.0, _lock_owner.map(|l| l.0));
         let t_handle = std::time::Instant::now();
-        let handled = handle_write(self, fh.0, offset, data);
+        // The open flags of the request: O_APPEND writes at the end of file.
+        let handled = handle_write_flags(self, fh.0, offset, data, _flags.0);
         let handle = t_handle.elapsed();
         if (gate_wait + handle).as_millis() >= 50 {
             eprintln!("[t={}][slow-write] ino={} offset={} len={} gate_wait_ms={} handle_ms={}",
