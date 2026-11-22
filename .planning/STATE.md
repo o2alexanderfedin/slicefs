@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 19
 current_phase_name: Fine-grained locks
 status: executing
-stopped_at: Completed 19-05-PLAN.md
-last_updated: "2026-11-22T04:59:27.596Z"
+stopped_at: Completed 19-06-PLAN.md
+last_updated: "2026-11-22T05:38:29.376Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 19 execution started
-state_head: a29d163a6b91c51f1c67ebfbc182c66f9dac9ba6
+state_head: 9811c32ee2d68ae860b8325cabe7edee3c20e6c8
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 18
-  completed_plans: 12
+  completed_plans: 13
   percent: 14
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 19 (Fine-grained locks) — EXECUTING
-Plan: 6 of 11
+Plan: 7 of 11
 Status: Ready to execute
 Last activity: 2026-11-21 — Phase 19 execution started
 
@@ -58,6 +58,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 19 P03 | 50min | 3 tasks | 7 files |
 | Phase 19 P04 | 45min | 3 tasks | 11 files |
 | Phase 19 P05 | 41min | 3 tasks | 5 files |
+| Phase 19 P06 | 25min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -100,6 +101,9 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: 19-05: cell map 16 shards (ino mod 16); orphan set lives in the handle table under one lock with the open count
 - [Phase 19]: 19-05: dirty_total moves by delta in a CellGuard drop under the cell lock; keep_budget steps only the writer's own cell (D-13)
 - [Phase 19]: 19-05: code under a cell lock must use the inner forms (*_open, *_state, finalize_write); with_cell/open_write/release_write lock the cell again
+- [Phase 19]: 19-06: overlay generations come from one process-wide counter, so a new overlay never repeats one
+- [Phase 19]: 19-06: a dropped rebase result is retried at once with the cell locked; past the hard cap (limit + 2 * REBASE_STEP) a writer stores a locked step
+- [Phase 19]: 19-06: finalize keeps the three rebase phases in one cell-lock hold until Plan 07
 
 ### Pending Todos
 
@@ -121,8 +125,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-22T04:59:27.455Z
-Stopped at: Completed 19-05-PLAN.md
+Last session: 2026-11-22T05:38:29.233Z
+Stopped at: Completed 19-06-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
