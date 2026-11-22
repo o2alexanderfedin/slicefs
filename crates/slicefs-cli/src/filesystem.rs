@@ -1843,12 +1843,13 @@ impl SliceFsFilesystem {
         uid: u32,
         gid: u32,
     ) -> Result<(u64, u64), i32> {
-        self.create_logged(parent_ino, name, mode, umask, uid, gid, 0, None, &mut |_| {})
+        self.create_logged(parent_ino, name, mode, umask, uid, gid, 0, None, &mut |_| {}).map(|(ino, fh, _)| (ino, fh))
     }
 
     /// `test_create` at inode `at` (replay; `None`: the next free one) that
     /// logs (D-08): the `Create` record (with `flags`) goes to `log` in the
-    /// parent-stripe hold that also opens the handle.
+    /// hold that also opens the handle and, with `O_TRUNC`, truncates; the
+    /// result of the truncate is the third value.
     #[allow(clippy::too_many_arguments)]
     fn create_logged(
         &self,
@@ -1861,26 +1862,40 @@ impl SliceFsFilesystem {
         flags: i32,
         at: Option<u64>,
         log: LogOp<'_>,
-    ) -> Result<(u64, u64), i32> {
+    ) -> Result<(u64, u64, Result<(), i32>), i32> {
         let file_mode = S_IFREG | (mode & !umask & 0o7777);
         let mut file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
         Self::stamp_new(&mut file_meta);
-        // The parent's stripe is held until the handle is counted, so an
-        // unlink of the new name cannot reclaim the inode before it is open.
-        // The new inode needs no stripe of its own: it has no name before
-        // the link, and every change of the name needs the parent's stripe.
-        let _ns = self.ns.lock(&[parent_ino]);
-        self.live_dir(parent_ino)?;
-        let ino = new_inode(&self.meta, at, &file_meta).map_err(|e| meta_error_to_errno(&e))?;
-        if let Err(e) = self.meta.link(parent_ino, name, ino) {
-            let _ = self.meta.delete_inode(ino);
-            return Err(meta_error_to_errno(&e));
-        }
+        // The parent's stripe and the new inode's are held until the handle
+        // is counted and the record appended (`new_entry`).
+        let (ino, _ns) = self.new_entry(parent_ino, name, at, &file_meta)?;
         self.touch_dir(parent_ino)?;
         let fh = self.open_handle(ino, true, false);
         self.open_write(ino, false, None)?;
+        let trunc = if flags & libc::O_TRUNC != 0 { self.test_setattr_size(ino, Some(fh), 0) } else { Ok(()) };
         log(crate::oplog::Op::Create { parent: parent_ino, name: name.to_string(), mode, umask, uid, gid, flags, ino });
-        Ok((ino, fh))
+        Ok((ino, fh, trunc))
+    }
+
+    /// The new inode `meta` (at `at` in replay) linked as `name` in
+    /// `parent`, which must be a live directory; returns it with the stripes
+    /// of the parent and the new inode held. The number is taken before the
+    /// stripes (nothing can reach an inode with no name), so both stripes
+    /// lock in ascending order. While the guard is held, a request that
+    /// finds the new name and works on the inode by its number (open, link,
+    /// setattr, xattrs) waits for the inode's stripe, so its record comes
+    /// after the create's (D-08); an unlink of the name waits for the
+    /// parent's, so it cannot reclaim the inode before the handle of a
+    /// create is counted.
+    fn new_entry(&self, parent: u64, name: &str, at: Option<u64>, meta: &InodeMeta) -> Result<(u64, NsGuard<'_>), i32> {
+        let ino = new_inode(&self.meta, at, meta).map_err(|e| meta_error_to_errno(&e))?;
+        let ns = self.ns.lock(&[parent, ino]);
+        let linked = self.live_dir(parent).and_then(|()| self.meta.link(parent, name, ino).map_err(|e| meta_error_to_errno(&e)));
+        if let Err(e) = linked {
+            let _ = self.meta.delete_inode(ino);
+            return Err(e);
+        }
+        Ok((ino, ns))
     }
 
     /// Write `data` at `offset` into the file handle `fh`. Returns bytes written.
@@ -2828,13 +2843,7 @@ impl SliceFsFilesystem {
         if file_type == S_IFCHR || file_type == S_IFBLK {
             file_meta.rdev = rdev;
         }
-        let _ns = self.ns.lock(&[parent]);
-        self.live_dir(parent)?;
-        let ino = new_inode(&self.meta, at, &file_meta).map_err(|e| meta_error_to_errno(&e))?;
-        if let Err(e) = self.meta.link(parent, name, ino) {
-            let _ = self.meta.delete_inode(ino);
-            return Err(meta_error_to_errno(&e));
-        }
+        let (ino, _ns) = self.new_entry(parent, name, at, &file_meta)?;
         self.touch_dir(parent)?;
         let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
         log(crate::oplog::Op::Mknod { parent, name: name.to_string(), mode, umask, rdev, uid, gid, ino });
@@ -3257,17 +3266,8 @@ impl SliceFsFilesystem {
         // If the create fails, the object is garbage for the GC.
         let content_digest = content::put_all(&self.content, target_bytes).map_err(|_| libc::EIO)?;
 
-        let _ns = self.ns.lock(&[parent_ino]);
-        self.live_dir(parent_ino)?;
-
-        // Create inode
-        let ino = new_inode(&self.meta, at, &symlink_meta).map_err(|e| meta_error_to_errno(&e))?;
-
-        // Link into parent directory
-        if let Err(e) = self.meta.link(parent_ino, link_name, ino) {
-            let _ = self.meta.delete_inode(ino);
-            return Err(meta_error_to_errno(&e));
-        }
+        // The inode, linked into the parent, with both stripes held.
+        let (ino, _ns) = self.new_entry(parent_ino, link_name, at, &symlink_meta)?;
         self.touch_dir(parent_ino)?;
 
         self.meta
@@ -3575,15 +3575,13 @@ impl SliceFsFilesystem {
         at: Option<u64>,
         log: LogOp<'_>,
     ) -> Result<(u64, u64, InodeMeta), i32> {
-        let (ino, fh) = self.create_logged(parent, name, mode, umask, uid, gid, flags, at, log)?;
-        if flags & libc::O_TRUNC != 0 {
-            if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
-                if self.take_handle(fh).is_some() {
-                    let _ = self.release_write(ino, None);
-                    self.uncount(ino);
-                }
-                return Err(e);
+        let (ino, fh, trunc) = self.create_logged(parent, name, mode, umask, uid, gid, flags, at, log)?;
+        if let Err(e) = trunc {
+            if self.take_handle(fh).is_some() {
+                let _ = self.release_write(ino, None);
+                self.uncount(ino);
             }
+            return Err(e);
         }
         if flags & libc::O_APPEND != 0 {
             if let Some(h) = self.handles.lock().by_fh.get_mut(&fh) {
