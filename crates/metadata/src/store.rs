@@ -5,13 +5,9 @@
 //! for crash-safe ordering.
 //!
 //! Locking order (always acquire in this order to prevent deadlocks):
-//!   1. `inode_map`
-//!   2. `io`
-//!   3. `inode_data`
-//!   4. `dir_data`
-//!   5. `manifest_data`
-//!   6. `xattr_data`
-//!   7. `refcounts`
+//!   `inode_map`, then one `inode_live` shard, then `inode_data`;
+//!   one `dir_live` shard, then `dir_data`. The other maps are taken alone.
+//!   No hot-path call holds the `io` lock; a commit takes it briefly.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicUsize, Ordering}};
@@ -19,7 +15,7 @@ use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicUsize, Ordering}};
 use chunk_store::lock_stats::{self, Site};
 use chunk_store::sync::{self, Rank};
 use slicefs_traits::key::{ObjectKey, KEY_BYTES};
-use crate::store_io::{NodeRead, NodeReader, NodeWrite};
+use crate::store_io::{NodeRead, NodeReader, NodeWrite, NodeWriter};
 use chunk_store::ChunkStore;
 use slicefs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, MetadataStore};
 
@@ -324,14 +320,7 @@ const S_IFDIR: u32 = 0o0040_000;
 ///
 /// All operations are lock-safe and `Send + Sync`.
 ///
-/// Locking order (always acquire in this order to prevent deadlocks):
-///   1. `inode_map`
-///   2. `io`
-///   3. `inode_data`
-///   4. `dir_data`
-///   5. `manifest_data`
-///   6. `xattr_data`
-///   7. `refcounts`
+/// Locking order: see the module comment.
 /// A lock of the store internals (rank 6, see `chunk_store::sync`).
 fn lk<T>(v: T) -> sync::Mutex<T> {
     sync::Mutex::new(Rank::Store, v)
@@ -343,8 +332,14 @@ pub type PreRootSync = Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>;
 pub struct DictMetadataStore {
     /// Node store — used for all put_node/get_node calls.
     io: Arc<Mutex<StoreIo>>,
-    /// The chunk store of `io`, for node reads with no lock held.
+    /// The chunk store of `io`: hot-path node reads and writes use it with
+    /// no lock held (`NodeReader`, a `NodeWriter` per call).
     cs: Arc<ChunkStore>,
+    /// Hot-path node puts since the last commit sync, and the first put
+    /// error since then: the next commit syncs them, or fails with the error
+    /// (the `StoreIo` lock is not on the hot path).
+    unsynced_puts: AtomicU64,
+    put_error: sync::Mutex<Option<std::io::Error>>,
     /// Inode-number allocator + mapping table.
     inode_map: sync::Mutex<InodeMap>,
     /// Maps inode number → current inode data `ObjectKey`.
@@ -460,6 +455,8 @@ impl DictMetadataStore {
         DictMetadataStore {
             io,
             cs,
+            unsynced_puts: AtomicU64::new(0),
+            put_error: lk(None),
             inode_map: lk(inode_map),
             inode_data: lk(inode_data),
             dir_data: lk(dir_data),
@@ -698,7 +695,7 @@ impl DictMetadataStore {
                 }
             }
             drop(live);
-            let list = DirList::load(&mut NodeReader(Arc::clone(&self.cs)), &digest)?;
+            let list = DirList::load(&mut self.reader(), &digest)?;
             cold = Some((digest, list));
         }
     }
@@ -749,7 +746,7 @@ impl DictMetadataStore {
                 }
             }
             drop(live);
-            let meta = load_inode(&mut NodeReader(Arc::clone(&self.cs)), &digest)?;
+            let meta = load_inode(&mut self.reader(), &digest)?;
             cold = Some((digest, meta));
         }
     }
@@ -896,11 +893,10 @@ impl DictMetadataStore {
             if taken.is_empty() {
                 continue;
             }
-            let written: Vec<(u64, u64, ObjectKey)> = {
-                let mut io_guard = lock_stats::lock(&self.io, Site::Io);
-                let mut fsa = &mut *io_guard;
-                taken.into_iter().map(|(ino, t, meta)| (ino, t, intern_inode(&mut fsa, &meta))).collect()
-            };
+            let mut w = self.writer();
+            let written: Vec<(u64, u64, ObjectKey)> =
+                taken.into_iter().map(|(ino, t, meta)| (ino, t, intern_inode(&mut w, &meta))).collect();
+            self.kept(w);
             if let Some(f) = between.take() {
                 f();
             }
@@ -930,11 +926,10 @@ impl DictMetadataStore {
             if taken.is_empty() {
                 continue;
             }
-            let written: Vec<(u64, u64, ObjectKey)> = {
-                let mut io_guard = lock_stats::lock(&self.io, Site::Io);
-                let mut fsa = &mut *io_guard;
-                taken.into_iter().map(|(ino, t, list)| (ino, t, list.intern(&mut fsa))).collect()
-            };
+            let mut w = self.writer();
+            let written: Vec<(u64, u64, ObjectKey)> =
+                taken.into_iter().map(|(ino, t, list)| (ino, t, list.intern(&mut w))).collect();
+            self.kept(w);
             let mut live = self.dir_live.lock_at(i);
             let mut dir_data = self.dir_data.lock();
             for (ino, t, d) in written {
@@ -943,6 +938,39 @@ impl DictMetadataStore {
                 }
             }
         }
+    }
+
+    /// A node writer for one hot-path call (no lock held); give it back to
+    /// `kept` after the puts.
+    fn writer(&self) -> NodeWriter {
+        NodeWriter::new(Arc::clone(&self.cs))
+    }
+
+    /// Node reads with no lock held.
+    fn reader(&self) -> NodeReader {
+        NodeReader(Arc::clone(&self.cs))
+    }
+
+    /// Count the puts of `w` for the next commit sync, and keep its first
+    /// put error (the next commit returns it).
+    fn kept(&self, mut w: NodeWriter) {
+        self.unsynced_puts.fetch_add(w.puts(), Ordering::Relaxed);
+        if let Err(e) = w.result() {
+            let mut k = self.put_error.lock();
+            if k.is_none() {
+                *k = Some(e);
+            }
+        }
+    }
+
+    /// For a commit that syncs the chunk store next: the put error kept
+    /// since the last commit, else the hot-path puts count as synced.
+    fn begin_put_sync(&self) -> std::io::Result<()> {
+        if let Some(e) = self.put_error.lock().take() {
+            return Err(e);
+        }
+        self.unsynced_puts.store(0, Ordering::Relaxed);
+        Ok(())
     }
 
     /// The write log, if any (a clone: no lock is held while it works).
@@ -1033,8 +1061,8 @@ impl DictMetadataStore {
     }
 
     fn finish_inner(&self, p: &mut PreparedCommit<'_>) -> Result<ObjectKey, MetaError> {
-        let cs = Arc::clone(lock_stats::lock(&self.io, Site::Io).store());
-        let mut w = crate::store_io::NodeWriter::new(Arc::clone(&cs));
+        let cs = Arc::clone(&self.cs);
+        let mut w = NodeWriter::new(Arc::clone(&cs));
         // Write the changed directories and inodes, so the digest maps are current.
         let mut new_inodes = Vec::with_capacity(p.inodes.len());
         for (ino, t, meta) in &p.inodes {
@@ -1102,7 +1130,10 @@ impl DictMetadataStore {
         // Make every object written since the last commit durable before the
         // root that refers to them is logged: after that, log rotation deletes
         // the segments whose records hold the same data (#20). A put error of
-        // a request since the last commit fails the commit too.
+        // a request since the last commit fails the commit too: hot-path puts
+        // (kept in the store) and puts of other `StoreIo` users.
+        self.begin_put_sync()
+            .map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
         lock_stats::lock(&self.io, Site::Io).begin_commit_sync()
             .map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
         cs.sync().map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
@@ -1268,6 +1299,35 @@ impl DictMetadataStore {
     }
 }
 
+impl DictMetadataStore {
+    /// Change the xattr set of `ino` with `f`: the set is read and stored
+    /// with no lock held; the new digest goes in only if the old one is
+    /// still current (else `f` runs again on the newer set), so a change
+    /// that ran meanwhile is not lost.
+    fn change_xattrs(
+        &self,
+        ino: InodeId,
+        mut f: impl FnMut(&mut Vec<(String, Vec<u8>)>) -> Result<(), MetaError>,
+    ) -> Result<(), MetaError> {
+        loop {
+            let old = self.xattr_data.lock().get(&ino).copied();
+            let mut xattrs = match old {
+                Some(d) => load_xattrs(&mut self.reader(), &d)?,
+                None => vec![],
+            };
+            f(&mut xattrs)?;
+            let mut w = self.writer();
+            let new = intern_xattrs(&mut w, &xattrs);
+            self.kept(w);
+            let mut map = self.xattr_data.lock();
+            if map.get(&ino).copied() == old {
+                map.insert(ino, new);
+                return Ok(());
+            }
+        }
+    }
+}
+
 impl MetadataStore for DictMetadataStore {
     fn create_inode(&self, meta: &InodeMeta) -> Result<InodeId, MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
@@ -1371,11 +1431,9 @@ impl MetadataStore for DictMetadataStore {
 
     fn set_manifest(&self, ino: InodeId, blocks: &[ObjectKey]) -> Result<(), MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        let digest = {
-            let mut io_guard = lock_stats::lock(&self.io, Site::Io);
-            let mut fsa = &mut *io_guard;
-            intern_manifest(&mut fsa, blocks)
-        };
+        let mut w = self.writer();
+        let digest = intern_manifest(&mut w, blocks);
+        self.kept(w);
         self.manifest_data.lock().insert(ino, digest);
         Ok(())
     }
@@ -1384,93 +1442,40 @@ impl MetadataStore for DictMetadataStore {
         let manifest_data = self.manifest_data.lock();
         let digest = manifest_data.get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
         drop(manifest_data);
-
-        let mut io_guard = lock_stats::lock(&self.io, Site::Io);
-        load_manifest(&mut *io_guard, &digest)
+        load_manifest(&mut self.reader(), &digest)
     }
 
     fn set_xattr(&self, ino: InodeId, name: &str, value: &[u8]) -> Result<(), MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        // Load existing xattrs for this inode (or empty vec if none yet)
-        let mut xattrs = {
-            let xattr_data = self.xattr_data.lock();
-            if let Some(digest) = xattr_data.get(&ino).copied() {
-                drop(xattr_data);
-                let mut io_guard = lock_stats::lock(&self.io, Site::Io);
-                load_xattrs(&mut *io_guard, &digest)?
-            } else {
-                vec![]
-            }
-        };
-
-        set_xattr_entry(&mut xattrs, name, value);
-
-        let new_digest = {
-            let mut io_guard = lock_stats::lock(&self.io, Site::Io);
-            let mut fsa = &mut *io_guard;
-            intern_xattrs(&mut fsa, &xattrs)
-        };
-
-        self.xattr_data.lock().insert(ino, new_digest);
-        Ok(())
+        self.change_xattrs(ino, |xattrs| {
+            set_xattr_entry(xattrs, name, value);
+            Ok(())
+        })
     }
 
     fn get_xattr(&self, ino: InodeId, name: &str) -> Result<Vec<u8>, MetaError> {
-        let xattr_data = self.xattr_data.lock();
-        let digest = match xattr_data.get(&ino).copied() {
-            Some(d) => d,
-            None => return Err(MetaError::NotFound(ino)),
-        };
-        drop(xattr_data);
-
-        let mut io_guard = lock_stats::lock(&self.io, Site::Io);
-        let xattrs = load_xattrs(&mut *io_guard, &digest)?;
-        drop(io_guard);
-
+        let digest = self.xattr_data.lock().get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
+        let xattrs = load_xattrs(&mut self.reader(), &digest)?;
         get_xattr_entry(&xattrs, name).ok_or(MetaError::NotFound(ino))
     }
 
     fn list_xattrs(&self, ino: InodeId) -> Result<Vec<String>, MetaError> {
-        let xattr_data = self.xattr_data.lock();
-        let digest = match xattr_data.get(&ino).copied() {
+        let digest = match self.xattr_data.lock().get(&ino).copied() {
             Some(d) => d,
             None => return Ok(vec![]),
         };
-        drop(xattr_data);
-
-        let mut io_guard = lock_stats::lock(&self.io, Site::Io);
-        let xattrs = load_xattrs(&mut *io_guard, &digest)?;
-        drop(io_guard);
-
+        let xattrs = load_xattrs(&mut self.reader(), &digest)?;
         Ok(list_xattr_names(&xattrs))
     }
 
     fn remove_xattr(&self, ino: InodeId, name: &str) -> Result<(), MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        let xattr_data = self.xattr_data.lock();
-        let digest = match xattr_data.get(&ino).copied() {
-            Some(d) => d,
-            None => return Err(MetaError::NotFound(ino)),
-        };
-        drop(xattr_data);
-
-        let mut xattrs = {
-            let mut io_guard = lock_stats::lock(&self.io, Site::Io);
-            load_xattrs(&mut *io_guard, &digest)?
-        };
-
-        if !remove_xattr_entry(&mut xattrs, name) {
+        if !self.xattr_data.lock().contains_key(&ino) {
             return Err(MetaError::NotFound(ino));
         }
-
-        let new_digest = {
-            let mut io_guard = lock_stats::lock(&self.io, Site::Io);
-            let mut fsa = &mut *io_guard;
-            intern_xattrs(&mut fsa, &xattrs)
-        };
-
-        self.xattr_data.lock().insert(ino, new_digest);
-        Ok(())
+        self.change_xattrs(ino, |xattrs| {
+            if remove_xattr_entry(xattrs, name) { Ok(()) } else { Err(MetaError::NotFound(ino)) }
+        })
     }
 
     fn root_ino(&self) -> InodeId {
@@ -1654,6 +1659,8 @@ impl DictMetadataStore {
         Ok(DictMetadataStore {
             io,
             cs,
+            unsynced_puts: AtomicU64::new(0),
+            put_error: lk(None),
             inode_map: lk(inode_map),
             inode_data: lk(inode_data),
             dir_data: lk(dir_data),
@@ -2891,6 +2898,71 @@ mod tests {
         let root = store.commit().unwrap();
         let reloaded = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
         assert_eq!(reloaded.get_inode(x).unwrap().size, 2);
+    }
+
+    // LOCK-01: thread A reads a manifest node and its pack read is held.
+    // Thread B changes another inode and stores another manifest: no
+    // `StoreIo` lock (or other lock) makes it wait for A.
+    #[test]
+    fn manifest_read_does_not_block_inode_changes() {
+        use chunk_store::mem::{Hold, MemIo};
+        use std::sync::mpsc;
+        let mem = MemIo::new();
+        let (io, store) = mem_store(&mem);
+        let f1 = store.create_inode(&new_file_meta()).unwrap();
+        let f2 = store.create_inode(&new_file_meta()).unwrap();
+        store.set_manifest(f1, &[ObjectKey::example(1)]).unwrap();
+        let root = store.commit().unwrap();
+        let store = DictMetadataStore::load_from_root(io, &root).unwrap();
+        store.get_inode(f2).unwrap();
+        mem.hold_pack_reads(true);
+        std::thread::scope(|s| {
+            let store = &store;
+            let (ta, ra) = mpsc::channel();
+            s.spawn(move || {
+                let _ = ta.send(store.get_manifest(f1));
+            });
+            let parked = mem.wait_parked(Hold::PackReads, 1, LIMIT);
+            let (tb, rb) = mpsc::channel();
+            s.spawn(move || {
+                let changed = store.modify_inode(f2, |m| m.size = 10).is_ok();
+                let stored = store.set_manifest(f2, &[ObjectKey::example(2)]).is_ok();
+                let _ = tb.send((changed, stored));
+            });
+            let b = rb.recv_timeout(LIMIT);
+            let a_waited = ra.try_recv().is_err();
+            mem.hold_pack_reads(false);
+            assert!(parked, "A is in the held pack read");
+            assert_eq!(b.expect("B finished while A read a manifest"), (true, true));
+            assert!(a_waited, "A was still in the manifest read while B ran");
+            let got = ra.recv_timeout(LIMIT).expect("A ends after the release").unwrap();
+            assert_eq!(got, vec![ObjectKey::example(1)]);
+        });
+        assert_eq!(store.get_manifest(f2).unwrap(), vec![ObjectKey::example(2)]);
+    }
+
+    // T-19-10: a node put error on the hot path is returned by the next
+    // commit; and a commit syncs every node that the hot path put.
+    #[test]
+    fn hot_path_put_error_fails_the_next_commit_and_puts_are_synced() {
+        use chunk_store::mem::MemIo;
+        let mem = MemIo::new();
+        let (_io, store) = mem_store(&mem);
+        let f = store.create_inode(&new_file_meta()).unwrap();
+        store.commit().unwrap();
+        mem.set_space_left(Some(0));
+        store.set_manifest(f, &[ObjectKey::example(1)]).unwrap();
+        mem.set_space_left(None);
+        assert!(store.commit().is_err(), "the kept put error fails the commit");
+        store.set_manifest(f, &[ObjectKey::example(2)]).unwrap();
+        let root = store.commit().unwrap();
+        // Only what is durable is left after a crash: the root and the
+        // manifest that the hot path put must read back.
+        mem.crash();
+        let cs = chunk_store::ChunkStore::open_with(Arc::new(mem.clone()), chunk_store::Options::default()).unwrap();
+        let io = Arc::new(Mutex::new(StoreIo::new("mem", Arc::new(cs))));
+        let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
+        assert_eq!(reloaded.get_manifest(f).unwrap(), vec![ObjectKey::example(2)]);
     }
 
     #[test]
