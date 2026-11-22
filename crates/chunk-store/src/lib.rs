@@ -40,8 +40,10 @@ mod race_tests;
 pub mod retry;
 mod run;
 pub mod mem;
+pub mod sync;
 
 use crate::lock_stats::Site;
+use crate::sync::Rank;
 use crate::index::{Counts, Hwm, Index, MergeOut, Snapshot};
 use crate::run::Run;
 use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK, SyncWait};
@@ -711,7 +713,7 @@ pub struct ChunkStore {
     opts: Options,
     /// The index, for lookups outside the store lock (also in `Inner`).
     index: Arc<Index>,
-    inner: Arc<Mutex<Inner>>,
+    inner: Arc<sync::Mutex<Inner>>,
     /// Shared with the merge thread (see `MergeCtl`).
     merge: Arc<MergeCtl>,
     /// The merge thread (a writable store with background merges), until
@@ -835,7 +837,7 @@ enum Policy {
 #[derive(Clone)]
 struct Merger {
     io: Arc<dyn PackIo>,
-    inner: Arc<Mutex<Inner>>,
+    inner: Arc<sync::Mutex<Inner>>,
     index: Arc<Index>,
     ctl: Arc<MergeCtl>,
     cfg: MergeCfg,
@@ -858,7 +860,7 @@ impl Merger {
         let (io, index) = (&*self.io, &*self.index);
         let _one = self.ctl.step.lock().unwrap();
         let plan = {
-            let inner = lock_stats::lock(&self.inner, Site::Store);
+            let inner = self.inner.lock();
             if inner.failed {
                 return Ok(false);
             }
@@ -877,7 +879,7 @@ impl Merger {
             Ok(None) => return Ok(false),
             Err(e) => {
                 if let Error::Corrupt(m) = &e {
-                    let _inner = lock_stats::lock(&self.inner, Site::Store);
+                    let _inner = self.inner.lock();
                     if !index.rebuild_requested() {
                         if let Err(e) = index.request_rebuild(io, m) {
                             tracing::warn!("chunk store: cannot ask for a rebuild of the index: {e}");
@@ -889,7 +891,7 @@ impl Merger {
         };
         between();
         let gone = {
-            let inner = lock_stats::lock(&self.inner, Site::Store);
+            let inner = self.inner.lock();
             if inner.failed {
                 drop(inner);
                 if let MergeOut::Run(r) = out {
@@ -1020,7 +1022,7 @@ impl ChunkStore {
             zstd_level: AtomicI32::new(opts.zstd_level),
             index: Arc::clone(&inner.index),
             merge: Arc::clone(&inner.merge),
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Arc::new(sync::Mutex::new(Rank::Store, inner).timed(Site::Store)),
             merge_thread: Mutex::new(None),
             opts,
             #[cfg(test)]
@@ -1339,7 +1341,7 @@ impl ChunkStore {
         let found = self.dedup_lookup(&id)?;
         self.after_lookup();
         if found {
-            let mut inner = lock_stats::lock(&self.inner, Site::Store);
+            let mut inner = self.inner.lock();
             inner.touch(id);
             if self.unchanged(gen, &id) || self.locked_lookup(&mut inner, &id)? {
                 return Ok(id);
@@ -1359,7 +1361,7 @@ impl ChunkStore {
             let stored = payload.len() as u32;
 
             let r = (|| {
-                let mut inner = lock_stats::lock(&self.inner, Site::Store);
+                let mut inner = self.inner.lock();
                 inner.touch(id);
                 // Another put of the same bytes, or a flush, merge or GC,
                 // since the lookup: look up again.
@@ -1395,7 +1397,7 @@ impl ChunkStore {
             Ok(Some(loc)) => loc,
             Ok(None) => return Ok(false),
             Err(_) => {
-                self.raise_trust_floor(&mut lock_stats::lock(&self.inner, Site::Store))?;
+                self.raise_trust_floor(&mut self.inner.lock())?;
                 return Ok(false);
             }
         };
@@ -1492,7 +1494,7 @@ impl ChunkStore {
     /// Returns the last pack number that the GC may change.
     pub fn gc_begin(&self) -> Result<u64> {
         let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
-        let mut inner = lock_stats::lock(&self.inner, Site::Store);
+        let mut inner = self.inner.lock();
         inner.check()?;
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
             self.seal(&mut inner)?;
@@ -1509,7 +1511,7 @@ impl ChunkStore {
     pub fn gc_begin_full(&self) -> Result<u64> {
         let dir = self.gc_tmp()?;
         let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
-        let mut inner = lock_stats::lock(&self.inner, Site::Store);
+        let mut inner = self.inner.lock();
         inner.check()?;
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
             self.seal(&mut inner)?;
@@ -1539,7 +1541,7 @@ impl ChunkStore {
     /// End a GC without deleting anything (for example after a failed mark).
     pub fn gc_abort(&self) {
         let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
-        lock_stats::lock(&self.inner, Site::Store).touched = None;
+        self.inner.lock().touched = None;
     }
 
     /// End a GC: remove every object of the packs up to `boundary` that is
@@ -1660,7 +1662,7 @@ impl ChunkStore {
 
     /// The store lock, with the time it is held added to `holds`.
     fn held<'a>(&'a self, holds: &'a Holds) -> Held<'a> {
-        let g = lock_stats::lock(&self.inner, Site::Store);
+        let g = self.inner.lock();
         Held { g, at: Instant::now(), holds }
     }
 
@@ -2356,7 +2358,7 @@ impl ChunkStore {
         self.after_lookup();
         let loc = looked?.ok_or(Error::Missing(*id))?;
         let (loc, file) = {
-            let mut inner = lock_stats::lock(&self.inner, Site::Store);
+            let mut inner = self.inner.lock();
             let loc = if self.unchanged(gen, id) { loc } else { inner.index.get(id)?.ok_or(Error::Missing(*id))? };
             inner.touch(*id);
             match inner.reader(&*self.io, loc.pack) {
@@ -2408,7 +2410,7 @@ impl ChunkStore {
         if !suspect {
             return err;
         }
-        let inner = lock_stats::lock(&self.inner, Site::Store);
+        let inner = self.inner.lock();
         match inner.index.get_verified(id) {
             Err(Error::Corrupt(m)) => {
                 if !self.opts.read_only && !inner.index.rebuild_requested() {
@@ -2441,7 +2443,7 @@ impl ChunkStore {
 
     /// The shape of the index now.
     pub fn index_info(&self) -> IndexInfo {
-        let _inner = lock_stats::lock(&self.inner, Site::Store);
+        let _inner = self.inner.lock();
         let ix = &self.index;
         let hwm = ix.hwm();
         let runs = ix.runs();
@@ -2522,7 +2524,7 @@ impl ChunkStore {
         if self.opts.read_only {
             return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
         }
-        let inner = lock_stats::lock(&self.inner, Site::Store);
+        let inner = self.inner.lock();
         inner.index.request_rebuild(&*self.io, "a caller asked for a rebuild")
     }
 
@@ -2542,7 +2544,7 @@ impl ChunkStore {
         // the lock, then has only the bytes put since, and gives the outcome.
         // The same for a background seal.
         let (seal, wait) = {
-            let mut inner = lock_stats::lock(&self.inner, Site::Store);
+            let mut inner = self.inner.lock();
             inner.check()?;
             let seal = inner.sealing.as_ref().map(|s| s.done.clone());
             (seal, inner.active.as_mut().filter(|a| a.dirty).and_then(|a| a.file.sync_soon()))
@@ -2550,7 +2552,7 @@ impl ChunkStore {
         for w in seal.iter().chain(&wait) {
             w.wait();
         }
-        let mut inner = lock_stats::lock(&self.inner, Site::Store);
+        let mut inner = self.inner.lock();
         inner.check()?;
         inner.sync_active()?;
         if inner.dir_dirty {
@@ -2564,7 +2566,7 @@ impl ChunkStore {
     /// not flush the memtable: an open replays the records above the hwm.
     pub fn close(&self) -> Result<()> {
         self.stop_merges();
-        let mut inner = lock_stats::lock(&self.inner, Site::Store);
+        let mut inner = self.inner.lock();
         inner.check()?;
         if inner.active.is_some() {
             self.seal(&mut inner)?;
@@ -2596,7 +2598,7 @@ impl ChunkStore {
 
     /// Current counts.
     pub fn stats(&self) -> Stats {
-        lock_stats::lock(&self.inner, Site::Store).stats
+        self.inner.lock().stats
     }
 
     /// An empty GC mark for this store: a [`LiveFilter`] for as many keys
@@ -2658,10 +2660,7 @@ impl Drop for ChunkStore {
     fn drop(&mut self) {
         self.stop_merges();
         // Let a background seal end; its error is lost (nothing was promised).
-        // A drop must not panic on a poisoned lock, so this site is not timed.
-        if let Ok(mut inner) = self.inner.lock() {
-            let _ = inner.join_seal();
-        }
+        let _ = self.inner.lock().join_seal();
     }
 }
 
@@ -2747,7 +2746,7 @@ struct Holds {
 
 /// The store lock, held for a GC: its hold time goes into `Holds`.
 struct Held<'a> {
-    g: lock_stats::Guard<'a, Inner>,
+    g: sync::MutexGuard<'a, Inner>,
     at: Instant,
     holds: &'a Holds,
 }

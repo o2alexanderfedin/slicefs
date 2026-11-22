@@ -541,7 +541,7 @@ fn an_unreadable_trust_floor_is_written_again_at_the_next_failed_lookup() {
     let y = ids[(2 * PER_PACK + 3) as usize];
     s.gc_begin().unwrap(); // seal: the put of Y makes a new pack
     s.gc_abort();
-    let next = s.inner.lock().unwrap().next_pack;
+    let next = s.inner.lock().next_pack;
     mem.fail_read_once_after(0);
     assert_eq!(s.put(&data(2 * PER_PACK + 3)).unwrap(), y);
     mem.clear_fail_reads_after();

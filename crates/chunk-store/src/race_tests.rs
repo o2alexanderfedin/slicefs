@@ -406,7 +406,7 @@ fn the_store_lock_is_free_during_the_gc_passes() {
     let (r1, r2) = (Arc::clone(&ran1), Arc::clone(&ran2));
     let dx2 = dx.clone();
     *s.gc_pass_hook.lock().unwrap() = Some(Box::new(move |s: &ChunkStore, pass: u32| {
-        assert!(s.inner.try_lock().is_ok(), "pass {pass}: the store lock is free");
+        assert!(s.inner.try_lock().is_some(), "pass {pass}: the store lock is free");
         assert_eq!(s.put(&blob(20_000 + pass as u64)).unwrap(), s.hasher().id(&blob(20_000 + pass as u64)));
         if pass == 2 {
             // A dedup hit on a planned victim: it touches X.
@@ -492,7 +492,7 @@ fn an_object_put_in_an_early_group_keeps_its_pack_in_a_later_group() {
     let b = s.gc_begin().unwrap();
     let st = s.gc_finish(&live, b).unwrap();
     assert!(ran.load(Ordering::SeqCst), "the hook ran in the pass of the first group");
-    assert!(s.inner.lock().unwrap().touched.is_none(), "the touched set ends with the GC");
+    assert!(s.inner.lock().touched.is_none(), "the touched set ends with the GC");
     let kept = |i: usize| live.contains(&objs[i].0) || packs[i] == x_pack;
     for (i, (id, d)) in objs.iter().enumerate() {
         assert_eq!(s.get(id).as_ref() == Some(d), kept(i), "object {i} in pack {}", packs[i]);
@@ -566,7 +566,7 @@ fn a_read_error_in_a_later_group_leaves_the_earlier_groups_done() {
     *s.gc_pass_hook.lock().unwrap() = None;
     assert_eq!(calls.load(Ordering::SeqCst), 2, "the GC stopped in the pass of the second group");
     assert!(matches!(r, Err(crate::Error::Io(_))), "{r:?}");
-    assert!(s.inner.lock().unwrap().touched.is_none(), "the touched set ends with the GC");
+    assert!(s.inner.lock().touched.is_none(), "the touched set ends with the GC");
     let check = |s: &ChunkStore, what: &str| {
         let mut gone = 0;
         for (i, (id, d)) in objs.iter().enumerate() {
