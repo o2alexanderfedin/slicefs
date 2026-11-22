@@ -18,6 +18,7 @@ use std::time::Duration;
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use slicefs_cli::filesystem::{RebaseHook, SliceFsFilesystem};
+use slicefs_traits::metadata::MetadataStore;
 use tempfile::TempDir;
 
 const KIB: usize = 1 << 10;
@@ -413,3 +414,173 @@ fn a_read_settles_pending_writes() {
     assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content after release");
 }
 
+/// A hook that counts its calls.
+fn counter(fs: &SliceFsFilesystem) -> Arc<std::sync::atomic::AtomicUsize> {
+    let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let c = Arc::clone(&n);
+    fs.test_set_push_hook(Some(Arc::new(move || {
+        c.fetch_add(1, Ordering::SeqCst);
+    })));
+    n
+}
+
+/// RESEARCH Pitfall 5: fsync 1 snapshots the stream and parks in its I/O
+/// phase; a write and fsync 2 publish a newer root; then fsync 1 ends. The
+/// manifest stays at fsync 2's root, every old root is released once, and
+/// the state stays clean (no write came after the published snapshot).
+#[test]
+fn fsyncs_publish_in_order() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "s", 0o644, 0, 0, 0).unwrap();
+    let mut model = seeded(30, 64 * KIB);
+    fs.test_write(fh, 0, &model).unwrap();
+    let r1 = slicefs_cli::content::put_all(fs.content(), &model).unwrap();
+    let (parked, go) = park_first_push(&fs);
+    let more = seeded(31, 64 * KIB);
+    put(&mut model, 64 * KIB, &more);
+    std::thread::scope(|s| {
+        let f1 = s.spawn(|| fs.test_fsync(ino, fh));
+        parked.recv_timeout(WAIT).expect("fsync 1 reached its I/O phase");
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_eq!(fs.test_write(fh, 64 * KIB as u64, &more), Ok(more.len() as u32));
+            assert_eq!(fs.test_fsync(ino, fh), Ok(()));
+        }));
+        go.send(()).ok();
+        if let Err(e) = r {
+            std::panic::resume_unwind(e);
+        }
+        assert_eq!(f1.join().unwrap(), Ok(()));
+    });
+    let r2 = slicefs_cli::content::put_all(fs.content(), &model).unwrap();
+    assert_ne!(r1, r2);
+    assert_eq!(fs.meta().get_manifest(ino).unwrap(), vec![r2], "the newer root stays");
+    assert_eq!(fs.meta().get_refcount(&r2), 1, "the published root is counted once");
+    assert_eq!(fs.meta().get_refcount(&r1), 0, "the older snapshot was never installed");
+    // Clean: another fsync has nothing to store (no stream step runs).
+    let pushes = counter(&fs);
+    fs.test_fsync(ino, fh).unwrap();
+    assert_eq!(pushes.load(Ordering::SeqCst), 0, "no write after the published snapshot: clean");
+    let tail = seeded(32, 4 * KIB);
+    fs.test_write(fh, 128 * KIB as u64, &tail).unwrap();
+    put(&mut model, 128 * KIB, &tail);
+    let before = pushes.load(Ordering::SeqCst);
+    fs.test_fsync(ino, fh).unwrap();
+    assert!(pushes.load(Ordering::SeqCst) > before, "a write after it makes the state dirty");
+    fs.test_set_push_hook(None);
+    let r3 = fs.meta().get_manifest(ino).unwrap()[0];
+    assert_eq!(fs.meta().get_refcount(&r2), 0, "the old root was released once");
+    assert_eq!(fs.meta().get_refcount(&r3), 1);
+    fs.test_release(ino, fh).unwrap();
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content after release");
+}
+
+/// A 1 MiB file, closed, then open with eight 32 KiB extents in its
+/// overlay (cost above a final step of 64 KiB). Returns the handle and the
+/// model.
+fn dirty_overlay(fs: &SliceFsFilesystem, ino_out: &mut u64) -> (u64, Vec<u8>) {
+    let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+    let mut model = seeded(40, 1 << 20);
+    fs.test_write(fh, 0, &model).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    fs.test_set_final_step(64 * KIB);
+    let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    for i in 0..8u64 {
+        let piece = seeded(41 + i, 32 * KIB);
+        let off = i as usize * 128 * KIB + 16 * KIB;
+        fs.test_write(fh, off as u64, &piece).unwrap();
+        put(&mut model, off, &piece);
+    }
+    *ino_out = ino;
+    (fh, model)
+}
+
+/// The last release stores an overlay dirtier than the final step in
+/// several steps (never all of it at once, #98).
+#[test]
+fn the_last_release_finalizes_in_steps() {
+    let (fs, _dir) = fresh_fs();
+    let mut ino = 0;
+    let (fh, model) = dirty_overlay(&fs, &mut ino);
+    assert!(fs.test_dirty_cost(ino) > 3 * 64 * KIB);
+    let before = fs.test_rebase_count();
+    fs.test_release(ino, fh).unwrap();
+    assert!(fs.test_rebase_count() - before > 1, "more than one step: {}", fs.test_rebase_count() - before);
+    assert_eq!(fs.test_dirty_cost(ino), 0, "the cell is gone");
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
+}
+
+/// RESEARCH Pitfall 4: a write handle opened while the last release is in
+/// a step's I/O phase keeps the cell alive, and its bytes are kept.
+#[test]
+fn a_writer_that_opens_during_the_finalize_keeps_the_cell() {
+    let (fs, _dir) = fresh_fs();
+    let mut ino = 0;
+    let (fh, mut model) = dirty_overlay(&fs, &mut ino);
+    let (parked, go) = park_first(&fs);
+    let patch = seeded(50, 4 * KIB);
+    put(&mut model, 700 * KIB, &patch);
+    let fh2 = std::thread::scope(|s| {
+        let rel = s.spawn(|| fs.test_release(ino, fh));
+        parked.recv_timeout(WAIT).expect("the finalize reached a step's I/O phase");
+        let (tx, rx) = channel();
+        let (fs, patch) = (&fs, &patch);
+        s.spawn(move || {
+            let r = fs.test_open(ino, libc::O_RDWR).map(|(h, _)| (h, fs.test_write(h, 700 * KIB as u64, patch)));
+            tx.send(r).ok();
+        });
+        let got = match rx.recv_timeout(WAIT) {
+            Ok(r) => r,
+            Err(e) => {
+                go.send(()).ok();
+                panic!("the open and write waited for the finalize: {e:?}");
+            }
+        };
+        go.send(()).unwrap();
+        let (fh2, w) = got.unwrap();
+        assert_eq!(w, Ok(patch.len() as u32), "the cell is alive for the new writer");
+        assert_eq!(rel.join().unwrap(), Ok(()));
+        fh2
+    });
+    fs.test_set_rebase_hook(None);
+    assert!(fs.test_dirty_cost(ino) > 0, "the finalize stopped: the cell lives on with dirty bytes");
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content with the new handle open");
+    fs.test_release(ino, fh2).unwrap();
+    assert_eq!(fs.test_dirty_cost(ino), 0, "the second release retired the cell");
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
+}
+
+/// A size change of a closed file runs in a transient cell: it shrinks and
+/// extends the file, and an open of the inode meanwhile waits for it only,
+/// then sees the new size.
+#[test]
+fn a_closed_file_truncate_runs_in_a_transient_cell() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "t", 0o644, 0, 0, 0).unwrap();
+    let model = seeded(60, 256 * KIB);
+    fs.test_write(fh, 0, &model).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    let (parked, go) = park_first(&fs);
+    let short = 100 * KIB as u64;
+    let fh2 = std::thread::scope(|s| {
+        let t = s.spawn(|| fs.test_setattr_size(ino, None, short));
+        parked.recv_timeout(WAIT).expect("the truncate reached its splice");
+        let (tx, rx) = channel();
+        let fs = &fs;
+        s.spawn(move || tx.send(fs.test_open(ino, libc::O_RDWR)).ok());
+        let early = rx.recv_timeout(Duration::from_millis(300));
+        go.send(()).unwrap();
+        assert!(early.is_err(), "the open waited for the transient cell");
+        let opened = rx.recv_timeout(WAIT).expect("the open went on after the truncate");
+        assert_eq!(t.join().unwrap(), Ok(()));
+        opened.unwrap().0
+    });
+    fs.test_set_rebase_hook(None);
+    assert_eq!(fs.test_getattr(ino).unwrap().size, short, "the open sees the new size");
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model[..short as usize], "shrunk");
+    fs.test_release(ino, fh2).unwrap();
+    fs.test_setattr_size(ino, None, 300 * KIB as u64).unwrap();
+    let mut want = model[..short as usize].to_vec();
+    want.resize(300 * KIB, 0);
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == want, "extended with zeros");
+    assert_eq!(fs.test_dirty_cost(ino), 0, "no cell is left");
+}

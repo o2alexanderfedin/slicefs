@@ -104,6 +104,11 @@ pub const DIRTY_LIMIT: usize = 32 << 20;
 /// so no single write pays for the rebase of the whole overlay.
 pub const REBASE_STEP: usize = 1 << 20;
 
+/// Most overlay cost one step of the last release stores (D-03, Claude's
+/// discretion): the release goes in steps of this size and never copies the
+/// whole overlay at once (#98).
+pub const FINAL_STEP: usize = 8 << 20;
+
 /// Budget of dirty bytes of all open files together (#105): when a write
 /// makes the sum pass it, the file with the most dirty bytes stores a step
 /// (an overlay rebase step; a stream's pending writes first become an
@@ -243,7 +248,7 @@ struct FileCell {
 
 impl FileCell {
     fn new(ino: u64) -> Self {
-        let state = CellState { file: OpenFileState::new(ino), write_handles: 0, retired: false, rebasing: false };
+        let state = CellState { file: OpenFileState::new(ino), write_handles: 0, retired: false, rebasing: false, last_published_gen: 0 };
         FileCell {
             ino,
             state: sync::Mutex::new_keyed(Rank::Cell, ino, state).timed(Site::FileCell),
@@ -264,6 +269,11 @@ struct CellState {
     /// unlocked (D-02): at most one at a time, so another writer over the
     /// limit skips its inline step.
     rebasing: bool,
+    /// The stream generation of the last flush snapshot that was installed,
+    /// or a newer value after another install of the manifest (a switch to
+    /// an overlay, a truncate to 0): a flush of an older snapshot is not
+    /// installed (RESEARCH Pitfall 5).
+    last_published_gen: u64,
 }
 
 /// A locked cell. When it is dropped (and at `sync_dirty`), it moves
@@ -342,6 +352,16 @@ impl CellMap {
 
     fn get_or_insert(&self, ino: u64) -> Arc<FileCell> {
         Arc::clone(self.shard(ino).lock().entry(ino).or_insert_with(|| Arc::new(FileCell::new(ino))))
+    }
+
+    /// Add `cell` if the map has no cell of its inode; false if it has one.
+    fn insert_new(&self, cell: &Arc<FileCell>) -> bool {
+        let mut m = self.shard(cell.ino).lock();
+        if m.contains_key(&cell.ino) {
+            return false;
+        }
+        m.insert(cell.ino, Arc::clone(cell));
+        true
     }
 
     /// Remove `cell` (only if the map still holds this very cell).
@@ -426,13 +446,17 @@ pub struct SliceFsFilesystem {
     dirty_limit: AtomicUsize,
     /// Dirty budget of all open files (`DIRTY_BUDGET`; tests set it lower).
     dirty_budget: AtomicUsize,
+    /// Step of the last release (`FINAL_STEP`; tests set it lower).
+    final_step: AtomicUsize,
     /// Rebases done so far (for tests).
     rebase_count: AtomicU64,
     /// `Write` payload bytes the last commit logged again (for tests).
     last_relog_bytes: AtomicU64,
     /// Run inside each rebase, after the new root is finished and before it
     /// is installed, with the cell unlocked unless the step holds it (for
-    /// tests: online GC during a rebase, a parked rebase).
+    /// tests: online GC during a rebase, a parked rebase). A size change of
+    /// a closed file runs it after its splice, with its transient cell
+    /// locked.
     rebase_hook: sync::Mutex<Option<RebaseHook>>,
     /// Run inside each read through the per-inode reader, with it locked
     /// (for tests: a reader parked in the middle of a read).
@@ -479,6 +503,7 @@ impl SliceFsFilesystem {
             replaying: std::sync::atomic::AtomicBool::new(false),
             dirty_limit: AtomicUsize::new(DIRTY_LIMIT),
             dirty_budget: AtomicUsize::new(DIRTY_BUDGET),
+            final_step: AtomicUsize::new(FINAL_STEP),
             rebase_count: AtomicU64::new(0),
             last_relog_bytes: AtomicU64::new(0),
             rebase_hook: sync::Mutex::new(Rank::Short, None),
@@ -506,6 +531,11 @@ impl SliceFsFilesystem {
     /// Test hook: set the dirty budget of all open files to `bytes`.
     pub fn test_set_dirty_budget(&self, bytes: usize) {
         self.dirty_budget.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Test hook: set the step of the last release to `bytes`.
+    pub fn test_set_final_step(&self, bytes: usize) {
+        self.final_step.store(bytes, Ordering::Relaxed);
     }
 
     /// Test hook: the number of rebases so far.
@@ -548,7 +578,8 @@ impl SliceFsFilesystem {
     }
 
     /// Test hook: run `hook` inside each rebase, after the new root is
-    /// finished and before it is installed (`None`: no hook).
+    /// finished and before it is installed, and after the splice of a size
+    /// change of a closed file (`None`: no hook).
     pub fn test_set_rebase_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
         *self.rebase_hook.lock() = hook;
     }
@@ -634,7 +665,7 @@ impl SliceFsFilesystem {
             g.write_handles += 1;
             if trunc {
                 if let Err(e) = self.setattr_size_open(&mut g, 0) {
-                    let _ = self.leave(&cell, &mut g, false);
+                    let _ = self.leave(&cell, &mut g);
                     return Err(e);
                 }
             }
@@ -643,27 +674,100 @@ impl SliceFsFilesystem {
     }
 
     /// One write handle of the cell ends. The last one finalizes the content
-    /// (if `finalize`), retires the cell and removes it from the map, all
-    /// under the cell lock.
-    fn leave(&self, cell: &Arc<FileCell>, g: &mut CellGuard<'_>, finalize: bool) -> Result<(), i32> {
+    /// in steps and then retires the cell (see `finalize`).
+    fn leave(&self, cell: &Arc<FileCell>, g: &mut CellGuard<'_>) -> Result<(), i32> {
         g.write_handles = g.write_handles.saturating_sub(1);
         if g.write_handles > 0 {
             return Ok(());
         }
-        let r = if finalize { self.finalize_write(cell.ino, &mut g.file) } else { Ok(()) };
-        g.retired = true;
-        self.cells.remove(cell);
-        r
+        self.finalize(cell, g, true)
     }
 
     /// A write handle of `ino` ends (see `leave`).
-    fn release_write(&self, ino: u64, finalize: bool) -> Result<(), i32> {
+    fn release_write(&self, ino: u64) -> Result<(), i32> {
         let Some(cell) = self.cells.get(ino) else { return Ok(()) };
         let mut g = self.lock_cell(&cell);
         if g.retired {
             return Ok(());
         }
-        self.leave(&cell, &mut g, finalize)
+        self.leave(&cell, &mut g)
+    }
+
+    /// The last write handle of the cell `g` is gone (D-03): store its
+    /// content in bounded steps by the protocol of D-02, with the I/O
+    /// unlocked if `unlocked` (pending writes one stream step each, an
+    /// overlay in rebase steps of at most `final_step` bytes, a stream by a
+    /// flush). When the content is clean, retire the cell and remove it from
+    /// the map in the same cell-lock hold (cell rank, then shard rank;
+    /// RESEARCH Pitfall 4). If a write handle is opened meanwhile (only
+    /// with `unlocked`), stop: the cell lives on, and its next last release
+    /// finalizes. After an error the cell is retired too, unless a write
+    /// handle is open again.
+    fn finalize(&self, cell: &Arc<FileCell>, g: &mut CellGuard<'_>, unlocked: bool) -> Result<(), i32> {
+        let r = self.finalize_steps(g, unlocked);
+        if g.retired || (unlocked && g.write_handles > 0) {
+            return r;
+        }
+        g.retired = true;
+        self.cells.remove(cell);
+        r
+    }
+
+    /// The steps of `finalize`; returns when the content is clean, the cell
+    /// is retired, or (with `wait_for_writers`) a write handle is open again.
+    fn finalize_steps(&self, g: &mut CellGuard<'_>, wait_for_writers: bool) -> Result<(), i32> {
+        enum Next { Settle, Rebase, Flush, Empty, Clean }
+        let step = self.final_step.load(Ordering::Relaxed).max(1);
+        // A rebase step that did not publish is tried again at once with
+        // the cell locked, so a busy cell always makes progress.
+        let mut unlocked = wait_for_writers;
+        loop {
+            if g.retired || (wait_for_writers && g.write_handles > 0) {
+                return Ok(());
+            }
+            let s = &g.file;
+            let next = match &s.write_mode {
+                WriteMode::Streaming { pending, .. } if !pending.is_empty() => Next::Settle,
+                WriteMode::Overlay(ov) if !ov.is_clean() => Next::Rebase,
+                WriteMode::Overlay(_) => Next::Clean,
+                WriteMode::Streaming { .. } if s.byte_count == 0 => Next::Empty,
+                WriteMode::Streaming { .. } if s.cas_committed && s.last_committed_root.is_some() => Next::Clean,
+                WriteMode::Streaming { .. } => Next::Flush,
+            };
+            let ino = g.file.ino;
+            match next {
+                Next::Settle => self.settle(g, unlocked)?,
+                Next::Rebase => {
+                    // A step in flight elsewhere, or a dropped one: a locked step.
+                    if !(unlocked && self.rebase_unlocked(g, step)?)
+                        && !g.retired
+                        && !(wait_for_writers && g.write_handles > 0)
+                    {
+                        self.rebase_step(ino, &mut g.file, step)?;
+                    }
+                }
+                Next::Flush => {
+                    self.flush_cell(g, unlocked)?;
+                    if !unlocked {
+                        // A locked flush installs the stream as it is.
+                        return Ok(());
+                    }
+                    // The stream changed in the I/O phase: once more, locked.
+                    unlocked = false;
+                }
+                Next::Empty => {
+                    // No bytes written through this cell. Only set an empty
+                    // manifest if this is a genuinely new file (no existing
+                    // manifest): FUSE-T on macOS may open existing files with
+                    // O_RDWR even for read-only access (issue #15).
+                    if !g.file.cas_committed && !self.meta.get_manifest(ino).is_ok_and(|m| !m.is_empty()) {
+                        self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
+                    }
+                    return Ok(());
+                }
+                Next::Clean => return Ok(()),
+            }
+        }
     }
 
     pub fn commit_gate(&self) -> Arc<RwLock<()>> {
@@ -689,37 +793,6 @@ impl SliceFsFilesystem {
     pub fn read_content(&self, key: &ObjectKey) -> Option<Vec<u8>> {
         content::get_all(&self.content, key)
     }
-}
-
-/// Push zeros into the stream until it reaches offset `to`.
-fn push_zeros(state: &mut Stream, cs: &chunk_store::ChunkStore, next: &mut u64, to: u64) -> std::io::Result<()> {
-    if *next < to {
-        state.push_zeros(cs, to - *next)?;
-        *next = to;
-    }
-    Ok(())
-}
-
-/// Push the pending writes that start before `upto` into the stream in offset
-/// order, with zeros in the gaps, then zeros up to `upto`. Memory stays O(1)
-/// in the gap size. Only for a fresh stream, where unwritten bytes read as zero.
-fn fill_stream(
-    state: &mut Stream,
-    cs: &chunk_store::ChunkStore,
-    next: &mut u64,
-    pending: &mut BTreeMap<u64, Vec<u8>>,
-    upto: u64,
-) -> std::io::Result<()> {
-    while let Some((&o, _)) = pending.first_key_value() {
-        if o >= upto {
-            break;
-        }
-        push_zeros(state, cs, next, o)?;
-        let v = pending.remove(&o).expect("first key exists");
-        state.push(cs, &v)?;
-        *next += v.len() as u64;
-    }
-    push_zeros(state, cs, next, upto)
 }
 
 /// Convert a `SystemTime` to `(seconds, nanoseconds)` since the epoch.
@@ -943,10 +1016,9 @@ impl SliceFsFilesystem {
         self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)
     }
 
-    /// Finish a clone of a streaming state as a stored root, first appending
+    /// End a clone of a streaming state as a stored root, first appending
     /// zeros from `streamed` up to `min_size` (an extension set by setattr).
-    fn end_padded(&self, state: &Stream, streamed: u64, min_size: u64) -> Result<ObjectKey, i32> {
-        let mut st = state.clone();
+    fn end_padded(&self, mut st: Stream, streamed: u64, min_size: u64) -> Result<ObjectKey, i32> {
         let cs = &*self.content;
         st.push_zeros(cs, min_size.saturating_sub(streamed))
             .and_then(|_| st.finish(cs))
@@ -1186,7 +1258,10 @@ impl SliceFsFilesystem {
         s.min_size = 0;
         s.cas_committed = false;
         s.generation = next_gen();
-        self.stamp_content(ino, size, s.modified)?;
+        let modified = s.modified;
+        // No older flush snapshot installs over this base.
+        g.last_published_gen = g.file.generation;
+        self.stamp_content(ino, size, modified)?;
         Ok(true)
     }
 
@@ -1319,14 +1394,6 @@ impl SliceFsFilesystem {
             let Some(v) = pending.get(&o).cloned() else { return Ok(()) };
             unlocked &= self.stream_step(g, o, &v, Some(o), unlocked)?;
         }
-    }
-
-    /// Store the content of an overlay as a new root and start a clean
-    /// overlay on it (the last release: the three phases in one cell-lock
-    /// hold, because the release retires the cell in that hold; Plan 07
-    /// steps it).
-    fn rebase_overlay(&self, ino: u64, s: &mut OpenFileState) -> Result<(), i32> {
-        self.rebase_step(ino, s, usize::MAX)
     }
 
     /// Store a part of an overlay as a new root (#108), with the cell lock
@@ -1554,26 +1621,6 @@ impl SliceFsFilesystem {
             hook();
         }
         r.read(&self.content, offset, size)
-    }
-
-    /// If `file_state` streams with out-of-order writes still pending, stream
-    /// them in order so its content is complete (read, truncate, release
-    /// need the whole picture; gaps become zero bytes). The caller holds the
-    /// cell lock.
-    fn settle_pending(&self, file_state: &mut OpenFileState) {
-        if let WriteMode::Streaming { state, next_expected_offset, pending } = &mut file_state.write_mode {
-            if !pending.is_empty() {
-                // Pending writes exist only on a fresh stream: the gaps are zeros.
-                // Stream them in order; no full-file buffer.
-                let upto = pending.iter().next_back().map(|(&o, v)| o + v.len() as u64).unwrap_or(0);
-                if let Err(e) = fill_stream(state, &self.content, next_expected_offset, pending, upto) {
-                    eprintln!("[{}][FUSE] settle: content store error: {}", ts(), e);
-                }
-                file_state.byte_count = file_state.byte_count.max(*next_expected_offset);
-                file_state.cas_committed = false;
-                file_state.generation = next_gen();
-            }
-        }
     }
 
     /// Test hook: true if the inode of write handle `fh` is still in
@@ -1893,71 +1940,9 @@ impl SliceFsFilesystem {
     /// finalizes. An unknown handle is ignored.
     pub fn test_release(&self, _ino: u64, fh: u64) -> Result<(), i32> {
         let Some(h) = self.take_handle(fh) else { return Ok(()) };
-        let result = if h.write { self.release_write(h.ino, true) } else { Ok(()) };
+        let result = if h.write { self.release_write(h.ino) } else { Ok(()) };
         self.uncount(h.ino);
         result
-    }
-
-    /// Commit the open write state `s` of `ino` to the inode's manifest
-    /// (the caller holds the cell lock and retires the cell after).
-    fn finalize_write(&self, ino: u64, s: &mut OpenFileState) -> Result<(), i32> {
-        self.settle_pending(s);
-        // An overlay: store its content as a new root (its base is already
-        // in the manifest, so a clean overlay needs nothing).
-        if matches!(s.write_mode, WriteMode::Overlay(_)) {
-            return self.rebase_overlay(ino, s);
-        }
-        let OpenFileState { write_mode, byte_count, cas_committed, last_committed_root, min_size, modified, .. } = &*s;
-        let (byte_count, cas_committed, last_committed_root, min_size, modified) =
-            (*byte_count, *cas_committed, *last_committed_root, *min_size, *modified);
-
-        // No bytes written through this handle.
-        // Only set empty manifest if this is a genuinely new file (no existing manifest).
-        // FUSE-T on macOS may open existing files with O_RDWR even for read-only access
-        // (issue #15). Setting an empty manifest here would erase the file's content.
-        if byte_count == 0 {
-            if !cas_committed {
-                // Check if the file already has content — if so, don't overwrite it.
-                let has_existing = self.meta.get_manifest(ino)
-                    .map(|m| !m.is_empty())
-                    .unwrap_or(false);
-                if !has_existing {
-                    self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
-                }
-            }
-            return Ok(());
-        }
-
-        // Finalize to CAS based on write mode
-        let new_digest: ObjectKey = match write_mode {
-            WriteMode::Streaming { state, next_expected_offset, .. } => {
-                self.end_padded(state, *next_expected_offset, min_size)?
-            }
-            WriteMode::Overlay(_) => unreachable!("an overlay is rebased above"),
-        };
-        // If the digest matches last committed root (fsync already committed this exact state),
-        // skip redundant manifest write and refcount increment
-        if last_committed_root == Some(new_digest) && cas_committed {
-            return Ok(());
-        }
-
-        // Decrement old committed root if different
-        if let Some(old) = last_committed_root {
-            if old != new_digest {
-                self.meta.decrement_refcount(&old);
-            }
-        }
-
-        // Set manifest and increment refcount
-        self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
-        if last_committed_root != Some(new_digest) {
-            self.meta.increment_refcount(&new_digest);
-        }
-
-        // Update inode size and mtime
-        self.stamp_content(ino, byte_count, modified)?;
-
-        Ok(())
     }
 
     /// Flush the write buffer for `fh` to CAS, then reset the buffer to empty.
@@ -2117,7 +2102,7 @@ impl SliceFsFilesystem {
         for cell in &cells {
             let r = {
                 let mut g = self.lock_cell(cell);
-                if g.retired { Ok(()) } else { self.flush_state(cell.ino, &mut g.file) }
+                if g.retired { Ok(()) } else { self.flush_cell(&mut g, false) }
             };
             if let Err(e) = r {
                 return Err(MetaError::Corrupted(format!("cut: flush of open file {} failed: errno {e}", cell.ino)));
@@ -2236,66 +2221,80 @@ impl SliceFsFilesystem {
     /// are durable through the write log (#20). A rebase at each fsync would
     /// cost a write of the changed chunks and nodes per fsync (#3).
     /// Any write handle of the inode flushes the shared cell; a read-only
-    /// or unknown handle does nothing.
+    /// or unknown handle does nothing. The end of the snapshot runs with
+    /// the cell unlocked (see `flush_cell`).
     fn flush_handle(&self, fh: u64) -> Result<(), i32> {
         let Some(ino) = self.ino_of_fh(fh) else { return Ok(()) };
-        self.with_cell(ino, |s| self.flush_state(ino, s)).unwrap_or(Ok(()))
+        let Some(cell) = self.cells.get(ino) else { return Ok(()) };
+        let mut g = self.lock_cell(&cell);
+        if g.retired {
+            return Ok(());
+        }
+        self.flush_cell(&mut g, true)
     }
 
-    /// The flush of `flush_handle`, on the open write state `s` of `ino`
-    /// (the caller holds the cell lock across the install, so two flushes
-    /// never install out of order or release one old root twice).
-    fn flush_state(&self, ino: u64, s: &mut OpenFileState) -> Result<(), i32> {
-        // Pending (out-of-order) bytes stay pending: settling them here would
-        // stream zeros for the gaps, and the late writes that fill the gaps
-        // would then force the handle into an overlay. The write log keeps
-        // pending bytes durable (#20), so the manifest takes the streamed prefix.
-        // 1. Clone the stream
-        let (snapshot, byte_count, old_root, modified) = {
-            if s.byte_count == 0 {
-                // Empty file -- nothing to flush
-                return Ok(());
-            }
-            if s.cas_committed && s.last_committed_root.is_some() {
-                // No write since the last fsync: the manifest is current.
-                // (NFS sends a COMMIT per group of writes; skip the re-hash.)
-                return Ok(());
-            }
-            let snap = match &s.write_mode {
-                WriteMode::Streaming { state, next_expected_offset, .. } =>
-                    (state.clone(), *next_expected_offset, s.min_size),
-                WriteMode::Overlay(_) => return Ok(()),
-            };
-            s.cas_committed = true;
-            (snap, s.byte_count, s.last_committed_root, s.modified)
+    /// Write the streamed content of the locked cell `g` into its manifest
+    /// (fsync, flush, the commit cut, the last release; D-02, RESEARCH
+    /// Pitfall 5). Phase A clones the stream and reads its generation.
+    /// Phase B (with the cell unlocked if `unlocked`; the push hook runs
+    /// there) ends the clone, zero-padded to `min_size`, and stores the
+    /// manifest node. Phase C installs it only if no newer snapshot, and no
+    /// other install (a switch to an overlay, a truncate to 0), came first
+    /// (`last_published_gen`); the refcounts use `last_committed_root` as
+    /// it is then. The state is clean (`cas_committed`) only if the stream
+    /// did not change after the snapshot.
+    ///
+    /// Pending (out-of-order) bytes stay pending: settling them here would
+    /// stream zeros for the gaps, and the late writes that fill the gaps
+    /// would then force the handle into an overlay. The write log keeps
+    /// pending bytes durable (#20), so the manifest takes the streamed prefix.
+    fn flush_cell(&self, g: &mut CellGuard<'_>, unlocked: bool) -> Result<(), i32> {
+        let s = &g.file;
+        if s.byte_count == 0 {
+            // Empty file -- nothing to flush
+            return Ok(());
+        }
+        if s.cas_committed && s.last_committed_root.is_some() {
+            // No write since the last fsync: the manifest is current.
+            // (NFS sends a COMMIT per group of writes; skip the re-hash.)
+            return Ok(());
+        }
+        let WriteMode::Streaming { state, next_expected_offset, .. } = &s.write_mode else {
+            return Ok(());
         };
-
-        // 2. End the clone (an O(log N) tree finish)
-        let (state_snapshot, streamed, min_size) = snapshot;
-        let new_digest: ObjectKey = self.end_padded(&state_snapshot, streamed, min_size)?;
-
-        // 3. Decrement old committed root if any
-        if let Some(old) = old_root {
-            if old != new_digest {
-                self.meta.decrement_refcount(&old);
+        let (ino, snap, streamed) = (s.ino, state.clone(), *next_expected_offset);
+        let (min_size, byte_count, modified, generation) = (s.min_size, s.byte_count, s.modified, s.generation);
+        let io = || -> Result<(ObjectKey, ObjectKey), i32> {
+            let k = self.end_padded(snap, streamed, min_size)?;
+            Ok((k, self.meta.prepare_manifest(&[k]).map_err(|_| libc::EIO)?))
+        };
+        let (new, digest) = if unlocked {
+            g.unlocked(|| {
+                let r = io();
+                self.run_push_hook();
+                r
+            })
+        } else {
+            io()
+        }?;
+        // Phase C: a newer snapshot, or another install, came first.
+        if g.retired || g.last_published_gen >= generation || !matches!(g.file.write_mode, WriteMode::Streaming { .. }) {
+            return Ok(());
+        }
+        g.last_published_gen = generation;
+        let s = &mut g.file;
+        let old = s.last_committed_root;
+        if old != Some(new) {
+            self.meta.set_manifest_digest(ino, digest).map_err(|_| libc::EIO)?;
+            self.meta.increment_refcount(&new);
+            if let Some(o) = old {
+                self.meta.decrement_refcount(&o);
             }
+            s.last_committed_root = Some(new);
         }
-
-        // 4. Set manifest and increment refcount (skip increment if same as old -- already counted)
-        self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
-        if old_root != Some(new_digest) {
-            self.meta.increment_refcount(&new_digest);
-        }
-
-        // 5. Update last_committed_root
-        s.last_committed_root = Some(new_digest);
-
-        // 6. Update inode size and mtime
-        self.stamp_content(ino, byte_count, modified)?;
-
-        Ok(())
+        s.cas_committed = s.generation == generation;
+        self.stamp_content(ino, byte_count, modified)
     }
-
 
     /// Truncate/extend a file to `new_size` bytes. If `fh` is Some and open,
     /// operates on the in-flight write state; otherwise streams the committed
@@ -2312,17 +2311,40 @@ impl SliceFsFilesystem {
         if new_size > MAX_FILE_SIZE {
             return Err(libc::EFBIG);
         }
-        // Case A: the inode has an open write state.
-        if let Some(cell) = self.cells.get(ino) {
-            let mut g = self.lock_cell(&cell);
-            if !g.retired {
+        loop {
+            // Case A: the inode has an open write state (also one that its
+            // last release is still storing).
+            if let Some(cell) = self.cells.get(ino) {
+                let mut g = self.lock_cell(&cell);
+                if g.retired {
+                    continue;
+                }
                 return self.setattr_size_open(&mut g, new_size);
             }
+            // Case B: no open write state. A transient cell, locked before
+            // it goes into the map, orders this change against an open or
+            // another size change of the inode; its lock is held across the
+            // splice (RESEARCH Pattern 1: the one accepted I/O under a cell
+            // lock beside the locked retry and the hard cap).
+            let cell = Arc::new(FileCell::new(ino));
+            let mut g = self.lock_cell(&cell);
+            if !self.cells.insert_new(&cell) {
+                continue;
+            }
+            let r = self.setattr_size_closed(ino, new_size);
+            g.retired = true;
+            self.cells.remove(&cell);
+            return r;
         }
+    }
 
-        // Case B: no open write handle — splice the committed content to the
-        // new size, truncated or zero-extended. NotFound from get_manifest means the inode exists but has no content yet
-        // (brand-new file created by create() before any write/release). Treat as empty content.
+    /// Case B of `test_setattr_size` (the caller holds the transient cell):
+    /// splice the committed content to the new size, truncated or
+    /// zero-extended. NotFound from get_manifest means the inode exists but
+    /// has no content yet (brand-new file created by create() before any
+    /// write/release). Treat as empty content. The rebase hook runs after
+    /// the splice, before the install (for tests).
+    fn setattr_size_closed(&self, ino: u64, new_size: u64) -> Result<(), i32> {
         let old_manifest = match self.meta.get_manifest(ino) {
             Ok(m) => m,
             Err(MetaError::NotFound(_)) => vec![],
@@ -2357,6 +2379,10 @@ impl SliceFsFilesystem {
             let (new_digest, stats) = content::splice(cs, old_root.as_ref(), ov.visible, &[], new_size, &mut src)
                 .map_err(store_err)?;
             LAST_REBASE_BYTES.with(|c| c.set(stats.rechunked));
+            let hook = self.rebase_hook.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
             self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
             self.meta.increment_refcount(&new_digest);
         }
@@ -2387,6 +2413,8 @@ impl SliceFsFilesystem {
             // Back to an empty stream (a new state: a new generation).
             let old_root = s.last_committed_root.take();
             *s = OpenFileState { modified: Some(now_pair()), ..OpenFileState::new(ino) };
+            // No flush snapshot of the old content installs after this.
+            g.last_published_gen = g.file.generation;
             if let Some(old) = old_root {
                 self.meta.decrement_refcount(&old);
             }
@@ -3062,7 +3090,7 @@ impl SliceFsFilesystem {
         if flags & libc::O_TRUNC != 0 {
             if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
                 if self.take_handle(fh).is_some() {
-                    let _ = self.release_write(ino, false);
+                    let _ = self.release_write(ino);
                     self.uncount(ino);
                 }
                 return Err(e);
@@ -3148,11 +3176,10 @@ impl SliceFsFilesystem {
             if g.retired {
                 continue;
             }
-            if let Err(e) = self.finalize_write(cell.ino, &mut g.file) {
+            // No request runs now: the steps keep the cell locked.
+            if let Err(e) = self.finalize(&cell, &mut g, false) {
                 eprintln!("[{}][FUSE] destroy: could not write open file ino={}: errno {}", ts(), cell.ino, e);
             }
-            g.retired = true;
-            self.cells.remove(&cell);
         }
         // No handle survives unmount: unlinked-but-open inodes go away now.
         self.reclaim_all_orphans();
