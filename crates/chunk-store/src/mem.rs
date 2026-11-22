@@ -145,6 +145,9 @@ pub enum Hold {
     Opens = 3,
     /// `read_at` of a pack (not of an index run).
     PackReads = 4,
+    /// A write through a writer handle (`PackFile::writer`): the record
+    /// write of a put.
+    PackWrites = 5,
 }
 
 /// A held operation waits at most this long, so a test that fails before it
@@ -153,9 +156,9 @@ const HOLD_MAX: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 struct HoldState {
-    on: [bool; 5],
+    on: [bool; 6],
     /// Callers that wait in a held operation now.
-    parked: [usize; 5],
+    parked: [usize; 6],
 }
 
 struct Holds {
@@ -296,6 +299,12 @@ impl MemIo {
     /// are not held).
     pub fn hold_pack_reads(&self, on: bool) {
         self.set_hold(Hold::PackReads, on);
+    }
+
+    /// While on, a write through a writer handle waits before it changes
+    /// the bytes (a slow record write).
+    pub fn hold_pack_writes(&self, on: bool) {
+        self.set_hold(Hold::PackWrites, on);
     }
 
     fn set_hold(&self, h: Hold, on: bool) {
@@ -532,10 +541,12 @@ fn write_file(s: &Mutex<State>, f: &Mutex<MemFile>, data: &[u8], offset: u64) ->
 struct MemWrite {
     s: Arc<Mutex<State>>,
     f: Arc<Mutex<MemFile>>,
+    hold: Arc<Holds>,
 }
 
 impl PackWrite for MemWrite {
     fn write_at(&self, data: &[u8], offset: u64) -> io::Result<()> {
+        self.hold.wait(Hold::PackWrites);
         write_file(&self.s, &self.f, data, offset)
     }
 }
@@ -563,7 +574,7 @@ impl PackFile for MemPack {
     }
 
     fn writer(&self) -> Option<Arc<dyn PackWrite>> {
-        Some(Arc::new(MemWrite { s: Arc::clone(&self.s), f: Arc::clone(&self.f) }))
+        Some(Arc::new(MemWrite { s: Arc::clone(&self.s), f: Arc::clone(&self.f), hold: Arc::clone(&self.hold) }))
     }
 }
 

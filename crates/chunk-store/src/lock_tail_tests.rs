@@ -356,3 +356,131 @@ fn put_and_read_pass_a_held_index_flush_sync() {
     assert_eq!(s.read(&x).unwrap(), data(1, 300));
     assert_eq!(s.read(&y).unwrap(), data(2, 300));
 }
+
+/// The runs of the index, sorted.
+fn runs_of(mem: &MemIo) -> Vec<u64> {
+    use crate::pack_io::PackIo;
+    let mut r = mem.list_runs().unwrap();
+    r.sort_unstable();
+    r
+}
+
+// A's put parks in its record write (no store lock held). B's read, dedup
+// put, `stats` and `sync` must not wait for it; C's put of a new object
+// waits for it (one write in flight per pack). After a crash every object
+// put before the last sync reads back.
+#[test]
+fn put_and_read_pass_a_held_record_write() {
+    let mem = MemIo::new();
+    let o = Options { pack_limit: 1 << 20, ..small_packs() };
+    let s = store(&mem, o.clone());
+    let x1 = s.put(&data(1, 300)).unwrap();
+    mem.hold_pack_writes(true);
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.put(&data(2, 300)).unwrap())
+    };
+    assert!(mem.wait_parked(Hold::PackWrites, 1, LIMIT), "A is in its held record write");
+    let b = {
+        let s = Arc::clone(&s);
+        spawn(move || (s.read(&x1).unwrap(), s.put(&data(1, 300)).unwrap(), s.stats(), s.sync().unwrap()))
+    }
+    .recv_timeout(LIMIT);
+    let c = {
+        let s = Arc::clone(&s);
+        spawn(move || s.put(&data(3, 300)).unwrap())
+    };
+    let c_waited = c.recv_timeout(Duration::from_millis(300)).is_err();
+    let a_waited = a.try_recv().is_err();
+    mem.hold_pack_writes(false);
+    let (got, again, _, ()) = b.expect("B's read, dedup put, stats and sync finished while A wrote");
+    assert!(a_waited, "A was still in its record write while B ran");
+    assert!(c_waited, "C's put waited for A's record write");
+    assert_eq!((got, again), (data(1, 300), x1));
+    let x2 = a.recv_timeout(LIMIT).expect("A ends after the write is released");
+    let x3 = c.recv_timeout(LIMIT).expect("C ends after A's write");
+    let all = [(x1, 1), (x2, 2), (x3, 3)];
+    for (x, i) in all {
+        assert_eq!(s.read(&x).unwrap(), data(i, 300));
+    }
+    s.sync().unwrap();
+    drop(s);
+    mem.crash();
+    let s = store(&mem, o);
+    for (x, i) in all {
+        assert_eq!(s.read(&x).unwrap(), data(i, 300));
+    }
+}
+
+// While A's record write of x2 at offset O is in flight, x2 is not visible,
+// and a flush puts its hwm at or below O (the pack length moves only at the
+// publish). After a crash the open needs no rebuild.
+#[test]
+fn a_record_in_flight_is_invisible_and_below_no_hwm() {
+    let mem = MemIo::new();
+    let o = Options { pack_limit: 1 << 20, index_memtable_limit: 1 << 20, ..small_packs() };
+    let s = store(&mem, o.clone());
+    let x1 = s.put(&data(1, 300)).unwrap();
+    let (pack, offset) = {
+        let inner = s.inner.lock();
+        let a = inner.active.as_ref().unwrap();
+        (a.num, a.len)
+    };
+    let x2 = s.hasher().id(&data(2, 300));
+    mem.hold_pack_writes(true);
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.put(&data(2, 300)).unwrap())
+    };
+    assert!(mem.wait_parked(Hold::PackWrites, 1, LIMIT), "A is in its held record write");
+    let seen = s.read(&x2);
+    let flushed = s.flush_frozen();
+    let info = s.index_info();
+    mem.hold_pack_writes(false);
+    assert!(matches!(seen, Err(crate::Error::Missing(_))), "a record in flight is not visible: {seen:?}");
+    flushed.unwrap();
+    assert!((info.hwm_pack, info.hwm_offset) <= (pack, offset), "hwm {:?} is above the write at {offset}", (info.hwm_pack, info.hwm_offset));
+    assert_eq!(a.recv_timeout(LIMIT).expect("A ends after the write is released"), x2);
+    assert_eq!(s.read(&x2).unwrap(), data(2, 300));
+    s.sync().unwrap();
+    let runs = runs_of(&mem);
+    assert_eq!(runs.len(), 1);
+    drop(s);
+    mem.crash();
+    let s = store(&mem, o);
+    assert_eq!(runs_of(&mem), runs, "the open kept the run (no rebuild)");
+    assert_eq!(s.read(&x1).unwrap(), data(1, 300));
+    assert_eq!(s.read(&x2).unwrap(), data(2, 300));
+}
+
+// While A's record write is in flight, `gc_begin` (which seals the active
+// pack) waits for it with no store lock: a read finishes meanwhile.
+#[test]
+fn gc_begin_waits_for_a_record_write_with_no_lock() {
+    let mem = MemIo::new();
+    let s = store(&mem, small_packs());
+    let x1 = s.put(&data(1, 300)).unwrap();
+    mem.hold_pack_writes(true);
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.put(&data(2, 300)).unwrap())
+    };
+    assert!(mem.wait_parked(Hold::PackWrites, 1, LIMIT), "A is in its held record write");
+    let d = {
+        let s = Arc::clone(&s);
+        spawn(move || s.gc_begin())
+    };
+    let d_waited = d.recv_timeout(Duration::from_millis(300)).is_err();
+    let b = {
+        let s = Arc::clone(&s);
+        spawn(move || s.read(&x1).unwrap())
+    }
+    .recv_timeout(LIMIT);
+    mem.hold_pack_writes(false);
+    assert!(d_waited, "gc_begin waited for the record write");
+    assert_eq!(b.expect("B's read finished while gc_begin waited"), data(1, 300));
+    let x2 = a.recv_timeout(LIMIT).expect("A ends after the write is released");
+    d.recv_timeout(LIMIT).expect("gc_begin ends after the write").unwrap();
+    s.gc_abort();
+    assert_eq!(s.read(&x2).unwrap(), data(2, 300));
+}

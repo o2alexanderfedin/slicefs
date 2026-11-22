@@ -82,6 +82,9 @@ pub trait PackFile: PackRead {
     fn writer(&self) -> Option<Arc<dyn PackWrite>> {
         None
     }
+    /// The store published a record that it wrote through `writer` at
+    /// `offset` (under its lock, after the write returned).
+    fn note_written(&mut self, _offset: u64, _data: &[u8]) {}
     /// Start a sync of every write so far in the background, if this file
     /// can, and return a wait for its end. It only shortens a later `sync`
     /// (which the caller still calls: only that one reports the outcome).

@@ -297,6 +297,21 @@ impl PackSync for RetrySync {
     }
 }
 
+/// The writer of a [`RetryingPack`]: it writes through the writer of the
+/// inner file and keeps the copy, as `write_at` does (see `write_kept`).
+/// The copy is pushed when the write returns, so a sync that starts later
+/// covers it, and a sync failure while it ran is seen.
+struct RetryWrite {
+    write: Arc<dyn PackWrite>,
+    st: Arc<Mutex<Copies>>,
+}
+
+impl PackWrite for RetryWrite {
+    fn write_at(&self, data: &[u8], offset: u64) -> io::Result<()> {
+        write_kept(&self.st, data, offset, |d, o| self.write.write_at(d, o))
+    }
+}
+
 struct RetryingPack {
     file: Box<dyn PackFile>,
     st: Arc<Mutex<Copies>>,
@@ -460,9 +475,25 @@ impl PackFile for RetryingPack {
         Some(Arc::new(self.handle()?))
     }
 
+    /// A writer that keeps the copies (see `RetryWrite`); `None` if the
+    /// inner file has none.
+    fn writer(&self) -> Option<Arc<dyn PackWrite>> {
+        Some(Arc::new(RetryWrite { write: self.file.writer()?, st: Arc::clone(&self.st) }))
+    }
+
+    /// After a write through `writer` (its copy is kept already): start a
+    /// background sync past `KEEP_LIMIT`, as `write_at` does. It never waits
+    /// at `KEEP_CAP`: the store checks `write_wait` before the write.
+    fn note_written(&mut self, _offset: u64, _data: &[u8]) {
+        // An error marks the pack broken; the next sync reports it.
+        if self.settle(false).is_ok() && self.flight.is_none() && self.kept() > KEEP_LIMIT {
+            let _ = self.start();
+        }
+    }
+
     /// The background sync that `write_at` would wait for at `KEEP_CAP`.
-    /// The store waits for it without its lock and then writes in one hold
-    /// with this check, so the cap holds; the wait in `write_at` stays for
+    /// The store waits for it without its lock and then starts the write in
+    /// one hold with this check, so the cap holds; the wait in `write_at` stays for
     /// the callers that do not ask (run files, GC copies).
     fn write_wait(&self, len: usize) -> Option<SyncWait> {
         let f = self.flight.as_ref()?;
@@ -583,6 +614,33 @@ mod tests {
         assert_eq!(p.kept(), 1000, "only the copy of piece 4 is kept");
         p.sync().unwrap();
         assert_eq!(p.kept(), 0);
+    }
+
+    // A handle sync fails (as on Linux it marks every dirty page clean)
+    // while a write runs: the write sees it and writes again, so the next
+    // sync saves the bytes. Without that, the copy would be dropped by a
+    // sync that found nothing dirty.
+    #[test]
+    fn a_write_that_overlaps_a_failed_sync_is_written_again() {
+        let mem = MemIo::new();
+        let mut p = RetryingPack::new(mem.create(1).unwrap(), vec![Duration::ZERO]);
+        mem.sync_dir().unwrap();
+        let h = p.sync_handle().expect("a handle");
+        let mut first = true;
+        let file = &mut p.file;
+        write_kept(&p.st, &piece(1), 0, |d, o| {
+            file.write_at(d, o)?;
+            if std::mem::take(&mut first) {
+                mem.fail_next_syncs(1);
+                h.sync().expect("the handle repairs its own failure");
+            }
+            Ok(())
+        })
+        .unwrap();
+        p.sync().unwrap();
+        drop(p);
+        mem.crash();
+        assert!(mem.read(1, Kind::Pack).unwrap() == piece(1), "the bytes of the write were lost");
     }
 
     // A short error of a handle sync is repaired in the handle: the copies

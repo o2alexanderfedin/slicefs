@@ -48,7 +48,7 @@ use crate::lock_stats::Site;
 use crate::sync::{Condvar, Mutex, MutexGuard, Rank};
 use crate::index::{Counts, Hwm, Index, MergeOut, Snapshot};
 use crate::run::Run;
-use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PackSync, PUNCH_BLOCK, SyncWait};
+use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PackSync, PackWrite, PUNCH_BLOCK, SyncWait};
 pub use crate::locality::LocalityStats;
 use crate::locality::LocalityCache;
 pub use crate::mark::{LiveFilter, LiveSet, LIVE_FILTER_BITS};
@@ -615,12 +615,20 @@ struct Active {
     /// Appends so far: a sync with no lock clears `dirty` only if none came
     /// after its start.
     published: u64,
+    /// A handle that writes records with no store lock held (`None`: the
+    /// file has none; then a put writes under the lock).
+    writer: Option<Arc<dyn PackWrite>>,
+    /// The record write of a put that runs now with no store lock, at
+    /// `len` (at most one per pack, see `append_locked`), and the signal of
+    /// its end.
+    writing: Option<SyncWait>,
 }
 
 impl Active {
     fn new(num: u64, file: Box<dyn PackFile>, len: u64, entries: Vec<(ObjectId, Loc)>, dirty: bool) -> Self {
         let sync = file.sync_handle();
-        Active { num, file, len, entries, dirty, sync, published: 0 }
+        let writer = file.writer();
+        Active { num, file, len, entries, dirty, sync, published: 0, writer, writing: None }
     }
 }
 
@@ -1513,7 +1521,7 @@ impl ChunkStore {
                             drop(inner);
                             self.note_wait();
                             if !w.wait_timeout(STORE_WAIT) {
-                                return Err(timed_out("a pack create, a seal or a background sync"));
+                                return Err(timed_out("a pack create, a record write, a seal or a background sync"));
                             }
                             inner = self.inner.lock();
                         }
@@ -1532,8 +1540,23 @@ impl ChunkStore {
                         }
                     }
                 }
-                let loc = self.append(&mut inner, &id, &s.record, stored, data.len() as u32, flags)?;
-                inner.add_new(id, loc);
+                // The record write runs with no store lock (LOCK-01), at the
+                // end of the pack; under the lock again it is published (see
+                // `append_locked` for the one-write rule).
+                let raw = data.len() as u32;
+                let seen = self.index.gen();
+                let Some((offset, writer, done)) = inner.begin_write() else {
+                    // The pack has no writer handle: write under the lock.
+                    let loc = self.append_locked(&mut inner, &id, &s.record, stored, raw, flags)?;
+                    inner.add_new(id, loc);
+                    drop(inner);
+                    self.flush_if_full()?;
+                    return Ok(id);
+                };
+                drop(inner);
+                let wrote = writer.write_at(&s.record, offset);
+                let mut inner = self.inner.lock();
+                self.publish(&mut inner, &id, &s.record, offset, (stored, raw, flags), (seen, wrote), &done)?;
                 drop(inner);
                 self.flush_if_full()?;
                 Ok(id)
@@ -1636,11 +1659,12 @@ impl ChunkStore {
         self.locality.stats()
     }
 
-    /// What `append` of a record of `len` bytes would do under the store
+    /// What the append of a record of `len` bytes would do under the store
     /// lock that is slow, if anything (LOCK-01): create the pack file (no
-    /// active pack), wait for the seal of the previous pack (this record
-    /// fills the active pack), or wait for a background sync at `KEEP_CAP`
-    /// (see `retry.rs`). `put` does it without the lock and asks again; the
+    /// active pack), wait for the record write of another put (one in
+    /// flight per pack), wait for the seal of the previous pack (this
+    /// record fills the active pack), or wait for a background sync at
+    /// `KEEP_CAP` (see `retry.rs`). `put` does it without the lock and asks again; the
     /// GC copies, under the lock, do not ask (they are not on the put and
     /// read paths). For a create, the number is taken here and `creating`
     /// is set: one create at a time, and other puts wait for it.
@@ -1655,6 +1679,9 @@ impl ChunkStore {
             inner.creating = Some((num, done.clone()));
             return Some(Before::Create(num, done));
         };
+        if let Some(w) = &a.writing {
+            return Some(Before::Wait(w.clone()));
+        }
         if a.len + len as u64 >= self.opts.pack_limit {
             // After its signal the seal thread only returns: the join under
             // the lock then takes no time.
@@ -1697,15 +1724,70 @@ impl ChunkStore {
         Ok(None)
     }
 
-    /// Append an encoded record to the active pack (made if there is none),
-    /// and seal the pack when it is full. Returns where the record is.
+    /// Under the store lock after the record write of a put at `offset`
+    /// (see `Inner::begin_write`): end the write (wake the puts that wait
+    /// for it) and, if it worked, publish the record: the pack length, its
+    /// entry, the note to the retry layer, and the index. A failed write
+    /// publishes nothing, so the next write uses the same offset. Seals the
+    /// pack when it is full (no write is in flight then). `seen` is the
+    /// index generation in the hold that started the write.
     ///
-    /// The record write stays under the store lock (D-14): it is a pwrite to
-    /// the page cache, not a disk wait. The offset of a record is the end of
-    /// the pack, given out under this lock; a write outside it could leave a
-    /// hole before a later record on a crash, and the pack scans (`covers`,
-    /// `scan_pack`, `resync_scan`) assume a pack has no such hole.
-    fn append(&self, inner: &mut Inner, id: &ObjectId, rec: &[u8], stored: u32, raw: u32, flags: u8) -> Result<Loc> {
+    /// No GC copy runs while a write is in flight (they wait for none), so
+    /// the index has no current entry of `id` unless it changed since
+    /// `seen`; only then is it looked up again (with the lock, as the put
+    /// loop does). An entry found then is replaced by the new record (it is
+    /// the newest, as in `Inner::replay`) and not counted again.
+    #[allow(clippy::too_many_arguments)]
+    fn publish(
+        &self,
+        inner: &mut Inner,
+        id: &ObjectId,
+        rec: &[u8],
+        offset: u64,
+        (stored, raw, flags): (u32, u32, u8),
+        (seen, wrote): (u64, io::Result<()>),
+        done: &SyncWait,
+    ) -> Result<()> {
+        let a = inner.active.as_mut().expect("the pack of a record write in flight stays active");
+        a.writing = None;
+        done.done();
+        wrote?;
+        debug_assert_eq!(a.len, offset, "nothing moves the end of a pack with a write in flight");
+        let loc = Loc { pack: a.num, offset, stored, raw, flags };
+        a.len += rec.len() as u64;
+        a.entries.push((*id, loc));
+        a.file.note_written(offset, rec);
+        a.dirty = true;
+        a.published += 1;
+        let full = a.len >= self.opts.pack_limit;
+        if !self.unchanged(seen, id) && inner.index.get(id).ok().flatten().is_some() {
+            inner.index.insert(*id, loc);
+        } else {
+            inner.add_new(*id, loc);
+        }
+        if full {
+            self.seal(inner)?;
+        }
+        Ok(())
+    }
+
+    /// Append an encoded record to the active pack (made if there is none)
+    /// under the store lock, and seal the pack when it is full. Returns
+    /// where the record is. GC copies use it (they are not on the put and
+    /// read paths), and a put whose pack has no writer handle.
+    ///
+    /// A put writes its record with no store lock instead (LOCK-01; this
+    /// supersedes D-14, since on macOS a pwrite to the page cache waits
+    /// about 20 ms behind any F_FULLFSYNC of the volume, spike 19g). The
+    /// offset of a record is the end of the pack, given out under the lock.
+    /// At most one record write is in flight per pack, at its end, and the
+    /// pack length, its entries and the index move only when the write is
+    /// published under the lock (`publish`). So a pack never has a hole
+    /// before a later record, and the pack scans (`covers`, `scan_pack`,
+    /// `resync_scan`) and the hwm (`Inner::hwm_end`) need no change. The
+    /// callers that write or seal under the lock (this one for GC copies,
+    /// `gc_begin`, `close`) first wait with no lock for no write in flight.
+    fn append_locked(&self, inner: &mut Inner, id: &ObjectId, rec: &[u8], stored: u32, raw: u32, flags: u8) -> Result<Loc> {
         if inner.active.is_none() {
             let num = inner.next_pack;
             inner.next_pack += 1;
@@ -1745,18 +1827,30 @@ impl ChunkStore {
         Ok(inner.next_pack - 1)
     }
 
-    /// The store lock, with no pack create in flight: a pack whose number
-    /// is taken but whose file is not installed yet would be at or below the
-    /// boundary of `gc_begin` with no entries, so `gc_select` would take it
-    /// as unused and remove it. The wait for the create runs without the
-    /// store lock, at most `STORE_WAIT`.
+    /// The store lock, with no pack create and no record write in flight:
+    /// a pack whose number is taken but whose file is not installed yet
+    /// would be at or below the boundary of `gc_begin` with no entries, so
+    /// `gc_select` would take it as unused and remove it; and `gc_begin`
+    /// seals the active pack. The wait runs without the store lock, at most
+    /// `STORE_WAIT`.
     fn lock_no_create(&self) -> Result<MutexGuard<'_, Inner>> {
+        self.lock_when(|i| i.creating.as_ref().map(|c| c.1.clone()).or_else(|| i.writing()), "a pack create or a record write")
+    }
+
+    /// The store lock, with no record write in flight (see `append_locked`).
+    fn lock_no_write(&self) -> Result<MutexGuard<'_, Inner>> {
+        self.lock_when(Inner::writing, "a record write")
+    }
+
+    /// The store lock once `busy` gives no signal; each wait for a signal
+    /// runs without the lock, at most `STORE_WAIT`.
+    fn lock_when(&self, busy: impl Fn(&Inner) -> Option<SyncWait>, what: &str) -> Result<MutexGuard<'_, Inner>> {
         loop {
             let inner = self.inner.lock();
-            let Some(w) = inner.creating.as_ref().map(|c| c.1.clone()) else { return Ok(inner) };
+            let Some(w) = busy(&inner) else { return Ok(inner) };
             drop(inner);
             if !w.wait_timeout(STORE_WAIT) {
-                return Err(timed_out("a pack create"));
+                return Err(timed_out(what));
             }
         }
     }
@@ -1920,6 +2014,12 @@ impl ChunkStore {
     fn held<'a>(&'a self, holds: &'a Holds) -> Held<'a> {
         let g = self.inner.lock();
         Held { g, at: Instant::now(), holds }
+    }
+
+    /// `held` with no record write in flight (for the GC copies).
+    fn held_no_write<'a>(&'a self, holds: &'a Holds) -> Result<Held<'a>> {
+        let g = self.lock_no_write()?;
+        Ok(Held { g, at: Instant::now(), holds })
     }
 
     /// The GC test hook (see `gc_pass_hook`); nothing outside tests.
@@ -2118,9 +2218,19 @@ impl ChunkStore {
         let (added, before) = {
             let mut inner = loop {
                 let inner = self.held(holds);
-                let Some(w) = inner.flushing.clone() else { break inner };
+                if let Some(w) = inner.flushing.clone() {
+                    drop(inner);
+                    w.wait();
+                    continue;
+                }
+                // Its sync covers the records of the active pack: wait for a
+                // record write in flight too.
+                let Some(w) = inner.writing() else { break inner };
                 drop(inner);
-                w.wait();
+                if !w.wait_timeout(STORE_WAIT) {
+                    drop(plans);
+                    return Err(self.gc_abandon(timed_out("a record write"), &pending, holds));
+                }
             };
             let during = inner.touched.take().unwrap_or_else(Touched::exact);
             if !last {
@@ -2373,10 +2483,10 @@ impl ChunkStore {
                         file.read_at(&mut rec, l.offset)?;
                         recs.push(rec);
                     }
-                    let mut inner = self.held(holds);
+                    let mut inner = self.held_no_write(holds)?;
                     inner.check()?;
                     for ((id, l), rec) in batch.iter().zip(&recs) {
-                        let nl = self.append(&mut inner, id, rec, l.stored, l.raw, l.flags)?;
+                        let nl = self.append_locked(&mut inner, id, rec, l.stored, l.raw, l.flags)?;
                         inner.index.insert(*id, nl);
                     }
                     drop(inner);
@@ -2980,7 +3090,7 @@ impl ChunkStore {
     /// not flush the memtable: an open replays the records above the hwm.
     pub fn close(&self) -> Result<()> {
         self.stop_merges();
-        let mut inner = self.inner.lock();
+        let mut inner = self.lock_no_write()?;
         inner.check()?;
         if inner.active.is_some() {
             self.seal(&mut inner)?;
@@ -3289,6 +3399,23 @@ impl Inner {
             }
         }
         Ok(())
+    }
+
+    /// Start the record write of a put at the end of the active pack (the
+    /// caller made sure there is one with no write in flight, see
+    /// `prepare_append`): its offset, the writer, and the signal of its end.
+    /// `None` if the pack has no writer handle.
+    fn begin_write(&mut self) -> Option<(u64, Arc<dyn PackWrite>, SyncWait)> {
+        let a = self.active.as_mut()?;
+        let w = Arc::clone(a.writer.as_ref()?);
+        let done = SyncWait::default();
+        a.writing = Some(done.clone());
+        Some((a.len, w, done))
+    }
+
+    /// The signal of the record write in flight, if one runs.
+    fn writing(&self) -> Option<SyncWait> {
+        self.active.as_ref()?.writing.clone()
     }
 
     /// What a sync with no store lock must do now: the active pack through
