@@ -109,8 +109,12 @@ const RELOG_PIECE: u64 = 1 << 20;
 /// stays busy holds about the limit; release stores the rest.
 /// An extent grows by at most 1/8 of its length (`overlay::GROW_DIV`), not by
 /// doubling, so the capacity stays near the dirty bytes. The real
-/// peak of one handle is max(REORDER_WINDOW, DIRTY_LIMIT) + one write + the
-/// rebase work space (one piece and the stream state).
+/// peak of one handle is max(REORDER_WINDOW, hard cap) + one write + the
+/// rebase work space (the copy of one step, at most `FINAL_STEP`, and the
+/// stream state): a switch moves up to `REORDER_WINDOW` of pending writes
+/// into the overlay, and the write that switched then steps it down to the
+/// hard cap (`hard_cap`: the limit + limit / 8 + 2 x `REBASE_STEP`), one
+/// step of at most `FINAL_STEP` per hold.
 /// Measured (#98, Docker, release build): VmHWM 114 MiB (1 GiB) and 161 MiB (4 GiB), cap 256 MiB;
 /// slowest write 5870 ms (1 GiB) and 7253 ms (4 GiB). Both are above 2000 ms,
 /// so 16 MiB was also run: 7778 ms and 5726 ms (VmHWM 97 and 146 MiB). The
@@ -173,6 +177,9 @@ thread_local! {
     static WRITE_REBASE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Base bytes the rebase steps of this thread's last write read (for tests).
     static WRITE_BASE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Most bytes one unlocked rebase step of this thread's last write
+    /// copied in its Phase A hold (for tests).
+    static WRITE_MAX_COPY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Add `n` to a thread-local counter.
@@ -689,6 +696,12 @@ impl SliceFsFilesystem {
     /// with FastCDC (0 if it ran no rebase).
     pub fn test_last_write_rebase_bytes(&self) -> u64 {
         WRITE_REBASE_BYTES.with(std::cell::Cell::get)
+    }
+
+    /// Test hook: the most bytes that one rebase step of this thread's last
+    /// write copied with the cell locked (its Phase A).
+    pub fn test_last_write_max_copy(&self) -> u64 {
+        WRITE_MAX_COPY.with(std::cell::Cell::get)
     }
 
     /// Test hook: the base bytes that the rebase work of this thread's last write read.
@@ -1795,14 +1808,18 @@ impl SliceFsFilesystem {
     }
 
     /// At the hard cap: wait for the step in flight with the cell unlocked
-    /// (`wait_step`), or run an own unlocked rebase step that frees at least
-    /// `excess` (and at least `REBASE_STEP`). A dropped own step counts in
+    /// (`wait_step`), or run an own unlocked rebase step that frees
+    /// `excess` (at least `REBASE_STEP`, at most `final_step`: a switch can
+    /// move up to `REORDER_WINDOW` of pending writes in, and one step then
+    /// copies no more than `final_step` in its Phase A hold; the caller
+    /// steps again while it is above the cap). A dropped own step counts in
     /// `drops`, a published one resets it. The caller looks at the cost again.
     fn cap_step(&self, g: &mut CellGuard<'_>, excess: usize, drops: &mut usize) -> Result<(), i32> {
         if g.stepping.is_some() {
             return g.wait_step();
         }
-        if self.rebase_unlocked(g, excess.max(REBASE_STEP))? {
+        let most = self.final_step.load(Ordering::Relaxed).max(1);
+        if self.rebase_unlocked(g, excess.max(REBASE_STEP).min(most))? {
             *drops = 0;
         } else {
             *drops += 1;
@@ -1828,6 +1845,8 @@ impl SliceFsFilesystem {
         let Some((plan, Some(part))) = Self::step_plan(&g.file, free, true) else {
             return Ok(true);
         };
+        let copied = plan.pieces.iter().map(|&(_, n)| n as u64).sum::<u64>();
+        WRITE_MAX_COPY.with(|c| c.set(c.get().max(copied)));
         let ino = g.file.ino;
         let done = g.run_step(|| -> Result<(Option<ObjectKey>, ObjectKey), i32> {
             let (root, digest, line) = self.step_io(ino, &part, &plan)?;
@@ -2244,6 +2263,7 @@ impl SliceFsFilesystem {
     ) -> Result<(u32, u64), i32> {
         WRITE_REBASE_BYTES.with(|c| c.set(0));
         WRITE_BASE_BYTES.with(|c| c.set(0));
+        WRITE_MAX_COPY.with(|c| c.set(0));
         let Some(h) = self.handle(fh).filter(|h| h.write) else { return Err(libc::EBADF) };
         let ino = h.ino;
         // An append ignores the request offset (D-12, D-17). Replay does not
@@ -2408,8 +2428,9 @@ impl SliceFsFilesystem {
         // the larger of the cost this write added and `REBASE_STEP`, down
         // to `limit - REBASE_STEP`: the work of one write does not grow with
         // the limit (#108), and the cost never grows while it is above the
-        // limit (after a switch it comes down with each write smaller than
-        // `REBASE_STEP`). Not the sum of both: bigwrite showed the 1 MiB
+        // limit (after a switch that left it above the hard cap, the gate
+        // above already stepped it down to the cap, in steps of at most
+        // `final_step`). Not the sum of both: bigwrite showed the 1 MiB
         // writes, whose steps freed 2 MiB, as the slowest ones. The added cost
         // counts at most the bytes of the write (and one extent overhead):
         // the spare capacity of a growing extent (up to 1/8 of its length)

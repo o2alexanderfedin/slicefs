@@ -367,6 +367,47 @@ fn a_dropped_step_below_the_cap_retries_later() {
     assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
 }
 
+/// A switch that moves many pending writes into an overlay above the hard
+/// cap: the switching write frees the excess in steps of at most the final
+/// step (a split extent head can add up to `MIN_TAKE`), so no hold copies
+/// more, and the write still returns under the cap.
+#[test]
+fn a_switch_above_the_cap_steps_at_most_the_final_step() {
+    use slicefs_cli::filesystem::REBASE_STEP;
+    use slicefs_cli::overlay::{GROW_DIV, MIN_TAKE};
+    const LIMIT: usize = 256 * KIB;
+    // Not below `REBASE_STEP`: the step of a write over the limit frees
+    // that much too.
+    const FINAL: usize = REBASE_STEP;
+    let cap = LIMIT + LIMIT / GROW_DIV + 2 * REBASE_STEP;
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "s", 0o644, 0, 0, 0).unwrap();
+    fs.test_set_dirty_limit(LIMIT);
+    fs.test_set_final_step(FINAL);
+    let mut model = seeded(97, 64 * KIB);
+    fs.test_write(fh, 0, &model).unwrap();
+    // 4 MiB of pending writes ahead of the stream (in the reorder window).
+    for i in 0..64u64 {
+        let piece = seeded(200 + i, 64 * KIB);
+        let off = 128 * KIB + i as usize * 64 * KIB;
+        fs.test_write(fh, off as u64, &piece).unwrap();
+        put(&mut model, off, &piece);
+    }
+    assert!(fs.test_dirty_cost(ino) > cap, "the pending writes are above the cap");
+    // A write over a pending one switches the stream to an overlay.
+    let patch = seeded(98, 4 * KIB);
+    fs.test_write(fh, 130 * KIB as u64, &patch).unwrap();
+    put(&mut model, 130 * KIB, &patch);
+    assert!(!fs.test_is_streaming(fh), "the write switched to an overlay");
+    let max = fs.test_last_write_max_copy() as usize;
+    assert!(max > 0, "the switching write stepped");
+    assert!(max <= FINAL + MIN_TAKE, "one hold copied {max} bytes, more than the final step {FINAL} + MIN_TAKE");
+    assert!(fs.test_dirty_cost(ino) <= cap, "the write returns under the cap: {}", fs.test_dirty_cost(ino));
+    assert!(fs.test_read(ino, 0, 8 << 20).unwrap() == model, "content with the handle open");
+    fs.test_release(ino, fh).unwrap();
+    assert!(fs.test_read(ino, 0, 8 << 20).unwrap() == model, "content after release");
+}
+
 /// RESEARCH Pitfall 1 (#98): 4 threads write one file at a dirty limit of
 /// 256 KiB; the steps keep dropping each other's results, but the dirty
 /// cost of the file never passes `limit + 2 * REBASE_STEP`.
