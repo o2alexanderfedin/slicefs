@@ -610,21 +610,24 @@ fn reads_during_rewrite_and_gc_never_fail() {
             n
         });
         let gc = s.spawn(|| {
-            let mut n = 0u64;
+            let (mut n, mut removed) = (0u64, 0u64);
             while Instant::now() < deadline {
                 {
                     let _commit = gate.write().unwrap();
                     fs.commit_cut().unwrap();
                 }
-                fs.gc_online(&stop).unwrap().expect("not stopped");
+                removed += fs.gc_online(&stop).unwrap().expect("not stopped").removed_objects;
                 n += 1;
             }
-            n
+            (n, removed)
         });
         (writer.join().unwrap(), reader.join().unwrap(), gc.join().unwrap())
     });
-    eprintln!("reads_during_rewrite_and_gc: writes {writes}, reads {reads}, GCs {gcs}, rebases {}", fs.test_rebase_count());
+    let (gcs, removed) = gcs;
+    eprintln!("reads_during_rewrite_and_gc: writes {writes}, reads {reads}, GCs {gcs}, removed {removed}, rebases {}",
+        fs.test_rebase_count());
     assert!(writes > 0 && reads > 0 && gcs > 0, "writes {writes}, reads {reads}, GCs {gcs}");
+    assert!(removed > 0, "the GCs deleted the old roots' objects while reads ran");
     assert!(fs.test_rebase_count() > 0, "the rewrites published new roots");
     for (b, vs) in versions.iter().enumerate() {
         let last = *vs.lock().unwrap().last().unwrap();

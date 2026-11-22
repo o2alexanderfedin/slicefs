@@ -357,9 +357,12 @@ fn reader_does_not_wait_for_streaming_push() {
     assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content after release");
 }
 
-/// Two in-order writers on one stream: the second write lands while the
-/// first is parked in its push, so the first loses the generation check,
-/// tries again with the cell locked, and both writes are in the stream.
+/// Two in-order writers on one stream: the second write (longer, at the
+/// same offset) publishes while the first is parked in its push, so the
+/// first loses the generation check and tries again with the cell locked.
+/// Its stale clone must not be swapped in: that would drop the tail of the
+/// second write. The retry is no longer in order, so it goes to an overlay
+/// on top of the second write.
 #[test]
 fn a_streaming_push_that_loses_the_generation_check_retries() {
     let (fs, _dir) = fresh_fs();
@@ -367,21 +370,20 @@ fn a_streaming_push_that_loses_the_generation_check_retries() {
     let (other, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
     let mut model = seeded(22, 64 * KIB);
     fs.test_write(fh, 0, &model).unwrap();
-    let (a, b) = (seeded(23, 64 * KIB), seeded(24, 64 * KIB));
+    let (a, b) = (seeded(23, 64 * KIB), seeded(24, 128 * KIB));
     let (parked, go) = park_first_push(&fs);
     std::thread::scope(|s| {
         let w = s.spawn(|| fs.test_write(fh, 64 * KIB as u64, &a));
         parked.recv_timeout(WAIT).expect("the push reached its I/O phase");
-        // Ahead of the stream end: it waits in the reorder window (memory).
-        let r = fs.test_write(other, 128 * KIB as u64, &b);
+        // Also in order (the parked write has not published): it goes first.
+        let r = fs.test_write(other, 64 * KIB as u64, &b);
         go.send(()).unwrap();
         assert_eq!(r, Ok(b.len() as u32));
         assert_eq!(w.join().unwrap(), Ok(a.len() as u32));
     });
     fs.test_set_push_hook(None);
+    put(&mut model, 64 * KIB, &b);
     put(&mut model, 64 * KIB, &a);
-    put(&mut model, 128 * KIB, &b);
-    assert!(fs.test_is_streaming(fh), "both writes are in order: still a stream");
     assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "both writes with the handles open");
     fs.test_release(ino, other).unwrap();
     fs.test_release(ino, fh).unwrap();
@@ -472,6 +474,32 @@ fn fsyncs_publish_in_order() {
     assert_eq!(fs.meta().get_refcount(&r3), 1);
     fs.test_release(ino, fh).unwrap();
     assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content after release");
+}
+
+/// RESEARCH Pitfall 5, truncate case: an fsync parked in its I/O phase
+/// must not install its snapshot after a truncate to 0 (the old content
+/// would come back, and the release would not correct it).
+#[test]
+fn a_parked_fsync_does_not_install_over_a_truncate() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "s", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, &seeded(33, 64 * KIB)).unwrap();
+    let (parked, go) = park_first_push(&fs);
+    std::thread::scope(|s| {
+        let f = s.spawn(|| fs.test_fsync(ino, fh));
+        parked.recv_timeout(WAIT).expect("the fsync reached its I/O phase");
+        let r = fs.test_setattr_size(ino, Some(fh), 0);
+        go.send(()).unwrap();
+        assert_eq!(r, Ok(()));
+        assert_eq!(f.join().unwrap(), Ok(()));
+    });
+    fs.test_set_push_hook(None);
+    assert!(fs.meta().get_manifest(ino).unwrap().is_empty(), "the truncate wins");
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 0);
+    fs.test_release(ino, fh).unwrap();
+    assert!(fs.meta().get_manifest(ino).unwrap().is_empty(), "still empty after release");
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 0);
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap().is_empty());
 }
 
 /// A 1 MiB file, closed, then open with eight 32 KiB extents in its
