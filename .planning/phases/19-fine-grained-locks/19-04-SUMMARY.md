@@ -12,7 +12,7 @@ provides:
   - "PerOpWal: in-memory queue timed as Site::WalQueue (\"wal_queue\"); sticky write-out failure until a cut or rotate"
   - "BufferedLog (FlushOnFsync, Periodic): append holds in RAM; write_out writes only past BUFFER_CAP_BYTES"
   - "One WAL lock order: writer, then queue or pending, then loc, then behind"
-  - "cut, rotate, install_root and shutdown write the queue out first"
+  - "cut, install_root and shutdown write the queue out first (PerOp and buffered); PerOp rotate writes it out too; buffered rotate drops the held records once the new segment exists (as before)"
   - "SegmentWriter::begin_sync / end_sync (SyncMark) and wal::sync_current: no WAL lock across a disk sync in flush_and_sync"
   - "Behind::settle syncs the old segments with the behind lock released"
   - "DictMetadataStore::log_append(bytes) -> Option<Lsn> and log_write_out(Option<Lsn>); log_op is both"
@@ -57,10 +57,10 @@ key-decisions:
   - "append and write_out are required trait methods. Two defaults that call each other would recurse for a strategy that implements neither"
   - "PerOp write_out drains the whole queue, not only up to `upto`: the writer is held anyway, and this keeps the queue short"
   - "A PerOp write-out failure is sticky until a cut or rotate (as in the buffered strategies): write_out and flush_and_sync fail meanwhile, so a record that another thread's failed write-out dropped is still reported (T-19-14)"
-  - "The buffered write_out takes the records out of `pending` before the write, so appends go on during a 4 MiB write-out. RAM is at most the cap plus the records of the requests in flight (T-19-11)"
+  - "The buffered write_out takes the records out of `pending` before the write, so appends go on during a 4 MiB write-out. While one batch is written, `pending` can fill again, so the peak RAM is about two caps plus the records of the requests in flight (T-19-11)"
   - "end_sync takes a SyncMark (segment id, write count) instead of the plan's argument-free form: overlapping syncs, or a cut between begin and end, must not clear `unsynced` of records that the sync did not cover"
   - "Behind::settle syncs second handles of the old segments and removes a writer only after its sync succeeded (by segment id); `dir` is cleared only if no cut came meanwhile (`cuts` counter, kept by `reset`)"
-  - "Rotate still holds `writer` across the fsync of the new segment (both strategies; buffered no longer holds `pending` across it). Rotate runs only from `commit()` under the exclusive gate, when no request appends"
+  - "Rotate still holds `writer` across the fsync of the new segment (both strategies; buffered no longer holds `pending` across it). For PerOp and the buffered strategies, rotate runs only from `commit_root` (the offline `snapshot switch` command): their `cut` always returns a cut, so the commit path of a mount uses cut and install_root"
 
 patterns-established:
   - "A request calls log_append under its apply locks and log_write_out after it released them, before the reply, with the shared commit gate held across both (a cut drains the queue under the exclusive gate)"
@@ -158,14 +158,19 @@ See `key-decisions`. All of them can be changed later.
 - The PerOp queue drain in `cut`, `rotate`, `install_root` and `shutdown` came in Task 1, because a queue without it could put records in the wrong segment. Task 2 added the tests for it.
 - PerOp `shutdown` is now `flush_and_sync`. It also syncs the segments left behind, and it fails after a failed write-out.
 
-**Total deviations:** 5 auto-fixes (3 Rule 1, 1 Rule 2, 1 Rule 3) and 1 note. **Impact:** inventory rows 9-11 leave their locks. Two plan signatures are stronger than the plan text (`SyncMark`, settle by handle).
+**7. [Plan fact] Buffered rotate drops the held records; it does not write them out**
+- The plan's must-have says rotate writes out the queue first. The buffered `rotate` keeps today's behavior: it clears `pending` after the new segment exists, because the new root holds those records and the old segment is deleted. Writing them out first would only write into a file that is then removed. `rotate_after_unwritten_appends_starts_with_the_seed_only` checks the property that matters: no record from before the rotate follows the seed.
+
+**Total deviations:** 5 auto-fixes (3 Rule 1, 1 Rule 2, 1 Rule 3) and 2 notes. **Impact:** inventory rows 9-11 leave their locks. Two plan signatures are stronger than the plan text (`SyncMark`, settle by handle).
 
 ## For later plans
 
 - Plans 08 and 10: call `log_append` under the apply locks and `log_write_out` after the release, before the reply. Hold the shared commit gate across both. `cut` runs under the exclusive gate and drains the queue, so no request can be between the two steps at a cut.
 - `log_append` returns `None` when there is no write log or the append failed (then `wal_fail_seq` was already bumped). `log_write_out(None)` does nothing.
 - After a failed PerOp write-out, every `log_write_out` bumps `wal_fail_seq` until the next commit. This is harmless, because `flush_wal` fails until then anyway.
-- Still holding a WAL lock across I/O: `rotate` holds `writer` across the fsync of the new segment, and `cut` holds `writer` and `pending` across the create of the new segment (no fsync). Both run under the exclusive gate. Group commit and `durable_lsn` stay deferred.
+- Still holding a WAL lock across I/O: `rotate` holds `writer` across the fsync of the new segment (it runs only from the offline `snapshot switch`), and `cut` holds `writer` and `pending` across the create of the new segment (no fsync; under the exclusive gate).
+- A buffered `rotate` drops the records held in `pending` after the new segment exists, also records appended during its fsync. Today no request runs then (offline command). A plan that calls rotate on a live mount must drop only the records held before `rotate_segment`.
+- Key link: the plan names `begin_sync` on the link from `per_op.rs` to `segment/writer.rs`. The call is in `wal::sync_current` (`wal/mod.rs`), which `PerOpWal::flush_and_sync` and `BufferedLog::flush_and_sync` call. Group commit and `durable_lsn` stay deferred.
 - `wal::Parker` (tests only) can park a thread at a named point of a WAL path.
 
 ## Issues Encountered
