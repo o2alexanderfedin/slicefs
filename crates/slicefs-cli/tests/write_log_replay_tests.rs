@@ -12,7 +12,7 @@ use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use metadata::wal::{create_wal, WalConfig};
 use slicefs_cli::filesystem::SliceFsFilesystem;
-use slicefs_cli::handlers::{self as h, CreateResult, EmptyResult, EntryResult, OpenResult, WriteResult};
+use slicefs_cli::handlers::{self as h, AttrResult, CreateResult, EmptyResult, EntryResult, OpenResult, WriteResult};
 use slicefs_cli::oplog;
 use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 use tempfile::TempDir;
@@ -1387,4 +1387,135 @@ fn reverse_order_creates_replay() {
     let (c, fc) = create(&fs, 1, "c");
     release(&fs, c, fc);
     assert!(c > 7, "a later create got {c}");
+}
+
+/// D-08 for namespace records: 4 threads run creates, links, renames
+/// between two directories, unlinks, setattrs (mode, times) and setxattrs
+/// for about 0.5 s on one small pool of names, so their requests depend on
+/// each other (a request that fails logs nothing). Two dependent records
+/// appended out of apply order make the replay stop or give another tree.
+/// After a crash, replay gives the live tree, with the inode numbers, link
+/// counts and times (also of the two directories).
+#[test]
+fn parallel_namespace_ops_replay() {
+    check(|fs| {
+        let mk = |name: &str| match h::handle_mkdir(fs, 1, name, S_IFDIR | 0o755, 0o022, 501, 20) {
+            EntryResult::Ok(i, _) => i,
+            _ => panic!("mkdir {name}"),
+        };
+        let dirs = [mk("d1"), mk("d2")];
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        std::thread::scope(|sc| {
+            for t in 0..4u64 {
+                sc.spawn(move || namespace_worker(fs, t, dirs, end));
+            }
+        });
+    });
+}
+
+/// One thread of `parallel_namespace_ops_replay`: names `n0`..`n5` in each
+/// of `dirs`, shared with the other threads.
+fn namespace_worker(fs: &SliceFsFilesystem, t: u64, dirs: [u64; 2], end: std::time::Instant) {
+    let mut x = (t + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut rnd = |n: u64| { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x % n };
+    let mut n = 0u64;
+    while std::time::Instant::now() < end {
+        n += 1;
+        let (d, name) = (dirs[rnd(2) as usize], format!("n{}", rnd(6)));
+        let (d2, name2) = (dirs[rnd(2) as usize], format!("n{}", rnd(6)));
+        let found = fs.test_lookup(d, &name).ok().map(|r| r.0);
+        match (rnd(6), found) {
+            (0, _) => {
+                if let CreateResult::Ok(ino, fh, _) = h::handle_create(fs, d, &name, S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR) {
+                    write(fs, fh, 0, &data(t * 100_000 + n, 64));
+                    release(fs, ino, fh);
+                }
+            }
+            (1, Some(ino)) => { let _ = h::handle_link(fs, ino, d2, &name2); }
+            (2, _) => { let _ = h::handle_rename(fs, d, &name, d2, &name2, 0); }
+            (3, _) => { let _ = h::handle_unlink(fs, d, &name); }
+            (4, Some(ino)) => {
+                let when = Some((1_600_000_000 + n as i64, (t * 1000) as u32));
+                let _ = h::handle_setattr(fs, ino, Some(0o600 | rnd(0o100) as u32), None, None, None, None, when, when);
+            }
+            (5, Some(ino)) => { let _ = h::handle_setxattr(fs, ino, "user.k", &n.to_le_bytes()); }
+            _ => {}
+        }
+    }
+}
+
+/// A namespace request that fails appends no record.
+#[test]
+fn a_failed_namespace_op_appends_no_record() {
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    let d = match h::handle_mkdir(&fs, 1, "d", S_IFDIR | 0o755, 0o022, 501, 20) { EntryResult::Ok(i, _) => i, _ => panic!() };
+    let (a, fa) = create(&fs, d, "a");
+    release(&fs, a, fa);
+    let before = logged_ops(&fs, dir.path()).len();
+    assert!(matches!(h::handle_mkdir(&fs, 1, "d", S_IFDIR | 0o755, 0o022, 501, 20), EntryResult::Error(_)));
+    assert!(matches!(h::handle_create(&fs, d, "a", S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR), CreateResult::Error(_)));
+    assert!(matches!(h::handle_symlink(&fs, 1, "d", "x", 501, 20), EntryResult::Error(_)));
+    assert!(matches!(h::handle_mknod(&fs, 9999, "n", S_IFREG | 0o644, 0, 0, 501, 20), EntryResult::Error(_)));
+    assert!(matches!(h::handle_link(&fs, d, 1, "dl"), EntryResult::Error(_)), "a hard link to a directory");
+    assert!(matches!(h::handle_unlink(&fs, 1, "missing"), EmptyResult::Error(_)));
+    assert!(matches!(h::handle_rmdir(&fs, 1, "d"), EmptyResult::Error(_)), "not empty");
+    assert!(matches!(h::handle_rename(&fs, 1, "missing", 1, "x", 0), EmptyResult::Error(_)));
+    assert!(matches!(h::handle_setattr(&fs, 9999, Some(0o600), None, None, None, None, None, None), AttrResult::Error(_)));
+    assert!(matches!(h::handle_setattr(&fs, a, None, None, None, Some(slicefs_cli::filesystem::MAX_FILE_SIZE + 1), None, None, None), AttrResult::Error(_)));
+    assert!(matches!(h::handle_setxattr(&fs, 9999, "user.k", b"v"), EmptyResult::Error(_)));
+    assert!(matches!(h::handle_removexattr(&fs, a, "user.none"), EmptyResult::Error(_)));
+    assert_eq!(logged_ops(&fs, dir.path()).len(), before, "no record for a failed request");
+}
+
+/// A setattr of an orphan replays (19-09 note). The orphan was unlinked
+/// while a plain open, which the log does not show, kept it. In replay the
+/// unlink reclaims the inode, so its later `Setattr` record is skipped, as
+/// an xattr change of a gone inode is.
+#[test]
+fn a_setattr_of_an_open_orphan_replays() {
+    let dir = TempDir::new().unwrap();
+    {
+        let fs = new_fs(dir.path());
+        let (ino, fh) = create(&fs, 1, "f");
+        release(&fs, ino, fh);
+        fs.commit_cut().unwrap();
+        assert!(matches!(h::handle_open(&fs, ino, libc::O_RDONLY), OpenResult::Ok(..)));
+        assert!(matches!(h::handle_unlink(&fs, 1, "f"), EmptyResult::Ok));
+        assert!(matches!(h::handle_setattr(&fs, ino, Some(0o600), None, None, None, None, None, None), AttrResult::Ok(_)));
+        std::mem::forget(fs); // crash with the handle open
+    }
+    let fs = reload_and_replay(dir.path());
+    assert!(fs.meta().lookup(1, "f").is_err());
+}
+
+/// A utimens while the release of the last write handle is in its I/O phase
+/// (the flush with the cell unlocked) wins, as at a close: the flush stamps
+/// the mtime the cell has then, not the one it read before its I/O. Replay
+/// gives the same (found by `parallel_namespace_ops_replay`).
+#[test]
+fn a_utimens_during_the_close_io_is_kept() {
+    check(|fs| {
+        let (ino, fh) = create(fs, 1, "f");
+        write(fs, fh, 0, b"hello");
+        let (parked_tx, parked) = std::sync::mpsc::channel();
+        let (go, go_rx) = std::sync::mpsc::channel::<()>();
+        let once = Mutex::new(Some((parked_tx, go_rx)));
+        fs.test_set_push_hook(Some(Arc::new(move || {
+            if let Some((p, g)) = once.lock().unwrap().take() {
+                p.send(()).unwrap();
+                g.recv().unwrap();
+            }
+        })));
+        let when = (1_500_000_000, 7);
+        std::thread::scope(|sc| {
+            sc.spawn(|| release(fs, ino, fh));
+            parked.recv_timeout(std::time::Duration::from_secs(10)).expect("the release parks in its I/O");
+            assert!(matches!(h::handle_setattr(fs, ino, None, None, None, None, None, None, Some(when)), AttrResult::Ok(_)));
+            go.send(()).unwrap();
+        });
+        fs.test_set_push_hook(None);
+        let m = fs.meta().get_inode(ino).unwrap();
+        assert_eq!((m.mtime_sec, m.mtime_nsec), when, "the explicit mtime");
+    });
 }

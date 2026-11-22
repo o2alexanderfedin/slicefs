@@ -103,9 +103,9 @@ pub enum LockResult {
 // ── Handler functions ─────────────────────────────────────────────────────────
 
 /// One logged request (#20): freezes the clock while the request runs (all
-/// its times are equal and replayable), and `log` appends its record after
-/// it succeeded. During replay the clock is frozen already and nothing is
-/// logged.
+/// its times are equal and replayable). Its record is appended in the lock
+/// hold of its apply (`sink`, D-08) and written out before the reply.
+/// During replay the clock is frozen already and nothing is logged.
 struct Logged {
     _clock: Option<crate::oplog::Clock>,
     time: (i64, u32),
@@ -122,10 +122,6 @@ fn logged() -> Logged {
 }
 
 impl Logged {
-    fn log(&self, fs: &SliceFsFilesystem, op: crate::oplog::Op) {
-        fs.log_record(crate::oplog::Record { time: self.time, op });
-    }
-
     /// The log callback of a namespace request (D-08): the fs function
     /// calls it in the lock hold of its apply; it appends the record and
     /// keeps the LSN in `lsn`, which the handler writes out after the call,
@@ -296,13 +292,10 @@ pub fn handle_setxattr(
     value: &[u8],
 ) -> EmptyResult {
     let l = logged();
-    match fs.test_setxattr(ino, name, value) {
-        Ok(()) => {
-            l.log(fs, crate::oplog::Op::Setxattr { ino, name: name.to_string(), value: value.to_vec() });
-            EmptyResult::Ok
-        }
-        Err(errno) => EmptyResult::Error(errno),
-    }
+    let mut lsn = None;
+    let r = fs.setxattr_logged(ino, name, value, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    empty(r)
 }
 
 /// Handle `removexattr`: remove extended attribute `name` from inode `ino`.
@@ -312,11 +305,11 @@ pub fn handle_removexattr(
     name: &str,
 ) -> EmptyResult {
     let l = logged();
-    match fs.test_removexattr(ino, name) {
-        Ok(()) => {
-            l.log(fs, crate::oplog::Op::Removexattr { ino, name: name.to_string() });
-            EmptyResult::Ok
-        }
+    let mut lsn = None;
+    let r = fs.removexattr_logged(ino, name, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    match r {
+        Ok(()) => EmptyResult::Ok,
         Err(e) if e == libc::ENOENT => EmptyResult::Error(libc::ENODATA),
         Err(errno) => EmptyResult::Error(errno),
     }
@@ -489,6 +482,14 @@ pub fn handle_symlink_at(
     entry(r)
 }
 
+/// The reply of a request that gives nothing back.
+fn empty(r: Result<(), i32>) -> EmptyResult {
+    match r {
+        Ok(()) => EmptyResult::Ok,
+        Err(errno) => EmptyResult::Error(errno),
+    }
+}
+
 /// The reply of a request that gives an inode.
 fn entry(r: Result<(u64, InodeMeta), i32>) -> EntryResult {
     match r {
@@ -513,13 +514,10 @@ pub fn handle_link(
     newname: &str,
 ) -> EntryResult {
     let l = logged();
-    match fs.test_link_full(ino, newparent, newname) {
-        Ok((new_ino, meta)) => {
-            l.log(fs, crate::oplog::Op::Link { ino, newparent, newname: newname.to_string() });
-            EntryResult::Ok(new_ino, inode_to_file_attr(&meta))
-        }
-        Err(errno) => EntryResult::Error(errno),
-    }
+    let mut lsn = None;
+    let r = fs.link_logged(ino, newparent, newname, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    entry(r)
 }
 
 /// Handle `unlink`: remove the directory entry `name` from `parent`.
@@ -529,13 +527,10 @@ pub fn handle_unlink(
     name: &str,
 ) -> EmptyResult {
     let l = logged();
-    match fs.simulate_unlink(parent, name) {
-        Ok(()) => {
-            l.log(fs, crate::oplog::Op::Unlink { parent, name: name.to_string() });
-            EmptyResult::Ok
-        }
-        Err(errno) => EmptyResult::Error(errno),
-    }
+    let mut lsn = None;
+    let r = fs.unlink_logged(parent, name, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    empty(r)
 }
 
 /// Handle `rmdir`: remove the empty directory `name` from `parent`.
@@ -545,13 +540,10 @@ pub fn handle_rmdir(
     name: &str,
 ) -> EmptyResult {
     let l = logged();
-    match fs.simulate_rmdir(parent, name) {
-        Ok(()) => {
-            l.log(fs, crate::oplog::Op::Rmdir { parent, name: name.to_string() });
-            EmptyResult::Ok
-        }
-        Err(errno) => EmptyResult::Error(errno),
-    }
+    let mut lsn = None;
+    let r = fs.rmdir_logged(parent, name, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    empty(r)
 }
 
 /// Handle `rename`: rename `name` in `parent` to `newname` in `newparent`.
@@ -564,13 +556,10 @@ pub fn handle_rename(
     flags: u32,
 ) -> EmptyResult {
     let l = logged();
-    match fs.simulate_rename(parent, name, newparent, newname, flags) {
-        Ok(()) => {
-            l.log(fs, crate::oplog::Op::Rename { parent, name: name.to_string(), newparent, newname: newname.to_string(), flags });
-            EmptyResult::Ok
-        }
-        Err(errno) => EmptyResult::Error(errno),
-    }
+    let mut lsn = None;
+    let r = fs.rename_logged(parent, name, newparent, newname, flags, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    empty(r)
 }
 
 /// Handle `setattr`: update inode attributes for `ino`.
@@ -589,11 +578,12 @@ pub fn handle_setattr(
 ) -> AttrResult {
     fs.note_write();
     let l = logged();
-    match fs.test_setattr_full(ino, mode, uid, gid, size, fh, atime, mtime) {
-        Ok(inode) => {
-            l.log(fs, crate::oplog::Op::Setattr { ino, mode, uid, gid, size, atime, mtime });
-            AttrResult::Ok(inode_to_file_attr(&inode))
-        }
+    let mut lsn = None;
+    // A size change logs its own record in its cell hold (see `setattr_logged`).
+    let r = fs.setattr_logged(ino, mode, uid, gid, size, fh, atime, mtime, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    match r {
+        Ok(inode) => AttrResult::Ok(inode_to_file_attr(&inode)),
         Err(errno) => AttrResult::Error(errno),
     }
 }

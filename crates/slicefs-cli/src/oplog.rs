@@ -294,6 +294,16 @@ pub fn replay_stream<B: AsRef<[u8]>>(
                     return Err(bad("rename"));
                 }
             }
+            // A change of an inode that replay has already reclaimed (an
+            // orphan whose open is not in the log) is skipped, as a write of
+            // a gone inode is: the setattr and xattr calls refuse a missing
+            // inode.
+            Op::Setattr { ino, .. } | Op::Setxattr { ino, .. } | Op::Removexattr { ino, .. }
+                if fs.test_getattr(*ino).is_err() =>
+            {
+                stats.skipped += 1;
+                continue;
+            }
             Op::Setattr { ino, mode, uid, gid, size, atime, mtime } => {
                 let fh = handles.get(ino).copied();
                 if !matches!(
@@ -302,13 +312,6 @@ pub fn replay_stream<B: AsRef<[u8]>>(
                 ) {
                     return Err(bad("setattr"));
                 }
-            }
-            // An xattr change of an inode that replay has already reclaimed
-            // (an orphan whose open is not in the log) is skipped, as a write
-            // of a gone inode is: the xattr calls refuse a missing inode.
-            Op::Setxattr { ino, .. } | Op::Removexattr { ino, .. } if fs.test_getattr(*ino).is_err() => {
-                stats.skipped += 1;
-                continue;
             }
             Op::Setxattr { ino, name, value } => {
                 if !matches!(handlers::handle_setxattr(fs, *ino, name, value), handlers::EmptyResult::Ok) {

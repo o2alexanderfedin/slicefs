@@ -2567,6 +2567,10 @@ impl SliceFsFilesystem {
             s.last_committed_root = Some(new);
         }
         s.cas_committed = s.generation == generation;
+        // With no write since the snapshot, `modified` can still have moved:
+        // a setattr of the mtime in the I/O phase sets it and wins (as at a
+        // close). Stamp the current one then, not the snapshot's.
+        let modified = if s.cas_committed { s.modified } else { modified };
         self.stamp_content(ino, byte_count, modified).map(|_| true)
     }
 
@@ -2582,9 +2586,18 @@ impl SliceFsFilesystem {
     /// A size change goes to the open write state of the inode whatever
     /// handle it names (the NFS SETATTR from cp carries no handle).
     pub fn test_setattr_size(&self, ino: u64, _fh: Option<u64>, new_size: u64) -> Result<(), i32> {
+        self.setattr_size_logged(ino, new_size, &mut |_| {})
+    }
+
+    /// `test_setattr_size` that logs a size-only `Setattr` in the cell hold
+    /// of the change (the open cell or the transient cell).
+    fn setattr_size_logged(&self, ino: u64, new_size: u64, log: LogOp<'_>) -> Result<(), i32> {
         if new_size > MAX_FILE_SIZE {
             return Err(libc::EFBIG);
         }
+        let size_op = || crate::oplog::Op::Setattr {
+            ino, mode: None, uid: None, gid: None, size: Some(new_size), atime: None, mtime: None,
+        };
         loop {
             // Case A: the inode has an open write state (also one that its
             // last release is still storing).
@@ -2593,7 +2606,11 @@ impl SliceFsFilesystem {
                 if g.retired {
                     continue;
                 }
-                return self.setattr_size_open(&mut g, new_size);
+                let r = self.setattr_size_open(&mut g, new_size);
+                if r.is_ok() {
+                    log(size_op());
+                }
+                return r;
             }
             // Case B: no open write state. A transient cell, locked before
             // it goes into the map, orders this change against an open or
@@ -2606,6 +2623,9 @@ impl SliceFsFilesystem {
                 continue;
             }
             let r = self.setattr_size_closed(ino, new_size);
+            if r.is_ok() {
+                log(size_op());
+            }
             g.retired = true;
             self.cells.remove(&cell);
             return r;
@@ -2933,6 +2953,11 @@ impl SliceFsFilesystem {
     /// Returns ENOTEMPTY if the directory still has entries beyond . and ..
     /// Returns EISDIR if the target is not a directory (though lookup normally guards this).
     pub fn simulate_rmdir(&self, parent_ino: u64, name: &str) -> Result<(), i32> {
+        self.rmdir_logged(parent_ino, name, &mut |_| {})
+    }
+
+    /// `simulate_rmdir` that logs its record in the stripe hold (D-08).
+    pub(crate) fn rmdir_logged(&self, parent_ino: u64, name: &str, log: LogOp<'_>) -> Result<(), i32> {
         // Resolve name to inode, with the parent and child stripes held (a
         // create in the child holds the child's stripe too).
         let (_ns, found) = self.lock_namespace(false, &[parent_ino], &[(parent_ino, name)]);
@@ -2966,6 +2991,7 @@ impl SliceFsFilesystem {
             .modify_inode(parent_ino, |m| m.nlinks = m.nlinks.saturating_sub(1))
             .map_err(|e| meta_error_to_errno(&e))?;
         self.touch_dir(parent_ino)?;
+        log(crate::oplog::Op::Rmdir { parent: parent_ino, name: name.to_string() });
         Ok(())
     }
 
@@ -2978,6 +3004,11 @@ impl SliceFsFilesystem {
     ///
     /// Returns EISDIR if the target is a directory (use rmdir instead).
     pub fn simulate_unlink(&self, parent_ino: u64, name: &str) -> Result<(), i32> {
+        self.unlink_logged(parent_ino, name, &mut |_| {})
+    }
+
+    /// `simulate_unlink` that logs its record in the stripe hold (D-08).
+    pub(crate) fn unlink_logged(&self, parent_ino: u64, name: &str, log: LogOp<'_>) -> Result<(), i32> {
         // Resolve name, with the parent and child stripes held.
         let (_ns, found) = self.lock_namespace(false, &[parent_ino], &[(parent_ino, name)]);
         let ino = found[0].as_ref().map_err(meta_error_to_errno).copied()?;
@@ -2999,6 +3030,7 @@ impl SliceFsFilesystem {
             self.drop_last_link(inode)?;
         }
         self.touch_dir(parent_ino)?;
+        log(crate::oplog::Op::Unlink { parent: parent_ino, name: name.to_string() });
         Ok(())
     }
 
@@ -3007,6 +3039,18 @@ impl SliceFsFilesystem {
     /// POSIX disallows hard links to directories — returns EPERM.
     /// Returns the new inode number (same as `ino`).
     pub fn simulate_link(&self, ino: u64, newparent_ino: u64, newname: &str) -> Result<u64, i32> {
+        self.link_logged(ino, newparent_ino, newname, &mut |_| {}).map(|(ino, _)| ino)
+    }
+
+    /// `simulate_link` that logs its record in the stripe hold (D-08).
+    /// Returns `(ino, InodeMeta)`.
+    pub(crate) fn link_logged(
+        &self,
+        ino: u64,
+        newparent_ino: u64,
+        newname: &str,
+        log: LogOp<'_>,
+    ) -> Result<(u64, InodeMeta), i32> {
         // The inode and the new parent, under their stripes.
         let (_ns, _) = self.lock_namespace(false, &[ino, newparent_ino], &[]);
         let inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
@@ -3029,14 +3073,15 @@ impl SliceFsFilesystem {
 
         // Increment nlinks and update ctime
         let (now_sec, now_nsec) = now_pair();
-        self.meta.modify_inode(ino, |inode| {
+        let meta = self.meta.modify_inode(ino, |inode| {
             inode.nlinks += 1;
             inode.ctime_sec = now_sec;
             inode.ctime_nsec = now_nsec;
+            inode.clone()
         }).map_err(|e| meta_error_to_errno(&e))?;
         self.touch_dir(newparent_ino)?;
-
-        Ok(ino)
+        log(crate::oplog::Op::Link { ino, newparent: newparent_ino, newname: newname.to_string() });
+        Ok((ino, meta))
     }
 
     /// Rename `name` in `parent_ino` to `newname` in `newparent_ino`.
@@ -3053,6 +3098,22 @@ impl SliceFsFilesystem {
         newname: &str,
         flags: u32,
     ) -> Result<(), i32> {
+        self.rename_logged(parent_ino, name, newparent_ino, newname, flags, &mut |_| {})
+    }
+
+    /// `simulate_rename` that logs its record in the stripe hold (D-08).
+    pub(crate) fn rename_logged(
+        &self,
+        parent_ino: u64,
+        name: &str,
+        newparent_ino: u64,
+        newname: &str,
+        flags: u32,
+        log: LogOp<'_>,
+    ) -> Result<(), i32> {
+        let op = || crate::oplog::Op::Rename {
+            parent: parent_ino, name: name.to_string(), newparent: newparent_ino, newname: newname.to_string(), flags,
+        };
         // RENAME_EXCHANGE not supported
         if flags & 2 != 0 {
             return Err(libc::ENOSYS);
@@ -3086,6 +3147,7 @@ impl SliceFsFilesystem {
         if let Some(dst_ino) = target_ino {
             // POSIX: old and new name the same file -> do nothing.
             if dst_ino == src_ino {
+                log(op());
                 return Ok(());
             }
             let dst_inode = self.meta.get_inode(dst_ino).map_err(|e| meta_error_to_errno(&e))?;
@@ -3142,7 +3204,7 @@ impl SliceFsFilesystem {
             m.ctime_sec = now_sec;
             m.ctime_nsec = now_nsec;
         }).map_err(|e| meta_error_to_errno(&e))?;
-
+        log(op());
         Ok(())
     }
 
@@ -3344,17 +3406,31 @@ impl SliceFsFilesystem {
     /// a set that loses the race with the delete of the inode leaves no
     /// xattr entry behind.
     pub fn test_setxattr(&self, ino: u64, name: &str, value: &[u8]) -> Result<(), i32> {
+        self.setxattr_logged(ino, name, value, &mut |_| {})
+    }
+
+    /// `test_setxattr` that logs its record in the stripe (and cell) hold.
+    pub(crate) fn setxattr_logged(&self, ino: u64, name: &str, value: &[u8], log: LogOp<'_>) -> Result<(), i32> {
         self.with_inode_locked(ino, |_| {
             self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-            self.meta.set_xattr(ino, name, value).map_err(|e| meta_error_to_errno(&e))
+            self.meta.set_xattr(ino, name, value).map_err(|e| meta_error_to_errno(&e))?;
+            log(crate::oplog::Op::Setxattr { ino, name: name.to_string(), value: value.to_vec() });
+            Ok(())
         })
     }
 
     /// Remove an extended attribute.
     pub fn test_removexattr(&self, ino: u64, name: &str) -> Result<(), i32> {
+        self.removexattr_logged(ino, name, &mut |_| {})
+    }
+
+    /// `test_removexattr` that logs its record in the stripe (and cell) hold.
+    pub(crate) fn removexattr_logged(&self, ino: u64, name: &str, log: LogOp<'_>) -> Result<(), i32> {
         self.with_inode_locked(ino, |_| {
             self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-            self.meta.remove_xattr(ino, name).map_err(|e| meta_error_to_errno(&e))
+            self.meta.remove_xattr(ino, name).map_err(|e| meta_error_to_errno(&e))?;
+            log(crate::oplog::Op::Removexattr { ino, name: name.to_string() });
+            Ok(())
         })
     }
 
@@ -3396,13 +3472,34 @@ impl SliceFsFilesystem {
         atime: Option<(i64, u32)>,
         mtime: Option<(i64, u32)>,
     ) -> Result<InodeMeta, i32> {
+        self.setattr_logged(ino, mode, uid, gid, size, fh, atime, mtime, &mut |_| {})
+    }
+
+    /// `test_setattr_full` that logs (D-08). A size change logs a size-only
+    /// `Setattr` in the cell hold of the size change, so it keeps its order
+    /// with the writes of the inode; the other fields then log a `Setattr`
+    /// without the size in the stripe-and-cell hold of their apply (also
+    /// when they are all `None`: that hold sets the ctime).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn setattr_logged(
+        &self,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        _fh: Option<u64>,
+        atime: Option<(i64, u32)>,
+        mtime: Option<(i64, u32)>,
+        log: LogOp<'_>,
+    ) -> Result<InodeMeta, i32> {
         // Size first: it rewrites the inode (size, mtime, ctime); the other
         // fields of the same request are applied on top of the result. The
         // size change is ordered by the cell lock alone (the open cell, or
         // the transient cell of a closed file), not under the stripe: it can
         // run stream steps or a splice (RESEARCH Pattern 4 rule 1).
         if let Some(new_size) = size {
-            self.test_setattr_size(ino, fh, new_size)?;
+            self.setattr_size_logged(ino, new_size, &mut *log)?;
         }
         // The other fields: stripe, then the cell (if open), so they are
         // ordered with the writes of the inode.
@@ -3438,6 +3535,7 @@ impl SliceFsFilesystem {
                 s.modified = Some((sec, nsec));
             }
         }
+        log(crate::oplog::Op::Setattr { ino, mode, uid, gid, size: None, atime, mtime });
         Ok(inode)
         })
     }
@@ -3541,9 +3639,7 @@ impl SliceFsFilesystem {
         newparent: u64,
         newname: &str,
     ) -> Result<(u64, InodeMeta), i32> {
-        let new_ino = self.simulate_link(ino, newparent, newname)?;
-        let meta = self.meta.get_inode(new_ino).map_err(|e| meta_error_to_errno(&e))?;
-        Ok((new_ino, meta))
+        self.link_logged(ino, newparent, newname, &mut |_| {})
     }
 
     /// Flush write buffer without closing the handle.
