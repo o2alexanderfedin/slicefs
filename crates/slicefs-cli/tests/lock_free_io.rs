@@ -584,3 +584,44 @@ fn a_closed_file_truncate_runs_in_a_transient_cell() {
     assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == want, "extended with zeros");
     assert_eq!(fs.test_dirty_cost(ino), 0, "no cell is left");
 }
+
+/// ROADMAP criterion 2: a thread parked in the I/O phase of file X does not
+/// delay a write, a read or an fsync of file Y.
+#[test]
+fn many_files_no_cross_file_wait() {
+    let (fs, _dir) = fresh_fs();
+    let (x, fx, mut model_x) = overlay_file(&fs);
+    let (y, fy) = fs.test_create(1, "y", 0o644, 0, 0, 0).unwrap();
+    let data_y = seeded(70, 64 * KIB);
+    let (parked, go) = park_first(&fs);
+    let big = seeded(71, 128 * KIB);
+    put(&mut model_x, 256 * KIB, &big);
+    std::thread::scope(|s| {
+        let w = s.spawn(|| fs.test_write(fx, 256 * KIB as u64, &big));
+        parked.recv_timeout(WAIT).expect("the rebase of X reached its I/O phase");
+        let (tx, rx) = channel();
+        let (fs, data_y) = (&fs, &data_y);
+        s.spawn(move || {
+            let r = fs.test_write(fy, 0, data_y)
+                .and_then(|_| fs.test_read(y, 0, 64 * KIB as u32))
+                .and_then(|got| fs.test_fsync(y, fy).map(|_| got));
+            tx.send(r).ok();
+        });
+        let got = match rx.recv_timeout(WAIT) {
+            Ok(r) => r,
+            Err(e) => {
+                go.send(()).ok();
+                panic!("file Y waited for the parked I/O of file X: {e:?}");
+            }
+        };
+        go.send(()).unwrap();
+        assert!(got.unwrap() == *data_y, "Y reads back its write");
+        assert_eq!(w.join().unwrap(), Ok(big.len() as u32));
+    });
+    fs.test_set_rebase_hook(None);
+    assert!(fs.test_read(x, 0, 2 << 20).unwrap() == model_x, "X with the handle open");
+    fs.test_release(x, fx).unwrap();
+    fs.test_release(y, fy).unwrap();
+    assert!(fs.test_read(x, 0, 2 << 20).unwrap() == model_x, "X after release");
+    assert!(fs.test_read(y, 0, 1 << 20).unwrap() == data_y, "Y after release");
+}
