@@ -4,17 +4,17 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: 19
 current_phase_name: Fine-grained locks
-status: executing
-stopped_at: Completed 19-10-PLAN.md
-last_updated: "2026-11-22T10:10:45.808Z"
+status: verifying
+stopped_at: Completed 19-11-PLAN.md
+last_updated: "2026-11-22T11:33:10.233Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 19 execution started
-state_head: f960da3557b22d33eb6cde7b9f0a5b37e589390a
+state_head: 1a6eddf4071f9821956553d855ef88508c4e8388
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 18
-  completed_plans: 17
+  completed_plans: 18
   percent: 14
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 Phase: 19 (Fine-grained locks) — EXECUTING
 Plan: 11 of 11
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-11-21 — Phase 19 execution started
 
 Progress: [█░░░░░░░░░] 14%
@@ -63,6 +63,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 19 P08 | 45min | 3 tasks | 5 files |
 | Phase 19 P09 | 55min | 3 tasks | 11 files |
 | Phase 19 P10 | 55min | 3 tasks | 7 files |
+| Phase 19 P11 | 52min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -122,6 +123,9 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: 19-10: the namespace log callback is &mut dyn FnMut(Op); the fs function builds the op in its apply hold, the handler appends it and writes out the LSN before the reply
 - [Phase 19]: 19-10: a setattr with a size logs a size-only Setattr in the cell hold of the size change, then the other fields in the stripe-and-cell hold
 - [Phase 19]: 19-10: the harness crash test (Config.crash) makes no commit in the last 250 ms and none at the end, so the log holds the end of the run
+- [Phase 19]: 19-11: LOCK-01 not marked: the store lock is still held across disk I/O (ChunkStore::sync second-phase fsync; a record pwrite under the store or WAL writer lock stalls behind a concurrent fsync on macOS); owner decision
+- [Phase 19]: 19-11: LOCK-04 not marked until the orchestrator applies the staged #21 body; mkdir and closed-file size change windows open for the owner
+- [Phase 19]: 19-11: LOCK-05 marked complete (lock_free_io, lock_wait_rows, multi_handle_posix, harness multi-handle mode)
 
 ### Pending Todos
 
@@ -134,6 +138,7 @@ None.
 - `keep_budget` is the last cross-file take-out of `open_files`; it stays until Phase 20 (LOCK-02). Phase 19 concurrency tests must stay below the dirty budget.
 - Phase 20 (budget, flusher and gate) has the highest deadlock risk; run research-phase before planning it.
 - Idle index merge can rewrite GBs after a short pause and is not stopped by new writes (#141). Not in v2.2.
+- LOCK-01 open: store lock held across an fsync (ChunkStore::sync second phase) and record pwrites under the store and WAL writer locks stall 20-36 ms behind a concurrent fsync on macOS (19-11 lock rows; deferred-items.md). Needs an owner decision on the store/log sync protocol.
 
 ## Deferred Items
 
@@ -143,8 +148,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-22T10:10:45.649Z
-Stopped at: Completed 19-10-PLAN.md
+Last session: 2026-11-22T11:33:10.071Z
+Stopped at: Completed 19-11-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
