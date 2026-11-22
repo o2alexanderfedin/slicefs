@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 19
 current_phase_name: Fine-grained locks
 status: executing
-stopped_at: Completed 19-02-PLAN.md
-last_updated: "2026-11-22T01:56:54.150Z"
+stopped_at: Completed 19-03-PLAN.md
+last_updated: "2026-11-22T02:48:47.645Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 19 execution started
-state_head: 3fb6def7d1c6bc844c7e8fbfb895e61a10917147
+state_head: bdeb0bfc5789b7d001246d82f98120373f7ac3b8
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 18
-  completed_plans: 9
+  completed_plans: 10
   percent: 14
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 19 (Fine-grained locks) — EXECUTING
-Plan: 3 of 11
+Plan: 4 of 11
 Status: Ready to execute
 Last activity: 2026-11-21 — Phase 19 execution started
 
@@ -55,6 +55,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 18 P07 | 35 min | 2 tasks | 1 files |
 | Phase 19 P01 | 60min | 3 tasks | 23 files |
 | Phase 19 P02 | 52min | 3 tasks | 6 files |
+| Phase 19 P03 | 50min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -86,6 +87,11 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: Plan 19-02: seal join, pack create and KEEP_CAP wait leave ChunkStore::inner by a check-wait-retry loop in put; one create and one flush at a time, marked in Inner
 - [Phase 19]: Plan 19-02: index flush uses a frozen memtable; run and MANIFEST writes run without the store lock; GC install waits for a running flush
 - [Phase 19]: Plan 19-02: trust floor has its own Rank::Store lock held across the TRUST write; read opens uncached packs without the store lock and re-checks the place
+- [Phase 19]: 19-03: modify_inode under the inode_live shard lock; filesystem read-modify-write helpers use it
+- [Phase 19]: 19-03: inode_live and dir_live are 32 shards (Rank::Store); store order inode_map, inode shard, inode_data; dir shard, dir_data
+- [Phase 19]: 19-03: Live.flushing holds a ticket per take; install only on the same ticket (a commit and a cache flush can take one entry)
+- [Phase 19]: 19-03: create_*_at counts a number as taken if it is in inode_map, the cache or inode_data; reserve under inode_map
+- [Phase 19]: 19-03: hot path uses NodeReader/NodeWriter on the store's Arc<ChunkStore>; unsynced_puts and first put error kept in the store
 
 ### Pending Todos
 
@@ -107,8 +113,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-22T01:56:54.006Z
-Stopped at: Completed 19-02-PLAN.md
+Last session: 2026-11-22T02:48:47.515Z
+Stopped at: Completed 19-03-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
