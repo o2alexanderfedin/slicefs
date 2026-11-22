@@ -33,6 +33,8 @@ mod locality;
 pub mod lock_stats;
 #[cfg(test)]
 mod locality_tests;
+#[cfg(test)]
+mod lock_tail_tests;
 mod mark;
 pub mod pack_io;
 #[cfg(test)]
@@ -741,6 +743,11 @@ pub struct ChunkStore {
     /// `race_tests.rs`).
     #[cfg(test)]
     gc_pass_hook: Mutex<Option<PassHook>>,
+    /// Test counter: the times a `put` began to wait for a slow operation of
+    /// another thread (a seal, a pack create, a background sync, a flush;
+    /// see `lock_tail_tests.rs`).
+    #[cfg(test)]
+    waits: std::sync::atomic::AtomicUsize,
 }
 
 /// The merge state that the store shares with its merge thread.
@@ -1044,6 +1051,8 @@ impl ChunkStore {
             locality: LocalityCache::default(),
             #[cfg(test)]
             gc_pass_hook: Mutex::new(Rank::Store, None),
+            #[cfg(test)]
+            waits: Default::default(),
         };
         s.locality.forget_below(floor);
         s.locality.sealed_below(unsealed);
@@ -1124,6 +1133,19 @@ impl ChunkStore {
                 f(self);
             }
         }
+    }
+
+    /// Count a wait of a `put` for a slow operation (see `waits`); nothing
+    /// outside tests.
+    fn note_wait(&self) {
+        #[cfg(test)]
+        self.waits.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// See `waits`.
+    #[cfg(test)]
+    pub(crate) fn test_waits(&self) -> usize {
+        self.waits.load(Ordering::SeqCst)
     }
 
     /// The test hook (see `after_lookup`); nothing outside tests.
@@ -1372,13 +1394,22 @@ impl ChunkStore {
 
             let r = (|| {
                 let mut inner = self.inner.lock();
-                inner.touch(id);
-                // Another put of the same bytes, or a flush, merge or GC,
-                // since the lookup: look up again.
-                if !self.unchanged(gen, &id) && self.locked_lookup(&mut inner, &id)? {
-                    return Ok(id);
+                loop {
+                    inner.touch(id);
+                    // Another put of the same bytes, or a flush, merge or GC,
+                    // since the lookup: look up again.
+                    if !self.unchanged(gen, &id) && self.locked_lookup(&mut inner, &id)? {
+                        return Ok(id);
+                    }
+                    inner.check()?;
+                    // A slow operation that the append would wait for runs:
+                    // wait for it without the store lock, then start again.
+                    let Some(w) = self.append_wait(&inner, s.record.len()) else { break };
+                    drop(inner);
+                    self.note_wait();
+                    w.wait();
+                    inner = self.inner.lock();
                 }
-                inner.check()?;
                 let loc = self.append(&mut inner, &id, &s.record, stored, data.len() as u32, flags)?;
                 inner.add_new(id, loc);
                 self.flush_if_full(&mut inner)?;
@@ -1475,8 +1506,30 @@ impl ChunkStore {
         self.locality.stats()
     }
 
+    /// What `append` of a record of `len` bytes would wait for under the
+    /// store lock, if anything: the seal of the previous pack (when this
+    /// record fills the active pack). `put` waits for it without the lock
+    /// and asks again (LOCK-01); the GC copies, under the lock, do not ask.
+    fn append_wait(&self, inner: &Inner, len: usize) -> Option<SyncWait> {
+        let a = inner.active.as_ref()?;
+        if a.len + len as u64 >= self.opts.pack_limit {
+            // After its signal the seal thread only returns: the join under
+            // the lock then takes no time.
+            if let Some(s) = inner.sealing.as_ref().filter(|s| !s.done.is_done()) {
+                return Some(s.done.clone());
+            }
+        }
+        None
+    }
+
     /// Append an encoded record to the active pack (made if there is none),
     /// and seal the pack when it is full. Returns where the record is.
+    ///
+    /// The record write stays under the store lock (D-14): it is a pwrite to
+    /// the page cache, not a disk wait. The offset of a record is the end of
+    /// the pack, given out under this lock; a write outside it could leave a
+    /// hole before a later record on a crash, and the pack scans (`covers`,
+    /// `scan_pack`, `resync_scan`) assume a pack has no such hole.
     fn append(&self, inner: &mut Inner, id: &ObjectId, rec: &[u8], stored: u32, raw: u32, flags: u8) -> Result<Loc> {
         if inner.active.is_none() {
             let num = inner.next_pack;

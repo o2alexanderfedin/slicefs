@@ -106,6 +106,11 @@ impl SyncWait {
         self.0 .1.notify_all();
     }
 
+    /// True if the sync has ended.
+    pub fn is_done(&self) -> bool {
+        *self.0 .0.lock()
+    }
+
     /// Wait until the sync has ended.
     pub fn wait(&self) {
         let mut d = self.0 .0.lock();

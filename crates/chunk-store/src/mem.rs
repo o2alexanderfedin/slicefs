@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::sync::{Condvar, Mutex, Rank};
 
@@ -130,6 +131,59 @@ impl State {
     }
 }
 
+/// A slow operation that a test can hold (see [`MemIo::hold_syncs`] and the
+/// knobs beside it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hold {
+    /// Pack and run syncs (through a handle or a sync handle).
+    Syncs = 0,
+    /// `create` and `create_run`.
+    Creates = 1,
+    /// `write_durable`.
+    Durable = 2,
+    /// `open_read` and `open_run`.
+    Opens = 3,
+}
+
+/// A held operation waits at most this long, so a test that fails before it
+/// lets go still ends.
+const HOLD_MAX: Duration = Duration::from_secs(10);
+
+#[derive(Default)]
+struct HoldState {
+    on: [bool; 4],
+    /// Callers that wait in a held operation now.
+    parked: [usize; 4],
+}
+
+struct Holds {
+    s: Mutex<HoldState>,
+    cv: Condvar,
+}
+
+impl Holds {
+    /// Wait while `h` is held (at most `HOLD_MAX`).
+    fn wait(&self, h: Hold) {
+        let i = h as usize;
+        let until = Instant::now() + HOLD_MAX;
+        let mut s = self.s.lock();
+        if !s.on[i] {
+            return;
+        }
+        s.parked[i] += 1;
+        self.cv.notify_all();
+        while s.on[i] {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            self.cv.wait_for(&mut s, left);
+        }
+        s.parked[i] -= 1;
+        self.cv.notify_all();
+    }
+}
+
 /// The mock. Clones share the same files.
 #[derive(Clone)]
 pub struct MemIo {
@@ -138,8 +192,8 @@ pub struct MemIo {
     open: Arc<AtomicUsize>,
     /// The most handles that were open at one time (see `peak_handles`).
     peak: Arc<AtomicUsize>,
-    /// While true, pack syncs wait (a slow disk; see `hold_syncs`).
-    hold: Arc<(Mutex<bool>, Condvar)>,
+    /// The held slow operations (see `hold_syncs`).
+    hold: Arc<Holds>,
 }
 
 impl Default for MemIo {
@@ -148,7 +202,7 @@ impl Default for MemIo {
             s: Arc::new(Mutex::new(Rank::Store, State::default())),
             open: Arc::default(),
             peak: Arc::default(),
-            hold: Arc::new((Mutex::new(Rank::Store, false), Condvar::new())),
+            hold: Arc::new(Holds { s: Mutex::new(Rank::Store, HoldState::default()), cv: Condvar::new() }),
         }
     }
 }
@@ -218,8 +272,47 @@ impl MemIo {
     /// While on, every pack sync (through a handle or a sync handle) waits
     /// until it is turned off: a slow disk, with no timing in the test.
     pub fn hold_syncs(&self, on: bool) {
-        *self.hold.0.lock() = on;
-        self.hold.1.notify_all();
+        self.set_hold(Hold::Syncs, on);
+    }
+
+    /// While on, `create` and `create_run` wait (a slow file create).
+    pub fn hold_creates(&self, on: bool) {
+        self.set_hold(Hold::Creates, on);
+    }
+
+    /// While on, `write_durable` waits (a slow durable write).
+    pub fn hold_durable(&self, on: bool) {
+        self.set_hold(Hold::Durable, on);
+    }
+
+    /// While on, `open_read` and `open_run` wait (a slow open).
+    pub fn hold_opens(&self, on: bool) {
+        self.set_hold(Hold::Opens, on);
+    }
+
+    fn set_hold(&self, h: Hold, on: bool) {
+        self.hold.s.lock().on[h as usize] = on;
+        self.hold.cv.notify_all();
+    }
+
+    /// Callers that wait in a held operation of kind `h` now.
+    pub fn parked(&self, h: Hold) -> usize {
+        self.hold.s.lock().parked[h as usize]
+    }
+
+    /// Wait until at least `n` callers wait in a held `h`, at most
+    /// `timeout`. True if they do.
+    pub fn wait_parked(&self, h: Hold, n: usize, timeout: Duration) -> bool {
+        let until = Instant::now() + timeout;
+        let mut s = self.hold.s.lock();
+        while s.parked[h as usize] < n {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            self.hold.cv.wait_for(&mut s, left);
+        }
+        true
     }
 
     /// Every removal fails with EIO and keeps the file.
@@ -332,15 +425,7 @@ struct MemPack {
     f: Arc<Mutex<MemFile>>,
     kind: Kind,
     open: Arc<AtomicUsize>,
-    hold: Arc<(Mutex<bool>, Condvar)>,
-}
-
-/// Wait while syncs are held.
-fn wait_hold(hold: &(Mutex<bool>, Condvar)) {
-    let mut held = hold.0.lock();
-    while *held {
-        hold.1.wait(&mut held);
-    }
+    hold: Arc<Holds>,
 }
 
 /// The pack sync of the model (see the module comment).
@@ -367,7 +452,7 @@ fn sync_file(s: &Mutex<State>, f: &Mutex<MemFile>) -> io::Result<()> {
 struct MemSync {
     s: Arc<Mutex<State>>,
     f: Arc<Mutex<MemFile>>,
-    hold: Arc<(Mutex<bool>, Condvar)>,
+    hold: Arc<Holds>,
 }
 
 impl PackSync for MemSync {
@@ -376,7 +461,7 @@ impl PackSync for MemSync {
     /// it, so the caller must not count on it).
     fn sync(&self) -> io::Result<()> {
         let started = self.f.lock().dirty.clone();
-        wait_hold(&self.hold);
+        self.hold.wait(Hold::Syncs);
         let mut s = self.s.lock();
         let mut f = self.f.lock();
         if s.sync_fails() {
@@ -441,7 +526,7 @@ impl PackFile for MemPack {
     }
 
     fn sync(&mut self) -> io::Result<()> {
-        wait_hold(&self.hold);
+        self.hold.wait(Hold::Syncs);
         sync_file(&self.s, &self.f)
     }
 
@@ -484,6 +569,7 @@ impl PackIo for MemIo {
     }
 
     fn write_durable(&self, num: u64, kind: Kind, data: &[u8]) -> io::Result<()> {
+        self.hold.wait(Hold::Durable);
         let mut s = self.s.lock();
         if s.write_durable_fails(kind) || s.sync_fails() {
             return Err(eio());
@@ -520,6 +606,7 @@ impl PackIo for MemIo {
     }
 
     fn create(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
+        self.hold.wait(Hold::Creates);
         Ok(Box::new(self.create_new(num, Kind::Pack)?))
     }
 
@@ -528,6 +615,7 @@ impl PackIo for MemIo {
     }
 
     fn open_read(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
+        self.hold.wait(Hold::Opens);
         Ok(Arc::new(self.handle(num, Kind::Pack)?))
     }
 
@@ -566,10 +654,12 @@ impl PackIo for MemIo {
     /// Like `create`: the bytes are durable after `sync`, the name after
     /// `sync_dir`.
     fn create_run(&self, num: u64) -> io::Result<Box<dyn PackFile>> {
+        self.hold.wait(Hold::Creates);
         Ok(Box::new(self.create_new(num, Kind::Run)?))
     }
 
     fn open_run(&self, num: u64) -> io::Result<Arc<dyn PackRead>> {
+        self.hold.wait(Hold::Opens);
         Ok(Arc::new(self.handle(num, Kind::Run)?))
     }
 
