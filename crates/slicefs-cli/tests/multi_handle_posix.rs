@@ -3,12 +3,12 @@
 //! write handle, one finalize at the last release. Requests go through the
 //! handlers, as the FUSE callbacks call them.
 
+mod common;
+
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use metadata::store::DictMetadataStore;
-use metadata::store_io::StoreIo;
-use metadata::wal::{create_wal, WalConfig};
+use metadata::wal::WalConfig;
 use slicefs_cli::filesystem::SliceFsFilesystem;
 use slicefs_cli::handlers::{self as h, CreateResult, DataResult, EmptyResult, OpenResult, WriteResult};
 use slicefs_cli::oplog::{Op, Record};
@@ -18,14 +18,7 @@ use tempfile::TempDir;
 const S_IFREG: u32 = 0o100_000;
 
 fn new_fs(store: &Path) -> SliceFsFilesystem {
-    std::fs::create_dir_all(store.join("segments")).unwrap();
-    let wal = create_wal(WalConfig::PerOp, store, 1).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
-    let mut meta = DictMetadataStore::new(io.clone());
-    meta.set_wal(wal);
-    let fs = SliceFsFilesystem::new(meta, io, Some(store.to_path_buf()));
-    fs.meta().commit().unwrap();
-    fs
+    common::new_fs_with(store, WalConfig::PerOp)
 }
 
 fn create(fs: &SliceFsFilesystem, parent: u64, name: &str) -> (u64, u64) {
@@ -117,15 +110,9 @@ fn committed(fs: &SliceFsFilesystem, ino: u64) -> Vec<u8> {
     }
 }
 
-/// What a mount does: load the last root (and replay the log).
+/// What a mount does: load the last root and replay the log.
 fn reload(store: &Path) -> SliceFsFilesystem {
-    let (root, snaps) = metadata::segment::load_store_from_segments(&store.join("segments")).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
-    let mut meta = DictMetadataStore::load_from_root(io.clone(), &root.unwrap()).unwrap();
-    meta.set_snapshots(snaps);
-    let fs = SliceFsFilesystem::new(meta, io, Some(store.to_path_buf()));
-    slicefs_cli::oplog::replay_log(&fs, &store.join("segments")).unwrap();
-    fs
+    common::reload_and_replay(store)
 }
 
 const BLOCK: usize = 64 << 10;

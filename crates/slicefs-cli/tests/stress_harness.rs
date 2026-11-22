@@ -17,6 +17,8 @@
 //! File bytes are never held in RAM as a model: a block is a function of
 //! (seed, file, block, version), and the model keeps only versions.
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -24,12 +26,9 @@ use std::sync::{mpsc, Arc, Barrier, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hdrhistogram::Histogram;
-use metadata::store::DictMetadataStore;
-use metadata::store_io::StoreIo;
-use metadata::wal::{create_wal, WalConfig};
+use metadata::wal::WalConfig;
 use slicefs_cli::commit_timer::timed_commit;
 use slicefs_cli::filesystem::{SliceFsFilesystem, DIRTY_BUDGET};
-use slicefs_traits::metadata::MetadataStore;
 use slicefs_cli::handlers::{
     self as h, AttrResult, CreateResult, DataResult, EmptyResult, EntryResult, OpenResult,
     ReaddirResult, WriteResult,
@@ -120,6 +119,10 @@ struct Config {
     wal: WalConfig,
     /// The watchdog aborts the process if the run takes longer than this.
     watchdog: Duration,
+    /// The run ends in a crash: the commit thread makes no commit in the
+    /// last `COMMIT_EVERY` before the deadline and none at the end, so the
+    /// log holds the end of the run.
+    crash: bool,
 }
 
 /// A number from the environment, with a range. Out of range panics with the
@@ -331,14 +334,7 @@ fn ns(d: Duration) -> u64 {
 // ---- file system setup -----------------------------------------------------
 
 fn new_fs(store: &Path, config: WalConfig) -> SliceFsFilesystem {
-    std::fs::create_dir_all(store.join("segments")).unwrap();
-    let wal = create_wal(config, store, 1).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
-    let mut meta = DictMetadataStore::new(io.clone());
-    meta.set_wal(wal);
-    let fs = SliceFsFilesystem::new(meta, io, Some(store.to_path_buf()));
-    fs.meta().commit().unwrap();
-    fs
+    common::new_fs_with(store, config)
 }
 
 // ---- the run ---------------------------------------------------------------
@@ -802,13 +798,16 @@ impl Ctx {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            match timed_commit(&self.fs, &self.gate) {
-                Ok(t) => {
-                    ch.gate_wait.saturating_record(ns(t.gate_wait));
-                    ch.hold.saturating_record(ns(t.hold));
-                    ch.total.saturating_record(ns(t.total));
+            let tail = self.cfg.crash && (stopped || self.deadline.is_some_and(|d| Instant::now() + every > d));
+            if !tail {
+                match timed_commit(&self.fs, &self.gate) {
+                    Ok(t) => {
+                        ch.gate_wait.saturating_record(ns(t.gate_wait));
+                        ch.hold.saturating_record(ns(t.hold));
+                        ch.total.saturating_record(ns(t.total));
+                    }
+                    Err(e) => out.push(mm("commit", format!("{e:?}"))),
                 }
-                Err(e) => out.push(mm("commit", format!("{e:?}"))),
             }
             if stopped {
                 return (ch, out);
@@ -1092,6 +1091,7 @@ fn short_cfg(mode: Mode) -> Config {
         serialize: true,
         wal: WalConfig::PerOp,
         watchdog: Duration::from_secs(60),
+        crash: false,
     }
 }
 
@@ -1237,6 +1237,43 @@ fn serialize_off_target() {
     }
 }
 
+/// ROADMAP Phase 19 criterion 5: after a crash, replay of the write log of
+/// a serialize-off run gives the state the run applied (names, inode numbers
+/// of creates, sizes, content, link counts, mtime and ctime). The commit
+/// thread cuts the log every 250 ms during the run, but not in its last
+/// 250 ms, so the log holds the end of the run. The workers release every
+/// handle at the end, as a client would. Then the file system is dropped
+/// with no commit and no shutdown, and the store is loaded and replayed.
+#[test]
+fn crash_replay_matches_apply() {
+    for mode in [Mode::ManyFiles, Mode::OneFile] {
+        let cfg = Config {
+            threads: 4,
+            ops_per_thread: usize::MAX,
+            secs: Some(1),
+            serialize: false,
+            watchdog: Duration::from_secs(30),
+            crash: true,
+            ..short_cfg(mode)
+        };
+        let o = run(cfg.clone());
+        assert_clean(cfg.seed, &o);
+        let Outcome { ctx: Ctx { fs, _dir: dir, .. }, .. } = o;
+        let records = common::log_len(&fs, dir.path());
+        assert!(records > 0, "seed={} mode={}: the log after the last cut is empty", cfg.seed, mode.name());
+        let live = common::dump(&fs);
+        std::mem::forget(fs); // a crash: no commit, no destroy
+        let replayed = common::dump(&common::reload_and_replay(dir.path()));
+        println!("STRESS crash replay mode={} records={records} entries={}", mode.name(), live.len());
+        if replayed != live {
+            for d in common::first_differences(&live, &replayed, 5) {
+                println!("DIFF seed={} mode={} {d}", cfg.seed, mode.name());
+            }
+            panic!("seed={} mode={}: replay after the crash differs from the live state", cfg.seed, mode.name());
+        }
+    }
+}
+
 // ---- spikes S3, S5, S6, S7 (Phase 18): by hand, one test alone per run ----------
 //
 // The lock recorder is process-global, so each spike test runs alone
@@ -1281,6 +1318,7 @@ fn spike_ctx(serialize: bool, seed: u64, threads: usize, wal: WalConfig) -> Ctx 
             serialize,
             wal,
             watchdog: Duration::from_secs(60),
+            crash: false,
         },
         one: None,
         dirs: None,
