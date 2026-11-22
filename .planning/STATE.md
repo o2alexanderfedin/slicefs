@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 19
 current_phase_name: Fine-grained locks
 status: executing
-stopped_at: Completed 19-15-PLAN.md
-last_updated: "2026-11-22T22:48:37.742Z"
+stopped_at: Completed 19-16-PLAN.md
+last_updated: "2026-11-22T23:25:49.998Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 19 execution started
-state_head: 1b52a4f495ae0e0215553148754bb6a45a42c51f
+state_head: f37913e500207ac7f2a48d7eb9bc36d1b2f22b64
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 23
-  completed_plans: 22
+  completed_plans: 23
   percent: 14
 ---
 
@@ -68,6 +68,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 19 P13 | 59min | 3 tasks | 10 files |
 | Phase 19 P14 | 320min | 2 tasks | 3 files |
 | Phase 19 P15 | 85 min | 4 tasks | 4 files |
+| Phase 19 P16 | 35 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -145,6 +146,8 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: G3 release part: the last release runs only unlocked steps under the step token; after FINAL_TRIES (8) forced drops in a row a finalize stops consulting the drop hook; finalize_locked only for destroy
 - [Phase 19]: Every size change of an open cell waits for the step token before it changes state; its I/O runs as unlocked steps (STEP_TRIES then EIO); reads and getattr do not lock a transient cell
 - [Phase 19]: Hard-cap gate steps free at most final_step each; the writer steps again until it is under the cap (orchestrator-added)
+- [Phase 19]: 19-16: LOCK-01 and LOCK-05 complete on measured evidence (macOS and Docker Linux, 0 rows over the bar); LOCK-04 code part complete, the orchestrator applies the #21 body and marks it
+- [Phase 19]: 19-16 finding for the owner: unlink_logged holds its namespace stripes about 20 ms on macOS while reclaim_inode reads the manifest from the store; no global lock held; fix is an owner decision
 
 ### Pending Todos
 
@@ -168,8 +171,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-22T22:48:37.523Z
-Stopped at: Completed 19-15-PLAN.md
+Last session: 2026-11-22T23:25:49.761Z
+Stopped at: Completed 19-16-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
