@@ -322,13 +322,12 @@ pub fn handle_write(
 ) -> WriteResult {
     fs.note_write();
     let l = logged();
-    match fs.test_write(fh, offset, data) {
-        Ok(n) => {
-            if let Some(ino) = fs.ino_of_fh(fh) {
-                l.log(fs, crate::oplog::Op::Write { ino, offset, data: data[..n as usize].to_vec() });
-            }
-            WriteResult::Ok(n)
-        }
+    // The record is appended in the cell-lock hold of the apply (D-08); it
+    // is written out here, with no cell lock held, before the reply.
+    let (r, lsn) = fs.write_logged(fh, offset, data, Some(l.time));
+    fs.log_write_out(lsn);
+    match r {
+        Ok((n, _)) => WriteResult::Ok(n),
         Err(e) => WriteResult::Error(e),
     }
 }

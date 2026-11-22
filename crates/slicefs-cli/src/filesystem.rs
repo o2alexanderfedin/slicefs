@@ -22,6 +22,7 @@ use crate::overlay::{next_gen, Overlay};
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
+use metadata::wal::Lsn;
 use slicefs_traits::metadata::{InodeMeta, MetaError, MetadataStore};
 
 // POSIX inode type bits
@@ -614,9 +615,26 @@ impl SliceFsFilesystem {
     /// exclusively, so a timed commit never sees half of an operation.
     /// Append a request to the write log (#20), unless the log is being replayed.
     pub(crate) fn log_record(&self, rec: crate::oplog::Record) {
-        if !self.replaying.load(Ordering::Relaxed) {
-            self.meta.log_op(rec.encode());
+        let lsn = self.log_append(rec);
+        self.log_write_out(lsn);
+    }
+
+    /// First half of `log_record` (D-08): encode the record and put it in
+    /// the write log's memory queue. A request calls it under the locks of
+    /// its apply. `None` while the log is replayed, with no write log, or
+    /// when the append failed.
+    pub(crate) fn log_append(&self, rec: crate::oplog::Record) -> Option<Lsn> {
+        if self.replaying.load(Ordering::Relaxed) {
+            return None;
         }
+        self.meta.log_append(rec.encode())
+    }
+
+    /// Second half of `log_record`: write the records up to `lsn` out. A
+    /// request calls it after its apply locks are released and before it
+    /// replies (still inside the shared commit gate).
+    pub(crate) fn log_write_out(&self, lsn: Option<Lsn>) {
+        self.meta.log_write_out(lsn);
     }
 
     /// Turn off logging until the returned guard is dropped (replay).
@@ -1726,6 +1744,35 @@ impl SliceFsFilesystem {
     /// write runs locked, so a busy stream always makes progress.
     /// Only a write handle may write (else EBADF).
     pub fn test_write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, i32> {
+        self.write_logged(fh, offset, data, None).0.map(|(n, _)| n)
+    }
+
+    /// `test_write` that logs (D-08): with `time`, the `Write` record (the
+    /// inode of the cell, the effective offset) is appended in the cell-lock
+    /// hold that applies the write, exactly once per applied write. Returns
+    /// the bytes written and the effective offset, and the LSN of the record
+    /// for `log_write_out` (also after an error that came after the apply).
+    pub(crate) fn write_logged(
+        &self,
+        fh: u64,
+        offset: u64,
+        data: &[u8],
+        time: Option<(i64, u32)>,
+    ) -> (Result<(u32, u64), i32>, Option<Lsn>) {
+        let mut lsn = None;
+        let r = self.write_in_cell(fh, offset, data, time, &mut lsn);
+        (r, lsn)
+    }
+
+    /// The body of `write_logged`; `lsn` gets the LSN of the record.
+    fn write_in_cell(
+        &self,
+        fh: u64,
+        offset: u64,
+        data: &[u8],
+        time: Option<(i64, u32)>,
+        lsn: &mut Option<Lsn>,
+    ) -> Result<(u32, u64), i32> {
         WRITE_REBASE_BYTES.with(|c| c.set(0));
         WRITE_BASE_BYTES.with(|c| c.set(0));
         if offset.checked_add(data.len() as u64).map_or(true, |end| end > MAX_FILE_SIZE) {
@@ -1737,6 +1784,13 @@ impl SliceFsFilesystem {
         if g.retired {
             return Err(libc::EBADF);
         }
+        // Called in the hold that applies the write (with the cell locked).
+        let log = |lsn: &mut Option<Lsn>, at: u64| {
+            if let Some(time) = time {
+                let op = crate::oplog::Op::Write { ino: cell.ino, offset: at, data: data.to_vec() };
+                *lsn = self.log_append(crate::oplog::Record { time, op });
+            }
+        };
         let end = offset + data.len() as u64;
         let mut unlocked = true;
         // Dirty cost before this write (after a switch: of the new overlay).
@@ -1748,7 +1802,11 @@ impl SliceFsFilesystem {
             }
             cost_before = dirty_cost(&g.file);
             if matches!(g.file.write_mode, WriteMode::Overlay(_)) {
-                break Self::overlay_write(&mut g.file, offset, data);
+                let r = Self::overlay_write(&mut g.file, offset, data);
+                if r.is_ok() {
+                    log(lsn, offset);
+                }
+                break r;
             }
             let WriteMode::Streaming { next_expected_offset, pending, .. } = &g.file.write_mode else { continue };
             let next = *next_expected_offset;
@@ -1798,6 +1856,9 @@ impl SliceFsFilesystem {
                     unlocked = false;
                     continue;
                 }
+                // Still the hold of Phase C that published the write: log it
+                // before `drain_lined_up` can unlock the cell.
+                log(lsn, offset);
                 g.file.modified = Some(now_pair());
                 // This write is in; a pending write that fails here stays
                 // pending (a read or the release streams it later).
@@ -1813,6 +1874,7 @@ impl SliceFsFilesystem {
                 s.cas_committed = false;
                 s.modified = Some(now_pair());
                 s.generation = next_gen();
+                log(lsn, offset);
                 break Ok(data.len() as u32);
             }
             // Random write: switch to an overlay on the stored content.
@@ -1853,12 +1915,12 @@ impl SliceFsFilesystem {
         if g.retired {
             // The last release finalized the file (with this write) while
             // the step was unlocked.
-            return result;
+            return result.map(|n| (n, offset));
         }
         // Then the budget of all open files (#105), with the same bound.
         match result {
-            Ok(n) => self.keep_budget(&mut g, added).map(|_| n),
-            r => r,
+            Ok(n) => self.keep_budget(&mut g, added).map(|_| (n, offset)),
+            Err(e) => Err(e),
         }
     }
 

@@ -1204,3 +1204,61 @@ fn the_log_of_a_mount_after_a_torn_cut_replays() {
     assert_eq!(fs.test_read(a, 0, after.len() as u32 + 1).unwrap(), after);
     assert!(fs.meta().lookup(1, "late.bin").is_err());
 }
+
+/// The ops of the write log of `store` so far (the log is synced first).
+fn logged_ops(fs: &SliceFsFilesystem, store: &Path) -> Vec<oplog::Op> {
+    fs.meta().flush_wal().unwrap();
+    let (_, _, log) = metadata::segment::scan_store_with_log(&store.join("segments")).unwrap();
+    log.records().map(|r| oplog::Record::decode(r.as_ref().unwrap()).unwrap().op).collect()
+}
+
+fn writes(ops: &[oplog::Op]) -> usize {
+    ops.iter().filter(|op| matches!(op, oplog::Op::Write { .. })).count()
+}
+
+/// D-08: two threads, each with its own write handle on one file, write
+/// the same three 4 KiB blocks in parallel. Each record is appended in the
+/// hold of its apply, so the log order is the apply order: after a crash
+/// with both handles open, replay gives the live content and size. Only
+/// the last write to each block decides the content, so the run is done 4
+/// times.
+#[test]
+fn parallel_overlapping_writes_replay_to_the_same_content() {
+    for _ in 0..4 {
+        parallel_overlapping_round();
+    }
+}
+
+fn parallel_overlapping_round() {
+    let (_dir, fs) = check_with(WalConfig::PerOp, |fs| {
+        let (ino, a) = create(fs, 1, "f");
+        let b = open_rw(fs, ino);
+        std::thread::scope(|sc| {
+            for (t, fh) in [(1u64, a), (2u64, b)] {
+                sc.spawn(move || {
+                    for i in 0..150u64 {
+                        let block = (i * 7 + t) % 3;
+                        write(fs, fh, block * 4096, &data(t * 1000 + i, 4096));
+                    }
+                });
+            }
+        });
+    });
+    let ino = fs.test_lookup(1, "f").unwrap().0;
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 3 * 4096);
+}
+
+/// A write that fails before it applies (EFBIG, EBADF) appends no record.
+#[test]
+fn a_failed_write_appends_no_record() {
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    let (_, fh) = create(&fs, 1, "f");
+    write(&fs, fh, 0, b"hello");
+    let before = writes(&logged_ops(&fs, dir.path()));
+    assert_eq!(before, 1);
+    let max = slicefs_cli::filesystem::MAX_FILE_SIZE;
+    assert!(matches!(h::handle_write(&fs, fh, max - 2, b"xyz"), WriteResult::Error(e) if e == libc::EFBIG));
+    assert!(matches!(h::handle_write(&fs, 9999, 0, b"xyz"), WriteResult::Error(e) if e == libc::EBADF));
+    assert_eq!(writes(&logged_ops(&fs, dir.path())), before, "no record for a failed write");
+}
