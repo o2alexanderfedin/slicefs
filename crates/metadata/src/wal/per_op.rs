@@ -9,9 +9,10 @@ use std::collections::VecDeque;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
 use chunk_store::lock_stats::Site;
-use chunk_store::sync::{Mutex, Rank};
+use chunk_store::sync::{Mutex, MutexGuard, Rank};
 use crate::segment::{SegmentEntry, SegmentWriter};
 use super::{Behind, Lsn, WalCut, WalEntry, WalError, WalStrategy};
 
@@ -36,6 +37,8 @@ fn write_failed() -> WalError {
 ///
 /// Lock order everywhere: `writer`, then `queue`, then `loc`, then
 /// `behind`. `append` takes only `queue`, so it never waits for a write.
+/// No WAL lock is held during a record write (G2): at most one is in flight
+/// per segment, at its end (see `write_upto`).
 pub struct PerOpWal {
     writer: Mutex<SegmentWriter>,
     /// Records appended and not yet written out (`append` takes only this).
@@ -71,32 +74,97 @@ impl PerOpWal {
         })
     }
 
-    /// Write every queued record into `writer`, in LSN order, and flush it
-    /// to the kernel. The caller holds `writer`; the queue lock is held only
-    /// to take the records out. Fails after a failed write-out in this
-    /// segment (see `failed`).
-    fn drain(&self, writer: &mut SegmentWriter) -> Result<(), WalError> {
-        let batch = std::mem::take(&mut self.queue.lock().records);
-        if let Some(&(last, _)) = batch.back() {
-            let r = if self.failed.load(Ordering::Acquire) {
-                Err(write_failed())
-            } else {
-                batch
-                    .iter()
-                    .try_for_each(|(_, e)| writer.write_entry(e).map(drop))
-                    .and_then(|()| writer.flush())
-                    .map_err(WalError::from)
+    /// Write the records up to LSN `upto` out, by the one-write rule (G2):
+    /// under `writer`, take the queued batch and reserve its sequence
+    /// numbers and the end offset (`begin_write`); write it with no WAL lock
+    /// held; publish it under `writer` (`end_write`), then move `done`. A
+    /// write-out that needs a record of the write in flight waits for that
+    /// write with no lock, until `deadline`. A failed segment writes nothing
+    /// more: its queued records are taken out as lost.
+    fn write_upto(&self, upto: u64, deadline: Instant) -> Result<(), WalError> {
+        loop {
+            let (slot, batch) = {
+                let mut writer = self.writer.lock();
+                #[cfg(test)]
+                self.park.point("write_out");
+                // Under `writer`, `done` is final: a record up to it is in
+                // the file (or lost, if `failed`).
+                if self.done.load(Ordering::Acquire) >= upto {
+                    return if self.failed.load(Ordering::Acquire) { Err(write_failed()) } else { Ok(()) };
+                }
+                if let Some(wait) = writer.in_flight() {
+                    drop(writer);
+                    super::wait_for(&wait, deadline)?;
+                    continue;
+                }
+                let batch = std::mem::take(&mut self.queue.lock().records);
+                let Some(&(last, _)) = batch.back() else {
+                    // Every record up to `upto` left the queue in a write
+                    // that ended: nothing is left to wait for.
+                    return if self.failed.load(Ordering::Acquire) { Err(write_failed()) } else { Ok(()) };
+                };
+                if self.failed.load(Ordering::Acquire) {
+                    self.done.store(last, Ordering::Release);
+                    return Err(write_failed());
+                }
+                match writer.begin_write(batch.len()) {
+                    Ok(slot) => (slot, batch),
+                    Err(e) => {
+                        self.failed.store(true, Ordering::Release);
+                        self.done.store(last, Ordering::Release);
+                        return Err(e.into());
+                    }
+                }
             };
+            #[cfg(test)]
+            self.park.point("pwrite");
+            let last = batch.back().map_or(0, |&(l, _)| l);
+            let r = slot.write(batch.iter().map(|(_, e)| e));
+            drop(batch);
+            let mut writer = self.writer.lock();
+            writer.end_write(slot, &r);
             if r.is_err() {
                 self.failed.store(true, Ordering::Release);
             }
             self.done.store(last, Ordering::Release);
-            return r;
+            drop(writer);
+            r?;
         }
-        if self.failed.load(Ordering::Acquire) {
-            return Err(write_failed());
+    }
+
+    /// For a cut, a rotate or an install: write out every record appended
+    /// before this call, then return `writer` locked with no record write in
+    /// flight, all within one `WRITE_WAIT`. Records appended meanwhile can
+    /// stay queued: their LSNs are above every record written so far, so
+    /// they go to whichever segment is current when they are written out.
+    /// The flag is true if the segment failed: then its queued records are
+    /// taken out as lost (a failed segment never writes them, so the caller
+    /// must not wait for them).
+    fn settled(&self) -> Result<(MutexGuard<'_, SegmentWriter>, bool), WalError> {
+        let deadline = Instant::now() + super::WRITE_WAIT;
+        let target = self.queue.lock().last;
+        match self.write_upto(target, deadline) {
+            Ok(()) => {}
+            Err(_) if self.failed.load(Ordering::Acquire) => {}
+            Err(e) => return Err(e),
         }
-        Ok(())
+        loop {
+            let writer = self.writer.lock();
+            if let Some(wait) = writer.in_flight() {
+                drop(writer);
+                super::wait_for(&wait, deadline)?;
+                continue;
+            }
+            let lost = self.failed.load(Ordering::Acquire);
+            if lost {
+                let mut q = self.queue.lock();
+                if let Some(&(last, _)) = q.records.back() {
+                    self.done.store(last, Ordering::Release);
+                }
+                q.records.clear();
+            }
+            return Ok((writer, lost));
+        }
     }
 }
 
@@ -115,18 +183,15 @@ impl WalStrategy for PerOpWal {
         if self.done.load(Ordering::Acquire) >= upto.0 && !self.failed.load(Ordering::Acquire) {
             return Ok(());
         }
-        let mut writer = self.writer.lock();
-        #[cfg(test)]
-        self.park.point("write_out");
-        // Under `writer`, `done` is final: a record up to it is in the file.
-        self.drain(&mut writer)
+        self.write_upto(upto.0, Instant::now() + super::WRITE_WAIT)
     }
 
+    /// Offline only (`snapshot switch`): holds `writer` across the sync of
+    /// the new segment. It waits for no record write in flight first.
     fn rotate(&self, seed: &[WalEntry]) -> Result<(), WalError> {
-        let mut writer = self.writer.lock();
         // Records appended before the rotate belong to the old segment (the
         // new root holds them); they must not follow the seed.
-        let _ = self.drain(&mut writer);
+        let (mut writer, _) = self.settled()?;
         let mut loc = self.loc.lock();
         let (new_writer, new_path, new_id) = super::rotate_segment(&loc.0, loc.1, seed)?;
         *writer = new_writer;
@@ -136,10 +201,10 @@ impl WalStrategy for PerOpWal {
         Ok(())
     }
     fn cut(&self) -> Result<Option<WalCut>, WalError> {
-        let mut writer = self.writer.lock();
         // Every record appended before the cut goes into the old segment.
-        // A failure is cut too: the commit is the way back.
-        let lost = self.drain(&mut writer).is_err();
+        // A failure is cut too: the commit is the way back. A failed
+        // segment's queued records are dropped as lost, not waited for.
+        let (mut writer, lost) = self.settled()?;
         let mut loc = self.loc.lock();
         let mut cut = super::cut_segment(&mut writer, &mut loc, &self.behind)?;
         cut.old_failed |= lost;
@@ -148,8 +213,10 @@ impl WalStrategy for PerOpWal {
     }
     fn install_root(&self, cut: &WalCut, seed: &[WalEntry]) -> Result<(), WalError> {
         let (file, path) = {
-            let mut writer = self.writer.lock();
-            self.drain(&mut writer)?;
+            let (mut writer, lost) = self.settled()?;
+            if lost {
+                return Err(write_failed());
+            }
             (writer.file_for_sync()?, self.loc.lock().0.clone())
         };
         // The disk sync runs with no lock held: requests log meanwhile.
@@ -175,9 +242,15 @@ impl WalStrategy for PerOpWal {
             #[cfg(test)]
             self.park.point("settle");
         })?;
-        // Under `writer`: write the queue out and take the file; the disk
-        // sync runs with no lock held, so requests append and write out.
-        super::sync_current(&self.writer, |w| self.drain(w), || {
+        // Write out every record given out so far (no lock across the
+        // record write), then take the file under `writer`; the disk sync
+        // runs with no lock held, so requests append and write out.
+        let target = self.queue.lock().last;
+        self.write_upto(target, Instant::now() + super::WRITE_WAIT)?;
+        let check = |_: &mut SegmentWriter| {
+            if self.failed.load(Ordering::Acquire) { Err(write_failed()) } else { Ok(()) }
+        };
+        super::sync_current(&self.writer, check, || {
             #[cfg(test)]
             self.park.point("sync");
         })
@@ -271,6 +344,100 @@ mod tests {
         b.join().unwrap();
         wal.write_out(second).unwrap();
         assert_eq!(ops_in(&path), vec![vec![1, 0, 0, 0, 0], vec![2, 0, 0, 0, 0]]);
+    }
+
+    /// G2: no WAL lock is held during a record write. While thread A is
+    /// parked in its record write, thread B takes the writer lock and
+    /// appends; thread C's write-out of a later record waits for A's write
+    /// (one write in flight), and the segment holds both records in order.
+    #[test]
+    fn the_writer_lock_is_free_during_a_record_write() {
+        use std::sync::{mpsc, Arc};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.seg");
+        let wal = Arc::new(PerOpWal::new(&path, 1).unwrap());
+        let l1 = wal.append(&op(1, 0)).unwrap();
+        let (parked, release) = wal.park.arm("pwrite");
+        let a = {
+            let wal = Arc::clone(&wal);
+            std::thread::spawn(move || wal.write_out(l1))
+        };
+        parked.recv_timeout(LIMIT).expect("thread A must park in its record write");
+        let (tx, rx) = mpsc::channel();
+        let b = {
+            let wal = Arc::clone(&wal);
+            std::thread::spawn(move || {
+                drop(wal.writer.lock());
+                tx.send(wal.append(&op(2, 0)).unwrap()).unwrap();
+            })
+        };
+        let l2 = rx.recv_timeout(LIMIT);
+        if l2.is_err() {
+            let _ = release.send(());
+        }
+        let l2 = l2.expect("the writer lock was held during the record write");
+        b.join().unwrap();
+        let (ctx, crx) = mpsc::channel();
+        let c = {
+            let wal = Arc::clone(&wal);
+            std::thread::spawn(move || ctx.send(wal.write_out(l2).is_ok()).unwrap())
+        };
+        let early = crx.recv_timeout(std::time::Duration::from_millis(300));
+        let _ = release.send(());
+        assert!(early.is_err(), "C's write-out must wait for the write in flight");
+        a.join().unwrap().unwrap();
+        assert_eq!(crx.recv_timeout(LIMIT), Ok(true), "C's write-out must succeed after A's write");
+        c.join().unwrap();
+        assert_eq!(ops_in(&path), vec![vec![1, 0, 0, 0, 0], vec![2, 0, 0, 0, 0]]);
+    }
+
+    /// An fsync that starts while a record write is parked returns only
+    /// after that write ended, and syncs the segment.
+    #[test]
+    fn flush_and_sync_waits_for_a_parked_record_write() {
+        use std::sync::{mpsc, Arc};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.seg");
+        let wal = Arc::new(PerOpWal::new(&path, 1).unwrap());
+        wal.flush_and_sync().unwrap();
+        let syncs = wal.writer.lock().disk_syncs();
+        let l1 = wal.append(&op(1, 0)).unwrap();
+        let (parked, release) = wal.park.arm("pwrite");
+        let a = {
+            let wal = Arc::clone(&wal);
+            std::thread::spawn(move || wal.write_out(l1))
+        };
+        parked.recv_timeout(LIMIT).expect("thread A must park in its record write");
+        let (tx, rx) = mpsc::channel();
+        let b = {
+            let wal = Arc::clone(&wal);
+            std::thread::spawn(move || tx.send(wal.flush_and_sync().is_ok()).unwrap())
+        };
+        let early = rx.recv_timeout(std::time::Duration::from_millis(300));
+        let _ = release.send(());
+        assert!(early.is_err(), "fsync must wait for the record write in flight");
+        assert_eq!(rx.recv_timeout(LIMIT), Ok(true));
+        a.join().unwrap().unwrap();
+        b.join().unwrap();
+        assert!(wal.writer.lock().disk_syncs() > syncs, "the fsync must sync the segment");
+        assert_eq!(ops_in(&path), vec![vec![1, 0, 0, 0, 0]]);
+    }
+
+    /// T-19-14: a failed record write makes every later write-out and fsync
+    /// fail until a cut; after the cut both work again.
+    #[test]
+    fn a_failed_record_write_fails_until_a_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = PerOpWal::new(&dir.path().join("segment-000001.seg"), 1).unwrap();
+        wal.writer.lock().fail_next_io();
+        assert!(wal.log_mutation(&op(1, 0)).is_err(), "the injected fault fails the write-out");
+        assert!(wal.log_mutation(&op(1, 1)).is_err(), "a later write-out fails too");
+        assert!(wal.flush_and_sync().is_err(), "fsync fails after a failed write");
+        let cut = wal.cut().unwrap().unwrap();
+        assert!(cut.old_failed, "the cut reports the lost records");
+        wal.log_mutation(&op(1, 2)).unwrap();
+        wal.flush_and_sync().unwrap();
+        assert_eq!(ops_in(&dir.path().join("segment-000003.seg")), vec![vec![1, 2, 0, 0, 0]]);
     }
 
     /// Two threads append and write out in parallel: the segment holds every
@@ -414,5 +581,40 @@ mod tests {
         meta.flush_wal().unwrap();
         let (_, _, ops) = crate::segment::load_store_with_log(&dir.path().join("segments")).unwrap();
         assert_eq!(ops, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], "one record per log_op");
+    }
+
+    /// T-19-50: the cut of a failed log does not wait for its queue. A
+    /// record queued after a failed write-out is dropped as lost; the commit
+    /// succeeds, fsync works again, and the records after it replay.
+    #[test]
+    fn a_commit_after_a_failed_write_with_queued_records_succeeds() {
+        use crate::store::DictMetadataStore;
+        use crate::store_io::StoreIo;
+        use slicefs_traits::metadata::MetadataStore;
+        use std::sync::{mpsc, Arc, Mutex};
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+        let path = dir.path().join("segments").join("segment-000001.seg");
+        let wal = PerOpWal::new(&path, 1).unwrap();
+        let mut meta = DictMetadataStore::new(Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap())));
+        wal.writer.lock().fail_next_io();
+        meta.set_wal(Box::new(wal));
+        meta.log_op(b"lost".to_vec());
+        assert!(meta.log_append(b"queued".to_vec()).is_some(), "the record stays queued");
+        let meta = Arc::new(meta);
+        let (tx, rx) = mpsc::channel();
+        let c = {
+            let meta = Arc::clone(&meta);
+            std::thread::spawn(move || tx.send(meta.commit().is_ok()).unwrap())
+        };
+        assert_eq!(rx.recv_timeout(LIMIT), Ok(true), "the commit must succeed and not wait for the queue");
+        c.join().unwrap();
+        assert!(meta.flush_wal().is_ok(), "after the commit, fsync works again");
+        for r in [b"a".to_vec(), b"b".to_vec(), b"c".to_vec()] {
+            meta.log_op(r);
+        }
+        meta.flush_wal().unwrap();
+        let (_, _, ops) = crate::segment::load_store_with_log(&dir.path().join("segments")).unwrap();
+        assert_eq!(ops, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
     }
 }

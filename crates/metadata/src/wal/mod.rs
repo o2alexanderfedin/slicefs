@@ -166,6 +166,23 @@ impl Parker {
     }
 }
 
+/// How long a write-out, fsync, cut, rotate or install waits for another
+/// thread's record write before it fails with an I/O error of kind
+/// `TimedOut` (nothing is lost then: the log is not marked failed).
+pub(crate) const WRITE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Wait for the record write of `wait` to end, at most until `deadline`.
+pub(crate) fn wait_for(wait: &chunk_store::pack_io::SyncWait, deadline: std::time::Instant) -> Result<(), WalError> {
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    if wait.wait_timeout(left) {
+        return Ok(());
+    }
+    Err(WalError::Io(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "a write-log record write did not end in time",
+    )))
+}
+
 /// A generation switch of the write log (see [`WalStrategy::cut`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalCut {
