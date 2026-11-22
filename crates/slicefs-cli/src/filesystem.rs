@@ -606,11 +606,10 @@ impl SliceFsFilesystem {
 
     /// The last link of a non-directory inode was removed: reclaim it now, or
     /// keep it as an orphan (nlink 0) while handles are still open.
-    fn drop_last_link(&self, mut inode: InodeMeta) -> Result<(), i32> {
+    fn drop_last_link(&self, inode: InodeMeta) -> Result<(), i32> {
         let open = self.handles.lock().values().any(|&i| i == inode.ino);
         if open {
-            inode.nlinks = 0;
-            self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
+            self.meta.modify_inode(inode.ino, |m| m.nlinks = 0).map_err(|e| meta_error_to_errno(&e))?;
             self.orphans.lock().insert(inode.ino);
         } else {
             self.reclaim_inode(inode.ino);
@@ -1033,20 +1032,35 @@ impl SliceFsFilesystem {
 
     /// A directory's entries changed: set its mtime and ctime to now.
     fn touch_dir(&self, ino: u64) -> Result<(), i32> {
-        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
         let (sec, nsec) = now_pair();
-        inode.mtime_sec = sec;
-        inode.mtime_nsec = nsec;
-        inode.ctime_sec = sec;
-        inode.ctime_nsec = nsec;
-        self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))
+        self.meta.modify_inode(ino, |inode| {
+            inode.mtime_sec = sec;
+            inode.mtime_nsec = nsec;
+            inode.ctime_sec = sec;
+            inode.ctime_nsec = nsec;
+        }).map_err(|e| meta_error_to_errno(&e))
     }
 
     /// Add `delta` to the link count of `ino` (directory ".." bookkeeping).
     fn adjust_nlinks(&self, ino: u64, delta: i32) -> Result<(), i32> {
-        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-        inode.nlinks = (inode.nlinks as i64 + delta as i64).max(0) as u32;
-        self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))
+        self.meta.modify_inode(ino, |inode| {
+            inode.nlinks = (inode.nlinks as i64 + delta as i64).max(0) as u32;
+        }).map_err(|e| meta_error_to_errno(&e))
+    }
+
+    /// One name of non-directory `ino` went: its link count goes down by one
+    /// (not below 0), and while links are left its ctime changes too.
+    /// Returns the inode after the change.
+    fn drop_link(&self, ino: u64) -> Result<InodeMeta, i32> {
+        let (sec, nsec) = now_pair();
+        self.meta.modify_inode(ino, |inode| {
+            inode.nlinks = inode.nlinks.saturating_sub(1);
+            if inode.nlinks > 0 {
+                inode.ctime_sec = sec;
+                inode.ctime_nsec = nsec;
+            }
+            inode.clone()
+        }).map_err(|e| meta_error_to_errno(&e))
     }
 
     /// Reclaim all orphans (used at unmount: no handle survives it).
@@ -1526,16 +1540,16 @@ impl SliceFsFilesystem {
     /// (now if unknown): set size, mtime and ctime. ctime does not go back
     /// past a later change (a chmod after the last write).
     fn stamp_content(&self, ino: u64, size: u64, modified: Option<(i64, u32)>) -> Result<(), i32> {
-        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-        inode.size = size;
         let (sec, nsec) = modified.unwrap_or_else(now_pair);
-        inode.mtime_sec = sec;
-        inode.mtime_nsec = nsec;
-        if (sec, nsec) > (inode.ctime_sec, inode.ctime_nsec) {
-            inode.ctime_sec = sec;
-            inode.ctime_nsec = nsec;
-        }
-        self.meta.update_inode(&inode).map_err(|_| libc::EIO)
+        self.meta.modify_inode(ino, |inode| {
+            inode.size = size;
+            inode.mtime_sec = sec;
+            inode.mtime_nsec = nsec;
+            if (sec, nsec) > (inode.ctime_sec, inode.ctime_nsec) {
+                inode.ctime_sec = sec;
+                inode.ctime_nsec = nsec;
+            }
+        }).map_err(|_| libc::EIO)
     }
 
     fn flush_buffer_for_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
@@ -1789,14 +1803,7 @@ impl SliceFsFilesystem {
                 }
             };
             if extended {
-                let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-                inode.size = new_size;
-                let (sec, nsec) = now_pair();
-                inode.mtime_sec = sec;
-                inode.mtime_nsec = nsec;
-                inode.ctime_sec = sec;
-                inode.ctime_nsec = nsec;
-                self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
+                self.stamp_size(ino, new_size)?;
                 return Ok(());
             }
             self.settle_pending(fh_val);
@@ -1862,15 +1869,7 @@ impl SliceFsFilesystem {
                 }
 
                 // Update inode size immediately
-                let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-                inode.size = new_size;
-                // truncate changes the content: mtime and ctime both change.
-                let (sec, nsec) = now_pair();
-                inode.mtime_sec = sec;
-                inode.mtime_nsec = nsec;
-                inode.ctime_sec = sec;
-                inode.ctime_nsec = nsec;
-                self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
+                self.stamp_size(ino, new_size)?;
                 return Ok(());
             }
         }
@@ -1917,27 +1916,30 @@ impl SliceFsFilesystem {
         }
 
         // Update inode
-        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-        inode.size = new_size;
-        // truncate changes the content: mtime and ctime both change.
+        self.stamp_size(ino, new_size)
+    }
+
+    /// A truncate or extend to `size`: it changes the content, so mtime and
+    /// ctime both change (to now).
+    fn stamp_size(&self, ino: u64, size: u64) -> Result<(), i32> {
         let (sec, nsec) = now_pair();
-        inode.mtime_sec = sec;
-        inode.mtime_nsec = nsec;
-        inode.ctime_sec = sec;
-        inode.ctime_nsec = nsec;
-        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
-        Ok(())
+        self.meta.modify_inode(ino, |inode| {
+            inode.size = size;
+            inode.mtime_sec = sec;
+            inode.mtime_nsec = nsec;
+            inode.ctime_sec = sec;
+            inode.ctime_nsec = nsec;
+        }).map_err(|_| libc::EIO)
     }
 
     /// Update permission bits (preserving file type bits) for an inode.
     pub fn test_setattr_mode(&self, ino: u64, mode: u32) -> Result<(), i32> {
-        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-        inode.mode = (inode.mode & S_IFMT) | (mode & 0o7777);
         let (now_sec, now_nsec) = now_pair();
-        inode.ctime_sec = now_sec;
-        inode.ctime_nsec = now_nsec;
-        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
-        Ok(())
+        self.meta.modify_inode(ino, |inode| {
+            inode.mode = (inode.mode & S_IFMT) | (mode & 0o7777);
+            inode.ctime_sec = now_sec;
+            inode.ctime_nsec = now_nsec;
+        }).map_err(|_| libc::EIO)
     }
 
     /// Update uid and/or gid for an inode.
@@ -1947,30 +1949,28 @@ impl SliceFsFilesystem {
         uid: Option<u32>,
         gid: Option<u32>,
     ) -> Result<(), i32> {
-        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-        if let Some(u) = uid {
-            inode.uid = u;
-        }
-        if let Some(g) = gid {
-            inode.gid = g;
-        }
         let (now_sec, now_nsec) = now_pair();
-        inode.ctime_sec = now_sec;
-        inode.ctime_nsec = now_nsec;
-        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
-        Ok(())
+        self.meta.modify_inode(ino, |inode| {
+            if let Some(u) = uid {
+                inode.uid = u;
+            }
+            if let Some(g) = gid {
+                inode.gid = g;
+            }
+            inode.ctime_sec = now_sec;
+            inode.ctime_nsec = now_nsec;
+        }).map_err(|_| libc::EIO)
     }
 
     /// Update mtime for an inode to a specific (sec, nsec).
     pub fn test_setattr_mtime(&self, ino: u64, mtime_sec: i64, mtime_nsec: u32) -> Result<(), i32> {
-        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-        inode.mtime_sec = mtime_sec;
-        inode.mtime_nsec = mtime_nsec;
         let (now_sec, now_nsec) = now_pair();
-        inode.ctime_sec = now_sec;
-        inode.ctime_nsec = now_nsec;
-        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
-        Ok(())
+        self.meta.modify_inode(ino, |inode| {
+            inode.mtime_sec = mtime_sec;
+            inode.mtime_nsec = mtime_nsec;
+            inode.ctime_sec = now_sec;
+            inode.ctime_nsec = now_nsec;
+        }).map_err(|_| libc::EIO)
     }
 
     /// Create a regular file inode via mknod (without opening it).
@@ -2131,14 +2131,9 @@ impl SliceFsFilesystem {
         self.meta.delete_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
 
         // Decrement parent nlinks (removing the .. backlink from the deleted subdir)
-        let mut parent_inode = self
-            .meta
-            .get_inode(parent_ino)
+        self.meta
+            .modify_inode(parent_ino, |m| m.nlinks = m.nlinks.saturating_sub(1))
             .map_err(|e| meta_error_to_errno(&e))?;
-        if parent_inode.nlinks > 0 {
-            parent_inode.nlinks -= 1;
-            self.meta.update_inode(&parent_inode).map_err(|e| meta_error_to_errno(&e))?;
-        }
         self.touch_dir(parent_ino)?;
         Ok(())
     }
@@ -2158,10 +2153,8 @@ impl SliceFsFilesystem {
             .lookup(parent_ino, name)
             .map_err(|e| meta_error_to_errno(&e))?;
 
-        // Get inode
-        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-
         // Must not be a directory
+        let inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
         if inode.mode & S_IFMT == S_IFDIR {
             return Err(libc::EISDIR);
         }
@@ -2171,21 +2164,10 @@ impl SliceFsFilesystem {
             .unlink(parent_ino, name)
             .map_err(|e| meta_error_to_errno(&e))?;
 
-        // Guard against underflow
-        if inode.nlinks > 0 {
-            inode.nlinks -= 1;
-        }
-
+        let inode = self.drop_link(ino)?;
         if inode.nlinks == 0 {
             // Reclaim now, or keep as an orphan while handles are open.
             self.drop_last_link(inode)?;
-        } else {
-            // Hard links still exist — persist the decremented nlinks; the
-            // link count changed, so ctime changes too.
-            let (sec, nsec) = now_pair();
-            inode.ctime_sec = sec;
-            inode.ctime_nsec = nsec;
-            self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
         }
         self.touch_dir(parent_ino)?;
         Ok(())
@@ -2197,7 +2179,7 @@ impl SliceFsFilesystem {
     /// Returns the new inode number (same as `ino`).
     pub fn simulate_link(&self, ino: u64, newparent_ino: u64, newname: &str) -> Result<u64, i32> {
         // Get source inode
-        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        let inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
 
         // Disallow hard links to directories
         if inode.mode & S_IFMT == S_IFDIR {
@@ -2210,11 +2192,12 @@ impl SliceFsFilesystem {
             .map_err(|e| meta_error_to_errno(&e))?;
 
         // Increment nlinks and update ctime
-        inode.nlinks += 1;
         let (now_sec, now_nsec) = now_pair();
-        inode.ctime_sec = now_sec;
-        inode.ctime_nsec = now_nsec;
-        self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
+        self.meta.modify_inode(ino, |inode| {
+            inode.nlinks += 1;
+            inode.ctime_sec = now_sec;
+            inode.ctime_nsec = now_nsec;
+        }).map_err(|e| meta_error_to_errno(&e))?;
         self.touch_dir(newparent_ino)?;
 
         Ok(ino)
@@ -2283,17 +2266,10 @@ impl SliceFsFilesystem {
                 self.meta.delete_inode(dst_ino).map_err(|e| meta_error_to_errno(&e))?;
                 self.adjust_nlinks(newparent_ino, -1)?;
             } else {
-                let new_nlinks = dst_inode.nlinks.saturating_sub(1);
-                if new_nlinks == 0 {
+                let left = self.drop_link(dst_ino)?;
+                if left.nlinks == 0 {
                     // Reclaim now, or keep as an orphan while handles are open.
-                    self.drop_last_link(dst_inode.clone())?;
-                } else {
-                    let mut updated_dst = dst_inode.clone();
-                    updated_dst.nlinks = new_nlinks;
-                    let (sec, nsec) = now_pair();
-                    updated_dst.ctime_sec = sec;
-                    updated_dst.ctime_nsec = nsec;
-                    self.meta.update_inode(&updated_dst).map_err(|e| meta_error_to_errno(&e))?;
+                    self.drop_last_link(left)?;
                 }
             }
         }
@@ -2318,11 +2294,11 @@ impl SliceFsFilesystem {
         }
 
         // Update ctime on moved inode
-        let mut src_inode = self.meta.get_inode(src_ino).map_err(|e| meta_error_to_errno(&e))?;
         let (now_sec, now_nsec) = now_pair();
-        src_inode.ctime_sec = now_sec;
-        src_inode.ctime_nsec = now_nsec;
-        self.meta.update_inode(&src_inode).map_err(|e| meta_error_to_errno(&e))?;
+        self.meta.modify_inode(src_ino, |m| {
+            m.ctime_sec = now_sec;
+            m.ctime_nsec = now_nsec;
+        }).map_err(|e| meta_error_to_errno(&e))?;
 
         Ok(())
     }
@@ -2376,9 +2352,8 @@ impl SliceFsFilesystem {
         self.meta.increment_refcount(&content_digest);
 
         // Update inode size to raw target length (uncompressed)
-        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-        inode.size = target_bytes.len() as u64;
-        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
+        let len = target_bytes.len() as u64;
+        self.meta.modify_inode(ino, |m| m.size = len).map_err(|_| libc::EIO)?;
 
         Ok(ino)
     }
@@ -2558,39 +2533,40 @@ impl SliceFsFilesystem {
         if let Some(new_size) = size {
             self.test_setattr_size(ino, fh, new_size)?;
         }
-        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-        if let Some((sec, nsec)) = atime {
-            inode.atime_sec = sec;
-            inode.atime_nsec = nsec;
-        }
-
-        if let Some(m) = mode {
-            inode.mode = (inode.mode & S_IFMT) | (m & 0o7777);
-        }
-        if let Some(u) = uid {
-            inode.uid = u;
-        }
-        if let Some(g) = gid {
-            inode.gid = g;
-        }
+        // Always update ctime
+        let (now_sec, now_nsec) = now_pair();
+        let inode = self.meta.modify_inode(ino, |inode| {
+            if let Some((sec, nsec)) = atime {
+                inode.atime_sec = sec;
+                inode.atime_nsec = nsec;
+            }
+            if let Some(m) = mode {
+                inode.mode = (inode.mode & S_IFMT) | (m & 0o7777);
+            }
+            if let Some(u) = uid {
+                inode.uid = u;
+            }
+            if let Some(g) = gid {
+                inode.gid = g;
+            }
+            if let Some((sec, nsec)) = mtime {
+                inode.mtime_sec = sec;
+                inode.mtime_nsec = nsec;
+            }
+            inode.ctime_sec = now_sec;
+            inode.ctime_nsec = now_nsec;
+            inode.clone()
+        }).map_err(|e| meta_error_to_errno(&e))?;
         if let Some((sec, nsec)) = mtime {
-            inode.mtime_sec = sec;
-            inode.mtime_nsec = nsec;
             // An explicit mtime (utimens) on a file with unflushed writes
             // wins over the time of those writes: the close stamps this one.
+            // (Outside the inode change: the store lock comes after this one.)
             for s in self.open_files.lock().values_mut() {
                 if s.ino == ino && s.modified.is_some() {
                     s.modified = Some((sec, nsec));
                 }
             }
         }
-
-        // Always update ctime
-        let (now_sec, now_nsec) = now_pair();
-        inode.ctime_sec = now_sec;
-        inode.ctime_nsec = now_nsec;
-
-        self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
         Ok(inode)
     }
 

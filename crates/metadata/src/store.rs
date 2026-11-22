@@ -577,44 +577,163 @@ impl DictMetadataStore {
         Ok(r)
     }
 
-    /// Current metadata of `ino`: the cached copy, or read from the store.
-    fn load_meta(&self, ino: InodeId) -> Result<InodeMeta, MetaError> {
-        if let Some(m) = self.inode_live.lock().map.get(&ino) {
-            return Ok(m.clone());
-        }
-        let digest = self.inode_data.lock().get(&ino).copied()
-            .ok_or(MetaError::NotFound(ino))?;
-        let meta = {
-            let mut io_guard = lock_stats::lock(&self.io, Site::Io);
-            load_inode(&mut *io_guard, &digest)?
-        };
-        let full = {
+    /// The inode cache, locked, with `ino` in it. A cold inode is read with
+    /// no cache lock held; it is cached only if it is still absent and its
+    /// digest did not change meanwhile (else a delete or a newer flush in
+    /// between would be undone). Lock order: `inode_map`, `inode_live`,
+    /// `inode_data`.
+    fn cached_inode(&self, ino: InodeId) -> Result<sync::MutexGuard<'_, Live<InodeMeta>>, MetaError> {
+        let mut cold: Option<(ObjectKey, InodeMeta)> = None;
+        loop {
             let mut live = self.inode_live.lock();
-            // A concurrent update may have cached a newer copy meanwhile; keep it.
-            live.map.entry(ino).or_insert_with(|| meta.clone());
-            live.map.len() > INODE_CACHE_MAX
-        };
-        if full {
-            self.flush_inodes();
-            self.inode_live.lock().evict_clean();
+            if live.map.contains_key(&ino) {
+                return Ok(live);
+            }
+            let digest = self.inode_data.lock().get(&ino).copied()
+                .ok_or(MetaError::NotFound(ino))?;
+            if let Some((d, meta)) = cold.take() {
+                if d == digest {
+                    live.map.insert(ino, meta);
+                    return Ok(live);
+                }
+            }
+            drop(live);
+            let meta = {
+                let mut io_guard = lock_stats::lock(&self.io, Site::Io);
+                load_inode(&mut *io_guard, &digest)?
+            };
+            cold = Some((digest, meta));
         }
-        Ok(meta)
     }
 
-    /// Cache `meta` as the new (dirty) state of its inode.
-    fn store_meta(&self, meta: &InodeMeta) {
-        let (flush, full) = {
-            let mut live = self.inode_live.lock();
-            live.map.insert(meta.ino, meta.clone());
-            live.mark_dirty(meta.ino);
-            (live.dirty.len() >= DIRTY_FLUSH, live.map.len() > INODE_CACHE_MAX)
-        };
+    /// After a change of the inode cache, with no cache lock held: write the
+    /// dirty entries (`flush`), and drop the clean ones when it is `full`.
+    fn trim_inodes(&self, flush: bool, full: bool) {
         if flush || full {
             self.flush_inodes();
         }
         if full {
             self.inode_live.lock().evict_clean();
         }
+    }
+
+    /// Current metadata of `ino`: the cached copy, or read from the store.
+    fn load_meta(&self, ino: InodeId) -> Result<InodeMeta, MetaError> {
+        let live = self.cached_inode(ino)?;
+        let meta = live.map[&ino].clone();
+        let full = live.map.len() > INODE_CACHE_MAX;
+        drop(live);
+        self.trim_inodes(false, full);
+        Ok(meta)
+    }
+
+    /// Change inode `ino` in one hold of its cache lock (D-05): `f` gets the
+    /// current metadata, and what it leaves is the new (dirty) state. Two
+    /// threads that change one inode never lose a change. `logical_bytes`
+    /// follows the size change in the same hold. `f` must not call the store
+    /// or take a lock. `NotFound` if there is no such inode.
+    pub fn modify_inode<R>(&self, ino: InodeId, f: impl FnOnce(&mut InodeMeta) -> R) -> Result<R, MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
+        let mut live = self.cached_inode(ino)?;
+        let m = live.map.get_mut(&ino).expect("cached_inode caches it");
+        let old_size = m.size;
+        let r = f(m);
+        debug_assert_eq!(m.ino, ino, "modify_inode must not change the inode number");
+        let new_size = m.size;
+        live.mark_dirty(ino);
+        self.add_size(old_size, new_size);
+        let (flush, full) = (live.dirty.len() >= DIRTY_FLUSH, live.map.len() > INODE_CACHE_MAX);
+        drop(live);
+        self.trim_inodes(flush, full);
+        Ok(r)
+    }
+
+    /// `logical_bytes` after an inode size went from `old` to `new`
+    /// (saturating: never below 0).
+    fn add_size(&self, old: u64, new: u64) {
+        if new > old {
+            self.logical_bytes.fetch_add(new - old, Ordering::Relaxed);
+        } else if old > new {
+            self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                Some(cur.saturating_sub(old - new))
+            }).ok();
+        }
+    }
+
+    /// Cache `meta` as a new dirty inode: number `at` (`AlreadyExists` if
+    /// it is taken; new numbers are above it afterwards), or a new number.
+    /// The number is taken and the inode cached under `inode_map`, so no
+    /// number is given twice. A new inode is only in the cache until a flush.
+    fn insert_inode(&self, at: Option<InodeId>, meta: &InodeMeta) -> Result<InodeId, MetaError> {
+        let mut map = self.inode_map.lock();
+        let mut live = self.inode_live.lock();
+        let ino = match at {
+            None => map.allocate_ino(),
+            Some(ino) => {
+                if map.get(ino).is_some() || live.map.contains_key(&ino)
+                    || self.inode_data.lock().contains_key(&ino)
+                {
+                    return Err(MetaError::AlreadyExists(ino));
+                }
+                if map.next_ino() <= ino {
+                    map.set_next_ino(ino.saturating_add(1));
+                }
+                ino
+            }
+        };
+        let mut m = meta.clone();
+        m.ino = ino;
+        let size = m.size;
+        live.map.insert(ino, m);
+        live.mark_dirty(ino);
+        let (flush, full) = (live.dirty.len() >= DIRTY_FLUSH, live.map.len() > INODE_CACHE_MAX);
+        drop(live);
+        drop(map);
+        self.add_size(0, size);
+        self.inode_count.fetch_add(1, Ordering::Relaxed);
+        self.trim_inodes(flush, full);
+        Ok(ino)
+    }
+
+    /// `create_directory` with number `at`, or a new number.
+    fn make_directory(
+        &self,
+        parent_ino: InodeId,
+        name: &str,
+        at: Option<InodeId>,
+        meta: &InodeMeta,
+    ) -> Result<InodeId, MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
+        // Validate parent exists and is a directory
+        check_name(name)?;
+        let parent_meta = self.get_inode(parent_ino)?;
+        if parent_meta.mode & S_IFMT != S_IFDIR {
+            return Err(MetaError::NotADirectory(parent_ino));
+        }
+        if !self.is_dir(parent_ino) {
+            return Err(MetaError::NotADirectory(parent_ino));
+        }
+        let mut dir_meta = meta.clone();
+        // Ensure mode has directory type bit
+        if dir_meta.mode & S_IFMT != S_IFDIR {
+            dir_meta.mode |= S_IFDIR;
+        }
+        // Take the number first; `inode_map` is released before the parent
+        // directory is read or changed (it may come from disk).
+        let ino = self.insert_inode(at, &dir_meta)?;
+        // Then the name: if it already exists, the new inode goes again.
+        if let Err(e) = self.with_dir(parent_ino, |d| d.add(name, ino).map(|()| ((), true))) {
+            let _ = self.delete_inode(ino);
+            return Err(e);
+        }
+        {
+            let mut live = self.dir_live.lock();
+            live.map.insert(ino, DirList::new_dir(ino, parent_ino));
+            live.mark_dirty(ino);
+        }
+        // The parent gains a link (the ".." of the new directory).
+        self.modify_inode(parent_ino, |m| m.nlinks += 1)?;
+        Ok(ino)
     }
 
     /// Write every dirty cached inode; record its digest in `inode_data` and `inode_map`.
@@ -990,23 +1109,13 @@ impl DictMetadataStore {
 impl MetadataStore for DictMetadataStore {
     fn create_inode(&self, meta: &InodeMeta) -> Result<InodeId, MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        let mut inode_map = self.inode_map.lock();
-        let ino = inode_map.allocate_ino();
-        let mut full_meta = meta.clone();
-        full_meta.ino = ino;
-        drop(inode_map);
         // The inode is written at the next flush; until then only the cache has it.
-        self.store_meta(&full_meta);
+        self.insert_inode(None, meta)
+    }
 
-        // Track logical bytes: add this inode's size to running total.
-        if full_meta.size > 0 {
-            self.logical_bytes.fetch_add(full_meta.size, Ordering::Relaxed);
-        }
-
-        // Track inode count.
-        self.inode_count.fetch_add(1, Ordering::Relaxed);
-
-        Ok(ino)
+    fn create_inode_at(&self, ino: InodeId, meta: &InodeMeta) -> Result<InodeId, MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
+        self.insert_inode(Some(ino), meta)
     }
 
     fn get_inode(&self, ino: InodeId) -> Result<InodeMeta, MetaError> {
@@ -1014,24 +1123,9 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn update_inode(&self, meta: &InodeMeta) -> Result<(), MetaError> {
-        self.changes.fetch_add(1, Ordering::Relaxed);
-        let ino = meta.ino;
-
-        // Capture old size before replacing the digest, so we can adjust logical_bytes.
-        let old_size = self.load_meta(ino)?.size;
-        self.store_meta(meta);
-
-        // Adjust logical_bytes by the size delta (saturating arithmetic prevents underflow).
-        let new_size = meta.size;
-        if new_size > old_size {
-            self.logical_bytes.fetch_add(new_size - old_size, Ordering::Relaxed);
-        } else if old_size > new_size {
-            self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                Some(cur.saturating_sub(old_size - new_size))
-            }).ok();
-        }
-
-        Ok(())
+        // The whole value is replaced (see `modify_inode` for a change of a
+        // few fields that must not lose a concurrent one).
+        self.modify_inode(meta.ino, |m| *m = meta.clone())
     }
 
     fn delete_inode(&self, ino: InodeId) -> Result<(), MetaError> {
@@ -1039,15 +1133,24 @@ impl MetadataStore for DictMetadataStore {
         // Capture size before removing so we can decrement logical_bytes.
         let size = self.load_meta(ino)?.size;
 
-        self.inode_live.lock().remove(ino);
-        self.inode_data.lock().remove(&ino);
-        self.inode_map.lock().remove(ino);
+        // The cache entry and the digest go in one hold of the cache lock:
+        // a cold load that runs meanwhile then cannot cache the inode again.
+        {
+            let mut inode_map = self.inode_map.lock();
+            let mut live = self.inode_live.lock();
+            live.remove(ino);
+            self.inode_data.lock().remove(&ino);
+            inode_map.remove(ino);
+        }
         // Drop every per-inode map entry: a leftover manifest/xattr/dir entry
         // would keep the deleted content reachable (never garbage-collected).
         self.manifest_data.lock().remove(&ino);
         self.xattr_data.lock().remove(&ino);
-        self.dir_live.lock().remove(ino);
-        self.dir_data.lock().remove(&ino);
+        {
+            let mut live = self.dir_live.lock();
+            live.remove(ino);
+            self.dir_data.lock().remove(&ino);
+        }
 
         // Decrement logical_bytes by the deleted inode's size.
         if size > 0 {
@@ -1070,47 +1173,17 @@ impl MetadataStore for DictMetadataStore {
         name: &str,
         meta: &InodeMeta,
     ) -> Result<InodeId, MetaError> {
-        self.changes.fetch_add(1, Ordering::Relaxed);
-        // Validate parent exists and is a directory
-        check_name(name)?;
-        let parent_meta = self.get_inode(parent_ino)?;
-        if parent_meta.mode & S_IFMT != S_IFDIR {
-            return Err(MetaError::NotADirectory(parent_ino));
-        }
-        if !self.is_dir(parent_ino) {
-            return Err(MetaError::NotADirectory(parent_ino));
-        }
+        self.make_directory(parent_ino, name, None, meta)
+    }
 
-        // Allocate new inode number
-        let mut inode_map = self.inode_map.lock();
-        let ino = inode_map.allocate_ino();
-        let mut dir_meta = meta.clone();
-        dir_meta.ino = ino;
-        // Ensure mode has directory type bit
-        if dir_meta.mode & S_IFMT != S_IFDIR {
-            dir_meta.mode |= S_IFDIR;
-        }
-
-        // Add the name to the parent first: if it already exists, nothing changed.
-        self.with_dir(parent_ino, |d| d.add(name, ino).map(|()| ((), true)))?;
-
-        drop(inode_map);
-        self.store_meta(&dir_meta);
-        {
-            let mut live = self.dir_live.lock();
-            live.map.insert(ino, DirList::new_dir(ino, parent_ino));
-            live.mark_dirty(ino);
-        }
-
-        // Increment parent nlinks (for the .. backlink from new subdir)
-        let mut parent_meta = self.get_inode(parent_ino)?;
-        parent_meta.nlinks += 1;
-        self.update_inode(&parent_meta)?;
-
-        // Track inode count for the new directory inode.
-        self.inode_count.fetch_add(1, Ordering::Relaxed);
-
-        Ok(ino)
+    fn create_directory_at(
+        &self,
+        parent_ino: InodeId,
+        name: &str,
+        ino: InodeId,
+        meta: &InodeMeta,
+    ) -> Result<InodeId, MetaError> {
+        self.make_directory(parent_ino, name, Some(ino), meta)
     }
 
     fn list_directory(&self, ino: InodeId) -> Result<Vec<DirEntry>, MetaError> {
@@ -2486,6 +2559,81 @@ mod tests {
         store.delete_inode(ino3).unwrap();
         assert_eq!(store.inode_count(), 3,
             "after deleting 1 inode, count should be 3");
+    }
+
+    // D-05: four threads that each add 1 to nlinks 500 times lose no change.
+    #[test]
+    fn atomic_modify_inode_loses_no_change() {
+        let (_d, store) = make_store();
+        let ino = store.create_inode(&new_file_meta()).unwrap();
+        let start = store.get_inode(ino).unwrap().nlinks;
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    for _ in 0..500 {
+                        store.modify_inode(ino, |m| m.nlinks += 1).unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(store.get_inode(ino).unwrap().nlinks, start + 2000);
+    }
+
+    #[test]
+    fn missing_inode_modify_inode_is_not_found_and_creates_nothing() {
+        let (_d, store) = make_store();
+        assert!(matches!(store.modify_inode(99, |m| m.size = 5), Err(MetaError::NotFound(99))));
+        assert!(matches!(store.get_inode(99), Err(MetaError::NotFound(99))));
+        assert_eq!(store.inode_count(), 1);
+    }
+
+    #[test]
+    fn size_change_in_modify_inode_moves_logical_bytes() {
+        let (_d, store) = make_store();
+        let ino = store.create_inode(&new_file_meta()).unwrap();
+        store.modify_inode(ino, |m| m.size = 1000).unwrap();
+        assert_eq!(store.logical_bytes(), 1000);
+        store.modify_inode(ino, |m| m.size = 300).unwrap();
+        assert_eq!(store.logical_bytes(), 300);
+        assert_eq!(store.modify_inode(ino, |m| m.size).unwrap(), 300);
+    }
+
+    // D-08 (store side): a create with a given number.
+    #[test]
+    fn create_inode_at_takes_the_number_and_raises_the_allocator() {
+        let (_d, store) = make_store();
+        assert_eq!(store.create_inode_at(7, &new_file_meta()).unwrap(), 7);
+        assert_eq!(store.get_inode(7).unwrap().ino, 7);
+        assert!(store.create_inode(&new_file_meta()).unwrap() >= 8);
+        assert!(matches!(store.create_inode_at(7, &new_file_meta()), Err(MetaError::AlreadyExists(7))));
+        assert!(matches!(store.create_inode_at(1, &new_file_meta()), Err(MetaError::AlreadyExists(1))));
+        // Taken after a commit and a reload too (the digest maps have it).
+        let root = store.commit().unwrap();
+        let reloaded = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
+        assert!(matches!(reloaded.create_inode_at(7, &new_file_meta()), Err(MetaError::AlreadyExists(7))));
+        assert_eq!(store.inode_count(), 3);
+    }
+
+    #[test]
+    fn create_directory_at_adds_the_entry_or_nothing() {
+        let (_d, store) = make_store();
+        let root_links = store.get_inode(1).unwrap().nlinks;
+        assert_eq!(store.create_directory_at(1, "d", 9, &new_dir_meta()).unwrap(), 9);
+        assert_eq!(store.lookup(1, "d").unwrap(), 9);
+        let names: Vec<(String, u64)> = store.list_directory(9).unwrap().into_iter().map(|e| (e.name, e.ino)).collect();
+        assert!(names.contains(&(".".into(), 9)) && names.contains(&("..".into(), 1)), "{names:?}");
+        assert_eq!(store.get_inode(1).unwrap().nlinks, root_links + 1);
+        assert!(store.create_directory(1, "e", &new_dir_meta()).unwrap() >= 10);
+        let count = store.inode_count();
+        // A taken number: nothing is added.
+        assert!(matches!(store.create_directory_at(1, "x", 9, &new_dir_meta()), Err(MetaError::AlreadyExists(9))));
+        assert!(store.lookup(1, "x").is_err());
+        // An existing name: the number stays free, nothing is added.
+        assert!(store.create_directory_at(1, "d", 20, &new_dir_meta()).is_err());
+        assert!(matches!(store.get_inode(20), Err(MetaError::NotFound(20))));
+        assert_eq!(store.lookup(1, "d").unwrap(), 9);
+        assert_eq!(store.inode_count(), count);
+        assert_eq!(store.get_inode(1).unwrap().nlinks, root_links + 2);
     }
 
     #[test]

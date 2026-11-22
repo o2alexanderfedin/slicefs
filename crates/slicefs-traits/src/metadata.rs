@@ -145,6 +145,10 @@ pub trait MetadataStore: Send + Sync {
     /// Assign a new inode number and store `meta`. Returns the assigned `InodeId`.
     fn create_inode(&self, meta: &InodeMeta) -> Result<InodeId, MetaError>;
 
+    /// Store `meta` as inode `ino` (the replay of a logged create). Returns
+    /// `AlreadyExists` if `ino` is taken. New numbers are above `ino` afterwards.
+    fn create_inode_at(&self, ino: InodeId, meta: &InodeMeta) -> Result<InodeId, MetaError>;
+
     /// Retrieve the metadata for an existing inode.
     fn get_inode(&self, ino: InodeId) -> Result<InodeMeta, MetaError>;
 
@@ -162,6 +166,17 @@ pub trait MetadataStore: Send + Sync {
         &self,
         parent_ino: InodeId,
         name: &str,
+        meta: &InodeMeta,
+    ) -> Result<InodeId, MetaError>;
+
+    /// `create_directory` with inode number `ino` (the replay of a logged
+    /// create). `AlreadyExists` if `ino` is taken; on any error nothing is
+    /// added. New numbers are above `ino` afterwards.
+    fn create_directory_at(
+        &self,
+        parent_ino: InodeId,
+        name: &str,
+        ino: InodeId,
         meta: &InodeMeta,
     ) -> Result<InodeId, MetaError>;
 
