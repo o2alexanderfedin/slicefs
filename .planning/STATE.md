@@ -6,10 +6,10 @@ current_phase: 19
 current_phase_name: Fine-grained locks
 status: executing
 stopped_at: Completed 19-09-PLAN.md
-last_updated: "2026-11-22T08:50:40.523Z"
+last_updated: "2026-11-22T09:05:46.389Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 19 execution started
-state_head: c9664c8edbef30a351c74d975104044fcaad5e37
+state_head: 37b1119191e6609d8be2e43a7ce20b35f863e127
 progress:
   total_phases: 7
   completed_phases: 1
@@ -117,6 +117,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: Namespace ops lock 256 stripes in ascending stripe order (inode number hashed to a stripe); lock_namespace reads, locks, re-reads and retries on a change; cross-directory rename takes the rename mutex first
 - [Phase 19]: The setattr size change stays under the cell lock only (it can splice); the other setattr fields and xattr changes run under stripe then cell
 - [Phase 19]: Every request takes the commit gate through gate_shared (Rank::Gate entry); the harness runs with the strict-gate rule; serialize_off_target is in the default suite
+- [Phase 19]: Replay skips a Setxattr/Removexattr record of an inode it already reclaimed, as it skips a write of a gone inode
 
 ### Pending Todos
 

@@ -17,19 +17,20 @@ provides:
   - "gate_shared / gate_exclusive -> GateGuard (std RwLock guard plus a Rank::Gate entry); used in all 33 FUSE callbacks, gc_start_mode, the harness gated(); timed_commit holds a Gate entry"
   - "Harness worker and commit threads run with rank::require_gate(true); serialize_off_target is in the default suite (2 s per mode)"
   - "test_orphan_count accessor; Site::Stripe"
+  - "Replay skips a Setxattr/Removexattr record of an inode it already reclaimed"
 affects: [19-10, 19-11, 20, 21]
 
 estimate:
   tokens: 140000
   tasks: 3
 actuals:
-  tokens: 15612
+  tokens: 16665
   tasks: 3
-  commits: 3
+  commits: 5
 
 plan_head_before: c10866671b1e38746b0abaade9f54ed1e989dce0
-plan_head_after: c9664c8edbef30a351c74d975104044fcaad5e37
-commits: 3
+plan_head_after: 37b1119191e6609d8be2e43a7ce20b35f863e127
+commits: 5
 
 tech-stack:
   added: []
@@ -50,6 +51,8 @@ key-files:
     - crates/slicefs-cli/tests/lock_stats_report.rs
     - crates/slicefs-cli/tests/dir_link_tests.rs
     - crates/slicefs-cli/tests/stress_harness.rs
+    - crates/slicefs-cli/src/oplog.rs
+    - crates/slicefs-cli/tests/write_log_replay_tests.rs
     - .planning/REQUIREMENTS.md
     - .planning/ROADMAP.md
 
@@ -68,7 +71,7 @@ patterns-established:
 
 requirements-completed: [LOCK-03]
 
-duration: 55min
+duration: 75min
 completed: 2026-11-22
 ---
 
@@ -78,11 +81,11 @@ completed: 2026-11-22
 
 ## Performance
 
-- **Duration:** about 55 min
-- **Started:** 2026-11-21T23:56Z (after `c108666`)
-- **Completed:** 2026-11-22T00:50Z
+- **Duration:** about 75 min (with the replay fix after the review)
+- **Started:** 2026-11-22T07:56Z (after `c108666`)
+- **Completed:** 2026-11-22T09:10Z
 - **Tasks:** 3
-- **Files modified:** 11 (1 created)
+- **Files modified:** 13 (1 created)
 
 ## Accomplishments
 
@@ -100,6 +103,8 @@ completed: 2026-11-22
 1. **Task 1: NamespaceLocks and atomic open, last close and unlink** (tracer): `3909e6e`
 2. **Task 2: Every namespace operation under its stripes; rename mutex; wording** (TDD): `dbd8166`
 3. **Task 3: Gate helpers, strict-gate rule, serialize_off_target in the suite** (TDD): `c9664c8`
+4. **Fix: replay skips an xattr record of a reclaimed inode** (deviation 4): `37b1119`
+- Plan metadata: `4b494f5` (first SUMMARY), then the docs commit with this update
 
 ## Verification
 
@@ -160,7 +165,15 @@ See `key-decisions`. All of them can be changed later.
 - **S3 spike site list:** `"open_files"` changed to `"file_cell"` (the stale label that 19-05 noted). This is an ignored spike, so it is outside the suite.
 - **Gate entry order:** `gate_shared` and `gate_exclusive` push the Gate entry before they take the std lock. A second gate hold on one thread therefore panics in debug builds instead of deadlocking behind a queued commit. `GateGuard` releases the std guard first, then the entry.
 
-**Total deviations:** 3 auto-fixes (2 Rule 1, 1 Rule 2) and 7 notes. **Impact:** all plan truths hold. The setattr truth holds with the size exception that rule 1 requires.
+**4. [Rule 1 - Bug] Replay aborted on an xattr record of an orphan**
+- **Found during:** review after Task 3
+- **Issue:** with deviation 1, the xattr calls refuse a missing inode. Take an orphan that was open in the live run through a plain open, which is not in the log. Its Unlink reclaims it in replay, so a later `Setxattr` or `Removexattr` record of it failed and aborted the whole replay. Replay already skips a `Write` or `Truncate` of a gone inode.
+- **Fix:** `oplog.rs` skips such an xattr record (`stats.skipped`).
+- **Test:** `an_xattr_change_of_an_open_orphan_replays`. It was red before the fix: "write log record 1 (setxattr) did not replay".
+- **Files modified:** `crates/slicefs-cli/src/oplog.rs`, `crates/slicefs-cli/tests/write_log_replay_tests.rs` (not in the plan file list)
+- **Commit:** `37b1119`
+
+**Total deviations:** 4 auto-fixes (3 Rule 1, 1 Rule 2) and 7 notes. **Impact:** all plan truths hold. The setattr truth holds with the size exception that rule 1 requires.
 
 ## Known open issue (deferred)
 
@@ -173,7 +186,8 @@ See `key-decisions`. All of them can be changed later.
 - With a stripe held, do not call `uncount`, `test_setxattr`, `test_removexattr`, `test_setattr_full`, `test_create`, `test_mknod_rdev`, `open_logged` or any `simulate_*`. Each of them locks a stripe, and a stripe with the same or a lower key than the held one panics in debug builds. Under a held stripe, use `uncount_held`, `close_handle_held` or `drop_last_link`.
 - A stripe must not be taken with a cell held (rank 3 after 4 panics). `test_release` therefore runs `release_write` (cell) before `uncount` (stripe).
 - New request code takes the gate only through `gate_shared`. A thread that runs request code in a test can turn on `rank::require_gate(true)` to check this.
-- Replay (Plan 10): `open_logged` now fails with ENOENT for an inode that does not exist, so replay must create the inode first. It does this today.
+- Replay (Plan 10): `open_logged` now fails with ENOENT for an inode that does not exist, so replay must create the inode first. It does this today. A `Write` or `Truncate` of a gone inode is skipped, as before. Xattr records of a gone inode are now skipped too (deviation 4).
+- Replay (Plan 10), older than this plan: a `Setattr` record of an orphan whose open is not in the log still aborts replay. Replay reclaims the orphan at its Unlink, and then `modify_inode` gives NotFound. Plan 10 can skip it in the same way.
 
 ## Issues Encountered
 
@@ -196,4 +210,5 @@ None. There is no new endpoint, file kind or trust boundary.
 ## Self-Check: PASSED
 
 - `crates/slicefs-cli/src/locks.rs`, this SUMMARY and `deferred-items.md`: FOUND
-- Commits `3909e6e`, `dbd8166` and `c9664c8`: FOUND on HEAD (`git rev-list --count c108666..c9664c8` prints 3)
+- Commits `3909e6e`, `dbd8166`, `c9664c8`, `4b494f5` and `37b1119`: FOUND on HEAD (`git rev-list --count c108666..37b1119` prints 5)
+- After the fix: `cargo test --workspace` exit 0 (66 ok, no FAILED, no rank violation); the `deadlock-detect` run of `serialize_off_target` passed in 4.99 s; the four Task 1 acceptance greps print 1, 1, 1, 1
