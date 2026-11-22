@@ -44,6 +44,8 @@ pub enum Site {
     FileCell,
     /// A shard of the cell map (`ino -> FileCell`) of the file system core.
     CellMap,
+    /// A namespace stripe of the file system core (`NamespaceLocks`).
+    Stripe,
 }
 
 impl Site {
@@ -61,6 +63,7 @@ impl Site {
         Site::Handles,
         Site::FileCell,
         Site::CellMap,
+        Site::Stripe,
     ];
 
     pub fn label(self) -> &'static str {
@@ -77,6 +80,7 @@ impl Site {
             Site::Handles => "handles",
             Site::FileCell => "file_cell",
             Site::CellMap => "cell_map",
+            Site::Stripe => "stripe",
         }
     }
 }

@@ -505,3 +505,63 @@ fn test_symlink_inode_size_equals_target_length() {
         "inode size must equal target path length"
     );
 }
+
+// ── Phase 19: namespace stripes (D-04) ────────────────────────────────────────
+
+/// The last close and the last unlink of one inode race: exactly one of them
+/// reclaims it, and no orphan is left (both decide under `stripe(ino)`).
+#[test]
+fn unlink_and_last_close_never_leak_an_orphan() {
+    let (fs, _dir) = fresh_fs();
+    for i in 0..200 {
+        let name = format!("f{i}");
+        let (ino, fh) = fs.test_create(1, &name, 0o644, 0o022, 0, 0).unwrap();
+        let b = std::sync::Barrier::new(2);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                b.wait();
+                fs.test_release(ino, fh).unwrap();
+            });
+            s.spawn(|| {
+                b.wait();
+                fs.simulate_unlink(1, &name).unwrap();
+            });
+        });
+        assert!(fs.test_getattr(ino).is_err(), "round {i}: inode {ino} is still there");
+        assert_eq!(fs.test_orphan_count(), 0, "round {i}: an orphan is left");
+    }
+}
+
+/// `open` checks under the inode's stripe that the inode exists.
+#[test]
+fn open_of_a_removed_inode_fails() {
+    let (fs, _dir) = fresh_fs();
+    let ino = make_file(&fs, 1, "gone");
+    fs.simulate_unlink(1, "gone").unwrap();
+    assert_eq!(fs.test_open(ino, libc::O_RDONLY).unwrap_err(), libc::ENOENT);
+    assert_eq!(fs.test_open(ino, libc::O_RDWR).unwrap_err(), libc::ENOENT);
+    assert_eq!(fs.test_orphan_count(), 0);
+}
+
+/// A parent and a child in one stripe: the stripe is locked once (no
+/// self-deadlock, no rank panic in a debug build).
+#[test]
+fn two_inodes_in_one_stripe_are_locked_once() {
+    use slicefs_cli::locks::stripe;
+    let (fs, _dir) = fresh_fs();
+    let mut n = 0;
+    let ino = loop {
+        let ino = make_file(&fs, 1, &format!("c{n}"));
+        n += 1;
+        if stripe(ino) == stripe(1) {
+            break ino;
+        }
+    };
+    let name = format!("c{}", n - 1);
+    let fh = fs.test_open(ino, libc::O_RDONLY).unwrap().0;
+    fs.simulate_unlink(1, &name).unwrap();
+    assert_eq!(fs.test_orphan_count(), 1);
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.test_orphan_count(), 0);
+    assert!(fs.test_getattr(ino).is_err());
+}

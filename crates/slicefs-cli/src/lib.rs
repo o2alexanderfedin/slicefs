@@ -8,6 +8,7 @@ pub mod filesystem;
 mod fuse_callbacks;
 #[doc(hidden)]
 pub mod handlers;
+pub mod locks;
 pub mod oplog;
 pub mod overlay;
 pub mod gc;

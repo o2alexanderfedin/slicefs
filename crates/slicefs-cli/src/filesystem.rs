@@ -18,6 +18,7 @@ use crate::util::ts;
 
 use slicefs_traits::key::ObjectKey;
 use crate::content::{self, Content, Stream};
+use crate::locks::{NamespaceLocks, NsGuard};
 use crate::overlay::{next_gen, Overlay};
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use metadata::store::DictMetadataStore;
@@ -436,6 +437,9 @@ pub struct SliceFsFilesystem {
     /// Every open handle (read-only too), the open count of each inode and
     /// the orphans: keeps an unlinked inode alive until its last handle closes.
     handles: sync::Mutex<HandleTable>,
+    /// Namespace stripes and the rename mutex (D-04): the namespace changes
+    /// of one inode, its open and last-close decisions, setattr and xattr.
+    ns: NamespaceLocks,
     next_fh: AtomicU64,
     pub(crate) store_path: Option<PathBuf>,
     pub(crate) auto_snapshot: bool,
@@ -497,6 +501,7 @@ impl SliceFsFilesystem {
             dirty_total: AtomicUsize::new(0),
             readers: sync::Mutex::new(Rank::Short, HashMap::new()).timed(Site::Readers),
             handles: sync::Mutex::new(Rank::Short, HandleTable::default()).timed(Site::Handles),
+            ns: NamespaceLocks::new(),
             next_fh: AtomicU64::new(0),
             store_path,
             auto_snapshot: false,
@@ -970,10 +975,11 @@ impl SliceFsFilesystem {
     }
 
     /// Forget handle `fh`. If it was the last handle of an orphaned inode,
-    /// reclaim the inode. A handle that is not open is ignored.
-    fn close_handle(&self, fh: u64) {
+    /// reclaim the inode. A handle that is not open is ignored. The caller
+    /// holds `stripe(ino)` of the handle's inode.
+    fn close_handle_held(&self, fh: u64) {
         if let Some(h) = self.take_handle(fh) {
-            self.uncount(h.ino);
+            self.uncount_held(h.ino);
         }
     }
 
@@ -984,8 +990,15 @@ impl SliceFsFilesystem {
     }
 
     /// One handle of `ino` is gone. If it was the last one of an orphaned
-    /// inode, reclaim the inode.
+    /// inode, reclaim the inode. Locks `stripe(ino)`, so the last-close and
+    /// the last-unlink decisions of one inode cannot interleave.
     fn uncount(&self, ino: u64) {
+        let _ns = self.ns.lock(&[ino]);
+        self.uncount_held(ino);
+    }
+
+    /// `uncount` with `stripe(ino)` already held by the caller.
+    fn uncount_held(&self, ino: u64) {
         let reclaim = {
             let mut t = self.handles.lock();
             let n = t.open_count.get_mut(&ino).expect("an open handle is counted");
@@ -1013,7 +1026,8 @@ impl SliceFsFilesystem {
     }
 
     /// The last link of a non-directory inode was removed: reclaim it now, or
-    /// keep it as an orphan (nlink 0) while handles are still open.
+    /// keep it as an orphan (nlink 0) while handles are still open. The
+    /// caller holds `stripe(ino)` (open and last close take it too).
     fn drop_last_link(&self, inode: InodeMeta) -> Result<(), i32> {
         let ino = inode.ino;
         if self.handles.lock().open_count.contains_key(&ino) {
@@ -1700,6 +1714,44 @@ impl SliceFsFilesystem {
             }
             inode.clone()
         }).map_err(|e| meta_error_to_errno(&e))
+    }
+
+    /// Orphans kept for open handles (for tests).
+    pub fn test_orphan_count(&self) -> usize {
+        self.handles.lock().orphans.len()
+    }
+
+    /// Lock the namespace for an operation on the inodes `known` and the
+    /// children named by `lookups` (`(parent, name)`), with the rename mutex
+    /// first if `cross_dir` (RESEARCH Pattern 4 rule 2). A child is read
+    /// from its parent, then all stripes are locked in ascending order, and
+    /// the children are read again under them: on a change the stripes are
+    /// released and taken again for the new set. Returns the guard and the
+    /// lookup results under it (stable while the guard is held, since every
+    /// change of a directory's entries holds the directory's stripe).
+    pub(crate) fn lock_namespace(
+        &self,
+        cross_dir: bool,
+        known: &[u64],
+        lookups: &[(u64, &str)],
+    ) -> (NsGuard<'_>, Vec<Result<u64, MetaError>>) {
+        let look = || lookups.iter().map(|&(p, n)| self.meta.lookup(p, n)).collect::<Vec<_>>();
+        let same = |a: &[Result<u64, MetaError>], b: &[Result<u64, MetaError>]| {
+            a.iter().map(|r| r.as_ref().ok()).eq(b.iter().map(|r| r.as_ref().ok()))
+        };
+        let mut rename = cross_dir.then(|| self.ns.lock_rename());
+        let mut seen = look();
+        loop {
+            let mut inos = known.to_vec();
+            inos.extend(seen.iter().filter_map(|r| r.as_ref().ok().copied()));
+            let g = self.ns.lock_after(rename.take(), &inos);
+            let now = look();
+            if same(&seen, &now) {
+                return (g, now);
+            }
+            rename = g.into_rename();
+            seen = now;
+        }
     }
 
     /// Reclaim all orphans (used at unmount: no handle survives it).
@@ -2793,11 +2845,9 @@ impl SliceFsFilesystem {
     ///
     /// Returns EISDIR if the target is a directory (use rmdir instead).
     pub fn simulate_unlink(&self, parent_ino: u64, name: &str) -> Result<(), i32> {
-        // Resolve name
-        let ino = self
-            .meta
-            .lookup(parent_ino, name)
-            .map_err(|e| meta_error_to_errno(&e))?;
+        // Resolve name, with the parent and child stripes held.
+        let (_ns, found) = self.lock_namespace(false, &[parent_ino], &[(parent_ino, name)]);
+        let ino = found[0].as_ref().map_err(meta_error_to_errno).copied()?;
 
         // Must not be a directory
         let inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
@@ -3080,6 +3130,12 @@ impl SliceFsFilesystem {
         let acc_mode = flags & libc::O_ACCMODE;
         let is_write = acc_mode == libc::O_WRONLY || acc_mode == libc::O_RDWR;
 
+        // Under stripe(ino): the inode exists, and the handle is counted
+        // before an unlink can decide that nobody has it open.
+        let _ns = self.ns.lock(&[ino]);
+        if self.meta.get_inode(ino).is_err() {
+            return (Err(libc::ENOENT), None);
+        }
         let fh = self.open_handle(ino, is_write, flags & libc::O_APPEND != 0);
 
         let mut lsn = None;
@@ -3089,7 +3145,7 @@ impl SliceFsFilesystem {
             match self.open_write(ino, flags & libc::O_TRUNC != 0, time) {
                 Ok(l) => lsn = l,
                 Err(e) => {
-                    self.close_handle(fh);
+                    self.close_handle_held(fh);
                     return (Err(e), None);
                 }
             }
