@@ -806,6 +806,25 @@ impl SliceFsFilesystem {
         Arc::clone(&self.commit_gate)
     }
 
+    /// Hold the commit gate shared (one request) with a `Rank::Gate` entry
+    /// on this thread's rank stack for the same span (D-16). The entry goes
+    /// on first, so a second gate hold on one thread panics in a debug build
+    /// instead of waiting behind a queued commit. Every request and the
+    /// harness take the gate through this, never `commit_gate().read()`.
+    pub fn gate_shared(&self) -> GateGuard<'_> {
+        let rank = sync::rank::enter(Rank::Gate);
+        let hold = GateHold::Shared { _g: self.commit_gate.read().unwrap_or_else(|e| e.into_inner()) };
+        GateGuard { _hold: hold, _rank: rank }
+    }
+
+    /// Hold the commit gate exclusively (a commit, the start of a GC), with
+    /// its `Rank::Gate` entry (see `gate_shared`).
+    pub fn gate_exclusive(&self) -> GateGuard<'_> {
+        let rank = sync::rank::enter(Rank::Gate);
+        let hold = GateHold::Exclusive { _g: self.commit_gate.write().unwrap_or_else(|e| e.into_inner()) };
+        GateGuard { _hold: hold, _rank: rank }
+    }
+
     /// Access the metadata store (used by the mount command after unmount).
     pub fn meta(&self) -> &Arc<DictMetadataStore> {
         &self.meta
@@ -825,6 +844,20 @@ impl SliceFsFilesystem {
     pub fn read_content(&self, key: &ObjectKey) -> Option<Vec<u8>> {
         content::get_all(&self.content, key)
     }
+}
+
+/// The std commit gate held, shared or exclusive (each guard is kept only
+/// for its drop).
+enum GateHold<'a> {
+    Shared { _g: std::sync::RwLockReadGuard<'a, ()> },
+    Exclusive { _g: std::sync::RwLockWriteGuard<'a, ()> },
+}
+
+/// A hold of the commit gate and its rank-1 entry (D-16, D-18: the gate
+/// stays a std `RwLock`). The gate is released first, then the entry.
+pub struct GateGuard<'a> {
+    _hold: GateHold<'a>,
+    _rank: sync::rank::Marker,
 }
 
 /// Convert a `SystemTime` to `(seconds, nanoseconds)` since the epoch.
@@ -1103,7 +1136,7 @@ impl SliceFsFilesystem {
         // (#108). The commit below waits for it in any case; waiting here,
         // before the gate, keeps requests from waiting for it too.
         self.meta.wait_for_commit();
-        let gate = self.commit_gate.write().unwrap_or_else(|e| e.into_inner());
+        let gate = self.gate_exclusive();
         // From here the chunk store keeps each object put or read (nodes and
         // file content), and the GC changes only packs up to `boundary`.
         let begin = if full { self.content.gc_begin_full() } else { self.content.gc_begin() };

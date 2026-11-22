@@ -433,12 +433,12 @@ impl Ctx {
     }
 
     /// One operation: the harness mutex (serialize mode), then the commit gate
-    /// (as `fuse_callbacks.rs` does), then the handler. The latency is the
+    /// through `gate_shared` (as `fuse_callbacks.rs` does), then the handler. The latency is the
     /// handler call only; the gate wait and hold are timed apart.
     fn gated<R>(&self, hs: &mut Hists, kind: Kind, f: impl FnOnce() -> R) -> R {
         let _s = self.cfg.serialize.then(|| self.serial.lock().unwrap());
         let w = Instant::now();
-        let g = self.gate.read().unwrap_or_else(|e| e.into_inner());
+        let g = self.fs.gate_shared();
         let acquired = Instant::now();
         hs.gate_wait.saturating_record(ns(acquired - w));
         let n = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
@@ -972,11 +972,18 @@ fn run(cfg: Config) -> Outcome {
     let mut commit = CommitHists::new();
     let mut dirty_total = 0;
     std::thread::scope(|s| {
-        let committer = s.spawn(|| ctx.commit_loop(&stop));
+        // The strict-gate rule (D-16): on the commit and worker threads, a
+        // cell or stripe taken outside a gate hold panics in a debug build.
+        // Setup and the final verify run on this thread, without it.
+        let committer = s.spawn(|| {
+            chunk_store::sync::rank::require_gate(true);
+            ctx.commit_loop(&stop)
+        });
         let handles: Vec<_> = (0..cfg.threads)
             .map(|t| {
                 let ctx = &ctx;
                 s.spawn(move || {
+                    chunk_store::sync::rank::require_gate(true);
                     let mut hs = Hists::new();
                     let w = match ctx.cfg.mode {
                         Mode::OneFile => ctx.worker_one_file(t, &mut hs),
@@ -1171,6 +1178,30 @@ fn model_detects_planted_bug() {
     );
 }
 
+/// The strict-gate rule catches a request that takes a cell with no gate
+/// helper held (debug builds: the rank checker).
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "taken without the commit gate")]
+fn strict_gate_catches_a_request_without_the_gate() {
+    struct Off;
+    impl Drop for Off {
+        fn drop(&mut self) {
+            chunk_store::sync::rank::require_gate(false);
+        }
+    }
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path(), WalConfig::PerOp);
+    let fh = match h::handle_create(&fs, ROOT, "f", S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR) {
+        CreateResult::Ok(_, fh, _) => fh,
+        CreateResult::Error(e) => panic!("create errno {e}"),
+    };
+    // Declared after `fs`, so the rule is off again before `fs` drops.
+    let _off = Off;
+    chunk_store::sync::rank::require_gate(true);
+    let _ = h::handle_write(&fs, fh, 0, b"x");
+}
+
 /// The long run, by hand (use `--release`). Env vars: see `Config::from_env`.
 #[test]
 #[ignore = "long run by hand: STRESS_THREADS STRESS_SECS STRESS_FILE_MIB STRESS_SEED STRESS_SERIALIZE STRESS_MODE; use --release"]
@@ -1184,18 +1215,18 @@ fn long_run() {
     }
 }
 
-/// Serialize off: the target of Phases 19-21. Both modes, 4 threads, about 5 s
-/// each; the files are small, so the dirty total stays below the budget.
+/// Serialize off: the target of Phases 19-21, in the default suite since
+/// Phase 19. Both modes, 4 threads, 2 s each (RESEARCH Risk 7); the files are
+/// small, so the dirty total stays below the budget.
 #[test]
-#[ignore = "target for Phases 19-21: needs file state kept in open_files (LOCK-01) and no cross-file take-out (LOCK-02)"]
 fn serialize_off_target() {
     for mode in [Mode::OneFile, Mode::ManyFiles] {
         let cfg = Config {
             threads: 4,
             ops_per_thread: usize::MAX,
-            secs: Some(5),
+            secs: Some(2),
             serialize: false,
-            watchdog: Duration::from_secs(65),
+            watchdog: Duration::from_secs(30),
             ..short_cfg(mode)
         };
         let o = run(cfg.clone());
@@ -1444,7 +1475,7 @@ fn s3_store_lock() {
         print!("S3 n={n} ");
         row("gate_wait", &o.gate_wait);
         if chunk_store::lock_stats::ENABLED {
-            const SITES: [&str; 6] = ["store", "io", "readers", "open_files", "wal", "wal_writer"];
+            const SITES: [&str; 6] = ["store", "io", "readers", "file_cell", "wal", "wal_writer"];
             for st in chunk_store::lock_stats::snapshot().iter().filter(|s| s.count > 0 && SITES.contains(&s.label)) {
                 println!(
                     "S3 n={n} lock site={} count={} wait_p50_us={:.1} wait_p99_us={:.1} wait_max_us={:.1} hold_p50_us={:.1} hold_p99_us={:.1} hold_max_us={:.1}",

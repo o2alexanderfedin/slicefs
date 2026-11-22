@@ -48,12 +48,15 @@ pub fn timed_commit(fs: &SliceFsFilesystem, gate: &RwLock<()>) -> Result<CommitT
     // seen again by that sync, which fails the commit.
     let _ = fs.content().sync();
     let w = Instant::now();
+    // The gate's rank entry, for the span of the hold (D-16).
+    let rank = chunk_store::sync::rank::enter(chunk_store::sync::Rank::Gate);
     let all = gate.write().unwrap_or_else(|e| e.into_inner());
     let gate_wait = w.elapsed();
     let t = Instant::now();
     // Only the generation switch runs under the gate (#108).
     let cut = fs.commit_cut_begin();
     drop(all);
+    drop(rank);
     let hold = t.elapsed();
     fs.commit_cut_finish(cut?)?;
     Ok(CommitTimes { gate_wait, hold, total: w.elapsed() })
