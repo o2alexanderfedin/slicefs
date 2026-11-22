@@ -234,7 +234,7 @@ Plans:
   4. Locks have one fixed rank, with two inodes locked in ascending stripe order (inode number hashed to a stripe); a test that breaks the rank fails in a debug build
   5. After a crash, replay of the log from the mixed-operation harness gives the same state as the apply, including creates by logged inode number, and the #21 body matches this rule
   6. With several handles on one inode in different modes (read-only, read-write, `O_APPEND`), the harness shows the POSIX.1 2.9.7 rules: a completed write through one handle is visible through every other handle, a read sees all or none of a concurrent write, and concurrent appends never overlap and lose no bytes. The research for this phase checks how the kernel FUSE client computes the append offset in the SliceFS mount mode
-**Plans**: 8/11 plans executed
+**Plans**: 9/11 plans executed
 
 One plan per wave; executors run them in order.
 
@@ -264,7 +264,7 @@ Plans:
 - [x] 19-08-PLAN.md — Write-path records logged under the cell lock; `O_APPEND` handles; POSIX multi-handle tests
 
 **Wave 9** *(blocked on Wave 8 completion)*
-- [ ] 19-09-PLAN.md — Namespace stripes and rename mutex, gate at rank 1, `serialize_off_target` in the suite
+- [x] 19-09-PLAN.md — Namespace stripes and rename mutex, gate at rank 1, `serialize_off_target` in the suite
 
 **Wave 10** *(blocked on Wave 9 completion)*
 - [ ] 19-10-PLAN.md — Namespace records logged under their stripes, replay by logged inode, crash replay of the harness
@@ -347,7 +347,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 18. Spikes, baseline and stress harness | 7/7 | Complete    | 2026-11-21 |
-| 19. Fine-grained locks | 8/11 | In Progress | - |
+| 19. Fine-grained locks | 9/11 | In Progress | - |
 | 20. Dirty budget and rebase flusher | 0/0 | Not started | - |
 | 21. Worker pool | 0/0 | Not started | - |
 | 22. Chunk profiles | 0/0 | Not started | - |

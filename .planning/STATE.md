@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 19
 current_phase_name: Fine-grained locks
 status: executing
-stopped_at: Completed 19-08-PLAN.md
-last_updated: "2026-11-22T07:50:57.229Z"
+stopped_at: Completed 19-09-PLAN.md
+last_updated: "2026-11-22T08:50:40.523Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 19 execution started
-state_head: 80b42c395615921ee51aad534c3474df2f6663d5
+state_head: c9664c8edbef30a351c74d975104044fcaad5e37
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 18
-  completed_plans: 15
+  completed_plans: 16
   percent: 14
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 19 (Fine-grained locks) — EXECUTING
-Plan: 9 of 11
+Plan: 10 of 11
 Status: Ready to execute
 Last activity: 2026-11-21 — Phase 19 execution started
 
@@ -61,6 +61,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 19 P06 | 25min | 2 tasks | 4 files |
 | Phase 19 P07 | 95min | 3 tasks | 4 files |
 | Phase 19 P08 | 45min | 3 tasks | 5 files |
+| Phase 19 P09 | 55min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -112,6 +113,10 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: A closed-file truncate runs in a transient cell locked before it goes into the map
 - [Phase 19]: 19-08: a Release record is appended only by the release that retired the cell; Flush only when its Phase C installed; replay never appends
 - [Phase 19]: 19-08: an O_APPEND write takes EOF under the cell lock in every write-loop turn; the Write record carries the effective offset
+- [Phase 19]: Rank 2 is shared by the commit lock and the rename mutex; no thread holds both, and the checker refuses two Rank::Rename locks at once
+- [Phase 19]: Namespace ops lock 256 stripes in ascending stripe order (inode number hashed to a stripe); lock_namespace reads, locks, re-reads and retries on a change; cross-directory rename takes the rename mutex first
+- [Phase 19]: The setattr size change stays under the cell lock only (it can splice); the other setattr fields and xattr changes run under stripe then cell
+- [Phase 19]: Every request takes the commit gate through gate_shared (Rank::Gate entry); the harness runs with the strict-gate rule; serialize_off_target is in the default suite
 
 ### Pending Todos
 
@@ -133,8 +138,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-22T07:50:57.083Z
-Stopped at: Completed 19-08-PLAN.md
+Last session: 2026-11-22T08:50:40.374Z
+Stopped at: Completed 19-09-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
