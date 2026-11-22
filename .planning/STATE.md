@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 19
 current_phase_name: Fine-grained locks
 status: executing
-stopped_at: Completed 19-01-PLAN.md
-last_updated: "2026-11-22T00:50:09.227Z"
+stopped_at: Completed 19-02-PLAN.md
+last_updated: "2026-11-22T01:56:54.150Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 19 execution started
-state_head: 84614685e6613da79160a9904db1a23865a842c9
+state_head: 3fb6def7d1c6bc844c7e8fbfb895e61a10917147
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 18
-  completed_plans: 8
+  completed_plans: 9
   percent: 14
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 19 (Fine-grained locks) — EXECUTING
-Plan: 2 of 11
+Plan: 3 of 11
 Status: Ready to execute
 Last activity: 2026-11-21 — Phase 19 execution started
 
@@ -54,6 +54,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 18 P06 | 75min | 3 tasks | 8 files |
 | Phase 18 P07 | 35 min | 2 tasks | 1 files |
 | Phase 19 P01 | 60min | 3 tasks | 23 files |
+| Phase 19 P02 | 52min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -82,6 +83,9 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: commit_lock of DictMetadataStore has Rank::Rename (2): a commit cut holds it while it locks file-system maps
 - [Phase 19]: WritePacer state has Rank::Store (6): the chunk store calls the pacer with its gc lock held
 - [Phase 19]: Site::ALL is a slice; shim try_lock runs the rank check
+- [Phase 19]: Plan 19-02: seal join, pack create and KEEP_CAP wait leave ChunkStore::inner by a check-wait-retry loop in put; one create and one flush at a time, marked in Inner
+- [Phase 19]: Plan 19-02: index flush uses a frozen memtable; run and MANIFEST writes run without the store lock; GC install waits for a running flush
+- [Phase 19]: Plan 19-02: trust floor has its own Rank::Store lock held across the TRUST write; read opens uncached packs without the store lock and re-checks the place
 
 ### Pending Todos
 
@@ -103,8 +107,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-22T00:50:09.088Z
-Stopped at: Completed 19-01-PLAN.md
+Last session: 2026-11-22T01:56:54.006Z
+Stopped at: Completed 19-02-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
