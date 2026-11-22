@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 19
 current_phase_name: Fine-grained locks
 status: executing
-stopped_at: Completed 19-12-PLAN.md
-last_updated: "2026-11-22T14:21:37.460Z"
+stopped_at: Completed 19-13-PLAN.md
+last_updated: "2026-11-22T15:29:37.793Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 19 execution started
-state_head: a7bff74cefc967ad0d48672c0a9b8b67c71e7bd0
+state_head: 7041add5af8c191f6590de5dc13af94f01aced2c
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 23
-  completed_plans: 19
+  completed_plans: 20
   percent: 14
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 19 (Fine-grained locks) — EXECUTING (gap closure)
-Plan: 13 of 16
+Plan: 14 of 16
 Status: Gap-closure plans 19-12..19-16 ready to execute (LOCK-01, LOCK-04, LOCK-05)
 Last activity: 2026-11-22 — Gap-closure plans 19-12..19-16 written
 
@@ -65,6 +65,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 19 P10 | 55min | 3 tasks | 7 files |
 | Phase 19 P11 | 52min | 3 tasks | 4 files |
 | Phase 19 P12 | 70min | 3 tasks | 6 files |
+| Phase 19 P13 | 59min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -132,6 +133,9 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: 19-12: one record write in flight per active pack, published under the store lock; supersedes D-14
 - [Phase 19]: 19-12: RetryingPack sync handle repairs in its own thread; a sync that saw a failure drops no copies; a write that saw one writes again
 - [Phase 19]: 19-12: store waits for another thread's job end after STORE_WAIT (10 s) with TimedOut, without failing the store
+- [Phase 19]: G2 WAL half: no WAL lock during a record write; one write in flight per segment (19-13)
+- [Phase 19]: Cut/rotate/install write out records appended before the call, then wait for no write in flight; a failed log drops its queue as lost (19-13)
+- [Phase 19]: G4: mkdir reserves the inode number and locks [parent, ino] before the link (19-13)
 
 ### Pending Todos
 
@@ -155,8 +159,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-22T14:21:37.296Z
-Stopped at: Completed 19-12-PLAN.md
+Last session: 2026-11-22T15:29:37.632Z
+Stopped at: Completed 19-13-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
