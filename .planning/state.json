@@ -11,7 +11,7 @@
     {
       "number": "19",
       "name": "Fine-grained locks",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "20",
@@ -44,5 +44,5 @@
     "label": "Advance to the next step",
     "reason": "Phase 2 of 7 · 14% · executing"
   },
-  "updated_at": "2026-11-21T23:50:04.097Z"
+  "updated_at": "2026-11-22T00:50:06.488Z"
 }
