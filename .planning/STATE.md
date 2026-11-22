@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 19
 current_phase_name: Fine-grained locks
 status: executing
-stopped_at: Completed 19-04-PLAN.md
-last_updated: "2026-11-22T04:03:29.632Z"
+stopped_at: Completed 19-05-PLAN.md
+last_updated: "2026-11-22T04:59:27.596Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 19 execution started
-state_head: 9d0d540ed96f3f19b25b86d3a03beaa005eca1fc
+state_head: a29d163a6b91c51f1c67ebfbc182c66f9dac9ba6
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 18
-  completed_plans: 11
+  completed_plans: 12
   percent: 14
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 19 (Fine-grained locks) — EXECUTING
-Plan: 5 of 11
+Plan: 6 of 11
 Status: Ready to execute
 Last activity: 2026-11-21 — Phase 19 execution started
 
@@ -57,6 +57,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 19 P02 | 52min | 3 tasks | 6 files |
 | Phase 19 P03 | 50min | 3 tasks | 7 files |
 | Phase 19 P04 | 45min | 3 tasks | 11 files |
+| Phase 19 P05 | 41min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -96,6 +97,9 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: 19-04: WAL append is a memory copy plus an LSN under one short queue lock; write_out drains in LSN order; one WAL lock order writer, queue or pending, loc, behind
 - [Phase 19]: 19-04: PerOp write-out failure is sticky until a cut or rotate, so a record dropped by another thread's failed write-out is still reported
 - [Phase 19]: 19-04: WAL fsync runs on a second file handle (begin_sync/end_sync with a SyncMark of segment id and write count); Behind::settle syncs with the behind lock released
+- [Phase 19]: 19-05: cell map 16 shards (ino mod 16); orphan set lives in the handle table under one lock with the open count
+- [Phase 19]: 19-05: dirty_total moves by delta in a CellGuard drop under the cell lock; keep_budget steps only the writer's own cell (D-13)
+- [Phase 19]: 19-05: code under a cell lock must use the inner forms (*_open, *_state, finalize_write); with_cell/open_write/release_write lock the cell again
 
 ### Pending Todos
 
@@ -117,8 +121,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-22T04:03:29.494Z
-Stopped at: Completed 19-04-PLAN.md
+Last session: 2026-11-22T04:59:27.455Z
+Stopped at: Completed 19-05-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
