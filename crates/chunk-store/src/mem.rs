@@ -143,6 +143,8 @@ pub enum Hold {
     Durable = 2,
     /// `open_read` and `open_run`.
     Opens = 3,
+    /// `read_at` of a pack (not of an index run).
+    PackReads = 4,
 }
 
 /// A held operation waits at most this long, so a test that fails before it
@@ -151,9 +153,9 @@ const HOLD_MAX: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 struct HoldState {
-    on: [bool; 4],
+    on: [bool; 5],
     /// Callers that wait in a held operation now.
-    parked: [usize; 4],
+    parked: [usize; 5],
 }
 
 struct Holds {
@@ -288,6 +290,12 @@ impl MemIo {
     /// While on, `open_read` and `open_run` wait (a slow open).
     pub fn hold_opens(&self, on: bool) {
         self.set_hold(Hold::Opens, on);
+    }
+
+    /// While on, `read_at` of a pack waits (a slow read; index run pages
+    /// are not held).
+    pub fn hold_pack_reads(&self, on: bool) {
+        self.set_hold(Hold::PackReads, on);
     }
 
     fn set_hold(&self, h: Hold, on: bool) {
@@ -489,6 +497,9 @@ impl Drop for MemPack {
 
 impl PackRead for MemPack {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        if self.kind == Kind::Pack {
+            self.hold.wait(Hold::PackReads);
+        }
         let mut s = self.s.lock();
         if s.read_fails() {
             return Err(eio());

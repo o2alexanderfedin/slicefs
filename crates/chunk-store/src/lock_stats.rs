@@ -33,6 +33,10 @@ pub enum Site {
     OpenFiles,
     /// `readers` of the file system core.
     Readers,
+    /// A shard of `dir_live`, the directory cache of the metadata store.
+    DirLive,
+    /// A shard of `inode_live`, the inode cache of the metadata store.
+    InodeLive,
 }
 
 impl Site {
@@ -45,6 +49,8 @@ impl Site {
         Site::WalPending,
         Site::OpenFiles,
         Site::Readers,
+        Site::DirLive,
+        Site::InodeLive,
     ];
 
     pub fn label(self) -> &'static str {
@@ -56,6 +62,8 @@ impl Site {
             Site::WalPending => "wal_pending",
             Site::OpenFiles => "open_files",
             Site::Readers => "readers",
+            Site::DirLive => "dir_live",
+            Site::InodeLive => "inode_live",
         }
     }
 }
