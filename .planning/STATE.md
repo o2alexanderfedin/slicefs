@@ -6,10 +6,10 @@ current_phase: 19
 current_phase_name: Fine-grained locks
 status: verifying
 stopped_at: Completed 19-11-PLAN.md
-last_updated: "2026-11-22T11:33:10.233Z"
+last_updated: "2026-11-22T11:40:16.965Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 19 execution started
-state_head: 1a6eddf4071f9821956553d855ef88508c4e8388
+state_head: 8e2ed7639d5bc1bc83dd25862b5109224061f3f8
 progress:
   total_phases: 7
   completed_phases: 1
@@ -125,7 +125,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: 19-10: the harness crash test (Config.crash) makes no commit in the last 250 ms and none at the end, so the log holds the end of the run
 - [Phase 19]: 19-11: LOCK-01 not marked: the store lock is still held across disk I/O (ChunkStore::sync second-phase fsync; a record pwrite under the store or WAL writer lock stalls behind a concurrent fsync on macOS); owner decision
 - [Phase 19]: 19-11: LOCK-04 not marked until the orchestrator applies the staged #21 body; mkdir and closed-file size change windows open for the owner
-- [Phase 19]: 19-11: LOCK-05 marked complete (lock_free_io, lock_wait_rows, multi_handle_posix, harness multi-handle mode)
+- [Phase 19]: 19-11: LOCK-05 not marked: the tests show readers do not wait on the main path, but finalize and write fall back to a locked rebase step or flush (store I/O in the cell hold) after a dropped or concurrent step, so a reader can wait for a writer's I/O under contention
 
 ### Pending Todos
 
@@ -139,6 +139,7 @@ None.
 - Phase 20 (budget, flusher and gate) has the highest deadlock risk; run research-phase before planning it.
 - Idle index merge can rewrite GBs after a short pause and is not stopped by new writes (#141). Not in v2.2.
 - LOCK-01 open: store lock held across an fsync (ChunkStore::sync second phase) and record pwrites under the store and WAL writer locks stall 20-36 ms behind a concurrent fsync on macOS (19-11 lock rows; deferred-items.md). Needs an owner decision on the store/log sync protocol.
+- LOCK-05 open: finalize and the write path fall back to a rebase step or flush with the cell locked after a dropped or concurrent step (19-06/07), so a reader can wait for a writer's I/O under contention (19-11 SUMMARY Finding 5; deferred-items.md). Needs an owner decision on the progress rule.
 
 ## Deferred Items
 

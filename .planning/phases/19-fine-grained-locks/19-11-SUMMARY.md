@@ -44,13 +44,13 @@ key-files:
 key-decisions:
   - "LOCK-01 is not marked complete: the store lock is still held across disk I/O (the second phase of ChunkStore::sync fsyncs under it, and a record pwrite under it stalls behind a concurrent pack fsync on macOS). A fix changes the store sync protocol and is an owner decision."
   - "LOCK-04 is not marked complete: its last sentence (the #21 body is updated) is true only after the orchestrator applies the staged body. Two older windows (mkdir, closed-file size change against a fields setattr) are open for the owner to judge."
-  - "LOCK-05 is marked complete: lock_free_io, lock_wait_rows, multi_handle_posix and the harness multi-handle mode show every clause."
+  - "LOCK-05 is not marked complete: the tests show every clause on the main path, but finalize and the write path fall back to a rebase step or flush with the cell locked after a dropped or concurrent step, so a reader can wait for a writer's I/O under contention."
   - "The multi-handle run in serialize_off_target is 1 s (the other modes 2 s), so the stress_harness binary stays under 10 s."
 
 patterns-established:
   - "A harness mode that checks a file region without a whole-file buffer: read in 64 KiB pieces with a bit set of the records seen"
 
-requirements-completed: [LOCK-05]
+requirements-completed: []
 
 duration: 52min
 completed: 2026-11-22
@@ -58,7 +58,7 @@ completed: 2026-11-22
 
 # Phase 19 Plan 11: Multi-handle harness mode, lock wait rows, #21 body and the Phase 19 result Summary
 
-**The harness runs read-only, read-write and `O_APPEND` handles on one inode with serialize off. The lock rows show that readers and other files do not wait for a parked writer I/O. The rows also show that the store lock still has 21-91 ms holds from an fsync and a stalled pwrite, so LOCK-01 is still open.**
+**The harness runs read-only, read-write and `O_APPEND` handles on one inode with serialize off. The lock rows show that readers and other files do not wait for a parked writer I/O on the main path. The rows also show that the store lock still has 21-91 ms holds from an fsync and a stalled pwrite, and the code has locked fallbacks that do writer I/O in the cell hold. So LOCK-01, LOCK-04 and LOCK-05 all stay open.**
 
 ## Performance
 
@@ -128,7 +128,7 @@ From `cargo test -p slicefs-cli --features lock-stats --test stress_harness seri
 | multi-handle | file_cell | 1642 | 0.0 / 78.4 / 20578.3 | 4.4 / 73.5 / 20578.3 |
 | multi-handle | stripe | 28 | 0.0 / 20480.0 / 20480.0 | 5.0 / 20611.1 / 20611.1 |
 
-Across four more runs (three with a probe), the store hold max was 21-91 ms. The many-files store wait max was 23-86 ms.
+Across four more runs, all with a probe, the store hold max was 21-91 ms. The many-files store wait max was 23-86 ms.
 
 `lock_wait_rows` (a writer's rebase I/O parked for at least 300 ms):
 - Readers test: `file_cell` wait max 1.0 us, hold max 349.7 us. `readers` n=52, wait max 0.0 us. Slowest read 257 us. No site held for 1 ms or more.
@@ -138,22 +138,29 @@ Across four more runs (three with a probe), the store hold max was 21-91 ms. The
 
 A probe captured backtraces for long holds. It ran locally, one run per probe, and was not committed. It named these paths:
 
-1. **`ChunkStore::sync`, second phase.** `sync_active` and `sync_dir` run with the store lock held. The commit calls `sync` before the gate (`timed_commit`) and as `pre_root_sync`. The hold under the lock was 20-42 ms each time. CONTEXT says an fsync must leave the lock. 19-02 kept this rest under the lock (the #108 pattern).
+1. **`ChunkStore::sync`, second phase.** `sync_active` and `sync_dir` run with the store lock held. The commit calls `sync` before the gate (`timed_commit`) and as `pre_root_sync`. In one run, 13 of 45 calls held the lock for 20-42 ms here; the other 32 had nothing to sync and took under 2 ms. CONTEXT says an fsync must leave the lock. 19-02 kept this rest under the lock (the #108 pattern).
 2. **`ChunkStore::put`, the record `append`.** This is a page-cache pwrite that D-14 keeps under the lock. It stalled 36 ms, from a release splice and from a read that puts a stream tail. The most likely cause is a concurrent fsync of the same pack file (macOS).
 3. **`wal_writer`.** `PerOpWal::write_out` holds the writer lock for the record pwrite. With 4 threads its hold p99 is about 20 ms. With one thread (in `lock_wait_rows`) its hold max is 0.3 ms. The most likely cause is the same: another thread's fsync of the same segment. `wal_writer` is not the "WAL append mutex" of criterion 3. That mutex is `wal_queue`, and its hold max is 32 us.
-4. **`file_cell` and `stripe` holds of about 20-37 ms.** In multi-handle mode, the store hold max is 21.5 ms, and the cell and stripe hold max is 20.6 ms. So the holder most likely took the store lock (rank 6) inside the cell or stripe hold, and the pwrite stalled. These holds are part of the store-lock item, not a writer's own I/O in a cell hold.
+4. **`file_cell` and `stripe` holds of about 20-37 ms: cause not established.** The captured cell stacks are of two kinds:
+   - The hold before Phase B of `to_overlay` in a write. That hold covers only in-memory work and the `eprintln!` "switches to overlay" debug line. A stderr write to a file can stall behind a device flush on macOS, but this is not proven.
+   - `release_write`.
+   The store wait max of the clean multi-handle run is 86.5 us, so these holders did not wait for the store lock.
+5. **Locked fallbacks (why LOCK-05 is not marked).** Code reading after the probe found these paths:
+   - `finalize_steps` runs `rebase_step` (chunk, hash, store put) with the cell locked when a step is in flight elsewhere or a step was dropped. It also retries a flush with the cell locked after the stream changed in the I/O phase.
+   - `write_in_cell` sets `unlocked = false` after a dropped step. `has_content`, `stream_step` and `to_overlay` then do their I/O with the cell locked.
+   These fallbacks come from 19-06 and 19-07, and they make sure a busy cell makes progress. While one runs, a reader of the file waits for the writer's I/O. CONTEXT says a dropped result "retries later", and that readers hold the cell only for memory copies.
 
-`readers`, `wal_queue`, `dir_live` and `inode_live` meet criterion 3 (tens of microseconds at most). The store lock does not. A fix changes the sync protocol of the chunk store and of the log, outside this plan's files: Rule 4. It is recorded in `deferred-items.md`, in the research doc and as a STATE blocker.
+`readers`, `wal_queue`, `dir_live` and `inode_live` meet criterion 3 (tens of microseconds at most). The store lock does not. Fixes for items 1-3 change the sync protocol of the chunk store and of the log. A fix for item 5 needs another progress rule (for example, bounded unlocked retries, or the Phase 20 flusher takes the step). Both are outside this plan's files, so they are Rule 4 owner decisions. They are recorded in `deferred-items.md`, in the research doc and in STATE.
 
 ## Requirements
 
-- **LOCK-05: marked complete.**
+- **LOCK-05: not marked.** All clauses have their test on the main path:
   - Readers do not wait for writer I/O: `reader_does_not_wait_for_rebase_io`, `reader_does_not_wait_for_streaming_push` and `readers_do_not_wait_for_writer_io_rows`.
   - No contention between files: `many_files_no_cross_file_wait` and `other_files_do_not_wait_rows`.
   - Several handles in different modes: `visibility_across_ro_rw_append_handles` and the harness multi-handle mode.
   - All or none: `all_or_none_reads` (multi-unit writes) and the per-block check of the harness.
   - Appends never overlap and come from the size under the cell lock: `appends_never_overlap`, `append_starts_at_the_committed_size_and_stops_at_the_max` and the harness `verify_appends`.
-  - Caveat: a store-lock stall nested in a cell hold (Finding 4) can still make a reader of that file wait about 20 ms. That is the LOCK-01 item.
+  - But a reader can wait for a writer's I/O when a locked fallback runs (Finding 5), and no test covers that path. LOCK-05 can be marked when the fallbacks no longer do I/O in the cell hold, or when the owner accepts them.
 - **LOCK-01: not marked.** See Findings.
 - **LOCK-04: not marked.**
   - The code part has its evidence: records are appended in the apply hold, replay is by logged inode, `crash_replay_matches_apply`, `reverse_order_creates_replay` and `parallel_namespace_ops_replay`.
@@ -212,13 +219,14 @@ See `key-decisions`.
 - **The store has a write log** (`common::new_fs_with`, PerOp), so the "every site" claim also covers the WAL sites.
 - **Issue #21 was not edited here.** As the orchestrator told me, the new body is in a scratch file for the orchestrator to review and apply. The plan's live-issue checks are pending (see Verification).
 - **Stale text:** the module header of the harness (it said two modes and serialize on until Phase 20) and the S7 comment about `open_files` are fixed. The S3 `SITES` filter already had `file_cell`. 19-05 assigned the `DIRTY_BUDGET` doc and the `dirty_budget_tests.rs` header to Phase 20, so they were left alone.
-- **Requirements:** only LOCK-05 is marked (see Requirements).
+- **Requirements:** none is marked (see Requirements). LOCK-05 was marked first, then unmarked in the follow-up docs commit after the locked fallbacks were found.
 
-**Total deviations:** 2 auto-fixes (1 Rule 2, 1 Rule 1) and 11 plan facts. One finding is held for a Rule 4 owner decision (the store lock). **Impact:** all plan tasks are done and the gate is green. Criterion 3 is not met for the store lock. LOCK-01 and LOCK-04 stay open.
+**Total deviations:** 2 auto-fixes (1 Rule 2, 1 Rule 1) and 11 plan facts. Two findings are held for Rule 4 owner decisions (the store lock; the locked fallbacks). **Impact:** all plan tasks are done and the gate is green. Criterion 3 is not met for the store lock, and criterion 1 holds only on the main path. LOCK-01, LOCK-04 and LOCK-05 stay open.
 
 ## For later plans
 
 - Phase 20 or a follow-up (owner decision): take the fsync of `ChunkStore::sync` out of the store lock. Also stop the record pwrite (store and WAL writer) from stalling behind a concurrent fsync of the same file on macOS. Then run `lock_wait_rows` and the lock-stats harness again. The store hold max should be in microseconds, as it is for `readers` and `wal_queue`.
+- Owner decision: a progress rule for a busy cell without a locked rebase step or flush (finalize and the write path), then a test that parks a step while a second writer forces the fallback, with a reader that must not wait.
 - `lock_wait_rows.rs` is the pattern for evidence that a lock is not held across I/O. A flusher test in Phase 20 can use it.
 - The harness modes are `one-file`, `many-files` and `multi-handle`. `long_run` takes `STRESS_MODE=multi-handle`.
 
