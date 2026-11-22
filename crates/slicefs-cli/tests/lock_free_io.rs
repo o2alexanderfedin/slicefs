@@ -10,7 +10,7 @@
 //! The parked tests hold no commit gate and run no commit thread while a
 //! step is parked (RESEARCH Pitfall 8).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -66,19 +66,24 @@ fn overlay_file(fs: &SliceFsFilesystem) -> (u64, u64, Vec<u8>) {
     (ino, fh, model)
 }
 
-/// A hook that parks its first call until `go` (at most 10 s) and tells
-/// `parked` when it gets there. Later calls do not park.
-fn parker() -> (RebaseHook, Receiver<()>, Sender<()>) {
+/// A hook that parks each call whose number (from 1) is in `calls` until
+/// `go` (at most 10 s per call) and tells `parked` when it gets there.
+fn parker_at(calls: &'static [usize]) -> (RebaseHook, Receiver<()>, Sender<()>) {
     let (parked_tx, parked_rx) = channel();
     let (go_tx, go_rx) = channel::<()>();
-    let (first, go_rx) = (AtomicBool::new(true), Mutex::new(go_rx));
+    let (n, go_rx) = (AtomicUsize::new(0), Mutex::new(go_rx));
     let hook: RebaseHook = Arc::new(move || {
-        if first.swap(false, Ordering::SeqCst) {
+        if calls.contains(&(n.fetch_add(1, Ordering::SeqCst) + 1)) {
             parked_tx.send(()).ok();
             let _ = go_rx.lock().unwrap().recv_timeout(Duration::from_secs(10));
         }
     });
     (hook, parked_rx, go_tx)
+}
+
+/// A hook that parks its first call (see `parker_at`). Later calls do not park.
+fn parker() -> (RebaseHook, Receiver<()>, Sender<()>) {
+    parker_at(&[1])
 }
 
 /// A rebase hook that parks its first call (see `parker`).
@@ -357,43 +362,83 @@ fn reader_does_not_wait_for_streaming_push() {
     assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content after release");
 }
 
-/// Two in-order writers on one stream: the second write (longer, at the
-/// same offset) publishes while the first is parked in its push, so the
-/// first loses the generation check and tries again with the cell locked.
-/// Its stale clone must not be swapped in: that would drop the tail of the
-/// second write. The retry is no longer in order, so it goes to an overlay
-/// on top of the second write.
+/// Two writers on one stream: B writes the block after A's while A is
+/// parked in its push. B waits for A's step with the cell released (a read
+/// passes meanwhile), then streams in order after it; no step is dropped.
 #[test]
-fn a_streaming_push_that_loses_the_generation_check_retries() {
+fn a_second_stream_write_waits_for_the_push_without_the_cell() {
     let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "s", 0o644, 0, 0, 0).unwrap();
     let (other, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
     let mut model = seeded(22, 64 * KIB);
     fs.test_write(fh, 0, &model).unwrap();
-    let (a, b) = (seeded(23, 64 * KIB), seeded(24, 128 * KIB));
+    let (a, b) = (seeded(23, 64 * KIB), seeded(24, 64 * KIB));
+    let prefix = model.clone();
+    put(&mut model, 64 * KIB, &a);
+    put(&mut model, 128 * KIB, &b);
     let (parked, go) = park_first_push(&fs);
     std::thread::scope(|s| {
         let w = s.spawn(|| fs.test_write(fh, 64 * KIB as u64, &a));
         parked.recv_timeout(WAIT).expect("the push reached its I/O phase");
-        // Also in order (the parked write has not published): it goes first.
-        let r = fs.test_write(other, 64 * KIB as u64, &b);
-        go.send(()).unwrap();
-        assert_eq!(r, Ok(b.len() as u32));
+        let (fs, b) = (&fs, &b);
+        let (tx, rx) = channel();
+        s.spawn(move || tx.send(fs.test_write(other, 128 * KIB as u64, b)).ok());
+        let early = rx.recv_timeout(Duration::from_millis(300));
+        let (rtx, rrx) = channel();
+        s.spawn(move || rtx.send(fs.test_read(ino, 0, 64 * KIB as u32)).ok());
+        let read = rrx.recv_timeout(WAIT);
+        go.send(()).ok();
+        assert!(early.is_err(), "B waited for the parked push: {early:?}");
+        assert!(read.expect("the read did not wait for the push").unwrap() == prefix, "the read sees the prefix");
+        assert_eq!(rx.recv_timeout(WAIT).expect("B went on after the push"), Ok(b.len() as u32));
         assert_eq!(w.join().unwrap(), Ok(a.len() as u32));
     });
     fs.test_set_push_hook(None);
-    put(&mut model, 64 * KIB, &b);
-    put(&mut model, 64 * KIB, &a);
+    assert!(fs.test_is_streaming(fh), "both writes stayed in order");
     assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "both writes with the handles open");
     fs.test_release(ino, other).unwrap();
     fs.test_release(ino, fh).unwrap();
     assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "both writes after release");
 }
 
-/// A read of a stream with pending out-of-order writes settles them (one
-/// step per pending write) and returns the right bytes; the gaps are zeros.
+/// A push whose result a test hook drops is tried again with the cell
+/// unlocked: a read passes while the retry is parked in its push.
 #[test]
-fn a_read_settles_pending_writes() {
+fn a_forced_drop_of_a_push_retries_unlocked() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "s", 0o644, 0, 0, 0).unwrap();
+    let mut model = seeded(28, 64 * KIB);
+    fs.test_write(fh, 0, &model).unwrap();
+    let prefix = model.clone();
+    let more = seeded(29, 64 * KIB);
+    let (hook, parked, go) = parker_at(&[2]);
+    fs.test_set_push_hook(Some(hook));
+    fs.test_drop_steps(1);
+    std::thread::scope(|s| {
+        let w = s.spawn(|| fs.test_write(fh, 64 * KIB as u64, &more));
+        let reached = parked.recv_timeout(WAIT);
+        let (tx, rx) = channel();
+        let fs = &fs;
+        s.spawn(move || tx.send(fs.test_read(ino, 0, 64 * KIB as u32)).ok());
+        let read = rx.recv_timeout(Duration::from_millis(300));
+        go.send(()).ok();
+        reached.expect("the retry after the dropped push reached its push");
+        assert!(read.expect("the read waited for the retry").unwrap() == prefix, "the read sees the prefix");
+        assert_eq!(w.join().unwrap(), Ok(more.len() as u32));
+    });
+    fs.test_set_push_hook(None);
+    put(&mut model, 64 * KIB, &more);
+    assert!(fs.test_is_streaming(fh), "the write stayed in order");
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content with the handle open");
+    fs.test_release(ino, fh).unwrap();
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content after release");
+}
+
+/// A read of a stream with pending out-of-order writes composes them from
+/// memory (stream bytes, zeros in the gaps, pending bytes) and runs no
+/// stream step; the pending writes stay pending.
+#[test]
+fn a_read_of_pending_writes_runs_no_stream_step() {
     let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "s", 0o644, 0, 0, 0).unwrap();
     let mut model = seeded(25, 16 * KIB);
@@ -403,15 +448,16 @@ fn a_read_settles_pending_writes() {
     fs.test_write(fh, 48 * KIB as u64, &y).unwrap();
     put(&mut model, 32 * KIB, &x);
     put(&mut model, 48 * KIB, &y);
-    let pushes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let n = Arc::clone(&pushes);
-    fs.test_set_push_hook(Some(Arc::new(move || {
-        n.fetch_add(1, Ordering::SeqCst);
-    })));
+    let pushes = counter(&fs);
     assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "pending writes and zero gaps");
-    assert_eq!(pushes.load(Ordering::SeqCst), 2, "one unlocked step per pending write");
+    assert!(fs.test_read(ino, 12 * KIB as u64, 24 * KIB as u32).unwrap() == model[12 * KIB..36 * KIB], "across a gap");
+    assert!(fs.test_read(ino, 36 * KIB as u64, 16 * KIB as u32).unwrap() == model[36 * KIB..52 * KIB], "gap and pending");
+    assert!(fs.test_read(ino, 52 * KIB as u64, 64 * KIB as u32).unwrap() == model[52 * KIB..], "to the end of file");
+    assert!(fs.test_read(ino, 60 * KIB as u64, 4 * KIB as u32).unwrap().is_empty(), "past the end of file");
+    assert_eq!(pushes.load(Ordering::SeqCst), 0, "no stream step in a read");
     fs.test_set_push_hook(None);
     assert!(fs.test_is_streaming(fh));
+    assert!(fs.test_dirty_cost(ino) > 0, "the pending writes stay pending");
     fs.test_release(ino, fh).unwrap();
     assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content after release");
 }
