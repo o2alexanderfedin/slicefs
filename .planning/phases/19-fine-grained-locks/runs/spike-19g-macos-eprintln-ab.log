@@ -1,0 +1,176 @@
+=== eprintln=on run 1 rebase_lines=124 overlay_lines=126
+SPIKE long site=file_cell hold_us=20877 span[eprintln_overlay]=20851x1
+report mode=one-file (closed loop: no coordinated-omission correction)
+lock site=store n=3578 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=22151.2 hold_p50_us=2.0 hold_p99_us=35.2 hold_max_us=23838.7
+lock site=wal_writer n=962 wait_p50_us=0.0 wait_p99_us=40796.2 wait_max_us=76283.9 hold_p50_us=80.2 hold_p99_us=36143.1 hold_max_us=75038.7
+lock site=file_cell n=2066 wait_p50_us=0.0 wait_p99_us=1030.1 wait_max_us=20955.1 hold_p50_us=9.3 hold_p99_us=755.2 hold_max_us=20889.6
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=94.3 wait_max_us=94.3 hold_p50_us=13.3 hold_p99_us=334.6 hold_max_us=334.6
+SPIKE long site=file_cell hold_us=21023 wait[store]=20953
+SPIKE long site=file_cell hold_us=36042 span[eprintln_overlay]=36030x1
+SPIKE long site=file_cell hold_us=19872 span[eprintln_overlay]=19862x1
+SPIKE long site=file_cell hold_us=20796 span[eprintln_overlay]=20784x1
+SPIKE long site=file_cell hold_us=21352 wait[store]=21249
+SPIKE long site=file_cell hold_us=36976 span[eprintln_overlay]=36965x1
+SPIKE long site=file_cell hold_us=19957 span[eprintln_overlay]=19946x1
+SPIKE long site=file_cell hold_us=20497 span[eprintln_overlay]=20476x1
+SPIKE long site=stripe hold_us=20660 wait[store]=20487
+SPIKE long site=stripe hold_us=41098 wait[store]=20487
+SPIKE long site=file_cell hold_us=20380 span[eprintln_overlay]=20355x1
+SPIKE long site=file_cell hold_us=20917 span[eprintln_overlay]=20898x1
+report mode=many-files (closed loop: no coordinated-omission correction)
+lock site=store n=8700 wait_p50_us=0.0 wait_p99_us=20152.3 wait_max_us=62521.3 hold_p50_us=2.3 hold_p99_us=195.2 hold_max_us=62521.3
+lock site=wal_writer n=1318 wait_p50_us=0.0 wait_p99_us=20447.2 wait_max_us=36700.2 hold_p50_us=21.4 hold_p99_us=21135.4 hold_max_us=37453.8
+lock site=file_cell n=3063 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=3.4 hold_p99_us=235.0 hold_max_us=36995.1
+lock site=stripe n=1296 wait_p50_us=0.0 wait_p99_us=2.4 wait_max_us=46.3 hold_p50_us=26.3 hold_p99_us=174.2 hold_max_us=41123.8
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+lock site=store n=2913 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=1.3 hold_p50_us=2.0 hold_p99_us=32.6 hold_max_us=70647.8
+lock site=wal_writer n=758 wait_p50_us=0.0 wait_p99_us=35913.7 wait_max_us=42893.3 hold_p50_us=26.8 hold_p99_us=26755.1 hold_max_us=42893.3
+lock site=file_cell n=1265 wait_p50_us=0.0 wait_p99_us=83.5 wait_max_us=176.3 hold_p50_us=4.9 hold_p99_us=79.2 hold_max_us=844.3
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=27.9 wait_max_us=27.9 hold_p50_us=6.7 hold_p99_us=204.7 hold_max_us=204.7
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.82s
+=== eprintln=on run 2 rebase_lines=121 overlay_lines=121
+report mode=one-file (closed loop: no coordinated-omission correction)
+lock site=store n=3585 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=21004.3 hold_p50_us=1.7 hold_p99_us=32.4 hold_max_us=21217.3
+lock site=wal_writer n=1018 wait_p50_us=0.0 wait_p99_us=38895.6 wait_max_us=77398.0 hold_p50_us=81.0 hold_p99_us=23642.1 hold_max_us=57540.6
+lock site=file_cell n=2266 wait_p50_us=0.0 wait_p99_us=1485.8 wait_max_us=4378.6 hold_p50_us=8.8 hold_p99_us=734.7 hold_max_us=4415.5
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=39.0 wait_max_us=39.0 hold_p50_us=12.9 hold_p99_us=333.3 hold_max_us=333.3
+SPIKE long site=file_cell hold_us=20752 span[eprintln_overlay]=20743x1
+SPIKE long site=file_cell hold_us=20344 span[eprintln_overlay]=20335x1
+SPIKE long site=file_cell hold_us=36108 span[eprintln_overlay]=36098x1
+SPIKE long site=file_cell hold_us=20648 span[eprintln_overlay]=20636x1
+SPIKE long site=file_cell hold_us=20854 span[eprintln_overlay]=20845x1
+SPIKE long site=file_cell hold_us=20403 span[eprintln_overlay]=20378x1
+SPIKE long site=file_cell hold_us=20663 span[eprintln_overlay]=20652x1
+SPIKE long site=file_cell hold_us=36649 span[eprintln_overlay]=36644x1
+SPIKE long site=file_cell hold_us=20673 span[eprintln_overlay]=20661x1
+SPIKE long site=file_cell hold_us=19993 span[eprintln_overlay]=19974x1
+SPIKE long site=file_cell hold_us=20810 span[eprintln_overlay]=20801x1
+SPIKE long site=file_cell hold_us=20976 span[eprintln_overlay]=20964x1
+SPIKE long site=file_cell hold_us=19958 span[eprintln_overlay]=19939x1
+SPIKE long site=file_cell hold_us=20583 wait[store]=20488
+SPIKE long site=file_cell hold_us=36654 span[eprintln_overlay]=36643x1
+report mode=many-files (closed loop: no coordinated-omission correction)
+lock site=store n=7843 wait_p50_us=0.0 wait_p99_us=20135.9 wait_max_us=58163.2 hold_p50_us=2.2 hold_p99_us=213.1 hold_max_us=58163.2
+lock site=wal_writer n=1316 wait_p50_us=0.0 wait_p99_us=20578.3 wait_max_us=36831.2 hold_p50_us=20.2 hold_p99_us=21119.0 hold_max_us=40894.5
+lock site=file_cell n=2974 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=3.4 hold_p99_us=223.9 hold_max_us=36667.4
+lock site=stripe n=1248 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=106.9 hold_p50_us=29.0 hold_p99_us=150.1 hold_max_us=539.1
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+lock site=store n=3010 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=20447.2 hold_p50_us=1.7 hold_p99_us=23.1 hold_max_us=21069.8
+lock site=wal_writer n=968 wait_p50_us=0.0 wait_p99_us=22478.8 wait_max_us=56721.4 hold_p50_us=26.5 hold_p99_us=21250.0 hold_max_us=56983.6
+lock site=file_cell n=1685 wait_p50_us=0.0 wait_p99_us=90.4 wait_max_us=130.7 hold_p50_us=4.6 hold_p99_us=76.4 hold_max_us=962.6
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=2.3 wait_max_us=2.3 hold_p50_us=6.6 hold_p99_us=182.1 hold_max_us=182.1
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.34s
+=== eprintln=on run 3 rebase_lines=116 overlay_lines=118
+SPIKE long site=file_cell hold_us=6448
+report mode=one-file (closed loop: no coordinated-omission correction)
+lock site=store n=3629 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=2.2 hold_p50_us=1.7 hold_p99_us=38.3 hold_max_us=20889.6
+lock site=wal_writer n=990 wait_p50_us=0.0 wait_p99_us=42238.0 wait_max_us=77070.3 hold_p50_us=78.5 hold_p99_us=25362.4 hold_max_us=67502.1
+lock site=file_cell n=2103 wait_p50_us=0.0 wait_p99_us=1435.6 wait_max_us=6406.1 hold_p50_us=8.4 hold_p99_us=803.3 hold_max_us=6451.2
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=34.8 wait_max_us=34.8 hold_p50_us=13.1 hold_p99_us=349.4 hold_max_us=349.4
+SPIKE long site=file_cell hold_us=20016 span[eprintln_overlay]=19993x1
+SPIKE long site=stripe hold_us=20461 wait[store]=20348
+SPIKE long site=stripe hold_us=20490 wait[store]=20348
+SPIKE long site=file_cell hold_us=19979 span[eprintln_overlay]=19962x1
+SPIKE long site=file_cell hold_us=20323 span[eprintln_overlay]=20303x1
+SPIKE long site=file_cell hold_us=20230 span[eprintln_overlay]=20217x1
+SPIKE long site=file_cell hold_us=20280 span[eprintln_overlay]=20263x1
+SPIKE long site=file_cell hold_us=20589 span[eprintln_overlay]=20565x1
+SPIKE long site=file_cell hold_us=21785 span[eprintln_overlay]=21774x1
+SPIKE long site=file_cell hold_us=20104 span[eprintln_overlay]=20092x1
+SPIKE long site=file_cell hold_us=20413 span[eprintln_overlay]=20404x1
+SPIKE long site=stripe hold_us=20878 wait[store]=20723
+SPIKE long site=stripe hold_us=20912 wait[store]=20723
+SPIKE long site=stripe hold_us=41582 wait[store]=41386
+SPIKE long site=stripe hold_us=41614 wait[store]=41386
+SPIKE long site=file_cell hold_us=20458 span[eprintln_overlay]=20447x1
+SPIKE long site=file_cell hold_us=20567 span[eprintln_overlay]=20557x1
+SPIKE long site=file_cell hold_us=20766 wait[store]=20669
+report mode=many-files (closed loop: no coordinated-omission correction)
+lock site=store n=7899 wait_p50_us=0.0 wait_p99_us=20217.9 wait_max_us=41713.7 hold_p50_us=2.2 hold_p99_us=240.8 hold_max_us=42041.3
+lock site=wal_writer n=1269 wait_p50_us=0.0 wait_p99_us=20791.3 wait_max_us=51576.8 hold_p50_us=18.3 hold_p99_us=21119.0 hold_max_us=57835.5
+lock site=file_cell n=2858 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=3.5 hold_p99_us=199.7 hold_max_us=21790.7
+lock site=stripe n=1228 wait_p50_us=0.0 wait_p99_us=27.8 wait_max_us=20873.2 hold_p50_us=28.7 hold_p99_us=245.2 hold_max_us=41615.4
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+lock site=store n=3032 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=20496.4 hold_p50_us=1.7 hold_p99_us=26.5 hold_max_us=21348.4
+lock site=wal_writer n=1028 wait_p50_us=0.0 wait_p99_us=21381.1 wait_max_us=60751.9 hold_p50_us=26.8 hold_p99_us=21053.4 hold_max_us=61014.0
+lock site=file_cell n=1795 wait_p50_us=0.0 wait_p99_us=68.7 wait_max_us=160.3 hold_p50_us=3.9 hold_p99_us=66.0 hold_max_us=577.0
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=2.7 wait_max_us=2.7 hold_p50_us=6.5 hold_p99_us=192.6 hold_max_us=192.6
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.27s
+=== eprintln=off run 1 rebase_lines=0 overlay_lines=0
+SPIKE long site=file_cell hold_us=5327
+report mode=one-file (closed loop: no coordinated-omission correction)
+lock site=store n=3623 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=2.1 hold_p50_us=1.8 hold_p99_us=31.7 hold_max_us=23232.5
+lock site=wal_writer n=1164 wait_p50_us=0.0 wait_p99_us=37978.1 wait_max_us=57442.3 hold_p50_us=78.5 hold_p99_us=22642.7 hold_max_us=39354.4
+lock site=file_cell n=2614 wait_p50_us=0.0 wait_p99_us=1906.7 wait_max_us=4665.3 hold_p50_us=9.0 hold_p99_us=876.0 hold_max_us=5328.9
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=37.9 wait_max_us=37.9 hold_p50_us=12.9 hold_p99_us=326.7 hold_max_us=326.7
+SPIKE long site=stripe hold_us=20011 wait[store]=19881
+SPIKE long site=stripe hold_us=20040 wait[store]=19881
+SPIKE long site=stripe hold_us=20336 wait[store]=20197
+SPIKE long site=stripe hold_us=20366 wait[store]=20197
+SPIKE long site=stripe hold_us=41356 wait[store]=41192
+SPIKE long site=stripe hold_us=41387 wait[store]=41192
+SPIKE long site=stripe hold_us=57619 wait[store]=57407
+SPIKE long site=stripe hold_us=57653 wait[store]=57407
+report mode=many-files (closed loop: no coordinated-omission correction)
+lock site=store n=8425 wait_p50_us=0.0 wait_p99_us=20135.9 wait_max_us=57507.8 hold_p50_us=2.3 hold_p99_us=249.2 hold_max_us=57376.8
+lock site=wal_writer n=1424 wait_p50_us=0.0 wait_p99_us=20480.0 wait_max_us=58261.5 hold_p50_us=20.8 hold_p99_us=20774.9 hold_max_us=58687.5
+lock site=file_cell n=3237 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=3.2 hold_p99_us=140.3 hold_max_us=446.7
+lock site=stripe n=1335 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=142.1 hold_p50_us=28.5 hold_p99_us=260.2 hold_max_us=57671.7
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+lock site=store n=2973 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=3.2 hold_p50_us=1.6 hold_p99_us=26.1 hold_max_us=95617.0
+lock site=wal_writer n=860 wait_p50_us=0.0 wait_p99_us=36241.4 wait_max_us=43024.4 hold_p50_us=25.7 hold_p99_us=21512.2 hold_max_us=42172.4
+lock site=file_cell n=1502 wait_p50_us=0.0 wait_p99_us=79.3 wait_max_us=189.2 hold_p50_us=4.9 hold_p99_us=71.8 hold_max_us=519.2
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=6.5 hold_p99_us=255.5 hold_max_us=255.5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.60s
+=== eprintln=off run 2 rebase_lines=0 overlay_lines=0
+report mode=one-file (closed loop: no coordinated-omission correction)
+lock site=store n=3530 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=3.3 hold_p50_us=1.7 hold_p99_us=32.1 hold_max_us=20955.1
+lock site=wal_writer n=1193 wait_p50_us=0.0 wait_p99_us=40239.1 wait_max_us=58753.0 hold_p50_us=78.8 hold_p99_us=23281.7 hold_max_us=36995.1
+lock site=file_cell n=2624 wait_p50_us=0.0 wait_p99_us=1373.2 wait_max_us=4096.0 hold_p50_us=8.9 hold_p99_us=907.8 hold_max_us=4048.9
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=165.9 wait_max_us=165.9 hold_p50_us=13.4 hold_p99_us=313.9 hold_max_us=313.9
+SPIKE long site=file_cell hold_us=20464 wait[store]=20380
+SPIKE long site=stripe hold_us=20569 wait[store]=20398
+SPIKE long site=stripe hold_us=20603 wait[store]=20398
+SPIKE long site=stripe hold_us=20189 wait[store]=20019 wait[handles]=1
+SPIKE long site=stripe hold_us=20225 wait[store]=20019 wait[handles]=1
+SPIKE long site=stripe hold_us=20192 wait[store]=20063
+SPIKE long site=stripe hold_us=40726 wait[store]=20063
+SPIKE long site=stripe hold_us=20418 wait[store]=20281
+SPIKE long site=stripe hold_us=20452 wait[store]=20281
+SPIKE long site=file_cell hold_us=20343 wait[store]=20250
+report mode=many-files (closed loop: no coordinated-omission correction)
+lock site=store n=8567 wait_p50_us=0.0 wait_p99_us=20037.6 wait_max_us=57540.6 hold_p50_us=2.2 hold_p99_us=175.4 hold_max_us=57507.8
+lock site=wal_writer n=1397 wait_p50_us=0.0 wait_p99_us=20611.1 wait_max_us=42106.9 hold_p50_us=20.9 hold_p99_us=20725.8 hold_max_us=42106.9
+lock site=file_cell n=3231 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=3.3 hold_p99_us=133.6 hold_max_us=20480.0
+lock site=stripe n=1270 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=74.2 hold_p50_us=28.4 hold_p99_us=182.1 hold_max_us=40730.6
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+lock site=store n=3049 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.9 hold_p50_us=1.7 hold_p99_us=27.8 hold_max_us=37027.8
+lock site=wal_writer n=1029 wait_p50_us=0.0 wait_p99_us=21200.9 wait_max_us=59736.1 hold_p50_us=26.0 hold_p99_us=20922.4 hold_max_us=59736.1
+lock site=file_cell n=1749 wait_p50_us=0.0 wait_p99_us=86.5 wait_max_us=146.4 hold_p50_us=4.7 hold_p99_us=77.4 hold_max_us=1039.9
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=3.6 wait_max_us=3.6 hold_p50_us=6.5 hold_p99_us=193.7 hold_max_us=193.7
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.21s
+=== eprintln=off run 3 rebase_lines=0 overlay_lines=0
+SPIKE long site=file_cell hold_us=6468
+report mode=one-file (closed loop: no coordinated-omission correction)
+lock site=store n=3592 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=20856.8 hold_p50_us=1.9 hold_p99_us=33.3 hold_max_us=23019.5
+lock site=wal_writer n=1172 wait_p50_us=0.0 wait_p99_us=39518.2 wait_max_us=56852.5 hold_p50_us=78.2 hold_p99_us=22822.9 hold_max_us=40927.2
+lock site=file_cell n=2633 wait_p50_us=0.0 wait_p99_us=1544.2 wait_max_us=7573.5 hold_p50_us=8.1 hold_p99_us=695.3 hold_max_us=6471.7
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=13.4 hold_p99_us=353.0 hold_max_us=353.0
+SPIKE long site=stripe hold_us=20996 wait[store]=20838
+SPIKE long site=stripe hold_us=21014 wait[store]=20838
+SPIKE long site=stripe hold_us=21044 wait[store]=20900
+SPIKE long site=stripe hold_us=21074 wait[store]=20900
+SPIKE long site=file_cell hold_us=20038 wait[store]=19960
+SPIKE long site=stripe hold_us=20968 wait[store]=20806
+SPIKE long site=stripe hold_us=21003 wait[store]=20806
+report mode=many-files (closed loop: no coordinated-omission correction)
+lock site=store n=8874 wait_p50_us=0.0 wait_p99_us=20316.2 wait_max_us=57638.9 hold_p50_us=2.2 hold_p99_us=211.6 hold_max_us=41353.2
+lock site=wal_writer n=1408 wait_p50_us=0.0 wait_p99_us=20512.8 wait_max_us=37224.4 hold_p50_us=20.5 hold_p99_us=20742.1 hold_max_us=37257.2
+lock site=file_cell n=3307 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=3.2 hold_p99_us=125.6 hold_max_us=20054.0
+lock site=stripe n=1312 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=123.8 hold_p50_us=27.9 hold_p99_us=166.1 hold_max_us=21086.2
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+lock site=store n=2921 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=1.5 hold_p50_us=1.8 hold_p99_us=25.3 hold_max_us=21004.3
+lock site=wal_writer n=802 wait_p50_us=0.0 wait_p99_us=23674.9 wait_max_us=62029.8 hold_p50_us=25.7 hold_p99_us=22577.2 hold_max_us=57933.8
+lock site=file_cell n=1349 wait_p50_us=0.0 wait_p99_us=91.3 wait_max_us=219.5 hold_p50_us=4.7 hold_p99_us=80.5 hold_max_us=781.8
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=31.9 wait_max_us=31.9 hold_p50_us=6.3 hold_p99_us=195.5 hold_max_us=195.5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.23s

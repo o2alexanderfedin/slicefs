@@ -1,0 +1,466 @@
+diff --git a/crates/chunk-store/src/lib.rs b/crates/chunk-store/src/lib.rs
+index 23da919..bdc1e54 100644
+--- a/crates/chunk-store/src/lib.rs
++++ b/crates/chunk-store/src/lib.rs
+@@ -1387,6 +1387,7 @@ impl ChunkStore {
+     /// touched (for a running GC) and checked under the lock in the same
+     /// way.
+     pub fn put(&self, data: &[u8]) -> Result<ObjectId> {
++        let _sp = crate::lock_stats::span("store_put");
+         if self.opts.read_only {
+             return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
+         }
+@@ -1657,12 +1658,13 @@ impl ChunkStore {
+             inner.dir_dirty = true;
+         }
+         let a = inner.active.as_mut().unwrap();
+-        a.file.write_at(rec, a.len)?;
++        { let _sp = crate::lock_stats::span("append_pwrite"); a.file.write_at(rec, a.len)?; }
+         let loc = Loc { pack: a.num, offset: a.len, stored, raw, flags };
+         a.len += rec.len() as u64;
+         a.entries.push((*id, loc));
+         a.dirty = true;
+         if a.len >= self.opts.pack_limit {
++            let _sp = crate::lock_stats::span("append_seal");
+             self.seal(inner)?;
+         }
+         Ok(loc)
+@@ -2809,8 +2811,9 @@ impl ChunkStore {
+                 w.wait();
+             };
+             inner.check()?;
+-            inner.sync_active()?;
++            { let _sp = crate::lock_stats::span("flush_sync_active"); inner.sync_active()?; }
+             if inner.dir_dirty {
++                let _sp = crate::lock_stats::span("flush_sync_dir");
+                 inner.sync_dir(&*self.io)?;
+             }
+             let hwm = inner.hwm_end();
+@@ -2839,12 +2842,35 @@ impl ChunkStore {
+             (seal, inner.active.as_mut().filter(|a| a.dirty).and_then(|a| a.file.sync_soon()))
+         };
+         for w in seal.iter().chain(&wait) {
++            let _sp = crate::lock_stats::span("sync1_wait");
+             w.wait();
+         }
++        // SPIKE 19g (temporary, not crash-correct): phase 2 fsync with no store lock.
++        if std::env::var_os("SPIKE_SYNC_UNLOCKED").is_some() {
++            let (h, dir) = {
++                let mut inner = self.inner.lock();
++                inner.check()?;
++                inner.join_seal()?;
++                let h = match inner.active.as_mut() {
++                    Some(a) if a.dirty => match a.file.sync_handle() {
++                        Some(h) => { a.dirty = false; Some(h) }
++                        None => None,
++                    },
++                    _ => None,
++                };
++                let d = inner.dir_dirty;
++                inner.dir_dirty = false;
++                (h, d)
++            };
++            if let Some(h) = h { let _sp = crate::lock_stats::span("sync2u_active"); h.sync()?; }
++            if dir { let _sp = crate::lock_stats::span("sync2u_dir"); self.io.sync_dir()?; }
++            return Ok(());
++        }
+         let mut inner = self.inner.lock();
+         inner.check()?;
+-        inner.sync_active()?;
++        { let _sp = crate::lock_stats::span("sync2_active"); inner.sync_active()?; }
+         if inner.dir_dirty {
++            let _sp = crate::lock_stats::span("sync2_dir");
+             inner.sync_dir(&*self.io)?;
+         }
+         Ok(())
+@@ -3150,7 +3176,7 @@ impl Inner {
+     /// of the pack before it: then every record so far is durable. A failure
+     /// is final.
+     fn sync_active(&mut self) -> Result<()> {
+-        self.join_seal()?;
++        { let _sp = crate::lock_stats::span("join_seal"); self.join_seal()?; }
+         if let Some(a) = self.active.as_mut() {
+             if a.dirty {
+                 if let Err(e) = a.file.sync() {
+diff --git a/crates/chunk-store/src/lock_stats.rs b/crates/chunk-store/src/lock_stats.rs
+index b6b1f24..5f8e299 100644
+--- a/crates/chunk-store/src/lock_stats.rs
++++ b/crates/chunk-store/src/lock_stats.rs
+@@ -122,7 +122,14 @@ pub fn snapshot() -> Vec<SiteStats> {
+ pub fn reset() {}
+ 
+ #[cfg(feature = "lock-stats")]
+-pub use on::{lock, reset, snapshot, TimedGuard as Guard};
++pub use on::{lock, reset, snapshot, span, TimedGuard as Guard};
++
++/// SPIKE 19g (temporary): a named span; no-op without the feature.
++#[cfg(not(feature = "lock-stats"))]
++pub fn span(_name: &'static str) {}
++
++#[cfg(feature = "lock-stats")]
++pub(crate) use on::{enter, exit};
+ 
+ /// Record one acquisition of `site`; the shim guards call this when dropped.
+ #[cfg(feature = "lock-stats")]
+@@ -159,6 +166,87 @@ mod on {
+         R.get_or_init(|| std::array::from_fn(|_| Mutex::new(SiteHists::new())))
+     }
+ 
++    // ---- SPIKE 19g probe (temporary) ----
++    struct Open {
++        site: Site,
++        waits: [u64; N],
++        spans: Vec<(&'static str, u64)>,
++    }
++    thread_local! {
++        static OPEN: std::cell::RefCell<Vec<Open>> = const { std::cell::RefCell::new(Vec::new()) };
++    }
++    fn long_ns() -> u64 {
++        static T: OnceLock<u64> = OnceLock::new();
++        *T.get_or_init(|| std::env::var("SPIKE_LONG_US").ok().and_then(|v| v.parse().ok()).unwrap_or(5000) * 1000)
++    }
++    pub(crate) fn enter(site: Site, wait_ns: u64) {
++        let _ = OPEN.try_with(|o| {
++            let mut o = o.borrow_mut();
++            for e in o.iter_mut() {
++                e.waits[site as usize] += wait_ns;
++            }
++            o.push(Open { site, waits: [0; N], spans: Vec::new() });
++        });
++    }
++    pub(crate) fn exit(site: Site, hold_ns: u64) {
++        let e = OPEN.try_with(|o| {
++            let mut o = o.borrow_mut();
++            let i = o.iter().rposition(|e| e.site == site)?;
++            Some(o.remove(i))
++        });
++        let Ok(Some(e)) = e else { return };
++        if hold_ns < long_ns() {
++            return;
++        }
++        let mut line = format!("SPIKE long site={} hold_us={:.0}", site.label(), hold_ns as f64 / 1000.0);
++        for (i, w) in e.waits.iter().enumerate() {
++            if *w > 0 {
++                line += &format!(" wait[{}]={:.0}", Site::ALL[i].label(), *w as f64 / 1000.0);
++            }
++        }
++        let mut agg: Vec<(&'static str, u64, u32)> = Vec::new();
++        for (n, d) in e.spans {
++            match agg.iter_mut().find(|a| a.0 == n) {
++                Some(a) => { a.1 += d; a.2 += 1; }
++                None => agg.push((n, d, 1)),
++            }
++        }
++        for (n, d, c) in agg {
++            line += &format!(" span[{n}]={:.0}x{c}", d as f64 / 1000.0);
++        }
++        if std::env::var_os("SPIKE_BT").is_some() {
++            let bt = std::backtrace::Backtrace::force_capture().to_string();
++            let fns: Vec<&str> = bt
++                .lines()
++                .map(str::trim)
++                .filter(|l| l.contains(": ") && !l.starts_with("at "))
++                .filter_map(|l| l.split_once(": ").map(|x| x.1))
++                .filter(|l| (l.contains("slicefs") || l.contains("chunk_store") || l.contains("metadata") || l.contains("stress_harness")) && !l.contains("lock_stats") && !l.contains("sync::"))
++                .take(8)
++                .collect();
++            line += &format!(" bt={}", fns.join(" < "));
++        }
++        eprintln!("{line}");
++    }
++    pub struct Span(&'static str, Instant);
++    pub fn span(name: &'static str) -> Span {
++        Span(name, Instant::now())
++    }
++    impl Drop for Span {
++        fn drop(&mut self) {
++            let d = self.1.elapsed().as_nanos() as u64;
++            if self.0.starts_with("FB_") {
++                eprintln!("SPIKE fb name={} us={}", self.0, d / 1000);
++            }
++            let _ = OPEN.try_with(|o| {
++                for e in o.borrow_mut().iter_mut() {
++                    e.spans.push((self.0, d));
++                }
++            });
++        }
++    }
++    // ---- end probe ----
++
+     pub(crate) fn record(site: Site, wait_ns: u64, hold_ns: u64) {
+         // A poisoned recorder still holds valid histograms.
+         let mut r = recorders()[site as usize].lock().unwrap_or_else(|e| e.into_inner());
+@@ -193,6 +281,7 @@ mod on {
+             // Release the site lock first: the recorder never runs inside a
+             // site lock and its cost is not in the measured hold.
+             drop(self.g.take());
++            exit(self.site, hold_ns);
+             record(self.site, self.wait_ns, hold_ns);
+         }
+     }
+@@ -210,6 +299,7 @@ mod on {
+             // Same panic as `m.lock().unwrap()`.
+             Err(TryLockError::Poisoned(_)) => (m.lock().unwrap(), 0),
+         };
++        enter(site, wait_ns);
+         TimedGuard { g: Some(g), site, wait_ns, acquired: Instant::now() }
+     }
+ 
+@@ -258,3 +348,45 @@ mod tests {
+         assert_eq!(labels.len(), Site::ALL.len());
+     }
+ }
++
++// ---- SPIKE 19g probe (temporary): fsyncs in flight, slow writes ----
++pub mod spike_io {
++    use std::os::unix::fs::MetadataExt;
++    use std::sync::Mutex;
++    use std::time::Instant;
++    static INFL: Mutex<Vec<(u64, u64, &'static str)>> = Mutex::new(Vec::new());
++    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
++    pub struct Fsync(u64, Instant, &'static str);
++    pub fn fsync_begin(f: &std::fs::File, kind: &'static str) -> Fsync {
++        let ino = f.metadata().map(|m| m.ino()).unwrap_or(0);
++        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++        INFL.lock().unwrap().push((id, ino, kind));
++        Fsync(id, Instant::now(), kind)
++    }
++    impl Drop for Fsync {
++        fn drop(&mut self) {
++            INFL.lock().unwrap().retain(|e| e.0 != self.0);
++            let d = self.1.elapsed().as_micros();
++            if std::env::var_os("SPIKE_FSYNC_LOG").is_some() {
++                eprintln!("SPIKE fsync kind={} us={d}", self.2);
++            }
++        }
++    }
++    pub struct Probe(Vec<(u64, u64, &'static str)>, Instant);
++    pub fn begin() -> Probe {
++        Probe(INFL.lock().unwrap().clone(), Instant::now())
++    }
++    /// `ino` 0: unknown.
++    pub fn end(p: Probe, what: &str, f: Option<&std::fs::File>) {
++        let us = p.1.elapsed().as_micros();
++        if us < 5000 {
++            return;
++        }
++        let ino = f.and_then(|f| f.metadata().ok()).map(|m| m.ino()).unwrap_or(0);
++        let now = INFL.lock().unwrap().clone();
++        let fmt = |v: &[(u64, u64, &'static str)]| {
++            v.iter().map(|e| format!("{}{}", e.2, if ino != 0 && e.1 == ino { "(same)" } else { "" })).collect::<Vec<_>>().join(",")
++        };
++        eprintln!("SPIKE slowio what={what} us={us} inflight_start=[{}] inflight_end=[{}]", fmt(&p.0), fmt(&now));
++    }
++}
+diff --git a/crates/chunk-store/src/pack_io.rs b/crates/chunk-store/src/pack_io.rs
+index 9233e12..b78c7f8 100644
+--- a/crates/chunk-store/src/pack_io.rs
++++ b/crates/chunk-store/src/pack_io.rs
+@@ -312,7 +312,10 @@ impl PackRead for FilePack {
+ 
+ impl PackFile for FilePack {
+     fn write_at(&mut self, data: &[u8], offset: u64) -> io::Result<()> {
+-        self.0.write_all_at(data, offset)
++        let p = crate::lock_stats::spike_io::begin();
++        let r = self.0.write_all_at(data, offset);
++        crate::lock_stats::spike_io::end(p, "pack_pwrite", Some(&self.0));
++        r
+     }
+     fn set_len(&mut self, len: u64) -> io::Result<()> {
+         self.0.set_len(len)
+@@ -485,6 +488,7 @@ fn punch_hole(_: &File, _: u64, _: u64) -> io::Result<()> {
+ /// `fsync`, and on macOS `F_FULLFSYNC` (a plain fsync there does not flush
+ /// the drive cache).
+ fn full_sync(f: &File) -> io::Result<()> {
++    let _fs = crate::lock_stats::spike_io::fsync_begin(f, "pack_or_dir");
+     #[cfg(target_os = "macos")]
+     {
+         use std::os::fd::AsRawFd;
+diff --git a/crates/chunk-store/src/retry.rs b/crates/chunk-store/src/retry.rs
+index 9431166..07a2346 100644
+--- a/crates/chunk-store/src/retry.rs
++++ b/crates/chunk-store/src/retry.rs
+@@ -229,11 +229,12 @@ impl PackFile for RetryingPack {
+         if self.broken {
+             return Err(broken());
+         }
+-        self.file.write_at(data, offset)?;
++        { let _sp = crate::lock_stats::span("raw_pwrite"); self.file.write_at(data, offset)?; }
+         self.unsynced.push_back((offset, data.to_vec()));
+         self.kept += data.len();
+         self.settle(false)?;
+         if self.flight.is_some() && self.kept > KEEP_CAP {
++            let _sp = crate::lock_stats::span("retry_settle_wait");
+             self.settle(true)?;
+         }
+         if self.flight.is_none() && self.kept > KEEP_LIMIT {
+@@ -275,6 +276,11 @@ impl PackFile for RetryingPack {
+         (self.kept + len > KEEP_CAP && !f.done.is_done()).then(|| f.done.clone())
+     }
+ 
++    fn sync_handle(&self) -> Option<std::sync::Arc<dyn crate::pack_io::PackSync>> {
++        // SPIKE 19g (temporary)
++        if std::env::var_os("SPIKE_SYNC_UNLOCKED").is_some() { self.file.sync_handle() } else { None }
++    }
++
+     fn sync_soon(&mut self) -> Option<SyncWait> {
+         if self.broken || self.settle(false).is_err() {
+             return None;
+diff --git a/crates/chunk-store/src/sync.rs b/crates/chunk-store/src/sync.rs
+index ac7fb0e..b37cdc5 100644
+--- a/crates/chunk-store/src/sync.rs
++++ b/crates/chunk-store/src/sync.rs
+@@ -241,6 +241,7 @@ struct Timing {
+ impl Drop for Timing {
+     fn drop(&mut self) {
+         let hold_ns = self.acquired.elapsed().as_nanos() as u64;
++        crate::lock_stats::exit(self.site, hold_ns);
+         crate::lock_stats::record(self.site, self.wait_ns, hold_ns);
+     }
+ }
+@@ -262,6 +263,7 @@ fn acquire<G>(
+             (g, t.elapsed().as_nanos() as u64)
+         }
+     };
++    crate::lock_stats::enter(site, wait_ns);
+     (g, Some(Timing { site, wait_ns, acquired: std::time::Instant::now() }))
+ }
+ 
+diff --git a/crates/metadata/src/wal/mod.rs b/crates/metadata/src/wal/mod.rs
+index 5bcc5a9..8ce5c53 100644
+--- a/crates/metadata/src/wal/mod.rs
++++ b/crates/metadata/src/wal/mod.rs
+@@ -247,7 +247,7 @@ pub(crate) fn sync_current(
+         }
+     };
+     between();
+-    file.sync_all()?;
++    { let _fs = chunk_store::lock_stats::spike_io::fsync_begin(&file, "wal"); file.sync_all()?; }
+     writer.lock().end_sync(mark);
+     Ok(())
+ }
+diff --git a/crates/metadata/src/wal/per_op.rs b/crates/metadata/src/wal/per_op.rs
+index 9a2b2f2..ef4dec5 100644
+--- a/crates/metadata/src/wal/per_op.rs
++++ b/crates/metadata/src/wal/per_op.rs
+@@ -78,6 +78,8 @@ impl PerOpWal {
+     fn drain(&self, writer: &mut SegmentWriter) -> Result<(), WalError> {
+         let batch = std::mem::take(&mut self.queue.lock().records);
+         if let Some(&(last, _)) = batch.back() {
++            let _sp = chunk_store::lock_stats::span("wal_drain_write");
++            let _pr = chunk_store::lock_stats::spike_io::begin();
+             let r = if self.failed.load(Ordering::Acquire) {
+                 Err(write_failed())
+             } else {
+@@ -87,6 +89,7 @@ impl PerOpWal {
+                     .and_then(|()| writer.flush())
+                     .map_err(WalError::from)
+             };
++            chunk_store::lock_stats::spike_io::end(_pr, "wal_drain", None);
+             if r.is_err() {
+                 self.failed.store(true, Ordering::Release);
+             }
+@@ -153,7 +156,7 @@ impl WalStrategy for PerOpWal {
+             (writer.file_for_sync()?, self.loc.lock().0.clone())
+         };
+         // The disk sync runs with no lock held: requests log meanwhile.
+-        file.sync_all()?;
++        { let _fs = chunk_store::lock_stats::spike_io::fsync_begin(&file, "wal_root"); file.sync_all()?; }
+         super::write_root_segment(&path, cut, seed, &self.behind)
+     }
+     fn log_mutation(&self, entry: &WalEntry) -> Result<(), WalError> {
+diff --git a/crates/slicefs-cli/src/filesystem.rs b/crates/slicefs-cli/src/filesystem.rs
+index 5aaa3f1..a7d63e0 100644
+--- a/crates/slicefs-cli/src/filesystem.rs
++++ b/crates/slicefs-cli/src/filesystem.rs
+@@ -791,10 +791,12 @@ impl SliceFsFilesystem {
+                         && !g.retired
+                         && !(wait_for_writers && g.write_handles > 0)
+                     {
++                        let _sp = chunk_store::lock_stats::span("FB_finalize_locked_rebase");
+                         self.rebase_step(ino, &mut g.file, step)?;
+                     }
+                 }
+                 Next::Flush => {
++                    let _sp = (!unlocked).then(|| chunk_store::lock_stats::span("FB_finalize_locked_flush"));
+                     self.flush_cell(g, unlocked)?;
+                     if !unlocked {
+                         // A locked flush installs the stream as it is.
+@@ -1313,7 +1315,7 @@ impl SliceFsFilesystem {
+         let (ino, next, generation, committed) = (s.ino, *next_expected_offset, s.generation, s.last_committed_root);
+         let clone = (next > 0).then(|| state.clone());
+         let io = move || self.overlay_base(ino, clone, next);
+-        let (base, base_len, old, digest) = if unlocked { g.unlocked(io) } else { io() }?;
++        let (base, base_len, old, digest) = if unlocked { g.unlocked(io) } else { let _sp = chunk_store::lock_stats::span("FB_locked_to_overlay_io"); io() }?;
+         if g.retired {
+             return Ok(false);
+         }
+@@ -1424,6 +1426,7 @@ impl SliceFsFilesystem {
+                 r
+             })
+         } else {
++            let _sp = chunk_store::lock_stats::span("FB_locked_stream_step");
+             io(&mut st)
+         };
+         if let Err(e) = r {
+@@ -1537,6 +1540,7 @@ impl SliceFsFilesystem {
+         };
+         if locked {
+             let ino = g.file.ino;
++            let _sp = chunk_store::lock_stats::span("FB_rebase_cell_locked");
+             self.rebase_step(ino, &mut g.file, free)?;
+         }
+         Ok(())
+@@ -1601,6 +1605,7 @@ impl SliceFsFilesystem {
+     /// run the rebase hook (after the new root is finished, before it is
+     /// installed). Returns the new root and its manifest digest.
+     fn step_io(&self, ino: u64, src: &Overlay, plan: &StepPlan) -> Result<(Option<ObjectKey>, Option<ObjectKey>), i32> {
++        let _sp0 = chunk_store::lock_stats::span("step_io");
+         let cs = &*self.content;
+         let store_err = |e: std::io::Error| {
+             eprintln!("[{}][FUSE] rebase: content store error: {e}", ts());
+@@ -1628,10 +1633,12 @@ impl SliceFsFilesystem {
+         LAST_REBASE_BYTES.with(|c| c.set(rechunked));
+         add_to(&WRITE_REBASE_BYTES, rechunked);
+         add_to(&WRITE_BASE_BYTES, base_bytes);
+-        eprintln!("[t={}][rebase] ino={ino} size={size} free={} cost_before={} taken={taken_n}/{taken_bytes} \
++        let _spe = chunk_store::lock_stats::span("eprintln_rebase");
++        if std::env::var_os("SPIKE_NO_EPRINTLN").is_none() { eprintln!("[t={}][rebase] ino={ino} size={size} free={} cost_before={} taken={taken_n}/{taken_bytes} \
+             rechunked={rechunked} base_read={base_bytes} reused_entries={} reused_nodes={} nodes_loaded={} splice_ms={splice_ms:.1}",
+             crate::util::epoch(), if plan.free == usize::MAX { "all".to_string() } else { plan.free.to_string() },
+-            plan.cost_before, stats.reused_entries, stats.reused_nodes, stats.nodes_loaded);
++            plan.cost_before, stats.reused_entries, stats.reused_nodes, stats.nodes_loaded); }
++        drop(_spe);
+         let hook = self.rebase_hook.lock().clone();
+         if let Some(hook) = hook {
+             hook();
+@@ -2014,7 +2021,7 @@ impl SliceFsFilesystem {
+                 true
+             } else {
+                 let generation = g.file.generation;
+-                let has = if unlocked { g.unlocked(|| self.has_content(ino)) } else { self.has_content(ino) };
++                let has = if unlocked { g.unlocked(|| self.has_content(ino)) } else { let _sp = chunk_store::lock_stats::span("FB_locked_has_content"); self.has_content(ino) };
+                 if g.retired || g.file.generation != generation {
+                     unlocked = false;
+                     continue;
+@@ -2074,8 +2081,10 @@ impl SliceFsFilesystem {
+                 break Ok(data.len() as u32);
+             }
+             // Random write: switch to an overlay on the stored content.
+-            eprintln!("[{}][FUSE] write: fh={} ino={} switches to overlay (offset={} len={} expected={} pending={} fresh={} overlap={})",
+-                ts(), fh, ino, offset, data.len(), next, pending_bytes, fresh, overlaps_pending);
++            let _spe = chunk_store::lock_stats::span("eprintln_overlay");
++            if std::env::var_os("SPIKE_NO_EPRINTLN").is_none() { eprintln!("[{}][FUSE] write: fh={} ino={} switches to overlay (offset={} len={} expected={} pending={} fresh={} overlap={})",
++                ts(), fh, ino, offset, data.len(), next, pending_bytes, fresh, overlaps_pending); }
++            drop(_spe);
+             // Older pending writes go in first; the next turn applies this
+             // (newest) write to the overlay.
+             if !self.to_overlay(&mut g, unlocked)? {
+@@ -2564,6 +2573,7 @@ impl SliceFsFilesystem {
+                 r
+             })
+         } else {
++            let _sp = chunk_store::lock_stats::span("FB_locked_flush_io");
+             io()
+         }?;
+         // Phase C: a newer snapshot, or another install, came first.

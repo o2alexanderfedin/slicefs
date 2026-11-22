@@ -1,0 +1,13 @@
+Darwin sync=none      target=same  pwrites=2620 p50_us=30 p99_us=66 max_us=611 over5ms=0 syncer=separate-process
+Darwin sync=none      target=other pwrites=2965 p50_us=18 p99_us=61 max_us=425 over5ms=0 syncer=separate-process
+Darwin sync=fsync     target=same  pwrites=3155 p50_us=18 p99_us=85 max_us=140 over5ms=0 syncer=separate-process
+Darwin sync=fsync     target=other pwrites=3143 p50_us=20 p99_us=63 max_us=1857 over5ms=0 syncer=separate-process
+Darwin sync=fullfsync target=same  pwrites=182 p50_us=19157 p99_us=27317 max_us=35788 over5ms=94 syncer=separate-process
+Darwin sync=fullfsync target=other pwrites=157 p50_us=19499 p99_us=22169 max_us=54922 over5ms=92 syncer=separate-process
+overlay        overlay 805568512 104497032 701071480  13% /
+Linux sync=none      target=same  pwrites=2775 p50_us=21 p99_us=54 max_us=248 over5ms=0 syncer=separate-process
+Linux sync=none      target=other pwrites=2797 p50_us=20 p99_us=64 max_us=133 over5ms=0 syncer=separate-process
+Linux sync=fsync     target=same  pwrites=2797 p50_us=22 p99_us=106 max_us=2312 over5ms=0 syncer=separate-process
+Linux sync=fsync     target=other pwrites=2830 p50_us=21 p99_us=58 max_us=86 over5ms=0 syncer=separate-process
+Linux sync=fdatasync target=same  pwrites=2834 p50_us=32 p99_us=250 max_us=14804 over5ms=1 syncer=separate-process
+Linux sync=fdatasync target=other pwrites=2859 p50_us=26 p99_us=72 max_us=113 over5ms=0 syncer=separate-process
