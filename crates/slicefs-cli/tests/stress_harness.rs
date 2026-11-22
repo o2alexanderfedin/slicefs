@@ -3,16 +3,18 @@
 //! mount). The data are checked against a model, and the report shows latency
 //! histograms and the commit gate times.
 //!
-//! Two modes: `OneFile` (all threads on one shared file, each thread owns a
-//! set of stripes) and `ManyFiles` (each thread owns its names in its own
+//! Three modes: `OneFile` (all threads on one shared file, each thread owns a
+//! set of stripes), `ManyFiles` (each thread owns its names in its own
 //! directory and in `shared`, and creates, renames, unlinks, writes, fsyncs
-//! them). A commit thread runs `timed_commit` beside the workers.
+//! them) and `MultiHandle` (one shared file; each thread has a read-only, a
+//! read-write and an `O_APPEND` handle on it). A commit thread runs
+//! `timed_commit` beside the workers.
 //!
-//! The core is safe with one operation at a time only (until Phase 20), so the
-//! suite runs with `serialize` on: N threads, but a harness mutex lets one
-//! operation run at a time. Lock order: the harness mutex first, then the
-//! commit gate (never the harness mutex while the gate is held). The commit
-//! thread does not take the harness mutex (as in the daemon).
+//! With `serialize` on, a harness mutex lets one operation run at a time (N
+//! threads). Lock order: the harness mutex first, then the commit gate (never
+//! the harness mutex while the gate is held). The commit thread does not take
+//! the harness mutex (as in the daemon). `serialize_off_target` runs every
+//! mode with `serialize` off (Phase 19).
 //!
 //! File bytes are never held in RAM as a model: a block is a function of
 //! (seed, file, block, version), and the model keeps only versions.
@@ -48,6 +50,10 @@ const MAX_BLOCKS: usize = 16;
 const MAX_LIVE: usize = 32;
 /// The commit thread commits this often.
 const COMMIT_EVERY: Duration = Duration::from_millis(250);
+/// Multi-handle mode: the size of one append record, and the most records
+/// one thread appends (so the file and the dirty total stay small).
+const RECORD: usize = 512;
+const MAX_APPENDS: u64 = 256;
 
 // ---- content: no file bytes in RAM -------------------------------------
 
@@ -94,6 +100,7 @@ impl Rng {
 enum Mode {
     OneFile,
     ManyFiles,
+    MultiHandle,
 }
 
 impl Mode {
@@ -101,6 +108,7 @@ impl Mode {
         match self {
             Mode::OneFile => "one-file",
             Mode::ManyFiles => "many-files",
+            Mode::MultiHandle => "multi-handle",
         }
     }
 }
@@ -158,13 +166,15 @@ impl Config {
     }
 }
 
-/// `STRESS_MODE`: `one-file`, `many-files` or `both` (default).
+/// `STRESS_MODE`: `one-file`, `many-files`, `multi-handle` or `both`
+/// (default: one-file and many-files).
 fn modes_from_env() -> Vec<Mode> {
     match std::env::var("STRESS_MODE").as_deref() {
         Err(_) | Ok("both") => vec![Mode::OneFile, Mode::ManyFiles],
         Ok("one-file") => vec![Mode::OneFile],
         Ok("many-files") => vec![Mode::ManyFiles],
-        Ok(_) => panic!("STRESS_MODE must be one-file, many-files or both"),
+        Ok("multi-handle") => vec![Mode::MultiHandle],
+        Ok(_) => panic!("STRESS_MODE must be one-file, many-files, multi-handle or both"),
     }
 }
 
@@ -233,9 +243,25 @@ impl FileModel {
     }
 }
 
+/// One-file and multi-handle modes. `appends[t]`: the records thread `t`
+/// has appended (multi-handle mode; each append that returned Ok).
 struct OneFile {
     model: FileModel,
     ino: u64,
+    appends: Vec<AtomicU64>,
+}
+
+/// Multi-handle mode: record `k` of thread `t`, 512 bytes. The first 16
+/// bytes name it; the rest is a function of (seed, t, k).
+fn append_record(seed: u64, t: u64, k: u64) -> Vec<u8> {
+    let mut r = Vec::with_capacity(RECORD);
+    r.extend_from_slice(&t.to_le_bytes());
+    r.extend_from_slice(&k.to_le_bytes());
+    let key = splitmix(splitmix(seed ^ 0x5eed) ^ (t << 32) ^ k);
+    for i in 0..((RECORD - 16) / 8) as u64 {
+        r.extend_from_slice(&splitmix(key.wrapping_add(i)).to_le_bytes());
+    }
+    r
 }
 
 /// Many-files mode: the directories of the run.
@@ -290,10 +316,11 @@ enum Kind {
     Open,
     Release,
     Lookup,
+    Append,
 }
 
-const KIND_NAMES: [&str; 9] =
-    ["read", "write", "fsync", "create", "rename", "unlink", "open", "release", "lookup"];
+const KIND_NAMES: [&str; 10] =
+    ["read", "write", "fsync", "create", "rename", "unlink", "open", "release", "lookup", "append"];
 
 struct Hists {
     ops: Vec<Histogram<u64>>,
@@ -544,10 +571,78 @@ impl Ctx {
         WorkerOut { mismatches: out, model: None }
     }
 
-    // ---- handler wrappers used by both modes ----
+    // ---- multi-handle mode ----
+
+    /// One shared file, three handles per thread: read-only, read-write and
+    /// read-write with `O_APPEND` (POSIX.1 2.9.7, ROADMAP Phase 19 criterion
+    /// 6). Writes go through the read-write handle, one owned block at a
+    /// time; the read after each write (visibility) and the other reads use
+    /// the inode of the read-only handle (`handle_read` takes the inode). Each
+    /// block read must be exactly one allowed version (all or none). Appends
+    /// go through the append handle with a wrong offset on purpose; they land
+    /// after the block region (checked by `verify_appends`).
+    fn worker_multi_handle(&self, t: usize, hs: &mut Hists) -> WorkerOut {
+        let one = self.one.as_ref().expect("multi-handle context");
+        let mut out = Vec::new();
+        let blocks = one.model.committed.len();
+        let owned: Vec<usize> = (0..blocks / STRIPE).filter(|s| s % self.cfg.threads == t).collect();
+        let mut rng = Rng(self.cfg.seed ^ ((t as u64 + 1) << 40) ^ 0xa11);
+        let mut fhs = Vec::new();
+        for flags in [libc::O_RDONLY, libc::O_RDWR, libc::O_RDWR | libc::O_APPEND] {
+            match self.open_flags(hs, one.ino, flags) {
+                Ok(fh) => fhs.push(fh),
+                Err(m) => {
+                    out.push(m);
+                    break;
+                }
+            }
+        }
+        if let [_ro, rw, ap] = fhs[..] {
+            let mut k = 0u64;
+            for _ in 0..self.cfg.ops_per_thread {
+                if !self.keep_going(out.len()) {
+                    break;
+                }
+                let r = rng.below(100);
+                if r < 4 {
+                    self.fsync_fh(hs, one.ino, rw, &mut out);
+                } else if r < 44 && !owned.is_empty() {
+                    let b = owned[rng.below(owned.len())] * STRIPE + rng.below(STRIPE);
+                    self.write_blocks(hs, rw, b, 1, &mut out);
+                    // A completed write is visible through the read-only handle.
+                    self.read_blocks(hs, one.ino, b, 1, &mut out);
+                } else if r < 64 && k < MAX_APPENDS {
+                    let rec = append_record(self.cfg.seed, t as u64, k);
+                    let wrong = if k % 2 == 0 { 0 } else { 999_999 + k };
+                    match self.gated(hs, Kind::Append, || h::handle_write(&self.fs, ap, wrong, &rec)) {
+                        WriteResult::Ok(n) if n as usize == RECORD => {
+                            k += 1;
+                            one.appends[t].store(k, Ordering::SeqCst);
+                        }
+                        WriteResult::Ok(n) => out.push(mm("append", format!("short append: {n} of {RECORD}"))),
+                        WriteResult::Error(e) => out.push(errno_mismatch("append", e)),
+                    }
+                } else {
+                    let n = 1 + rng.below(STRIPE);
+                    let start = rng.below(blocks - n + 1);
+                    self.read_blocks(hs, one.ino, start, n, &mut out);
+                }
+            }
+        }
+        for fh in fhs {
+            self.release_fh(hs, one.ino, fh, &mut out);
+        }
+        WorkerOut { mismatches: out, model: None }
+    }
+
+    // ---- handler wrappers used by all modes ----
 
     fn open_fh(&self, hs: &mut Hists, ino: u64) -> Result<u64, Mismatch> {
-        match self.gated(hs, Kind::Open, || h::handle_open(&self.fs, ino, libc::O_RDWR)) {
+        self.open_flags(hs, ino, libc::O_RDWR)
+    }
+
+    fn open_flags(&self, hs: &mut Hists, ino: u64, flags: i32) -> Result<u64, Mismatch> {
+        match self.gated(hs, Kind::Open, || h::handle_open(&self.fs, ino, flags)) {
             OpenResult::Ok(fh, _) => Ok(fh),
             OpenResult::Error(e) => Err(errno_mismatch("open", e)),
         }
@@ -834,6 +929,71 @@ fn verify_files(ctx: &Ctx) -> Vec<Mismatch> {
     out
 }
 
+/// Multi-handle mode, after the join: the file is the block region and then
+/// every appended record exactly once and whole, in some order. Read in 64
+/// KiB pieces with a bit set of the records seen (no whole-file buffer).
+fn verify_appends(ctx: &Ctx) -> Vec<Mismatch> {
+    const PIECE: u64 = 64 << 10;
+    let one = ctx.one.as_ref().expect("multi-handle context");
+    let counts: Vec<u64> = one.appends.iter().map(|c| c.load(Ordering::SeqCst)).collect();
+    let total: u64 = counts.iter().sum();
+    let base = ctx.cfg.file_bytes;
+    let mut out = Vec::new();
+    let size = match ctx.fs.test_getattr(one.ino) {
+        Ok(a) => a.size,
+        Err(e) => return vec![mm("append", format!("getattr: {e:?}"))],
+    };
+    if size != base + total * RECORD as u64 {
+        out.push(mm("append", format!("size {size}, want {base} + {total} records")));
+    }
+    let mut seen = vec![0u64; (counts.len() * MAX_APPENDS as usize).div_ceil(64)];
+    let mut found = 0u64;
+    let mut off = base;
+    while off < size && out.len() < 50 {
+        let want = (size - off).min(PIECE);
+        let piece = match h::handle_read(&ctx.fs, one.ino, off, want as u32) {
+            DataResult::Ok(d) if d.len() as u64 == want => d,
+            DataResult::Ok(d) => {
+                out.push(mm("append", format!("short read at {off}: {} of {want}", d.len())));
+                break;
+            }
+            DataResult::Error(e) => {
+                out.push(mm("append", format!("read at {off}: errno {e}")));
+                break;
+            }
+        };
+        for (i, r) in piece.chunks(RECORD).enumerate() {
+            let at = off + (i * RECORD) as u64;
+            if r.len() != RECORD {
+                out.push(mm("append", format!("part of a record at {at}")));
+                continue;
+            }
+            let t = u64::from_le_bytes(r[..8].try_into().unwrap());
+            let k = u64::from_le_bytes(r[8..16].try_into().unwrap());
+            if t as usize >= counts.len() || k >= counts[t as usize] {
+                out.push(mm("append", format!("record ({t}, {k}) at {at}: not an appended record")));
+                continue;
+            }
+            if r != append_record(ctx.cfg.seed, t, k) {
+                out.push(mm("append", format!("record ({t}, {k}) at {at}: not whole")));
+                continue;
+            }
+            let bit = t as usize * MAX_APPENDS as usize + k as usize;
+            if seen[bit / 64] & (1 << (bit % 64)) != 0 {
+                out.push(mm("append", format!("record ({t}, {k}) at {at}: twice")));
+                continue;
+            }
+            seen[bit / 64] |= 1 << (bit % 64);
+            found += 1;
+        }
+        off += want;
+    }
+    if found != total {
+        out.push(mm("append", format!("{found} of {total} records found")));
+    }
+    out
+}
+
 /// Many-files mode, after the join: the names of every directory equal the
 /// model, every name resolves to the model inode, and every file has the model
 /// size and content.
@@ -915,7 +1075,7 @@ fn run(cfg: Config) -> Outcome {
     let fs = new_fs(dir.path(), cfg.wal.clone());
     let gate = fs.commit_gate();
     let (one, dirs) = match cfg.mode {
-        Mode::OneFile => {
+        Mode::OneFile | Mode::MultiHandle => {
             let ino = match h::handle_create(&fs, ROOT, "one-file", S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR) {
                 CreateResult::Ok(ino, fh, _) => {
                     assert!(
@@ -933,7 +1093,8 @@ fn run(cfg: Config) -> Outcome {
             };
             let blocks = (cfg.file_bytes as usize) / BLOCK;
             assert!(blocks % STRIPE == 0, "file size must be a multiple of a stripe");
-            (Some(OneFile { model: FileModel::new(blocks), ino }), None)
+            let appends = (0..cfg.threads).map(|_| AtomicU64::new(0)).collect();
+            (Some(OneFile { model: FileModel::new(blocks), ino, appends }), None)
         }
         Mode::ManyFiles => {
             let shared = mkdir(&fs, ROOT, "shared", cfg.seed);
@@ -987,6 +1148,7 @@ fn run(cfg: Config) -> Outcome {
                     let w = match ctx.cfg.mode {
                         Mode::OneFile => ctx.worker_one_file(t, &mut hs),
                         Mode::ManyFiles => ctx.worker_many_files(t, &mut hs),
+                        Mode::MultiHandle => ctx.worker_multi_handle(t, &mut hs),
                     };
                     (hs, w)
                 })
@@ -1010,6 +1172,10 @@ fn run(cfg: Config) -> Outcome {
     match cfg.mode {
         Mode::OneFile => mismatches.extend(verify_files(&ctx)),
         Mode::ManyFiles => mismatches.extend(verify_namespace(&ctx, &models)),
+        Mode::MultiHandle => {
+            mismatches.extend(verify_files(&ctx));
+            mismatches.extend(verify_appends(&ctx));
+        }
     }
     let ops = ctx.ops_done.load(Ordering::SeqCst);
     let max_inflight = ctx.max_inflight.load(Ordering::SeqCst);
@@ -1176,6 +1342,23 @@ fn model_detects_planted_bug() {
         "seed={}: no mismatch names {name}: {found:?}",
         cfg.seed
     );
+
+    // Append part: record (0, 0) is appended once more behind the model's back.
+    let mut cfg = short_cfg(Mode::MultiHandle);
+    cfg.threads = 1;
+    cfg.ops_per_thread = 30;
+    let o = run(cfg.clone());
+    assert_clean(cfg.seed, &o);
+    let ino = o.ctx.one.as_ref().unwrap().ino;
+    let ap = match h::handle_open(&o.ctx.fs, ino, libc::O_RDWR | libc::O_APPEND) {
+        OpenResult::Ok(fh, _) => fh,
+        OpenResult::Error(e) => panic!("seed={} open errno {e}", cfg.seed),
+    };
+    assert!(matches!(h::handle_write(&o.ctx.fs, ap, 0, &append_record(cfg.seed, 0, 0)), WriteResult::Ok(_)));
+    assert!(matches!(h::handle_release(&o.ctx.fs, ino, ap), EmptyResult::Ok));
+    let found = verify_appends(&o.ctx);
+    assert!(found.iter().any(|m| m.detail.contains("(0, 0)")), "seed={}: {found:?}", cfg.seed);
+    assert!(verify_files(&o.ctx).is_empty(), "seed={}: the append changed the block region", cfg.seed);
 }
 
 /// The strict-gate rule catches a request that takes a cell with no gate
@@ -1216,15 +1399,16 @@ fn long_run() {
 }
 
 /// Serialize off: the target of Phases 19-21, in the default suite since
-/// Phase 19. Both modes, 4 threads, 2 s each (RESEARCH Risk 7); the files are
-/// small, so the dirty total stays below the budget.
+/// Phase 19. All three modes, 4 threads, 2 s each (multi-handle 1 s, so the
+/// binary stays under about 10 s; RESEARCH Risk 7); the files are small, so
+/// the dirty total stays below the budget.
 #[test]
 fn serialize_off_target() {
-    for mode in [Mode::OneFile, Mode::ManyFiles] {
+    for mode in [Mode::OneFile, Mode::ManyFiles, Mode::MultiHandle] {
         let cfg = Config {
             threads: 4,
             ops_per_thread: usize::MAX,
-            secs: Some(2),
+            secs: Some(if mode == Mode::MultiHandle { 1 } else { 2 }),
             serialize: false,
             watchdog: Duration::from_secs(30),
             ..short_cfg(mode)
@@ -1802,7 +1986,7 @@ fn s7_budget_baseline() {
                             buf.extend_from_slice(&block_bytes(seed, fid, b as u64, ver[b]));
                         }
                         // Sample inside `gated`, after the write, while the harness mutex is held:
-                        // no other write has a file's state taken out of `open_files` then.
+                        // no other write is changing a dirty count then.
                         let r = ctx.gated(hs, Kind::Write, || {
                             let r = h::handle_write(&ctx.fs, fh, (first * BLOCK) as u64, buf);
                             max_dirty.fetch_max(ctx.fs.test_dirty_total(), Ordering::SeqCst);
