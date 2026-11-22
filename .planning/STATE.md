@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 19
 current_phase_name: Fine-grained locks
 status: executing
-stopped_at: Planned gap closure 19-12..19-16
-last_updated: "2026-11-22T11:40:16.965Z"
-last_activity: 2026-11-21
+stopped_at: Completed 19-12-PLAN.md
+last_updated: "2026-11-22T14:21:37.460Z"
+last_activity: 2026-11-22
 last_activity_desc: Phase 19 execution started
-state_head: 8e2ed7639d5bc1bc83dd25862b5109224061f3f8
+state_head: a7bff74cefc967ad0d48672c0a9b8b67c71e7bd0
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 23
-  completed_plans: 18
+  completed_plans: 19
   percent: 14
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 19 (Fine-grained locks) — EXECUTING (gap closure)
-Plan: 12 of 16
+Plan: 13 of 16
 Status: Gap-closure plans 19-12..19-16 ready to execute (LOCK-01, LOCK-04, LOCK-05)
 Last activity: 2026-11-22 — Gap-closure plans 19-12..19-16 written
 
@@ -64,6 +64,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 19 P09 | 55min | 3 tasks | 11 files |
 | Phase 19 P10 | 55min | 3 tasks | 7 files |
 | Phase 19 P11 | 52min | 3 tasks | 4 files |
+| Phase 19 P12 | 70min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -127,6 +128,10 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: 19-11: LOCK-04 not marked until the orchestrator applies the staged #21 body; mkdir and closed-file size change windows open for the owner
 - [Phase 19]: 19-11: LOCK-05 not marked: the tests show readers do not wait on the main path, but finalize and write fall back to a locked rebase step or flush (store I/O in the cell hold) after a dropped or concurrent step, so a reader can wait for a writer's I/O under contention
 - [Phase 19]: Gap closure 19-12..19-16 (G1-G6): one record write in flight per pack and per WAL segment (no holes, no lock across the pwrite); dirty flags clear by mark after the unlocked fsync; a per-cell step token replaces the locked fallbacks; reads compose pending writes; LOCK-04 is marked by the orchestrator after it applies the #21 body
+- [Phase 19]: 19-12: ChunkStore::sync phase 2 and the index flush fsync with no store lock (sync handle and marks; dirty flags cleared by mark)
+- [Phase 19]: 19-12: one record write in flight per active pack, published under the store lock; supersedes D-14
+- [Phase 19]: 19-12: RetryingPack sync handle repairs in its own thread; a sync that saw a failure drops no copies; a write that saw one writes again
+- [Phase 19]: 19-12: store waits for another thread's job end after STORE_WAIT (10 s) with TimedOut, without failing the store
 
 ### Pending Todos
 
@@ -150,8 +155,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-22T11:33:10.071Z
-Stopped at: Completed 19-11-PLAN.md
+Last session: 2026-11-22T14:21:37.296Z
+Stopped at: Completed 19-12-PLAN.md
 Resume file: None
 
 ## Operator Next Steps

@@ -234,7 +234,7 @@ Plans:
   4. Locks have one fixed rank, with two inodes locked in ascending stripe order (inode number hashed to a stripe); a test that breaks the rank fails in a debug build
   5. After a crash, replay of the log from the mixed-operation harness gives the same state as the apply, including creates by logged inode number, and the #21 body matches this rule
   6. With several handles on one inode in different modes (read-only, read-write, `O_APPEND`), the harness shows the POSIX.1 2.9.7 rules: a completed write through one handle is visible through every other handle, a read sees all or none of a concurrent write, and concurrent appends never overlap and lose no bytes. The research for this phase checks how the kernel FUSE client computes the append offset in the SliceFS mount mode
-**Plans**: 16 plans (11/11 executed; 5 gap-closure plans 19-12..19-16 for LOCK-01, LOCK-04, LOCK-05)
+**Plans**: 12/16 plans executed (11/11 executed; 5 gap-closure plans 19-12..19-16 for LOCK-01, LOCK-04, LOCK-05)
 
 One plan per wave; executors run them in order.
 
@@ -273,7 +273,7 @@ Plans:
 - [x] 19-11-PLAN.md — Harness multi-handle mode, lock wait rows, #21 body, Phase 19 note in the research doc
 
 **Wave 12** *(gap closure; blocked on Wave 11 completion)*
-- [ ] 19-12-PLAN.md — Chunk store: phase-2 and index-flush fsync with no store lock (RetryingPack sync handle), record pwrite with no store lock (one write in flight)
+- [x] 19-12-PLAN.md — Chunk store: phase-2 and index-flush fsync with no store lock (RetryingPack sync handle), record pwrite with no store lock (one write in flight)
 
 **Wave 13** *(gap closure; blocked on Wave 12 completion)*
 - [ ] 19-13-PLAN.md — Write log: record writes with no WAL lock in every strategy, cut opens its segment outside the writer; mkdir locks the parent and new-directory stripes
@@ -362,7 +362,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 18. Spikes, baseline and stress harness | 7/7 | Complete    | 2026-11-21 |
-| 19. Fine-grained locks | 11/11 | In Progress | - |
+| 19. Fine-grained locks | 12/16 | In Progress | - |
 | 20. Dirty budget and rebase flusher | 0/0 | Not started | - |
 | 21. Worker pool | 0/0 | Not started | - |
 | 22. Chunk profiles | 0/0 | Not started | - |
