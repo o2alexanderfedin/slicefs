@@ -4,8 +4,8 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: 19
 current_phase_name: Fine-grained locks
-status: verifying
-stopped_at: Completed 19-11-PLAN.md
+status: executing
+stopped_at: Planned gap closure 19-12..19-16
 last_updated: "2026-11-22T11:40:16.965Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 19 execution started
@@ -13,7 +13,7 @@ state_head: 8e2ed7639d5bc1bc83dd25862b5109224061f3f8
 progress:
   total_phases: 7
   completed_phases: 1
-  total_plans: 18
+  total_plans: 23
   completed_plans: 18
   percent: 14
 ---
@@ -29,10 +29,10 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Phase: 19 (Fine-grained locks) — EXECUTING
-Plan: 11 of 11
-Status: Phase complete — ready for verification
-Last activity: 2026-11-21 — Phase 19 execution started
+Phase: 19 (Fine-grained locks) — EXECUTING (gap closure)
+Plan: 12 of 16
+Status: Gap-closure plans 19-12..19-16 ready to execute (LOCK-01, LOCK-04, LOCK-05)
+Last activity: 2026-11-22 — Gap-closure plans 19-12..19-16 written
 
 Progress: [█░░░░░░░░░] 14%
 
@@ -126,6 +126,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: 19-11: LOCK-01 not marked: the store lock is still held across disk I/O (ChunkStore::sync second-phase fsync; a record pwrite under the store or WAL writer lock stalls behind a concurrent fsync on macOS); owner decision
 - [Phase 19]: 19-11: LOCK-04 not marked until the orchestrator applies the staged #21 body; mkdir and closed-file size change windows open for the owner
 - [Phase 19]: 19-11: LOCK-05 not marked: the tests show readers do not wait on the main path, but finalize and write fall back to a locked rebase step or flush (store I/O in the cell hold) after a dropped or concurrent step, so a reader can wait for a writer's I/O under contention
+- [Phase 19]: Gap closure 19-12..19-16 (G1-G6): one record write in flight per pack and per WAL segment (no holes, no lock across the pwrite); dirty flags clear by mark after the unlocked fsync; a per-cell step token replaces the locked fallbacks; reads compose pending writes; LOCK-04 is marked by the orchestrator after it applies the #21 body
 
 ### Pending Todos
 
@@ -138,8 +139,8 @@ None.
 - `keep_budget` is the last cross-file take-out of `open_files`; it stays until Phase 20 (LOCK-02). Phase 19 concurrency tests must stay below the dirty budget.
 - Phase 20 (budget, flusher and gate) has the highest deadlock risk; run research-phase before planning it.
 - Idle index merge can rewrite GBs after a short pause and is not stopped by new writes (#141). Not in v2.2.
-- LOCK-01 open: store lock held across an fsync (ChunkStore::sync second phase) and record pwrites under the store and WAL writer locks stall 20-36 ms behind a concurrent fsync on macOS (19-11 lock rows; deferred-items.md). Needs an owner decision on the store/log sync protocol.
-- LOCK-05 open: finalize and the write path fall back to a rebase step or flush with the cell locked after a dropped or concurrent step (19-06/07), so a reader can wait for a writer's I/O under contention (19-11 SUMMARY Finding 5; deferred-items.md). Needs an owner decision on the progress rule.
+- LOCK-01 open: store lock held across an fsync (ChunkStore::sync second phase) and record pwrites under the store and WAL writer locks stall 20-36 ms behind a concurrent fsync on macOS (19-11 lock rows; deferred-items.md). Decided (G1, G2); plans 19-12 (store) and 19-13 (WAL), measured in 19-16.
+- LOCK-05 open: finalize and the write path fall back to a rebase step or flush with the cell locked after a dropped or concurrent step (19-06/07), so a reader can wait for a writer's I/O under contention (19-11 SUMMARY Finding 5; deferred-items.md). Decided (G3); plans 19-14 (step token, write and read paths) and 19-15 (finalize, setattr, forced-drop evidence).
 
 ## Deferred Items
 

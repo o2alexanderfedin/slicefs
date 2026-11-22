@@ -234,7 +234,7 @@ Plans:
   4. Locks have one fixed rank, with two inodes locked in ascending stripe order (inode number hashed to a stripe); a test that breaks the rank fails in a debug build
   5. After a crash, replay of the log from the mixed-operation harness gives the same state as the apply, including creates by logged inode number, and the #21 body matches this rule
   6. With several handles on one inode in different modes (read-only, read-write, `O_APPEND`), the harness shows the POSIX.1 2.9.7 rules: a completed write through one handle is visible through every other handle, a read sees all or none of a concurrent write, and concurrent appends never overlap and lose no bytes. The research for this phase checks how the kernel FUSE client computes the append offset in the SliceFS mount mode
-**Plans**: 11/11 plans executed
+**Plans**: 16 plans (11/11 executed; 5 gap-closure plans 19-12..19-16 for LOCK-01, LOCK-04, LOCK-05)
 
 One plan per wave; executors run them in order.
 
@@ -271,6 +271,21 @@ Plans:
 
 **Wave 11** *(blocked on Wave 10 completion)*
 - [x] 19-11-PLAN.md — Harness multi-handle mode, lock wait rows, #21 body, Phase 19 note in the research doc
+
+**Wave 12** *(gap closure; blocked on Wave 11 completion)*
+- [ ] 19-12-PLAN.md — Chunk store: phase-2 and index-flush fsync with no store lock (RetryingPack sync handle), record pwrite with no store lock (one write in flight)
+
+**Wave 13** *(gap closure; blocked on Wave 12 completion)*
+- [ ] 19-13-PLAN.md — Write log: record writes with no WAL lock in every strategy, cut opens its segment outside the writer; mkdir locks the parent and new-directory stripes
+
+**Wave 14** *(gap closure; blocked on Wave 13 completion)*
+- [ ] 19-14-PLAN.md — Cell step token: stream writes and reads with no locked I/O, hard cap waits without the cell, dropped steps retry unlocked, debug lines out of the hold
+
+**Wave 15** *(gap closure; blocked on Wave 14 completion)*
+- [ ] 19-15-PLAN.md — Release and finalize in unlocked steps with a bounded retry count, open-stream size change through the token, reads skip the transient cell, forced-drop lock rows
+
+**Wave 16** *(gap closure; blocked on Wave 15 completion)*
+- [ ] 19-16-PLAN.md — Re-measure lock holds on macOS and Docker Linux against stated bars; research doc, deferred items, draft #21 body; requirement marks
 
 ### Phase 20: Dirty budget and rebase flusher
 
