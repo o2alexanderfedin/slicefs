@@ -266,6 +266,15 @@ impl PackFile for RetryingPack {
         self.sync_here()
     }
 
+    /// The background sync that `write_at` would wait for at `KEEP_CAP`.
+    /// The store waits for it without its lock and then writes in one hold
+    /// with this check, so the cap holds; the wait in `write_at` stays for
+    /// the callers that do not ask (run files, GC copies).
+    fn write_wait(&self, len: usize) -> Option<SyncWait> {
+        let f = self.flight.as_ref()?;
+        (self.kept + len > KEEP_CAP && !f.done.is_done()).then(|| f.done.clone())
+    }
+
     fn sync_soon(&mut self) -> Option<SyncWait> {
         if self.broken || self.settle(false).is_err() {
             return None;

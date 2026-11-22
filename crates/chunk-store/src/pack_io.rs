@@ -82,6 +82,12 @@ pub trait PackFile: PackRead {
     fn sync_soon(&mut self) -> Option<SyncWait> {
         None
     }
+    /// The wait that a `write_at` of `len` more bytes would do now (the end
+    /// of a background sync, see `retry.rs`), if any. A caller under a lock
+    /// waits for it without the lock first (LOCK-01).
+    fn write_wait(&self, _len: usize) -> Option<SyncWait> {
+        None
+    }
 }
 
 /// Syncs one file from any thread (see [`PackFile::sync_handle`]).

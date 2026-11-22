@@ -609,6 +609,22 @@ struct Inner {
     merge: Arc<MergeCtl>,
     /// The seal that runs in the background, if any (see `ChunkStore::seal`).
     sealing: Option<Sealing>,
+    /// A `put` creates the pack file with this number now, with no store
+    /// lock held, and signals the end (see `ChunkStore::prepare_append`).
+    /// The number is taken from `next_pack`.
+    creating: Option<(u64, SyncWait)>,
+    /// A flush runs now (see `ChunkStore::flush_if_full`), and signals its
+    /// end: one flush at a time, and no GC install meanwhile.
+    flushing: Option<SyncWait>,
+}
+
+/// A slow step that `put` does without the store lock before its append
+/// (see `ChunkStore::prepare_append`).
+enum Before {
+    /// Wait for this signal, then look again.
+    Wait(SyncWait),
+    /// Create the pack file with this number, then install it and signal.
+    Create(u64, SyncWait),
 }
 
 /// A seal in a background thread, and the signal of its end (a wait on it
@@ -1261,6 +1277,8 @@ impl ChunkStore {
             failed: false,
             merge: Arc::new(MergeCtl::default()),
             sealing: None,
+            creating: None,
+            flushing: None,
         };
         let limit = opts.index_memtable_limit.max(1);
         let last = nums.last().copied();
@@ -1402,17 +1420,36 @@ impl ChunkStore {
                         return Ok(id);
                     }
                     inner.check()?;
-                    // A slow operation that the append would wait for runs:
-                    // wait for it without the store lock, then start again.
-                    let Some(w) = self.append_wait(&inner, s.record.len()) else { break };
-                    drop(inner);
-                    self.note_wait();
-                    w.wait();
-                    inner = self.inner.lock();
+                    // The append needs a slow operation (a pack create, or a
+                    // wait for a seal or a background sync): do it without
+                    // the store lock, then start again (LOCK-01).
+                    match self.prepare_append(&mut inner, s.record.len()) {
+                        None => break,
+                        Some(Before::Wait(w)) => {
+                            drop(inner);
+                            self.note_wait();
+                            w.wait();
+                            inner = self.inner.lock();
+                        }
+                        Some(Before::Create(num, done)) => {
+                            drop(inner);
+                            let made = self.create_pack(num);
+                            inner = self.inner.lock();
+                            if let Some(spare) = self.install_pack(&mut inner, num, made, &done)? {
+                                drop(inner);
+                                drop(spare);
+                                // Best effort: an empty pack below the active
+                                // one is only removed by a later GC.
+                                let _ = self.io.remove(num, Kind::Pack);
+                                inner = self.inner.lock();
+                            }
+                        }
+                    }
                 }
                 let loc = self.append(&mut inner, &id, &s.record, stored, data.len() as u32, flags)?;
                 inner.add_new(id, loc);
-                self.flush_if_full(&mut inner)?;
+                drop(inner);
+                self.flush_if_full()?;
                 Ok(id)
             })();
             // Chunks and nodes are small; do not keep the buffers of a big object.
@@ -1506,20 +1543,64 @@ impl ChunkStore {
         self.locality.stats()
     }
 
-    /// What `append` of a record of `len` bytes would wait for under the
-    /// store lock, if anything: the seal of the previous pack (when this
-    /// record fills the active pack). `put` waits for it without the lock
-    /// and asks again (LOCK-01); the GC copies, under the lock, do not ask.
-    fn append_wait(&self, inner: &Inner, len: usize) -> Option<SyncWait> {
-        let a = inner.active.as_ref()?;
+    /// What `append` of a record of `len` bytes would do under the store
+    /// lock that is slow, if anything (LOCK-01): create the pack file (no
+    /// active pack), wait for the seal of the previous pack (this record
+    /// fills the active pack), or wait for a background sync at `KEEP_CAP`
+    /// (see `retry.rs`). `put` does it without the lock and asks again; the
+    /// GC copies, under the lock, do not ask (they are not on the put and
+    /// read paths). For a create, the number is taken here and `creating`
+    /// is set: one create at a time, and other puts wait for it.
+    fn prepare_append(&self, inner: &mut Inner, len: usize) -> Option<Before> {
+        let Some(a) = inner.active.as_ref() else {
+            if let Some((_, w)) = &inner.creating {
+                return Some(Before::Wait(w.clone()));
+            }
+            let num = inner.next_pack;
+            inner.next_pack += 1;
+            let done = SyncWait::default();
+            inner.creating = Some((num, done.clone()));
+            return Some(Before::Create(num, done));
+        };
         if a.len + len as u64 >= self.opts.pack_limit {
             // After its signal the seal thread only returns: the join under
             // the lock then takes no time.
             if let Some(s) = inner.sealing.as_ref().filter(|s| !s.done.is_done()) {
-                return Some(s.done.clone());
+                return Some(Before::Wait(s.done.clone()));
             }
         }
-        None
+        a.file.write_wait(len).map(Before::Wait)
+    }
+
+    /// A new pack file `num` with its header (no store lock held).
+    fn create_pack(&self, num: u64) -> Result<Box<dyn PackFile>> {
+        let mut file = self.io.create(num)?;
+        file.write_at(&pack_header(num), 0)?;
+        Ok(file)
+    }
+
+    /// Under the store lock after `create_pack`: end the create (wake the
+    /// puts that wait for it) and make the file the active pack. A GC copy
+    /// may have made an active pack meanwhile (under the lock); then the new
+    /// file is returned, for the caller to remove without the lock. Its
+    /// number is not used again.
+    fn install_pack(
+        &self,
+        inner: &mut Inner,
+        num: u64,
+        made: Result<Box<dyn PackFile>>,
+        done: &SyncWait,
+    ) -> Result<Option<Box<dyn PackFile>>> {
+        inner.creating = None;
+        done.done();
+        let file = made?;
+        if inner.active.is_some() {
+            return Ok(Some(file));
+        }
+        inner.active = Some(Active { num, file, len: PACK_HEADER as u64, entries: Vec::new(), dirty: true });
+        inner.stats.packs += 1;
+        inner.dir_dirty = true;
+        Ok(None)
     }
 
     /// Append an encoded record to the active pack (made if there is none),
@@ -1557,7 +1638,7 @@ impl ChunkStore {
     /// Returns the last pack number that the GC may change.
     pub fn gc_begin(&self) -> Result<u64> {
         let _one = self.gc.lock();
-        let mut inner = self.inner.lock();
+        let mut inner = self.lock_no_create();
         inner.check()?;
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
             self.seal(&mut inner)?;
@@ -1568,13 +1649,27 @@ impl ChunkStore {
         Ok(inner.next_pack - 1)
     }
 
+    /// The store lock, with no pack create in flight: a pack whose number
+    /// is taken but whose file is not installed yet would be at or below the
+    /// boundary of `gc_begin` with no entries, so `gc_select` would take it
+    /// as unused and remove it. The wait for the create runs without the
+    /// store lock.
+    fn lock_no_create(&self) -> MutexGuard<'_, Inner> {
+        loop {
+            let inner = self.inner.lock();
+            let Some(w) = inner.creating.as_ref().map(|c| c.1.clone()) else { return inner };
+            drop(inner);
+            w.wait();
+        }
+    }
+
     /// Start a full GC (see [`ChunkStore::gc_finish_full`]): as
     /// [`ChunkStore::gc_begin`], but the objects put or read from now on go
     /// to an exact set in temp files (bounded RAM), not to a Bloom filter.
     pub fn gc_begin_full(&self) -> Result<u64> {
         let dir = self.gc_tmp()?;
         let _one = self.gc.lock();
-        let mut inner = self.inner.lock();
+        let mut inner = self.lock_no_create();
         inner.check()?;
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
             self.seal(&mut inner)?;
@@ -1919,9 +2014,16 @@ impl ChunkStore {
             Err(e) => return Err(self.gc_abandon(e, &pending, holds)),
         };
 
-        // (5) The install.
+        // (5) The install. Not while a flush runs: its frozen run must be
+        // older than the tombstones of this install (see `install_gc`), so
+        // wait for it, without the store lock.
         let (added, before) = {
-            let mut inner = self.held(holds);
+            let mut inner = loop {
+                let inner = self.held(holds);
+                let Some(w) = inner.flushing.clone() else { break inner };
+                drop(inner);
+                w.wait();
+            };
             let during = inner.touched.take().unwrap_or_else(Touched::exact);
             if !last {
                 inner.touched = Some(Touched::exact());
@@ -1965,10 +2067,7 @@ impl ChunkStore {
                 // the store lock, so no `put` that sees the new generation
                 // can get them from the cache.
                 self.locality.untrust(plans.iter().filter(|p| !p.dropped).map(|p| p.num).chain(unused.iter().copied()));
-                let hwm = match inner.active.as_ref() {
-                    Some(a) => Hwm { pack: a.num, offset: a.len },
-                    None => Hwm { pack: inner.next_pack, offset: 0 },
-                };
+                let hwm = inner.hwm_end();
                 let counts = Counts { objects: after.objects, raw_bytes: after.raw_bytes, stored_bytes: after.stored_bytes };
                 match inner.index.install_gc(io, runs, hwm, counts) {
                     Ok(nums) => added = nums,
@@ -2182,7 +2281,8 @@ impl ChunkStore {
                         let nl = self.append(&mut inner, id, rec, l.stored, l.raw, l.flags)?;
                         inner.index.insert(*id, nl);
                     }
-                    self.flush_if_full(&mut inner)?;
+                    drop(inner);
+                    self.flush_if_full()?;
                 }
             }
             plans.push(GcPlan {
@@ -2591,12 +2691,82 @@ impl ChunkStore {
         inner.index.request_rebuild(&*self.io, "a caller asked for a rebuild")
     }
 
-    /// Write the memtable to a run when it has reached the limit.
-    fn flush_if_full(&self, inner: &mut Inner) -> Result<()> {
-        if inner.index.mem_len() < self.opts.index_memtable_limit.max(1) {
-            return Ok(());
+    /// Write the memtable to a run when it has reached the limit. The
+    /// caller holds no store lock (LOCK-01).
+    ///
+    /// One flush at a time (`Inner::flushing`; a second one waits for the
+    /// first without the lock). The steps:
+    /// 1. Without the lock, wait for the background seal and a background
+    ///    sync of the active pack (started here), as `sync` does.
+    /// 2. Under the lock: join the ended seal, sync the rest of the active
+    ///    pack (the bytes put since step 1) and the directory, take the hwm
+    ///    and the counts, and freeze the memtable (`Index::freeze`): lookups
+    ///    still see it, new entries go to an empty memtable.
+    /// 3. Without the lock: write the run, then the MANIFEST
+    ///    (`Index::install_frozen`, under the MANIFEST lock).
+    ///
+    /// A GC install waits for a flush in step 1 to 3, so the frozen run is
+    /// installed before the tombstones of a GC. A failure is final.
+    fn flush_if_full(&self) -> Result<()> {
+        let limit = self.opts.index_memtable_limit.max(1);
+        let (done, waits) = loop {
+            let mut inner = self.inner.lock();
+            if inner.index.mem_len() < limit {
+                return Ok(());
+            }
+            inner.check()?;
+            if let Some(w) = inner.flushing.clone() {
+                drop(inner);
+                self.note_wait();
+                w.wait();
+                continue;
+            }
+            let done = SyncWait::default();
+            inner.flushing = Some(done.clone());
+            let seal = inner.sealing.as_ref().map(|s| s.done.clone());
+            let soon = inner.active.as_mut().filter(|a| a.dirty).and_then(|a| a.file.sync_soon());
+            break (done, [seal, soon]);
+        };
+        for w in waits.iter().flatten() {
+            w.wait();
         }
-        inner.flush_index(&*self.io)
+        let r = self.flush_frozen();
+        let mut inner = self.inner.lock();
+        inner.flushing = None;
+        done.done();
+        if r.is_err() {
+            inner.failed = true;
+        }
+        r
+    }
+
+    /// Steps 2 and 3 of `flush_if_full`.
+    fn flush_frozen(&self) -> Result<()> {
+        let (entries, num, hwm, counts) = {
+            // A seal that started after step 1 is waited for without the lock.
+            let mut inner = loop {
+                let inner = self.inner.lock();
+                let Some(w) = inner.sealing.as_ref().filter(|s| !s.done.is_done()).map(|s| s.done.clone()) else {
+                    break inner;
+                };
+                drop(inner);
+                w.wait();
+            };
+            inner.check()?;
+            inner.sync_active()?;
+            if inner.dir_dirty {
+                inner.sync_dir(&*self.io)?;
+            }
+            let hwm = inner.hwm_end();
+            let s = inner.stats;
+            let counts = Counts { objects: s.objects, raw_bytes: s.raw_bytes, stored_bytes: s.stored_bytes };
+            let (entries, num) = inner.index.freeze();
+            (entries, num, hwm, counts)
+        };
+        let run = self.index.write_frozen(&*self.io, num, &entries)?;
+        self.index.install_frozen(&*self.io, run, hwm, counts)?;
+        self.merge.notify();
+        Ok(())
     }
 
     /// Make every object put so far durable. Without new objects this does
@@ -2894,6 +3064,8 @@ impl Inner {
             failed: false,
             merge: Arc::new(MergeCtl::default()),
             sealing: None,
+            creating: None,
+            flushing: None,
         }
     }
 
@@ -2977,22 +3149,15 @@ impl Inner {
         Ok(())
     }
 
-    /// Sync the active pack and the directory, then write the memtable to a
-    /// run with the hwm at the end of the active pack (or at the start of
-    /// the next pack if none is active). A failure is final.
-    fn flush_index(&mut self, io: &dyn PackIo) -> Result<()> {
-        if self.index.mem_len() == 0 {
-            return Ok(());
+    /// The hwm of a flush now: the end of the active pack, else the start
+    /// of the pack that a `put` creates now, else the start of the next
+    /// pack. Every pack record so far is below it.
+    fn hwm_end(&self) -> Hwm {
+        match (&self.active, &self.creating) {
+            (Some(a), _) => Hwm { pack: a.num, offset: a.len },
+            (None, Some((num, _))) => Hwm { pack: *num, offset: 0 },
+            (None, None) => Hwm { pack: self.next_pack, offset: 0 },
         }
-        self.sync_active()?;
-        if self.dir_dirty {
-            self.sync_dir(io)?;
-        }
-        let hwm = match self.active.as_ref() {
-            Some(a) => Hwm { pack: a.num, offset: a.len },
-            None => Hwm { pack: self.next_pack, offset: 0 },
-        };
-        self.flush_at(io, hwm)
     }
 
     /// Write the memtable to a run with this hwm and the current counts. The
