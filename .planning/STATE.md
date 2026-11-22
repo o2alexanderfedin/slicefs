@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 19
 current_phase_name: Fine-grained locks
 status: executing
-stopped_at: Completed 19-14-PLAN.md
-last_updated: "2026-11-22T21:16:46.196Z"
+stopped_at: Completed 19-15-PLAN.md
+last_updated: "2026-11-22T22:48:37.742Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 19 execution started
-state_head: 24bf98e6da6accfce4b40ab27d086dc1e15de8d7
+state_head: 1b52a4f495ae0e0215553148754bb6a45a42c51f
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 23
-  completed_plans: 21
+  completed_plans: 22
   percent: 14
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 19 (Fine-grained locks) — EXECUTING (gap closure)
-Plan: 15 of 16
+Plan: 16 of 16
 Status: Gap-closure plans 19-12..19-16 ready to execute (LOCK-01, LOCK-04, LOCK-05)
 Last activity: 2026-11-22 — Gap-closure plans 19-12..19-16 written
 
@@ -67,6 +67,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 19 P12 | 70min | 3 tasks | 6 files |
 | Phase 19 P13 | 59min | 3 tasks | 10 files |
 | Phase 19 P14 | 320min | 2 tasks | 3 files |
+| Phase 19 P15 | 85 min | 4 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -141,6 +142,9 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: Reads compose stream prefix, zeros and pending parts from memory; no settle, no stream step in a read
 - [Phase 19]: hard_cap() = limit + limit/GROW_DIV + 2*REBASE_STEP: extent regrowth near the 32 MiB limit passed limit + 2 MiB; the overlay apply is gated on Overlay::cost_after
 - [Phase 19]: G5: overlay-switch and rebase trace lines print with no cell lock held
+- [Phase 19]: G3 release part: the last release runs only unlocked steps under the step token; after FINAL_TRIES (8) forced drops in a row a finalize stops consulting the drop hook; finalize_locked only for destroy
+- [Phase 19]: Every size change of an open cell waits for the step token before it changes state; its I/O runs as unlocked steps (STEP_TRIES then EIO); reads and getattr do not lock a transient cell
+- [Phase 19]: Hard-cap gate steps free at most final_step each; the writer steps again until it is under the cap (orchestrator-added)
 
 ### Pending Todos
 
@@ -164,8 +168,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-22T21:16:46.012Z
-Stopped at: Completed 19-14-PLAN.md
+Last session: 2026-11-22T22:48:37.523Z
+Stopped at: Completed 19-15-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
