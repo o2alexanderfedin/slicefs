@@ -39,8 +39,12 @@ impl WalStrategy for FlushOnFsyncWal {
     fn install_root(&self, cut: &super::WalCut, seed: &[WalEntry]) -> Result<(), WalError> {
         self.log.install_root(cut, seed)
     }
-    fn log_mutation(&self, entry: &WalEntry) -> Result<(), WalError> {
-        self.log.log(entry)
+    fn append(&self, entry: &WalEntry) -> Result<super::Lsn, WalError> {
+        self.log.log(entry)?;
+        Ok(super::Lsn(0))
+    }
+    fn write_out(&self, _upto: super::Lsn) -> Result<(), WalError> {
+        Ok(())
     }
 
     fn flush_and_sync(&self) -> Result<(), WalError> {

@@ -29,6 +29,9 @@ pub enum Site {
     WalWriter,
     /// The WAL pending-append lock.
     WalPending,
+    /// The in-memory record queue of the per-operation WAL (append takes
+    /// only this lock).
+    WalQueue,
     /// `open_files` of the file system core.
     OpenFiles,
     /// `readers` of the file system core.
@@ -47,6 +50,7 @@ impl Site {
         Site::Wal,
         Site::WalWriter,
         Site::WalPending,
+        Site::WalQueue,
         Site::OpenFiles,
         Site::Readers,
         Site::DirLive,
@@ -60,6 +64,7 @@ impl Site {
             Site::Wal => "wal",
             Site::WalWriter => "wal_writer",
             Site::WalPending => "wal_pending",
+            Site::WalQueue => "wal_queue",
             Site::OpenFiles => "open_files",
             Site::Readers => "readers",
             Site::DirLive => "dir_live",

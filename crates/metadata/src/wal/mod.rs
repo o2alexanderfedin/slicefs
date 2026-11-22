@@ -73,12 +73,34 @@ pub enum WalConfig {
     NoWal,
 }
 
+/// Log sequence number: the place of a record in the write log. Given out
+/// by [`WalStrategy::append`] in the order the records are written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Lsn(pub u64);
+
 /// Abstraction over durability strategies for Dictionary mutations.
 ///
 /// All implementations must be `Send + Sync` to allow use behind `Arc`.
+///
+/// A request logs in two steps (LOCK-04): `append` under the locks of its
+/// apply (a memory copy and an LSN, no I/O), then `write_out` after it
+/// released them and before it replies.
 pub trait WalStrategy: Send + Sync {
-    /// Record a single mutation. May write to disk immediately or buffer it.
-    fn log_mutation(&self, entry: &WalEntry) -> Result<(), WalError>;
+    /// Put the record in the in-memory queue of the log and return its LSN.
+    /// Memory only: takes one short lock and never waits for the segment
+    /// writer or the disk.
+    fn append(&self, entry: &WalEntry) -> Result<Lsn, WalError>;
+    /// Make the records up to `upto` reach the place the strategy promises
+    /// for a completed request (PerOp: written into the segment file and
+    /// flushed to the kernel, in LSN order; buffered: held in RAM up to the
+    /// cap). Idempotent: an LSN already written out returns at once. An
+    /// error means a record up to `upto` may be lost.
+    fn write_out(&self, upto: Lsn) -> Result<(), WalError>;
+    /// Record a single mutation: `append`, then `write_out`.
+    fn log_mutation(&self, entry: &WalEntry) -> Result<(), WalError> {
+        let lsn = self.append(entry)?;
+        self.write_out(lsn)
+    }
     /// Flush all buffered mutations to disk and call `sync_all`.
     fn flush_and_sync(&self) -> Result<(), WalError>;
     /// Flush remaining mutations and release all resources.
@@ -107,6 +129,39 @@ pub trait WalStrategy: Send + Sync {
     /// meanwhile.
     fn install_root(&self, _cut: &WalCut, _seed: &[WalEntry]) -> Result<(), WalError> {
         Ok(())
+    }
+}
+
+/// Test hook: park a thread at a named point of a WAL path until the test
+/// releases it (at most 5 s). Fires once per `arm`.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Parker {
+    #[allow(clippy::type_complexity)]
+    armed: std::sync::Mutex<Option<(&'static str, std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+}
+
+#[cfg(test)]
+impl Parker {
+    /// Arm point `at`. Returns (parked, release): `parked` gets a message
+    /// when a thread reaches the point; sending on `release` lets it go.
+    pub(crate) fn arm(&self, at: &'static str) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *self.armed.lock().unwrap() = Some((at, parked_tx, release_rx));
+        (parked_rx, release_tx)
+    }
+
+    /// Park here if point `at` is armed.
+    pub(crate) fn point(&self, at: &'static str) {
+        let taken = {
+            let mut g = self.armed.lock().unwrap();
+            if matches!(&*g, Some((p, _, _)) if *p == at) { g.take() } else { None }
+        };
+        if let Some((_, parked, release)) = taken {
+            let _ = parked.send(());
+            let _ = release.recv_timeout(std::time::Duration::from_secs(5));
+        }
     }
 }
 

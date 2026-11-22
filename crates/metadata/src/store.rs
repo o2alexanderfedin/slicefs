@@ -21,7 +21,7 @@ use slicefs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, Metadata
 
 use crate::snapshot::SnapshotEntry;
 use crate::store_io::StoreIo;
-use crate::wal::{WalCut, WalEntry, WalError, WalStrategy};
+use crate::wal::{Lsn, WalCut, WalEntry, WalError, WalStrategy};
 
 use crate::inode::{intern_inode, load_inode};
 use crate::inode_map::{InodeMap, intern_inode_map, load_inode_map};
@@ -607,7 +607,7 @@ impl DictMetadataStore {
     ///
     /// Should be called before dropping the store (e.g., in `destroy()`).
     pub fn shutdown_wal(&self) -> Result<(), WalError> {
-        if let Some(ref w) = *self.wal.lock() {
+        if let Some(w) = self.wal_handle() {
             w.shutdown()?;
         }
         Ok(())
@@ -649,17 +649,51 @@ impl DictMetadataStore {
     /// Append a file system request to the write log (#20). Durable after the
     /// next `flush_wal` (fsync) or commit; a commit makes it part of a root.
     pub fn log_op(&self, bytes: Vec<u8>) {
-        self.log_wal_entry(&WalEntry::Op { bytes });
+        let lsn = self.log_append(bytes);
+        self.log_write_out(lsn);
+    }
+
+    /// First half of `log_op` (LOCK-04): put the record in the write log's
+    /// memory queue and return its LSN. Memory only (a copy and a short
+    /// queue lock), so a request calls it under the locks of its apply.
+    /// `None`: no write log, or the append failed (then fsync fails until
+    /// the next commit).
+    pub fn log_append(&self, bytes: Vec<u8>) -> Option<Lsn> {
+        let w = self.wal_handle()?;
+        match w.append(&WalEntry::Op { bytes }) {
+            Ok(lsn) => Some(lsn),
+            Err(e) => {
+                self.note_wal_failure(&e);
+                None
+            }
+        }
+    }
+
+    /// Second half of `log_op`: write the records up to `lsn` out (PerOp:
+    /// into the segment file and the kernel). A request calls it after it
+    /// released its apply locks and before it replies. Does nothing for
+    /// `None`.
+    pub fn log_write_out(&self, lsn: Option<Lsn>) {
+        let (Some(lsn), Some(w)) = (lsn, self.wal_handle()) else { return };
+        if let Err(e) = w.write_out(lsn) {
+            self.note_wal_failure(&e);
+        }
+    }
+
+    /// The in-memory state is already correct. A failed append or write-out
+    /// is reported by every later flush_wal (fsync) until the next commit
+    /// starts a new segment (#20).
+    fn note_wal_failure(&self, e: &WalError) {
+        eprintln!("write log append failed (fsync fails until the next commit): {e}");
+        self.wal_fail_seq.fetch_add(1, Ordering::SeqCst);
     }
 
     fn log_wal_entry(&self, entry: &WalEntry) {
-        if let Some(ref w) = *self.wal.lock() {
-            // The in-memory state is already correct. A failed append is
-            // reported by every later flush_wal (fsync) until the next
-            // commit rotates the log (#20).
+        // A clone of the handle: the `wal` slot lock is not held while the
+        // log writes or syncs.
+        if let Some(w) = self.wal_handle() {
             if let Err(e) = w.log_mutation(entry) {
-                eprintln!("write log append failed (fsync fails until the next commit): {e}");
-                self.wal_fail_seq.fetch_add(1, Ordering::SeqCst);
+                self.note_wal_failure(&e);
             }
         }
     }
