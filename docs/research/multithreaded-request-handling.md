@@ -266,6 +266,38 @@ A code review after the runs (`.planning/phases/18-spikes-baseline-and-stress-ha
 - **S7.** The old code took the sample of the largest dirty size outside the serialization. So the sample could miss the overlay of one file, and the true value can be higher than 64 MiB. The fixed code takes the sample inside the timed write.
 - The other fixes (the watchdog limit, and cleanup after a failed mount in the S4, S6 and bigwrite scripts) do not change a recorded number.
 
+## Phase 19 result
+
+Phase 19 (issue #21) did steps 2, 3 and 4 of the migration, and the lock parts of step 1. The core is still called from one dispatch thread in the daemon, but the stress harness now runs its target with free threads (`serialize_off_target`, in the default suite).
+
+What is done:
+- **Per-file cells instead of take-out (step 2).** Each open inode has one `FileCell` in a sharded `ino -> cell` map, and all handles of the inode share it. Writes, flush and setattr change the state in place. Nothing takes a file's state out of a map now. The dirty cost is a per-cell atomic plus a global total, and a writer over the budget steps only its own file.
+- **Copy, I/O, publish.** A rebase step or a stream push copies its range under the cell lock, does the chunk, hash and store work with no cell lock, and publishes only if the file generation did not change. A reader holds the cell lock only to copy the overlay view or clone the stream.
+- **Lock tails off the global locks (step 1).** Pack create, seal join, run write, the `KEEP_CAP` wait, the trust floor write and pack open left the store lock. Cold loads and flushes left the `dir_live`/`inode_live` shard locks (single-inode changes use `modify_inode`). The WAL append is a memory copy plus an LSN under the queue lock. The write-out runs after the apply locks are released (it takes the WAL writer lock for the `pwrite`), and the sync runs outside the WAL locks.
+- **Stripes and the rank checker (step 4).** A fixed array of namespace stripes and a rename mutex for cross-directory rename. Locks have one rank: commit gate, rename mutex, stripes (ascending), file cell, short maps, store internals. A debug build checks the rank on each lock, and the harness worker threads also check that every cell or stripe is taken inside a shared gate hold.
+- **The log under the apply locks (step 3).** Every record (writes, setattr, xattr, namespace) is appended in the lock hold of its apply and written out after the locks are released, before the reply. Replay creates each inode at its logged number.
+
+Decisions that differ from the design text above:
+- **Stripes, not inode-number order.** Two inodes are locked in ascending stripe order (the inode number is hashed to a stripe). This gives the same freedom from deadlock and also covers two inodes in one stripe.
+- **The commit gate stays a std `RwLock` at rank 1.** The checker sees it through the gate helper methods. `StoreIo` also stays a std mutex.
+- **A page-cache record write stays under the store lock.** A `pwrite` with no sync was not counted as disk I/O. Pack create, seal join, index run write and the `KEEP_CAP` wait left the lock on the put and read paths. The measurements below show that this exception does not hold on macOS.
+- **The file cell is one mutex, not a read-write lock.** Readers hold it only to copy, so a read-write lock gives nothing yet.
+- **`O_APPEND`:** the daemon keeps a per-handle append flag, takes the end of file under the cell lock and logs that offset, whatever offset the kernel sends.
+
+Tests per ROADMAP Phase 19 criterion:
+1. Readers do not wait for writer I/O: `reader_does_not_wait_for_rebase_io` and `reader_does_not_wait_for_streaming_push` (`lock_free_io.rs`), and the wait rows of `readers_do_not_wait_for_writer_io_rows` (`lock_wait_rows.rs`, feature `lock-stats`).
+2. No contention between files: `many_files_no_cross_file_wait` and `other_files_do_not_wait_rows`.
+3. No global lock held during I/O, a hash or a wait: the parked tests in `lock_tail_tests.rs` (chunk store) and the metadata and WAL tests of Plans 03-04. In the serialize-off harness run with `lock-stats` (4 threads, macOS, debug build), `readers`, the WAL append lock (`wal_queue`), `dir_live` and `inode_live` hold for at most tens of microseconds. The store lock does not: its hold max is 21-91 ms across runs (see "Still open"), so this criterion is not met for the store lock.
+4. Lock rank: the rank tests in `chunk_store::sync` and `strict_gate_catches_a_request_without_the_gate`.
+5. Replay equals apply: `crash_replay_matches_apply` (harness), `reverse_order_creates_replay`, `parallel_namespace_ops_replay` and `parallel_overlapping_writes_replay_to_the_same_content`.
+6. POSIX.1 2.9.7 with several handles: `multi_handle_posix.rs` (including `appends_never_overlap`) and the harness multi-handle mode (read-only, read-write and `O_APPEND` handles on one inode, with serialize off).
+
+Still open after Phase 19:
+- Phase 20: the background rebase flusher, writers throttled before they take a lock, and the cross-file dirty budget (today a writer over the budget steps only its own file, so nothing lowers the dirty bytes of other files; LOCK-02, LOCK-06).
+- Phase 21: the worker pool (N threads by mount option).
+- **The store lock is still held across disk I/O in two places.** (1) The second phase of `ChunkStore::sync` (the commit calls it before the gate and as `pre_root_sync`) syncs the bytes put since its first phase with the store lock held. (2) The record append of a put (a page-cache `pwrite` under the lock) stalled up to 36 ms on macOS, most likely behind a concurrent fsync of the same pack file. Requests waited up to 86 ms for the store lock, and a cell or stripe hold that takes the store lock grows by the same time. The WAL writer lock shows the same effect: `PerOpWal::write_out` holds it for the record `pwrite`, which stalls about 20 ms when another thread syncs the same segment (with one thread its hold max is 0.3 ms). A fix changes the sync protocol of the store and of the log; it is an owner decision for Phase 20 or a follow-up.
+- Known windows, older than Phase 19: a size change of a closed file has no stripe, so it can race an unlink or a setattr of other fields of the same inode; a new directory can be found by name before its `Mkdir` record is appended; there is no ancestor check for a cross-directory rename.
+
 ## Conclusion
 
 Adding threads does not solve SliceFS's latency problem by itself. Two other changes do most of the work. The first takes the inline 8 MiB pack fsync out of the store lock, so a thread-pool design does not hit that tail on every worker. The second replaces the take-out-of-map ownership trick with a real per-inode lock. That trick is the hidden reason SliceFS needs one thread, and replacing it also makes the log order, the dirty budget and the rebase-off-thread fix (#108 option 1) simple to state. The kernel file systems point to the same design: per-inode locks taken in a fixed rank, commits that never wait while a lock is held, and writers that pay by sleeping instead of doing other files' work.
