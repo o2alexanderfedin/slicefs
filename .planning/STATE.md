@@ -2,21 +2,21 @@
 gsd_state_version: "1.0"
 milestone: v2.2
 milestone_name: Concurrency & Store Evolution
-current_phase: 20
-current_phase_name: Dirty budget and rebase flusher
-current_plan: 8
-status: verifying
-stopped_at: Completed 20-08-PLAN.md
-last_updated: "2026-11-23T12:34:11.333Z"
+current_phase: 21
+current_phase_name: Worker pool
+current_plan: Not started
+status: planning
+stopped_at: Phase 20 complete, ready to plan Phase 21
+last_updated: "2026-11-23T14:57:29.685Z"
 last_activity: 2026-11-23
-last_activity_desc: Phase 19 complete, transitioned to Phase 20
-state_head: cbb1182fe5bda1c9eb51f22a2eb33289d91ba537
+last_activity_desc: Phase 20 complete, transitioned to Phase 21
+state_head: 31e30b75cd6ca019ff0d1dc86648b39f86a49124
 progress:
   total_phases: 7
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 31
   completed_plans: 31
-  percent: 29
+  percent: 43
 ---
 
 # Project State
@@ -30,14 +30,14 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 8
+Current Plan: Not started
 Total Plans in Phase: 8
-Phase: 20 — Dirty budget and rebase flusher
+Phase: 21 — Worker pool
 Plan: 20-08 complete (8 of 8); next: phase verification
-Status: Phase complete — ready for verification
-Last activity: 2026-11-23 — empty-pass fix (4d8ac3d); 20-08 phase close: docs, README options, LOCK-02/LOCK-06 marked, gate green, Docker smoke ok
+Status: Ready to plan
+Last activity: 2026-11-23 — Phase 20 complete, transitioned to Phase 21
 
-Progress: [███░░░░░░░] 29%
+Progress: [████░░░░░░] 43%
 
 ## Performance Metrics
 
@@ -200,7 +200,7 @@ None.
 ## Session Continuity
 
 Last session: 2026-11-23T12:01:11.068Z
-Stopped at: Completed 20-08-PLAN.md
+Stopped at: Phase 20 complete, ready to plan Phase 21
 Resume file: None
 
 ## Operator Next Steps

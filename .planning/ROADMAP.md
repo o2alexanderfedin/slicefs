@@ -186,7 +186,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
 
 - [x] **Phase 18: Spikes, baseline and stress harness** (#127) - re-measure S1-S7 on the current code, build the N-thread harness, run S1 on macOS (completed 2026-11-21)
 - [x] **Phase 19: Fine-grained locks** (#21) - no global lock on the hot path, lock rank with a debug checker, log record under the same locks as its apply (completed 2026-11-22)
-- [ ] **Phase 20: Dirty budget and rebase flusher** (#21) - no cross-file take-out, a background flusher, writers throttled before they take locks, no deadlock with a commit
+- [x] **Phase 20: Dirty budget and rebase flusher** (#21) - no cross-file take-out, a background flusher, writers throttled before they take locks, no deadlock with a commit (completed 2026-11-23)
 - [ ] **Phase 21: Worker pool** (#22) - N worker threads by mount option, drain before `destroy()`, abort on panic, 4 workers pass pjdfstest
 - [ ] **Phase 22: Chunk profiles** (#67) - FastCDC min/avg/max fixed per store at `seed`, benchmark of five profiles, default unchanged (parallel track)
 - [ ] **Phase 23: Hashes and rehash** (#62) - SHA-256 write hash and an offline, crash-safe `slicefs rehash` (parallel track)
@@ -297,7 +297,7 @@ Plans:
   2. A background flusher lowers the shared dirty budget, a writer over the limit sleeps before it takes any lock, and every wait has a time limit
   3. A test with all workers throttled while a commit waits finishes without deadlock
   4. A Docker run with parallel random writers on large files keeps peak RSS (VmHWM) under one fixed cap
-**Plans**: 8/8 plans executed
+**Plans**: 8/8 plans complete
 
 One plan per wave; executors run them in order.
 
@@ -390,7 +390,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 18. Spikes, baseline and stress harness | 7/7 | Complete    | 2026-11-21 |
 | 19. Fine-grained locks | 16/16 | Complete    | 2026-11-22 |
-| 20. Dirty budget and rebase flusher | 8/8 | In Progress | - |
+| 20. Dirty budget and rebase flusher | 8/8 | Complete    | 2026-11-23 |
 | 21. Worker pool | 0/0 | Not started | - |
 | 22. Chunk profiles | 0/0 | Not started | - |
 | 23. Hashes and rehash | 0/0 | Not started | - |

@@ -75,7 +75,7 @@ Other candidates (not in v2.2): idle-merge control (#141), several roots, commit
 
 ### Active
 
-- [ ] Multithreaded request handling: worker pool (#22); spikes (#127) done in Phase 18; fine-grained locks (#21) done in Phase 19 (LOCK-01, LOCK-03, LOCK-04, LOCK-05); dirty budget flusher (LOCK-02, LOCK-06) in Phase 20
+- [ ] Multithreaded request handling: worker pool (#22); spikes (#127) done in Phase 18; fine-grained locks (#21) done in Phase 19 (LOCK-01, LOCK-03, LOCK-04, LOCK-05); dirty budget flusher (LOCK-02, LOCK-06) done in Phase 20
 - [ ] `slicefs rehash` (#62)
 - [ ] Configurable FastCDC profiles and benchmark (#67)
 - [ ] Prolly-tree evaluation (#19)
@@ -121,6 +121,7 @@ Other candidates (not in v2.2): idle-merge control (#141), several roots, commit
 | Keep `std::sync::RwLock` for the commit gate; release the gate before any wait (v2.2, Phase 18) | Spike S5: a new reader waits as long as the longest hold while a commit waits | — Pending |
 | Stress harness with model check is the "done" test for the lock phases (v2.2, Phase 18) | Today's code fails it with free threads on one shared file | ✓ Good |
 | Fine-grained locks: parking_lot 0.12 shim with a debug rank checker; one `FileCell` per open inode; rebase and stream steps run unlocked under a per-file step token; log record appended under the apply locks (v2.2, Phase 19) | The harness passes with free threads on one file; six lock sites hold at most 262 us (macOS) and 1967 us (Linux); a step wait now has 10-15 s limits that give EIO | ✓ Good |
+| Dirty budget and flusher: writers wait for budget before any lock; one background flusher steps idle, expired or quiet files, one step per shared gate hold; `--dirty-budget` 64M, `--dirty-limit` min(32M, budget), `--dirty-idle` 5 s, `--dirty-expire` 30 s (v2.2, Phase 20) | No take-out of another file's state; all writers throttled with a commit waiting ends; Docker S7 with the flusher peaks at 287 MiB VmHWM under the 320 MiB cap | ✓ Good |
 
 ## Evolution
 
@@ -141,4 +142,4 @@ This document evolves at phase transitions and milestone boundaries.
 
 ---
 
-*Last updated: 2026-11-23 after Phase 19*
+*Last updated: 2026-11-23 after Phase 20*
