@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 20
 current_phase_name: Dirty budget and rebase flusher
 status: planning
-stopped_at: Completed 20-03-PLAN.md
-last_updated: "2026-11-23T07:38:21.729Z"
+stopped_at: Completed 20-04-PLAN.md
+last_updated: "2026-11-23T08:23:57.831Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 19 complete, transitioned to Phase 20
-state_head: aa853f2b6704215219e0dba33b3d90187ce5bc31
+state_head: df5de5f8bd714876e4174149fb74ec1d8f7c2b9b
 progress:
   total_phases: 7
   completed_phases: 2
   total_plans: 31
-  completed_plans: 26
+  completed_plans: 27
   percent: 29
 ---
 
@@ -30,9 +30,9 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 20 — Dirty budget and rebase flusher
-Plan: 20-03 complete (3 of 8); next 20-04
+Plan: 20-04 complete (4 of 8); next 20-05
 Status: Executing
-Last activity: 2026-11-23 — 20-03 flusher lifecycle done (flusher thread with the mount, throttle in the FUSE write, shutdown order, stop and panic wake throttled writers)
+Last activity: 2026-11-23 — 20-04 criterion 3 tests done (all writers throttled while a commit waits, flusher paused and flusher in a step; a flusher pass skips a cell with a step in flight)
 
 Progress: [███░░░░░░░] 29%
 
@@ -72,6 +72,7 @@ Progress: [███░░░░░░░] 29%
 | Phase 20 P01 | 60min | 3 tasks | 7 files |
 | Phase 20 P02 | 50min | 2 tasks | 6 files |
 | Phase 20 P03 | 45 min | 2 tasks | 7 files |
+| Phase 20 P04 | 60 min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -157,6 +158,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 20]: 20-03: throttle exits at a stop or with no flusher are counted in stop_exits, not timeouts
 - [Phase 20]: 20-03: shutdown = stop and join the flusher with no lock held, then the gate, then test_destroy; FUSE destroy calls it
 - [Phase 20]: 20-03: run_mount keeps an Arc clone only for the stop after mount() and drops it right after
+- [Phase 20]: 20-04: criterion 3 holds with no source change; the red runs are guard mutations (gate hold while paused; hold kept across the pass wait; wait_step in place of the skip)
 
 ### Pending Todos
 
@@ -180,8 +182,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-23T07:38:21.436Z
-Stopped at: Completed 20-03-PLAN.md
+Last session: 2026-11-23T08:23:57.492Z
+Stopped at: Completed 20-04-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
