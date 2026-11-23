@@ -221,12 +221,11 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
 }
 
 /// One flusher step of `target` (the gate and the cell are released when
-/// it returns), then wake the throttled writers and count the result. A
+/// it returns), then count the result and wake the throttled writers. A
 /// step that freed nothing puts the cell in `tried`.
 fn step(fs: &SliceFsFilesystem, target: &FlushTarget, st: &mut PassStats, tried: &mut HashSet<u64>) {
     let ctl = fs.flush_ctl();
     let step = fs.flush_step(target, FLUSH_STEP);
-    ctl.notify_freed();
     st.steps += 1;
     ctl.steps.fetch_add(1, Ordering::Relaxed);
     let counter = match step {
@@ -260,6 +259,9 @@ fn step(fs: &SliceFsFilesystem, target: &FlushTarget, st: &mut PassStats, tried:
     if !matches!(step, FlushStep::Freed(_)) {
         tried.insert(target.ino());
     }
+    // Wake the throttled writers after the counts, so a woken writer
+    // (and a test that reads the stats) sees this step counted.
+    ctl.notify_freed();
 }
 
 #[cfg(test)]
