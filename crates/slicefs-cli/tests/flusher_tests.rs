@@ -809,3 +809,63 @@ fn all_writers_throttled_while_a_commit_waits_flusher_in_a_step() {
     fs.test_set_rebase_hook(None);
     check_after_writers(fs, files, &store);
 }
+
+#[test]
+fn the_flusher_skips_a_cell_with_a_step_in_flight() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_dirty_limit(2 * MIB);
+    // With the default budget: X about 1.9 MiB dirty in its first half
+    // (slots 1 to 60 of 128), Y 1 MiB. Neither passes its limit.
+    let mut x = dirty_file(&fs, 1, 8 * MIB, 60);
+    let y = dirty_file(&fs, 2, 8 * MIB, 32);
+    let (x_cost, y_cost) = (fs.test_dirty_cost(x.ino), fs.test_dirty_cost(y.ino));
+    assert!(x_cost > 3 * MIB / 2 && x_cost < 2 * MIB, "X is dirty below its limit: {x_cost}");
+    fs.test_set_dirty_budget(4 * MIB);
+    assert!(fs.test_dirty_total() >= 2 * MIB, "the total is at or above half the budget");
+    // 256 KiB in the clean second half of X: the write adds its full size,
+    // so X passes its limit and the writer runs its own step on X.
+    let (first, n) = (4 * MIB / BLOCK, 256 * KIB / BLOCK);
+    let next: Vec<u32> = x.versions[first..first + n].iter().map(|v| v + 1).collect();
+    let data = x.bytes(first, &next);
+    let (hook, parked, go) = park_first_rebase();
+    fs.test_set_rebase_hook(Some(hook));
+    std::thread::scope(|s| {
+        // Dropped before the scope joins (also on a failed assert): the
+        // parked step goes on, so the writer and the pass end.
+        let mut go = Some(go);
+        let (fs_ref, data, x_fh) = (&fs, &data, x.fh);
+        let (w_tx, w_rx) = mpsc::channel();
+        s.spawn(move || {
+            let _ = w_tx.send(throttled_write(fs_ref, x_fh, (4 * MIB) as u64, data).0);
+        });
+        // The writer holds the gate shared and the step token of X.
+        parked.recv_timeout(WAIT).expect("the writer's own step on X is parked");
+        let x_parked = fs.test_dirty_cost(x.ino);
+        assert!(x_parked > 2 * MIB, "X is over its limit with the write: {x_parked}");
+
+        let (p_tx, p_rx) = mpsc::channel();
+        s.spawn(move || {
+            let _ = p_tx.send(flusher::flush_pass(fs_ref));
+        });
+        let st = p_rx.recv_timeout(WAIT).expect("the pass returns within 5 s");
+        assert!(w_rx.try_recv().is_err(), "the step on X is still parked when the pass returns");
+        assert!(st.skips >= 1, "the pass skipped X: {st:?}");
+        assert!(fs.test_dirty_cost(y.ino) < y_cost, "the pass stepped Y: {st:?}");
+        assert_eq!(fs.test_dirty_cost(x.ino), x_parked, "the pass did not step X: {st:?}");
+
+        go.take();
+        let r = w_rx.recv_timeout(Duration::from_secs(10)).expect("the writer returns after the park");
+        assert!(matches!(r, WriteResult::Ok(k) if k as usize == 256 * KIB), "the write is in: {r:?}");
+    });
+    fs.test_set_rebase_hook(None);
+    for v in &mut x.versions[first..first + n] {
+        *v += 1;
+    }
+    x.check(&fs, "handles open");
+    y.check(&fs, "handles open");
+    x.release(&fs);
+    y.release(&fs);
+    x.check(&fs, "after release");
+    y.check(&fs, "after release");
+}
