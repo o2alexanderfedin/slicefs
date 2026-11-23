@@ -72,7 +72,7 @@ Progress: [███░░░░░░░] 29%
 | Phase 20 P01 | 60min | 3 tasks | 7 files |
 | Phase 20 P02 | 50min | 2 tasks | 6 files |
 | Phase 20 P03 | 45 min | 2 tasks | 7 files |
-| Phase 20 P04 | 60 min | 2 tasks | 1 files |
+| Phase 20 P04 | 40 min | 2 tasks | 1 files |
 
 ## Accumulated Context
 

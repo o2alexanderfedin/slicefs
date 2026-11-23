@@ -44,7 +44,7 @@ decisions:
   - "The park of the rebase hook waits at most 30 s (as in the 20-03 shutdown test), not 10 s as in lock_free_io.rs"
 
 metrics:
-  duration: "about 60 min (two workspace runs of about 13 min each)"
+  duration: "about 40 min (07:45 to 08:25 UTC; two workspace runs of about 13 min each)"
   completed: 2026-11-23
 ---
 
@@ -75,7 +75,7 @@ The rules hold on the committed code, so each red run is a named guard mutation 
 | Test | Guard mutation | Failed at | Run time |
 |---|---|---|---|
 | `all_writers_throttled_while_a_commit_waits_flusher_paused` | `run_flusher` takes `gate_shared()` before the pause check and keeps it while paused; it releases the hold only just before a pass | line 752, `the commit returns within 10 s: Timeout` | test 10.66 s (command 30 s with the build) |
-| `all_writers_throttled_while_a_commit_waits_flusher_in_a_step` | `flush_step` gets the hold from `run_flusher` (`flush_pass_held` with an `Option<GateGuard>` that `run_flusher` owns); it takes the gate only once and never releases it, so the hold of the first step stays across the pass wait and into the next pass | line 803, `the commit returns within 10 s: Timeout` | test 10.97 s (command 38 s with the build) |
+| `all_writers_throttled_while_a_commit_waits_flusher_in_a_step` | `flush_step` gets the hold from `run_flusher` (`flush_pass_held` with an `Option<GateGuard>` that `run_flusher` owns); it takes the gate only once and keeps it, so the hold of the first step stays across the pass wait and into the next pass; the hold ends only when `run_flusher` returns at the stop | line 803, `the commit returns within 10 s: Timeout` | test 10.97 s (command 38 s with the build) |
 | `the_flusher_skips_a_cell_with_a_step_in_flight` | `flush_step` calls `g.wait_step()` when the step token is set, before its skip checks (the retired, transient and cap-writer skips stay) | line 851, `the pass returns within 5 s: Timeout` | test 5.64 s (command 32 s with the build) |
 
 Each mutation run failed at its named assert. None stopped at the watchdog, and no flusher panic or lock-rank panic was in the output. In each run the stop guard (forms A and B) or the drop of the go sender (Task 2) ended the scope.
@@ -102,7 +102,7 @@ None.
 
 **1. No separate RED commit.** The project rule is to commit only when `cargo test --workspace` passes. The red runs are guard mutations, as the plan says, and are recorded above.
 
-**2. Park limit 30 s.** The plan says to copy `parker_at` from `lock_free_io.rs` (10 s per park). The new helper `park_first_rebase` waits at most 30 s, as the 20-03 shutdown test does. Form B has up to 15 s of waits between the park and the go (5 s, then 10 s for the queued commit), so 10 s could let the park go early on a slow machine.
+**2. Park limit 30 s.** The plan says to copy `parker_at` from `lock_free_io.rs` (10 s per park). The new helper `park_first_rebase` waits at most 30 s, as the 20-03 shutdown test does. In form B the wait for the queued commit (at most 10 s) is between the park and the go, so a 10 s park limit could let the park go early on a slow machine.
 
 **3. Form A mutation in `run_flusher`.** `flusher_loop` has no file system reference, so the mutation copied the loop into `run_flusher` and took the gate there. It is the plan's mutation: the hold is taken before the pause check and is kept while the flusher is paused.
 
