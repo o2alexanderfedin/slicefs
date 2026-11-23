@@ -13,10 +13,19 @@
 
 ### From 19-16
 
-- **unlink reclaims the inode with the namespace stripes held.** On macOS, `unlink_logged` held its two stripes for about 20 ms in each of the 3 many-files runs (21.5, 20.2 and 20.2 ms). A probe (`runs/g6-macos-probe.log`) shows that the first store read of the manifest in `reclaim_inode` takes the 20 ms. No global lock is held during it. Why the read takes 20 ms is not measured. On Linux the stripe max was 1.1-2.6 ms. A fix (reclaim after the stripes are released, or read the manifest before the stripes are taken) is an owner decision. Owner: Phase 20 or a follow-up plan.
 - **file_cell holds of 3.6-13 ms, span not measured.** On macOS the one-file mode had `file_cell` holds of 3.6-7.9 ms in every run, on Linux one of 13 ms. The probe caught only 3.2-4.8 ms holds, released in `write_in_cell`. The parked tests show no writer I/O in a cell hold. Owner: Phase 20 (a span probe).
 - **WAL group commit** (REQUIREMENTS future item; spike S6 decides). Owner: a later phase.
 - **The Phase 20 flusher and throttle:** the background rebase flusher, writers throttled before they take a lock, and the cross-file dirty budget (LOCK-02, LOCK-06). Owner: Phase 20.
+
+### From the 19-REVIEW fixes
+
+- **A writer at the hard cap makes the other writers of its file wait (CR-01 fix).** While a writer is counted at the cap, the other overlay writers of that file wait for the cap step, so the step publishes. Readers do not wait. The performance effect is not measured. Owner: Phase 20 (flusher, throttle).
+- **A cell kept by a failed last release (WR-04 fix)** is stored only by a later open and release, or by destroy; each commit cut logs its extents again until then. A retry (for example by the Phase 20 flusher) is not done. Owner: Phase 20.
+- **The step-wait progress count (WR-05 fix)** moves only with chunk-store work on the holder's thread. A step with more than 15 s of CPU work and no store call would give its waiters EIO. No step does that today. Owner: none until a step like that exists.
+
+## Closed by the 19-REVIEW fixes
+
+- **unlink reclaimed the inode with the namespace stripes held (from 19-16).** Fixed (IN-01): under the stripes only the manifest digest is taken from memory and the inode is deleted; the manifest node read and the refcount drops run after the stripes, inside the shared gate. Not measured again on macOS.
 
 ## Closed by 19-12..19-15
 

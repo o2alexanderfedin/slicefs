@@ -47,6 +47,9 @@ findings:
   info: 2
   total: 10
 status: issues_found
+fix_status: all_fixed
+fixed: 10
+skipped: 0
 ---
 
 # Phase 19: Code Review Report
@@ -72,9 +75,36 @@ The main defect is liveness on the overlay write path. When several threads writ
 
 The necessity references could not be applied in this run: no `necessity:` classification is given.
 
+## Fix Status
+
+All 10 findings are fixed on `feature/phase-19-fine-grained-locks`, one commit per finding or small group. Each new test failed before its fix and passes after it. This section replaces a separate REVIEW-FIX.md file. "Human check" means a logic fix: the tests pass, but a person must check the logic.
+
+| Finding | Status | Test (red before the fix) |
+|---------|--------|---------------------------|
+| CR-01 | fixed: human check | `lock_free_io::overwriters_do_not_starve_a_writer_at_the_cap` |
+| WR-01 | fixed: human check | `lock_free_io::a_failed_step_after_the_apply_does_not_fail_the_write` |
+| WR-02 | fixed: human check | `lock_free_io::an_o_trunc_open_waits_for_a_finalize_step` (chmod during the wait) |
+| WR-03 | fixed: human check | `write_log_replay_tests::a_size_change_of_a_new_file_comes_after_its_create_record` |
+| WR-04 | fixed: human check | `lock_free_io::a_failed_last_release_keeps_the_unstored_bytes` |
+| WR-05 | fixed: human check | `lock_free_io::a_writer_waits_for_a_step_while_it_makes_progress` |
+| WR-06 | fixed: human check | `lock_free_io::a_panic_in_a_step_clears_the_step_token` |
+| WR-07 | fixed | the changed asserts in `lock_free_io.rs` |
+| IN-01 | fixed: human check | `lock_free_io::an_unlink_releases_the_content_with_no_stripe_held` |
+| IN-02 | fixed: human check | no new test (an inode that is not cached is hard to make in a test) |
+
+Commits: `244eb80` (WR-07), `863be32` (CR-01, WR-01), `c7bdb36` (WR-02, WR-03), `41bb85b` (WR-04, WR-05, WR-06), and the IN-01 + IN-02 commit after it. `cargo test --workspace` passed on the tree of each code commit. For `244eb80` (one test file only) the `lock_free_io` target was run on its tree, and the rest of the workspace was unchanged from the green baseline.
+
+Open points (also in `deferred-items.md`):
+- CR-01: while a writer of a file is at the hard cap, the other writers of that file wait for the cap step (writers wait for one writer's I/O on one file; readers do not wait). The performance effect is not measured. Phase 20 (the flusher and the throttle) can change this.
+- WR-04: a cell that a failed last release keeps is stored only by a later open and release, or by destroy. Until then each commit cut logs its extents again.
+- WR-05: the progress count moves only with chunk-store work on the holder's thread. A step that does more than 15 s of CPU work with no store call gets EIO for its waiters. No step does that today (each chunk is put after it is hashed).
+- The 19-09 and 19-10 deferred items (a closed-file size change against an unlink or a setattr of other fields) stay open: the WR-03 stripe barrier orders a size change only after a create.
+
 ## Critical Issues
 
 ### CR-01: A writer at the hard cap gets EIO when other threads write the same overlay
+
+**Fix status:** fixed: human check. A writer at the cap is counted in the cell (`CellState::cap_writers`). While one is counted, every overlay writer waits for the step in flight before it applies, and no ordinary rebase step starts (`rebase_cell`). So only a forced drop or a retire can drop a step at the cap. Readers do not wait. The `STEP_TRIES` EIO stays, but only before the apply.
 
 **File:** `crates/slicefs-cli/src/filesystem.rs:2326-2340` (cap gate), `:1817-1830` (`cap_step`), `:2297-2304` (`drops >= STEP_TRIES` -> EIO)
 
@@ -102,6 +132,8 @@ Another fix is to make `step_publish` accept a publish when the only changes sin
 
 ### WR-01: A write that was applied and logged can still return EIO (an O_APPEND retry then duplicates data)
 
+**Fix status:** fixed: human check. After the apply and the `Write` record, a failed hard-cap step, rebase step or budget step is printed after the hold, and the write returns `Ok`. The next write, the release or a budget step does the work. New test hook: `test_fail_steps(n)`.
+
 **File:** `crates/slicefs-cli/src/filesystem.rs:2443-2449`, `:2460`, `:2471`
 
 **Issue:** After `overlay_write` (or the stream push) applied the bytes and `log(lsn, offset)` appended the `Write` record, the write can still fail with EIO from three places:
@@ -123,6 +155,8 @@ For the post-apply cap loop, stop stepping and return `Ok`. Its EIO is only vali
 
 ### WR-02: An O_TRUNC open (and an open that meets a transient cell) holds the inode's stripe across a wait of up to 15 s and store I/O
 
+**Fix status:** fixed: human check. `open_logged` holds `stripe(ino)` only for the existence check and the handle count, then does the cell work (also the truncate) with no stripe. An error undoes the count with `uncount`. `create_logged` runs no truncate for `O_TRUNC`: the new inode is empty.
+
 **File:** `crates/slicefs-cli/src/filesystem.rs:3844-3858` (`open_logged` holds `stripe(ino)` across `open_write`), `:858-889` (`open_write` -> `setattr_size_open(&mut g, 0)`), `:2171` (create with `O_TRUNC` under the parent and child stripes)
 
 **Issue:** `open_logged` holds `self.ns.lock(&[ino])` for the whole `open_write` call. With `O_TRUNC`, `setattr_size_open` runs these steps:
@@ -136,6 +170,8 @@ Without `O_TRUNC`, `cells.get_or_insert` can return the *transient* cell of a cl
 **Fix:** Count the handle under the stripe, which is the only part that needs it (existence check and `open_count`). Then release the stripe, and do the cell work (`write_handles += 1`, the truncate) with the stripe released. If the truncate fails, undo it with `close_handle` (which takes the stripe again). Unlink is still safe: the handle is already counted. In `create_logged`, apply `O_TRUNC` after `_ns` is dropped (a new inode is empty anyway, so the truncate can be skipped).
 
 ### WR-03: A size change takes no stripe, so its `Setattr` record can come before the `Create`/`Mknod` record and replay drops it
+
+**Fix status:** fixed: human check. `setattr_size_logged` first takes `stripe(ino)` and releases it at once. The caller holds no stripe. The test hook `test_set_mkdir_hook` now also runs in create and mknod (in `new_entry`).
 
 **File:** `crates/slicefs-cli/src/filesystem.rs:2999-3046` (`setattr_size_logged`), `:2186-2194` (`new_entry` links the name before the record), `:2167-2172`, `:3320`; `crates/slicefs-cli/src/oplog.rs:302`
 
@@ -154,6 +190,8 @@ Do this together with the WR-02 fix. `create_logged` (`:2171`) calls `test_setat
 
 ### WR-04: A failed last release retires the cell and discards its unstored data; a step-token timeout is now enough to trigger it
 
+**Fix status:** fixed: human check. When `finalize_steps` fails and the state is not clean, the cell stays in the map with no write handle. Reads see the bytes, a commit cut flushes them or logs them again, and the next open and release, or destroy, store them. `reclaim_inode` drops such a cell when the inode goes. Open point: nothing retries the store before a new open or destroy.
+
 **File:** `crates/slicefs-cli/src/filesystem.rs:925-934` (`finalize`), `:972-976` (`wait_step()?` in `finalize_steps`)
 
 **Issue:** `finalize` sets `g.retired = true` and removes the cell even when `finalize_steps` returned Err. This drops a dirty overlay's extents, a stream's unflushed tail, or pending writes. Before this phase, only a store I/O error lost the state. Now `wait_step()` can fail the finalize too: it returns EIO after `STEP_WAIT` for a step of another request on the cell, for example a size change from `truncate(path)`. So a lock-wait timeout now discards data.
@@ -164,6 +202,8 @@ Do this together with the WR-02 fix. `create_logged` (`:2171`) calls `test_setat
 
 ### WR-05: `STEP_WAIT` (15 s) is shorter than one step can legitimately take
 
+**Fix status:** fixed: human check. Rule: a waiter waits for one step in slices of `STEP_WAIT` (15 s). It waits another slice only if the step moved its progress count in the last slice. Each chunk-store put or read on the holder's thread moves the count, and so does each store wait that ends in time (`chunk_store::with_progress`). After a slice with no progress, or `STEP_WAIT_MAX` (120 s) for that step, it gives EIO. Every store wait ends within `STORE_WAIT` (10 s), so a slow step that is not stuck moves its count in each slice. New test hook: `test_set_step_wait`.
+
 **File:** `crates/slicefs-cli/src/filesystem.rs:142-145`, `:414-421`
 
 **Issue:** The comment says that 15 s is "above the 10 s STORE_WAIT ... because the step can itself wait that long in a store put". But one step makes many puts: a rebase step of `final_step` (8 MiB) is about 1000 chunk puts plus nodes, and a stream push puts many chunks. Each put can wait up to `STORE_WAIT` for a pack create, a seal, a record write in flight or `KEEP_CAP` (`lib.rs:1519-1527`). So the time of one step has no bound of 15 s. The measured slowest single write was already 7.8 s (DIRTY_LIMIT notes).
@@ -173,6 +213,8 @@ Do this together with the WR-02 fix. `create_logged` (`:2171`) calls `test_setat
 **Fix:** Make the wait depend on progress. For example, the token carries a progress counter that each put moves, and `wait_step` returns EIO only after 15 s with no progress. Or apply `STEP_WAIT` only when the holder is stuck in one store wait. Another way is to give up on the wait without EIO, and only for the paths that can retry.
 
 ### WR-06: A panic in a step's I/O phase leaves the step token set forever
+
+**Fix status:** fixed: human check. `run_step` holds a drop guard (`StepEnd`). It ends the token on every path. On a panic it also clears the token from the cell, so waiters wake and later steps can start. The cap count of a guard is also cleared on a panic.
 
 **File:** `crates/slicefs-cli/src/filesystem.rs:401-410` (`run_step`), `:388-394` (`unlocked`)
 
@@ -197,6 +239,8 @@ Also make `wait_step` treat a token whose `is_done()` is already true as cleared
 
 ### WR-07: Tests assert that work finishes within 300 ms (flaky on a loaded machine)
 
+**Fix status:** fixed. The positive receives use `WAIT` (5 s) while the step is still parked (the hook parks for up to 10 s). The step is let go only after the receive. The mixed check of the cap test also checks that the write it sees waiting is at the cap.
+
 **File:** `crates/slicefs-cli/tests/lock_free_io.rs:238`, `:301`, `:665`, `:895`, `:946`, `:1073`, `:1106`, `:1138`
 
 **Issue:** These tests spawn a thread for a read or write and then call `recv_timeout(Duration::from_millis(300)).expect(...)`. That is a *positive* deadline: the test fails if a debug-build read (Reader open, node loads) or a 128 KiB write takes more than 300 ms. The 19-14/19-15 runs were at load average 30-40. The negative checks ("it waited": `is_err()`) are safe. The positive ones are not.
@@ -209,6 +253,8 @@ Also make `wait_step` treat a token whose `is_done()` is already true as cleared
 
 ### IN-01: Safe fix shape for the deferred unlink reclaim under the stripes
 
+**Fix status:** fixed: human check. Under the stripes, `reclaim_inode` takes the manifest digest from memory and deletes the inode. After the stripes, inside the shared gate, `release_content` reads the manifest node and drops the refcounts. This is the same in unlink, in a rename that replaces a file, at the last close of an orphan, and at unmount. New store calls: `manifest_digest`, `manifest_entries`. New test hook: `test_set_reclaim_hook`. The 19-16 deferred item is closed.
+
 **File:** `crates/slicefs-cli/src/filesystem.rs:1318-1326` (`reclaim_inode`), `:1331-1345`; `crates/metadata/src/store.rs:1497-1501`
 
 **Issue:** The deferred 20 ms hold is `get_manifest` -> `load_manifest` (a node read). `manifest_data` holds the digest in memory.
@@ -216,6 +262,8 @@ Also make `wait_step` treat a token whose `is_done()` is already true as cleared
 **Fix:** Under the stripes, read the manifest *digest* (memory, `manifest_data`), then `delete_inode`. This removes the entry, so no request can reach the inode. After the `NsGuard` drops, and still inside the request's shared gate (so no commit cut falls in between), call `load_manifest(digest)` and `decrement_refcount` for each entry. Refcount decrements commute. Replay of the `Unlink` from the old root runs the full reclaim again, so the counts stay right. This needs a small store API, for example `take_manifest_digest(ino) -> Option<ObjectKey>` and `manifest_entries(digest)`.
 
 ### IN-02: `append_eof` can read the store with the cell locked
+
+**Fix status:** fixed: human check. For a fresh stream, the committed size of an append is read as a step with the cell unlocked, and is used only if the stream generation did not change. No new test.
 
 **File:** `crates/slicefs-cli/src/filesystem.rs:2479-2484`
 
