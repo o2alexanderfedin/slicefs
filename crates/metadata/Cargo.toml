@@ -8,6 +8,8 @@ license = "AGPL-3.0-or-later"
 [features]
 # Lock hold and wait times (stress harness report); forwards to the recorder.
 lock-stats = ["chunk-store/lock-stats"]
+# Lock cycle detection for stress builds; forwards to the shim crate.
+deadlock-detect = ["chunk-store/deadlock-detect"]
 
 [dependencies]
 slicefs-traits = { path = "../slicefs-traits" }
@@ -16,6 +18,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 libc = { workspace = true }
 crc32c = "0.6"
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 # Registers a second hasher (`chunk_store::hash::TestKeyedBlake3`) for tests

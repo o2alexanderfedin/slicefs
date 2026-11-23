@@ -38,7 +38,9 @@ use crate::{Error, Loc, ObjectId, Result};
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
+
+use crate::sync::{Mutex, Rank, RwLock};
 
 const MAGIC: &[u8; 4] = b"SFMF";
 /// Format version of the MANIFEST.
@@ -245,6 +247,10 @@ pub(crate) struct Index {
     /// From the newest to the oldest, as in `man.runs`. A lookup clones the
     /// `Arc` and reads pages with no lock held.
     runs: RwLock<Arc<Vec<Arc<Run>>>>,
+    /// The frozen memtable: the entries of a flush whose run is written now
+    /// with no store lock held (sorted by ID; empty when no flush runs).
+    /// Lookups see it between the memtable and the runs.
+    frozen: RwLock<Arc<Vec<(ObjectId, Entry)>>>,
     man: Mutex<Manifest>,
     /// See [`Index::gen`].
     gen: AtomicU64,
@@ -355,10 +361,11 @@ pub fn tier(entries: u64, limit: u64, fan_in: u64) -> u32 {
 impl Index {
     fn with(runs: Vec<Arc<Run>>, man: Manifest) -> Self {
         Index {
-            shards: std::array::from_fn(|_| Mutex::new(BTreeMap::new())),
+            shards: std::array::from_fn(|_| Mutex::new(Rank::Store, BTreeMap::new())),
             mem_len: AtomicUsize::new(0),
-            runs: RwLock::new(Arc::new(runs)),
-            man: Mutex::new(man),
+            runs: RwLock::new(Rank::Store, Arc::new(runs)),
+            frozen: RwLock::new(Rank::Store, Arc::new(Vec::new())),
+            man: Mutex::new(Rank::Store, man),
             gen: AtomicU64::new(0),
             bloom_bits: DEFAULT_BLOOM_BITS,
             merge_bytes: AtomicU64::new(0),
@@ -456,7 +463,7 @@ impl Index {
             return Ok(ix);
         }
         let on_disk = io.list_runs()?;
-        let man = ix.man.get_mut().unwrap();
+        let man = ix.man.get_mut();
         // A run file that a failed flush left behind must not block the next
         // flush with the same number (also if its removal below fails).
         if let Some(max) = on_disk.iter().max() {
@@ -493,7 +500,7 @@ impl Index {
         tracing::warn!("chunk store: the index cannot be used ({reason}); it is rebuilt from the packs");
         let on_disk = io.list_runs()?;
         let mut ix = Index::empty();
-        ix.man.get_mut().unwrap().next_run = on_disk.iter().max().map_or(1, |m| m.saturating_add(1));
+        ix.man.get_mut().next_run = on_disk.iter().max().map_or(1, |m| m.saturating_add(1));
         match io.remove(0, Kind::Manifest) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
             _ => {}
@@ -515,7 +522,7 @@ impl Index {
     /// The caller holds the store lock.
     pub fn request_rebuild(&self, io: &dyn PackIo, reason: &str) -> Result<()> {
         tracing::error!("chunk store: index damage ({reason}); the index is rebuilt from the packs at the next writable open");
-        let mut man = self.man.lock().unwrap();
+        let mut man = self.man.lock();
         man.flags |= FLAG_REBUILD;
         man.seq += 1;
         io.write_durable(0, Kind::Manifest, &man.encode())?;
@@ -524,7 +531,7 @@ impl Index {
 
     /// True if the MANIFEST asks for a rebuild at the next writable open.
     pub fn rebuild_requested(&self) -> bool {
-        self.man.lock().unwrap().flags & FLAG_REBUILD != 0
+        self.man.lock().flags & FLAG_REBUILD != 0
     }
 
     /// Bloom filter bits per key of the runs that this index writes from
@@ -534,12 +541,12 @@ impl Index {
     }
 
     pub fn hwm(&self) -> Hwm {
-        self.man.lock().unwrap().hwm
+        self.man.lock().hwm
     }
 
     /// The counts as of the last flush.
     pub fn counts(&self) -> Counts {
-        self.man.lock().unwrap().counts
+        self.man.lock().counts
     }
 
     pub fn mem_len(&self) -> usize {
@@ -554,11 +561,12 @@ impl Index {
 
     /// The live runs now, from the newest to the oldest.
     pub fn runs(&self) -> Arc<Vec<Arc<Run>>> {
-        Arc::clone(&self.runs.read().unwrap())
+        Arc::clone(&self.runs.read())
     }
 
-    /// The generation: it goes up, under the store lock, after each run
-    /// install (a flush or a merge) and after each GC install (the
+    /// The generation: it goes up after each run install (a flush or a
+    /// merge; under the store lock, or for a frozen flush under the MANIFEST
+    /// lock), at each freeze of the memtable, and after each GC install (the
     /// tombstones and new places of a GC are durable, before any pack
     /// changes). A caller reads it before a lookup outside the store lock;
     /// if it is the same under the lock, and the memtable has no entry of
@@ -577,9 +585,18 @@ impl Index {
         &self.shards[shard_of(id)]
     }
 
-    /// True if the memtable has an entry (put or tombstone) of `id`.
+    /// True if the memtable (or the frozen memtable) has an entry (put or
+    /// tombstone) of `id`.
     pub fn mem_has(&self, id: &ObjectId) -> bool {
-        self.shard(id).lock().unwrap().contains_key(id)
+        // One lock at a time (see the module comment).
+        let live = self.shard(id).lock().contains_key(id);
+        live || self.frozen_get(id).is_some()
+    }
+
+    /// The entry of `id` in the frozen memtable.
+    fn frozen_get(&self, id: &ObjectId) -> Option<Entry> {
+        let f = Arc::clone(&self.frozen.read());
+        f.binary_search_by(|(k, _)| k.cmp(id)).ok().map(|i| f[i].1)
     }
 
     /// The current place of `id`: the newest entry decides (a tombstone
@@ -587,12 +604,14 @@ impl Index {
     /// goes on to an older run, whose put entry could be one that a
     /// tombstone in the unread page hides.
     ///
-    /// Safe outside the store lock: the shard first, then a snapshot of the
-    /// runs. A flush installs its run before it clears the shards, so an
-    /// entry that moves from the memtable to a run is seen in one of them.
+    /// Safe outside the store lock: the shard first, then the frozen
+    /// memtable, then a snapshot of the runs. A flush publishes the frozen
+    /// memtable before it clears the shards, and installs its run before it
+    /// clears the frozen memtable, so an entry that moves from the memtable
+    /// to a run is seen in one of them.
     pub fn get(&self, id: &ObjectId) -> Result<Option<Loc>> {
-        let e = self.shard(id).lock().unwrap().get(id).copied();
-        if let Some(e) = e {
+        let e = self.shard(id).lock().get(id).copied();
+        if let Some(e) = e.or_else(|| self.frozen_get(id)) {
             return Ok(put_loc(e));
         }
         for r in self.runs().iter() {
@@ -607,7 +626,8 @@ impl Index {
     /// page CRC checked, in the runs whose filter may have the ID): damage
     /// is always `Corrupt`.
     pub fn get_verified(&self, id: &ObjectId) -> Result<Option<Loc>> {
-        let e = self.shard(id).lock().unwrap().get(id).copied();
+        let e = self.shard(id).lock().get(id).copied();
+        let e = e.or_else(|| self.frozen_get(id));
         if let Some(e) = e {
             return Ok(put_loc(e));
         }
@@ -629,7 +649,7 @@ impl Index {
     }
 
     fn set(&self, id: ObjectId, e: Entry) {
-        if self.shard(&id).lock().unwrap().insert(id, e).is_none() {
+        if self.shard(&id).lock().insert(id, e).is_none() {
             self.mem_len.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -640,7 +660,7 @@ impl Index {
     /// [`Index::write_pending`]).
     #[cfg(test)]
     pub fn tombstone(&self, id: ObjectId, pack: u64) {
-        let newer = matches!(self.shard(&id).lock().unwrap().get(&id), Some(Entry::Put(l)) if l.pack != pack);
+        let newer = matches!(self.shard(&id).lock().get(&id), Some(Entry::Put(l)) if l.pack != pack);
         if !newer {
             self.set(id, Entry::Tomb(pack));
         }
@@ -651,16 +671,84 @@ impl Index {
     fn sorted_mem(&self) -> Vec<(ObjectId, Entry)> {
         let mut v = Vec::with_capacity(self.mem_len());
         for s in &self.shards {
-            v.extend(s.lock().unwrap().iter().map(|(id, e)| (*id, *e)));
+            v.extend(s.lock().iter().map(|(id, e)| (*id, *e)));
         }
         v.sort_unstable_by_key(|(id, _)| *id);
         v
     }
 
-    /// A copy of the memtable and a snapshot of the runs. The caller holds
-    /// the store lock, so the two agree.
+    /// A copy of the memtable (with the frozen memtable under it) and a
+    /// snapshot of the runs. The caller holds the store lock, so the
+    /// memtable does not change. A frozen run may be installed meanwhile:
+    /// the frozen copy is read before the runs, so its entries are in one of
+    /// them (or in both, with the same values).
     pub fn snapshot(&self) -> Snapshot {
-        Snapshot { mem: self.sorted_mem(), runs: self.runs() }
+        let frozen = Arc::clone(&self.frozen.read());
+        let mut mem = self.sorted_mem();
+        if !frozen.is_empty() {
+            let mut all: BTreeMap<ObjectId, Entry> = frozen.iter().copied().collect();
+            all.extend(mem);
+            mem = all.into_iter().collect();
+        }
+        Snapshot { mem, runs: self.runs() }
+    }
+
+    /// The first step of a flush outside the store lock: the memtable
+    /// becomes the frozen memtable (lookups still see it), the shards are
+    /// cleared, the generation goes up (a lookup before this may have missed
+    /// an entry that is now only in the frozen copy), and a run number is
+    /// taken. The caller holds the store lock, has made every pack record
+    /// that the memtable points to durable, and no frozen memtable exists.
+    pub fn freeze(&self) -> (Arc<Vec<(ObjectId, Entry)>>, u64) {
+        let entries = Arc::new(self.sorted_mem());
+        *self.frozen.write() = Arc::clone(&entries);
+        for s in &self.shards {
+            s.lock().clear();
+        }
+        self.mem_len.store(0, Ordering::SeqCst);
+        self.bump_gen();
+        (entries, self.take_run_num())
+    }
+
+    /// Write the frozen entries to run `num` (no lock needed: no MANIFEST
+    /// lists it yet). On an error the partial file is removed (best effort).
+    pub fn write_frozen(&self, io: &dyn PackIo, num: u64, entries: &[(ObjectId, Entry)]) -> Result<Run> {
+        let r = Self::write_run(io, num, entries, self.bloom_bits);
+        if r.is_err() {
+            let _ = io.remove(num, Kind::Run);
+        }
+        r
+    }
+
+    /// The end of a flush outside the store lock: a MANIFEST with `run` as
+    /// the newest run (the hwm and counts of the freeze), then the run into
+    /// the run list, then the frozen memtable cleared, then the generation
+    /// up. Under the MANIFEST lock only: the other MANIFEST writers take it
+    /// after the store lock, and the entries of the frozen memtable keep
+    /// their answers, so no lookup needs the store lock to agree. GC does
+    /// not install while a frozen flush runs (`ChunkStore::flush_if_full`).
+    /// On an error the frozen memtable stays (the store then fails).
+    pub fn install_frozen(&self, io: &dyn PackIo, run: Run, hwm: Hwm, counts: Counts) -> Result<()> {
+        let mut man = self.man.lock();
+        let mut new = man.clone();
+        new.seq += 1;
+        new.hwm = hwm;
+        new.counts = counts;
+        new.runs.insert(0, RunMeta { num: run.num(), len: run.len(), entries: run.entries() });
+        new.obsolete.clear();
+        io.write_durable(0, Kind::Manifest, &new.encode())?;
+        *man = new;
+        {
+            let mut runs = self.runs.write();
+            let mut v = Vec::with_capacity(runs.len() + 1);
+            v.push(Arc::new(run));
+            v.extend(runs.iter().cloned());
+            *runs = Arc::new(v);
+        }
+        *self.frozen.write() = Arc::new(Vec::new());
+        self.bump_gen();
+        drop(man);
+        Ok(())
     }
 
     /// Write the memtable to a new run and commit it with a new MANIFEST
@@ -682,7 +770,7 @@ impl Index {
             return Ok(());
         }
         let entries = self.sorted_mem();
-        let mut man = self.man.lock().unwrap();
+        let mut man = self.man.lock();
         let num = man.next_run;
         let run = match Self::write_run(io, num, &entries, self.bloom_bits) {
             Ok(r) => r,
@@ -702,14 +790,14 @@ impl Index {
         *man = new;
         drop(man);
         {
-            let mut runs = self.runs.write().unwrap();
+            let mut runs = self.runs.write();
             let mut v = Vec::with_capacity(runs.len() + 1);
             v.push(Arc::new(run));
             v.extend(runs.iter().cloned());
             *runs = Arc::new(v);
         }
         for s in &self.shards {
-            s.lock().unwrap().clear();
+            s.lock().clear();
         }
         self.mem_len.store(0, Ordering::SeqCst);
         self.bump_gen();
@@ -748,7 +836,7 @@ impl Index {
             let end = (f..=n).rev().find(|&end| tiers[end - f..end].iter().all(|&t| t == tiers[end - 1]))?;
             end - f..end
         };
-        let mut man = self.man.lock().unwrap();
+        let mut man = self.man.lock();
         let out = man.next_run;
         man.next_run += 1;
         Some(MergePlan { inputs: runs[window.clone()].to_vec(), out, drop_tombs: window.end == n })
@@ -777,7 +865,7 @@ impl Index {
     pub fn pick_idle_merge(&self) -> Option<MergePlan> {
         let window = self.idle_range()?;
         let runs = self.runs();
-        let mut man = self.man.lock().unwrap();
+        let mut man = self.man.lock();
         let out = man.next_run;
         man.next_run += 1;
         Some(MergePlan { inputs: runs[window.clone()].to_vec(), out, drop_tombs: window.end == runs.len() })
@@ -843,8 +931,10 @@ impl Index {
     pub fn install_merge(&self, io: &dyn PackIo, plan: &MergePlan, out: MergeOut) -> Result<Option<Vec<u64>>> {
         let nums: Vec<u64> = plan.inputs.iter().map(|r| r.num()).collect();
         let k = nums.len();
+        // Under the MANIFEST lock: a frozen flush installs its run under
+        // that lock alone, so the run list and the MANIFEST agree here.
+        let mut man = self.man.lock();
         let cur = self.runs();
-        let mut man = self.man.lock().unwrap();
         let same = |it: &mut dyn Iterator<Item = u64>| it.eq(nums.iter().copied());
         let at = cur.windows(k).position(|w| same(&mut w.iter().map(|r| r.num()))).filter(|&at| {
             man.runs.get(at..at + k).is_some_and(|m| same(&mut m.iter().map(|r| r.num)))
@@ -873,7 +963,7 @@ impl Index {
             self.merge_bytes.fetch_add(r.len(), Ordering::SeqCst);
         }
         {
-            let mut runs = self.runs.write().unwrap();
+            let mut runs = self.runs.write();
             let mut v: Vec<Arc<Run>> = runs.iter().cloned().collect();
             v.splice(at..at + k, run.map(Arc::new));
             *runs = Arc::new(v);
@@ -915,7 +1005,7 @@ impl Index {
     /// RAM, so no flush or merge can take it). The caller holds the store
     /// lock.
     pub fn take_run_num(&self) -> u64 {
-        let mut man = self.man.lock().unwrap();
+        let mut man = self.man.lock();
         let num = man.next_run;
         man.next_run += 1;
         num
@@ -964,7 +1054,7 @@ impl Index {
     ///
     /// Returns the numbers of the added runs, from the newest.
     pub fn install_gc(&self, io: &dyn PackIo, pending: Vec<Arc<Run>>, hwm: Hwm, counts: Counts) -> Result<Vec<u64>> {
-        let mut man = self.man.lock().unwrap();
+        let mut man = self.man.lock();
         let mem_run = if self.mem_len() > 0 {
             let num = man.next_run;
             let entries = self.sorted_mem();
@@ -998,13 +1088,13 @@ impl Index {
         drop(man);
         let nums = added.iter().map(|r| r.num()).collect();
         {
-            let mut runs = self.runs.write().unwrap();
+            let mut runs = self.runs.write();
             let mut v = added;
             v.extend(runs.iter().cloned());
             *runs = Arc::new(v);
         }
         for s in &self.shards {
-            s.lock().unwrap().clear();
+            s.lock().clear();
         }
         self.mem_len.store(0, Ordering::SeqCst);
         self.bump_gen();
@@ -1024,7 +1114,7 @@ impl Index {
         let runs = self.runs();
         let k = nums.len();
         let at = runs.windows(k).position(|w| w.iter().map(|r| r.num()).eq(nums.iter().copied()))?;
-        let mut man = self.man.lock().unwrap();
+        let mut man = self.man.lock();
         let out = man.next_run;
         man.next_run += 1;
         Some(MergePlan { inputs: runs[at..at + k].to_vec(), out, drop_tombs: false })

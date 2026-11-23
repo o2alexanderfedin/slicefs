@@ -1,0 +1,166 @@
+756 crates/chunk-store/src/sync.rs
+=== run 1
+SPIKE long site=file_cell hold_us=12153
+SPIKE slowio what=wal_drain us=21179 inflight_start=[wal,wal,wal] inflight_end=[wal,wal,wal]
+SPIKE long site=wal_writer hold_us=21282 span[wal_drain_write]=21268x1
+report mode=one-file (closed loop: no coordinated-omission correction)
+lock site=store n=3583 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=1.8 hold_p99_us=32.7 hold_max_us=3330.0
+lock site=io n=11 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=421.1 hold_max_us=421.1
+lock site=wal n=13312 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.1 hold_p50_us=0.5 hold_p99_us=2.1 hold_max_us=39.0
+lock site=wal_writer n=7117 wait_p50_us=0.0 wait_p99_us=749.6 wait_max_us=4366.3 hold_p50_us=63.3 hold_p99_us=744.4 hold_max_us=21282.8
+lock site=wal_queue n=12855 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=35.3 hold_p50_us=0.6 hold_p99_us=2.4 hold_max_us=32.4
+lock site=readers n=1255 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.9 hold_p99_us=2.6 hold_max_us=17.4
+lock site=dir_live n=291 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.5 hold_p99_us=9.0 hold_max_us=12.0
+lock site=inode_live n=315 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.5 hold_p99_us=10.9 hold_max_us=20.4
+lock site=handles n=6620 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=57.2 hold_p50_us=1.8 hold_p99_us=4.3 hold_max_us=119.4
+lock site=file_cell n=16960 wait_p50_us=0.0 wait_p99_us=255.2 wait_max_us=12165.1 hold_p50_us=6.9 hold_p99_us=94.7 hold_max_us=12156.9
+lock site=cell_map n=18058 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=1038.8 hold_p50_us=0.9 hold_p99_us=3.8 hold_max_us=59.3
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=11.2 hold_p99_us=269.6 hold_max_us=269.6
+SPIKE slowio what=wal_drain us=25992 inflight_start=[wal,wal] inflight_end=[wal,pack_or_dir]
+SPIKE long site=wal_writer hold_us=26071 span[wal_drain_write]=26052x1
+SPIKE long site=store hold_us=27732 span[join_seal]=0x1 span[sync2_active]=27702x1
+report mode=many-files (closed loop: no coordinated-omission correction)
+lock site=store n=66693 wait_p50_us=0.0 wait_p99_us=156.0 wait_max_us=28033.0 hold_p50_us=2.7 hold_p99_us=53.2 hold_max_us=27738.1
+lock site=io n=10 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=212.0 hold_max_us=212.0
+lock site=wal n=23362 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=56.6 hold_p50_us=0.3 hold_p99_us=1.2 hold_max_us=39.3
+lock site=wal_writer n=11521 wait_p50_us=0.0 wait_p99_us=254.7 wait_max_us=25985.0 hold_p50_us=16.9 hold_p99_us=256.1 hold_max_us=26083.3
+lock site=wal_queue n=21636 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=45.4 hold_p50_us=0.5 hold_p99_us=2.0 hold_max_us=107.6
+lock site=readers n=7458 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=975.9 hold_p50_us=2.2 hold_p99_us=12.7 hold_max_us=655.4
+lock site=dir_live n=17180 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=612.4 hold_p50_us=3.3 hold_p99_us=16.8 hold_max_us=414.0
+lock site=inode_live n=26807 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=72.1 hold_p50_us=1.8 hold_p99_us=10.0 hold_max_us=94.7
+lock site=handles n=13336 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=477.7 hold_p50_us=1.7 hold_p99_us=7.5 hold_max_us=55.8
+lock site=file_cell n=25311 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=3.9 hold_p99_us=102.2 hold_max_us=2768.9
+lock site=cell_map n=20611 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=2.6 hold_p50_us=1.1 hold_p99_us=4.0 hold_max_us=62.4
+lock site=stripe n=11477 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=2156.5 hold_p50_us=34.0 hold_p99_us=220.5 hold_max_us=2621.4
+SPIKE slowio what=wal_drain us=24566 inflight_start=[wal,wal] inflight_end=[wal,wal]
+SPIKE long site=wal_writer hold_us=24658 span[wal_drain_write]=24626x1
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+lock site=store n=3727 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=4.3 hold_p50_us=1.9 hold_p99_us=30.5 hold_max_us=3096.6
+lock site=io n=8 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.3 hold_p99_us=207.7 hold_max_us=207.7
+lock site=wal n=12291 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=33.2 hold_p50_us=0.4 hold_p99_us=2.1 hold_max_us=42.8
+lock site=wal_writer n=6566 wait_p50_us=0.0 wait_p99_us=310.8 wait_max_us=24100.9 hold_p50_us=20.9 hold_p99_us=316.2 hold_max_us=24657.9
+lock site=wal_queue n=11837 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=2.0 hold_p50_us=0.4 hold_p99_us=2.2 hold_max_us=31.6
+lock site=readers n=5787 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=74.6 hold_p50_us=0.9 hold_p99_us=2.5 hold_max_us=69.1
+lock site=dir_live n=195 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=9.1 hold_max_us=10.2
+lock site=inode_live n=225 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.5 hold_p99_us=9.6 hold_max_us=21.6
+lock site=handles n=5872 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=86.4 hold_p50_us=1.0 hold_p99_us=4.1 hold_max_us=29.8
+lock site=file_cell n=15819 wait_p50_us=0.0 wait_p99_us=350.2 wait_max_us=2523.1 hold_p50_us=7.6 hold_p99_us=136.8 hold_max_us=2400.3
+lock site=cell_map n=16634 wait_p50_us=0.0 wait_p99_us=0.3 wait_max_us=289.3 hold_p50_us=0.8 hold_p99_us=3.8 hold_max_us=48.2
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=679.4 wait_max_us=679.4 hold_p50_us=6.9 hold_p99_us=145.9 hold_max_us=145.9
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 5.75s
+=== run 2
+SPIKE slowio what=wal_drain us=63189 inflight_start=[wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=63385 span[wal_drain_write]=63347x1
+SPIKE long site=file_cell hold_us=7104
+SPIKE slowio what=wal_drain us=25921 inflight_start=[wal,wal] inflight_end=[wal,wal]
+SPIKE long site=wal_writer hold_us=26056 span[wal_drain_write]=26004x1
+SPIKE long site=file_cell hold_us=6927
+SPIKE long site=file_cell hold_us=9634
+SPIKE long site=file_cell hold_us=14814
+report mode=one-file (closed loop: no coordinated-omission correction)
+lock site=store n=3619 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=1.9 hold_p99_us=31.7 hold_max_us=3037.2
+lock site=io n=11 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=333.1 hold_max_us=333.1
+lock site=wal n=11622 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=2.4 hold_max_us=33.6
+lock site=wal_writer n=6216 wait_p50_us=0.0 wait_p99_us=999.4 wait_max_us=63275.0 hold_p50_us=71.7 hold_p99_us=914.4 hold_max_us=63406.1
+lock site=wal_queue n=11222 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.6 hold_p50_us=0.7 hold_p99_us=2.7 hold_max_us=46.0
+lock site=readers n=1279 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.2 hold_p50_us=0.9 hold_p99_us=2.7 hold_max_us=22.2
+lock site=dir_live n=291 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.5 hold_p99_us=8.1 hold_max_us=10.4
+lock site=inode_live n=315 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.5 hold_p99_us=10.2 hold_max_us=12.8
+lock site=handles n=5750 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=40.5 hold_p50_us=1.9 hold_p99_us=7.3 hold_max_us=60.0
+lock site=file_cell n=14869 wait_p50_us=0.0 wait_p99_us=272.9 wait_max_us=14868.5 hold_p50_us=7.5 hold_p99_us=119.9 hold_max_us=14819.3
+lock site=cell_map n=15942 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=547.8 hold_p50_us=1.0 hold_p99_us=4.6 hold_max_us=66.3
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=10.0 hold_p99_us=211.1 hold_max_us=211.1
+SPIKE slowio what=wal_drain us=26092 inflight_start=[wal,wal] inflight_end=[wal,wal]
+SPIKE long site=wal_writer hold_us=26181 span[wal_drain_write]=26151x1
+SPIKE long site=store hold_us=8302 span[join_seal]=0x1 span[sync2_active]=8286x1
+SPIKE long site=store hold_us=5405 span[join_seal]=0x1 span[sync2_active]=5392x1
+SPIKE slowio what=pack_pwrite us=13770 inflight_start=[pack_or_dir(same)] inflight_end=[pack_or_dir(same)]
+SPIKE long site=store hold_us=13923 span[raw_pwrite]=13865x1 span[append_pwrite]=13873x1
+SPIKE long site=store hold_us=5582 span[join_seal]=0x1 span[sync2_active]=5565x1
+SPIKE long site=store hold_us=6129 span[join_seal]=0x1 span[sync2_active]=6109x1
+report mode=many-files (closed loop: no coordinated-omission correction)
+lock site=store n=60730 wait_p50_us=0.0 wait_p99_us=222.8 wait_max_us=13787.1 hold_p50_us=2.7 hold_p99_us=64.3 hold_max_us=13926.4
+lock site=io n=10 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=218.0 hold_max_us=218.0
+lock site=wal n=21207 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=764.9 hold_p50_us=0.4 hold_p99_us=1.3 hold_max_us=30.8
+lock site=wal_writer n=10419 wait_p50_us=0.0 wait_p99_us=564.7 wait_max_us=26165.2 hold_p50_us=17.6 hold_p99_us=378.6 hold_max_us=26181.6
+lock site=wal_queue n=19645 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=20.1 hold_p50_us=0.5 hold_p99_us=2.3 hold_max_us=99.3
+lock site=readers n=6613 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=230.9 hold_p50_us=2.3 hold_p99_us=13.1 hold_max_us=364.5
+lock site=dir_live n=14796 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=729.1 hold_p50_us=3.4 hold_p99_us=18.0 hold_max_us=103.3
+lock site=inode_live n=23940 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=24.5 hold_p50_us=1.8 hold_p99_us=9.7 hold_max_us=124.9
+lock site=handles n=12067 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=1130.5 hold_p50_us=1.7 hold_p99_us=7.6 hold_max_us=87.2
+lock site=file_cell n=23213 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=4.0 hold_p99_us=117.4 hold_max_us=2345.0
+lock site=cell_map n=18645 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=2.7 hold_p50_us=1.3 hold_p99_us=4.5 hold_max_us=78.1
+lock site=stripe n=10130 wait_p50_us=0.0 wait_p99_us=39.5 wait_max_us=1732.6 hold_p50_us=34.1 hold_p99_us=249.2 hold_max_us=2297.9
+SPIKE long site=store hold_us=6866 span[join_seal]=0x1 span[sync2_active]=32x1 span[sync2_dir]=6823x1
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+lock site=store n=3709 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=6.4 hold_p50_us=1.9 hold_p99_us=61.2 hold_max_us=6869.0
+lock site=io n=8 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=212.7 hold_max_us=212.7
+lock site=wal n=11017 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=2.7 hold_p50_us=0.5 hold_p99_us=2.2 hold_max_us=36.7
+lock site=wal_writer n=5842 wait_p50_us=0.0 wait_p99_us=920.6 wait_max_us=3973.1 hold_p50_us=24.8 hold_p99_us=566.3 hold_max_us=4083.7
+lock site=wal_queue n=10640 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=35.9 hold_p50_us=0.5 hold_p99_us=2.4 hold_max_us=28.5
+lock site=readers n=5845 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=3.7 hold_p50_us=0.8 hold_p99_us=2.7 hold_max_us=41.5
+lock site=dir_live n=195 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.5 hold_p99_us=8.7 hold_max_us=11.1
+lock site=inode_live n=227 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.5 hold_p99_us=11.6 hold_max_us=12.9
+lock site=handles n=5113 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=56.2 hold_p50_us=1.1 hold_p99_us=5.7 hold_max_us=91.3
+lock site=file_cell n=13459 wait_p50_us=0.0 wait_p99_us=502.0 wait_max_us=3153.9 hold_p50_us=8.0 hold_p99_us=148.9 hold_max_us=3573.8
+lock site=cell_map n=14149 wait_p50_us=0.0 wait_p99_us=0.1 wait_max_us=226.4 hold_p50_us=0.8 hold_p99_us=4.0 hold_max_us=83.5
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=50.1 wait_max_us=50.1 hold_p50_us=6.2 hold_p99_us=161.3 hold_max_us=161.3
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 5.78s
+=== run 3
+SPIKE long site=store hold_us=5301 span[join_seal]=0x1 span[sync2_active]=29x1 span[sync2_dir]=5261x1
+SPIKE long site=file_cell hold_us=5006
+SPIKE long site=file_cell hold_us=11537
+SPIKE long site=file_cell hold_us=8173
+SPIKE long site=file_cell hold_us=8340
+SPIKE slowio what=wal_drain us=19714 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=19819 span[wal_drain_write]=19795x1
+SPIKE long site=store hold_us=6643 span[join_seal]=1x1 span[sync2_active]=6634x1
+report mode=one-file (closed loop: no coordinated-omission correction)
+lock site=store n=3601 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=2.1 hold_p99_us=28.3 hold_max_us=6643.7
+lock site=io n=9 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=320.8 hold_max_us=320.8
+lock site=wal n=7148 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.7 hold_p50_us=0.6 hold_p99_us=2.6 hold_max_us=33.2
+lock site=wal_writer n=3805 wait_p50_us=0.0 wait_p99_us=993.3 wait_max_us=19710.0 hold_p50_us=79.4 hold_p99_us=1092.6 hold_max_us=19824.6
+lock site=wal_queue n=6918 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.2 hold_p50_us=0.7 hold_p99_us=2.8 hold_max_us=23.0
+lock site=readers n=1257 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=1.0 hold_p99_us=3.5 hold_max_us=27.2
+lock site=dir_live n=227 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.5 hold_p99_us=9.0 hold_max_us=11.5
+lock site=inode_live n=249 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.5 hold_p99_us=12.0 hold_max_us=15.1
+lock site=handles n=3540 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=3.1 hold_p50_us=2.0 hold_p99_us=7.8 hold_max_us=38.3
+lock site=file_cell n=9129 wait_p50_us=0.0 wait_p99_us=620.0 wait_max_us=11518.0 hold_p50_us=8.4 hold_p99_us=296.7 hold_max_us=11542.5
+lock site=cell_map n=10200 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=41.5 hold_p50_us=1.0 hold_p99_us=4.4 hold_max_us=46.0
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=11.3 hold_p99_us=242.8 hold_max_us=242.8
+SPIKE slowio what=wal_drain us=158341 inflight_start=[wal,wal,wal] inflight_end=[wal,wal,wal,pack_or_dir]
+SPIKE long site=wal_writer hold_us=158441 span[wal_drain_write]=158429x1
+SPIKE long site=store hold_us=5511 span[join_seal]=0x1 span[sync2_active]=5492x1
+SPIKE slowio what=wal_drain us=8350 inflight_start=[wal,wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=8441 span[wal_drain_write]=8423x1
+SPIKE slowio what=pack_pwrite us=18509 inflight_start=[pack_or_dir(same)] inflight_end=[pack_or_dir(same)]
+SPIKE long site=store hold_us=18656 span[raw_pwrite]=18626x1 span[append_pwrite]=18634x1
+report mode=many-files (closed loop: no coordinated-omission correction)
+lock site=store n=55266 wait_p50_us=0.0 wait_p99_us=313.6 wait_max_us=5500.9 hold_p50_us=2.7 hold_p99_us=72.8 hold_max_us=18661.4
+lock site=io n=10 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=211.2 hold_max_us=211.2
+lock site=wal n=19048 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=33.7 hold_p50_us=0.4 hold_p99_us=1.5 hold_max_us=50.3
+lock site=wal_writer n=9395 wait_p50_us=0.0 wait_p99_us=329.5 wait_max_us=2742.3 hold_p50_us=17.9 hold_p99_us=279.3 hold_max_us=158466.0
+lock site=wal_queue n=17584 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=89.2 hold_p50_us=0.5 hold_p99_us=2.4 hold_max_us=69.7
+lock site=readers n=6001 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=1391.6 hold_p50_us=2.3 hold_p99_us=20.2 hold_max_us=925.7
+lock site=dir_live n=13291 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=630.8 hold_p50_us=3.4 hold_p99_us=20.1 hold_max_us=84.5
+lock site=inode_live n=21771 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=59.3 hold_p50_us=1.8 hold_p99_us=11.7 hold_max_us=157.7
+lock site=handles n=11003 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=745.0 hold_p50_us=1.8 hold_p99_us=8.8 hold_max_us=87.3
+lock site=file_cell n=20744 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=4.1 hold_p99_us=110.1 hold_max_us=2656.3
+lock site=cell_map n=16847 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=34.9 hold_p50_us=1.3 hold_p99_us=6.0 hold_max_us=80.4
+lock site=stripe n=9233 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=1294.3 hold_p50_us=34.5 hold_p99_us=264.7 hold_max_us=2156.5
+SPIKE slowio what=wal_drain us=23687 inflight_start=[wal,wal] inflight_end=[wal,wal]
+SPIKE long site=wal_writer hold_us=23815 span[wal_drain_write]=23779x1
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+lock site=store n=3752 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=42.6 hold_p50_us=2.1 hold_p99_us=60.8 hold_max_us=3733.5
+lock site=io n=8 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=211.6 hold_max_us=211.6
+lock site=wal n=12089 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.6 hold_p50_us=0.4 hold_p99_us=2.2 hold_max_us=27.6
+lock site=wal_writer n=6489 wait_p50_us=0.0 wait_p99_us=367.1 wait_max_us=23822.3 hold_p50_us=22.5 hold_p99_us=338.2 hold_max_us=23822.3
+lock site=wal_queue n=11613 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.7 hold_p50_us=0.5 hold_p99_us=2.4 hold_max_us=83.3
+lock site=readers n=5990 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=1.7 hold_p50_us=0.8 hold_p99_us=2.6 hold_max_us=79.3
+lock site=dir_live n=195 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.5 hold_p99_us=9.9 hold_max_us=11.3
+lock site=inode_live n=225 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.5 hold_p99_us=10.6 hold_max_us=13.6
+lock site=handles n=5701 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=288.8 hold_p50_us=1.0 hold_p99_us=4.9 hold_max_us=47.2
+lock site=file_cell n=15112 wait_p50_us=0.0 wait_p99_us=356.6 wait_max_us=3723.3 hold_p50_us=7.4 hold_p99_us=135.9 hold_max_us=3391.5
+lock site=cell_map n=15857 wait_p50_us=0.0 wait_p99_us=0.3 wait_max_us=1828.9 hold_p50_us=0.8 hold_p99_us=3.7 hold_max_us=107.5
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=124.0 wait_max_us=124.0 hold_p50_us=6.6 hold_p99_us=336.6 hold_max_us=336.6
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.25s

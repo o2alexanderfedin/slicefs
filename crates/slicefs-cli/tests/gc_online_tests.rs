@@ -540,3 +540,97 @@ fn low_space_starts_a_gc_without_the_interval() {
     thread.join().unwrap();
     assert!(!fs.content().last_gc_timing().wall.is_zero(), "no GC ran in 30 s");
 }
+
+/// RESEARCH Pitfall 3 (T-19-24): reads that run with no cell lock, during
+/// rewrites, fsyncs, commits and online GCs, never fail and never return
+/// bytes of no written version. Each request holds the commit gate shared,
+/// as the callbacks do; each commit holds it exclusively, as the commit
+/// timer does (a GC start takes it itself). A low dirty limit makes the
+/// rewrites publish new roots while the GCs run. The model keeps the
+/// versions of each 64 KiB block, not a copy of the file.
+#[test]
+fn reads_during_rewrite_and_gc_never_fail() {
+    use std::time::{Duration, Instant};
+    const BLOCK: usize = 64 << 10;
+    const BLOCKS: usize = 64;
+    let block = |b: usize, v: u64| data(((b as u64) << 32) | v, BLOCK);
+    let dir = TempDir::new().unwrap();
+    let fs = make_fs(dir.path());
+    let (ino, fh) = fs.test_create(1, "big.bin", 0o644, 0, 0, 0).unwrap();
+    for b in 0..BLOCKS {
+        fs.test_write(fh, (b * BLOCK) as u64, &block(b, 0)).unwrap();
+    }
+    fs.test_release(ino, fh).unwrap();
+    fs.meta().commit().unwrap();
+    fs.test_set_dirty_limit(256 << 10);
+    let versions: Vec<Mutex<Vec<u64>>> = (0..BLOCKS).map(|_| Mutex::new(vec![0])).collect();
+    let gate = fs.commit_gate();
+    let stop = no_stop();
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    let next = |x: &mut u64| {
+        *x ^= *x << 13;
+        *x ^= *x >> 7;
+        *x ^= *x << 17;
+        *x as usize % BLOCKS
+    };
+    let (writes, reads, gcs) = std::thread::scope(|s| {
+        let writer = s.spawn(|| {
+            let (wfh, _) = {
+                let _op = gate.read().unwrap();
+                fs.test_open(ino, libc::O_RDWR).unwrap()
+            };
+            let (mut x, mut v) = (0x2545_F491_4F6C_DD1Du64, 0u64);
+            while Instant::now() < deadline {
+                let b = next(&mut x);
+                v += 1;
+                versions[b].lock().unwrap().push(v);
+                let _op = gate.read().unwrap();
+                assert_eq!(fs.test_write(wfh, (b * BLOCK) as u64, &block(b, v)), Ok(BLOCK as u32));
+                if v % 4 == 0 {
+                    assert_eq!(fs.test_fsync(ino, wfh), Ok(()));
+                }
+            }
+            let _op = gate.read().unwrap();
+            fs.test_release(ino, wfh).unwrap();
+            v
+        });
+        let reader = s.spawn(|| {
+            let (mut x, mut n) = (0x9E37_79B9_7F4A_7C15u64, 0u64);
+            while Instant::now() < deadline {
+                let b = next(&mut x);
+                let got = {
+                    let _op = gate.read().unwrap();
+                    fs.test_read(ino, (b * BLOCK) as u64, BLOCK as u32)
+                };
+                let got = got.unwrap_or_else(|e| panic!("read of block {b} failed: errno {e}"));
+                let allowed = versions[b].lock().unwrap().clone();
+                assert!(allowed.iter().rev().any(|&v| got == block(b, v)), "block {b}: bytes of no written version");
+                n += 1;
+            }
+            n
+        });
+        let gc = s.spawn(|| {
+            let (mut n, mut removed) = (0u64, 0u64);
+            while Instant::now() < deadline {
+                {
+                    let _commit = gate.write().unwrap();
+                    fs.commit_cut().unwrap();
+                }
+                removed += fs.gc_online(&stop).unwrap().expect("not stopped").removed_objects;
+                n += 1;
+            }
+            (n, removed)
+        });
+        (writer.join().unwrap(), reader.join().unwrap(), gc.join().unwrap())
+    });
+    let (gcs, removed) = gcs;
+    eprintln!("reads_during_rewrite_and_gc: writes {writes}, reads {reads}, GCs {gcs}, removed {removed}, rebases {}",
+        fs.test_rebase_count());
+    assert!(writes > 0 && reads > 0 && gcs > 0, "writes {writes}, reads {reads}, GCs {gcs}");
+    assert!(removed > 0, "the GCs deleted the old roots' objects while reads ran");
+    assert!(fs.test_rebase_count() > 0, "the rewrites published new roots");
+    for (b, vs) in versions.iter().enumerate() {
+        let last = *vs.lock().unwrap().last().unwrap();
+        assert!(fs.test_read(ino, (b * BLOCK) as u64, BLOCK as u32).unwrap() == block(b, last), "block {b}");
+    }
+}

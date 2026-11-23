@@ -12,6 +12,7 @@
 //! - with the extents laid over both.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use slicefs_traits::key::ObjectKey;
 
@@ -26,6 +27,15 @@ pub const GROW_DIV: usize = 8;
 /// `Overlay::take` splits an extent only if it is longer than what is still
 /// needed plus this, and then takes at least this many bytes of it.
 pub const MIN_TAKE: usize = 64 << 10;
+
+/// Source of overlay generations. One counter for the whole process, so no
+/// two states of any overlays share a generation: an overlay made after a
+/// truncate to 0 cannot repeat the generation of the one it replaced.
+static NEXT_GEN: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn next_gen() -> u64 {
+    NEXT_GEN.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Base content plus the extents written since that base.
 ///
@@ -45,36 +55,57 @@ pub struct Overlay {
     /// Where the next `take` starts. Steps go through the file in offset
     /// order, so the extents of one step are close and change few nodes.
     sweep: u64,
+    /// Moves at every change of the extents, `visible`, `size` or the sweep
+    /// point (D-02): a rebase step publishes only if it did not move.
+    generation: u64,
 }
 
 impl Overlay {
     /// A clean overlay on `base` (of `base_len` bytes) with logical size `size`.
     pub fn new(base: Option<ObjectKey>, base_len: u64, size: u64) -> Self {
-        Overlay { base, base_len, visible: base_len, size, extents: BTreeMap::new(), cost: 0, sweep: 0 }
+        Overlay { base, base_len, visible: base_len, size, extents: BTreeMap::new(), cost: 0, sweep: 0, generation: next_gen() }
     }
 
     /// A clean overlay with the base, visible part and size of this one.
     pub fn empty_like(&self) -> Self {
-        Overlay { extents: BTreeMap::new(), cost: 0, sweep: 0, ..*self }
+        Overlay { extents: BTreeMap::new(), cost: 0, sweep: 0, generation: next_gen(), ..*self }
     }
 
-    /// Take extents out until at least `free` bytes of cost are freed (or no
-    /// extent is left): in offset order from the sweep point, then from 0.
-    /// An extent longer than what is still needed plus `MIN_TAKE` gives only
-    /// its head (at least `MIN_TAKE` bytes); its rest moves down in place,
-    /// so no second buffer of the extent is made.
-    pub fn take(&mut self, free: usize) -> Vec<(u64, Vec<u8>)> {
+    /// The generation (see the field). A new overlay, also one made after a
+    /// publish, starts past every generation before it.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The pieces `take(free)` would take, as `(start, len)`, with no change.
+    /// In offset order from the sweep point, then from 0; a whole extent
+    /// frees its capacity plus `EXTENT_OVERHEAD`; a split head (at least
+    /// `MIN_TAKE` bytes) is always the last piece.
+    fn select(&self, free: usize) -> Vec<(u64, usize)> {
         let mut out = Vec::new();
-        let start = self.cost;
-        while start.saturating_sub(self.cost) < free && !self.extents.is_empty() {
-            let Some(s) = self.extents.range(self.sweep..).next().map(|(&s, _)| s) else {
-                self.sweep = 0;
-                continue;
-            };
-            let need = free - start.saturating_sub(self.cost);
-            let mut v = self.remove(s);
+        let mut freed = 0usize;
+        for (&s, v) in self.extents.range(self.sweep..).chain(self.extents.range(..self.sweep)) {
+            if freed >= free {
+                break;
+            }
+            let need = free - freed;
             if v.len() > need.saturating_add(MIN_TAKE) {
-                let k = need.max(MIN_TAKE);
+                out.push((s, need.max(MIN_TAKE)));
+                break;
+            }
+            freed += v.capacity() + EXTENT_OVERHEAD;
+            out.push((s, v.len()));
+        }
+        out
+    }
+
+    /// Remove the pieces `sel` (heads of extents, from `select`) and return
+    /// their bytes. The sweep point goes to the end of the last piece.
+    fn cut(&mut self, sel: &[(u64, usize)]) -> Vec<(u64, Vec<u8>)> {
+        let mut out = Vec::with_capacity(sel.len());
+        for &(s, k) in sel {
+            let mut v = self.remove(s);
+            if k < v.len() {
                 let head = v[..k].to_vec();
                 v.drain(..k);
                 v.shrink_to_fit();
@@ -87,7 +118,38 @@ impl Overlay {
                 out.push((s, v));
             }
         }
+        if !sel.is_empty() {
+            self.generation = next_gen();
+        }
         out
+    }
+
+    /// A copy of what `take(free)` would take, with no change (Phase A of a
+    /// rebase step, D-02). Memory: about `max(free, MIN_TAKE)` bytes, never
+    /// the whole overlay (#98).
+    pub fn copy_step(&self, free: usize) -> Vec<(u64, Vec<u8>)> {
+        self.select(free).into_iter().map(|(s, k)| (s, self.extents[&s][..k].to_vec())).collect()
+    }
+
+    /// The pieces `take(free)` would take, as `(start, len)`, with no copy.
+    pub fn step_ranges(&self, free: usize) -> Vec<(u64, usize)> {
+        self.select(free)
+    }
+
+    /// Remove exactly the pieces `copied` (from `copy_step` or `step_ranges`
+    /// at the current generation), as `take` would.
+    pub fn discard(&mut self, copied: &[(u64, usize)]) {
+        self.cut(copied);
+    }
+
+    /// Take extents out until at least `free` bytes of cost are freed (or no
+    /// extent is left): in offset order from the sweep point, then from 0.
+    /// An extent longer than what is still needed plus `MIN_TAKE` gives only
+    /// its head (at least `MIN_TAKE` bytes); its rest moves down in place,
+    /// so no second buffer of the extent is made.
+    pub fn take(&mut self, free: usize) -> Vec<(u64, Vec<u8>)> {
+        let sel = self.select(free);
+        self.cut(&sel)
     }
 
     /// The sweep point (see `take`).
@@ -98,6 +160,7 @@ impl Overlay {
     /// Set the sweep point (an overlay on a new base goes on from the old one).
     pub fn set_sweep(&mut self, at: u64) {
         self.sweep = at;
+        self.generation = next_gen();
     }
 
     /// All extents, in offset order (they move out, no copy).
@@ -119,6 +182,7 @@ impl Overlay {
         if data.is_empty() {
             return;
         }
+        self.generation = next_gen();
         let end = off + data.len() as u64;
         // Extents that overlap or touch [off, end]: they start at or before
         // `end` and end at or after `off`.
@@ -163,6 +227,7 @@ impl Overlay {
     /// Set the size to `n`: drop the extents at or past `n`, cut the one
     /// across `n`, and hide the base past `n`. Growing adds zeros.
     pub fn truncate(&mut self, n: u64) {
+        self.generation = next_gen();
         let past: Vec<u64> = self.extents.range(n..).map(|(&s, _)| s).collect();
         for s in past {
             self.remove(s);
@@ -178,6 +243,28 @@ impl Overlay {
         }
         self.visible = self.visible.min(n);
         self.size = n;
+    }
+
+    /// The cost after `write(off, len bytes)`, with no change: the same
+    /// merge and growth rule as `put` (for the hard-cap gate of a write).
+    pub fn cost_after(&self, off: u64, len: usize) -> usize {
+        if len == 0 {
+            return self.cost;
+        }
+        let end = off + len as u64;
+        let mut freed = 0usize;
+        let (mut lo, mut lo_cap, mut last_end) = (None, 0usize, end);
+        for (&s, v) in self.extents.range(..=end).rev().take_while(|&(&s, v)| s + v.len() as u64 >= off) {
+            freed += v.capacity() + EXTENT_OVERHEAD;
+            (lo, lo_cap) = (Some(s), v.capacity());
+            last_end = last_end.max(s + v.len() as u64);
+        }
+        let Some(lo) = lo else { return self.cost + len + EXTENT_OVERHEAD };
+        let start = lo.min(off);
+        let cap = if lo == start { lo_cap } else { 0 };
+        let need = (last_end - start) as usize;
+        let grown = if need > cap { need.max(cap + cap / GROW_DIV) } else { cap };
+        self.cost - freed + grown + EXTENT_OVERHEAD
     }
 
     /// RAM charged to this overlay: extent buffers plus `EXTENT_OVERHEAD` each.
@@ -410,6 +497,18 @@ mod tests {
     }
 
     #[test]
+    fn cost_after_predicts_the_cost_of_a_write() {
+        let mut ov = Overlay::new(None, 0, 1 << 20);
+        let writes: [(u64, usize); 8] =
+            [(4096, 100), (0, 4096), (4196, 50_000), (200_000, 10), (54_196, 9000), (100, 200_000), (300_000, 1), (299_999, 3)];
+        for (off, len) in writes {
+            let want = ov.cost_after(off, len);
+            ov.write(off, &vec![7u8; len]);
+            assert_eq!(ov.cost(), want, "write at {off} of {len}");
+        }
+    }
+
+    #[test]
     fn a_growing_extent_does_not_double_its_capacity() {
         // One extent that grows in order. Its cost (capacity) must follow its
         // length, so the dirty limit bounds the RAM and not 2x the limit.
@@ -502,6 +601,65 @@ mod tests {
                 back.put(o, v);
             }
             assert!(read(&back, &[], 0, size) == whole, "seed {seed}: bytes changed");
+        }
+    }
+
+    /// Every change moves the generation; a copy does not (D-02).
+    #[test]
+    fn every_change_moves_gen_and_a_copy_does_not() {
+        let mut ov = Overlay::new(None, 0, 0);
+        let mut last = ov.generation();
+        let moved = |ov: &Overlay, what: &str, last: &mut u64| {
+            assert!(ov.generation() > *last, "{what} must move gen");
+            *last = ov.generation();
+        };
+        ov.put(0, vec![1; 100 << 10]);
+        moved(&ov, "put", &mut last);
+        ov.write(200 << 10, &[2; 4096]);
+        moved(&ov, "write", &mut last);
+        ov.truncate(250 << 10);
+        moved(&ov, "truncate", &mut last);
+        ov.set_sweep(0);
+        moved(&ov, "set_sweep", &mut last);
+        let copied = ov.copy_step(4096);
+        assert_eq!(ov.generation(), last, "copy_step must not move gen");
+        let pieces: Vec<(u64, usize)> = copied.iter().map(|(o, v)| (*o, v.len())).collect();
+        assert_eq!(ov.step_ranges(4096), pieces);
+        ov.discard(&pieces);
+        moved(&ov, "discard", &mut last);
+        ov.take(4096);
+        moved(&ov, "take", &mut last);
+        let fresh = Overlay::new(None, 0, 0);
+        assert!(fresh.generation() > last && ov.empty_like().generation() > fresh.generation(), "a new overlay starts past every gen");
+    }
+
+    /// `copy_step` returns what `take` takes, and `discard` of those pieces
+    /// leaves the overlay as `take` leaves it (ranges, cost, sweep, bytes).
+    #[test]
+    fn a_copy_then_discard_at_one_gen_equals_take() {
+        for seed in 1..=4u64 {
+            let mut r = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let (mut a, mut b) = (Overlay::new(None, 0, 0), Overlay::new(None, 0, 0));
+            for _ in 0..300 {
+                let off = r.below(8 << 20);
+                let n = if r.below(10) == 0 { 1 + r.below(1 << 20) as usize } else { 1 + r.below(8192) as usize };
+                let data = r.bytes(n);
+                a.write(off, &data);
+                b.write(off, &data);
+            }
+            while a.extent_count() > 0 {
+                let free = 1 + r.below(512 << 10) as usize;
+                let g0 = b.generation();
+                let copied = b.copy_step(free);
+                assert_eq!(b.generation(), g0);
+                let taken = a.take(free);
+                assert!(copied == taken, "seed {seed}: copy_step differs from take");
+                let pieces: Vec<(u64, usize)> = copied.iter().map(|(o, v)| (*o, v.len())).collect();
+                b.discard(&pieces);
+                assert_eq!(a.extent_ranges(), b.extent_ranges(), "seed {seed}");
+                assert_eq!((a.cost(), a.sweep()), (b.cost(), b.sweep()), "seed {seed}");
+                assert!(read(&a, &[], 0, a.size) == read(&b, &[], 0, b.size), "seed {seed}: bytes");
+            }
         }
     }
 

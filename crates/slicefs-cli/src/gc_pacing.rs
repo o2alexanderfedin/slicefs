@@ -28,7 +28,9 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use chunk_store::sync::{Mutex, Rank};
 use std::time::{Duration, Instant};
 
 /// Above this free ratio: yield to writes.
@@ -156,6 +158,9 @@ pub struct WritePacer<'a> {
     clock: Box<dyn Clock + 'a>,
     cap: Duration,
     stop: &'a AtomicBool,
+    /// A leaf lock. The chunk store calls the pacer with its `gc` lock held,
+    /// so this has the store rank (a short-map rank would be taken after a
+    /// store-rank lock).
     state: Mutex<State>,
 }
 
@@ -173,12 +178,12 @@ impl<'a> WritePacer<'a> {
         let count = writes.load(Ordering::Relaxed);
         let now = clock.now();
         let state = State { count, changed: None, waited: Duration::ZERO, free: 1.0, free_at: None, period: (now, count) };
-        WritePacer { writes, free, clock, cap, stop, state: Mutex::new(state) }
+        WritePacer { writes, free, clock, cap, stop, state: Mutex::new(Rank::Store, state) }
     }
 
     /// The total time this pacer waited.
     pub fn waited(&self) -> Duration {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).waited
+        self.state.lock().waited
     }
 
     fn mode(&self, s: &mut State, now: Duration) -> Mode {
@@ -240,7 +245,7 @@ impl<'a> WritePacer<'a> {
 
 impl chunk_store::GcPacer for WritePacer<'_> {
     fn at_safe_point(&self) {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.state.lock();
         let now = self.clock.now();
         match self.mode(&mut s, now) {
             Mode::FullSpeed => {}

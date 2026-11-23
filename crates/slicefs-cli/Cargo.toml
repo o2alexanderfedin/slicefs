@@ -13,6 +13,8 @@ path = "src/main.rs"
 [features]
 # Lock hold and wait times in the stress harness report.
 lock-stats = ["chunk-store/lock-stats", "metadata/lock-stats"]
+# Lock cycle detection and the harness watchdog (stress builds).
+deadlock-detect = ["chunk-store/deadlock-detect", "metadata/deadlock-detect"]
 
 [dependencies]
 slicefs-traits       = { path = "../slicefs-traits" }
@@ -27,6 +29,7 @@ tracing        = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
 sha2-compress  = { workspace = true }
+parking_lot    = { workspace = true }
 
 [dev-dependencies]
 # Registers a second hasher (`chunk_store::hash::TestKeyedBlake3`) for tests

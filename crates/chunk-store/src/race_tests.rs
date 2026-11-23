@@ -24,7 +24,7 @@ fn data(i: u8) -> Vec<u8> {
 fn set_hook(s: &ChunkStore, ran: &Arc<AtomicBool>, f: impl FnOnce(&ChunkStore) + Send + 'static) {
     let ran = Arc::clone(ran);
     let mut f = Some(f);
-    *s.after_lookup.lock().unwrap() = Some(Box::new(move |s: &ChunkStore| {
+    *s.after_lookup.lock() = Some(Box::new(move |s: &ChunkStore| {
         (f.take().unwrap())(s);
         ran.store(true, Ordering::SeqCst);
     }));
@@ -107,7 +107,7 @@ fn a_put_hit_without_a_gc_writes_nothing() {
 fn set_merge_hook(s: &ChunkStore, ran: &Arc<AtomicBool>, f: impl FnOnce(&ChunkStore) + Send + 'static) {
     let ran = Arc::clone(ran);
     let mut f = Some(f);
-    *s.after_merge_write.lock().unwrap() = Some(Box::new(move |s: &ChunkStore| {
+    *s.after_merge_write.lock() = Some(Box::new(move |s: &ChunkStore| {
         (f.take().unwrap())(s);
         ran.store(true, Ordering::SeqCst);
     }));
@@ -290,7 +290,7 @@ impl Files {
 fn at_pass(s: &ChunkStore, pass: u32, ran: &Arc<AtomicBool>, f: impl FnOnce(&ChunkStore) + Send + 'static) {
     let ran = Arc::clone(ran);
     let mut f = Some(f);
-    *s.gc_pass_hook.lock().unwrap() = Some(Box::new(move |s: &ChunkStore, p: u32| {
+    *s.gc_pass_hook.lock() = Some(Box::new(move |s: &ChunkStore, p: u32| {
         if p == pass {
             if let Some(f) = f.take() {
                 f(s);
@@ -405,8 +405,8 @@ fn the_store_lock_is_free_during_the_gc_passes() {
     let (ran1, ran2) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
     let (r1, r2) = (Arc::clone(&ran1), Arc::clone(&ran2));
     let dx2 = dx.clone();
-    *s.gc_pass_hook.lock().unwrap() = Some(Box::new(move |s: &ChunkStore, pass: u32| {
-        assert!(s.inner.try_lock().is_ok(), "pass {pass}: the store lock is free");
+    *s.gc_pass_hook.lock() = Some(Box::new(move |s: &ChunkStore, pass: u32| {
+        assert!(s.inner.try_lock().is_some(), "pass {pass}: the store lock is free");
         assert_eq!(s.put(&blob(20_000 + pass as u64)).unwrap(), s.hasher().id(&blob(20_000 + pass as u64)));
         if pass == 2 {
             // A dedup hit on a planned victim: it touches X.
@@ -492,7 +492,7 @@ fn an_object_put_in_an_early_group_keeps_its_pack_in_a_later_group() {
     let b = s.gc_begin().unwrap();
     let st = s.gc_finish(&live, b).unwrap();
     assert!(ran.load(Ordering::SeqCst), "the hook ran in the pass of the first group");
-    assert!(s.inner.lock().unwrap().touched.is_none(), "the touched set ends with the GC");
+    assert!(s.inner.lock().touched.is_none(), "the touched set ends with the GC");
     let kept = |i: usize| live.contains(&objs[i].0) || packs[i] == x_pack;
     for (i, (id, d)) in objs.iter().enumerate() {
         assert_eq!(s.get(id).as_ref() == Some(d), kept(i), "object {i} in pack {}", packs[i]);
@@ -523,14 +523,14 @@ fn an_object_put_in_a_later_group_keeps_its_pack() {
     let x_pack = packs[xi];
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let c = Arc::clone(&calls);
-    *s.gc_pass_hook.lock().unwrap() = Some(Box::new(move |s: &ChunkStore, pass: u32| {
+    *s.gc_pass_hook.lock() = Some(Box::new(move |s: &ChunkStore, pass: u32| {
         if pass == 2 && c.fetch_add(1, Ordering::SeqCst) == 1 {
             assert_eq!(s.put(&dx).unwrap(), x);
         }
     }));
     let b = s.gc_begin().unwrap();
     let st = s.gc_finish(&live, b).unwrap();
-    *s.gc_pass_hook.lock().unwrap() = None;
+    *s.gc_pass_hook.lock() = None;
     assert!(calls.load(Ordering::SeqCst) >= 3, "more than two groups");
     let kept = |i: usize| live.contains(&objs[i].0) || packs[i] == x_pack;
     for (i, (id, d)) in objs.iter().enumerate() {
@@ -555,7 +555,7 @@ fn a_read_error_in_a_later_group_leaves_the_earlier_groups_done() {
     let live = one_in_four(&objs);
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (c, m) = (Arc::clone(&calls), mem.clone());
-    *s.gc_pass_hook.lock().unwrap() = Some(Box::new(move |_: &ChunkStore, pass: u32| {
+    *s.gc_pass_hook.lock() = Some(Box::new(move |_: &ChunkStore, pass: u32| {
         if pass == 2 && c.fetch_add(1, Ordering::SeqCst) == 1 {
             m.fail_reads_after(1);
         }
@@ -563,10 +563,10 @@ fn a_read_error_in_a_later_group_leaves_the_earlier_groups_done() {
     let b = s.gc_begin().unwrap();
     let r = s.gc_finish(&live, b);
     mem.clear_fail_reads_after();
-    *s.gc_pass_hook.lock().unwrap() = None;
+    *s.gc_pass_hook.lock() = None;
     assert_eq!(calls.load(Ordering::SeqCst), 2, "the GC stopped in the pass of the second group");
     assert!(matches!(r, Err(crate::Error::Io(_))), "{r:?}");
-    assert!(s.inner.lock().unwrap().touched.is_none(), "the touched set ends with the GC");
+    assert!(s.inner.lock().touched.is_none(), "the touched set ends with the GC");
     let check = |s: &ChunkStore, what: &str| {
         let mut gone = 0;
         for (i, (id, d)) in objs.iter().enumerate() {

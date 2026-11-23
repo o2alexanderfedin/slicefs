@@ -20,7 +20,7 @@ use std::io;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,8 @@ mod locality;
 pub mod lock_stats;
 #[cfg(test)]
 mod locality_tests;
+#[cfg(test)]
+mod lock_tail_tests;
 mod mark;
 pub mod pack_io;
 #[cfg(test)]
@@ -40,11 +42,13 @@ mod race_tests;
 pub mod retry;
 mod run;
 pub mod mem;
+pub mod sync;
 
 use crate::lock_stats::Site;
+use crate::sync::{Condvar, Mutex, MutexGuard, Rank};
 use crate::index::{Counts, Hwm, Index, MergeOut, Snapshot};
 use crate::run::Run;
-use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PUNCH_BLOCK, SyncWait};
+use crate::pack_io::{FileIo, Kind, PackFile, PackIo, PackRead, PackSync, PackWrite, PUNCH_BLOCK, SyncWait};
 pub use crate::locality::LocalityStats;
 use crate::locality::LocalityCache;
 pub use crate::mark::{LiveFilter, LiveSet, LIVE_FILTER_BITS};
@@ -299,6 +303,36 @@ const COPY_BATCH: usize = 1024;
 /// Objects smaller than this are not compressed.
 const MIN_COMPRESS: usize = 64;
 
+/// The longest wait of a store call for a slow job of another thread (a
+/// seal, a pack create, a background sync). At the limit the call fails
+/// with an I/O error of kind `TimedOut`; the store is not failed, since
+/// nothing was lost.
+const STORE_WAIT: Duration = Duration::from_secs(10);
+
+/// The error of a wait that reached `STORE_WAIT`.
+fn timed_out(what: &str) -> Error {
+    let msg = format!("the chunk store waited {} s for {what}", STORE_WAIT.as_secs());
+    Error::Io(io::Error::new(io::ErrorKind::TimedOut, StoreWaitTimeout(msg)))
+}
+
+/// The inner error of `timed_out`: a caller tells it from a disk error,
+/// which fails the store.
+#[derive(Debug)]
+struct StoreWaitTimeout(String);
+
+impl std::fmt::Display for StoreWaitTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StoreWaitTimeout {}
+
+/// True for an error of `timed_out`.
+fn is_store_wait(e: &Error) -> bool {
+    matches!(e, Error::Io(e) if e.get_ref().is_some_and(|r| r.is::<StoreWaitTimeout>()))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Loc {
     pack: u64,
@@ -335,6 +369,38 @@ struct Scratch {
 thread_local! {
     static SCRATCH: std::cell::RefCell<Scratch> =
         const { std::cell::RefCell::new(Scratch { zstd: None, compressed: Vec::new(), record: Vec::new() }) };
+}
+
+thread_local! {
+    /// The progress count of the caller on this thread (see `with_progress`).
+    static PROGRESS: std::cell::RefCell<Option<Arc<std::sync::atomic::AtomicU64>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `count` as the progress count of this thread: each put and
+/// each read of a [`ChunkStore`] on this thread adds 1 to it, and so does
+/// each store wait of a put that ends in time. Another thread that waits
+/// for `f` can so tell a slow `f` (the count moves) from a stuck one. Every
+/// store wait ends within `STORE_WAIT`.
+pub fn with_progress<R>(count: &Arc<std::sync::atomic::AtomicU64>, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<Arc<std::sync::atomic::AtomicU64>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let old = self.0.take();
+            PROGRESS.with(|p| *p.borrow_mut() = old);
+        }
+    }
+    let _restore = Restore(PROGRESS.with(|p| p.borrow_mut().replace(Arc::clone(count))));
+    f()
+}
+
+/// Add 1 to the progress count of this thread, if it has one.
+fn note_progress() {
+    PROGRESS.with(|p| {
+        if let Some(c) = &*p.borrow() {
+            c.fetch_add(1, Ordering::Relaxed);
+        }
+    });
 }
 
 impl Scratch {
@@ -575,6 +641,36 @@ struct Active {
     entries: Vec<(ObjectId, Loc)>,
     /// Bytes appended since the last sync.
     dirty: bool,
+    /// A handle that syncs the pack with no store lock held (`None`: the
+    /// file has none; then a sync runs under the lock).
+    sync: Option<Arc<dyn PackSync>>,
+    /// Appends so far: a sync with no lock clears `dirty` only if none came
+    /// after its start.
+    published: u64,
+    /// A handle that writes records with no store lock held (`None`: the
+    /// file has none; then a put writes under the lock).
+    writer: Option<Arc<dyn PackWrite>>,
+    /// The record write of a put that runs now with no store lock, at
+    /// `len` (at most one per pack, see `append_locked`), and the signal of
+    /// its end.
+    writing: Option<SyncWait>,
+}
+
+impl Active {
+    fn new(num: u64, file: Box<dyn PackFile>, len: u64, entries: Vec<(ObjectId, Loc)>, dirty: bool) -> Self {
+        let sync = file.sync_handle();
+        let writer = file.writer();
+        Active { num, file, len, entries, dirty, sync, published: 0, writer, writing: None }
+    }
+}
+
+/// A sync that runs with no store lock (see `ChunkStore::sync`): what it
+/// syncs, and the marks that say which flags it may clear after.
+struct SyncJob {
+    /// The active pack: its number, its `published` count, its handle.
+    pack: Option<(u64, u64, Arc<dyn PackSync>)>,
+    /// The directory: `Inner::created` at the start.
+    dir: Option<u64>,
 }
 
 struct Inner {
@@ -588,12 +684,16 @@ struct Inner {
     tick: u64,
     active: Option<Active>,
     next_pack: u64,
-    /// The durable trust floor (the `TRUST` file, see `locality.rs`);
-    /// `None` if the open could not read it.
+    /// The durable trust floor (the `TRUST` file, see `locality.rs`) read at
+    /// open; `None` if the open could not read it. After the open
+    /// `ChunkStore::trust` has it.
     trust_floor: Option<u64>,
     stats: Stats,
     /// A pack file was created since the last directory sync.
     dir_dirty: bool,
+    /// Pack files created so far: a directory sync with no lock clears
+    /// `dir_dirty` only if none came after its start.
+    created: u64,
     /// While a GC runs: every object put or read since `gc_begin`. GC keeps
     /// them even if its mark did not find them.
     touched: Option<Touched>,
@@ -605,6 +705,22 @@ struct Inner {
     merge: Arc<MergeCtl>,
     /// The seal that runs in the background, if any (see `ChunkStore::seal`).
     sealing: Option<Sealing>,
+    /// A `put` creates the pack file with this number now, with no store
+    /// lock held, and signals the end (see `ChunkStore::prepare_append`).
+    /// The number is taken from `next_pack`.
+    creating: Option<(u64, SyncWait)>,
+    /// A flush runs now (see `ChunkStore::flush_if_full`), and signals its
+    /// end: one flush at a time, and no GC install meanwhile.
+    flushing: Option<SyncWait>,
+}
+
+/// A slow step that `put` does without the store lock before its append
+/// (see `ChunkStore::prepare_append`).
+enum Before {
+    /// Wait for this signal, then look again.
+    Wait(SyncWait),
+    /// Create the pack file with this number, then install it and signal.
+    Create(u64, SyncWait),
 }
 
 /// A seal in a background thread, and the signal of its end (a wait on it
@@ -734,15 +850,23 @@ pub struct ChunkStore {
     gc_timing: Mutex<GcTiming>,
     /// The locality cache of `put` (see `locality.rs`).
     locality: LocalityCache,
+    /// The durable trust floor (`None`: unknown). Held across the write of
+    /// the `TRUST` file, with no store lock (LOCK-01): one writer at a time,
+    /// so the file never goes back to a lower floor.
+    trust: Mutex<Option<u64>>,
     /// Test hook: `gc_finish` calls it at the start of its pass 1 (with 1)
     /// and of its pass 2 (with 2), with no store lock held (see
     /// `race_tests.rs`).
     #[cfg(test)]
     gc_pass_hook: Mutex<Option<PassHook>>,
+    /// Test counter: the times a `put` began to wait for a slow operation of
+    /// another thread (a seal, a pack create, a background sync, a flush;
+    /// see `lock_tail_tests.rs`).
+    #[cfg(test)]
+    waits: std::sync::atomic::AtomicUsize,
 }
 
 /// The merge state that the store shares with its merge thread.
-#[derive(Default)]
 struct MergeCtl {
     /// One merge at a time: held for a whole merge step. Lock order: this
     /// lock, then the store lock. `state` is a leaf lock: nothing else is
@@ -769,9 +893,20 @@ struct MergeState {
     idle_check: bool,
 }
 
+impl Default for MergeCtl {
+    fn default() -> Self {
+        MergeCtl {
+            step: Mutex::new(Rank::Store, ()),
+            stop: AtomicBool::new(false),
+            state: Mutex::new(Rank::Store, MergeState::default()),
+            cv: Condvar::new(),
+        }
+    }
+}
+
 impl MergeCtl {
-    fn state(&self) -> std::sync::MutexGuard<'_, MergeState> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    fn state(&self) -> MutexGuard<'_, MergeState> {
+        self.state.lock()
     }
 
     /// A flush wrote a run: the thread looks for a merge.
@@ -856,9 +991,9 @@ impl Merger {
     /// the runs are derived data.
     fn step(&self, policy: Policy, stop: &AtomicBool, between: &mut dyn FnMut()) -> Result<bool> {
         let (io, index) = (&*self.io, &*self.index);
-        let _one = self.ctl.step.lock().unwrap();
+        let _one = self.ctl.step.lock();
         let plan = {
-            let inner = lock_stats::lock(&self.inner, Site::Store);
+            let inner = self.inner.lock();
             if inner.failed {
                 return Ok(false);
             }
@@ -877,7 +1012,7 @@ impl Merger {
             Ok(None) => return Ok(false),
             Err(e) => {
                 if let Error::Corrupt(m) = &e {
-                    let _inner = lock_stats::lock(&self.inner, Site::Store);
+                    let _inner = self.inner.lock();
                     if !index.rebuild_requested() {
                         if let Err(e) = index.request_rebuild(io, m) {
                             tracing::warn!("chunk store: cannot ask for a rebuild of the index: {e}");
@@ -889,7 +1024,7 @@ impl Merger {
         };
         between();
         let gone = {
-            let inner = lock_stats::lock(&self.inner, Site::Store);
+            let inner = self.inner.lock();
             if inner.failed {
                 drop(inner);
                 if let MergeOut::Run(r) = out {
@@ -960,7 +1095,7 @@ impl Merger {
             let delay = match self.cfg.idle_after {
                 Some(d) if s.idle_check => d,
                 _ => {
-                    s = ctl.cv.wait(s).unwrap_or_else(|e| e.into_inner());
+                    ctl.cv.wait(&mut s);
                     continue;
                 }
             };
@@ -986,7 +1121,7 @@ impl Merger {
                 if left.is_zero() || s.pending || ctl.stop.load(Ordering::SeqCst) {
                     break;
                 }
-                s = ctl.cv.wait_timeout(s, left).unwrap_or_else(|e| e.into_inner()).0;
+                ctl.cv.wait_for(&mut s, left);
                 if (self.index.mem_len(), self.index.gen()) != mark {
                     idle = false;
                     break;
@@ -1011,7 +1146,8 @@ type PassHook = Box<dyn FnMut(&ChunkStore, u32) + Send>;
 
 impl ChunkStore {
     fn new(io: Arc<dyn PackIo>, punches: bool, opts: Options, inner: Inner) -> Self {
-        let floor = inner.trust_floor.unwrap_or(u64::MAX);
+        let trust_floor = inner.trust_floor;
+        let floor = trust_floor.unwrap_or(u64::MAX);
         // Packs from here on have no `.idx` yet (the active pack).
         let unsealed = inner.active.as_ref().map_or(inner.next_pack, |a| a.num);
         let s = ChunkStore {
@@ -1020,18 +1156,21 @@ impl ChunkStore {
             zstd_level: AtomicI32::new(opts.zstd_level),
             index: Arc::clone(&inner.index),
             merge: Arc::clone(&inner.merge),
-            inner: Arc::new(Mutex::new(inner)),
-            merge_thread: Mutex::new(None),
+            inner: Arc::new(Mutex::new(Rank::Store, inner).timed(Site::Store)),
+            merge_thread: Mutex::new(Rank::Store, None),
             opts,
             #[cfg(test)]
-            after_lookup: Mutex::new(None),
+            after_lookup: Mutex::new(Rank::Store, None),
             #[cfg(test)]
-            after_merge_write: Mutex::new(None),
-            gc: Mutex::new(()),
-            gc_timing: Mutex::new(GcTiming::default()),
+            after_merge_write: Mutex::new(Rank::Store, None),
+            gc: Mutex::new(Rank::Store, ()),
+            gc_timing: Mutex::new(Rank::Store, GcTiming::default()),
             locality: LocalityCache::default(),
+            trust: Mutex::new(Rank::Store, trust_floor),
             #[cfg(test)]
-            gc_pass_hook: Mutex::new(None),
+            gc_pass_hook: Mutex::new(Rank::Store, None),
+            #[cfg(test)]
+            waits: Default::default(),
         };
         s.locality.forget_below(floor);
         s.locality.sealed_below(unsealed);
@@ -1051,7 +1190,7 @@ impl ChunkStore {
         }
         let m = self.merger();
         match std::thread::Builder::new().name("chunk-store-merge".into()).spawn(move || m.run()) {
-            Ok(h) => *self.merge_thread.lock().unwrap() = Some(h),
+            Ok(h) => *self.merge_thread.lock() = Some(h),
             Err(e) => {
                 // The store works without it: the runs only stay more.
                 tracing::warn!("chunk store: cannot start the index merge thread: {e}");
@@ -1065,7 +1204,7 @@ impl ChunkStore {
     /// store lock: the thread may wait for it.
     fn stop_merges(&self) {
         self.merge.request_stop();
-        let h = self.merge_thread.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let h = self.merge_thread.lock().take();
         if let Some(h) = h {
             if h.join().is_err() {
                 tracing::warn!("chunk store: the index merge thread panicked");
@@ -1081,7 +1220,7 @@ impl ChunkStore {
     pub fn wait_index_idle(&self) {
         let mut s = self.merge.state();
         while s.running && (s.pending || s.busy) {
-            s = self.merge.cv.wait(s).unwrap_or_else(|e| e.into_inner());
+            self.merge.cv.wait(&mut s);
         }
     }
 
@@ -1098,7 +1237,7 @@ impl ChunkStore {
             if left.is_zero() {
                 return false;
             }
-            s = self.merge.cv.wait_timeout(s, left).unwrap_or_else(|e| e.into_inner()).0;
+            self.merge.cv.wait_for(&mut s, left);
         }
         true
     }
@@ -1107,18 +1246,31 @@ impl ChunkStore {
     fn after_merge_write(&self) {
         #[cfg(test)]
         {
-            let hook = self.after_merge_write.lock().unwrap().take();
+            let hook = self.after_merge_write.lock().take();
             if let Some(mut f) = hook {
                 f(self);
             }
         }
     }
 
+    /// Count a wait of a `put` for a slow operation (see `waits`); nothing
+    /// outside tests.
+    fn note_wait(&self) {
+        #[cfg(test)]
+        self.waits.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// See `waits`.
+    #[cfg(test)]
+    pub(crate) fn test_waits(&self) -> usize {
+        self.waits.load(Ordering::SeqCst)
+    }
+
     /// The test hook (see `after_lookup`); nothing outside tests.
     fn after_lookup(&self) {
         #[cfg(test)]
         {
-            let hook = self.after_lookup.lock().unwrap().take();
+            let hook = self.after_lookup.lock().take();
             if let Some(mut f) = hook {
                 f(self);
             }
@@ -1223,10 +1375,13 @@ impl ChunkStore {
                 packs: nums.len() as u64,
             },
             dir_dirty: false,
+            created: 0,
             touched: None,
             failed: false,
             merge: Arc::new(MergeCtl::default()),
             sealing: None,
+            creating: None,
+            flushing: None,
         };
         let limit = opts.index_memtable_limit.max(1);
         let last = nums.last().copied();
@@ -1295,7 +1450,7 @@ impl ChunkStore {
             if let Some((file, len)) = active {
                 // The pack keeps all its entries (for its `.idx` at seal);
                 // only the memtable skips those below the hwm.
-                inner.active = Some(Active { num, file, len, entries, dirty: false });
+                inner.active = Some(Active::new(num, file, len, entries, false));
                 continue;
             }
             if !opts.read_only && inner.index.mem_len() >= limit {
@@ -1328,6 +1483,7 @@ impl ChunkStore {
     /// touched (for a running GC) and checked under the lock in the same
     /// way.
     pub fn put(&self, data: &[u8]) -> Result<ObjectId> {
+        note_progress();
         if self.opts.read_only {
             return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
         }
@@ -1339,11 +1495,23 @@ impl ChunkStore {
         let found = self.dedup_lookup(&id)?;
         self.after_lookup();
         if found {
-            let mut inner = lock_stats::lock(&self.inner, Site::Store);
-            inner.touch(id);
-            if self.unchanged(gen, &id) || self.locked_lookup(&mut inner, &id)? {
-                return Ok(id);
+            let mut inner = self.inner.lock();
+            loop {
+                inner.touch(id);
+                if self.unchanged(gen, &id) {
+                    return Ok(id);
+                }
+                match self.locked_lookup(&inner, &id) {
+                    Ok(true) => return Ok(id),
+                    Ok(false) => break,
+                    Err(floor) => {
+                        drop(inner);
+                        self.raise_trust_floor(floor)?;
+                        inner = self.inner.lock();
+                    }
+                }
             }
+            drop(inner);
             // GC removed the object after the lookup: write it again.
         }
         if data.len() > u32::MAX as usize - REC_HEADER {
@@ -1359,17 +1527,72 @@ impl ChunkStore {
             let stored = payload.len() as u32;
 
             let r = (|| {
-                let mut inner = lock_stats::lock(&self.inner, Site::Store);
-                inner.touch(id);
-                // Another put of the same bytes, or a flush, merge or GC,
-                // since the lookup: look up again.
-                if !self.unchanged(gen, &id) && self.locked_lookup(&mut inner, &id)? {
-                    return Ok(id);
+                let mut inner = self.inner.lock();
+                loop {
+                    inner.touch(id);
+                    // Another put of the same bytes, or a flush, merge or GC,
+                    // since the lookup: look up again.
+                    if !self.unchanged(gen, &id) {
+                        match self.locked_lookup(&inner, &id) {
+                            Ok(true) => return Ok(id),
+                            Ok(false) => {}
+                            Err(floor) => {
+                                drop(inner);
+                                self.raise_trust_floor(floor)?;
+                                inner = self.inner.lock();
+                                continue;
+                            }
+                        }
+                    }
+                    inner.check()?;
+                    // The append needs a slow operation (a pack create, or a
+                    // wait for a seal or a background sync): do it without
+                    // the store lock, then start again (LOCK-01).
+                    match self.prepare_append(&mut inner, s.record.len()) {
+                        None => break,
+                        Some(Before::Wait(w)) => {
+                            drop(inner);
+                            self.note_wait();
+                            if !w.wait_timeout(STORE_WAIT) {
+                                return Err(timed_out("a pack create, a record write, a seal or a background sync"));
+                            }
+                            note_progress();
+                            inner = self.inner.lock();
+                        }
+                        Some(Before::Create(num, done)) => {
+                            drop(inner);
+                            let made = self.create_pack(num);
+                            inner = self.inner.lock();
+                            if let Some(spare) = self.install_pack(&mut inner, num, made, &done)? {
+                                drop(inner);
+                                drop(spare);
+                                // Best effort: an empty pack below the active
+                                // one is only removed by a later GC.
+                                let _ = self.io.remove(num, Kind::Pack);
+                                inner = self.inner.lock();
+                            }
+                        }
+                    }
                 }
-                inner.check()?;
-                let loc = self.append(&mut inner, &id, &s.record, stored, data.len() as u32, flags)?;
-                inner.add_new(id, loc);
-                self.flush_if_full(&mut inner)?;
+                // The record write runs with no store lock (LOCK-01), at the
+                // end of the pack; under the lock again it is published (see
+                // `append_locked` for the one-write rule).
+                let raw = data.len() as u32;
+                let seen = self.index.gen();
+                let Some((offset, writer, done)) = inner.begin_write() else {
+                    // The pack has no writer handle: write under the lock.
+                    let loc = self.append_locked(&mut inner, &id, &s.record, stored, raw, flags)?;
+                    inner.add_new(id, loc);
+                    drop(inner);
+                    self.flush_if_full()?;
+                    return Ok(id);
+                };
+                drop(inner);
+                let wrote = writer.write_at(&s.record, offset);
+                let mut inner = self.inner.lock();
+                self.publish(&mut inner, &id, &s.record, offset, (stored, raw, flags), (seen, wrote), &done)?;
+                drop(inner);
+                self.flush_if_full()?;
                 Ok(id)
             })();
             // Chunks and nodes are small; do not keep the buffers of a big object.
@@ -1395,7 +1618,8 @@ impl ChunkStore {
             Ok(Some(loc)) => loc,
             Ok(None) => return Ok(false),
             Err(_) => {
-                self.raise_trust_floor(&mut lock_stats::lock(&self.inner, Site::Store))?;
+                let floor = self.inner.lock().next_pack;
+                self.raise_trust_floor(floor)?;
                 return Ok(false);
             }
         };
@@ -1429,30 +1653,36 @@ impl ChunkStore {
         }
     }
 
-    /// The index lookup of `put` under the store lock. A failed lookup
-    /// counts as "not found" after it moved the trust floor (an error if it
-    /// could not): the object is written again, so a pack may then hold an
-    /// older copy that a later GC does not select when it removes the new
-    /// copy, and its `.idx` would still list the object (see `locality.rs`).
-    fn locked_lookup(&self, inner: &mut Inner, id: &ObjectId) -> Result<bool> {
+    /// The index lookup of `put` under the store lock: `Ok(found)`. A failed
+    /// lookup counts as "not found" after the trust floor is at least
+    /// `next_pack` (durable): the object is written again, so a pack may then
+    /// hold an older copy that a later GC does not select when it removes
+    /// the new copy, and its `.idx` would still list the object (see
+    /// `locality.rs`). If the floor is lower, `Err(floor)`: the caller drops
+    /// the store lock, calls `raise_trust_floor(floor)` and looks again.
+    fn locked_lookup(&self, inner: &Inner, id: &ObjectId) -> std::result::Result<bool, u64> {
         match inner.index.get(id) {
             Ok(l) => Ok(l.is_some()),
             Err(_) => {
-                self.raise_trust_floor(inner)?;
-                Ok(false)
+                let floor = inner.next_pack;
+                // A busy lock is a floor write now: raise it after it.
+                let durable = self.trust.try_lock().is_some_and(|t| t.is_some_and(|f| f >= floor));
+                if durable { Ok(false) } else { Err(floor) }
             }
         }
     }
 
     /// Before `put` writes an object again after a failed lookup: no pack
-    /// that exists now is trusted again, in this process or a later one.
-    /// The new floor is durable before the caller writes (see `locality.rs`).
-    fn raise_trust_floor(&self, inner: &mut Inner) -> Result<()> {
-        let floor = inner.next_pack;
+    /// below `floor` (the `next_pack` of the store at the failure: every
+    /// pack that exists then) is trusted again, in this process or a later
+    /// one. The new floor is durable before the caller writes (see
+    /// `locality.rs`). The caller holds no store lock (LOCK-01).
+    fn raise_trust_floor(&self, floor: u64) -> Result<()> {
         self.locality.forget_below(floor);
-        if inner.trust_floor.is_none_or(|f| floor > f) {
+        let mut durable = self.trust.lock();
+        if durable.is_none_or(|f| floor > f) {
             self.io.write_durable(0, Kind::Trust, &encode_trust_floor(floor))?;
-            inner.trust_floor = Some(floor);
+            *durable = Some(floor);
         }
         Ok(())
     }
@@ -1463,17 +1693,144 @@ impl ChunkStore {
         self.locality.stats()
     }
 
-    /// Append an encoded record to the active pack (made if there is none),
-    /// and seal the pack when it is full. Returns where the record is.
-    fn append(&self, inner: &mut Inner, id: &ObjectId, rec: &[u8], stored: u32, raw: u32, flags: u8) -> Result<Loc> {
+    /// What the append of a record of `len` bytes would do under the store
+    /// lock that is slow, if anything (LOCK-01): create the pack file (no
+    /// active pack), wait for the record write of another put (one in
+    /// flight per pack), wait for the seal of the previous pack (this
+    /// record fills the active pack), or wait for a background sync at
+    /// `KEEP_CAP` (see `retry.rs`). `put` does it without the lock and asks again; the
+    /// GC copies, under the lock, do not ask (they are not on the put and
+    /// read paths). For a create, the number is taken here and `creating`
+    /// is set: one create at a time, and other puts wait for it.
+    fn prepare_append(&self, inner: &mut Inner, len: usize) -> Option<Before> {
+        let Some(a) = inner.active.as_ref() else {
+            if let Some((_, w)) = &inner.creating {
+                return Some(Before::Wait(w.clone()));
+            }
+            let num = inner.next_pack;
+            inner.next_pack += 1;
+            let done = SyncWait::default();
+            inner.creating = Some((num, done.clone()));
+            return Some(Before::Create(num, done));
+        };
+        if let Some(w) = &a.writing {
+            return Some(Before::Wait(w.clone()));
+        }
+        if a.len + len as u64 >= self.opts.pack_limit {
+            // After its signal the seal thread only returns: the join under
+            // the lock then takes no time.
+            if let Some(s) = inner.sealing.as_ref().filter(|s| !s.done.is_done()) {
+                return Some(Before::Wait(s.done.clone()));
+            }
+        }
+        a.file.write_wait(len).map(Before::Wait)
+    }
+
+    /// A new pack file `num` with its header (no store lock held).
+    fn create_pack(&self, num: u64) -> Result<Box<dyn PackFile>> {
+        let mut file = self.io.create(num)?;
+        file.write_at(&pack_header(num), 0)?;
+        Ok(file)
+    }
+
+    /// Under the store lock after `create_pack`: end the create (wake the
+    /// puts that wait for it) and make the file the active pack. A GC copy
+    /// may have made an active pack meanwhile (under the lock); then the new
+    /// file is returned, for the caller to remove without the lock. Its
+    /// number is not used again.
+    fn install_pack(
+        &self,
+        inner: &mut Inner,
+        num: u64,
+        made: Result<Box<dyn PackFile>>,
+        done: &SyncWait,
+    ) -> Result<Option<Box<dyn PackFile>>> {
+        inner.creating = None;
+        done.done();
+        let file = made?;
+        if inner.active.is_some() {
+            return Ok(Some(file));
+        }
+        inner.active = Some(Active::new(num, file, PACK_HEADER as u64, Vec::new(), true));
+        inner.stats.packs += 1;
+        inner.dir_dirty = true;
+        inner.created += 1;
+        Ok(None)
+    }
+
+    /// Under the store lock after the record write of a put at `offset`
+    /// (see `Inner::begin_write`): end the write (wake the puts that wait
+    /// for it) and, if it worked, publish the record: the pack length, its
+    /// entry, the note to the retry layer, and the index. A failed write
+    /// publishes nothing, so the next write uses the same offset. Seals the
+    /// pack when it is full (no write is in flight then). `seen` is the
+    /// index generation in the hold that started the write.
+    ///
+    /// No GC copy runs while a write is in flight (they wait for none), so
+    /// the index has no current entry of `id` unless it changed since
+    /// `seen`; only then is it looked up again (with the lock, as the put
+    /// loop does). An entry found then is replaced by the new record (it is
+    /// the newest, as in `Inner::replay`) and not counted again.
+    #[allow(clippy::too_many_arguments)]
+    fn publish(
+        &self,
+        inner: &mut Inner,
+        id: &ObjectId,
+        rec: &[u8],
+        offset: u64,
+        (stored, raw, flags): (u32, u32, u8),
+        (seen, wrote): (u64, io::Result<()>),
+        done: &SyncWait,
+    ) -> Result<()> {
+        let a = inner.active.as_mut().expect("the pack of a record write in flight stays active");
+        a.writing = None;
+        done.done();
+        wrote?;
+        debug_assert_eq!(a.len, offset, "nothing moves the end of a pack with a write in flight");
+        let loc = Loc { pack: a.num, offset, stored, raw, flags };
+        a.len += rec.len() as u64;
+        a.entries.push((*id, loc));
+        a.file.note_written(offset, rec);
+        a.dirty = true;
+        a.published += 1;
+        let full = a.len >= self.opts.pack_limit;
+        if !self.unchanged(seen, id) && inner.index.get(id).ok().flatten().is_some() {
+            inner.index.insert(*id, loc);
+        } else {
+            inner.add_new(*id, loc);
+        }
+        if full {
+            self.seal(inner)?;
+        }
+        Ok(())
+    }
+
+    /// Append an encoded record to the active pack (made if there is none)
+    /// under the store lock, and seal the pack when it is full. Returns
+    /// where the record is. GC copies use it (they are not on the put and
+    /// read paths), and a put whose pack has no writer handle.
+    ///
+    /// A put writes its record with no store lock instead (LOCK-01; this
+    /// supersedes D-14, since on macOS a pwrite to the page cache waits
+    /// about 20 ms behind any F_FULLFSYNC of the volume, spike 19g). The
+    /// offset of a record is the end of the pack, given out under the lock.
+    /// At most one record write is in flight per pack, at its end, and the
+    /// pack length, its entries and the index move only when the write is
+    /// published under the lock (`publish`). So a pack never has a hole
+    /// before a later record, and the pack scans (`covers`, `scan_pack`,
+    /// `resync_scan`) and the hwm (`Inner::hwm_end`) need no change. The
+    /// callers that write or seal under the lock (this one for GC copies,
+    /// `gc_begin`, `close`) first wait with no lock for no write in flight.
+    fn append_locked(&self, inner: &mut Inner, id: &ObjectId, rec: &[u8], stored: u32, raw: u32, flags: u8) -> Result<Loc> {
         if inner.active.is_none() {
             let num = inner.next_pack;
             inner.next_pack += 1;
             let mut file = self.io.create(num)?;
             file.write_at(&pack_header(num), 0)?;
-            inner.active = Some(Active { num, file, len: PACK_HEADER as u64, entries: Vec::new(), dirty: true });
+            inner.active = Some(Active::new(num, file, PACK_HEADER as u64, Vec::new(), true));
             inner.stats.packs += 1;
             inner.dir_dirty = true;
+            inner.created += 1;
         }
         let a = inner.active.as_mut().unwrap();
         a.file.write_at(rec, a.len)?;
@@ -1481,6 +1838,7 @@ impl ChunkStore {
         a.len += rec.len() as u64;
         a.entries.push((*id, loc));
         a.dirty = true;
+        a.published += 1;
         if a.len >= self.opts.pack_limit {
             self.seal(inner)?;
         }
@@ -1491,8 +1849,8 @@ impl ChunkStore {
     /// sealed pack, and record from now on each object that is put or read.
     /// Returns the last pack number that the GC may change.
     pub fn gc_begin(&self) -> Result<u64> {
-        let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
-        let mut inner = lock_stats::lock(&self.inner, Site::Store);
+        let _one = self.gc.lock();
+        let mut inner = self.lock_no_create()?;
         inner.check()?;
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
             self.seal(&mut inner)?;
@@ -1503,13 +1861,42 @@ impl ChunkStore {
         Ok(inner.next_pack - 1)
     }
 
+    /// The store lock, with no pack create and no record write in flight:
+    /// a pack whose number is taken but whose file is not installed yet
+    /// would be at or below the boundary of `gc_begin` with no entries, so
+    /// `gc_select` would take it as unused and remove it; and `gc_begin`
+    /// seals the active pack. The wait runs without the store lock, at most
+    /// `STORE_WAIT`.
+    fn lock_no_create(&self) -> Result<MutexGuard<'_, Inner>> {
+        self.lock_when(|i| i.creating.as_ref().map(|c| c.1.clone()).or_else(|| i.writing()), "a pack create or a record write")
+    }
+
+    /// The store lock, with no record write in flight (see `append_locked`).
+    fn lock_no_write(&self) -> Result<MutexGuard<'_, Inner>> {
+        self.lock_when(Inner::writing, "a record write")
+    }
+
+    /// The store lock once `busy` gives no signal; each wait for a signal
+    /// runs without the lock, at most `STORE_WAIT`.
+    fn lock_when(&self, busy: impl Fn(&Inner) -> Option<SyncWait>, what: &str) -> Result<MutexGuard<'_, Inner>> {
+        loop {
+            let inner = self.inner.lock();
+            let Some(w) = busy(&inner) else { return Ok(inner) };
+            drop(inner);
+            if !w.wait_timeout(STORE_WAIT) {
+                return Err(timed_out(what));
+            }
+            note_progress();
+        }
+    }
+
     /// Start a full GC (see [`ChunkStore::gc_finish_full`]): as
     /// [`ChunkStore::gc_begin`], but the objects put or read from now on go
     /// to an exact set in temp files (bounded RAM), not to a Bloom filter.
     pub fn gc_begin_full(&self) -> Result<u64> {
         let dir = self.gc_tmp()?;
-        let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
-        let mut inner = lock_stats::lock(&self.inner, Site::Store);
+        let _one = self.gc.lock();
+        let mut inner = self.lock_no_create()?;
         inner.check()?;
         if inner.active.as_ref().is_some_and(|a| !a.entries.is_empty()) {
             self.seal(&mut inner)?;
@@ -1538,8 +1925,8 @@ impl ChunkStore {
 
     /// End a GC without deleting anything (for example after a failed mark).
     pub fn gc_abort(&self) {
-        let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
-        lock_stats::lock(&self.inner, Site::Store).touched = None;
+        let _one = self.gc.lock();
+        self.inner.lock().touched = None;
     }
 
     /// End a GC: remove every object of the packs up to `boundary` that is
@@ -1644,10 +2031,10 @@ impl ChunkStore {
 
     fn gc_finish_mark(&self, mark: Mark<'_>, boundary: u64, pacer: &dyn GcPacer) -> Result<GcStats> {
         let start = Instant::now();
-        let _one = self.gc.lock().unwrap_or_else(|e| e.into_inner());
+        let _one = self.gc.lock();
         let holds = Holds::default();
         let r = self.gc_run(mark, boundary, &holds, pacer);
-        *self.gc_timing.lock().unwrap() =
+        *self.gc_timing.lock() =
             GcTiming { lock_hold_max: holds.max.get(), lock_hold_total: holds.total.get(), wall: start.elapsed() };
         r
     }
@@ -1655,23 +2042,29 @@ impl ChunkStore {
     /// The store-lock holds and the time of the last `gc_finish` (zero
     /// before the first one).
     pub fn last_gc_timing(&self) -> GcTiming {
-        *self.gc_timing.lock().unwrap()
+        *self.gc_timing.lock()
     }
 
     /// The store lock, with the time it is held added to `holds`.
     fn held<'a>(&'a self, holds: &'a Holds) -> Held<'a> {
-        let g = lock_stats::lock(&self.inner, Site::Store);
+        let g = self.inner.lock();
         Held { g, at: Instant::now(), holds }
+    }
+
+    /// `held` with no record write in flight (for the GC copies).
+    fn held_no_write<'a>(&'a self, holds: &'a Holds) -> Result<Held<'a>> {
+        let g = self.lock_no_write()?;
+        Ok(Held { g, at: Instant::now(), holds })
     }
 
     /// The GC test hook (see `gc_pass_hook`); nothing outside tests.
     fn gc_pass(&self, pass: u32) {
         #[cfg(test)]
         {
-            let hook = self.gc_pass_hook.lock().unwrap().take();
+            let hook = self.gc_pass_hook.lock().take();
             if let Some(mut f) = hook {
                 f(self, pass);
-                let mut slot = self.gc_pass_hook.lock().unwrap();
+                let mut slot = self.gc_pass_hook.lock();
                 if slot.is_none() {
                     *slot = Some(f);
                 }
@@ -1854,9 +2247,26 @@ impl ChunkStore {
             Err(e) => return Err(self.gc_abandon(e, &pending, holds)),
         };
 
-        // (5) The install.
+        // (5) The install. Not while a flush runs: its frozen run must be
+        // older than the tombstones of this install (see `install_gc`), so
+        // wait for it, without the store lock.
         let (added, before) = {
-            let mut inner = self.held(holds);
+            let mut inner = loop {
+                let inner = self.held(holds);
+                if let Some(w) = inner.flushing.clone() {
+                    drop(inner);
+                    w.wait();
+                    continue;
+                }
+                // Its sync covers the records of the active pack: wait for a
+                // record write in flight too.
+                let Some(w) = inner.writing() else { break inner };
+                drop(inner);
+                if !w.wait_timeout(STORE_WAIT) {
+                    drop(plans);
+                    return Err(self.gc_abandon(timed_out("a record write"), &pending, holds));
+                }
+            };
             let during = inner.touched.take().unwrap_or_else(Touched::exact);
             if !last {
                 inner.touched = Some(Touched::exact());
@@ -1900,10 +2310,7 @@ impl ChunkStore {
                 // the store lock, so no `put` that sees the new generation
                 // can get them from the cache.
                 self.locality.untrust(plans.iter().filter(|p| !p.dropped).map(|p| p.num).chain(unused.iter().copied()));
-                let hwm = match inner.active.as_ref() {
-                    Some(a) => Hwm { pack: a.num, offset: a.len },
-                    None => Hwm { pack: inner.next_pack, offset: 0 },
-                };
+                let hwm = inner.hwm_end();
                 let counts = Counts { objects: after.objects, raw_bytes: after.raw_bytes, stored_bytes: after.stored_bytes };
                 match inner.index.install_gc(io, runs, hwm, counts) {
                     Ok(nums) => added = nums,
@@ -2111,13 +2518,14 @@ impl ChunkStore {
                         file.read_at(&mut rec, l.offset)?;
                         recs.push(rec);
                     }
-                    let mut inner = self.held(holds);
+                    let mut inner = self.held_no_write(holds)?;
                     inner.check()?;
                     for ((id, l), rec) in batch.iter().zip(&recs) {
-                        let nl = self.append(&mut inner, id, rec, l.stored, l.raw, l.flags)?;
+                        let nl = self.append_locked(&mut inner, id, rec, l.stored, l.raw, l.flags)?;
                         inner.index.insert(*id, nl);
                     }
-                    self.flush_if_full(&mut inner)?;
+                    drop(inner);
+                    self.flush_if_full()?;
                 }
             }
             plans.push(GcPlan {
@@ -2347,8 +2755,12 @@ impl ChunkStore {
     /// Under the lock, the place is used only if the index generation is
     /// the same and the memtable has no entry of the ID; else it is looked
     /// up again (a GC may have moved the object and deleted its old pack).
-    /// The pack handle is taken under the lock, so the pack is still there.
+    /// A cached pack handle is taken under the lock. A pack that is not
+    /// cached is opened without the lock (LOCK-01); then, under the lock
+    /// again, the place must still be the current one (else the read starts
+    /// over at the new place), so the pack was still there.
     pub fn read(&self, id: &ObjectId) -> Result<Vec<u8>> {
+        note_progress();
         let hasher = hasher_by_tag(id.tag()).ok_or(Error::UnknownHash(*id))?;
         let gen = self.index.gen();
         // An index read error is returned, never taken as "missing".
@@ -2356,14 +2768,32 @@ impl ChunkStore {
         self.after_lookup();
         let loc = looked?.ok_or(Error::Missing(*id))?;
         let (loc, file) = {
-            let mut inner = lock_stats::lock(&self.inner, Site::Store);
-            let loc = if self.unchanged(gen, id) { loc } else { inner.index.get(id)?.ok_or(Error::Missing(*id))? };
+            let mut inner = self.inner.lock();
+            let mut loc = if self.unchanged(gen, id) { loc } else { inner.index.get(id)?.ok_or(Error::Missing(*id))? };
             inner.touch(*id);
-            match inner.reader(&*self.io, loc.pack) {
-                Ok(file) => (loc, file),
-                Err(e) => {
-                    drop(inner);
-                    return Err(self.check_entry(id, e.into()));
+            loop {
+                if let Some(file) = inner.cached_reader(loc.pack) {
+                    break (loc, file);
+                }
+                // Open the pack without the store lock (LOCK-01). Then the
+                // place must still be the current one: a GC may have moved
+                // the object and removed the pack meanwhile (it changes the
+                // index before it removes a pack).
+                let seen = self.index.gen();
+                drop(inner);
+                let opened = self.io.open_read(loc.pack);
+                inner = self.inner.lock();
+                let now = if self.unchanged(seen, id) { loc } else { inner.index.get(id)?.ok_or(Error::Missing(*id))? };
+                if now != loc {
+                    loc = now;
+                    continue;
+                }
+                match opened {
+                    Ok(file) => break (loc, inner.add_reader(loc.pack, file)),
+                    Err(e) => {
+                        drop(inner);
+                        return Err(self.check_entry(id, e.into()));
+                    }
                 }
             }
         };
@@ -2408,7 +2838,7 @@ impl ChunkStore {
         if !suspect {
             return err;
         }
-        let inner = lock_stats::lock(&self.inner, Site::Store);
+        let inner = self.inner.lock();
         match inner.index.get_verified(id) {
             Err(Error::Corrupt(m)) => {
                 if !self.opts.read_only && !inner.index.rebuild_requested() {
@@ -2441,7 +2871,7 @@ impl ChunkStore {
 
     /// The shape of the index now.
     pub fn index_info(&self) -> IndexInfo {
-        let _inner = lock_stats::lock(&self.inner, Site::Store);
+        let _inner = self.inner.lock();
         let ix = &self.index;
         let hwm = ix.hwm();
         let runs = ix.runs();
@@ -2522,27 +2952,109 @@ impl ChunkStore {
         if self.opts.read_only {
             return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
         }
-        let inner = lock_stats::lock(&self.inner, Site::Store);
+        let inner = self.inner.lock();
         inner.index.request_rebuild(&*self.io, "a caller asked for a rebuild")
     }
 
-    /// Write the memtable to a run when it has reached the limit.
-    fn flush_if_full(&self, inner: &mut Inner) -> Result<()> {
-        if inner.index.mem_len() < self.opts.index_memtable_limit.max(1) {
-            return Ok(());
+    /// Write the memtable to a run when it has reached the limit. The
+    /// caller holds no store lock (LOCK-01).
+    ///
+    /// One flush at a time (`Inner::flushing`; a second one waits for the
+    /// first without the lock). The steps:
+    /// 1. Without the lock, wait for the background seal and a background
+    ///    sync of the active pack (started here), as `sync` does.
+    /// 2. Under the lock: join the ended seal, take the sync handle of the
+    ///    active pack and the marks (as `sync` does), the hwm and the counts,
+    ///    and freeze the memtable (`Index::freeze`): lookups still see it,
+    ///    new entries go to an empty memtable. Without the lock: sync the
+    ///    rest of the active pack (the bytes put since step 1, so every
+    ///    record below the hwm) and the directory (LOCK-01).
+    /// 3. Without the lock, only after that sync: write the run, then the
+    ///    MANIFEST (`Index::install_frozen`, under the MANIFEST lock).
+    ///
+    /// A GC install waits for a flush in step 1 to 3, so the frozen run is
+    /// installed before the tombstones of a GC. A failure is final.
+    fn flush_if_full(&self) -> Result<()> {
+        let limit = self.opts.index_memtable_limit.max(1);
+        let (done, waits) = loop {
+            let mut inner = self.inner.lock();
+            if inner.index.mem_len() < limit {
+                return Ok(());
+            }
+            inner.check()?;
+            if let Some(w) = inner.flushing.clone() {
+                drop(inner);
+                self.note_wait();
+                w.wait();
+                continue;
+            }
+            let done = SyncWait::default();
+            inner.flushing = Some(done.clone());
+            let seal = inner.sealing.as_ref().map(|s| s.done.clone());
+            let soon = inner.active.as_mut().filter(|a| a.dirty).and_then(|a| a.file.sync_soon());
+            break (done, [seal, soon]);
+        };
+        for w in waits.iter().flatten() {
+            w.wait();
         }
-        inner.flush_index(&*self.io)
+        let r = self.flush_frozen();
+        let mut inner = self.inner.lock();
+        inner.flushing = None;
+        done.done();
+        // A timeout of a wait lost nothing: the memtable is not frozen yet.
+        if r.as_ref().is_err_and(|e| !is_store_wait(e)) {
+            inner.failed = true;
+        }
+        r
+    }
+
+    /// Steps 2 and 3 of `flush_if_full`.
+    fn flush_frozen(&self) -> Result<()> {
+        let (entries, num, hwm, counts, job) = {
+            // A seal that started after step 1 is waited for without the lock.
+            let mut inner = self.lock_no_seal()?;
+            inner.check()?;
+            inner.join_seal()?;
+            let job = match inner.sync_job() {
+                Some(job) => job,
+                None => {
+                    inner.sync_locked_fallback(&*self.io)?;
+                    SyncJob { pack: None, dir: None }
+                }
+            };
+            let hwm = inner.hwm_end();
+            let s = inner.stats;
+            let counts = Counts { objects: s.objects, raw_bytes: s.raw_bytes, stored_bytes: s.stored_bytes };
+            let (entries, num) = inner.index.freeze();
+            (entries, num, hwm, counts, job)
+        };
+        // The run goes in only after the records below its hwm are durable.
+        self.run_sync(job)?;
+        let run = self.index.write_frozen(&*self.io, num, &entries)?;
+        self.index.install_frozen(&*self.io, run, hwm, counts)?;
+        self.merge.notify();
+        Ok(())
     }
 
     /// Make every object put so far durable. Without new objects this does
     /// not touch the disk.
+    ///
+    /// No fsync runs under the store lock (LOCK-01), so puts and reads go
+    /// on meanwhile (#108):
+    /// 1. Start the sync of the active pack in the background, and wait for
+    ///    it and for a background seal with no lock.
+    /// 2. Wait (with no lock) for a seal that started since, and under the
+    ///    lock join it and take the handle of the active pack and the marks
+    ///    (see `SyncJob`). With no lock, sync the pack through the handle,
+    ///    then the directory. Under the lock again, set `failed` on an
+    ///    error, else clear the flags that nothing changed since the marks.
+    ///
+    /// A pack with no sync handle is synced under the lock (a rare
+    /// fallback, `Inner::sync_locked_fallback`). GC, `gc_begin` and `close`
+    /// still sync under the lock; they are not on the put and read paths.
     pub fn sync(&self) -> Result<()> {
-        // Start the sync of the active pack and wait for it without the
-        // store lock, so puts go on meanwhile (#108). The sync below, under
-        // the lock, then has only the bytes put since, and gives the outcome.
-        // The same for a background seal.
         let (seal, wait) = {
-            let mut inner = lock_stats::lock(&self.inner, Site::Store);
+            let mut inner = self.inner.lock();
             inner.check()?;
             let seal = inner.sealing.as_ref().map(|s| s.done.clone());
             (seal, inner.active.as_mut().filter(|a| a.dirty).and_then(|a| a.file.sync_soon()))
@@ -2550,11 +3062,62 @@ impl ChunkStore {
         for w in seal.iter().chain(&wait) {
             w.wait();
         }
-        let mut inner = lock_stats::lock(&self.inner, Site::Store);
-        inner.check()?;
-        inner.sync_active()?;
-        if inner.dir_dirty {
-            inner.sync_dir(&*self.io)?;
+        let job = {
+            let mut inner = self.lock_no_seal()?;
+            inner.check()?;
+            inner.join_seal()?;
+            match inner.sync_job() {
+                Some(job) => job,
+                None => return inner.sync_locked_fallback(&*self.io),
+            }
+        };
+        self.run_sync(job)
+    }
+
+    /// The store lock, with no background seal in flight: a seal that runs
+    /// is waited for with no lock (at most `STORE_WAIT`), so the join under
+    /// the lock then takes no time.
+    fn lock_no_seal(&self) -> Result<MutexGuard<'_, Inner>> {
+        loop {
+            let inner = self.inner.lock();
+            let Some(w) = inner.sealing.as_ref().filter(|s| !s.done.is_done()).map(|s| s.done.clone()) else {
+                return Ok(inner);
+            };
+            drop(inner);
+            if !w.wait_timeout(STORE_WAIT) {
+                return Err(timed_out("a pack seal"));
+            }
+            note_progress();
+        }
+    }
+
+    /// Run a `SyncJob` with no store lock; then, under the lock, set
+    /// `failed` on an error, or clear the flags by its marks.
+    fn run_sync(&self, job: SyncJob) -> Result<()> {
+        if job.pack.is_none() && job.dir.is_none() {
+            return Ok(());
+        }
+        let r = (|| -> io::Result<()> {
+            if let Some((_, _, h)) = &job.pack {
+                h.sync()?;
+            }
+            if job.dir.is_some() {
+                self.io.sync_dir()?;
+            }
+            Ok(())
+        })();
+        let mut inner = self.inner.lock();
+        if let Err(e) = r {
+            inner.failed = true;
+            return Err(e.into());
+        }
+        if let (Some((num, published, _)), Some(a)) = (&job.pack, inner.active.as_mut()) {
+            if a.num == *num && a.published == *published {
+                a.dirty = false;
+            }
+        }
+        if job.dir.is_some_and(|c| c == inner.created) {
+            inner.dir_dirty = false;
         }
         Ok(())
     }
@@ -2564,7 +3127,7 @@ impl ChunkStore {
     /// not flush the memtable: an open replays the records above the hwm.
     pub fn close(&self) -> Result<()> {
         self.stop_merges();
-        let mut inner = lock_stats::lock(&self.inner, Site::Store);
+        let mut inner = self.lock_no_write()?;
         inner.check()?;
         if inner.active.is_some() {
             self.seal(&mut inner)?;
@@ -2596,7 +3159,7 @@ impl ChunkStore {
 
     /// Current counts.
     pub fn stats(&self) -> Stats {
-        lock_stats::lock(&self.inner, Site::Store).stats
+        self.inner.lock().stats
     }
 
     /// An empty GC mark for this store: a [`LiveFilter`] for as many keys
@@ -2609,8 +3172,9 @@ impl ChunkStore {
 
     ///
     /// The pack sync and the `.idx` write run in a background thread, so a
-    /// put that fills a pack does not wait for them (#108); `sync_active`
-    /// (so `sync`, a flush and GC) and the next seal wait for it. A crash
+    /// put that fills a pack does not wait for them (#108). `sync` and a
+    /// flush wait for it with no store lock (`lock_no_seal`), then join it
+    /// (`join_seal`); GC (`sync_active`) and the next seal wait for it. A crash
     /// before it ends leaves a pack with no `.idx` below the newest pack:
     /// the open scans it (`resync_scan`) and seals it then. Nothing durable
     /// refers to its objects yet, since every sync waits for the seal.
@@ -2621,12 +3185,12 @@ impl ChunkStore {
         // may not be in the directory sync of the `.idx` write.
         let num = a.num;
         let job = SealJob { io: Arc::clone(&self.io), num: a.num, file: a.file, idx: encode_index(&a.entries, true), dirty: a.dirty };
-        let slot = Arc::new(Mutex::new(Some(job)));
+        let slot = Arc::new(Mutex::new(Rank::Store, Some(job)));
         let theirs = Arc::clone(&slot);
         let done = SyncWait::default();
         let end = done.clone();
         let spawned = std::thread::Builder::new().name("pack-seal".into()).spawn(move || {
-            let job = theirs.lock().unwrap().take();
+            let job = theirs.lock().take();
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.map_or(Ok(()), SealJob::run)))
                 .unwrap_or_else(|_| Err(io::Error::other("the pack seal panicked")));
             end.done();
@@ -2636,7 +3200,7 @@ impl ChunkStore {
             Ok(thread) => inner.sealing = Some(Sealing { thread, done }),
             Err(_) => {
                 // No thread: seal here.
-                let job = slot.lock().unwrap().take();
+                let job = slot.lock().take();
                 if let Err(e) = job.map_or(Ok(()), SealJob::run) {
                     inner.failed = true;
                     return Err(e.into());
@@ -2658,10 +3222,7 @@ impl Drop for ChunkStore {
     fn drop(&mut self) {
         self.stop_merges();
         // Let a background seal end; its error is lost (nothing was promised).
-        // A drop must not panic on a poisoned lock, so this site is not timed.
-        if let Ok(mut inner) = self.inner.lock() {
-            let _ = inner.join_seal();
-        }
+        let _ = self.inner.lock().join_seal();
     }
 }
 
@@ -2747,7 +3308,7 @@ struct Holds {
 
 /// The store lock, held for a GC: its hold time goes into `Holds`.
 struct Held<'a> {
-    g: lock_stats::Guard<'a, Inner>,
+    g: MutexGuard<'a, Inner>,
     at: Instant,
     holds: &'a Holds,
 }
@@ -2828,10 +3389,13 @@ impl Inner {
             trust_floor: Some(0),
             stats: Stats::default(),
             dir_dirty: false,
+            created: 0,
             touched: None,
             failed: false,
             merge: Arc::new(MergeCtl::default()),
             sealing: None,
+            creating: None,
+            flushing: None,
         }
     }
 
@@ -2858,7 +3422,9 @@ impl Inner {
 
     /// Sync the active pack if it has new bytes, after the background seal
     /// of the pack before it: then every record so far is durable. A failure
-    /// is final.
+    /// is final. It syncs under the store lock: only GC, `gc_begin`, `close`
+    /// and the fallback below call it (`ChunkStore::sync` and the index
+    /// flush sync through a handle with no lock).
     fn sync_active(&mut self) -> Result<()> {
         self.join_seal()?;
         if let Some(a) = self.active.as_mut() {
@@ -2869,6 +3435,46 @@ impl Inner {
                 }
                 a.dirty = false;
             }
+        }
+        Ok(())
+    }
+
+    /// Start the record write of a put at the end of the active pack (the
+    /// caller made sure there is one with no write in flight, see
+    /// `prepare_append`): its offset, the writer, and the signal of its end.
+    /// `None` if the pack has no writer handle.
+    fn begin_write(&mut self) -> Option<(u64, Arc<dyn PackWrite>, SyncWait)> {
+        let a = self.active.as_mut()?;
+        let w = Arc::clone(a.writer.as_ref()?);
+        let done = SyncWait::default();
+        a.writing = Some(done.clone());
+        Some((a.len, w, done))
+    }
+
+    /// The signal of the record write in flight, if one runs.
+    fn writing(&self) -> Option<SyncWait> {
+        self.active.as_ref()?.writing.clone()
+    }
+
+    /// What a sync with no store lock must do now: the active pack through
+    /// its handle if it is dirty, and the directory if it is dirty. `None`
+    /// if the dirty active pack has no handle (then
+    /// `sync_locked_fallback`).
+    fn sync_job(&self) -> Option<SyncJob> {
+        let pack = match self.active.as_ref().filter(|a| a.dirty) {
+            Some(a) => Some((a.num, a.published, Arc::clone(a.sync.as_ref()?))),
+            None => None,
+        };
+        Some(SyncJob { pack, dir: self.dir_dirty.then_some(self.created) })
+    }
+
+    /// The rare fallback of a sync with no handle (`try_clone` failed): sync
+    /// the active pack and the directory under the store lock. A failure
+    /// is final.
+    fn sync_locked_fallback(&mut self, io: &dyn PackIo) -> Result<()> {
+        self.sync_active()?;
+        if self.dir_dirty {
+            self.sync_dir(io)?;
         }
         Ok(())
     }
@@ -2915,22 +3521,15 @@ impl Inner {
         Ok(())
     }
 
-    /// Sync the active pack and the directory, then write the memtable to a
-    /// run with the hwm at the end of the active pack (or at the start of
-    /// the next pack if none is active). A failure is final.
-    fn flush_index(&mut self, io: &dyn PackIo) -> Result<()> {
-        if self.index.mem_len() == 0 {
-            return Ok(());
+    /// The hwm of a flush now: the end of the active pack, else the start
+    /// of the pack that a `put` creates now, else the start of the next
+    /// pack. Every pack record so far is below it.
+    fn hwm_end(&self) -> Hwm {
+        match (&self.active, &self.creating) {
+            (Some(a), _) => Hwm { pack: a.num, offset: a.len },
+            (None, Some((num, _))) => Hwm { pack: *num, offset: 0 },
+            (None, None) => Hwm { pack: self.next_pack, offset: 0 },
         }
-        self.sync_active()?;
-        if self.dir_dirty {
-            self.sync_dir(io)?;
-        }
-        let hwm = match self.active.as_ref() {
-            Some(a) => Hwm { pack: a.num, offset: a.len },
-            None => Hwm { pack: self.next_pack, offset: 0 },
-        };
-        self.flush_at(io, hwm)
     }
 
     /// Write the memtable to a run with this hwm and the current counts. The
@@ -2946,11 +3545,28 @@ impl Inner {
         Ok(())
     }
 
+    /// A pack for reads: the cached handle, or a new one (opened under the
+    /// store lock; for GC, which is not on the read path).
     fn reader(&mut self, io: &dyn PackIo, num: u64) -> io::Result<Arc<dyn PackRead>> {
+        if let Some(f) = self.cached_reader(num) {
+            return Ok(f);
+        }
+        Ok(self.add_reader(num, io.open_read(num)?))
+    }
+
+    /// The cached handle of pack `num`, if any (it counts as a use).
+    fn cached_reader(&mut self, num: u64) -> Option<Arc<dyn PackRead>> {
         self.tick += 1;
-        if let Some((f, used)) = self.readers.get_mut(&num) {
-            *used = self.tick;
-            return Ok(Arc::clone(f));
+        let (f, used) = self.readers.get_mut(&num)?;
+        *used = self.tick;
+        Some(Arc::clone(f))
+    }
+
+    /// Cache the new handle `f` of pack `num`, or keep the one that another
+    /// read cached meanwhile. Returns the cached handle.
+    fn add_reader(&mut self, num: u64, f: Arc<dyn PackRead>) -> Arc<dyn PackRead> {
+        if let Some(cached) = self.cached_reader(num) {
+            return cached;
         }
         if self.readers.len() >= MAX_OPEN_PACKS {
             // Close the least recently used pack. A read that holds its
@@ -2960,9 +3576,8 @@ impl Inner {
                 self.readers.remove(&n);
             }
         }
-        let f = io.open_read(num)?;
         self.readers.insert(num, (Arc::clone(&f), self.tick));
-        Ok(f)
+        f
     }
 }
 

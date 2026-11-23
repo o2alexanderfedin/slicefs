@@ -1,21 +1,22 @@
 //! Lock hold and wait times, for the stress harness and the spikes (Phase 18).
 //!
-//! Every timed lock site calls [`lock`] with its [`Site`] instead of
-//! `mutex.lock().unwrap()`.
+//! Locks of the shim ([`crate::sync`]) built with `.timed(site)` record their
+//! times here. A std mutex (the `StoreIo` lock, which stays std) calls [`lock`]
+//! with its [`Site`] instead of `mutex.lock().unwrap()`.
 //!
 //! - Feature `lock-stats` off (default): [`lock`] is `m.lock().unwrap()` and
 //!   [`Guard`] is the std guard. No timing, no `hdrhistogram` dependency.
-//! - Feature `lock-stats` on: [`Guard`] times the wait (zero when the lock was
-//!   free) and the hold of each acquisition, and records both in one
-//!   `hdrhistogram` histogram per site, in nanoseconds.
+//! - Feature `lock-stats` on: the shim guards and [`Guard`] time the wait (zero
+//!   when the lock was free) and the hold of each acquisition, and record both
+//!   in one `hdrhistogram` histogram per site, in nanoseconds.
 //!
 //! The recorder is process-global, so tests that run in parallel in one binary
 //! share it. Call [`reset`] at the start of a measured run.
 
 use std::sync::{Mutex, MutexGuard};
 
-/// A lock site. All sites are defined here; a site is timed once its code
-/// calls [`lock`] with it.
+/// A lock site. All sites are defined here; a site is timed once a lock is
+/// built with `.timed(site)` or its code calls [`lock`] with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Site {
     /// `ChunkStore.inner`, the store lock.
@@ -28,21 +29,41 @@ pub enum Site {
     WalWriter,
     /// The WAL pending-append lock.
     WalPending,
-    /// `open_files` of the file system core.
-    OpenFiles,
+    /// The in-memory record queue of the per-operation WAL (append takes
+    /// only this lock).
+    WalQueue,
     /// `readers` of the file system core.
     Readers,
+    /// A shard of `dir_live`, the directory cache of the metadata store.
+    DirLive,
+    /// A shard of `inode_live`, the inode cache of the metadata store.
+    InodeLive,
+    /// The handle table of the file system core.
+    Handles,
+    /// The state lock of one open file (`FileCell`) of the file system core.
+    FileCell,
+    /// A shard of the cell map (`ino -> FileCell`) of the file system core.
+    CellMap,
+    /// A namespace stripe of the file system core (`NamespaceLocks`).
+    Stripe,
 }
 
 impl Site {
-    pub const ALL: [Site; 7] = [
+    /// Every site, in discriminant order (a test checks it).
+    pub const ALL: &'static [Site] = &[
         Site::Store,
         Site::Io,
         Site::Wal,
         Site::WalWriter,
         Site::WalPending,
-        Site::OpenFiles,
+        Site::WalQueue,
         Site::Readers,
+        Site::DirLive,
+        Site::InodeLive,
+        Site::Handles,
+        Site::FileCell,
+        Site::CellMap,
+        Site::Stripe,
     ];
 
     pub fn label(self) -> &'static str {
@@ -52,8 +73,14 @@ impl Site {
             Site::Wal => "wal",
             Site::WalWriter => "wal_writer",
             Site::WalPending => "wal_pending",
-            Site::OpenFiles => "open_files",
+            Site::WalQueue => "wal_queue",
             Site::Readers => "readers",
+            Site::DirLive => "dir_live",
+            Site::InodeLive => "inode_live",
+            Site::Handles => "handles",
+            Site::FileCell => "file_cell",
+            Site::CellMap => "cell_map",
+            Site::Stripe => "stripe",
         }
     }
 }
@@ -97,6 +124,10 @@ pub fn reset() {}
 #[cfg(feature = "lock-stats")]
 pub use on::{lock, reset, snapshot, TimedGuard as Guard};
 
+/// Record one acquisition of `site`; the shim guards call this when dropped.
+#[cfg(feature = "lock-stats")]
+pub(crate) use on::record;
+
 #[cfg(feature = "lock-stats")]
 mod on {
     use super::{Mutex, MutexGuard, Site, SiteStats};
@@ -120,12 +151,15 @@ mod on {
         }
     }
 
-    fn recorders() -> &'static [Mutex<SiteHists>; 7] {
-        static R: OnceLock<[Mutex<SiteHists>; 7]> = OnceLock::new();
+    /// One recorder per site; `Site as usize` indexes it.
+    const N: usize = Site::ALL.len();
+
+    fn recorders() -> &'static [Mutex<SiteHists>; N] {
+        static R: OnceLock<[Mutex<SiteHists>; N]> = OnceLock::new();
         R.get_or_init(|| std::array::from_fn(|_| Mutex::new(SiteHists::new())))
     }
 
-    fn record(site: Site, wait_ns: u64, hold_ns: u64) {
+    pub(crate) fn record(site: Site, wait_ns: u64, hold_ns: u64) {
         // A poisoned recorder still holds valid histograms.
         let mut r = recorders()[site as usize].lock().unwrap_or_else(|e| e.into_inner());
         r.wait.saturating_record(wait_ns);
@@ -206,5 +240,21 @@ mod on {
             r.wait.reset();
             r.hold.reset();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Site;
+
+    #[test]
+    fn all_lists_every_site_in_discriminant_order() {
+        for (i, s) in Site::ALL.iter().enumerate() {
+            assert_eq!(*s as usize, i, "{}", s.label());
+        }
+        let mut labels: Vec<_> = Site::ALL.iter().map(|s| s.label()).collect();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), Site::ALL.len());
     }
 }

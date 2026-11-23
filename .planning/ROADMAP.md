@@ -185,7 +185,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
 **Research flags** (run `/gsd-plan-phase <N> --research-phase`): Phase 18 (S5 gate fairness on both platforms), Phase 20 (budget, flusher and gate deadlock protocol), Phase 21 (FUSE-T and FSKit overlap, reply under load), Phase 23 (old-to-new map strategy, GC interaction, snapshot record supersession), Phase 24 (boundary rule details). Skip for Phases 19 and 22: standard patterns.
 
 - [x] **Phase 18: Spikes, baseline and stress harness** (#127) - re-measure S1-S7 on the current code, build the N-thread harness, run S1 on macOS (completed 2026-11-21)
-- [ ] **Phase 19: Fine-grained locks** (#21) - no global lock on the hot path, lock rank with a debug checker, log record under the same locks as its apply
+- [x] **Phase 19: Fine-grained locks** (#21) - no global lock on the hot path, lock rank with a debug checker, log record under the same locks as its apply (completed 2026-11-22)
 - [ ] **Phase 20: Dirty budget and rebase flusher** (#21) - no cross-file take-out, a background flusher, writers throttled before they take locks, no deadlock with a commit
 - [ ] **Phase 21: Worker pool** (#22) - N worker threads by mount option, drain before `destroy()`, abort on panic, 4 workers pass pjdfstest
 - [ ] **Phase 22: Chunk profiles** (#67) - FastCDC min/avg/max fixed per store at `seed`, benchmark of five profiles, default unchanged (parallel track)
@@ -231,10 +231,61 @@ Plans:
   1. A test with parallel readers and writers on one file returns correct data, and the lock wait times show that readers do not wait for the I/O of writers
   2. A test with parallel I/O on different files shows no contention between them
   3. The store lock, `readers`, the WAL append mutex and `dir_live`/`inode_live` are not held during disk I/O, a hash calculation or a wait; the hold times in the harness report show it
-  4. Locks have one fixed rank, with two inodes locked in increasing inode order; a test that breaks the rank fails in a debug build
+  4. Locks have one fixed rank, with two inodes locked in ascending stripe order (inode number hashed to a stripe); a test that breaks the rank fails in a debug build
   5. After a crash, replay of the log from the mixed-operation harness gives the same state as the apply, including creates by logged inode number, and the #21 body matches this rule
   6. With several handles on one inode in different modes (read-only, read-write, `O_APPEND`), the harness shows the POSIX.1 2.9.7 rules: a completed write through one handle is visible through every other handle, a read sees all or none of a concurrent write, and concurrent appends never overlap and lose no bytes. The research for this phase checks how the kernel FUSE client computes the append offset in the SliceFS mount mode
-**Plans**: TBD
+**Plans**: 16/16 plans complete (11/11 executed; 5 gap-closure plans 19-12..19-16 for LOCK-01, LOCK-04, LOCK-05)
+
+One plan per wave; executors run them in order.
+
+Plans:
+**Wave 1**
+- [x] 19-01-PLAN.md — Lock shim `chunk_store::sync` over parking_lot 0.12, rank checker, `deadlock-detect`, all hot-path locks migrated
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 19-02-PLAN.md — Chunk-store lock tails (pack create, seal join, run write, KEEP_CAP wait, trust floor, pack open) off the store lock
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 19-03-PLAN.md — Metadata hot path: `modify_inode`, sharded caches, cold loads and flushes off the locks, `create_inode_at`
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 19-04-PLAN.md — WAL append (LSN, memory only) and write-out split; fsync outside the WAL mutexes
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 19-05-PLAN.md — `FileCell` per inode, handle table with modes, per-inode readers, `keep_budget` on atomics
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 19-06-PLAN.md — Overlay rebase through copy, I/O without lock, publish if the generation is unchanged
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [x] 19-07-PLAN.md — Streaming, read, fsync, finalize and truncate through the same protocol; no cross-file wait
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [x] 19-08-PLAN.md — Write-path records logged under the cell lock; `O_APPEND` handles; POSIX multi-handle tests
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [x] 19-09-PLAN.md — Namespace stripes and rename mutex, gate at rank 1, `serialize_off_target` in the suite
+
+**Wave 10** *(blocked on Wave 9 completion)*
+- [x] 19-10-PLAN.md — Namespace records logged under their stripes, replay by logged inode, crash replay of the harness
+
+**Wave 11** *(blocked on Wave 10 completion)*
+- [x] 19-11-PLAN.md — Harness multi-handle mode, lock wait rows, #21 body, Phase 19 note in the research doc
+
+**Wave 12** *(gap closure; blocked on Wave 11 completion)*
+- [x] 19-12-PLAN.md — Chunk store: phase-2 and index-flush fsync with no store lock (RetryingPack sync handle), record pwrite with no store lock (one write in flight)
+
+**Wave 13** *(gap closure; blocked on Wave 12 completion)*
+- [x] 19-13-PLAN.md — Write log: record writes with no WAL lock in every strategy, cut opens its segment outside the writer; mkdir locks the parent and new-directory stripes
+
+**Wave 14** *(gap closure; blocked on Wave 13 completion)*
+- [x] 19-14-PLAN.md — Cell step token: stream writes and reads with no locked I/O, hard cap waits without the cell, dropped steps retry unlocked, debug lines out of the hold
+
+**Wave 15** *(gap closure; blocked on Wave 14 completion)*
+- [x] 19-15-PLAN.md — Release and finalize in unlocked steps with a bounded retry count, open-stream size change through the token, reads skip the transient cell, forced-drop lock rows
+
+**Wave 16** *(gap closure; blocked on Wave 15 completion)*
+- [x] 19-16-PLAN.md — Re-measure lock holds on macOS and Docker Linux against stated bars; research doc, deferred items, draft #21 body; requirement marks
 
 ### Phase 20: Dirty budget and rebase flusher
 
@@ -311,7 +362,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 18. Spikes, baseline and stress harness | 7/7 | Complete    | 2026-11-21 |
-| 19. Fine-grained locks | 0/0 | Not started | - |
+| 19. Fine-grained locks | 16/16 | Complete    | 2026-11-22 |
 | 20. Dirty budget and rebase flusher | 0/0 | Not started | - |
 | 21. Worker pool | 0/0 | Not started | - |
 | 22. Chunk profiles | 0/0 | Not started | - |

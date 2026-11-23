@@ -11,7 +11,7 @@
     {
       "number": "19",
       "name": "Fine-grained locks",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "20",
@@ -41,8 +41,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (plan phase 19)",
-    "reason": "Phase 2 of 7 — needs a plan"
+    "label": "Advance to the next step (plan phase 20)",
+    "reason": "Phase 3 of 7 — needs a plan"
   },
-  "updated_at": "2026-11-21T09:32:07.112Z"
+  "updated_at": "2026-11-23T01:38:39.422Z"
 }

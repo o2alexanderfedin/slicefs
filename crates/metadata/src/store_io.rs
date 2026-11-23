@@ -98,11 +98,17 @@ impl NodeRead for NodeReader {
 pub struct NodeWriter {
     cs: Arc<ChunkStore>,
     failed: Option<io::Error>,
+    puts: u64,
 }
 
 impl NodeWriter {
     pub fn new(cs: Arc<ChunkStore>) -> Self {
-        Self { cs, failed: None }
+        Self { cs, failed: None, puts: 0 }
+    }
+
+    /// Number of nodes put so far.
+    pub fn puts(&self) -> u64 {
+        self.puts
     }
 
     /// The first put error, if any.
@@ -119,6 +125,7 @@ impl NodeRead for NodeWriter {
 
 impl NodeWrite for NodeWriter {
     fn put_node(&mut self, bytes: &[u8]) -> ObjectKey {
+        self.puts += 1;
         match put_value(&self.cs, bytes) {
             Ok(k) => k,
             Err(e) => {

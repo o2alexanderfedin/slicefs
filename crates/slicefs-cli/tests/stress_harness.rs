@@ -3,19 +3,23 @@
 //! mount). The data are checked against a model, and the report shows latency
 //! histograms and the commit gate times.
 //!
-//! Two modes: `OneFile` (all threads on one shared file, each thread owns a
-//! set of stripes) and `ManyFiles` (each thread owns its names in its own
+//! Three modes: `OneFile` (all threads on one shared file, each thread owns a
+//! set of stripes), `ManyFiles` (each thread owns its names in its own
 //! directory and in `shared`, and creates, renames, unlinks, writes, fsyncs
-//! them). A commit thread runs `timed_commit` beside the workers.
+//! them) and `MultiHandle` (one shared file; each thread has a read-only, a
+//! read-write and an `O_APPEND` handle on it). A commit thread runs
+//! `timed_commit` beside the workers.
 //!
-//! The core is safe with one operation at a time only (until Phase 20), so the
-//! suite runs with `serialize` on: N threads, but a harness mutex lets one
-//! operation run at a time. Lock order: the harness mutex first, then the
-//! commit gate (never the harness mutex while the gate is held). The commit
-//! thread does not take the harness mutex (as in the daemon).
+//! With `serialize` on, a harness mutex lets one operation run at a time (N
+//! threads). Lock order: the harness mutex first, then the commit gate (never
+//! the harness mutex while the gate is held). The commit thread does not take
+//! the harness mutex (as in the daemon). `serialize_off_target` runs every
+//! mode with `serialize` off (Phase 19).
 //!
 //! File bytes are never held in RAM as a model: a block is a function of
 //! (seed, file, block, version), and the model keeps only versions.
+
+mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -24,12 +28,9 @@ use std::sync::{mpsc, Arc, Barrier, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hdrhistogram::Histogram;
-use metadata::store::DictMetadataStore;
-use metadata::store_io::StoreIo;
-use metadata::wal::{create_wal, WalConfig};
+use metadata::wal::WalConfig;
 use slicefs_cli::commit_timer::timed_commit;
 use slicefs_cli::filesystem::{SliceFsFilesystem, DIRTY_BUDGET};
-use slicefs_traits::metadata::MetadataStore;
 use slicefs_cli::handlers::{
     self as h, AttrResult, CreateResult, DataResult, EmptyResult, EntryResult, OpenResult,
     ReaddirResult, WriteResult,
@@ -49,6 +50,10 @@ const MAX_BLOCKS: usize = 16;
 const MAX_LIVE: usize = 32;
 /// The commit thread commits this often.
 const COMMIT_EVERY: Duration = Duration::from_millis(250);
+/// Multi-handle mode: the size of one append record, and the most records
+/// one thread appends (so the file and the dirty total stay small).
+const RECORD: usize = 512;
+const MAX_APPENDS: u64 = 256;
 
 // ---- content: no file bytes in RAM -------------------------------------
 
@@ -95,6 +100,7 @@ impl Rng {
 enum Mode {
     OneFile,
     ManyFiles,
+    MultiHandle,
 }
 
 impl Mode {
@@ -102,6 +108,7 @@ impl Mode {
         match self {
             Mode::OneFile => "one-file",
             Mode::ManyFiles => "many-files",
+            Mode::MultiHandle => "multi-handle",
         }
     }
 }
@@ -120,6 +127,14 @@ struct Config {
     wal: WalConfig,
     /// The watchdog aborts the process if the run takes longer than this.
     watchdog: Duration,
+    /// The run ends in a crash: the commit thread makes no commit in the
+    /// last `COMMIT_EVERY` before the deadline and none at the end, so the
+    /// log holds the end of the run.
+    crash: bool,
+    /// Drop every k-th unlocked step (`test_drop_every`; 0: off).
+    drop_every: usize,
+    /// Dirty limit of each open file in KiB (`test_set_dirty_limit`; 0: unchanged).
+    dirty_limit_kib: usize,
 }
 
 /// A number from the environment, with a range. Out of range panics with the
@@ -135,8 +150,10 @@ fn env_num(name: &str, default: u64, lo: u64, hi: u64) -> u64 {
 impl Config {
     /// The long run (by hand): `STRESS_THREADS` (1..=64, default 8),
     /// `STRESS_SECS` (1..=3600, default 60), `STRESS_FILE_MIB` (1..=4096,
-    /// default 64), `STRESS_SEED`, `STRESS_SERIALIZE` (0 or 1, default 1).
-    /// `STRESS_MODE` is read by `modes_from_env`.
+    /// default 64), `STRESS_SEED`, `STRESS_SERIALIZE` (0 or 1, default 1),
+    /// `STRESS_DROP_EVERY` (0..=1000, default 0: drop every k-th unlocked
+    /// step) and `STRESS_DIRTY_LIMIT_KIB` (0..=1048576, default 0: the limit
+    /// is unchanged). `STRESS_MODE` is read by `modes_from_env`.
     fn from_env(defaults: Config) -> Config {
         let secs = env_num("STRESS_SECS", 60, 1, 3600);
         let file_bytes = env_num("STRESS_FILE_MIB", 64, 1, 4096) << 20;
@@ -150,18 +167,22 @@ impl Config {
             file_bytes,
             serialize: env_num("STRESS_SERIALIZE", 1, 0, 1) == 1,
             watchdog: Duration::from_secs(secs + 60 + verify_secs),
+            drop_every: env_num("STRESS_DROP_EVERY", 0, 0, 1000) as usize,
+            dirty_limit_kib: env_num("STRESS_DIRTY_LIMIT_KIB", 0, 0, 1 << 20) as usize,
             ..defaults
         }
     }
 }
 
-/// `STRESS_MODE`: `one-file`, `many-files` or `both` (default).
+/// `STRESS_MODE`: `one-file`, `many-files`, `multi-handle` or `both`
+/// (default: one-file and many-files).
 fn modes_from_env() -> Vec<Mode> {
     match std::env::var("STRESS_MODE").as_deref() {
         Err(_) | Ok("both") => vec![Mode::OneFile, Mode::ManyFiles],
         Ok("one-file") => vec![Mode::OneFile],
         Ok("many-files") => vec![Mode::ManyFiles],
-        Ok(_) => panic!("STRESS_MODE must be one-file, many-files or both"),
+        Ok("multi-handle") => vec![Mode::MultiHandle],
+        Ok(_) => panic!("STRESS_MODE must be one-file, many-files, multi-handle or both"),
     }
 }
 
@@ -178,6 +199,34 @@ fn watchdog(limit: Duration, seed: u64) -> mpsc::Sender<()> {
     });
     tx
 }
+
+/// Stress builds (`--features deadlock-detect`): one process-wide thread asks
+/// parking_lot for a lock cycle every second. On a cycle it prints each thread
+/// with its backtrace and aborts. It is a detached thread: it ends with the
+/// process, and nothing waits for it.
+#[cfg(feature = "deadlock-detect")]
+fn start_deadlock_watchdog() {
+    static START: std::sync::Once = std::sync::Once::new();
+    START.call_once(|| {
+        std::thread::spawn(|| loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let cycles = parking_lot::deadlock::check_deadlock();
+            if cycles.is_empty() {
+                continue;
+            }
+            eprintln!("STRESS deadlock detected: {} cycle(s)", cycles.len());
+            for (i, threads) in cycles.iter().enumerate() {
+                for t in threads {
+                    eprintln!("cycle {i} thread {:?}\n{:?}", t.thread_id(), t.backtrace());
+                }
+            }
+            std::process::abort();
+        });
+    });
+}
+
+#[cfg(not(feature = "deadlock-detect"))]
+fn start_deadlock_watchdog() {}
 
 fn seed_from_env() -> u64 {
     match std::env::var("STRESS_SEED") {
@@ -202,9 +251,25 @@ impl FileModel {
     }
 }
 
+/// One-file and multi-handle modes. `appends[t]`: the records thread `t`
+/// has appended (multi-handle mode; each append that returned Ok).
 struct OneFile {
     model: FileModel,
     ino: u64,
+    appends: Vec<AtomicU64>,
+}
+
+/// Multi-handle mode: record `k` of thread `t`, 512 bytes. The first 16
+/// bytes name it; the rest is a function of (seed, t, k).
+fn append_record(seed: u64, t: u64, k: u64) -> Vec<u8> {
+    let mut r = Vec::with_capacity(RECORD);
+    r.extend_from_slice(&t.to_le_bytes());
+    r.extend_from_slice(&k.to_le_bytes());
+    let key = splitmix(splitmix(seed ^ 0x5eed) ^ (t << 32) ^ k);
+    for i in 0..((RECORD - 16) / 8) as u64 {
+        r.extend_from_slice(&splitmix(key.wrapping_add(i)).to_le_bytes());
+    }
+    r
 }
 
 /// Many-files mode: the directories of the run.
@@ -259,10 +324,11 @@ enum Kind {
     Open,
     Release,
     Lookup,
+    Append,
 }
 
-const KIND_NAMES: [&str; 9] =
-    ["read", "write", "fsync", "create", "rename", "unlink", "open", "release", "lookup"];
+const KIND_NAMES: [&str; 10] =
+    ["read", "write", "fsync", "create", "rename", "unlink", "open", "release", "lookup", "append"];
 
 struct Hists {
     ops: Vec<Histogram<u64>>,
@@ -303,14 +369,7 @@ fn ns(d: Duration) -> u64 {
 // ---- file system setup -----------------------------------------------------
 
 fn new_fs(store: &Path, config: WalConfig) -> SliceFsFilesystem {
-    std::fs::create_dir_all(store.join("segments")).unwrap();
-    let wal = create_wal(config, store, 1).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
-    let mut meta = DictMetadataStore::new(io.clone());
-    meta.set_wal(wal);
-    let fs = SliceFsFilesystem::new(meta, io, Some(store.to_path_buf()));
-    fs.meta().commit().unwrap();
-    fs
+    common::new_fs_with(store, config)
 }
 
 // ---- the run ---------------------------------------------------------------
@@ -405,12 +464,12 @@ impl Ctx {
     }
 
     /// One operation: the harness mutex (serialize mode), then the commit gate
-    /// (as `fuse_callbacks.rs` does), then the handler. The latency is the
+    /// through `gate_shared` (as `fuse_callbacks.rs` does), then the handler. The latency is the
     /// handler call only; the gate wait and hold are timed apart.
     fn gated<R>(&self, hs: &mut Hists, kind: Kind, f: impl FnOnce() -> R) -> R {
         let _s = self.cfg.serialize.then(|| self.serial.lock().unwrap());
         let w = Instant::now();
-        let g = self.gate.read().unwrap_or_else(|e| e.into_inner());
+        let g = self.fs.gate_shared();
         let acquired = Instant::now();
         hs.gate_wait.saturating_record(ns(acquired - w));
         let n = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
@@ -520,10 +579,78 @@ impl Ctx {
         WorkerOut { mismatches: out, model: None }
     }
 
-    // ---- handler wrappers used by both modes ----
+    // ---- multi-handle mode ----
+
+    /// One shared file, three handles per thread: read-only, read-write and
+    /// read-write with `O_APPEND` (POSIX.1 2.9.7, ROADMAP Phase 19 criterion
+    /// 6). Writes go through the read-write handle, one owned block at a
+    /// time; the read after each write (visibility) and the other reads use
+    /// the inode of the read-only handle (`handle_read` takes the inode). Each
+    /// block read must be exactly one allowed version (all or none). Appends
+    /// go through the append handle with a wrong offset on purpose; they land
+    /// after the block region (checked by `verify_appends`).
+    fn worker_multi_handle(&self, t: usize, hs: &mut Hists) -> WorkerOut {
+        let one = self.one.as_ref().expect("multi-handle context");
+        let mut out = Vec::new();
+        let blocks = one.model.committed.len();
+        let owned: Vec<usize> = (0..blocks / STRIPE).filter(|s| s % self.cfg.threads == t).collect();
+        let mut rng = Rng(self.cfg.seed ^ ((t as u64 + 1) << 40) ^ 0xa11);
+        let mut fhs = Vec::new();
+        for flags in [libc::O_RDONLY, libc::O_RDWR, libc::O_RDWR | libc::O_APPEND] {
+            match self.open_flags(hs, one.ino, flags) {
+                Ok(fh) => fhs.push(fh),
+                Err(m) => {
+                    out.push(m);
+                    break;
+                }
+            }
+        }
+        if let [_ro, rw, ap] = fhs[..] {
+            let mut k = 0u64;
+            for _ in 0..self.cfg.ops_per_thread {
+                if !self.keep_going(out.len()) {
+                    break;
+                }
+                let r = rng.below(100);
+                if r < 4 {
+                    self.fsync_fh(hs, one.ino, rw, &mut out);
+                } else if r < 44 && !owned.is_empty() {
+                    let b = owned[rng.below(owned.len())] * STRIPE + rng.below(STRIPE);
+                    self.write_blocks(hs, rw, b, 1, &mut out);
+                    // A completed write is visible through the read-only handle.
+                    self.read_blocks(hs, one.ino, b, 1, &mut out);
+                } else if r < 64 && k < MAX_APPENDS {
+                    let rec = append_record(self.cfg.seed, t as u64, k);
+                    let wrong = if k % 2 == 0 { 0 } else { 999_999 + k };
+                    match self.gated(hs, Kind::Append, || h::handle_write(&self.fs, ap, wrong, &rec)) {
+                        WriteResult::Ok(n) if n as usize == RECORD => {
+                            k += 1;
+                            one.appends[t].store(k, Ordering::SeqCst);
+                        }
+                        WriteResult::Ok(n) => out.push(mm("append", format!("short append: {n} of {RECORD}"))),
+                        WriteResult::Error(e) => out.push(errno_mismatch("append", e)),
+                    }
+                } else {
+                    let n = 1 + rng.below(STRIPE);
+                    let start = rng.below(blocks - n + 1);
+                    self.read_blocks(hs, one.ino, start, n, &mut out);
+                }
+            }
+        }
+        for fh in fhs {
+            self.release_fh(hs, one.ino, fh, &mut out);
+        }
+        WorkerOut { mismatches: out, model: None }
+    }
+
+    // ---- handler wrappers used by all modes ----
 
     fn open_fh(&self, hs: &mut Hists, ino: u64) -> Result<u64, Mismatch> {
-        match self.gated(hs, Kind::Open, || h::handle_open(&self.fs, ino, libc::O_RDWR)) {
+        self.open_flags(hs, ino, libc::O_RDWR)
+    }
+
+    fn open_flags(&self, hs: &mut Hists, ino: u64, flags: i32) -> Result<u64, Mismatch> {
+        match self.gated(hs, Kind::Open, || h::handle_open(&self.fs, ino, flags)) {
             OpenResult::Ok(fh, _) => Ok(fh),
             OpenResult::Error(e) => Err(errno_mismatch("open", e)),
         }
@@ -774,13 +901,16 @@ impl Ctx {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            match timed_commit(&self.fs, &self.gate) {
-                Ok(t) => {
-                    ch.gate_wait.saturating_record(ns(t.gate_wait));
-                    ch.hold.saturating_record(ns(t.hold));
-                    ch.total.saturating_record(ns(t.total));
+            let tail = self.cfg.crash && (stopped || self.deadline.is_some_and(|d| Instant::now() + every > d));
+            if !tail {
+                match timed_commit(&self.fs, &self.gate) {
+                    Ok(t) => {
+                        ch.gate_wait.saturating_record(ns(t.gate_wait));
+                        ch.hold.saturating_record(ns(t.hold));
+                        ch.total.saturating_record(ns(t.total));
+                    }
+                    Err(e) => out.push(mm("commit", format!("{e:?}"))),
                 }
-                Err(e) => out.push(mm("commit", format!("{e:?}"))),
             }
             if stopped {
                 return (ch, out);
@@ -803,6 +933,71 @@ fn verify_files(ctx: &Ctx) -> Vec<Mismatch> {
         if c != p {
             out.push(Mismatch { op: "verify", block: Some(b as u64), detail: format!("committed {c} != pending {p}") });
         }
+    }
+    out
+}
+
+/// Multi-handle mode, after the join: the file is the block region and then
+/// every appended record exactly once and whole, in some order. Read in 64
+/// KiB pieces with a bit set of the records seen (no whole-file buffer).
+fn verify_appends(ctx: &Ctx) -> Vec<Mismatch> {
+    const PIECE: u64 = 64 << 10;
+    let one = ctx.one.as_ref().expect("multi-handle context");
+    let counts: Vec<u64> = one.appends.iter().map(|c| c.load(Ordering::SeqCst)).collect();
+    let total: u64 = counts.iter().sum();
+    let base = ctx.cfg.file_bytes;
+    let mut out = Vec::new();
+    let size = match ctx.fs.test_getattr(one.ino) {
+        Ok(a) => a.size,
+        Err(e) => return vec![mm("append", format!("getattr: {e:?}"))],
+    };
+    if size != base + total * RECORD as u64 {
+        out.push(mm("append", format!("size {size}, want {base} + {total} records")));
+    }
+    let mut seen = vec![0u64; (counts.len() * MAX_APPENDS as usize).div_ceil(64)];
+    let mut found = 0u64;
+    let mut off = base;
+    while off < size && out.len() < 50 {
+        let want = (size - off).min(PIECE);
+        let piece = match h::handle_read(&ctx.fs, one.ino, off, want as u32) {
+            DataResult::Ok(d) if d.len() as u64 == want => d,
+            DataResult::Ok(d) => {
+                out.push(mm("append", format!("short read at {off}: {} of {want}", d.len())));
+                break;
+            }
+            DataResult::Error(e) => {
+                out.push(mm("append", format!("read at {off}: errno {e}")));
+                break;
+            }
+        };
+        for (i, r) in piece.chunks(RECORD).enumerate() {
+            let at = off + (i * RECORD) as u64;
+            if r.len() != RECORD {
+                out.push(mm("append", format!("part of a record at {at}")));
+                continue;
+            }
+            let t = u64::from_le_bytes(r[..8].try_into().unwrap());
+            let k = u64::from_le_bytes(r[8..16].try_into().unwrap());
+            if t as usize >= counts.len() || k >= counts[t as usize] {
+                out.push(mm("append", format!("record ({t}, {k}) at {at}: not an appended record")));
+                continue;
+            }
+            if r != append_record(ctx.cfg.seed, t, k) {
+                out.push(mm("append", format!("record ({t}, {k}) at {at}: not whole")));
+                continue;
+            }
+            let bit = t as usize * MAX_APPENDS as usize + k as usize;
+            if seen[bit / 64] & (1 << (bit % 64)) != 0 {
+                out.push(mm("append", format!("record ({t}, {k}) at {at}: twice")));
+                continue;
+            }
+            seen[bit / 64] |= 1 << (bit % 64);
+            found += 1;
+        }
+        off += want;
+    }
+    if found != total {
+        out.push(mm("append", format!("{found} of {total} records found")));
     }
     out
 }
@@ -881,13 +1076,21 @@ struct Report {
 }
 
 fn run(cfg: Config) -> Outcome {
+    start_deadlock_watchdog();
     let _watchdog = watchdog(cfg.watchdog, cfg.seed);
     chunk_store::lock_stats::reset();
     let dir = TempDir::new().unwrap();
     let fs = new_fs(dir.path(), cfg.wal.clone());
+    // The forced-drop knobs of the long run (`Config::from_env`); off by default.
+    if cfg.drop_every > 0 {
+        fs.test_drop_every(cfg.drop_every);
+    }
+    if cfg.dirty_limit_kib > 0 {
+        fs.test_set_dirty_limit(cfg.dirty_limit_kib << 10);
+    }
     let gate = fs.commit_gate();
     let (one, dirs) = match cfg.mode {
-        Mode::OneFile => {
+        Mode::OneFile | Mode::MultiHandle => {
             let ino = match h::handle_create(&fs, ROOT, "one-file", S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR) {
                 CreateResult::Ok(ino, fh, _) => {
                     assert!(
@@ -905,7 +1108,8 @@ fn run(cfg: Config) -> Outcome {
             };
             let blocks = (cfg.file_bytes as usize) / BLOCK;
             assert!(blocks % STRIPE == 0, "file size must be a multiple of a stripe");
-            (Some(OneFile { model: FileModel::new(blocks), ino }), None)
+            let appends = (0..cfg.threads).map(|_| AtomicU64::new(0)).collect();
+            (Some(OneFile { model: FileModel::new(blocks), ino, appends }), None)
         }
         Mode::ManyFiles => {
             let shared = mkdir(&fs, ROOT, "shared", cfg.seed);
@@ -943,15 +1147,23 @@ fn run(cfg: Config) -> Outcome {
     let mut commit = CommitHists::new();
     let mut dirty_total = 0;
     std::thread::scope(|s| {
-        let committer = s.spawn(|| ctx.commit_loop(&stop));
+        // The strict-gate rule (D-16): on the commit and worker threads, a
+        // cell or stripe taken outside a gate hold panics in a debug build.
+        // Setup and the final verify run on this thread, without it.
+        let committer = s.spawn(|| {
+            chunk_store::sync::rank::require_gate(true);
+            ctx.commit_loop(&stop)
+        });
         let handles: Vec<_> = (0..cfg.threads)
             .map(|t| {
                 let ctx = &ctx;
                 s.spawn(move || {
+                    chunk_store::sync::rank::require_gate(true);
                     let mut hs = Hists::new();
                     let w = match ctx.cfg.mode {
                         Mode::OneFile => ctx.worker_one_file(t, &mut hs),
                         Mode::ManyFiles => ctx.worker_many_files(t, &mut hs),
+                        Mode::MultiHandle => ctx.worker_multi_handle(t, &mut hs),
                     };
                     (hs, w)
                 })
@@ -975,6 +1187,10 @@ fn run(cfg: Config) -> Outcome {
     match cfg.mode {
         Mode::OneFile => mismatches.extend(verify_files(&ctx)),
         Mode::ManyFiles => mismatches.extend(verify_namespace(&ctx, &models)),
+        Mode::MultiHandle => {
+            mismatches.extend(verify_files(&ctx));
+            mismatches.extend(verify_appends(&ctx));
+        }
     }
     let ops = ctx.ops_done.load(Ordering::SeqCst);
     let max_inflight = ctx.max_inflight.load(Ordering::SeqCst);
@@ -1056,6 +1272,9 @@ fn short_cfg(mode: Mode) -> Config {
         serialize: true,
         wal: WalConfig::PerOp,
         watchdog: Duration::from_secs(60),
+        crash: false,
+        drop_every: 0,
+        dirty_limit_kib: 0,
     }
 }
 
@@ -1140,11 +1359,52 @@ fn model_detects_planted_bug() {
         "seed={}: no mismatch names {name}: {found:?}",
         cfg.seed
     );
+
+    // Append part: record (0, 0) is appended once more behind the model's back.
+    let mut cfg = short_cfg(Mode::MultiHandle);
+    cfg.threads = 1;
+    cfg.ops_per_thread = 30;
+    let o = run(cfg.clone());
+    assert_clean(cfg.seed, &o);
+    let ino = o.ctx.one.as_ref().unwrap().ino;
+    let ap = match h::handle_open(&o.ctx.fs, ino, libc::O_RDWR | libc::O_APPEND) {
+        OpenResult::Ok(fh, _) => fh,
+        OpenResult::Error(e) => panic!("seed={} open errno {e}", cfg.seed),
+    };
+    assert!(matches!(h::handle_write(&o.ctx.fs, ap, 0, &append_record(cfg.seed, 0, 0)), WriteResult::Ok(_)));
+    assert!(matches!(h::handle_release(&o.ctx.fs, ino, ap), EmptyResult::Ok));
+    let found = verify_appends(&o.ctx);
+    assert!(found.iter().any(|m| m.detail.contains("(0, 0)")), "seed={}: {found:?}", cfg.seed);
+    assert!(verify_files(&o.ctx).is_empty(), "seed={}: the append changed the block region", cfg.seed);
+}
+
+/// The strict-gate rule catches a request that takes a cell with no gate
+/// helper held (debug builds: the rank checker).
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "taken without the commit gate")]
+fn strict_gate_catches_a_request_without_the_gate() {
+    struct Off;
+    impl Drop for Off {
+        fn drop(&mut self) {
+            chunk_store::sync::rank::require_gate(false);
+        }
+    }
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path(), WalConfig::PerOp);
+    let fh = match h::handle_create(&fs, ROOT, "f", S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR) {
+        CreateResult::Ok(_, fh, _) => fh,
+        CreateResult::Error(e) => panic!("create errno {e}"),
+    };
+    // Declared after `fs`, so the rule is off again before `fs` drops.
+    let _off = Off;
+    chunk_store::sync::rank::require_gate(true);
+    let _ = h::handle_write(&fs, fh, 0, b"x");
 }
 
 /// The long run, by hand (use `--release`). Env vars: see `Config::from_env`.
 #[test]
-#[ignore = "long run by hand: STRESS_THREADS STRESS_SECS STRESS_FILE_MIB STRESS_SEED STRESS_SERIALIZE STRESS_MODE; use --release"]
+#[ignore = "long run by hand: STRESS_THREADS STRESS_SECS STRESS_FILE_MIB STRESS_SEED STRESS_SERIALIZE STRESS_MODE STRESS_DROP_EVERY STRESS_DIRTY_LIMIT_KIB; use --release"]
 fn long_run() {
     for mode in modes_from_env() {
         let cfg = Config::from_env(Config { mode, ..short_cfg(mode) });
@@ -1155,18 +1415,19 @@ fn long_run() {
     }
 }
 
-/// Serialize off: the target of Phases 19-21. Both modes, 4 threads, about 5 s
-/// each; the files are small, so the dirty total stays below the budget.
+/// Serialize off: the target of Phases 19-21, in the default suite since
+/// Phase 19. All three modes, 4 threads, 2 s each (multi-handle 1 s, so the
+/// binary stays under about 10 s; RESEARCH Risk 7); the files are small, so
+/// the dirty total stays below the budget.
 #[test]
-#[ignore = "target for Phases 19-21: needs file state kept in open_files (LOCK-01) and no cross-file take-out (LOCK-02)"]
 fn serialize_off_target() {
-    for mode in [Mode::OneFile, Mode::ManyFiles] {
+    for mode in [Mode::OneFile, Mode::ManyFiles, Mode::MultiHandle] {
         let cfg = Config {
             threads: 4,
             ops_per_thread: usize::MAX,
-            secs: Some(5),
+            secs: Some(if mode == Mode::MultiHandle { 1 } else { 2 }),
             serialize: false,
-            watchdog: Duration::from_secs(65),
+            watchdog: Duration::from_secs(30),
             ..short_cfg(mode)
         };
         let o = run(cfg.clone());
@@ -1174,6 +1435,43 @@ fn serialize_off_target() {
         assert_clean(cfg.seed, &o);
         assert!(o.report.dirty_total < DIRTY_BUDGET, "seed={}: dirty total {}", cfg.seed, o.report.dirty_total);
         assert!(o.report.max_inflight > 1, "seed={}: ops never overlapped", cfg.seed);
+    }
+}
+
+/// ROADMAP Phase 19 criterion 5: after a crash, replay of the write log of
+/// a serialize-off run gives the state the run applied (names, inode numbers
+/// of creates, sizes, content, link counts, mtime and ctime). The commit
+/// thread cuts the log every 250 ms during the run, but not in its last
+/// 250 ms, so the log holds the end of the run. The workers release every
+/// handle at the end, as a client would. Then the file system is dropped
+/// with no commit and no shutdown, and the store is loaded and replayed.
+#[test]
+fn crash_replay_matches_apply() {
+    for mode in [Mode::ManyFiles, Mode::OneFile] {
+        let cfg = Config {
+            threads: 4,
+            ops_per_thread: usize::MAX,
+            secs: Some(1),
+            serialize: false,
+            watchdog: Duration::from_secs(30),
+            crash: true,
+            ..short_cfg(mode)
+        };
+        let o = run(cfg.clone());
+        assert_clean(cfg.seed, &o);
+        let Outcome { ctx: Ctx { fs, _dir: dir, .. }, .. } = o;
+        let records = common::log_len(&fs, dir.path());
+        assert!(records > 0, "seed={} mode={}: the log after the last cut is empty", cfg.seed, mode.name());
+        let live = common::dump(&fs);
+        std::mem::forget(fs); // a crash: no commit, no destroy
+        let replayed = common::dump(&common::reload_and_replay(dir.path()));
+        println!("STRESS crash replay mode={} records={records} entries={}", mode.name(), live.len());
+        if replayed != live {
+            for d in common::first_differences(&live, &replayed, 5) {
+                println!("DIFF seed={} mode={} {d}", cfg.seed, mode.name());
+            }
+            panic!("seed={} mode={}: replay after the crash differs from the live state", cfg.seed, mode.name());
+        }
     }
 }
 
@@ -1221,6 +1519,9 @@ fn spike_ctx(serialize: bool, seed: u64, threads: usize, wal: WalConfig) -> Ctx 
             serialize,
             wal,
             watchdog: Duration::from_secs(60),
+            crash: false,
+            drop_every: 0,
+            dirty_limit_kib: 0,
         },
         one: None,
         dirs: None,
@@ -1415,7 +1716,7 @@ fn s3_store_lock() {
         print!("S3 n={n} ");
         row("gate_wait", &o.gate_wait);
         if chunk_store::lock_stats::ENABLED {
-            const SITES: [&str; 6] = ["store", "io", "readers", "open_files", "wal", "wal_writer"];
+            const SITES: [&str; 6] = ["store", "io", "readers", "file_cell", "wal", "wal_writer"];
             for st in chunk_store::lock_stats::snapshot().iter().filter(|s| s.count > 0 && SITES.contains(&s.label)) {
                 println!(
                     "S3 n={n} lock site={} count={} wait_p50_us={:.1} wait_p99_us={:.1} wait_max_us={:.1} hold_p50_us={:.1} hold_p99_us={:.1} hold_max_us={:.1}",
@@ -1704,7 +2005,7 @@ fn s7_budget_baseline() {
                             buf.extend_from_slice(&block_bytes(seed, fid, b as u64, ver[b]));
                         }
                         // Sample inside `gated`, after the write, while the harness mutex is held:
-                        // no other write has a file's state taken out of `open_files` then.
+                        // no other write is changing a dirty count then.
                         let r = ctx.gated(hs, Kind::Write, || {
                             let r = h::handle_write(&ctx.fs, fh, (first * BLOCK) as u64, buf);
                             max_dirty.fetch_max(ctx.fs.test_dirty_total(), Ordering::SeqCst);
