@@ -89,7 +89,7 @@ The per-task `<automated>` commands and `<fails_when>` signals are in each `20-N
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
 | Hot-rule effect under the S7 load (flusher drops next to steps) | LOCK-06 | A judgement on measured counters, not a pass or fail | Read `flusher_steps` and `flusher_drops` in `runs/s7-flusher.log`; a drop count near the step count means research Pitfall 1 holds under that load; note it in the 20-07 SUMMARY |
-| Slowest write with the throttle in a one-thread daemon | LOCK-06 | Phase 21 changes the dispatch; no threshold is set now | Read `slowest_write_ms` of the P1 runs and write it into the Phase 20 result |
+| Slowest write with the throttle in a one-thread daemon | LOCK-06 | Phase 21 changes the dispatch; no threshold is set now | Read `slowest_write_ms` and `throttle_wait_max_ms` of the P1 runs (the first is timed after the throttle, so a write's delay is the sum) and write both into the Phase 20 result |
 
 ---
 
