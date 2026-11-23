@@ -297,7 +297,7 @@ Plans:
   2. A background flusher lowers the shared dirty budget, a writer over the limit sleeps before it takes any lock, and every wait has a time limit
   3. A test with all workers throttled while a commit waits finishes without deadlock
   4. A Docker run with parallel random writers on large files keeps peak RSS (VmHWM) under one fixed cap
-**Plans**: 6/8 plans executed
+**Plans**: 7/8 plans executed
 
 One plan per wave; executors run them in order.
 
@@ -321,7 +321,7 @@ Plans:
 - [x] 20-06-PLAN.md — Mount options `--dirty-budget`, `--dirty-limit`, `--dirty-idle`, `--dirty-expire` with checks (costly: public CLI)
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 20-07-PLAN.md — Short dirty-bound test with parallel writers; S7 flusher form; P1 Docker runs under the fixed cap
+- [x] 20-07-PLAN.md — Short dirty-bound test with parallel writers; S7 flusher form; P1 Docker runs under the fixed cap
 
 **Wave 8** *(blocked on Wave 7 completion)*
 - [ ] 20-08-PLAN.md — Phase 20 result in the research doc, README options, requirement marks on evidence, phase gate
@@ -390,7 +390,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 18. Spikes, baseline and stress harness | 7/7 | Complete    | 2026-11-21 |
 | 19. Fine-grained locks | 16/16 | Complete    | 2026-11-22 |
-| 20. Dirty budget and rebase flusher | 6/8 | In Progress | - |
+| 20. Dirty budget and rebase flusher | 7/8 | In Progress | - |
 | 21. Worker pool | 0/0 | Not started | - |
 | 22. Chunk profiles | 0/0 | Not started | - |
 | 23. Hashes and rehash | 0/0 | Not started | - |
