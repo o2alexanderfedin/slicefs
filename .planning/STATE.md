@@ -29,6 +29,8 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
+Current Plan: 5
+Total Plans in Phase: 8
 Phase: 20 — Dirty budget and rebase flusher
 Plan: 20-04 complete (4 of 8); next 20-05
 Status: Executing
