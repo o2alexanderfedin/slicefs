@@ -369,6 +369,10 @@ fn a_write_past_half_the_budget_kicks_the_flusher() {
         // Half the budget sits just above the total: the next piece crosses it.
         let budget = 2 * (fs.test_dirty_total() + PIECE / 2);
         fs.test_set_dirty_budget(budget);
+        // A pass below half the budget (like a timed pass with no load)
+        // finds nothing to do. It must not stop the kick at half.
+        let st = flusher::flush_pass(&fs);
+        assert_eq!(st.steps, 0, "the pass below half the budget makes no step: {st:?}");
         let passes = fs.test_flusher_stats().passes;
         let mut write = |slot: usize| {
             let (off, data) = a.piece(slot);

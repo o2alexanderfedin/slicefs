@@ -758,10 +758,13 @@ pub(crate) struct FlushCtl {
     /// It is per file system, so tests that run in parallel do not move
     /// the clock of each other.
     clock_offset_ms: AtomicU64,
-    /// The last pass found no candidate (it tried no step). While it is
-    /// true, a write below the budget does not kick the flusher: with one
-    /// hot file, each write would else cause one more empty pass. The next
-    /// pass sets it again: a timed pass, or a pass kicked at the budget.
+    /// The last pass tried no step, and its last pick found no candidate
+    /// with the total at or above half the budget. While it is true, a
+    /// write below the budget does not kick the flusher: with one hot
+    /// file, each write would else cause one more empty pass. A pass below
+    /// half the budget leaves it false, so the first write that finds the
+    /// total at half kicks. The next pass sets it again: a timed pass, or
+    /// a pass kicked at the budget.
     pub(crate) empty_pass: AtomicBool,
     /// Writers in a throttle wait now.
     pub(crate) throttled_now: AtomicUsize,
@@ -3210,8 +3213,8 @@ impl SliceFsFilesystem {
     /// (`stop_flusher`, a panic): then it writes and pays with steps of its
     /// own file (`pay_budget`); a write never fails here. A total at or
     /// above half the budget wakes the flusher at once, unless the last
-    /// pass found no candidate and the total is below the budget
-    /// (`FlushCtl::empty_pass`). In a debug build it panics when the
+    /// pass found no candidate at half the budget or more and the total is
+    /// below the budget (`FlushCtl::empty_pass`). In a debug build it panics when the
     /// thread holds any ranked lock (the gate too).
     pub fn throttle_write(&self) -> Admit {
         debug_assert!(

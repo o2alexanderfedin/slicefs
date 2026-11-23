@@ -137,9 +137,10 @@ fn flusher_loop(ctl: &FlushCtl, mut pass: impl FnMut() -> bool) {
 /// locked cell); the pick reads only atomics. After each step the
 /// throttled writers are woken. A cell whose step freed nothing (skipped,
 /// dropped or failed) is not tried again in this pass. A stop ends the
-/// pass. At its end the pass records whether it tried no step
-/// (`FlushCtl::empty_pass`): then writes below the budget do not kick the
-/// flusher until a later pass tries a step.
+/// pass. At its end the pass records whether it tried no step although
+/// the total was at or above half the budget (`FlushCtl::empty_pass`):
+/// then writes below the budget do not kick the flusher until a later
+/// pass sets it again.
 pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
     let ctl = fs.flush_ctl();
     ctl.passes.fetch_add(1, Ordering::Relaxed);
@@ -148,6 +149,8 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
     let mut tried: HashSet<u64> = HashSet::new();
     let hot_ms = ctl.hot_ms.load(Ordering::Relaxed);
     let hot = |t: &FlushTarget, now: u64| now.saturating_sub(t.last_write()) < hot_ms;
+    // `full` of the last pick (the one that found no candidate).
+    let mut last_full = false;
     loop {
         if ctl.flags.lock().stop {
             return st;
@@ -156,6 +159,7 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
         let limit = fs.dirty_limit_now();
         let now = ctl.now_ms();
         let (at_budget, full) = (total >= budget, total >= budget / 2);
+        last_full = full;
         // A stream with pending writes only when no overlay candidate is
         // left (its writer would lose streaming).
         let Some(target) = fs
@@ -187,7 +191,7 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
             step(fs, &target, &mut st, &mut tried);
         }
     }
-    ctl.empty_pass.store(st.steps == 0, Ordering::Relaxed);
+    ctl.empty_pass.store(st.steps == 0 && last_full, Ordering::Relaxed);
     st
 }
 
