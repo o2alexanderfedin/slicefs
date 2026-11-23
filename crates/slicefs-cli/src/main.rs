@@ -11,7 +11,8 @@ fn main() {
     let json = cli.json;
 
     match cli.command {
-        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force, commit_interval, gc_interval, compression, hash } => {
+        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force, commit_interval, gc_interval, compression, hash, dirty_budget, dirty_limit } => {
+            let dirty = slicefs_cli::filesystem::DirtyConfig { budget: dirty_budget, limit: dirty_limit, ..Default::default() };
             if let Err(e) = mount::run_mount(
                 &store,
                 &mountpoint,
@@ -27,6 +28,7 @@ fn main() {
                 gc_interval,
                 compression,
                 hash.as_deref(),
+                dirty,
             ) {
                 if json {
                     eprintln!("{{\"error\": \"{e}\"}}");

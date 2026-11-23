@@ -94,6 +94,18 @@ pub enum Cmd {
         /// recorded; objects of the old hash stay readable.
         #[arg(long, value_name = "NAME", value_parser = crate::content::parse_hash)]
         hash: Option<String>,
+        /// Most dirty file data (data that is not stored yet) of all open
+        /// files together. SIZE is bytes, or a number with K, M or G
+        /// (1024-based). Default 64M, at least 4M. A writer over it waits up
+        /// to 5 s for the background flusher, then stores part of its own
+        /// file.
+        #[arg(long, value_name = "SIZE", default_value = "64M", value_parser = crate::content::parse_dirty_bytes)]
+        dirty_budget: usize,
+        /// Most dirty file data of one file. SIZE is bytes, or a number with
+        /// K, M or G (1024-based). Default 32M, at least 4M, not above
+        /// --dirty-budget.
+        #[arg(long, value_name = "SIZE", default_value = "32M", value_parser = crate::content::parse_dirty_bytes)]
+        dirty_limit: usize,
     },
 
     /// Unmount a SliceFS filesystem mounted at the given path.
@@ -259,6 +271,34 @@ mod tests {
         ] {
             let err = Cli::try_parse_from(args).err().expect("an unknown hash is refused").to_string();
             assert!(err.contains("unknown hash \"md5\"") && err.contains("blake3-256"), "{err}");
+        }
+    }
+
+    /// The budget and the limit of `slicefs mount ... extra`.
+    fn dirty_sizes(extra: &[&str]) -> Result<(usize, usize), String> {
+        let args: Vec<&str> = ["slicefs", "mount", "/mnt", "--store", "/data"].into_iter().chain(extra.iter().copied()).collect();
+        match Cli::try_parse_from(&args).map_err(|e| e.to_string())?.command {
+            Cmd::Mount { dirty_budget, dirty_limit, .. } => Ok((dirty_budget, dirty_limit)),
+            _ => panic!("expected Mount"),
+        }
+    }
+
+    /// With no option, the values are the constants of the file system.
+    #[test]
+    fn dirty_size_defaults_are_the_constants() {
+        use crate::filesystem::{DIRTY_BUDGET, DIRTY_LIMIT};
+        assert_eq!(dirty_sizes(&[]), Ok((DIRTY_BUDGET, DIRTY_LIMIT)));
+        assert_eq!((DIRTY_BUDGET, DIRTY_LIMIT), (67108864, 33554432));
+    }
+
+    #[test]
+    fn dirty_size_options_parse() {
+        for (b, l) in [("8M", "4M"), ("8388608", "4194304")] {
+            let got = dirty_sizes(&["--dirty-budget", b, "--dirty-limit", l]);
+            assert_eq!(got, Ok((8 << 20, 4 << 20)), "--dirty-budget {b} --dirty-limit {l}");
+        }
+        for extra in [&["--dirty-budget", "-5"][..], &["--dirty-budget=-5"], &["--dirty-limit", "0"], &["--dirty-limit", "3M"]] {
+            assert!(dirty_sizes(extra).is_err(), "{extra:?} is refused");
         }
     }
 

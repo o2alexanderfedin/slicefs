@@ -139,6 +139,11 @@ pub const FINAL_STEP: usize = 8 << 20;
 /// `REORDER_WINDOW`, so one stream can still use its whole window.
 pub const DIRTY_BUDGET: usize = 64 << 20;
 
+/// The least value of `--dirty-budget` and `--dirty-limit` (Phase 20 A3):
+/// four rebase steps. A later release can lower it with no break for a
+/// user; a higher value would refuse values that work today.
+pub const MIN_DIRTY_BYTES: usize = 4 * REBASE_STEP;
+
 /// Most dirty cost one flusher step frees (Phase 20, Claude's discretion):
 /// larger than `REBASE_STEP` (less fixed cost per install), smaller than
 /// `FINAL_STEP` (a commit cut waits for the longest shared gate hold). The
@@ -170,6 +175,58 @@ const DIRTY_EXPIRE: Duration = Duration::from_secs(30);
 /// does not step it (plan 20-05 choice: three pass intervals, "a few
 /// hundred ms" of A10).
 const HOT_WINDOW: Duration = Duration::from_millis(300);
+
+/// The dirty-data values of a mount (`--dirty-budget`, `--dirty-limit`,
+/// `--dirty-idle`, `--dirty-expire`). `Default` gives the values of the
+/// constants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirtyConfig {
+    /// Most dirty bytes of all open files (`DIRTY_BUDGET`).
+    pub budget: usize,
+    /// Most dirty bytes of one file (`DIRTY_LIMIT`).
+    pub limit: usize,
+    /// The idle time of a file, in seconds (`DIRTY_IDLE`).
+    pub idle_secs: u64,
+    /// The maximum age of dirty data, in seconds (`DIRTY_EXPIRE`).
+    pub expire_secs: u64,
+}
+
+impl Default for DirtyConfig {
+    fn default() -> Self {
+        DirtyConfig {
+            budget: DIRTY_BUDGET,
+            limit: DIRTY_LIMIT,
+            idle_secs: DIRTY_IDLE.as_secs(),
+            expire_secs: DIRTY_EXPIRE.as_secs(),
+        }
+    }
+}
+
+impl DirtyConfig {
+    /// Refuse the values that the mount options refuse: a byte value below
+    /// `MIN_DIRTY_BYTES`, a limit above the budget, and a time of 0 s or of
+    /// more ms than a u64 holds. A caller that makes the struct directly
+    /// gets the same checks as the command line.
+    pub fn check(&self) -> Result<(), String> {
+        for (name, bytes) in [("--dirty-budget", self.budget), ("--dirty-limit", self.limit)] {
+            if bytes < MIN_DIRTY_BYTES {
+                return Err(format!("{name} {bytes} is below the minimum of 4M ({MIN_DIRTY_BYTES} bytes)"));
+            }
+        }
+        if self.limit > self.budget {
+            return Err(format!(
+                "--dirty-limit {} is above --dirty-budget {} (bytes); the limit of one file must not be above the budget of all files",
+                self.limit, self.budget
+            ));
+        }
+        for (name, secs) in [("--dirty-idle", self.idle_secs), ("--dirty-expire", self.expire_secs)] {
+            if secs == 0 || secs > u64::MAX / 1000 {
+                return Err(format!("{name} {secs} is not in 1-{} seconds", u64::MAX / 1000));
+            }
+        }
+        Ok(())
+    }
+}
 
 /// The start of the flusher clock (`FlushCtl::now_ms`).
 static CLOCK_EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -1053,6 +1110,24 @@ impl SliceFsFilesystem {
     /// Test hook: set the dirty budget of all open files to `bytes`.
     pub fn test_set_dirty_budget(&self, bytes: usize) {
         self.dirty_budget.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Set the dirty-data values of the mount options (Phase 20). The mount
+    /// calls it before the write-log replay, so the replay uses them too.
+    /// It does not check `cfg`: `DirtyConfig::check` does.
+    pub fn set_dirty_config(&self, cfg: &DirtyConfig) {
+        self.dirty_budget.store(cfg.budget, Ordering::Relaxed);
+        self.dirty_limit.store(cfg.limit, Ordering::Relaxed);
+    }
+
+    /// Test hook: the dirty-data values now in use.
+    pub fn test_dirty_config(&self) -> DirtyConfig {
+        DirtyConfig {
+            budget: self.dirty_budget.load(Ordering::Relaxed),
+            limit: self.dirty_limit.load(Ordering::Relaxed),
+            idle_secs: self.flush_ctl.idle_ms.load(Ordering::Relaxed) / 1000,
+            expire_secs: self.flush_ctl.expire_ms.load(Ordering::Relaxed) / 1000,
+        }
     }
 
     /// Test hook: set the step of the last release to `bytes`.
@@ -6451,6 +6526,27 @@ mod tests {
             _ => 0,
         };
         fs.ino_of_fh(fh).and_then(|ino| fs.with_cell(ino, cost)).unwrap_or(0)
+    }
+
+    /// The mount options reach the atomics; the dirty data that is there
+    /// does not change.
+    #[test]
+    fn set_dirty_config_stores_the_budget_and_limit() {
+        let (fs, _dir) = fresh_fs();
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        fs.test_write(fh, 0, &seeded(1, 1 << 20)).unwrap();
+        fs.test_release(ino, fh).unwrap();
+        let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+        fs.test_write(fh, 4096, &seeded(2, 4096)).unwrap();
+        let total = fs.test_dirty_total();
+        assert!(total > 0, "the overlay write is dirty data");
+        assert_eq!(fs.test_dirty_config(), DirtyConfig::default());
+        let cfg = DirtyConfig { budget: 8 << 20, limit: 4 << 20, ..DirtyConfig::default() };
+        fs.set_dirty_config(&cfg);
+        let now = fs.test_dirty_config();
+        assert_eq!((now.budget, now.limit), (8 << 20, 4 << 20), "the dirty budget and limit are set");
+        assert_eq!(fs.test_dirty_total(), total, "the dirty total did not change");
+        fs.test_release(ino, fh).unwrap();
     }
 
     #[test]
