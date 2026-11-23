@@ -10,14 +10,10 @@ fn main() {
     let cli = Cli::parse();
     let json = cli.json;
 
+    let dirty = cli.command.dirty_config();
     match cli.command {
-        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force, commit_interval, gc_interval, compression, hash, dirty_budget, dirty_limit, dirty_idle, dirty_expire } => {
-            let dirty = slicefs_cli::filesystem::DirtyConfig {
-                budget: dirty_budget,
-                limit: dirty_limit,
-                idle_secs: dirty_idle,
-                expire_secs: dirty_expire,
-            };
+        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force, commit_interval, gc_interval, compression, hash, .. } => {
+            let dirty = dirty.expect("mount has dirty values");
             if let Err(e) = mount::run_mount(
                 &store,
                 &mountpoint,

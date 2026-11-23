@@ -132,11 +132,14 @@ pub const REBASE_STEP: usize = 1 << 20;
 /// whole overlay at once (#98).
 pub const FINAL_STEP: usize = 8 << 20;
 
-/// Budget of dirty bytes of all open files together (#105): when a write
-/// makes the sum pass it, the file with the most dirty bytes stores a step
-/// (an overlay rebase step; a stream's pending writes first become an
-/// overlay). Each file also keeps its own `DIRTY_LIMIT`. The same value as
-/// `REORDER_WINDOW`, so one stream can still use its whole window.
+/// Budget of dirty bytes of all open files together (#105, Phase 20). At
+/// half of it the flusher (`crate::flusher`) steps quiet files; a writer
+/// that finds the total at or above it waits in `throttle_write`, before it
+/// takes any lock, and after the wait it steps only its own file. Each file
+/// also keeps its own `DIRTY_LIMIT`. The default is the same value as
+/// `REORDER_WINDOW`, so one stream can still use its whole window. With a
+/// smaller `--dirty-budget`, a stream with pending writes can become an
+/// overlay when the total reaches the budget (one way).
 pub const DIRTY_BUDGET: usize = 64 << 20;
 
 /// The least value of `--dirty-budget` and `--dirty-limit` (Phase 20 A3):
@@ -218,7 +221,10 @@ impl DirtyConfig {
     pub fn check(&self) -> Result<(), String> {
         for (name, bytes) in [("--dirty-budget", self.budget), ("--dirty-limit", self.limit)] {
             if bytes < MIN_DIRTY_BYTES {
-                return Err(format!("{name} {bytes} is below the minimum of 4M ({MIN_DIRTY_BYTES} bytes)"));
+                return Err(format!(
+                    "{name} {bytes} is below the minimum of {}M ({MIN_DIRTY_BYTES} bytes)",
+                    MIN_DIRTY_BYTES >> 20
+                ));
             }
         }
         if self.limit > self.budget {

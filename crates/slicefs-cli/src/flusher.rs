@@ -166,7 +166,7 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
     let hot_ms = ctl.hot_ms.load(Ordering::Relaxed);
     let hot = |t: &FlushTarget, now: u64| now.saturating_sub(t.last_write()) < hot_ms;
     // `full` and `at_budget` of the last pick (the one that found no candidate).
-    let (mut last_full, mut last_at_budget) = (false, false);
+    let (mut last_full, mut last_at_budget): (bool, bool);
     loop {
         if ctl.flags.lock().stop {
             return st;

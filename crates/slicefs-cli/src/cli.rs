@@ -98,16 +98,20 @@ pub enum Cmd {
         /// files together. This is memory that the daemon may use. SIZE is
         /// bytes, or a number with K, M or G (1024-based). Default 64M, at
         /// least 4M, no upper bound. A writer over it waits up to 5 s for
-        /// the background flusher, then stores part of its own file.
+        /// the background flusher, then stores part of its own file. Below
+        /// 64M, a file that is written from start to end with out-of-order
+        /// writes (a stream) can become a file changed in place (an
+        /// overlay) when the total reaches the budget.
         #[arg(long, value_name = "SIZE", default_value = "64M", value_parser = crate::content::parse_dirty_bytes)]
         dirty_budget: usize,
         /// Most dirty file data of one file that is changed in place (an
         /// overlay). SIZE is bytes, or a number with K, M or G (1024-based).
-        /// Default 32M, at least 4M, not above --dirty-budget. A file that is
-        /// written from start to end (a stream) can also hold out-of-order
-        /// writes up to a fixed 64 MiB window, whatever this limit is.
-        #[arg(long, value_name = "SIZE", default_value = "32M", value_parser = crate::content::parse_dirty_bytes)]
-        dirty_limit: usize,
+        /// Default 32M, or --dirty-budget if that is less. At least 4M, not
+        /// above --dirty-budget. A file that is written from start to end
+        /// (a stream) can also hold out-of-order writes up to a fixed
+        /// 64 MiB window, whatever this limit is.
+        #[arg(long, value_name = "SIZE", value_parser = crate::content::parse_dirty_bytes)]
+        dirty_limit: Option<usize>,
         /// Store the dirty data of a file after SECS seconds with no write
         /// to it (default 5, at least 1).
         #[arg(long, value_name = "SECS", default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=u64::MAX / 1000))]
@@ -179,6 +183,24 @@ pub enum Cmd {
         /// Path to the SliceFS block store directory.
         store: PathBuf,
     },
+}
+
+impl Cmd {
+    /// The dirty-data values of `slicefs mount` (not checked; see
+    /// `DirtyConfig::check`). With no `--dirty-limit`, the limit is
+    /// `DIRTY_LIMIT`, or the budget if that is less. `None` for another
+    /// subcommand.
+    pub fn dirty_config(&self) -> Option<crate::filesystem::DirtyConfig> {
+        match self {
+            Cmd::Mount { dirty_budget, dirty_limit, dirty_idle, dirty_expire, .. } => Some(crate::filesystem::DirtyConfig {
+                budget: *dirty_budget,
+                limit: dirty_limit.unwrap_or(crate::filesystem::DIRTY_LIMIT.min(*dirty_budget)),
+                idle_secs: *dirty_idle,
+                expire_secs: *dirty_expire,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// Snapshot subcommands.
@@ -285,13 +307,30 @@ mod tests {
         }
     }
 
+    /// The dirty values of `slicefs mount ... extra`, as the mount gets them.
+    fn dirty_config(extra: &[&str]) -> Result<crate::filesystem::DirtyConfig, String> {
+        let args: Vec<&str> = ["slicefs", "mount", "/mnt", "--store", "/data"].into_iter().chain(extra.iter().copied()).collect();
+        let cli = Cli::try_parse_from(&args).map_err(|e| e.to_string())?;
+        Ok(cli.command.dirty_config().expect("expected Mount"))
+    }
+
     /// The budget and the limit of `slicefs mount ... extra`.
     fn dirty_sizes(extra: &[&str]) -> Result<(usize, usize), String> {
-        let args: Vec<&str> = ["slicefs", "mount", "/mnt", "--store", "/data"].into_iter().chain(extra.iter().copied()).collect();
-        match Cli::try_parse_from(&args).map_err(|e| e.to_string())?.command {
-            Cmd::Mount { dirty_budget, dirty_limit, .. } => Ok((dirty_budget, dirty_limit)),
-            _ => panic!("expected Mount"),
-        }
+        dirty_config(extra).map(|c| (c.budget, c.limit))
+    }
+
+    /// With no --dirty-limit, the limit is 32M, or the budget if that is
+    /// less. An explicit limit above the budget is still refused.
+    #[test]
+    fn a_small_budget_alone_gives_a_limit_of_the_budget() {
+        let mib = 1 << 20;
+        let cfg = dirty_config(&["--dirty-budget", "16M"]).unwrap();
+        assert_eq!((cfg.budget, cfg.limit), (16 * mib, 16 * mib), "{cfg:?}");
+        assert_eq!(cfg.check(), Ok(()), "--dirty-budget 16M alone is accepted");
+        assert_eq!(dirty_sizes(&["--dirty-budget", "4M"]), Ok((4 * mib, 4 * mib)));
+        assert_eq!(dirty_sizes(&["--dirty-budget", "128M"]), Ok((128 * mib, 32 * mib)));
+        let cfg = dirty_config(&["--dirty-budget", "16M", "--dirty-limit", "32M"]).unwrap();
+        assert!(cfg.check().is_err(), "an explicit limit above the budget is refused: {cfg:?}");
     }
 
     /// With no option, the values are the constants of the file system.

@@ -237,7 +237,7 @@ pub fn parse_dirty_bytes(s: &str) -> Result<usize, String> {
         .and_then(|n| n.checked_mul(unit))
         .ok_or_else(|| format!("size {s:?} is too large"))?;
     if bytes < MIN_DIRTY_BYTES {
-        return Err(format!("size {s:?} is below the minimum of 4M ({MIN_DIRTY_BYTES} bytes)"));
+        return Err(format!("size {s:?} is below the minimum of {}M ({MIN_DIRTY_BYTES} bytes)", MIN_DIRTY_BYTES >> 20));
     }
     Ok(bytes)
 }

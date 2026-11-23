@@ -104,7 +104,7 @@ Dirty data is written file data that is not stored yet. It is kept in memory. Fo
 | Option | Default | Meaning |
 |---|---|---|
 | `--dirty-budget <SIZE>` | `64M` | The most dirty data of all open files together. This is memory that the daemon may use for it. |
-| `--dirty-limit <SIZE>` | `32M` | The most dirty data of one file. It must not be above `--dirty-budget`. |
+| `--dirty-limit <SIZE>` | `32M`, or `--dirty-budget` if that is less | The most dirty data of one file. It must not be above `--dirty-budget`. |
 | `--dirty-idle <SECS>` | `5` | Store the dirty data of a file after this time with no write to it. |
 | `--dirty-expire <SECS>` | `30` | Store dirty data that is this old. |
 
@@ -114,6 +114,7 @@ Dirty data is written file data that is not stored yet. It is kept in memory. Fo
 - A writer over the budget waits up to 5 s for the flusher. Then it writes, and stores part of its own file. The write does not fail. When the flusher cannot store data (for example, after a store error), the writer stops its wait after that flusher pass.
 - A file that is written with no pause of 300 ms or more is kept under its limit by its own writer.
 - `--dirty-limit` applies to a file that is changed in place (an overlay). A file that is written from start to end (a stream) can also hold writes that come out of order. These writes can use up to 64 MiB (a fixed window), whatever the limit is.
+- With a `--dirty-budget` below 64M, a stream with out-of-order writes can become an overlay when the total reaches the budget. The file then does not go back to a stream.
 
 ## Test
 
