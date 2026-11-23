@@ -387,6 +387,75 @@ fn a_write_past_half_the_budget_kicks_the_flusher() {
     a.check(&fs, "after release");
 }
 
+/// One hot file keeps the total at or above half the budget (and below
+/// the budget). The first pass finds no candidate (a hot cell is not a
+/// candidate below the budget), so later writes do not kick the flusher
+/// again: at most 2 passes for 200 writes (a write that kicks during the
+/// first pass can cause a second one). With no timed pass (60 s interval)
+/// and a hot window of an hour, the count does not depend on the load. At
+/// the full budget a write still kicks the flusher.
+#[test]
+fn a_hot_file_above_half_the_budget_does_not_kick_after_an_empty_pass() {
+    const WRITES: usize = 200;
+    const SLOTS: usize = 16;
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_dirty_limit(2 * MIB);
+    let mut a = dirty_file(&fs, 1, 4 * MIB, SLOTS);
+    fs.test_set_flush_pass(60_000);
+    fs.test_set_hot_window(HOUR_MS);
+    fs.test_set_throttle_wait(10_000);
+    std::thread::scope(|s| {
+        let _stop = StopGuard(&fs);
+        s.spawn(|| flusher::run_flusher(&fs));
+        assert!(wait_until(WAIT, || fs.test_flusher_running()), "the flusher runs");
+        // The writes go again to slots 1 to SLOTS: the total stays near
+        // `total`, between half the budget and the budget.
+        let total = fs.test_dirty_total();
+        let budget = total + total / 2;
+        fs.test_set_dirty_budget(budget);
+        let before = fs.test_flusher_stats();
+        let in_band = AtomicUsize::new(0);
+        for i in 0..WRITES {
+            let slot = 1 + i % SLOTS;
+            let (off, data) = a.piece(slot);
+            let (r, _) = throttled_write_sampled(
+                &fs,
+                a.fh,
+                off,
+                &data,
+                || {
+                    let t = fs.test_dirty_total();
+                    if t >= budget / 2 && t < budget {
+                        in_band.fetch_add(1, Ordering::Relaxed);
+                    }
+                },
+                |()| (),
+            );
+            assert!(matches!(r, WriteResult::Ok(n) if n as usize == PIECE), "the write is in: {r:?}");
+            a.applied(slot);
+        }
+        let st = fs.test_flusher_stats();
+        let passes = st.passes - before.passes;
+        println!("EMPTY-PASS writes={WRITES} in_band={} passes={passes} stats={st:?}", in_band.load(Ordering::Relaxed));
+        assert_eq!(in_band.load(Ordering::Relaxed), WRITES, "every write found the total between half the budget and the budget");
+        assert_eq!(st.steps, before.steps, "no step of the hot file below the budget: {st:?}");
+        assert_eq!(st.throttled, before.throttled, "no write waited: {st:?}");
+        assert!(passes <= 2, "{passes} flusher passes for {WRITES} writes of one hot file (at most 2): {st:?}");
+        // At the full budget a write kicks the flusher; the flusher steps
+        // the hot file and the throttled write goes in.
+        fs.test_set_dirty_budget(fs.test_dirty_total());
+        let (off, data) = a.piece(1);
+        let (r, _) = throttled_write(&fs, a.fh, off, &data);
+        assert!(matches!(r, WriteResult::Ok(n) if n as usize == PIECE), "the write is in: {r:?}");
+        a.applied(1);
+        assert!(fs.test_flusher_stats().passes > st.passes, "a write at the full budget kicked the flusher");
+    });
+    a.check(&fs, "handle open");
+    a.release(&fs);
+    a.check(&fs, "after release");
+}
+
 /// Receive `n` write results within `limit` in total, and check that each
 /// write put one piece in.
 fn all_writes_ok(rx: &mpsc::Receiver<(usize, WriteResult)>, n: usize, limit: Duration, what: &str) {

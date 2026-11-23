@@ -137,7 +137,9 @@ fn flusher_loop(ctl: &FlushCtl, mut pass: impl FnMut() -> bool) {
 /// locked cell); the pick reads only atomics. After each step the
 /// throttled writers are woken. A cell whose step freed nothing (skipped,
 /// dropped or failed) is not tried again in this pass. A stop ends the
-/// pass.
+/// pass. At its end the pass records whether it tried no step
+/// (`FlushCtl::empty_pass`): then writes below the budget do not kick the
+/// flusher until a later pass tries a step.
 pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
     let ctl = fs.flush_ctl();
     ctl.passes.fetch_add(1, Ordering::Relaxed);
@@ -185,6 +187,7 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
             step(fs, &target, &mut st, &mut tried);
         }
     }
+    ctl.empty_pass.store(st.steps == 0, Ordering::Relaxed);
     st
 }
 

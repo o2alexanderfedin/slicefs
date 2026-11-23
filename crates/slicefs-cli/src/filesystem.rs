@@ -724,7 +724,8 @@ pub(crate) struct FlushFlags {
     /// The flusher must end (set once, never cleared).
     pub(crate) stop: bool,
     /// A write found the total at or above half the budget: the flusher
-    /// makes a pass now, not at the end of its pass interval.
+    /// makes a pass now, not at the end of its pass interval (see
+    /// `FlushCtl::empty_pass` for when a write does not kick).
     pub(crate) kicked: bool,
     /// Test hook: the flusher makes no pass.
     pub(crate) paused: bool,
@@ -757,6 +758,11 @@ pub(crate) struct FlushCtl {
     /// It is per file system, so tests that run in parallel do not move
     /// the clock of each other.
     clock_offset_ms: AtomicU64,
+    /// The last pass found no candidate (it tried no step). While it is
+    /// true, a write below the budget does not kick the flusher: with one
+    /// hot file, each write would else cause one more empty pass. The next
+    /// pass sets it again: a timed pass, or a pass kicked at the budget.
+    pub(crate) empty_pass: AtomicBool,
     /// Writers in a throttle wait now.
     pub(crate) throttled_now: AtomicUsize,
     pub(crate) passes: AtomicU64,
@@ -784,6 +790,7 @@ impl FlushCtl {
             expire_ms: AtomicU64::new(DIRTY_EXPIRE.as_millis() as u64),
             hot_ms: AtomicU64::new(HOT_WINDOW.as_millis() as u64),
             clock_offset_ms: AtomicU64::new(0),
+            empty_pass: AtomicBool::new(false),
             throttled_now: AtomicUsize::new(0),
             passes: AtomicU64::new(0),
             steps: AtomicU64::new(0),
@@ -3202,8 +3209,10 @@ impl SliceFsFilesystem {
     /// not pay), the wait limit passed, or the flusher stopped or ended
     /// (`stop_flusher`, a panic): then it writes and pays with steps of its
     /// own file (`pay_budget`); a write never fails here. A total at or
-    /// above half the budget wakes the flusher at once. In a debug build it
-    /// panics when the thread holds any ranked lock (the gate too).
+    /// above half the budget wakes the flusher at once, unless the last
+    /// pass found no candidate and the total is below the budget
+    /// (`FlushCtl::empty_pass`). In a debug build it panics when the
+    /// thread holds any ranked lock (the gate too).
     pub fn throttle_write(&self) -> Admit {
         debug_assert!(
             sync::rank::held().is_empty(),
@@ -3212,7 +3221,7 @@ impl SliceFsFilesystem {
         );
         let ctl = &*self.flush_ctl;
         let (total, budget) = self.dirty_now();
-        if total >= budget / 2 {
+        if total >= budget || (total >= budget / 2 && !ctl.empty_pass.load(Ordering::Relaxed)) {
             self.kick_flusher();
         }
         if total < budget {
@@ -3250,7 +3259,8 @@ impl SliceFsFilesystem {
     }
 
     /// Wake the flusher for a pass now (the background threshold, half the
-    /// budget, was reached). Takes no lock when no flusher runs.
+    /// budget, was reached, see `throttle_write`). Takes no lock when no
+    /// flusher runs.
     fn kick_flusher(&self) {
         let ctl = &*self.flush_ctl;
         if !ctl.running.load(Ordering::Acquire) {
