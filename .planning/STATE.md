@@ -5,17 +5,17 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 20
 current_phase_name: Dirty budget and rebase flusher
 current_plan: 8
-status: executing
-stopped_at: Completed 20-07-PLAN.md
-last_updated: "2026-11-23T10:56:20.376Z"
+status: verifying
+stopped_at: Completed 20-08-PLAN.md
+last_updated: "2026-11-23T12:01:11.363Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 19 complete, transitioned to Phase 20
-state_head: a6cf1eb5910f12cae49f06bcf228797af6930512
+state_head: 192ebc0c99eb6d77bcf30001aa0afcb4a1fe6842
 progress:
   total_phases: 7
   completed_phases: 2
   total_plans: 31
-  completed_plans: 30
+  completed_plans: 31
   percent: 29
 ---
 
@@ -33,9 +33,9 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 Current Plan: 8
 Total Plans in Phase: 8
 Phase: 20 — Dirty budget and rebase flusher
-Plan: 20-06 complete (6 of 8); next 20-07
-Status: Ready to execute
-Last activity: 2026-11-23 — 20-05 flusher policy done (idle and maximum-age triggers on a test clock, hot rule, largest quiet file first, per-file limit trigger)
+Plan: 20-08 complete (8 of 8); next: phase verification
+Status: Phase complete — ready for verification
+Last activity: 2026-11-23 — empty-pass fix (4d8ac3d); 20-08 phase close: docs, README options, LOCK-02/LOCK-06 marked, gate green, Docker smoke ok
 
 Progress: [███░░░░░░░] 29%
 
@@ -79,6 +79,7 @@ Progress: [███░░░░░░░] 29%
 | Phase 20 P05 | 39 min | 2 tasks | 3 files |
 | Phase 20 P06 | 36 min | 2 tasks | 6 files |
 | Phase 20 P07 | 55 min | 3 tasks | 4 files |
+| Phase 20 P08 | 75min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -172,6 +173,8 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 20]: 20-06: run_mount checks DirtyConfig before the mount point is made and sets it before the write-log replay
 - [Phase 20]: 20-06: set_dirty_config is a plain store; DirtyConfig::check refuses times above u64::MAX / 1000 s like the clap range
 - [Phase 20]: 20-07: S7 flusher form asserts VmHWM (not getrusage) against CAP_MIB 320; P1 = 287 MiB, margin 33 MiB
+- [Phase 20]: Empty-pass fix (4d8ac3d): after a pass with no candidate, a write below the budget does not kick the flusher
+- [Phase 20]: LOCK-02 and LOCK-06 marked complete on evidence (gate, smoke 20-08, P1 under CAP_MIB)
 
 ### Pending Todos
 
@@ -195,8 +198,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-23T10:56:20.044Z
-Stopped at: Completed 20-07-PLAN.md
+Last session: 2026-11-23T12:01:11.068Z
+Stopped at: Completed 20-08-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
