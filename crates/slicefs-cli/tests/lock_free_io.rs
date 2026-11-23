@@ -1246,9 +1246,10 @@ fn a_size_change_waits_for_a_finalize_step_without_the_cell() {
     assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after the size change");
 }
 
-/// An O_TRUNC open waits for a step of the last release with its stripe
-/// held and the cell released; the step's holder takes no stripe, so both
-/// go on. The new handle stops the finalize, and the truncate applies.
+/// An O_TRUNC open waits for a step of the last release with the cell
+/// released and no stripe held (WR-02): a chmod of the inode (it takes the
+/// inode's stripe) goes on meanwhile. The new handle stops the finalize,
+/// and the truncate applies.
 #[test]
 fn an_o_trunc_open_waits_for_a_finalize_step() {
     let (fs, _dir) = fresh_fs();
@@ -1262,9 +1263,13 @@ fn an_o_trunc_open_waits_for_a_finalize_step() {
         let (tx, rx) = channel();
         s.spawn(move || tx.send(fs.test_open(ino, libc::O_RDWR | libc::O_TRUNC)).ok());
         let early = rx.recv_timeout(Duration::from_millis(300));
+        let (ctx, crx) = channel();
+        s.spawn(move || ctx.send(fs.test_setattr_mode(ino, 0o600)).ok());
+        let chmod = crx.recv_timeout(WAIT);
         go.send(()).ok();
         reached.expect("the finalize reached a step's I/O phase");
         assert!(early.is_err(), "the truncate waited for the finalize step: {early:?}");
+        assert_eq!(chmod.expect("the chmod waited for the stripe of the waiting open"), Ok(()));
         let opened = rx.recv_timeout(WAIT).expect("the open went on after the step");
         assert_eq!(rel.join().unwrap(), Ok(()));
         opened.unwrap().0

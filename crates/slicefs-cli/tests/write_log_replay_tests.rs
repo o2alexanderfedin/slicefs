@@ -1496,3 +1496,56 @@ fn a_create_in_a_new_directory_waits_for_its_mkdir_record() {
     assert_eq!(replayed, live, "replay must give the live tree");
     assert!(waited, "the create in the new directory must wait for the mkdir's stripe");
 }
+
+/// WR-03, D-08: a size change of an inode takes the inode's stripe first,
+/// so its `Setattr` record comes after the `Create` record of a create that
+/// has linked the name but not yet logged it. Replay then gives the size
+/// the live mount showed; it skips a `Setattr` of an inode that does not
+/// exist yet.
+#[test]
+fn a_size_change_of_a_new_file_comes_after_its_create_record() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    const ROOT: u64 = 1;
+    const LIMIT: Duration = Duration::from_secs(5);
+    let dir = TempDir::new().unwrap();
+    let live = {
+        let fs = new_fs(dir.path());
+        let (parked_tx, parked) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let slot = Mutex::new(Some((parked_tx, release_rx)));
+        // The hook runs in a create after the link, before its record.
+        fs.test_set_mkdir_hook(Some(Arc::new(move || {
+            if let Some((parked, release)) = slot.lock().unwrap().take() {
+                let _ = parked.send(());
+                let _ = release.recv_timeout(LIMIT);
+            }
+        })));
+        let live = std::thread::scope(|sc| {
+            let fs = &fs;
+            let a = sc.spawn(move || create(fs, ROOT, "f"));
+            parked.recv_timeout(LIMIT).expect("the create must park after the link");
+            let f = fs.test_lookup(ROOT, "f").expect("the new name is found during the park").0;
+            let b = sc.spawn(move || h::handle_setattr(fs, f, None, None, None, Some(4096), None, None, None));
+            // Without the stripe the size change is applied (and logged)
+            // during the park; with it, it waits. Look for at most 2 s.
+            let t0 = Instant::now();
+            while fs.meta().get_inode(f).unwrap().size == 0 && t0.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            release_tx.send(()).unwrap();
+            let (f2, fh) = a.join().unwrap();
+            assert_eq!(f2, f);
+            assert!(matches!(b.join().unwrap(), AttrResult::Ok(_)), "the size change");
+            release(fs, f, fh);
+            fs.test_set_mkdir_hook(None);
+            fs.meta().flush_wal().unwrap();
+            dump(fs)
+        });
+        std::mem::forget(fs); // a crash: no commit, no destroy
+        live
+    };
+    assert!(live.values().any(|v| v.contains("size=4096")), "the live size: {live:?}");
+    let replayed = dump(&reload_and_replay(dir.path()));
+    assert_eq!(replayed, live, "replay must give the live size");
+}

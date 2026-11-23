@@ -634,9 +634,9 @@ pub struct SliceFsFilesystem {
     /// of a flush snapshot), with the cell unlocked (for tests: a parked
     /// streaming write or fsync).
     push_hook: sync::Mutex<Option<RebaseHook>>,
-    /// Run in each mkdir after the directory is linked and before its
-    /// `Mkdir` record is appended, with its stripes held (for tests: a
-    /// parked mkdir).
+    /// Run in each mkdir, create and mknod after the new entry is linked
+    /// and before its record is appended, with its stripes held (for
+    /// tests: a parked mkdir or create).
     mkdir_hook: sync::Mutex<Option<RebaseHook>>,
     /// Write requests so far (write, create, setattr): the online GC gives
     /// way to writes by it (`gc_pacing`).
@@ -789,8 +789,9 @@ impl SliceFsFilesystem {
         *self.push_hook.lock() = hook;
     }
 
-    /// Test hook: run `hook` in each mkdir after the directory is linked and
-    /// before its record is appended, with its stripes held (`None`: no hook).
+    /// Test hook: run `hook` in each mkdir, create and mknod after the new
+    /// entry is linked and before its record is appended, with its stripes
+    /// held (`None`: no hook).
     pub fn test_set_mkdir_hook(&self, hook: Option<RebaseHook>) {
         *self.mkdir_hook.lock() = hook;
     }
@@ -923,8 +924,8 @@ impl SliceFsFilesystem {
                 return Ok(None);
             }
             // The truncate waits for a step in flight with the cell
-            // released and this stripe held: the step's holder takes no
-            // stripe, and the wait is limited (`STEP_WAIT`).
+            // released and no stripe held (WR-02): the caller counted the
+            // handle under the stripe and released it.
             match self.setattr_size_open(&mut g, 0) {
                 Ok(true) => {}
                 // Retired while it waited (only destroy can do that: this
@@ -1326,15 +1327,6 @@ impl SliceFsFilesystem {
         t.by_fh.insert(fh, Handle { ino, write, append });
         *t.open_count.entry(ino).or_insert(0) += 1;
         fh
-    }
-
-    /// Forget handle `fh`. If it was the last handle of an orphaned inode,
-    /// reclaim the inode. A handle that is not open is ignored. The caller
-    /// holds `stripe(ino)` of the handle's inode.
-    fn close_handle_held(&self, fh: u64) {
-        if let Some(h) = self.take_handle(fh) {
-            self.uncount_held(h.ino);
-        }
     }
 
     /// Remove `fh` from the handle table (its inode stays counted as open
@@ -2200,13 +2192,14 @@ impl SliceFsFilesystem {
         uid: u32,
         gid: u32,
     ) -> Result<(u64, u64), i32> {
-        self.create_logged(parent_ino, name, mode, umask, uid, gid, 0, None, &mut |_| {}).map(|(ino, fh, _)| (ino, fh))
+        self.create_logged(parent_ino, name, mode, umask, uid, gid, 0, None, &mut |_| {})
     }
 
     /// `test_create` at inode `at` (replay; `None`: the next free one) that
     /// logs (D-08): the `Create` record (with `flags`) goes to `log` in the
-    /// hold that also opens the handle and, with `O_TRUNC`, truncates; the
-    /// result of the truncate is the third value.
+    /// hold that also opens the handle. `O_TRUNC` needs no truncate: the
+    /// new inode is empty (a truncate here would wait for a step and do
+    /// store I/O with the stripes held, WR-02).
     #[allow(clippy::too_many_arguments)]
     fn create_logged(
         &self,
@@ -2219,7 +2212,7 @@ impl SliceFsFilesystem {
         flags: i32,
         at: Option<u64>,
         log: LogOp<'_>,
-    ) -> Result<(u64, u64, Result<(), i32>), i32> {
+    ) -> Result<(u64, u64), i32> {
         let file_mode = S_IFREG | (mode & !umask & 0o7777);
         let mut file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
         Self::stamp_new(&mut file_meta);
@@ -2229,9 +2222,8 @@ impl SliceFsFilesystem {
         self.touch_dir(parent_ino)?;
         let fh = self.open_handle(ino, true, false);
         self.open_write(ino, false, None)?;
-        let trunc = if flags & libc::O_TRUNC != 0 { self.test_setattr_size(ino, Some(fh), 0) } else { Ok(()) };
         log(crate::oplog::Op::Create { parent: parent_ino, name: name.to_string(), mode, umask, uid, gid, flags, ino });
-        Ok((ino, fh, trunc))
+        Ok((ino, fh))
     }
 
     /// The new inode `meta` (at `at` in replay) linked as `name` in
@@ -2251,6 +2243,10 @@ impl SliceFsFilesystem {
         if let Err(e) = linked {
             let _ = self.meta.delete_inode(ino);
             return Err(e);
+        }
+        let hook = self.mkdir_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
         }
         Ok((ino, ns))
     }
@@ -3087,6 +3083,12 @@ impl SliceFsFilesystem {
         let size_op = || crate::oplog::Op::Setattr {
             ino, mode: None, uid: None, gid: None, size: Some(new_size), atime: None, mtime: None,
         };
+        // A create (or mknod) that has linked `ino` holds its stripe until
+        // its record is appended (`new_entry`): wait for that, so this
+        // change's record comes after it (WR-03, D-08), and release the
+        // stripe at once. The change itself holds no stripe; the caller
+        // holds none either (stripes rank before cells).
+        drop(self.ns.lock(&[ino]));
         loop {
             // Case A: the inode has an open write state (also one that its
             // last release is still storing).
@@ -3923,13 +3925,19 @@ impl SliceFsFilesystem {
         let acc_mode = flags & libc::O_ACCMODE;
         let is_write = acc_mode == libc::O_WRONLY || acc_mode == libc::O_RDWR;
 
-        // Under stripe(ino): the inode exists, and the handle is counted
-        // before an unlink can decide that nobody has it open.
-        let _ns = self.ns.lock(&[ino]);
-        if self.meta.get_inode(ino).is_err() {
-            return (Err(libc::ENOENT), None);
-        }
-        let fh = self.open_handle(ino, is_write, flags & libc::O_APPEND != 0);
+        // Under stripe(ino): the inode exists (a create that linked it has
+        // logged its record), and the handle is counted before an unlink
+        // can decide that nobody has it open. Only that needs the stripe:
+        // the cell work below (a truncate can wait for a step and do store
+        // I/O) runs with it released (WR-02); the counted handle keeps an
+        // unlinked inode alive as an orphan.
+        let fh = {
+            let _ns = self.ns.lock(&[ino]);
+            if self.meta.get_inode(ino).is_err() {
+                return (Err(libc::ENOENT), None);
+            }
+            self.open_handle(ino, is_write, flags & libc::O_APPEND != 0)
+        };
 
         let mut lsn = None;
         if is_write {
@@ -3938,7 +3946,11 @@ impl SliceFsFilesystem {
             match self.open_write(ino, flags & libc::O_TRUNC != 0, time) {
                 Ok(l) => lsn = l,
                 Err(e) => {
-                    self.close_handle_held(fh);
+                    // `open_write` counted the handle out of the cell;
+                    // `uncount` takes the stripe again.
+                    if self.take_handle(fh).is_some() {
+                        self.uncount(ino);
+                    }
                     return (Err(e), None);
                 }
             }
@@ -4138,14 +4150,7 @@ impl SliceFsFilesystem {
         at: Option<u64>,
         log: LogOp<'_>,
     ) -> Result<(u64, u64, InodeMeta), i32> {
-        let (ino, fh, trunc) = self.create_logged(parent, name, mode, umask, uid, gid, flags, at, log)?;
-        if let Err(e) = trunc {
-            if self.take_handle(fh).is_some() {
-                let _ = self.release_write(ino, None);
-                self.uncount(ino);
-            }
-            return Err(e);
-        }
+        let (ino, fh) = self.create_logged(parent, name, mode, umask, uid, gid, flags, at, log)?;
         if flags & libc::O_APPEND != 0 {
             if let Some(h) = self.handles.lock().by_fh.get_mut(&fh) {
                 h.append = true;
