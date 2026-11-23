@@ -1,8 +1,10 @@
 #!/bin/bash
 # Mount smoke test inside the container. Usage: mt-linux.sh <slicefs-binary>
+# SLICEFS_WORKERS=N mounts with --workers N, and the Workers line of the mount
+# must then be "Workers: N (set)"; for N >= 2 the pool line must show jobs.
 B=$1; R=/tmp/run; rm -rf $R; mkdir -p $R/src $R/mnt; echo seed-file > $R/src/seed.txt
 $B seed $R/store $R/src >/dev/null 2>&1
-$B mount --store $R/store $R/mnt </dev/null > $R/mount.log 2>&1 &
+$B mount --store $R/store ${SLICEFS_WORKERS:+--workers $SLICEFS_WORKERS} $R/mnt </dev/null > $R/mount.log 2>&1 &
 MP=$!
 for i in $(seq 1 20); do mountpoint -q $R/mnt && break; sleep 1; done
 mountpoint -q $R/mnt || { echo "NOT MOUNTED"; cat $R/mount.log | tail; exit 1; }
@@ -23,5 +25,11 @@ step rm 10 rm $R/mnt/d/r1.bin
 step unmount 15 $B unmount $R/mnt
 for i in $(seq 20); do kill -0 $MP 2>/dev/null || break; sleep .5; done
 if kill -0 $MP 2>/dev/null; then echo "  daemon-exit: FAIL (still running 10s after unmount)"; F=1; kill -9 $MP; else echo "  daemon-exit: ok"; fi
+WL=$(grep -m1 '^Workers:' $R/mount.log)
+echo "  workers-line: ${WL:-none}"
+if [ -n "${SLICEFS_WORKERS:-}" ] && [ "$WL" != "Workers: $SLICEFS_WORKERS (set)" ]; then echo "  workers-line: FAIL"; F=1; fi
+PL=$(grep -m1 -o 'pool: workers=.*' $R/mount.log)
+echo "  pool-line: ${PL:-none}"
+if [ "${SLICEFS_WORKERS:-0}" -ge 2 ] 2>/dev/null && ! grep -qE 'pool: workers=[0-9]+ jobs=[1-9]' $R/mount.log; then echo "  pool-line: FAIL"; F=1; fi
 $B stats $R/store 2>/dev/null | grep -iE "dedup|CAS" | head -3
 exit $F

@@ -10,6 +10,7 @@
 
 use std::ffi::OsStr;
 use std::io;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use fuser::{
@@ -20,6 +21,7 @@ use fuser::{
 };
 
 use crate::filesystem::{SliceFsFilesystem, TTL};
+use crate::pool::{Pool, DRAIN_WAIT};
 use crate::util::ts;
 use crate::handlers::{
     handle_create, handle_flush, handle_fsync, handle_fsyncdir, handle_getattr, handle_getlk,
@@ -33,13 +35,53 @@ use crate::handlers::{
 
 /// The file system as the FUSE session owns it. fuser takes the file system
 /// by value; this shares it, so the GC thread of the mount can reach it too.
-pub struct MountedFs(pub std::sync::Arc<SliceFsFilesystem>);
+/// With a pool, the request jobs run on its workers; with none (one
+/// worker), they run on the FUSE reader thread.
+pub struct MountedFs {
+    fs: Arc<SliceFsFilesystem>,
+    pool: Option<Pool>,
+}
 
 impl std::ops::Deref for MountedFs {
     type Target = SliceFsFilesystem;
     fn deref(&self) -> &SliceFsFilesystem {
-        &self.0
+        &self.fs
     }
+}
+
+impl MountedFs {
+    /// The session value of `fs`; `pool` is `None` for one worker.
+    pub fn new(fs: Arc<SliceFsFilesystem>, pool: Option<Pool>) -> Self {
+        MountedFs { fs, pool }
+    }
+
+    /// Run a request job: on this (reader) thread with no pool, else on a
+    /// worker of the pool. `weight` is the payload bytes that the job owns
+    /// (0 for most requests).
+    fn run(&self, weight: usize, job: impl FnOnce() + Send + 'static) {
+        match &self.pool {
+            None => job(),
+            Some(pool) => pool.submit(weight, Box::new(job)),
+        }
+    }
+}
+
+/// Run one handler inside one shared hold of the commit gate, and return
+/// its result with every lock released. The caller sends the reply after
+/// this returns, so no reply is sent with the gate held. When plan 21-02
+/// is done, this and `init` are the only places in this file that take
+/// the gate.
+fn serve<T>(fs: &SliceFsFilesystem, f: impl FnOnce() -> T) -> T {
+    let r = {
+        let _op = fs.gate_shared();
+        f()
+    };
+    debug_assert!(
+        chunk_store::sync::rank::held().is_empty(),
+        "reply with a lock held: {:?}",
+        chunk_store::sync::rank::held()
+    );
+    r
 }
 
 impl Filesystem for MountedFs {
@@ -61,6 +103,22 @@ impl Filesystem for MountedFs {
 
     fn destroy(&mut self) {
         eprintln!("[{}][FUSE] destroy: ENTRY — auto_snapshot={}", ts(), self.auto_snapshot);
+        // The reader has ended, so no new job comes. Run every queued job and
+        // join the workers first: the destroy work assumes that no request
+        // runs. The flusher still runs during the drain.
+        if let Some(pool) = self.pool.take() {
+            match pool.drain_and_join(DRAIN_WAIT) {
+                Ok(stats) => eprintln!("[{}][FUSE] destroy: {stats}", ts()),
+                Err(busy) => {
+                    eprintln!(
+                        "[{}][FUSE] destroy: {busy} worker(s) still busy after {} s: abort; the write log replays at the next mount",
+                        ts(),
+                        DRAIN_WAIT.as_secs()
+                    );
+                    std::process::abort();
+                }
+            }
+        }
         // Stop and join the flusher before the gate, then the destroy work.
         let ok = self.shutdown();
         eprintln!("[{}][FUSE] destroy: EXIT — commit_ok={}", ts(), ok);
@@ -69,18 +127,22 @@ impl Filesystem for MountedFs {
     // ── Read operations ───────────────────────────────────────────────────────
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
-        let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] getattr: ENTRY ino={}, fh={:?}", ts(), ino.0, _fh.map(|f| f.0));
-        match handle_getattr(self, ino.0) {
-            AttrResult::Ok(attr) => {
-                eprintln!("[{}][FUSE] getattr: EXIT ino={} -> ok size={}, mode={:#o}, uid={}, gid={}, nlink={}, kind={:?}", ts(), ino.0, attr.size, attr.perm, attr.uid, attr.gid, attr.nlink, attr.kind);
-                reply.attr(&TTL, &attr);
+        let ino = ino.0;
+        let fh = _fh.map(|f| f.0);
+        let fs = Arc::clone(&self.fs);
+        self.run(0, move || {
+            eprintln!("[{}][FUSE] getattr: ENTRY ino={}, fh={:?}", ts(), ino, fh);
+            match serve(&fs, || handle_getattr(&fs, ino)) {
+                AttrResult::Ok(attr) => {
+                    eprintln!("[{}][FUSE] getattr: EXIT ino={} -> ok size={}, mode={:#o}, uid={}, gid={}, nlink={}, kind={:?}", ts(), ino, attr.size, attr.perm, attr.uid, attr.gid, attr.nlink, attr.kind);
+                    reply.attr(&TTL, &attr);
+                }
+                AttrResult::Error(e) => {
+                    eprintln!("[{}][FUSE] getattr: EXIT ino={} -> error {}", ts(), ino, e);
+                    reply.error(Errno::from_i32(e));
+                }
             }
-            AttrResult::Error(e) => {
-                eprintln!("[{}][FUSE] getattr: EXIT ino={} -> error {}", ts(), ino.0, e);
-                reply.error(Errno::from_i32(e));
-            }
-        }
+        });
     }
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {

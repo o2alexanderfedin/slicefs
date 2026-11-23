@@ -14,6 +14,7 @@
 #        scripts/docker-linux-test/run.sh harness <test-name>   (one ignored test of the stress harness in release, no mount: s3_store_lock, s5_gate_fairness, s7_budget_baseline (S7_SERIALIZE=0 for the parallel form, S7_FLUSHER=1 for the flusher form); HARNESS_FEATURES=lock-stats for lock rows; by hand, not in CI)
 #        scripts/docker-linux-test/run.sh index-bench [SIZES...]   (default sizes: 1000000 10000000)
 #        scripts/docker-linux-test/run.sh index-bench-cold [SIZES...]   (cold page cache; privileged; by hand)
+# SLICEFS_WORKERS (for example 4) passes --workers to the mounts of the scripts.
 # SLICEFS_TARGET_VOL names the cargo target volume (default slicefs-target), so
 # two runs from different trees at the same time do not share build output.
 set -euo pipefail
@@ -21,7 +22,7 @@ HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 docker build -q -t slicefs-fusetest "$HERE" >/dev/null
 RUN=(docker run --rm --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined
   -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry
-  -v "$HERE":/dk:ro -e CARGO_TARGET_DIR=/target -e BW_KEEP -e BW_QUIET_REF slicefs-fusetest unshare -m --propagation private)
+  -v "$HERE":/dk:ro -e CARGO_TARGET_DIR=/target -e BW_KEEP -e BW_QUIET_REF -e SLICEFS_WORKERS slicefs-fusetest unshare -m --propagation private)
 case "${1:-all}" in
   smoke) "${RUN[@]}" bash -c 'cargo build -q -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/mt-linux.sh /target/debug/slicefs && /dk/dedup-probe.sh /target/debug/slicefs' ;;
   test)  "${RUN[@]}" bash -c 'cargo test -q --workspace && rm -rf /tmp/fuser && cp -r vendor/fuser /tmp/fuser && cd /tmp/fuser && cargo test -q --lib' ;;

@@ -247,6 +247,8 @@ fn check_mountpoint_not_in_use(mountpoint: &Path) -> Result<(), Box<dyn std::err
 /// `force` is accepted but currently unused.
 /// `dirty` holds the dirty-data values; they are checked before any side
 /// effect and set before the write-log replay.
+/// `workers` is the number of request worker threads (`None`: the default
+/// of `pool::default_workers`); with 1 there is no pool.
 #[allow(clippy::too_many_arguments)]
 pub fn run_mount(
     store_path: &Path,
@@ -264,9 +266,20 @@ pub fn run_mount(
     zstd_level: i32,
     hash: Option<&str>,
     dirty: DirtyConfig,
+    workers: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Pre-flight: refuse bad dirty-data values before anything changes.
     dirty.check()?;
+
+    // The request worker count, read once (Phase 21).
+    let (n_workers, how) = match workers {
+        Some(n) => (n, "set"),
+        None => (crate::pool::default_workers(), "default"),
+    };
+    if n_workers == 0 {
+        return Err("--workers must be at least 1".into());
+    }
+    println!("Workers: {n_workers} ({how})");
 
     // Pre-flight: create mountpoint directory if it doesn't exist.
     if !mountpoint.exists() {
@@ -458,8 +471,14 @@ pub fn run_mount(
     let unmount_watch =
         crate::fuset_watch::spawn_unmount_watcher(mountpoint, mounted_msg, Arc::clone(&unmount_watch_shutdown));
 
+    // The request pool: only for 2 or more workers (1 runs each request on
+    // the reader thread). A spawn error is a mount error, and goes through
+    // the stop steps below.
     #[allow(unused_mut)]
-    let mut mounted = mount(crate::fuse_callbacks::MountedFs(fs), mountpoint, &config);
+    let mut mounted = match (n_workers >= 2).then(|| crate::pool::Pool::new(n_workers)).transpose() {
+        Ok(pool) => mount(crate::fuse_callbacks::MountedFs::new(fs, pool), mountpoint, &config),
+        Err(e) => Err(std::io::Error::other(format!("cannot start {n_workers} request workers: {e}"))),
+    };
 
     #[cfg(target_os = "macos")]
     {
@@ -563,7 +582,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mnt = dir.path().join("mnt");
         let cfg = DirtyConfig { budget: 8 << 20, limit: 16 << 20, ..DirtyConfig::default() };
-        let r = run_mount(&dir.path().join("no-store"), &mnt, true, false, 0, None, None, false, None, false, 0, 0, 0, None, cfg);
+        let r = run_mount(&dir.path().join("no-store"), &mnt, true, false, 0, None, None, false, None, false, 0, 0, 0, None, cfg, None);
         let err = r.expect_err("run_mount refuses the dirty values").to_string();
         assert!(!mnt.exists(), "the mount point was not made ({err})");
         assert!(err.contains("16777216") && err.contains("8388608"), "{err}");

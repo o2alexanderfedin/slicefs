@@ -121,6 +121,12 @@ pub enum Cmd {
         /// kept under its limit by its own writer instead.
         #[arg(long, value_name = "SECS", default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=u64::MAX / 1000))]
         dirty_expire: u64,
+        /// Request worker threads. Default on Linux: half the CPUs, at least
+        /// 1 and at most 8; default on macOS: 1. With 1, each request runs
+        /// on the FUSE reader thread. At least 1; an explicit value above 8
+        /// is allowed.
+        #[arg(long, value_name = "N", value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+        workers: Option<usize>,
     },
 
     /// Unmount a SliceFS filesystem mounted at the given path.
