@@ -77,7 +77,7 @@ Out of scope: WAL group commit (deferred), chunk profiles (Phase 22), the Phase 
 <deferred>
 ## Deferred Ideas
 
-- Adaptive control from live statistics (owner idea, 2026-11-23): tune the throttle pause, the number of save-step slots and possibly the active worker count from measured values (flusher and store bandwidth, step time, queue depth, RSS), like Linux `balance_dirty_pages` sizes its pauses from measured write bandwidth. Not in Phase 21: fixed values first, so the base behavior is measured and tested. Phase 21 must expose the counters that such a controller needs (see [Stats]); the controller is a later phase or issue.
+- Adaptive control from live statistics (owner idea, 2026-11-23): tune the throttle pause, the number of save-step slots and possibly the active worker count from measured values (flusher and store bandwidth, step time, queue depth, RSS), like Linux `balance_dirty_pages` sizes its pauses from measured write bandwidth. Not in Phase 21: fixed values first, so the base behavior is measured and tested. Phase 21 must expose the counters that such a controller needs (see [Stats]); the controller is tracked in issue #152.
 - Raising the macOS default above 1: only after a measured FSKit throughput gain (a later decision on the Phase 21 numbers).
 - WAL group commit; Phase 19 and 20 deferred items stay open.
 
