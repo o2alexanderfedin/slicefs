@@ -297,7 +297,34 @@ Plans:
   2. A background flusher lowers the shared dirty budget, a writer over the limit sleeps before it takes any lock, and every wait has a time limit
   3. A test with all workers throttled while a commit waits finishes without deadlock
   4. A Docker run with parallel random writers on large files keeps peak RSS (VmHWM) under one fixed cap
-**Plans**: TBD
+**Plans**: 8 plans
+
+One plan per wave; executors run them in order.
+
+Plans:
+**Wave 1** *(Wave 0 baseline)*
+- [ ] 20-01-PLAN.md — S7 serialize knob and VmHWM; P_old and P0 in Docker; CAP_MIB fixed by a stated rule; `no_take_out` test and `pay_budget`
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 20-02-PLAN.md — Tracer: throttle before the gate, flusher pass with one step per gate hold, pay after the wait limit
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 20-03-PLAN.md — Stop and panic wake throttled writers; flusher thread with the mount; throttle in FUSE `write`; `shutdown` order
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 20-04-PLAN.md — All writers throttled while a commit waits (flusher paused; flusher in a step); no wait for a step token
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 20-05-PLAN.md — Idle and maximum-age triggers, hot rule, largest quiet file first, per-file limit trigger
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 20-06-PLAN.md — Mount options `--dirty-budget`, `--dirty-limit`, `--dirty-idle`, `--dirty-expire` with checks (costly: public CLI)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 20-07-PLAN.md — Short dirty-bound test with parallel writers; S7 flusher form; P1 Docker runs under the fixed cap
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 20-08-PLAN.md — Phase 20 result in the research doc, README options, requirement marks on evidence, phase gate
 
 ### Phase 21: Worker pool
 
