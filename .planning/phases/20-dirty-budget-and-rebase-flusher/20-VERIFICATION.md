@@ -1,8 +1,8 @@
 ---
 phase: 20-dirty-budget-and-rebase-flusher
 verified: 2026-11-23T14:51:21Z
-status: human_needed
-score: 4/5 must-haves verified
+status: passed
+score: 5/5 must-haves verified
 covered_files:
   - .planning/phases/20-dirty-budget-and-rebase-flusher/20-01-PLAN.md
   - .planning/phases/20-dirty-budget-and-rebase-flusher/20-01-SUMMARY.md
@@ -189,3 +189,7 @@ No gap. The four ROADMAP criteria and LOCK-02 and LOCK-06 have evidence in the c
 
 _Verified: 2026-11-23T14:51:21Z_
 _Verifier: Claude (gsd-verifier)_
+
+## Human item closed (orchestrator, 2026-11-23)
+
+The Docker smoke mount ran on d061ba2 (the same source code as the final Phase 20 code; later commits change only planning text). `rustc -V` in the image equals the `RUSTC` line of the Wave 0 notes. All file steps ok, `unmount: ok`, `daemon-exit: ok`, exit 0. Log: `runs/smoke-final.log`. Status changed from human_needed to passed.
