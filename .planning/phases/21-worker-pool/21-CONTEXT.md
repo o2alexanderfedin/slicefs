@@ -41,6 +41,8 @@ Out of scope: WAL group commit (deferred), chunk profiles (Phase 22), the Phase 
 - [Scale bar] (user answer, 2026-11-23) POOL-05 passes when throughput at `--workers 4` is at least 1.5x the `--workers 1` value in the Linux Docker bench (parallel I/O on different files). If it misses, the phase records the numbers and the cause, a follow-up issue is opened, and the pool still ships.
 - [Waits] Every new wait (queue push, drain, join) has a time limit or ends at unmount; no wait while a ranked lock is held (Phase 19/20 rules).
 
+- [Stats] (orchestrator, 2026-11-23, for the deferred adaptive control): the pool and the step limit keep cheap atomic counters (queue depth now and max, jobs served per worker, slot waits and their time, steps per second, bytes freed per step) next to the Phase 20 flusher stats, readable by tests and printed at unmount. No controller in this phase.
+
 ### Claude's Discretion
 - Queue depth, worker thread names, the exact handoff type, how the CPU count is read.
 
@@ -75,6 +77,7 @@ Out of scope: WAL group commit (deferred), chunk profiles (Phase 22), the Phase 
 <deferred>
 ## Deferred Ideas
 
+- Adaptive control from live statistics (owner idea, 2026-11-23): tune the throttle pause, the number of save-step slots and possibly the active worker count from measured values (flusher and store bandwidth, step time, queue depth, RSS), like Linux `balance_dirty_pages` sizes its pauses from measured write bandwidth. Not in Phase 21: fixed values first, so the base behavior is measured and tested. Phase 21 must expose the counters that such a controller needs (see [Stats]); the controller is a later phase or issue.
 - Raising the macOS default above 1: only after a measured FSKit throughput gain (a later decision on the Phase 21 numbers).
 - WAL group commit; Phase 19 and 20 deferred items stay open.
 

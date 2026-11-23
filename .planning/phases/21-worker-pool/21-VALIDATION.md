@@ -31,7 +31,7 @@ created: "2026-11-23"
 
 - **After every task commit:** the quick run command, plus the test names in the task's `<verify>`
 - **After every plan:** the full suite command (each plan commits only after `cargo test --workspace` exits 0); a Docker smoke with `SLICEFS_WORKERS=4` after any plan that changes a callback
-- **Before `/gsd-verify-work`:** the full suite green; the 21-08 gate log (smoke and live checks with 4 workers); the 21-05 and 21-07 records; the orchestrator CI evidence
+- **Before `/gsd-verify-work`:** the full suite green; the 21-09 gate log (smoke and live checks with 4 workers); the 21-06 and 21-08 records; the orchestrator CI evidence
 - **Max feedback latency:** 60 seconds for the quick command (warm build); Docker tasks are long by nature and run in the background with a `timeout`
 
 ---
@@ -51,16 +51,16 @@ created: "2026-11-23"
 | 21-04-01 | 04 | 4 | POOL-05 | T-21-13 | S7 writer count knob; before-runs at 8 and 16 writers | measurement knob + Docker | short local S7 with `S7_THREADS=2`; grep of `runs/s7-before-limit.log` | ✅ stress_harness.rs | ⬜ pending |
 | 21-04-02 | 04 | 4 | POOL-05 | T-21-13, T-21-14, T-21-15, T-21-16 | at most 2 save steps at once; slot waits before the gate, timed, end at stop; skip keeps the hard cap and the stated bound; no-slot flusher does not mark the pass stuck | integration (red on stubs) | `cargo test -p slicefs-cli --test flusher_tests -- save_steps_stay_at_the_limit a_writer_with_no_slot_writes_without_its_budget_step a_flusher_with_no_slot_does_not_mark_the_pass_stuck a_slot_wait_with_a_lock_held_panics stop_wakes_a_slot_waiter more_writers_than_slots_stay_bounded` | ✅ flusher_tests.rs | ⬜ pending |
 | 21-04-03 | 04 | 4 | POOL-05 | T-21-13 | releases wait for a slot before the gate; Must only in cap and finalize steps | integration (red on a stub) + source scan (guard mutation) | `cargo test -p slicefs-cli --test flusher_tests releases_stay_at_the_limit`; `cargo test -p slicefs-cli --test no_take_out` | ✅ | ⬜ pending |
-| 21-05-01 | 05 | 5 | POOL-05 | T-21-17, T-21-18 | 7 runs at 4 writers under CAP_MIB 320; 1, 2, 8, 16 recorded; 64 MiB rule | Docker measurement (rule set first) | counts and awk over `runs/s7-step-limit.log`; CAP_MIB still 320 | ❌ W0 (log) | ⬜ pending |
-| 21-05-02 | 05 | 5 | POOL-05 | T-21-17 | CAP(N) by the stated rule | recompute | awk over the log equals the `CAP(N) = ` lines of the notes | ❌ W0 | ⬜ pending |
-| 21-06-01 | 06 | 6 | POOL-04 | T-21-19 | every Linux CI mount uses SLICEFS_WORKERS and fails on a wrong Workers line | script syntax + counts | `bash -n` and counts on verify-phases.sh, pjdfstest.sh, dedup-probe.sh | ✅ | ⬜ pending |
-| 21-06-02 | 06 | 6 | POOL-04 | T-21-19, T-21-21 | ci.yml Linux job with 4 workers, a Workers check per step; macOS logs show the default | YAML parse + added-lines gate | Ruby YAML check of ci.yml; `bash -n` of the macOS scripts | ✅ | ⬜ pending |
-| 21-06-03 | 06 | 6 | POOL-04 | T-21-20 | all, verify and pjdfstest pass with 4 workers | Docker | grep of the three `runs/docker-*-w4.log` files | ❌ W0 (logs) | ⬜ pending |
-| 21-07-01 | 07 | 7 | POOL-05 | T-21-24 | the bench runs end to end (quick form); macOS bench and workflow ready; lock rows in a lock-stats build | Docker quick run + parse checks | `bash -n`; Ruby YAML check; `cargo check -p slicefs-cli --features lock-stats`; grep of `runs/pool-bench-quick.log` | ❌ W0 | ⬜ pending |
-| 21-07-02 | 07 | 7 | POOL-05 | T-21-23, T-21-24 | 16 clients at 1/2/4/8/16 workers, 3 rounds, 0 mismatches | Docker bench | counts over `runs/pool-bench.log` | ❌ W0 (log) | ⬜ pending |
-| 21-07-03 | 07 | 7 | POOL-05 | T-21-22 | ratios and verdict by the bar set first; cause on a miss | recompute | awk medians over the log equal the notes; verdict follows the bar | ❌ W0 | ⬜ pending |
-| 21-08-01 | 08 | 8 | POOL-01..05 | T-21-26 | docs match the code and the numbers; no paths or legal-terms words | doc gates | counts of the Phase 21 result, the README part, the deferred list; added-lines gate | ✅ | ⬜ pending |
-| 21-08-02 | 08 | 8 | POOL-01..05 | T-21-25 | marks follow the evidence; final tree mounts with 4 workers | phase gate + Docker | the full suite command; grep of `runs/gate-21-08.log`; mark checks against `ci-evidence.md` and the verdict | ✅ | ⬜ pending |
+| 21-06-01 | 05 | 5 | POOL-05 | T-21-17, T-21-18 | 7 runs at 4 writers under CAP_MIB 320; 1, 2, 8, 16 recorded; 64 MiB rule | Docker measurement (rule set first) | counts and awk over `runs/s7-step-limit.log`; CAP_MIB still 320 | ❌ W0 (log) | ⬜ pending |
+| 21-06-02 | 05 | 5 | POOL-05 | T-21-17 | CAP(N) by the stated rule | recompute | awk over the log equals the `CAP(N) = ` lines of the notes | ❌ W0 | ⬜ pending |
+| 21-07-01 | 06 | 6 | POOL-04 | T-21-19 | every Linux CI mount uses SLICEFS_WORKERS and fails on a wrong Workers line | script syntax + counts | `bash -n` and counts on verify-phases.sh, pjdfstest.sh, dedup-probe.sh | ✅ | ⬜ pending |
+| 21-07-02 | 06 | 6 | POOL-04 | T-21-19, T-21-21 | ci.yml Linux job with 4 workers, a Workers check per step; macOS logs show the default | YAML parse + added-lines gate | Ruby YAML check of ci.yml; `bash -n` of the macOS scripts | ✅ | ⬜ pending |
+| 21-07-03 | 06 | 6 | POOL-04 | T-21-20 | all, verify and pjdfstest pass with 4 workers | Docker | grep of the three `runs/docker-*-w4.log` files | ❌ W0 (logs) | ⬜ pending |
+| 21-08-01 | 07 | 7 | POOL-05 | T-21-24 | the bench runs end to end (quick form); macOS bench and workflow ready; lock rows in a lock-stats build | Docker quick run + parse checks | `bash -n`; Ruby YAML check; `cargo check -p slicefs-cli --features lock-stats`; grep of `runs/pool-bench-quick.log` | ❌ W0 | ⬜ pending |
+| 21-08-02 | 07 | 7 | POOL-05 | T-21-23, T-21-24 | 16 clients at 1/2/4/8/16 workers, 3 rounds, 0 mismatches | Docker bench | counts over `runs/pool-bench.log` | ❌ W0 (log) | ⬜ pending |
+| 21-08-03 | 07 | 7 | POOL-05 | T-21-22 | ratios and verdict by the bar set first; cause on a miss | recompute | awk medians over the log equal the notes; verdict follows the bar | ❌ W0 | ⬜ pending |
+| 21-09-01 | 08 | 8 | POOL-01..05 | T-21-26 | docs match the code and the numbers; no paths or legal-terms words | doc gates | counts of the Phase 21 result, the README part, the deferred list; added-lines gate | ✅ | ⬜ pending |
+| 21-09-02 | 08 | 8 | POOL-01..05 | T-21-25 | marks follow the evidence; final tree mounts with 4 workers | phase gate + Docker | the full suite command; grep of `runs/gate-21-09.log`; mark checks against `ci-evidence.md` and the verdict | ✅ | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -69,10 +69,10 @@ created: "2026-11-23"
 | Criterion | Requirement | Evidence |
 |-----------|-------------|----------|
 | 1. Mount option; 1 worker inline; macOS default 1 | POOL-01 | cli and default tests, `run_without_a_pool_runs_on_the_caller` (21-01); smoke with 4 and 1 workers (21-01, 21-02) |
-| 2. Unmount and SIGTERM drain and join before `destroy()`; replies after all locks | POOL-02 | `destroy_drains_before_shutdown`, drain tests (21-01); `reply_after_locks`, the `serve` assert (21-02); FUSET-05 with 4 workers (21-06, 21-08) |
+| 2. Unmount and SIGTERM drain and join before `destroy()`; replies after all locks | POOL-02 | `destroy_drains_before_shutdown`, drain tests (21-01); `reply_after_locks`, the `serve` assert (21-02); FUSET-05 with 4 workers (21-07, 21-09) |
 | 3. Worker panic aborts; replay; no request after a half-done update | POOL-03 | `pool_panic_tests` and the POOL-03 live-check block (21-03) |
-| 4. Tests and pjdfstest with 4 workers on Linux CI; macOS FSKit CI with the default | POOL-04 | local Docker logs (21-06) and the orchestrator CI evidence |
-| 5. Parallel I/O on different files scales on Linux; recorded | POOL-05 | the bench and its verdict (21-07); the step limit and the S7 memory numbers (21-04, 21-05) |
+| 4. Tests and pjdfstest with 4 workers on Linux CI; macOS FSKit CI with the default | POOL-04 | local Docker logs (21-07) and the orchestrator CI evidence |
+| 5. Parallel I/O on different files scales on Linux; recorded | POOL-05 | the bench and its verdict (21-08); the step limit and the S7 memory numbers (21-04, 21-06) |
 
 ---
 
@@ -95,10 +95,10 @@ The per-task `<automated>` commands and `<fails_when>` signals are in each `21-N
 
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
-| Linux CI with 4 workers and macOS FSKit CI with the default | POOL-04 | CI runs only after a push or a pull request, which the executor does not do | The orchestrator follows "Orchestrator after this plan" in the 21-06 SUMMARY and writes `runs/ci-evidence.md` |
-| macOS bench at 1 and 2 workers | POOL-05 ([Bench]) | macOS mounts run only in CI | The orchestrator pushes `ci-pool/<name>` after 21-07 and saves the log as `runs/pool-bench-macos.log` |
-| The follow-up issue on a bench miss | POOL-05 ([Scale bar]) | GitHub changes are for the orchestrator | The orchestrator opens it from the 21-07 notes and gives the number to 21-08 |
-| Which reading of [Step limit] holds above 4 writers | POOL-05 | An owner decision if a run at 8 or 16 writers is above 320 MiB | The 21-05 SUMMARY names it; the orchestrator asks the owner |
+| Linux CI with 4 workers and macOS FSKit CI with the default | POOL-04 | CI runs only after a push or a pull request, which the executor does not do | The orchestrator follows "Orchestrator after this plan" in the 21-07 SUMMARY and writes `runs/ci-evidence.md` |
+| macOS bench at 1 and 2 workers | POOL-05 ([Bench]) | macOS mounts run only in CI | The orchestrator pushes `ci-pool/<name>` after 21-08 and saves the log as `runs/pool-bench-macos.log` |
+| The follow-up issue on a bench miss | POOL-05 ([Scale bar]) | GitHub changes are for the orchestrator | The orchestrator opens it from the 21-08 notes and gives the number to 21-09 |
+| Which reading of [Step limit] holds above 4 writers | POOL-05 | An owner decision if a run at 8 or 16 writers is above 320 MiB | The 21-06 SUMMARY names it; the orchestrator asks the owner |
 
 ---
 
