@@ -4,18 +4,18 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: 20
 current_phase_name: Dirty budget and rebase flusher
-current_plan: 6
+current_plan: 7
 status: executing
-stopped_at: Completed 20-05-PLAN.md
-last_updated: "2026-11-23T09:14:33.094Z"
+stopped_at: Completed 20-06-PLAN.md
+last_updated: "2026-11-23T09:57:48.826Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 19 complete, transitioned to Phase 20
-state_head: 63be44712bee57c906a2a40a94e1c913dee33cfe
+state_head: 2493fea2586ade59798bc9d4a2169b1a0822e638
 progress:
   total_phases: 7
   completed_phases: 2
   total_plans: 31
-  completed_plans: 28
+  completed_plans: 29
   percent: 29
 ---
 
@@ -30,10 +30,10 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 6
+Current Plan: 7
 Total Plans in Phase: 8
 Phase: 20 — Dirty budget and rebase flusher
-Plan: 20-05 complete (5 of 8); next 20-06
+Plan: 20-06 complete (6 of 8); next 20-07
 Status: Ready to execute
 Last activity: 2026-11-23 — 20-05 flusher policy done (idle and maximum-age triggers on a test clock, hot rule, largest quiet file first, per-file limit trigger)
 
@@ -77,6 +77,7 @@ Progress: [███░░░░░░░] 29%
 | Phase 20 P03 | 45 min | 2 tasks | 7 files |
 | Phase 20 P04 | 40 min | 2 tasks | 1 files |
 | Phase 20 P05 | 39 min | 2 tasks | 3 files |
+| Phase 20 P06 | 36 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -166,6 +167,9 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 20]: 20-05: the flusher clock offset is per file system (FlushCtl field), so parallel tests do not move the clock of each other
 - [Phase 20]: 20-05: hot window 300 ms; below the budget the flusher never steps a hot cell, in any mode; at or above the budget hot cells are budget-full candidates
 - [Phase 20]: 20-05: budget-full pick is overlays first, then quiet cells, then the largest; a quiet cell at its own limit is stepped below half the budget
+- [Phase 20]: 20-06: MIN_DIRTY_BYTES (4 MiB) is a public constant used by parse_dirty_bytes and DirtyConfig::check
+- [Phase 20]: 20-06: run_mount checks DirtyConfig before the mount point is made and sets it before the write-log replay
+- [Phase 20]: 20-06: set_dirty_config is a plain store; DirtyConfig::check refuses times above u64::MAX / 1000 s like the clap range
 
 ### Pending Todos
 
@@ -189,8 +193,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-23T09:14:32.738Z
-Stopped at: Completed 20-05-PLAN.md
+Last session: 2026-11-23T09:57:48.433Z
+Stopped at: Completed 20-06-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
