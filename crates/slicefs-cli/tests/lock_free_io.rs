@@ -235,7 +235,7 @@ fn a_dropped_step_is_retried_unlocked() {
         let (tx, rx) = channel();
         let fs = &fs;
         s.spawn(move || tx.send(fs.test_read(ino, 300 * KIB as u64, 4096)).ok());
-        let read = rx.recv_timeout(Duration::from_millis(300));
+        let read = rx.recv_timeout(WAIT);
         go.send(()).ok();
         retry.expect("the retry reached its I/O phase");
         assert_eq!(r, Ok(patch.len() as u32));
@@ -296,9 +296,12 @@ fn a_writer_at_the_hard_cap_waits_without_the_cell() {
             }
         });
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // A write that does not wait arrives within `WAIT`, however slow
+            // the machine is; the write at the cap stays away while the
+            // step is parked (the hook parks it for up to 10 s).
             let mut waiting = None;
             for _ in 0..pieces.len() {
-                match rx.recv_timeout(Duration::from_millis(300)) {
+                match rx.recv_timeout(WAIT) {
                     Ok((i, r, cost)) => {
                         assert_eq!(r, Ok(128 * KIB as u32), "write {i}");
                         assert!(cost <= cap, "write {i}: dirty cost {cost} > cap {cap}");
@@ -312,6 +315,10 @@ fn a_writer_at_the_hard_cap_waits_without_the_cell() {
             assert!(waiting.is_some(), "a write at the hard cap waits for the step in flight");
             let cost = fs.test_dirty_cost(ino);
             assert!(cost <= cap, "while the writer waits: dirty cost {cost} > cap {cap}");
+            // It waits at the cap: its write (128 KiB, one extent overhead,
+            // the spare capacity of an extent of at most `cost`) passes it.
+            let most = cost + 128 * KIB + slicefs_cli::overlay::EXTENT_OVERHEAD + cost / GROW_DIV;
+            assert!(most > cap, "the waiting write is at the cap: cost {cost}, cap {cap}");
             let (rtx, rrx) = channel();
             s.spawn(move || rtx.send(fs.test_read(ino, 256 * KIB as u64, 4096)).ok());
             let read = rrx.recv_timeout(WAIT).expect("the read waited for the writer at the cap");
@@ -662,7 +669,7 @@ fn a_forced_drop_of_a_push_retries_unlocked() {
         let (tx, rx) = channel();
         let fs = &fs;
         s.spawn(move || tx.send(fs.test_read(ino, 0, 64 * KIB as u32)).ok());
-        let read = rx.recv_timeout(Duration::from_millis(300));
+        let read = rx.recv_timeout(WAIT);
         go.send(()).ok();
         reached.expect("the retry after the dropped push reached its push");
         assert!(read.expect("the read waited for the retry").unwrap() == prefix, "the read sees the prefix");
@@ -892,7 +899,7 @@ fn the_last_release_retries_dropped_steps_unlocked() {
         let (tx, rx) = channel();
         let fs = &fs;
         s.spawn(move || tx.send(fs.test_read(ino, 144 * KIB as u64, 4096)).ok());
-        let read = rx.recv_timeout(Duration::from_millis(300));
+        let read = rx.recv_timeout(WAIT);
         go.send(()).ok();
         reached.expect("the retry after a dropped step reached its I/O phase");
         let got = read.expect("the read waited for the retry of the release").unwrap();
@@ -943,7 +950,7 @@ fn the_last_release_of_a_stream_flushes_unlocked() {
         let (tx, rx) = channel();
         let fs = &fs;
         s.spawn(move || tx.send(fs.test_read(ino, 0, 64 * KIB as u32)).ok());
-        let read = rx.recv_timeout(Duration::from_millis(300));
+        let read = rx.recv_timeout(WAIT);
         go.send(()).ok();
         reached.expect("the flush of the release reached its I/O phase");
         assert!(read.expect("the read waited for the flush").unwrap() == model[..64 * KIB], "the read sees the prefix");
@@ -1070,7 +1077,7 @@ fn a_size_change_of_an_open_stream_runs_its_steps_unlocked() {
         let (tx, rx) = channel();
         let fs = &fs;
         s.spawn(move || tx.send(fs.test_read(ino, 0, 64 * KIB as u32)).ok());
-        let read = rx.recv_timeout(Duration::from_millis(300));
+        let read = rx.recv_timeout(WAIT);
         go.send(()).ok();
         reached.expect("a stream step of the size change reached its I/O phase");
         assert!(read.expect("the read waited for the size change").unwrap() == prefix, "the read sees the prefix");
@@ -1103,7 +1110,7 @@ fn a_read_does_not_wait_for_a_closed_file_truncate() {
         let (tx, rx) = channel();
         let fs = &fs;
         s.spawn(move || tx.send(fs.test_read(ino, 0, 1 << 20)).ok());
-        let read = rx.recv_timeout(Duration::from_millis(300));
+        let read = rx.recv_timeout(WAIT);
         go.send(()).ok();
         reached.expect("the truncate reached its splice");
         assert!(read.expect("the read waited for the splice").unwrap() == model, "the read sees the old content");
@@ -1135,7 +1142,7 @@ fn a_size_change_waits_for_a_finalize_step_without_the_cell() {
         let early = srx.recv_timeout(Duration::from_millis(300));
         let (rtx, rrx) = channel();
         s.spawn(move || rtx.send(fs.test_read(ino, 0, 4096)).ok());
-        let read = rrx.recv_timeout(Duration::from_millis(300));
+        let read = rrx.recv_timeout(WAIT);
         go.send(()).ok();
         reached.expect("the finalize reached a step's I/O phase");
         assert!(early.is_err(), "the size change waited for the finalize step: {early:?}");
