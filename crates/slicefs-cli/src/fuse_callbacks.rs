@@ -10,7 +10,7 @@
 
 use std::ffi::OsStr;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use fuser::{
@@ -32,6 +32,25 @@ use crate::handlers::{
     AttrResult, CreateResult, DataResult, EmptyResult, EntryResult, LockResult,
     OpenResult, ReaddirResult, StatfsResult, WriteResult, XattrResult,
 };
+
+/// False when `SLICEFS_FUSE_TRACE` is `0`, else true. It is read once, at
+/// the first request. The bench of plan 21-08 turns the per-request lines
+/// off to measure the cost of the global stderr lock; the default does not
+/// change the logs.
+fn trace_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SLICEFS_FUSE_TRACE").is_none_or(|v| v != "0"))
+}
+
+/// `eprintln!` for one per-request ENTRY or EXIT line. When `trace_on()`
+/// is false, it prints nothing and formats nothing.
+macro_rules! fuse_trace {
+    ($($arg:tt)*) => {
+        if trace_on() {
+            eprintln!($($arg)*);
+        }
+    };
+}
 
 /// The file system as the FUSE session owns it. fuser takes the file system
 /// by value; this shares it, so the GC thread of the mount can reach it too.
@@ -131,14 +150,14 @@ impl Filesystem for MountedFs {
         let fh = _fh.map(|f| f.0);
         let fs = Arc::clone(&self.fs);
         self.run(0, move || {
-            eprintln!("[{}][FUSE] getattr: ENTRY ino={}, fh={:?}", ts(), ino, fh);
+            fuse_trace!("[{}][FUSE] getattr: ENTRY ino={}, fh={:?}", ts(), ino, fh);
             match serve(&fs, || handle_getattr(&fs, ino)) {
                 AttrResult::Ok(attr) => {
-                    eprintln!("[{}][FUSE] getattr: EXIT ino={} -> ok size={}, mode={:#o}, uid={}, gid={}, nlink={}, kind={:?}", ts(), ino, attr.size, attr.perm, attr.uid, attr.gid, attr.nlink, attr.kind);
+                    fuse_trace!("[{}][FUSE] getattr: EXIT ino={} -> ok size={}, mode={:#o}, uid={}, gid={}, nlink={}, kind={:?}", ts(), ino, attr.size, attr.perm, attr.uid, attr.gid, attr.nlink, attr.kind);
                     reply.attr(&TTL, &attr);
                 }
                 AttrResult::Error(e) => {
-                    eprintln!("[{}][FUSE] getattr: EXIT ino={} -> error {}", ts(), ino, e);
+                    fuse_trace!("[{}][FUSE] getattr: EXIT ino={} -> error {}", ts(), ino, e);
                     reply.error(Errno::from_i32(e));
                 }
             }
@@ -146,19 +165,23 @@ impl Filesystem for MountedFs {
     }
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
-        let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] lookup: ENTRY parent={}, name={:?}", ts(), parent.0, name);
-        let name_str = name.to_str().unwrap_or("");
-        match handle_lookup(self, parent.0, name_str) {
-            EntryResult::Ok(child_ino, attr) => {
-                eprintln!("[{}][FUSE] lookup: EXIT parent={}, name={:?} -> found ino={}, size={}, mode={:#o}, kind={:?}", ts(), parent.0, name, child_ino, attr.size, attr.perm, attr.kind);
-                reply.entry(&TTL, &attr, Generation(0));
+        let parent = parent.0;
+        let name = name.to_os_string();
+        let fs = Arc::clone(&self.fs);
+        self.run(0, move || {
+            fuse_trace!("[{}][FUSE] lookup: ENTRY parent={}, name={:?}", ts(), parent, name);
+            let name_str = name.to_str().unwrap_or("");
+            match serve(&fs, || handle_lookup(&fs, parent, name_str)) {
+                EntryResult::Ok(child_ino, attr) => {
+                    fuse_trace!("[{}][FUSE] lookup: EXIT parent={}, name={:?} -> found ino={}, size={}, mode={:#o}, kind={:?}", ts(), parent, name, child_ino, attr.size, attr.perm, attr.kind);
+                    reply.entry(&TTL, &attr, Generation(0));
+                }
+                EntryResult::Error(errno) => {
+                    fuse_trace!("[{}][FUSE] lookup: EXIT parent={}, name={:?} -> error {}", ts(), parent, name, errno);
+                    reply.error(Errno::from_i32(errno));
+                }
             }
-            EntryResult::Error(errno) => {
-                eprintln!("[{}][FUSE] lookup: EXIT parent={}, name={:?} -> error {}", ts(), parent.0, name, errno);
-                reply.error(Errno::from_i32(errno));
-            }
-        }
+        });
     }
 
     fn readdir(
@@ -169,28 +192,31 @@ impl Filesystem for MountedFs {
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
-        let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] readdir: ENTRY ino={}, fh={}, offset={}", ts(), ino.0, _fh.0, offset);
-        match handle_readdir(self, ino.0, offset) {
-            ReaddirResult::Ok(entries) => {
-                let total = entries.len();
-                let mut returned = 0u64;
-                for (index, (entry_ino, kind, name)) in entries.iter().enumerate() {
-                    let next_offset = offset + (index as u64) + 1;
-                    let buffer_full = reply.add(INodeNo(*entry_ino), next_offset, *kind, name);
-                    if buffer_full {
-                        break;
+        let (ino, fh) = (ino.0, _fh.0);
+        let fs = Arc::clone(&self.fs);
+        self.run(0, move || {
+            fuse_trace!("[{}][FUSE] readdir: ENTRY ino={}, fh={}, offset={}", ts(), ino, fh, offset);
+            match serve(&fs, || handle_readdir(&fs, ino, offset)) {
+                ReaddirResult::Ok(entries) => {
+                    let total = entries.len();
+                    let mut returned = 0u64;
+                    for (index, (entry_ino, kind, name)) in entries.iter().enumerate() {
+                        let next_offset = offset + (index as u64) + 1;
+                        let buffer_full = reply.add(INodeNo(*entry_ino), next_offset, *kind, name);
+                        if buffer_full {
+                            break;
+                        }
+                        returned += 1;
                     }
-                    returned += 1;
+                    fuse_trace!("[{}][FUSE] readdir: EXIT ino={} -> ok, total_entries={}, returned={}", ts(), ino, total, returned);
+                    reply.ok();
                 }
-                eprintln!("[{}][FUSE] readdir: EXIT ino={} -> ok, total_entries={}, returned={}", ts(), ino.0, total, returned);
-                reply.ok();
+                ReaddirResult::Error(errno) => {
+                    fuse_trace!("[{}][FUSE] readdir: EXIT ino={} -> error {}", ts(), ino, errno);
+                    reply.error(Errno::from_i32(errno));
+                }
             }
-            ReaddirResult::Error(errno) => {
-                eprintln!("[{}][FUSE] readdir: EXIT ino={} -> error {}", ts(), ino.0, errno);
-                reply.error(Errno::from_i32(errno));
-            }
-        }
+        });
     }
 
     fn read(
@@ -204,22 +230,24 @@ impl Filesystem for MountedFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] read: ENTRY ino={}, fh={}, offset={}, size={}, flags={:#x}", ts(), ino.0, _fh.0, offset, size, _flags.0);
-        match handle_read(self, ino.0, offset, size) {
-            DataResult::Ok(data) => {
-                eprintln!("[{}][FUSE] read: EXIT ino={}, fh={} -> ok, {} bytes returned", ts(), ino.0, _fh.0, data.len());
-                reply.data(&data);
+        let (ino, fh, flags) = (ino.0, _fh.0, _flags.0);
+        let fs = Arc::clone(&self.fs);
+        self.run(0, move || {
+            fuse_trace!("[{}][FUSE] read: ENTRY ino={}, fh={}, offset={}, size={}, flags={:#x}", ts(), ino, fh, offset, size, flags);
+            match serve(&fs, || handle_read(&fs, ino, offset, size)) {
+                DataResult::Ok(data) => {
+                    fuse_trace!("[{}][FUSE] read: EXIT ino={}, fh={} -> ok, {} bytes returned", ts(), ino, fh, data.len());
+                    reply.data(&data);
+                }
+                DataResult::Error(e) => {
+                    fuse_trace!("[{}][FUSE] read: EXIT ino={}, fh={} -> error {}", ts(), ino, fh, e);
+                    reply.error(Errno::from_i32(e));
+                }
             }
-            DataResult::Error(e) => {
-                eprintln!("[{}][FUSE] read: EXIT ino={}, fh={} -> error {}", ts(), ino.0, _fh.0, e);
-                reply.error(Errno::from_i32(e));
-            }
-        }
+        });
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
-        let _op = self.gate_shared();
         use fuser::OpenAccMode;
         let acc = flags.acc_mode();
         #[allow(unreachable_patterns)]
@@ -229,27 +257,34 @@ impl Filesystem for MountedFs {
             OpenAccMode::O_RDWR => "O_RDWR",
             _ => "UNKNOWN",
         };
-        let has_trunc = flags.0 & libc::O_TRUNC != 0;
-        let has_append = flags.0 & libc::O_APPEND != 0;
-        eprintln!("[{}][FUSE] open: ENTRY ino={}, flags={:#x}, acc_mode={}, O_TRUNC={}, O_APPEND={}", ts(), ino.0, flags.0, acc_str, has_trunc, has_append);
-        match handle_open(self, ino.0, flags.0) {
-            OpenResult::Ok(fh, is_write) => {
-                eprintln!("[{}][FUSE] open: EXIT ino={} -> ok, fh={}, writable={}", ts(), ino.0, fh, is_write);
-                reply.opened(FileHandle(fh), FopenFlags::empty());
+        let (ino, flags) = (ino.0, flags.0);
+        let fs = Arc::clone(&self.fs);
+        self.run(0, move || {
+            let has_trunc = flags & libc::O_TRUNC != 0;
+            let has_append = flags & libc::O_APPEND != 0;
+            fuse_trace!("[{}][FUSE] open: ENTRY ino={}, flags={:#x}, acc_mode={}, O_TRUNC={}, O_APPEND={}", ts(), ino, flags, acc_str, has_trunc, has_append);
+            match serve(&fs, || handle_open(&fs, ino, flags)) {
+                OpenResult::Ok(fh, is_write) => {
+                    fuse_trace!("[{}][FUSE] open: EXIT ino={} -> ok, fh={}, writable={}", ts(), ino, fh, is_write);
+                    reply.opened(FileHandle(fh), FopenFlags::empty());
+                }
+                OpenResult::Error(e) => {
+                    fuse_trace!("[{}][FUSE] open: EXIT ino={} -> error {}", ts(), ino, e);
+                    reply.error(Errno::from_i32(e));
+                }
             }
-            OpenResult::Error(e) => {
-                eprintln!("[{}][FUSE] open: EXIT ino={} -> error {}", ts(), ino.0, e);
-                reply.error(Errno::from_i32(e));
-            }
-        }
+        });
     }
 
     fn opendir(&self, _req: &Request, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] opendir: ENTRY ino={}, flags={:#x}", ts(), _ino.0, _flags.0);
-        let fh = self.alloc_dir_handle();
-        eprintln!("[{}][FUSE] opendir: EXIT ino={} -> ok, fh={}", ts(), _ino.0, fh);
-        reply.opened(FileHandle(fh), FopenFlags::empty());
+        let (ino, flags) = (_ino.0, _flags.0);
+        let fs = Arc::clone(&self.fs);
+        self.run(0, move || {
+            fuse_trace!("[{}][FUSE] opendir: ENTRY ino={}, flags={:#x}", ts(), ino, flags);
+            let fh = serve(&fs, || fs.alloc_dir_handle());
+            fuse_trace!("[{}][FUSE] opendir: EXIT ino={} -> ok, fh={}", ts(), ino, fh);
+            reply.opened(FileHandle(fh), FopenFlags::empty());
+        });
     }
 
     fn release(
@@ -263,14 +298,14 @@ impl Filesystem for MountedFs {
         reply: ReplyEmpty,
     ) {
         let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] release: ENTRY ino={}, fh={}, flush={}, flags={:#x}, lock_owner={:?}", ts(), ino.0, fh.0, flush, _flags.0, _lock_owner.map(|l| l.0));
+        fuse_trace!("[{}][FUSE] release: ENTRY ino={}, fh={}, flush={}, flags={:#x}, lock_owner={:?}", ts(), ino.0, fh.0, flush, _flags.0, _lock_owner.map(|l| l.0));
         match handle_release(self, ino.0, fh.0) {
             EmptyResult::Ok => {
-                eprintln!("[{}][FUSE] release: EXIT ino={}, fh={} -> ok", ts(), ino.0, fh.0);
+                fuse_trace!("[{}][FUSE] release: EXIT ino={}, fh={} -> ok", ts(), ino.0, fh.0);
                 reply.ok();
             }
             EmptyResult::Error(e) => {
-                eprintln!("[{}][FUSE] release: EXIT ino={}, fh={} -> error {}", ts(), ino.0, fh.0, e);
+                fuse_trace!("[{}][FUSE] release: EXIT ino={}, fh={} -> error {}", ts(), ino.0, fh.0, e);
                 reply.error(Errno::EIO);
             }
         }
@@ -284,10 +319,14 @@ impl Filesystem for MountedFs {
         _flags: OpenFlags,
         reply: ReplyEmpty,
     ) {
-        let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] releasedir: ENTRY ino={}, fh={}, flags={:#x}", ts(), _ino.0, _fh.0, _flags.0);
-        eprintln!("[{}][FUSE] releasedir: EXIT ino={} -> ok", ts(), _ino.0);
-        reply.ok();
+        let (ino, fh, flags) = (_ino.0, _fh.0, _flags.0);
+        let fs = Arc::clone(&self.fs);
+        self.run(0, move || {
+            fuse_trace!("[{}][FUSE] releasedir: ENTRY ino={}, fh={}, flags={:#x}", ts(), ino, fh, flags);
+            serve(&fs, || ());
+            fuse_trace!("[{}][FUSE] releasedir: EXIT ino={} -> ok", ts(), ino);
+            reply.ok();
+        });
     }
 
     /// Flush any buffered writes for `fh` to CAS in response to a `close(2)` syscall.
@@ -310,14 +349,14 @@ impl Filesystem for MountedFs {
         reply: ReplyEmpty,
     ) {
         let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] flush: ENTRY ino={}, fh={}, lock_owner={}", ts(), ino.0, fh.0, _lock_owner.0);
+        fuse_trace!("[{}][FUSE] flush: ENTRY ino={}, fh={}, lock_owner={}", ts(), ino.0, fh.0, _lock_owner.0);
         match handle_flush(self, ino.0, fh.0) {
             EmptyResult::Ok => {
-                eprintln!("[{}][FUSE] flush: EXIT ino={}, fh={} -> ok", ts(), ino.0, fh.0);
+                fuse_trace!("[{}][FUSE] flush: EXIT ino={}, fh={} -> ok", ts(), ino.0, fh.0);
                 reply.ok();
             }
             EmptyResult::Error(e) => {
-                eprintln!("[{}][FUSE] flush: EXIT ino={}, fh={} -> error {}", ts(), ino.0, fh.0, e);
+                fuse_trace!("[{}][FUSE] flush: EXIT ino={}, fh={} -> error {}", ts(), ino.0, fh.0, e);
                 reply.error(Errno::EIO);
             }
         }
@@ -357,36 +396,43 @@ impl Filesystem for MountedFs {
         reply: ReplyEmpty,
     ) {
         let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] fsync: ENTRY ino={}, fh={}, datasync={}", ts(), ino.0, fh.0, _datasync);
+        fuse_trace!("[{}][FUSE] fsync: ENTRY ino={}, fh={}, datasync={}", ts(), ino.0, fh.0, _datasync);
         match handle_fsync(self, ino.0, fh.0) {
             EmptyResult::Ok => {
-                eprintln!("[{}][FUSE] fsync: EXIT ino={}, fh={} -> ok", ts(), ino.0, fh.0);
+                fuse_trace!("[{}][FUSE] fsync: EXIT ino={}, fh={} -> ok", ts(), ino.0, fh.0);
                 reply.ok();
             }
             EmptyResult::Error(e) => {
-                eprintln!("[{}][FUSE] fsync: EXIT ino={}, fh={} -> error {}", ts(), ino.0, fh.0, e);
+                fuse_trace!("[{}][FUSE] fsync: EXIT ino={}, fh={} -> error {}", ts(), ino.0, fh.0, e);
                 reply.error(Errno::EIO);
             }
         }
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
-        let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] statfs: ENTRY ino={}", ts(), _ino.0);
-        match handle_statfs(self) {
-            StatfsResult::Ok(blocks, bfree, bavail, files, ffree, bsize) => {
-                eprintln!("[{}][FUSE] statfs: EXIT ino={} -> ok, blocks={}, bfree={}, bavail={}, files={}, ffree={}, bsize={}", ts(), _ino.0, blocks, bfree, bavail, files, ffree, bsize);
-                reply.statfs(blocks, bfree, bavail, files, ffree, bsize, 255, bsize);
+        let ino = _ino.0;
+        let fs = Arc::clone(&self.fs);
+        self.run(0, move || {
+            fuse_trace!("[{}][FUSE] statfs: ENTRY ino={}", ts(), ino);
+            match serve(&fs, || handle_statfs(&fs)) {
+                StatfsResult::Ok(blocks, bfree, bavail, files, ffree, bsize) => {
+                    fuse_trace!("[{}][FUSE] statfs: EXIT ino={} -> ok, blocks={}, bfree={}, bavail={}, files={}, ffree={}, bsize={}", ts(), ino, blocks, bfree, bavail, files, ffree, bsize);
+                    reply.statfs(blocks, bfree, bavail, files, ffree, bsize, 255, bsize);
+                }
             }
-        }
+        });
     }
 
     fn access(&self, _req: &Request, _ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
-        let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] access: ENTRY ino={}, mask={:#x}", ts(), _ino.0, _mask.bits());
-        eprintln!("[{}][FUSE] access: EXIT ino={} -> ok", ts(), _ino.0);
-        // Read-only filesystem — all reads are allowed
-        reply.ok();
+        let (ino, mask) = (_ino.0, _mask.bits());
+        let fs = Arc::clone(&self.fs);
+        self.run(0, move || {
+            fuse_trace!("[{}][FUSE] access: ENTRY ino={}, mask={:#x}", ts(), ino, mask);
+            serve(&fs, || ());
+            fuse_trace!("[{}][FUSE] access: EXIT ino={} -> ok", ts(), ino);
+            // Read-only filesystem — all reads are allowed
+            reply.ok();
+        });
     }
 
     fn getxattr(
@@ -397,42 +443,49 @@ impl Filesystem for MountedFs {
         size: u32,
         reply: ReplyXattr,
     ) {
-        let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] getxattr: ENTRY ino={}, name={:?}, size={}", ts(), ino.0, name, size);
-        let name_str = name.to_str().unwrap_or("");
-        match handle_getxattr(self, ino.0, name_str, size) {
-            XattrResult::Size(sz) => {
-                eprintln!("[{}][FUSE] getxattr: EXIT ino={}, name={:?} -> size_query, value_len={}", ts(), ino.0, name, sz);
-                reply.size(sz);
+        let ino = ino.0;
+        let name = name.to_os_string();
+        let fs = Arc::clone(&self.fs);
+        self.run(0, move || {
+            fuse_trace!("[{}][FUSE] getxattr: ENTRY ino={}, name={:?}, size={}", ts(), ino, name, size);
+            let name_str = name.to_str().unwrap_or("");
+            match serve(&fs, || handle_getxattr(&fs, ino, name_str, size)) {
+                XattrResult::Size(sz) => {
+                    fuse_trace!("[{}][FUSE] getxattr: EXIT ino={}, name={:?} -> size_query, value_len={}", ts(), ino, name, sz);
+                    reply.size(sz);
+                }
+                XattrResult::Data(value) => {
+                    fuse_trace!("[{}][FUSE] getxattr: EXIT ino={}, name={:?} -> ok, value_len={}", ts(), ino, name, value.len());
+                    reply.data(&value);
+                }
+                XattrResult::Error(_) => {
+                    fuse_trace!("[{}][FUSE] getxattr: EXIT ino={}, name={:?} -> NO_XATTR", ts(), ino, name);
+                    reply.error(Errno::NO_XATTR);
+                }
             }
-            XattrResult::Data(value) => {
-                eprintln!("[{}][FUSE] getxattr: EXIT ino={}, name={:?} -> ok, value_len={}", ts(), ino.0, name, value.len());
-                reply.data(&value);
-            }
-            XattrResult::Error(_) => {
-                eprintln!("[{}][FUSE] getxattr: EXIT ino={}, name={:?} -> NO_XATTR", ts(), ino.0, name);
-                reply.error(Errno::NO_XATTR);
-            }
-        }
+        });
     }
 
     fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
-        let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] listxattr: ENTRY ino={}, size={}", ts(), ino.0, size);
-        match handle_listxattr(self, ino.0, size) {
-            XattrResult::Size(sz) => {
-                eprintln!("[{}][FUSE] listxattr: EXIT ino={} -> size_query, total_len={}", ts(), ino.0, sz);
-                reply.size(sz);
+        let ino = ino.0;
+        let fs = Arc::clone(&self.fs);
+        self.run(0, move || {
+            fuse_trace!("[{}][FUSE] listxattr: ENTRY ino={}, size={}", ts(), ino, size);
+            match serve(&fs, || handle_listxattr(&fs, ino, size)) {
+                XattrResult::Size(sz) => {
+                    fuse_trace!("[{}][FUSE] listxattr: EXIT ino={} -> size_query, total_len={}", ts(), ino, sz);
+                    reply.size(sz);
+                }
+                XattrResult::Data(buf) => {
+                    fuse_trace!("[{}][FUSE] listxattr: EXIT ino={} -> ok, total_len={}", ts(), ino, buf.len());
+                    reply.data(&buf);
+                }
+                XattrResult::Error(errno) => {
+                    fuse_trace!("[{}][FUSE] listxattr: EXIT ino={} -> error {}", ts(), ino, errno);
+                    reply.error(Errno::from_i32(errno));
+                }
             }
-            XattrResult::Data(buf) => {
-                eprintln!("[{}][FUSE] listxattr: EXIT ino={} -> ok, total_len={}", ts(), ino.0, buf.len());
-                reply.data(&buf);
-            }
-            XattrResult::Error(errno) => {
-                eprintln!("[{}][FUSE] listxattr: EXIT ino={} -> error {}", ts(), ino.0, errno);
-                reply.error(Errno::from_i32(errno));
-            }
-        }
+        });
     }
 
     fn setxattr(
@@ -446,15 +499,15 @@ impl Filesystem for MountedFs {
         reply: ReplyEmpty,
     ) {
         let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] setxattr: ENTRY ino={}, name={:?}, value_len={}, flags={:#x}, position={}", ts(), ino.0, name, value.len(), _flags, _position);
+        fuse_trace!("[{}][FUSE] setxattr: ENTRY ino={}, name={:?}, value_len={}, flags={:#x}, position={}", ts(), ino.0, name, value.len(), _flags, _position);
         let name_str = name.to_str().unwrap_or("");
         match handle_setxattr(self, ino.0, name_str, value) {
             EmptyResult::Ok => {
-                eprintln!("[{}][FUSE] setxattr: EXIT ino={}, name={:?} -> ok", ts(), ino.0, name);
+                fuse_trace!("[{}][FUSE] setxattr: EXIT ino={}, name={:?} -> ok", ts(), ino.0, name);
                 reply.ok();
             }
             EmptyResult::Error(errno) => {
-                eprintln!("[{}][FUSE] setxattr: EXIT ino={}, name={:?} -> error {}", ts(), ino.0, name, errno);
+                fuse_trace!("[{}][FUSE] setxattr: EXIT ino={}, name={:?} -> error {}", ts(), ino.0, name, errno);
                 reply.error(Errno::from_i32(errno));
             }
         }
@@ -462,19 +515,19 @@ impl Filesystem for MountedFs {
 
     fn removexattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] removexattr: ENTRY ino={}, name={:?}", ts(), ino.0, name);
+        fuse_trace!("[{}][FUSE] removexattr: ENTRY ino={}, name={:?}", ts(), ino.0, name);
         let name_str = name.to_str().unwrap_or("");
         match handle_removexattr(self, ino.0, name_str) {
             EmptyResult::Ok => {
-                eprintln!("[{}][FUSE] removexattr: EXIT ino={}, name={:?} -> ok", ts(), ino.0, name);
+                fuse_trace!("[{}][FUSE] removexattr: EXIT ino={}, name={:?} -> ok", ts(), ino.0, name);
                 reply.ok();
             }
             EmptyResult::Error(e) if e == libc::ENODATA => {
-                eprintln!("[{}][FUSE] removexattr: EXIT ino={}, name={:?} -> NO_XATTR (not found)", ts(), ino.0, name);
+                fuse_trace!("[{}][FUSE] removexattr: EXIT ino={}, name={:?} -> NO_XATTR (not found)", ts(), ino.0, name);
                 reply.error(Errno::NO_XATTR);
             }
             EmptyResult::Error(errno) => {
-                eprintln!("[{}][FUSE] removexattr: EXIT ino={}, name={:?} -> error {}", ts(), ino.0, name, errno);
+                fuse_trace!("[{}][FUSE] removexattr: EXIT ino={}, name={:?} -> error {}", ts(), ino.0, name, errno);
                 reply.error(Errno::from_i32(errno));
             }
         }
@@ -501,7 +554,7 @@ impl Filesystem for MountedFs {
         let t_gate = std::time::Instant::now();
         let _op = self.gate_shared();
         let gate_wait = t_gate.elapsed();
-        eprintln!("[{}][FUSE] write: ENTRY ino={}, fh={}, offset={}, data_len={}, write_flags={:#x}, flags={:#x}, lock_owner={:?}", ts(), ino.0, fh.0, offset, data.len(), _write_flags.bits(), _flags.0, _lock_owner.map(|l| l.0));
+        fuse_trace!("[{}][FUSE] write: ENTRY ino={}, fh={}, offset={}, data_len={}, write_flags={:#x}, flags={:#x}, lock_owner={:?}", ts(), ino.0, fh.0, offset, data.len(), _write_flags.bits(), _flags.0, _lock_owner.map(|l| l.0));
         let t_handle = std::time::Instant::now();
         // The open flags of the request: O_APPEND writes at the end of file.
         let handled = handle_write_admitted(self, fh.0, offset, data, _flags.0, admit);
@@ -512,11 +565,11 @@ impl Filesystem for MountedFs {
         }
         match handled {
             WriteResult::Ok(n) => {
-                eprintln!("[{}][FUSE] write: EXIT ino={}, fh={} -> ok, written={} bytes", ts(), ino.0, fh.0, n);
+                fuse_trace!("[{}][FUSE] write: EXIT ino={}, fh={} -> ok, written={} bytes", ts(), ino.0, fh.0, n);
                 reply.written(n);
             }
             WriteResult::Error(e) => {
-                eprintln!("[{}][FUSE] write: EXIT ino={}, fh={} -> error {}", ts(), ino.0, fh.0, e);
+                fuse_trace!("[{}][FUSE] write: EXIT ino={}, fh={} -> error {}", ts(), ino.0, fh.0, e);
                 reply.error(Errno::from_i32(e));
             }
         }
@@ -533,21 +586,21 @@ impl Filesystem for MountedFs {
         reply: ReplyCreate,
     ) {
         let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] create: ENTRY parent={}, name={:?}, mode={:#o}, umask={:#o}, flags={:#x}, uid={}, gid={}", ts(), parent.0, name, mode, umask, flags, req.uid(), req.gid());
+        fuse_trace!("[{}][FUSE] create: ENTRY parent={}, name={:?}, mode={:#o}, umask={:#o}, flags={:#x}, uid={}, gid={}", ts(), parent.0, name, mode, umask, flags, req.uid(), req.gid());
         let name_str = match name.to_str() {
             Some(s) => s,
             None => {
-                eprintln!("[{}][FUSE] create: EXIT parent={}, name={:?} -> EINVAL (invalid name)", ts(), parent.0, name);
+                fuse_trace!("[{}][FUSE] create: EXIT parent={}, name={:?} -> EINVAL (invalid name)", ts(), parent.0, name);
                 return reply.error(Errno::EINVAL);
             }
         };
         match handle_create(self, parent.0, name_str, mode, umask, req.uid(), req.gid(), flags) {
             CreateResult::Ok(ino, fh, attr) => {
-                eprintln!("[{}][FUSE] create: EXIT parent={}, name={:?} -> ok, ino={}, fh={}, size={}, mode={:#o}", ts(), parent.0, name, ino, fh, attr.size, attr.perm);
+                fuse_trace!("[{}][FUSE] create: EXIT parent={}, name={:?} -> ok, ino={}, fh={}, size={}, mode={:#o}", ts(), parent.0, name, ino, fh, attr.size, attr.perm);
                 reply.created(&TTL, &attr, Generation(0), FileHandle(fh), FopenFlags::empty());
             }
             CreateResult::Error(errno) => {
-                eprintln!("[{}][FUSE] create: EXIT parent={}, name={:?} -> error {}", ts(), parent.0, name, errno);
+                fuse_trace!("[{}][FUSE] create: EXIT parent={}, name={:?} -> error {}", ts(), parent.0, name, errno);
                 reply.error(Errno::from_i32(errno));
             }
         }
@@ -563,21 +616,21 @@ impl Filesystem for MountedFs {
         reply: ReplyEntry,
     ) {
         let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] mkdir: ENTRY parent={}, name={:?}, mode={:#o}, umask={:#o}, uid={}, gid={}", ts(), parent.0, name, mode, umask, req.uid(), req.gid());
+        fuse_trace!("[{}][FUSE] mkdir: ENTRY parent={}, name={:?}, mode={:#o}, umask={:#o}, uid={}, gid={}", ts(), parent.0, name, mode, umask, req.uid(), req.gid());
         let name_str = match name.to_str() {
             Some(s) => s,
             None => {
-                eprintln!("[{}][FUSE] mkdir: EXIT parent={}, name={:?} -> EINVAL", ts(), parent.0, name);
+                fuse_trace!("[{}][FUSE] mkdir: EXIT parent={}, name={:?} -> EINVAL", ts(), parent.0, name);
                 return reply.error(Errno::EINVAL);
             }
         };
         match handle_mkdir(self, parent.0, name_str, mode, umask, req.uid(), req.gid()) {
             EntryResult::Ok(ino, attr) => {
-                eprintln!("[{}][FUSE] mkdir: EXIT parent={}, name={:?} -> ok, ino={}, mode={:#o}", ts(), parent.0, name, ino, attr.perm);
+                fuse_trace!("[{}][FUSE] mkdir: EXIT parent={}, name={:?} -> ok, ino={}, mode={:#o}", ts(), parent.0, name, ino, attr.perm);
                 reply.entry(&TTL, &attr, Generation(0));
             }
             EntryResult::Error(errno) => {
-                eprintln!("[{}][FUSE] mkdir: EXIT parent={}, name={:?} -> error {}", ts(), parent.0, name, errno);
+                fuse_trace!("[{}][FUSE] mkdir: EXIT parent={}, name={:?} -> error {}", ts(), parent.0, name, errno);
                 reply.error(Errno::from_i32(errno));
             }
         }
@@ -594,18 +647,18 @@ impl Filesystem for MountedFs {
         reply: ReplyEntry,
     ) {
         let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] mknod: ENTRY parent={}, name={:?}, mode={:#o}, umask={:#o}, rdev={}, uid={}, gid={}", ts(), parent.0, name, mode, umask, rdev, req.uid(), req.gid());
+        fuse_trace!("[{}][FUSE] mknod: ENTRY parent={}, name={:?}, mode={:#o}, umask={:#o}, rdev={}, uid={}, gid={}", ts(), parent.0, name, mode, umask, rdev, req.uid(), req.gid());
         let name_str = match name.to_str() {
             Some(s) => s,
             None => return reply.error(Errno::EINVAL),
         };
         match handle_mknod(self, parent.0, name_str, mode, umask, rdev, req.uid(), req.gid()) {
             EntryResult::Ok(ino, attr) => {
-                eprintln!("[{}][FUSE] mknod: EXIT parent={}, name={:?} -> ok, ino={}, mode={:#o}", ts(), parent.0, name, ino, attr.perm);
+                fuse_trace!("[{}][FUSE] mknod: EXIT parent={}, name={:?} -> ok, ino={}, mode={:#o}", ts(), parent.0, name, ino, attr.perm);
                 reply.entry(&TTL, &attr, Generation(0));
             }
             EntryResult::Error(errno) => {
-                eprintln!("[{}][FUSE] mknod: EXIT parent={}, name={:?} -> error {}", ts(), parent.0, name, errno);
+                fuse_trace!("[{}][FUSE] mknod: EXIT parent={}, name={:?} -> error {}", ts(), parent.0, name, errno);
                 reply.error(Errno::from_i32(errno));
             }
         }
@@ -620,46 +673,49 @@ impl Filesystem for MountedFs {
         reply: ReplyEntry,
     ) {
         let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] symlink: ENTRY parent={}, link_name={:?}, target={:?}, uid={}, gid={}", ts(), parent.0, link_name, target, req.uid(), req.gid());
+        fuse_trace!("[{}][FUSE] symlink: ENTRY parent={}, link_name={:?}, target={:?}, uid={}, gid={}", ts(), parent.0, link_name, target, req.uid(), req.gid());
         let name_str = match link_name.to_str() {
             Some(s) => s,
             None => {
-                eprintln!("[{}][FUSE] symlink: EXIT parent={} -> EINVAL (invalid link_name)", ts(), parent.0);
+                fuse_trace!("[{}][FUSE] symlink: EXIT parent={} -> EINVAL (invalid link_name)", ts(), parent.0);
                 return reply.error(Errno::EINVAL);
             }
         };
         let target_str = match target.to_str() {
             Some(s) => s,
             None => {
-                eprintln!("[{}][FUSE] symlink: EXIT parent={} -> EINVAL (invalid target)", ts(), parent.0);
+                fuse_trace!("[{}][FUSE] symlink: EXIT parent={} -> EINVAL (invalid target)", ts(), parent.0);
                 return reply.error(Errno::EINVAL);
             }
         };
         match handle_symlink(self, parent.0, name_str, target_str, req.uid(), req.gid()) {
             EntryResult::Ok(ino, attr) => {
-                eprintln!("[{}][FUSE] symlink: EXIT parent={}, link_name={:?} -> ok, ino={}, size={}", ts(), parent.0, link_name, ino, attr.size);
+                fuse_trace!("[{}][FUSE] symlink: EXIT parent={}, link_name={:?} -> ok, ino={}, size={}", ts(), parent.0, link_name, ino, attr.size);
                 reply.entry(&TTL, &attr, Generation(0));
             }
             EntryResult::Error(errno) => {
-                eprintln!("[{}][FUSE] symlink: EXIT parent={}, link_name={:?} -> error {}", ts(), parent.0, link_name, errno);
+                fuse_trace!("[{}][FUSE] symlink: EXIT parent={}, link_name={:?} -> error {}", ts(), parent.0, link_name, errno);
                 reply.error(Errno::from_i32(errno));
             }
         }
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
-        let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] readlink: ENTRY ino={}", ts(), ino.0);
-        match handle_readlink(self, ino.0) {
-            DataResult::Ok(bytes) => {
-                eprintln!("[{}][FUSE] readlink: EXIT ino={} -> ok, len={}", ts(), ino.0, bytes.len());
-                reply.data(&bytes);
+        let ino = ino.0;
+        let fs = Arc::clone(&self.fs);
+        self.run(0, move || {
+            fuse_trace!("[{}][FUSE] readlink: ENTRY ino={}", ts(), ino);
+            match serve(&fs, || handle_readlink(&fs, ino)) {
+                DataResult::Ok(bytes) => {
+                    fuse_trace!("[{}][FUSE] readlink: EXIT ino={} -> ok, len={}", ts(), ino, bytes.len());
+                    reply.data(&bytes);
+                }
+                DataResult::Error(errno) => {
+                    fuse_trace!("[{}][FUSE] readlink: EXIT ino={} -> error {}", ts(), ino, errno);
+                    reply.error(Errno::from_i32(errno));
+                }
             }
-            DataResult::Error(errno) => {
-                eprintln!("[{}][FUSE] readlink: EXIT ino={} -> error {}", ts(), ino.0, errno);
-                reply.error(Errno::from_i32(errno));
-            }
-        }
+        });
     }
 
     fn link(
@@ -671,21 +727,21 @@ impl Filesystem for MountedFs {
         reply: ReplyEntry,
     ) {
         let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] link: ENTRY ino={}, newparent={}, newname={:?}", ts(), ino.0, newparent.0, newname);
+        fuse_trace!("[{}][FUSE] link: ENTRY ino={}, newparent={}, newname={:?}", ts(), ino.0, newparent.0, newname);
         let name_str = match newname.to_str() {
             Some(s) => s,
             None => {
-                eprintln!("[{}][FUSE] link: EXIT ino={} -> EINVAL (invalid name)", ts(), ino.0);
+                fuse_trace!("[{}][FUSE] link: EXIT ino={} -> EINVAL (invalid name)", ts(), ino.0);
                 return reply.error(Errno::EINVAL);
             }
         };
         match handle_link(self, ino.0, newparent.0, name_str) {
             EntryResult::Ok(new_ino, attr) => {
-                eprintln!("[{}][FUSE] link: EXIT ino={}, newparent={}, newname={:?} -> ok, ino={}, nlink={}", ts(), ino.0, newparent.0, newname, new_ino, attr.nlink);
+                fuse_trace!("[{}][FUSE] link: EXIT ino={}, newparent={}, newname={:?} -> ok, ino={}, nlink={}", ts(), ino.0, newparent.0, newname, new_ino, attr.nlink);
                 reply.entry(&TTL, &attr, Generation(0));
             }
             EntryResult::Error(errno) => {
-                eprintln!("[{}][FUSE] link: EXIT ino={} -> error {}", ts(), ino.0, errno);
+                fuse_trace!("[{}][FUSE] link: EXIT ino={} -> error {}", ts(), ino.0, errno);
                 reply.error(Errno::from_i32(errno));
             }
         }
@@ -693,21 +749,21 @@ impl Filesystem for MountedFs {
 
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] unlink: ENTRY parent={}, name={:?}", ts(), parent.0, name);
+        fuse_trace!("[{}][FUSE] unlink: ENTRY parent={}, name={:?}", ts(), parent.0, name);
         let name_str = match name.to_str() {
             Some(s) => s,
             None => {
-                eprintln!("[{}][FUSE] unlink: EXIT parent={}, name={:?} -> EINVAL", ts(), parent.0, name);
+                fuse_trace!("[{}][FUSE] unlink: EXIT parent={}, name={:?} -> EINVAL", ts(), parent.0, name);
                 return reply.error(Errno::EINVAL);
             }
         };
         match handle_unlink(self, parent.0, name_str) {
             EmptyResult::Ok => {
-                eprintln!("[{}][FUSE] unlink: EXIT parent={}, name={:?} -> ok", ts(), parent.0, name);
+                fuse_trace!("[{}][FUSE] unlink: EXIT parent={}, name={:?} -> ok", ts(), parent.0, name);
                 reply.ok();
             }
             EmptyResult::Error(errno) => {
-                eprintln!("[{}][FUSE] unlink: EXIT parent={}, name={:?} -> error {}", ts(), parent.0, name, errno);
+                fuse_trace!("[{}][FUSE] unlink: EXIT parent={}, name={:?} -> error {}", ts(), parent.0, name, errno);
                 reply.error(Errno::from_i32(errno));
             }
         }
@@ -715,21 +771,21 @@ impl Filesystem for MountedFs {
 
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] rmdir: ENTRY parent={}, name={:?}", ts(), parent.0, name);
+        fuse_trace!("[{}][FUSE] rmdir: ENTRY parent={}, name={:?}", ts(), parent.0, name);
         let name_str = match name.to_str() {
             Some(s) => s,
             None => {
-                eprintln!("[{}][FUSE] rmdir: EXIT parent={}, name={:?} -> EINVAL", ts(), parent.0, name);
+                fuse_trace!("[{}][FUSE] rmdir: EXIT parent={}, name={:?} -> EINVAL", ts(), parent.0, name);
                 return reply.error(Errno::EINVAL);
             }
         };
         match handle_rmdir(self, parent.0, name_str) {
             EmptyResult::Ok => {
-                eprintln!("[{}][FUSE] rmdir: EXIT parent={}, name={:?} -> ok", ts(), parent.0, name);
+                fuse_trace!("[{}][FUSE] rmdir: EXIT parent={}, name={:?} -> ok", ts(), parent.0, name);
                 reply.ok();
             }
             EmptyResult::Error(errno) => {
-                eprintln!("[{}][FUSE] rmdir: EXIT parent={}, name={:?} -> error {}", ts(), parent.0, name, errno);
+                fuse_trace!("[{}][FUSE] rmdir: EXIT parent={}, name={:?} -> error {}", ts(), parent.0, name, errno);
                 reply.error(Errno::from_i32(errno));
             }
         }
@@ -746,28 +802,28 @@ impl Filesystem for MountedFs {
         reply: ReplyEmpty,
     ) {
         let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] rename: ENTRY parent={}, name={:?}, newparent={}, newname={:?}, flags={:#x}", ts(), parent.0, name, newparent.0, newname, flags.bits());
+        fuse_trace!("[{}][FUSE] rename: ENTRY parent={}, name={:?}, newparent={}, newname={:?}, flags={:#x}", ts(), parent.0, name, newparent.0, newname, flags.bits());
         let name_str = match name.to_str() {
             Some(s) => s,
             None => {
-                eprintln!("[{}][FUSE] rename: EXIT -> EINVAL (invalid name)", ts());
+                fuse_trace!("[{}][FUSE] rename: EXIT -> EINVAL (invalid name)", ts());
                 return reply.error(Errno::EINVAL);
             }
         };
         let newname_str = match newname.to_str() {
             Some(s) => s,
             None => {
-                eprintln!("[{}][FUSE] rename: EXIT -> EINVAL (invalid newname)", ts());
+                fuse_trace!("[{}][FUSE] rename: EXIT -> EINVAL (invalid newname)", ts());
                 return reply.error(Errno::EINVAL);
             }
         };
         match handle_rename(self, parent.0, name_str, newparent.0, newname_str, flags.bits()) {
             EmptyResult::Ok => {
-                eprintln!("[{}][FUSE] rename: EXIT parent={}, name={:?} -> newparent={}, newname={:?} -> ok", ts(), parent.0, name, newparent.0, newname);
+                fuse_trace!("[{}][FUSE] rename: EXIT parent={}, name={:?} -> newparent={}, newname={:?} -> ok", ts(), parent.0, name, newparent.0, newname);
                 reply.ok();
             }
             EmptyResult::Error(errno) => {
-                eprintln!("[{}][FUSE] rename: EXIT parent={}, name={:?} -> error {}", ts(), parent.0, name, errno);
+                fuse_trace!("[{}][FUSE] rename: EXIT parent={}, name={:?} -> error {}", ts(), parent.0, name, errno);
                 reply.error(Errno::from_i32(errno));
             }
         }
@@ -792,7 +848,7 @@ impl Filesystem for MountedFs {
         reply: ReplyAttr,
     ) {
         let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] setattr: ENTRY ino={}, mode={:?}, uid={:?}, gid={:?}, size={:?}, mtime={:?}, fh={:?}", ts(), ino.0, mode.map(|m| format!("{:#o}", m)), uid, gid, size, mtime.as_ref().map(|t| match t { TimeOrNow::Now => "Now".to_string(), TimeOrNow::SpecificTime(st) => format!("{:?}", st) }), fh.map(|f| f.0));
+        fuse_trace!("[{}][FUSE] setattr: ENTRY ino={}, mode={:?}, uid={:?}, gid={:?}, size={:?}, mtime={:?}, fh={:?}", ts(), ino.0, mode.map(|m| format!("{:#o}", m)), uid, gid, size, mtime.as_ref().map(|t| match t { TimeOrNow::Now => "Now".to_string(), TimeOrNow::SpecificTime(st) => format!("{:?}", st) }), fh.map(|f| f.0));
         // Convert TimeOrNow to (sec, nsec) for the testable method
         let to_pair = |t: TimeOrNow| crate::filesystem::system_time_to_pair(match t {
             TimeOrNow::SpecificTime(st) => st,
@@ -803,11 +859,11 @@ impl Filesystem for MountedFs {
         let fh_val = fh.map(|f| f.0);
         match handle_setattr(self, ino.0, mode, uid, gid, size, fh_val, atime_pair, mtime_pair) {
             AttrResult::Ok(attr) => {
-                eprintln!("[{}][FUSE] setattr: EXIT ino={} -> ok, size={}, mode={:#o}, uid={}, gid={}", ts(), ino.0, attr.size, attr.perm, attr.uid, attr.gid);
+                fuse_trace!("[{}][FUSE] setattr: EXIT ino={} -> ok, size={}, mode={:#o}, uid={}, gid={}", ts(), ino.0, attr.size, attr.perm, attr.uid, attr.gid);
                 reply.attr(&TTL, &attr);
             }
             AttrResult::Error(errno) => {
-                eprintln!("[{}][FUSE] setattr: EXIT ino={} -> error {}", ts(), ino.0, errno);
+                fuse_trace!("[{}][FUSE] setattr: EXIT ino={} -> error {}", ts(), ino.0, errno);
                 reply.error(Errno::from_i32(errno));
             }
         }
@@ -835,15 +891,18 @@ impl Filesystem for MountedFs {
         pid: u32,
         reply: ReplyLock,
     ) {
-        let _op = self.gate_shared();
-        let type_str = match _typ { x if x == libc::F_RDLCK as i32 => "F_RDLCK", x if x == libc::F_WRLCK as i32 => "F_WRLCK", x if x == libc::F_UNLCK as i32 => "F_UNLCK", _ => "UNKNOWN" };
-        eprintln!("[{}][FUSE] getlk: ENTRY ino={}, fh={}, lock_owner={}, start={}, end={}, type={}({}), pid={}", ts(), ino.0, _fh.0, _lock_owner.0, start, end, type_str, _typ, pid);
-        match handle_getlk(start, end, pid) {
-            LockResult::Ok(s, e, typ, p) => {
-                eprintln!("[{}][FUSE] getlk: EXIT ino={}, fh={} -> F_UNLCK (no conflict)", ts(), ino.0, _fh.0);
-                reply.locked(s, e, typ, p);
+        let (ino, fh, owner, typ) = (ino.0, _fh.0, _lock_owner.0, _typ);
+        let fs = Arc::clone(&self.fs);
+        self.run(0, move || {
+            let type_str = match typ { x if x == libc::F_RDLCK as i32 => "F_RDLCK", x if x == libc::F_WRLCK as i32 => "F_WRLCK", x if x == libc::F_UNLCK as i32 => "F_UNLCK", _ => "UNKNOWN" };
+            fuse_trace!("[{}][FUSE] getlk: ENTRY ino={}, fh={}, lock_owner={}, start={}, end={}, type={}({}), pid={}", ts(), ino, fh, owner, start, end, type_str, typ, pid);
+            match serve(&fs, || handle_getlk(start, end, pid)) {
+                LockResult::Ok(s, e, typ, p) => {
+                    fuse_trace!("[{}][FUSE] getlk: EXIT ino={}, fh={} -> F_UNLCK (no conflict)", ts(), ino, fh);
+                    reply.locked(s, e, typ, p);
+                }
             }
-        }
+        });
     }
 
     /// Acquire, modify or release a POSIX file lock.
@@ -867,8 +926,8 @@ impl Filesystem for MountedFs {
     ) {
         let _op = self.gate_shared();
         let type_str = match _typ { x if x == libc::F_RDLCK as i32 => "F_RDLCK", x if x == libc::F_WRLCK as i32 => "F_WRLCK", x if x == libc::F_UNLCK as i32 => "F_UNLCK", _ => "UNKNOWN" };
-        eprintln!("[{}][FUSE] setlk: ENTRY ino={}, fh={}, lock_owner={}, start={}, end={}, type={}({}), pid={}, sleep={}", ts(), ino.0, _fh.0, _lock_owner.0, _start, _end, type_str, _typ, _pid, _sleep);
-        eprintln!("[{}][FUSE] setlk: EXIT ino={}, fh={} -> ok (no-op, single-threaded)", ts(), ino.0, _fh.0);
+        fuse_trace!("[{}][FUSE] setlk: ENTRY ino={}, fh={}, lock_owner={}, start={}, end={}, type={}({}), pid={}, sleep={}", ts(), ino.0, _fh.0, _lock_owner.0, _start, _end, type_str, _typ, _pid, _sleep);
+        fuse_trace!("[{}][FUSE] setlk: EXIT ino={}, fh={} -> ok (no-op, single-threaded)", ts(), ino.0, _fh.0);
         reply.ok();
     }
 
@@ -883,11 +942,11 @@ impl Filesystem for MountedFs {
         reply: ReplyEmpty,
     ) {
         let _op = self.gate_shared();
-        eprintln!("[{}][FUSE] fallocate: ENTRY ino={}, fh={}, offset={}, length={}, mode={:#x}", ts(), _ino.0, _fh.0, _offset, _length, _mode);
+        fuse_trace!("[{}][FUSE] fallocate: ENTRY ino={}, fh={}, offset={}, length={}, mode={:#x}", ts(), _ino.0, _fh.0, _offset, _length, _mode);
         // Return ENOSYS (not supported) instead of EROFS (read-only filesystem).
         // EROFS would incorrectly signal to the NFS client that the filesystem is
         // read-only, potentially blocking all subsequent write operations.
-        eprintln!("[{}][FUSE] fallocate: EXIT ino={} -> ENOSYS (not supported)", ts(), _ino.0);
+        fuse_trace!("[{}][FUSE] fallocate: EXIT ino={} -> ENOSYS (not supported)", ts(), _ino.0);
         reply.error(Errno::ENOSYS);
     }
 }
