@@ -332,3 +332,28 @@ fn worker_loop(s: &Shared, k: usize) {
         s.jobs.fetch_add(1, Ordering::Relaxed);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workers_for_cpus_halves_and_clamps() {
+        for (cpus, n) in [(1, 1), (2, 1), (3, 1), (4, 2), (16, 8), (32, 8)] {
+            assert_eq!(workers_for_cpus(cpus), n, "{cpus} CPUs");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn default_workers_is_one_on_macos() {
+        assert_eq!(default_workers(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn default_workers_is_in_range() {
+        let n = default_workers();
+        assert!((1..=DEFAULT_WORKERS_MAX).contains(&n), "default {n}");
+    }
+}

@@ -891,3 +891,62 @@ impl Filesystem for MountedFs {
         reply.error(Errno::ENOSYS);
     }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use metadata::store::DictMetadataStore;
+    use metadata::store_io::StoreIo;
+    use metadata::wal::{create_wal, WalConfig};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    use tempfile::TempDir;
+
+    /// A file system on a new per-op write-log store in `dir`.
+    fn make_fs(dir: &TempDir) -> Arc<SliceFsFilesystem> {
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+        let wal = create_wal(WalConfig::PerOp, dir.path(), 1).unwrap();
+        let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
+        let mut meta = DictMetadataStore::new(io.clone());
+        meta.set_wal(wal);
+        Arc::new(SliceFsFilesystem::new(meta, io, Some(dir.path().to_path_buf())))
+    }
+
+    #[test]
+    fn run_without_a_pool_runs_on_the_caller() {
+        let dir = TempDir::new().unwrap();
+        let mfs = MountedFs::new(make_fs(&dir), None);
+        let seen = Arc::new(Mutex::new(None));
+        let s = Arc::clone(&seen);
+        mfs.run(0, move || *s.lock().unwrap() = Some(std::thread::current().id()));
+        assert_eq!(*seen.lock().unwrap(), Some(std::thread::current().id()), "the job ran on the caller");
+    }
+
+    #[test]
+    fn destroy_drains_before_shutdown() {
+        let dir = TempDir::new().unwrap();
+        let fs = make_fs(&dir);
+        fs.start_flusher();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !fs.test_flusher_running() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(fs.test_flusher_running(), "the flusher runs");
+        let mut mfs = MountedFs::new(Arc::clone(&fs), Some(Pool::new(2).unwrap()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (s, f) = (Arc::clone(&seen), Arc::clone(&fs));
+        mfs.run(0, move || {
+            std::thread::sleep(Duration::from_millis(100));
+            s.lock().unwrap().push((f.is_shut_down(), f.test_flusher_running()));
+        });
+        Filesystem::destroy(&mut mfs);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(false, true)],
+            "the job ran once, before the shutdown: (shut down, flusher running)"
+        );
+        assert!(fs.is_shut_down(), "destroy shut the file system down");
+    }
+}

@@ -559,4 +559,35 @@ mod tests {
         let cli = Cli::try_parse_from(["slicefs", "stats", "/data"]).unwrap();
         assert!(!cli.json, "expected --json to default to false");
     }
+
+    /// The `--workers` value of `slicefs mount` with `extra` options.
+    fn workers(extra: &[&str]) -> Result<Option<usize>, clap::Error> {
+        let mut args = vec!["slicefs", "mount", "/mnt", "--store", "/data"];
+        args.extend_from_slice(extra);
+        match Cli::try_parse_from(args)?.command {
+            Cmd::Mount { workers, .. } => Ok(workers),
+            _ => panic!("expected Mount"),
+        }
+    }
+
+    #[test]
+    fn workers_flag_parses() {
+        assert_eq!(workers(&["--workers", "4"]).unwrap(), Some(4));
+    }
+
+    #[test]
+    fn workers_zero_is_refused() {
+        let e = workers(&["--workers", "0"]).expect_err("--workers 0 is refused");
+        assert_eq!(e.kind(), clap::error::ErrorKind::ValueValidation, "{e}");
+    }
+
+    #[test]
+    fn workers_absent_is_none() {
+        assert_eq!(workers(&[]).unwrap(), None);
+    }
+
+    #[test]
+    fn workers_above_eight_is_accepted() {
+        assert_eq!(workers(&["--workers", "16"]).unwrap(), Some(16));
+    }
 }
