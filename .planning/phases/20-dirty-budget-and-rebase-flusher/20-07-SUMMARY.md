@@ -106,7 +106,7 @@ Default harness time: 9.86 s in the Task 2 workspace run, and 9.65 s in the Task
 
 ## Task 3
 
-- Image: `docker build` from the same Dockerfile (orchestrator correction). `rustc -V` in the image is `rustc 1.100.0 (0ef1bc386 2026-11-09)`, the same as the `RUSTC =` line of `runs/s7-wave0-NOTES.md`. Image ID, for reference only: `sha256:e0a5211dff03041af45f8c27113ebf23f6f70ef8b9c3158e70dbabd7e7f9f0ae`.
+- Image: `docker build` from the same Dockerfile (orchestrator correction). `rustc -V` in the image is `rustc 1.100.0 (0ef1bc386 2026-11-09)`, the same as the `RUSTC =` line of `runs/s7-wave0-NOTES.md`. Image ID of the three measured runs, for reference only: `sha256:cdecaa062837b5d1c249becf3670bc203bffe9023e9975a75623c3e679501da0` (the probe run built again and got another ID; the containerd store gives a new ID for each build).
 - Tree: `git archive HEAD` of `efc1e9b` (porcelain 0 lines) as a tar stream into `docker run -i`, target volume `slicefs-target-p20`, release, `timeout 5400`. Kernel `Linux 7.2.12-orbstack x86_64`, 32 CPUs. Host load average 69.30 / 56.64 / 58.34 at the start and 29.55 / 49.00 / 55.18 at the end. VM load (1 min) 4.6 to 4.9 before each run.
 - Before the measurement, one small probe run (`S7_FILE_MIB=8 S7_WRITE_MIB=4 S7_COMMIT_SECS=1`) went into a scratch log. It gave `vmhwm_mib=60`, test ok, and it built the release binary. It is not in `runs/`.
 
@@ -125,14 +125,14 @@ Numbers for criterion 4:
 - The plan's awk on `runs/s7-wave0.log` prints `runs=6 modes=2 pm=267 spread=20 r=40 cap=320`. `runs/s7-wave0.log` and the notes did not change since `e4bc8d3b9ac1a85ec2d9455d1f7eefc0bdf0c034`, the 20-01 Task 3 sha.
 
 Notes on the numbers:
-- P1 is 20 MiB above P0. VmHWM went up from run to run (257, 278, 287), and `rss_after_writes_mib` too (234, 246, 253). The P0 runs had 207 to 215 MiB after the writes. The flusher form keeps about 30 to 40 MiB more after the write phase. The dirty total is the same (`max_dirty_mib=65`), so this is not dirty data. A possible cause is malloc arenas of the flusher thread (the 20-01 arena run showed that arenas are a part of the overhead). This plan did not measure it.
+- P1 is 20 MiB above P0. VmHWM was higher in each later run (257, 278, 287), and `rss_after_writes_mib` too (234, 246, 253). Each run is a new `cargo test` process, so nothing accumulates from one run to the next. The host load fell from about 69 to about 29 during the three runs; this is a fact, not a known cause. The P0 runs had 207 to 215 MiB after the writes. The flusher form keeps about 30 to 40 MiB more after the write phase. The dirty total is the same (`max_dirty_mib=65`), so this is not dirty data. A possible cause is malloc arenas of the flusher thread (the 20-01 arena run showed that arenas are a part of the overhead). This plan did not measure it.
 - `flusher_drops=0` in all runs, next to 118 to 128 steps. So the hot rule holds under this load (research Pitfall 1 did not occur).
 - `throttle_timeouts=0`: no writer reached the 5 s wait limit. The largest throttle wait was 1015 ms.
 - `max_dirty_mib=65`: the sampled total went about 1 MiB above the 64 MiB budget. The 1 MiB fill writes and the bound of Task 1 permit this.
 
 ## Empty flusher passes (deferred item from 20-05)
 
-The pass count is high: 9238, 36605 and 37761 passes in 42 to 83 s, for 118 to 128 steps. That is about 99.7 % empty passes, or up to about 900 passes per second. The local bound test shows the same shape (about 480 passes for 14 steps in about 1 s). Each write that finds the total at or above half the budget kicks the flusher, and with hot files the pass finds no candidate. The runs did not measure CPU time per pass. The memory and latency numbers above are good, so the cost does not show in them. This is for a decision (see Open points).
+The pass count is high: 9238, 36605 and 37761 passes in 42 to 83 s, for 118 to 128 steps. That is 98.6 % (run 1) to 99.7 % (runs 2 and 3) empty passes, or up to about 900 passes per second. The local bound test shows the same shape (about 480 passes for 14 steps in about 1 s). Each write that finds the total at or above half the budget kicks the flusher, and with hot files the pass finds no candidate. The runs did not measure CPU time per pass. The memory and latency numbers above are good, so the cost does not show in them. This is for a decision (see Open points).
 
 ## Deviations from Plan
 
@@ -157,7 +157,8 @@ None.
 ## Open points
 
 - **Empty flusher passes (decision).** Up to about 37800 passes for about 120 steps in one S7 run. Options: accept it (passes are cheap and the numbers are good), or do not kick the flusher when the last pass found no candidate (the option in deferred-items.md). A CPU measurement of the flusher thread would settle it.
-- **P1 is above P0 by 20 MiB, and the margin to the cap is 33 MiB.** The trend in the three runs went up (257, 278, 287). It is under the cap, but the owner may want one `MALLOC_ARENA_MAX=2` flusher run to see if the extra memory is arenas.
+- **P1 is above P0 by 20 MiB, and the margin to the cap is 33 MiB.** The three P1 values span 30 MiB (257 to 287); the 20-01 rule used a spread of 20 MiB. So the margin is about one spread. It is under the cap, but the owner may want one `MALLOC_ARENA_MAX=2` flusher run to see if the extra memory is arenas.
+- **Harness time.** The Task 2 check fails on a warm default harness run above 10 s. Two runs alone gave 11.27 s and 10.71 s at a load average of about 75. The workspace run on the committed Task 2 tree gave 9.86 s. Check again at phase close on a quiet machine (as deferred-items.md says).
 - **Requirements.** LOCK-06 is in the plan frontmatter. It is not marked complete (orchestrator rule); REQUIREMENTS.md did not change.
 
 ## Threat model check
