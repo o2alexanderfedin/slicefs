@@ -354,6 +354,56 @@ fn a_throttled_writer_writes_after_the_limit() {
     w.check(&fs, "after release");
 }
 
+/// When the flusher cannot free memory (here its step fails, as with a
+/// store error), a throttled writer does not wait for the limit: after the
+/// first pass that began in its wait and freed nothing, it writes and pays
+/// with a step of its own file. The wait limit is 10 s and the pass
+/// interval 60 s, so the counters show the early exit with no time bound;
+/// the time bound of 2 s is a second check.
+#[test]
+fn a_throttled_writer_does_not_wait_when_the_flusher_cannot_free() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_dirty_limit(2 * MIB);
+    // One dirty file only: a second file would let the flusher free memory.
+    let mut w = dirty_file(&fs, 1, 4 * MIB, 48);
+    fs.test_pause_flusher(true);
+    fs.test_set_flush_pass(60_000);
+    fs.test_set_throttle_wait(10_000);
+    let (off, data) = w.piece(50);
+    let w_fh = w.fh;
+    std::thread::scope(|s| {
+        let _stop = StopGuard(&fs);
+        s.spawn(|| flusher::run_flusher(&fs));
+        assert!(wait_until(WAIT, || fs.test_flusher_running()), "the flusher runs");
+        fs.test_set_dirty_budget(MIB);
+        let (tx, rx) = mpsc::channel();
+        let (fs_ref, data) = (&fs, &data);
+        s.spawn(move || {
+            let start = Instant::now();
+            let r = throttled_write(fs_ref, w_fh, off, data);
+            tx.send((r, start.elapsed())).unwrap();
+        });
+        assert!(wait_until(WAIT, || fs.test_throttled_now() == 1), "the writer waits in the throttle");
+        // The flusher step takes the failure; the writer's own step does not fail.
+        fs.test_fail_steps(1);
+        fs.test_pause_flusher(false);
+        let ((r, rebase), took) = rx.recv_timeout(Duration::from_secs(20)).expect("the writer returns");
+        let st = fs.test_flusher_stats();
+        println!("NO-ROOM took={took:?} stats={st:?}");
+        assert!(matches!(r, WriteResult::Ok(n) if n as usize == PIECE), "the write is in: {r:?}");
+        assert_eq!(st.errors, 1, "the flusher step failed: {st:?}");
+        assert_eq!(st.timeouts, 0, "the wait did not reach the limit: {st:?}");
+        assert_eq!(st.no_room_exits, 1, "the wait ended after the pass that could not free: {st:?}");
+        assert!(rebase > 0, "the writer paid with a step of its own file");
+        assert!(took < Duration::from_secs(2), "the writer returned in {took:?} (bound 2 s, wait limit 10 s)");
+    });
+    w.applied(50);
+    w.check(&fs, "handle open");
+    w.release(&fs);
+    w.check(&fs, "after release");
+}
+
 #[test]
 fn a_write_past_half_the_budget_kicks_the_flusher() {
     let _dog = watchdog(Duration::from_secs(60));

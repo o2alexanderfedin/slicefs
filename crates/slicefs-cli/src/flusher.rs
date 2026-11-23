@@ -140,17 +140,28 @@ fn flusher_loop(ctl: &FlushCtl, mut pass: impl FnMut() -> bool) {
 /// pass. At its end the pass records whether it tried no step although
 /// the total was at or above half the budget (`FlushCtl::empty_pass`):
 /// then writes below the budget do not kick the flusher until a later
-/// pass sets it again.
+/// pass sets it again. It also records whether it could not free memory
+/// (`FlushFlags::pass_stuck`): no step published, and a step failed or the
+/// last pick found no candidate at the budget. Then it wakes the throttled
+/// writers, which stop their wait (`throttle_write`).
 pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
     let ctl = fs.flush_ctl();
     ctl.passes.fetch_add(1, Ordering::Relaxed);
     let mut st = PassStats::default();
+    let seq = {
+        let mut f = ctl.flags.lock();
+        if f.stop {
+            return st;
+        }
+        f.pass_begun += 1;
+        f.pass_begun
+    };
     // Cells whose step freed nothing in this pass.
     let mut tried: HashSet<u64> = HashSet::new();
     let hot_ms = ctl.hot_ms.load(Ordering::Relaxed);
     let hot = |t: &FlushTarget, now: u64| now.saturating_sub(t.last_write()) < hot_ms;
-    // `full` of the last pick (the one that found no candidate).
-    let mut last_full = false;
+    // `full` and `at_budget` of the last pick (the one that found no candidate).
+    let (mut last_full, mut last_at_budget) = (false, false);
     loop {
         if ctl.flags.lock().stop {
             return st;
@@ -159,7 +170,7 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
         let limit = fs.dirty_limit_now();
         let now = ctl.now_ms();
         let (at_budget, full) = (total >= budget, total >= budget / 2);
-        last_full = full;
+        (last_full, last_at_budget) = (full, at_budget);
         // A stream with pending writes only when no overlay candidate is
         // left (its writer would lose streaming).
         let Some(target) = fs
@@ -192,6 +203,15 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
         }
     }
     ctl.empty_pass.store(st.steps == 0 && last_full, Ordering::Relaxed);
+    let stuck = st.published == 0 && (st.errors > 0 || last_at_budget);
+    {
+        let mut f = ctl.flags.lock();
+        if seq > f.pass_done {
+            (f.pass_done, f.pass_stuck) = (seq, stuck);
+        }
+    }
+    // A throttled writer checks `pass_stuck` under the flags lock.
+    ctl.freed.notify_all();
     st
 }
 

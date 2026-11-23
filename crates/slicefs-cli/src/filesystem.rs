@@ -729,6 +729,15 @@ pub(crate) struct FlushFlags {
     pub(crate) kicked: bool,
     /// Test hook: the flusher makes no pass.
     pub(crate) paused: bool,
+    /// The number of the last pass that began (`flush_pass`).
+    pub(crate) pass_begun: u64,
+    /// The number of the last pass that came to its normal end.
+    pub(crate) pass_done: u64,
+    /// The pass `pass_done` could not free memory: it published no step,
+    /// and a step failed or its last pick found no candidate with the
+    /// total at or above the budget. A throttled writer then does not wait
+    /// for the limit (`throttle_write`).
+    pub(crate) pass_stuck: bool,
 }
 
 /// The flush control block (Phase 20): the flusher thread and throttled
@@ -777,6 +786,7 @@ pub(crate) struct FlushCtl {
     pub(crate) throttled: AtomicU64,
     pub(crate) timeouts: AtomicU64,
     pub(crate) stop_exits: AtomicU64,
+    pub(crate) no_room_exits: AtomicU64,
     pub(crate) max_wait_ms: AtomicU64,
 }
 
@@ -804,6 +814,7 @@ impl FlushCtl {
             throttled: AtomicU64::new(0),
             timeouts: AtomicU64::new(0),
             stop_exits: AtomicU64::new(0),
+            no_room_exits: AtomicU64::new(0),
             max_wait_ms: AtomicU64::new(0),
         }
     }
@@ -846,6 +857,9 @@ pub struct FlusherStats {
     pub timeouts: u64,
     /// Throttle waits that ended because the flusher stopped or ended.
     pub stop_exits: u64,
+    /// Throttle waits that ended because a flusher pass could not free
+    /// memory (`FlushFlags::pass_stuck`).
+    pub no_room_exits: u64,
     /// The longest throttle wait, in ms.
     pub max_wait_ms: u64,
 }
@@ -1328,6 +1342,7 @@ impl SliceFsFilesystem {
             throttled: v(&c.throttled),
             timeouts: v(&c.timeouts),
             stop_exits: v(&c.stop_exits),
+            no_room_exits: v(&c.no_room_exits),
             max_wait_ms: v(&c.max_wait_ms),
         }
     }
@@ -3209,9 +3224,13 @@ impl SliceFsFilesystem {
     /// With no flusher running (replay, in-process callers) it pays at once
     /// (the Phase 19 path). Else the writer waits, in slices of
     /// `THROTTLE_SLICE`, until the total is below the budget (then it does
-    /// not pay), the wait limit passed, or the flusher stopped or ended
-    /// (`stop_flusher`, a panic): then it writes and pays with steps of its
-    /// own file (`pay_budget`); a write never fails here. A total at or
+    /// not pay), the flusher stopped or ended (`stop_flusher`, a panic), a
+    /// flusher pass that began in the wait could not free memory
+    /// (`FlushFlags::pass_stuck`, for example a store error: more wait
+    /// cannot help), or the wait limit passed: then it writes and pays with
+    /// steps of its own file (`pay_budget`); a write never fails here. A
+    /// waiting writer kicks the flusher again under the flags lock, so a
+    /// pass begins after its wait began. A total at or
     /// above half the budget wakes the flusher at once, unless the last
     /// pass found no candidate at half the budget or more and the total is
     /// below the budget (`FlushCtl::empty_pass`). In a debug build it panics when the
@@ -3238,6 +3257,10 @@ impl SliceFsFilesystem {
         let start = Instant::now();
         let deadline = start + Duration::from_millis(ctl.throttle_wait_ms.load(Ordering::Relaxed));
         let mut flags = ctl.flags.lock();
+        // Only a pass with a higher number began after this point.
+        let seen = flags.pass_begun;
+        flags.kicked = true;
+        ctl.wake.notify_all();
         let pay = loop {
             // Under the flags lock: the flusher lowers the total before it
             // takes this lock to notify, so no wakeup is lost.
@@ -3247,6 +3270,10 @@ impl SliceFsFilesystem {
             }
             if flags.stop || !ctl.running.load(Ordering::Acquire) {
                 ctl.stop_exits.fetch_add(1, Ordering::Relaxed);
+                break true;
+            }
+            if flags.pass_done > seen && flags.pass_stuck {
+                ctl.no_room_exits.fetch_add(1, Ordering::Relaxed);
                 break true;
             }
             let left = deadline.saturating_duration_since(Instant::now());
