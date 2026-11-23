@@ -158,6 +158,17 @@ const THROTTLE_SLICE: Duration = Duration::from_millis(50);
 /// Time between two flusher passes when nothing wakes the flusher.
 const FLUSH_PASS: Duration = Duration::from_millis(100);
 
+/// The flusher stores the dirty data of a file with no write for this time
+/// (Phase 20 CONTEXT default of `--dirty-idle`).
+const DIRTY_IDLE: Duration = Duration::from_secs(5);
+
+/// The flusher stores the dirty data of a file whose oldest dirty data is
+/// this old (Phase 20 CONTEXT default of `--dirty-expire`).
+const DIRTY_EXPIRE: Duration = Duration::from_secs(30);
+
+/// The start of the flusher clock (`FlushCtl::now_ms`).
+static CLOCK_EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
 /// One slice of a wait for the step in flight of a cell (with the cell
 /// unlocked; see `CellGuard::wait_step`). The waiter waits another slice
 /// only if the step made progress in this one (a store put or read of the
@@ -348,6 +359,13 @@ struct FileCell {
     /// True if the state was a stream when its guard last synced (the
     /// flusher reads it with no cell lock, to step overlays first).
     stream: AtomicBool,
+    /// The flusher clock (`FlushCtl::now_ms`) at the last applied write; 0
+    /// for none. `write_in_cell` stores it after the apply.
+    last_write: AtomicU64,
+    /// The flusher clock when the dirty cost went from 0 to above 0; 0 when
+    /// the cell is clean. The age of the dirty data starts again only when
+    /// the cell is clean (the Linux `dirtied_when` rule; `sync_dirty`).
+    dirty_since: AtomicU64,
 }
 
 impl FileCell {
@@ -376,6 +394,8 @@ impl FileCell {
             state: sync::Mutex::new_keyed(Rank::Cell, ino, state).timed(Site::FileCell),
             dirty: AtomicUsize::new(0),
             stream: AtomicBool::new(true),
+            last_write: AtomicU64::new(0),
+            dirty_since: AtomicU64::new(0),
         }
     }
 }
@@ -444,6 +464,8 @@ impl Drop for StepEnd<'_> {
 /// `dirty_cost`, with the cell lock still held.
 struct CellGuard<'a> {
     total: &'a AtomicUsize,
+    /// For the flusher clock of `sync_dirty`.
+    ctl: &'a FlushCtl,
     cell: &'a FileCell,
     /// `None` only inside `unlocked`.
     state: Option<sync::MutexGuard<'a, CellState>>,
@@ -534,6 +556,11 @@ impl CellGuard<'_> {
         let cost = if state.retired { 0 } else { dirty_cost(&state.file) };
         self.cell.stream.store(matches!(state.file.write_mode, WriteMode::Streaming { .. }), Ordering::Relaxed);
         let old = self.cell.dirty.swap(cost, Ordering::Relaxed);
+        if old == 0 && cost > 0 {
+            self.cell.dirty_since.store(self.ctl.now_ms(), Ordering::Relaxed);
+        } else if cost == 0 {
+            self.cell.dirty_since.store(0, Ordering::Relaxed);
+        }
         if cost >= old {
             self.total.fetch_add(cost - old, Ordering::Relaxed);
         } else {
@@ -658,6 +685,14 @@ pub(crate) struct FlushCtl {
     pub(crate) throttle_wait_ms: AtomicU64,
     /// The pass interval of the flusher, in ms (`FLUSH_PASS`).
     pub(crate) pass_ms: AtomicU64,
+    /// The idle time of a file, in ms (`DIRTY_IDLE`).
+    pub(crate) idle_ms: AtomicU64,
+    /// The maximum age of dirty data, in ms (`DIRTY_EXPIRE`).
+    pub(crate) expire_ms: AtomicU64,
+    /// Added to the flusher clock (`test_advance_clock`); 0 in production.
+    /// It is per file system, so tests that run in parallel do not move
+    /// the clock of each other.
+    clock_offset_ms: AtomicU64,
     /// Writers in a throttle wait now.
     pub(crate) throttled_now: AtomicUsize,
     pub(crate) passes: AtomicU64,
@@ -681,6 +716,9 @@ impl FlushCtl {
             running: AtomicBool::new(false),
             throttle_wait_ms: AtomicU64::new(THROTTLE_WAIT.as_millis() as u64),
             pass_ms: AtomicU64::new(FLUSH_PASS.as_millis() as u64),
+            idle_ms: AtomicU64::new(DIRTY_IDLE.as_millis() as u64),
+            expire_ms: AtomicU64::new(DIRTY_EXPIRE.as_millis() as u64),
+            clock_offset_ms: AtomicU64::new(0),
             throttled_now: AtomicUsize::new(0),
             passes: AtomicU64::new(0),
             steps: AtomicU64::new(0),
@@ -693,6 +731,13 @@ impl FlushCtl {
             stop_exits: AtomicU64::new(0),
             max_wait_ms: AtomicU64::new(0),
         }
+    }
+
+    /// The flusher clock: ms since a process epoch plus the test offset,
+    /// always at least 1 (0 means "none" in the cell times).
+    pub(crate) fn now_ms(&self) -> u64 {
+        let base = CLOCK_EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64;
+        base + 1 + self.clock_offset_ms.load(Ordering::Relaxed)
     }
 
     /// Wake throttled writers after the total fell. The lock is taken and
@@ -748,6 +793,16 @@ impl FlushTarget {
     /// True if the cell was a stream when its guard last synced.
     pub(crate) fn is_stream(&self) -> bool {
         self.cell.stream.load(Ordering::Relaxed)
+    }
+
+    /// The flusher clock at the last applied write (0: none).
+    pub(crate) fn last_write(&self) -> u64 {
+        self.cell.last_write.load(Ordering::Relaxed)
+    }
+
+    /// The flusher clock when the cell became dirty (0: clean).
+    pub(crate) fn dirty_since(&self) -> u64 {
+        self.cell.dirty_since.load(Ordering::Relaxed)
     }
 }
 
@@ -1117,6 +1172,21 @@ impl SliceFsFilesystem {
         self.flush_ctl.pass_ms.store(ms, Ordering::Relaxed);
     }
 
+    /// Test hook: set the idle time of a file (`DIRTY_IDLE`).
+    pub fn test_set_dirty_idle(&self, ms: u64) {
+        self.flush_ctl.idle_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: set the maximum age of dirty data (`DIRTY_EXPIRE`).
+    pub fn test_set_dirty_expire(&self, ms: u64) {
+        self.flush_ctl.expire_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: move the flusher clock of this file system forward.
+    pub fn test_advance_clock(&self, ms: u64) {
+        self.flush_ctl.clock_offset_ms.fetch_add(ms, Ordering::Relaxed);
+    }
+
     /// Test hook: the writers in a throttle wait now.
     pub fn test_throttled_now(&self) -> usize {
         self.flush_ctl.throttled_now.load(Ordering::Relaxed)
@@ -1241,6 +1311,7 @@ impl SliceFsFilesystem {
     fn lock_cell<'a>(&'a self, cell: &'a FileCell) -> CellGuard<'a> {
         CellGuard {
             total: &self.dirty_total,
+            ctl: &self.flush_ctl,
             cell,
             state: Some(cell.state.lock()),
             notes: Vec::new(),
@@ -2921,6 +2992,11 @@ impl SliceFsFilesystem {
                 drops += 1;
             }
         };
+        if result.is_ok() {
+            // For the idle and hot rules of the flusher: after the apply,
+            // before the own steps below.
+            cell.last_write.store(self.flush_ctl.now_ms(), Ordering::Relaxed);
+        }
 
         // An overlay past the dirty limit (also right after a switch that
         // moved pending writes in) stores a part of itself as a new root now,

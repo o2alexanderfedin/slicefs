@@ -869,3 +869,64 @@ fn the_flusher_skips_a_cell_with_a_step_in_flight() {
     x.check(&fs, "after release");
     y.check(&fs, "after release");
 }
+
+// The flusher policy (plan 20-05): the idle, maximum-age and buffer-full
+// triggers, with the hot rule. The tests use the test clock of the file
+// system and one-pass calls (`flush_pass`): no flusher thread, no sleep.
+
+/// The file size of the policy tests: 32 KiB pieces on a 64 KiB grid dirty
+/// at most half of a file, and these tests need up to 6.5 MiB of dirty
+/// data in one file.
+const BIG: usize = 16 * MIB;
+/// A time limit that a test does not use (1 h): only the mode under test
+/// can act.
+const HOUR_MS: u64 = 3_600_000;
+
+#[test]
+fn an_idle_file_is_flushed() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_dirty_idle(5_000);
+    fs.test_set_dirty_expire(HOUR_MS);
+    // 512 KiB of dirty data; the default budget is far above it.
+    let f = dirty_file(&fs, 1, BIG, 16);
+    let cost = fs.test_dirty_cost(f.ino);
+    assert!(cost >= 512 * KIB, "F is dirty: {cost}");
+    let st = flusher::flush_pass(&fs);
+    assert_eq!(fs.test_dirty_cost(f.ino), cost, "a pass before the idle time leaves F: {st:?}");
+    fs.test_advance_clock(6_000);
+    let st = flusher::flush_pass(&fs);
+    assert_eq!(fs.test_dirty_cost(f.ino), 0, "F's cost is 0 after the idle time: {st:?}");
+    f.check(&fs, "handle open");
+    f.release(&fs);
+    f.check(&fs, "after release");
+}
+
+#[test]
+fn an_expired_file_is_flushed() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_dirty_idle(HOUR_MS);
+    fs.test_set_dirty_expire(30_000);
+    // The first dirty write (slot 1) starts the age of F's dirty data.
+    let mut f = overlay_file(&fs, 1, BIG);
+    fs.test_advance_clock(10_000);
+    f.write(&fs, 2);
+    let cost = fs.test_dirty_cost(f.ino);
+    let st = flusher::flush_pass(&fs);
+    assert_eq!(fs.test_dirty_cost(f.ino), cost, "a pass at the age of 10 s leaves F: {st:?}");
+    // The age is 35 s; the last write is 25 s old.
+    fs.test_advance_clock(25_000);
+    let st = flusher::flush_pass(&fs);
+    assert_eq!(fs.test_dirty_cost(f.ino), 0, "a pass lowers F's cost to 0 at the age of 35 s: {st:?}");
+    // F is dirty again: its age starts again from this write.
+    f.write(&fs, 3);
+    let cost = fs.test_dirty_cost(f.ino);
+    assert!(cost > 0, "F is dirty again");
+    fs.test_advance_clock(10_000);
+    let st = flusher::flush_pass(&fs);
+    assert_eq!(fs.test_dirty_cost(f.ino), cost, "the age started again when F was clean: {st:?}");
+    f.check(&fs, "handle open");
+    f.release(&fs);
+    f.check(&fs, "after release");
+}

@@ -17,7 +17,7 @@ use std::sync::{Arc, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::filesystem::{FlushCtl, FlushStep, SliceFsFilesystem, FLUSH_STEP};
+use crate::filesystem::{FlushCtl, FlushStep, FlushTarget, SliceFsFilesystem, FLUSH_STEP};
 use crate::util::ts;
 
 /// The counts of one flusher pass.
@@ -107,14 +107,22 @@ fn flusher_loop(ctl: &FlushCtl, mut pass: impl FnMut() -> bool) {
     }
 }
 
-/// One flusher pass (also the entry of the tests). Budget-full mode: while
-/// the shared total is at or above half the budget, step the candidate
-/// with the most dirty cost, overlays before streams, one step of
-/// `FLUSH_STEP` per gate hold (`SliceFsFilesystem::flush_step`, which calls
-/// `free_dirty` on the locked cell). After each step the throttled writers
-/// are woken. A cell whose step freed nothing (skipped, dropped or failed)
-/// is not tried again in this pass, so the pass ends when the total is
-/// below half the budget or no candidate is left.
+/// One flusher pass (also the entry of the tests), in two modes.
+///
+/// Budget-full mode: while the shared total is at or above half the
+/// budget, step the candidate with the most dirty cost, overlays before
+/// streams. Idle and expire mode: then step each dirty cell once whose
+/// last write is at least the idle time old, or whose dirty data is at
+/// least the maximum age old (`FileCell::dirty_since`); later passes go on
+/// until the cell is clean. In this mode a stream with pending writes may
+/// become an overlay (it is idle or old).
+///
+/// Each step is `FLUSH_STEP` in one gate hold
+/// (`SliceFsFilesystem::flush_step`, which calls `free_dirty` on the
+/// locked cell); the pick reads only atomics. After each step the
+/// throttled writers are woken. A cell whose step freed nothing (skipped,
+/// dropped or failed) is not tried again in this pass. A stop ends the
+/// pass.
 pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
     let ctl = fs.flush_ctl();
     ctl.passes.fetch_add(1, Ordering::Relaxed);
@@ -122,8 +130,11 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
     // Cells whose step freed nothing in this pass.
     let mut tried: HashSet<u64> = HashSet::new();
     loop {
+        if ctl.flags.lock().stop {
+            return st;
+        }
         let (total, budget) = fs.dirty_now();
-        if total < budget / 2 || ctl.flags.lock().stop {
+        if total < budget / 2 {
             break;
         }
         // Overlays first, then the largest; a stream with pending writes
@@ -137,36 +148,60 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
         else {
             break;
         };
-        // The gate and the cell are released when this returns.
-        let step = fs.flush_step(&target, FLUSH_STEP);
-        ctl.notify_freed();
-        st.steps += 1;
-        ctl.steps.fetch_add(1, Ordering::Relaxed);
-        let counter = match step {
-            FlushStep::Freed(_) => {
-                st.published += 1;
-                &ctl.published
-            }
-            FlushStep::Nothing => {
-                st.drops += 1;
-                &ctl.drops
-            }
-            FlushStep::Skipped => {
-                st.skips += 1;
-                &ctl.skips
-            }
-            FlushStep::Failed(e) => {
-                st.errors += 1;
-                eprintln!("[{}][FLUSH] step of ino={} failed (errno {e}); the file keeps its dirty data", ts(), target.ino());
-                &ctl.errors
-            }
-        };
-        counter.fetch_add(1, Ordering::Relaxed);
-        if !matches!(step, FlushStep::Freed(_)) {
-            tried.insert(target.ino());
+        step(fs, &target, &mut st, &mut tried);
+    }
+    let now = ctl.now_ms();
+    let idle = ctl.idle_ms.load(Ordering::Relaxed);
+    let expire = ctl.expire_ms.load(Ordering::Relaxed);
+    for target in fs.flush_targets() {
+        if ctl.flags.lock().stop {
+            return st;
+        }
+        if tried.contains(&target.ino()) {
+            continue;
+        }
+        let since = target.dirty_since();
+        let is_idle = now.saturating_sub(target.last_write()) >= idle;
+        let is_old = since != 0 && now.saturating_sub(since) >= expire;
+        if is_idle || is_old {
+            step(fs, &target, &mut st, &mut tried);
         }
     }
     st
+}
+
+/// One flusher step of `target` (the gate and the cell are released when
+/// it returns), then wake the throttled writers and count the result. A
+/// step that freed nothing puts the cell in `tried`.
+fn step(fs: &SliceFsFilesystem, target: &FlushTarget, st: &mut PassStats, tried: &mut HashSet<u64>) {
+    let ctl = fs.flush_ctl();
+    let step = fs.flush_step(target, FLUSH_STEP);
+    ctl.notify_freed();
+    st.steps += 1;
+    ctl.steps.fetch_add(1, Ordering::Relaxed);
+    let counter = match step {
+        FlushStep::Freed(_) => {
+            st.published += 1;
+            &ctl.published
+        }
+        FlushStep::Nothing => {
+            st.drops += 1;
+            &ctl.drops
+        }
+        FlushStep::Skipped => {
+            st.skips += 1;
+            &ctl.skips
+        }
+        FlushStep::Failed(e) => {
+            st.errors += 1;
+            eprintln!("[{}][FLUSH] step of ino={} failed (errno {e}); the file keeps its dirty data", ts(), target.ino());
+            &ctl.errors
+        }
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+    if !matches!(step, FlushStep::Freed(_)) {
+        tried.insert(target.ino());
+    }
 }
 
 #[cfg(test)]
