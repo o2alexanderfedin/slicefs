@@ -643,7 +643,7 @@ pub struct SliceFsFilesystem {
     /// One cell per inode with open write handles; every handle of the
     /// inode uses it (POSIX: every handle writes the same file).
     cells: CellMap,
-    /// Sum of `FileCell::dirty` of all cells (see `keep_budget`).
+    /// Sum of `FileCell::dirty` of all cells (see `pay_budget`).
     dirty_total: AtomicUsize,
     /// File content store (`<store>/packs/`).
     pub(crate) content: Content,
@@ -2686,22 +2686,24 @@ impl SliceFsFilesystem {
         }
         // Then the budget of all open files (#105), with the same bound.
         let n = result?;
-        if let Err(e) = self.keep_budget(&mut g, added) {
+        if let Err(e) = self.pay_budget(&mut g, added) {
             after_err(&mut g, "the budget step", e);
         }
         Ok((n, offset))
     }
 
-    /// Keep the dirty bytes of all open files within the budget (#105). `g`
-    /// is the locked cell of the file being written, and `added` the dirty
-    /// cost its write added. The check reads only the global total. If it
-    /// is above the budget, this file (and only this one, D-13: no other
-    /// cell is locked) stores steps until the cost `max(added, REBASE_STEP)`
-    /// is freed, the total is `REBASE_STEP` below the budget, or the file is
-    /// clean. A write can always free the bytes it added, so the total does
-    /// not grow while it is above the budget, and a write pays for at most
-    /// that much work. Moving work to other files is Phase 20 (flusher).
-    fn keep_budget(&self, g: &mut CellGuard<'_>, added: usize) -> Result<(), i32> {
+    /// The writer pays for its own file with steps (#105). `g` is the locked
+    /// cell of the file being written (only this cell is locked, D-13), and
+    /// `added` the dirty cost its write added. The check reads only the
+    /// global total. If it is above the budget, this file stores steps until
+    /// the cost `max(added, REBASE_STEP)` is freed, the total is
+    /// `REBASE_STEP` below the budget, or the file is clean. A write can
+    /// always free the bytes it added, so the total does not grow while it is
+    /// above the budget, and a write pays for at most that much work. This
+    /// runs when no flusher runs (replay, in-process callers) or after a
+    /// throttle wait ended with no room (Phase 20). Work on other files is
+    /// done only by the flusher thread, never by a request.
+    fn pay_budget(&self, g: &mut CellGuard<'_>, added: usize) -> Result<(), i32> {
         let budget = self.dirty_budget.load(Ordering::Relaxed);
         let target = budget.saturating_sub(REBASE_STEP);
         let mut cap: Option<usize> = None;
