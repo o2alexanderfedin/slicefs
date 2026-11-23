@@ -103,7 +103,7 @@ Task 2, on 04ef0a8 plus a stub `spawn_flusher` whose loop sleeps for the pass in
 | `a_spawned_flusher_stops_and_joins` | flusher.rs line 197, `stop_flusher returns within 5 s (the join ended): Timeout` |
 | `a_spawned_flusher_ends_when_the_fs_is_dropped` | flusher.rs line 212, `the flusher thread ends within 5 s after the drop: Timeout` |
 
-Guard mutation for `shutdown_with_a_parked_flusher_step_and_a_queued_commit_ends` (not committed): the order in `shutdown` was changed to the gate first, then the stop. The test failed at line 610, `the shutdown asked the stop`, after its 10 s wait. The plan expected the failure at "shutdown returns true". The real cause: with the gate first, the shutdown thread blocks in `gate_shared()` behind the queued commit, so it does not get to `stop_flusher` (and its lock assert) before the park is let go. In a release build this order is the deadlock that the test is for. The file was restored from a copy; `shutdown` has `stop_flusher()` before `gate_shared()` again.
+Guard mutation for `shutdown_with_a_parked_flusher_step_and_a_queued_commit_ends` (not committed): the order in `shutdown` was changed to the gate first, then the stop. The test failed at line 610, `the shutdown asked the stop`, after its 10 s wait. The plan expected the failure at "shutdown returns true". The probable cause: with the gate first, the shutdown thread blocks in `gate_shared()` behind the queued commit, so it does not get to `stop_flusher` before the park is let go. The log of the mutation run shows only the panic of the test thread; it has no line from the lock assert of `stop_flusher`. `a_stop_with_a_lock_held_panics` shows that assert. In a release build this order is the deadlock that the test is for. The file was restored from a copy; `shutdown` has `stop_flusher()` before `gate_shared()` again.
 
 Green:
 - Task 1 tree (04ef0a8): `cargo test -p slicefs-cli --test flusher_tests`: 10 passed. `--test dirty_budget_tests --test rebase_step_tests --test lock_free_io --test no_take_out`: 1, 33, 4, 4 passed. `cargo test --workspace` exited 0 (69 `test result: ok` lines) before the commit.
@@ -121,6 +121,7 @@ Green:
   - `daemon-exit: ok`
   - daemon log: `destroy: ENTRY` at 07:36:49.040, `destroy: EXIT — commit_ok=true` at 07:36:49.096
   - script exit 0. Host load at the start: 18.23 / 24.16 / 22.54.
+- The flusher thread writes no log line. The mount had a flusher because `run_mount` calls `start_flusher()` for each mount that is not a snapshot mount.
 
 ## Acceptance checks
 
