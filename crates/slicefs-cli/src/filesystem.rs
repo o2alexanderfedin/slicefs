@@ -2984,10 +2984,15 @@ impl SliceFsFilesystem {
     /// With no flusher running (replay, in-process callers) it pays at once
     /// (the Phase 19 path). Else the writer waits, in slices of
     /// `THROTTLE_SLICE`, until the total is below the budget (then it does
-    /// not pay) or the wait limit passed.
+    /// not pay) or the wait limit passed: then it writes and pays with steps
+    /// of its own file (`pay_budget`); a write never fails here. A total at
+    /// or above half the budget wakes the flusher at once.
     pub fn throttle_write(&self) -> Admit {
         let ctl = &*self.flush_ctl;
         let (total, budget) = self.dirty_now();
+        if total >= budget / 2 {
+            self.kick_flusher();
+        }
         if total < budget {
             return Admit { pay: false };
         }
@@ -3009,13 +3014,24 @@ impl SliceFsFilesystem {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 ctl.timeouts.fetch_add(1, Ordering::Relaxed);
-                break false;
+                break true;
             }
             ctl.freed.wait_for(&mut flags, left.min(THROTTLE_SLICE));
         };
         drop(flags);
         ctl.max_wait_ms.fetch_max(start.elapsed().as_millis() as u64, Ordering::Relaxed);
         Admit { pay }
+    }
+
+    /// Wake the flusher for a pass now (the background threshold, half the
+    /// budget, was reached). Takes no lock when no flusher runs.
+    fn kick_flusher(&self) {
+        let ctl = &*self.flush_ctl;
+        if !ctl.running.load(Ordering::Acquire) {
+            return;
+        }
+        ctl.flags.lock().kicked = true;
+        ctl.wake.notify_all();
     }
 
     /// Ask the flusher loop to end (plan 20-03 adds the writer wake and

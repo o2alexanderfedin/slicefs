@@ -7,10 +7,14 @@
 //! The dynamic half is the rank rule: a thread that takes a second
 //! `Rank::Cell` lock panics in debug builds (`chunk-store` `sync.rs`), and
 //! the flusher thread calls `require_gate` (plan 20-02).
+//!
+//! The flusher (`flusher.rs`) steps cells of other files, so it must never
+//! take one out of the map: its source has no removal text at all.
 
 const FILESYSTEM: &str = include_str!("../src/filesystem.rs");
 const HANDLERS: &str = include_str!("../src/handlers.rs");
 const FUSE_CALLBACKS: &str = include_str!("../src/fuse_callbacks.rs");
+const FLUSHER: &str = include_str!("../src/flusher.rs");
 
 /// The only functions that may remove a cell from the cell map.
 const ALLOWED: [&str; 4] = ["finalize", "finalize_locked", "reclaim_inode", "setattr_size_logged"];
@@ -85,6 +89,13 @@ fn the_budget_step_is_own_file_only() {
     for (file, src) in [("filesystem.rs", FILESYSTEM), ("handlers.rs", HANDLERS), ("fuse_callbacks.rs", FUSE_CALLBACKS)] {
         assert!(!src.contains("open_files"), "{file} has the token `open_files`");
     }
+}
+
+#[test]
+fn the_flusher_takes_no_cell_out() {
+    let lines: Vec<usize> =
+        FLUSHER.lines().enumerate().filter(|(_, l)| l.contains("cells.remove(")).map(|(i, _)| i + 1).collect();
+    assert!(lines.is_empty(), "flusher.rs removes a cell at lines {lines:?}");
 }
 
 #[test]

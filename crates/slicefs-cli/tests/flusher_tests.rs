@@ -285,3 +285,71 @@ fn a_pass_ends_when_no_step_frees() {
     a.check(&fs, "after release");
     b.check(&fs, "after release");
 }
+
+#[test]
+fn a_throttled_writer_writes_after_the_limit() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_dirty_limit(2 * MIB);
+    let mut w = dirty_file(&fs, 1, 4 * MIB, 48);
+    fs.test_pause_flusher(true);
+    fs.test_set_flush_pass(20);
+    fs.test_set_throttle_wait(300);
+    let (off, data) = w.piece(50);
+    let w_fh = w.fh;
+    std::thread::scope(|s| {
+        let _stop = StopGuard(&fs);
+        s.spawn(|| flusher::run_flusher(&fs));
+        assert!(wait_until(WAIT, || fs.test_flusher_running()), "the flusher runs");
+        fs.test_set_dirty_budget(MIB);
+        let (tx, rx) = mpsc::channel();
+        let (fs_ref, data) = (&fs, &data);
+        s.spawn(move || {
+            let start = Instant::now();
+            let r = throttled_write(fs_ref, w_fh, off, data);
+            tx.send((r, start.elapsed())).unwrap();
+        });
+        let ((r, rebase), took) = rx.recv_timeout(Duration::from_secs(10)).expect("the writer returns");
+        assert!(matches!(r, WriteResult::Ok(n) if n as usize == PIECE), "the write is in: {r:?}");
+        assert!(took >= Duration::from_millis(300), "the writer waited for the limit: {took:?}");
+        assert_eq!(fs.test_flusher_stats().timeouts, 1, "one throttle wait reached the limit");
+        assert!(rebase > 0, "the writer paid with a step of its own file");
+    });
+    w.applied(50);
+    w.check(&fs, "handle open");
+    w.release(&fs);
+    w.check(&fs, "after release");
+}
+
+#[test]
+fn a_write_past_half_the_budget_kicks_the_flusher() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_dirty_limit(2 * MIB);
+    let mut a = dirty_file(&fs, 1, 4 * MIB, 16);
+    // With a pass interval of 60 s the flusher makes no pass by itself.
+    fs.test_set_flush_pass(60_000);
+    std::thread::scope(|s| {
+        let _stop = StopGuard(&fs);
+        s.spawn(|| flusher::run_flusher(&fs));
+        assert!(wait_until(WAIT, || fs.test_flusher_running()), "the flusher runs");
+        // Half the budget sits just above the total: the next piece crosses it.
+        let budget = 2 * (fs.test_dirty_total() + PIECE / 2);
+        fs.test_set_dirty_budget(budget);
+        let passes = fs.test_flusher_stats().passes;
+        let mut write = |slot: usize| {
+            let (off, data) = a.piece(slot);
+            let (r, _) = throttled_write(&fs, a.fh, off, &data);
+            assert!(matches!(r, WriteResult::Ok(n) if n as usize == PIECE), "the write is in: {r:?}");
+            a.applied(slot);
+        };
+        write(17);
+        assert!(fs.test_dirty_total() >= budget / 2, "the first write crossed half the budget");
+        assert_eq!(fs.test_flusher_stats().passes, passes, "no pass before a write finds the total at half");
+        write(18);
+        assert!(wait_until(WAIT, || fs.test_flusher_stats().passes > passes), "the second write kicked the flusher");
+    });
+    a.check(&fs, "handle open");
+    a.release(&fs);
+    a.check(&fs, "after release");
+}
