@@ -30,7 +30,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use hdrhistogram::Histogram;
 use metadata::wal::WalConfig;
 use slicefs_cli::commit_timer::timed_commit;
-use slicefs_cli::filesystem::{SliceFsFilesystem, DIRTY_BUDGET};
+use slicefs_cli::filesystem::{Admit, SliceFsFilesystem, DIRTY_BUDGET};
+use slicefs_cli::flusher;
 use slicefs_cli::handlers::{
     self as h, AttrResult, CreateResult, DataResult, EmptyResult, EntryResult, OpenResult,
     ReaddirResult, WriteResult,
@@ -1972,9 +1973,12 @@ fn s6_small_fsync() {
 /// file, the bigwrite random-write mix, peak RSS against the cap. The cap is
 /// NOT asserted (a baseline); the model check is. The model is one version per
 /// 4 KiB block, so no file bytes are held. `S7_SERIALIZE` (default 1) selects
-/// the serialized form or the parallel form.
+/// the serialized form or the parallel form. `S7_FLUSHER=1` (plan 20-07) is
+/// the flusher form: serialize off, the flusher thread runs, and each write
+/// goes through `throttle_write` before the gate. It asserts VmHWM <= CAP_MIB
+/// on Linux.
 #[test]
-#[ignore = "spike S7 baseline: S7_FILE_MIB S7_WRITE_MIB S7_COMMIT_SECS S7_SERIALIZE; use --release"]
+#[ignore = "spike S7 baseline: S7_FILE_MIB S7_WRITE_MIB S7_COMMIT_SECS S7_SERIALIZE S7_FLUSHER; use --release"]
 fn s7_budget_baseline() {
     const THREADS: usize = 4;
     // CAP_MIB = Pm + F + R, rounded up to a multiple of 8 (B + N x W + O + F + R).
@@ -1987,12 +1991,13 @@ fn s7_budget_baseline() {
     let file_mib = env_num("S7_FILE_MIB", 1024, 4, 8192);
     let write_mib = env_num("S7_WRITE_MIB", 128, 2, 4096);
     let commit_secs = env_num("S7_COMMIT_SECS", 30, 1, 600);
-    let serialize = env_num("S7_SERIALIZE", 1, 0, 1) == 1;
+    let flusher_on = env_num("S7_FLUSHER", 0, 0, 1) == 1;
+    let serialize = !flusher_on && env_num("S7_SERIALIZE", 1, 0, 1) == 1;
     let seed = seed_from_env();
     let _watchdog = watchdog(Duration::from_secs(60 * 60), seed);
     // Serialize on is the Phase 18 baseline form. With serialize off the writers
-    // run in parallel (Phase 19 removed the cross-file take-out). Plan 20-07 adds
-    // the flusher form.
+    // run in parallel (Phase 19 removed the cross-file take-out). The flusher
+    // form has serialize off.
     let ctx = spike_ctx(serialize, seed, THREADS, WalConfig::PerOp);
     let files: Vec<(u64, u64)> = (0..THREADS).map(|t| create_file(&ctx.fs, ROOT, &format!("s7-{t}"), seed)).collect();
     let blocks = file_mib as usize * MIB_BLOCKS;
@@ -2006,6 +2011,17 @@ fn s7_budget_baseline() {
     let mut models: Vec<Vec<u32>> = Vec::new();
     std::thread::scope(|s| {
         let (ctx, max_dirty) = (&ctx, &max_dirty);
+        // Flusher form: the flusher runs in the scope. The guard stops it after
+        // the check phase, or when the scope ends on a panic.
+        let flusher_guard = flusher_on.then(|| StopFlusher(&ctx.fs));
+        if flusher_on {
+            s.spawn(|| flusher::run_flusher(&ctx.fs));
+            let t = Instant::now();
+            while !ctx.fs.test_flusher_running() {
+                assert!(t.elapsed() < Duration::from_secs(10), "seed={seed}: the S7 flusher does not run");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
         let committer = s.spawn(|| ctx.commit_loop_every(&stop, Duration::from_secs(commit_secs)));
         // Write phase: the whole file in 1 MiB writes, then the random mix.
         let writers: Vec<_> = files
@@ -2026,10 +2042,13 @@ fn s7_budget_baseline() {
                             ver[b] += 1;
                             buf.extend_from_slice(&block_bytes(seed, fid, b as u64, ver[b]));
                         }
+                        // Flusher form: the throttle first, with no lock held (as in the
+                        // FUSE write callback). Else the write pays at once (`handle_write`).
+                        let admit = if flusher_on { ctx.fs.throttle_write() } else { Admit { pay: true } };
                         // Sample inside `gated`, after the write, while the harness mutex is held:
                         // no other write is changing a dirty count then.
                         let r = ctx.gated(hs, Kind::Write, || {
-                            let r = h::handle_write(&ctx.fs, fh, (first * BLOCK) as u64, buf);
+                            let r = h::handle_write_admitted(&ctx.fs, fh, (first * BLOCK) as u64, buf, 0, admit);
                             max_dirty.fetch_max(ctx.fs.test_dirty_total(), Ordering::SeqCst);
                             r
                         });
@@ -2112,25 +2131,54 @@ fn s7_budget_baseline() {
         for j in checkers {
             mismatches.extend(j.join().expect("S7 checker panicked"));
         }
+        drop(flusher_guard);
         stop.store(true, Ordering::SeqCst);
         let (ch, cm) = committer.join().expect("commit thread panicked");
         commits = ch;
         mismatches.extend(cm);
     });
     let peak = peak_rss_mib();
-    let vmhwm = vmhwm_mib().map_or_else(|| "na".to_string(), |v| v.to_string());
+    let hwm = vmhwm_mib();
+    let vmhwm = hwm.map_or_else(|| "na".to_string(), |v| v.to_string());
+    let fl = ctx.fs.test_flusher_stats();
     println!(
-        "S7 threads={THREADS} serialize={serialize} file_mib={file_mib} write_mib={write_mib} peak_rss_mib={peak} vmhwm_mib={vmhwm} cap_mib={CAP_MIB} within_cap={} slowest_write_ms={:.1} rebase_steps={} max_dirty_mib={} rss_start_mib={rss_start} rss_after_writes_mib={rss_writes} commit_every_s={commit_secs} commits={} commit_hold_max_ms={:.1} commit_total_max_ms={:.1}",
+        "S7 threads={THREADS} serialize={serialize} flusher={} file_mib={file_mib} write_mib={write_mib} peak_rss_mib={peak} vmhwm_mib={vmhwm} cap_mib={CAP_MIB} within_cap={} slowest_write_ms={:.1} rebase_steps={} max_dirty_mib={} rss_start_mib={rss_start} rss_after_writes_mib={rss_writes} commit_every_s={commit_secs} commits={} commit_hold_max_ms={:.1} commit_total_max_ms={:.1} commit_gate_wait_max_ms={:.1} flusher_passes={} flusher_steps={} flusher_published={} flusher_drops={} flusher_skips={} flusher_errors={} throttled={} throttle_timeouts={} throttle_wait_max_ms={}",
+        u8::from(flusher_on),
         peak <= CAP_MIB,
         ms(slowest),
         ctx.fs.test_rebase_count(),
         max_dirty.load(Ordering::SeqCst) >> 20,
         commits.total.len(),
         ms(commits.hold.max()),
-        ms(commits.total.max())
+        ms(commits.total.max()),
+        ms(commits.gate_wait.max()),
+        fl.passes,
+        fl.steps,
+        fl.published,
+        fl.drops,
+        fl.skips,
+        fl.errors,
+        fl.throttled,
+        fl.timeouts,
+        fl.max_wait_ms
     );
     println!("S7 peak_rss_mib is the whole test process (getrusage), also the model and the check buffers");
-    println!("baseline only: flusher lag and pause curve need Phase 20");
     print_first("S7", seed, &mismatches);
     assert!(mismatches.is_empty(), "seed={seed}: S7 found {} mismatches", mismatches.len());
+    if flusher_on {
+        match hwm {
+            Some(v) => assert!(v <= CAP_MIB, "seed={seed}: S7 flusher form: VmHWM {v} MiB is above the cap {CAP_MIB} MiB"),
+            None => println!("S7 cap not checked: no VmHWM on this system"),
+        }
+    }
+}
+
+/// Stops the flusher of the S7 flusher form when it drops (also on a panic):
+/// throttled writers then write and pay, and the scope join does not wait.
+struct StopFlusher<'a>(&'a SliceFsFilesystem);
+
+impl Drop for StopFlusher<'_> {
+    fn drop(&mut self) {
+        self.0.stop_flusher();
+    }
 }
