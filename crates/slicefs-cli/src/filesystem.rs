@@ -668,6 +668,7 @@ pub(crate) struct FlushCtl {
     pub(crate) errors: AtomicU64,
     pub(crate) throttled: AtomicU64,
     pub(crate) timeouts: AtomicU64,
+    pub(crate) stop_exits: AtomicU64,
     pub(crate) max_wait_ms: AtomicU64,
 }
 
@@ -689,6 +690,7 @@ impl FlushCtl {
             errors: AtomicU64::new(0),
             throttled: AtomicU64::new(0),
             timeouts: AtomicU64::new(0),
+            stop_exits: AtomicU64::new(0),
             max_wait_ms: AtomicU64::new(0),
         }
     }
@@ -722,6 +724,8 @@ pub struct FlusherStats {
     pub throttled: u64,
     /// Throttle waits that reached the wait limit.
     pub timeouts: u64,
+    /// Throttle waits that ended because the flusher stopped or ended.
+    pub stop_exits: u64,
     /// The longest throttle wait, in ms.
     pub max_wait_ms: u64,
 }
@@ -758,6 +762,23 @@ pub(crate) enum FlushStep {
     Nothing,
     /// Failed with this errno (nothing was published).
     Failed(i32),
+}
+
+/// Counts one waiter for the exclusive commit gate while it lives
+/// (`SliceFsFilesystem::exclusive_wait`).
+pub(crate) struct ExclusiveWait<'a>(&'a AtomicUsize);
+
+impl<'a> ExclusiveWait<'a> {
+    fn enter(n: &'a AtomicUsize) -> Self {
+        n.fetch_add(1, Ordering::Relaxed);
+        ExclusiveWait(n)
+    }
+}
+
+impl Drop for ExclusiveWait<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Lowers `FlushCtl::throttled_now` when dropped (every exit of a wait).
@@ -889,6 +910,9 @@ pub struct SliceFsFilesystem {
     step_wait_ms: AtomicU64,
     /// The flush control block (Phase 20; see `FlushCtl`).
     flush_ctl: Arc<FlushCtl>,
+    /// Threads that wait for the exclusive commit gate now (a test hook;
+    /// see `ExclusiveWait`).
+    gate_xwaiters: AtomicUsize,
 }
 
 impl SliceFsFilesystem {
@@ -940,6 +964,7 @@ impl SliceFsFilesystem {
             fail_steps: AtomicUsize::new(0),
             step_wait_ms: AtomicU64::new(STEP_WAIT.as_millis() as u64),
             flush_ctl: Arc::new(FlushCtl::new()),
+            gate_xwaiters: AtomicUsize::new(0),
         }
     }
 
@@ -1098,6 +1123,23 @@ impl SliceFsFilesystem {
         self.flush_ctl.running.load(Ordering::Acquire)
     }
 
+    /// Test hook: true when a stop of the flusher was asked.
+    pub fn test_flusher_stopping(&self) -> bool {
+        self.flush_ctl.flags.lock().stop
+    }
+
+    /// Test hook: commits (or GC starts) that wait for the exclusive gate now.
+    pub fn test_gate_exclusive_waiters(&self) -> usize {
+        self.gate_xwaiters.load(Ordering::Relaxed)
+    }
+
+    /// Count this thread as one that waits for the exclusive commit gate
+    /// until the returned guard drops (also on a panic). Take it just
+    /// before the wait and drop it when the gate is held.
+    pub(crate) fn exclusive_wait(&self) -> ExclusiveWait<'_> {
+        ExclusiveWait::enter(&self.gate_xwaiters)
+    }
+
     /// Test hook: the counters of the flusher and the throttle.
     pub fn test_flusher_stats(&self) -> FlusherStats {
         let c = &*self.flush_ctl;
@@ -1111,6 +1153,7 @@ impl SliceFsFilesystem {
             errors: v(&c.errors),
             throttled: v(&c.throttled),
             timeouts: v(&c.timeouts),
+            stop_exits: v(&c.stop_exits),
             max_wait_ms: v(&c.max_wait_ms),
         }
     }
@@ -1466,7 +1509,9 @@ impl SliceFsFilesystem {
     /// its `Rank::Gate` entry (see `gate_shared`).
     pub fn gate_exclusive(&self) -> GateGuard<'_> {
         let rank = sync::rank::enter(Rank::Gate);
+        let waiting = self.exclusive_wait();
         let hold = GateHold::Exclusive { _g: self.commit_gate.write().unwrap_or_else(|e| e.into_inner()) };
+        drop(waiting);
         GateGuard { _hold: hold, _rank: rank }
     }
 
@@ -2984,10 +3029,17 @@ impl SliceFsFilesystem {
     /// With no flusher running (replay, in-process callers) it pays at once
     /// (the Phase 19 path). Else the writer waits, in slices of
     /// `THROTTLE_SLICE`, until the total is below the budget (then it does
-    /// not pay) or the wait limit passed: then it writes and pays with steps
-    /// of its own file (`pay_budget`); a write never fails here. A total at
-    /// or above half the budget wakes the flusher at once.
+    /// not pay), the wait limit passed, or the flusher stopped or ended
+    /// (`stop_flusher`, a panic): then it writes and pays with steps of its
+    /// own file (`pay_budget`); a write never fails here. A total at or
+    /// above half the budget wakes the flusher at once. In a debug build it
+    /// panics when the thread holds any ranked lock (the gate too).
     pub fn throttle_write(&self) -> Admit {
+        debug_assert!(
+            sync::rank::held().is_empty(),
+            "throttle_write with a lock held: {:?}",
+            sync::rank::held()
+        );
         let ctl = &*self.flush_ctl;
         let (total, budget) = self.dirty_now();
         if total >= budget / 2 {
@@ -3010,6 +3062,10 @@ impl SliceFsFilesystem {
             let (total, budget) = self.dirty_now();
             if total < budget {
                 break false;
+            }
+            if flags.stop || !ctl.running.load(Ordering::Acquire) {
+                ctl.stop_exits.fetch_add(1, Ordering::Relaxed);
+                break true;
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -3034,11 +3090,22 @@ impl SliceFsFilesystem {
         ctl.wake.notify_all();
     }
 
-    /// Ask the flusher loop to end (plan 20-03 adds the writer wake and
-    /// the join).
+    /// Ask the flusher loop to end and wake every throttled writer (each
+    /// one then writes and pays with steps of its own file). Calling it
+    /// again does nothing new. In a debug build it panics when the thread
+    /// holds any ranked lock (the gate too).
     pub fn stop_flusher(&self) {
-        self.flush_ctl.flags.lock().stop = true;
-        self.flush_ctl.wake.notify_all();
+        debug_assert!(
+            sync::rank::held().is_empty(),
+            "stop_flusher with a lock held: {:?}",
+            sync::rank::held()
+        );
+        let ctl = &*self.flush_ctl;
+        // The stop is set under the flags lock: a writer checks it under
+        // that lock, so it sees it or waits already and gets the notify.
+        ctl.flags.lock().stop = true;
+        ctl.wake.notify_all();
+        ctl.freed.notify_all();
     }
 
     /// The flush control block.

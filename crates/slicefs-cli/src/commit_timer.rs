@@ -50,7 +50,10 @@ pub fn timed_commit(fs: &SliceFsFilesystem, gate: &RwLock<()>) -> Result<CommitT
     let w = Instant::now();
     // The gate's rank entry, for the span of the hold (D-16).
     let rank = chunk_store::sync::rank::enter(chunk_store::sync::Rank::Gate);
+    // Counted while it waits for the gate (a test hook sees the queued commit).
+    let waiting = fs.exclusive_wait();
     let all = gate.write().unwrap_or_else(|e| e.into_inner());
+    drop(waiting);
     let gate_wait = w.elapsed();
     let t = Instant::now();
     // Only the generation switch runs under the gate (#108).

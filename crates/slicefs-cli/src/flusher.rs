@@ -33,13 +33,16 @@ pub struct PassStats {
     pub errors: u64,
 }
 
-/// Clears `running` when the loop ends (also on a panic).
+/// Clears `running` when the loop ends (also on a panic) and wakes every
+/// throttled writer, so a writer does not wait for a flusher that is gone.
 struct Running<'a>(&'a FlushCtl);
 
 impl Drop for Running<'_> {
     fn drop(&mut self) {
         self.0.running.store(false, Ordering::Release);
         chunk_store::sync::rank::require_gate(false);
+        // A writer checks `running` under the flags lock (see `notify_freed`).
+        self.0.notify_freed();
     }
 }
 

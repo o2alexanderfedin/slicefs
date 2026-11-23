@@ -15,12 +15,14 @@
 //! budget during the fill, the fill writes would pay at once and no writer
 //! would ever wait.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
+use slicefs_cli::commit_timer::timed_commit;
 use slicefs_cli::filesystem::SliceFsFilesystem;
 use slicefs_cli::flusher;
 use slicefs_cli::handlers::{self as h, WriteResult};
@@ -352,4 +354,191 @@ fn a_write_past_half_the_budget_kicks_the_flusher() {
     a.check(&fs, "handle open");
     a.release(&fs);
     a.check(&fs, "after release");
+}
+
+/// Receive `n` write results within `limit` in total, and check that each
+/// write put one piece in.
+fn all_writes_ok(rx: &mpsc::Receiver<(usize, WriteResult)>, n: usize, limit: Duration, what: &str) {
+    let deadline = Instant::now() + limit;
+    for _ in 0..n {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let (i, r) = rx.recv_timeout(left).unwrap_or_else(|_| panic!("{what}: the throttled writes return Ok within {limit:?}"));
+        assert!(matches!(r, WriteResult::Ok(k) if k as usize == PIECE), "{what}: write {i} is in: {r:?}");
+    }
+}
+
+/// Four overlay files of 1 MiB with 8 dirty pieces each (files 1 to 4).
+fn four_writers(fs: &SliceFsFilesystem) -> Vec<Model> {
+    (1..=4).map(|f| dirty_file(fs, f, MIB, 8)).collect()
+}
+
+/// Start one throttled write of slot `slot` per file on scoped threads; the
+/// results come on the returned channel.
+fn spawn_writes<'s, 'e: 's>(
+    s: &'s std::thread::Scope<'s, 'e>,
+    fs: &'e SliceFsFilesystem,
+    writes: &'e [(u64, u64, Vec<u8>)],
+) -> mpsc::Receiver<(usize, WriteResult)> {
+    let (tx, rx) = mpsc::channel();
+    for (i, (fh, off, data)) in writes.iter().enumerate() {
+        let tx = tx.clone();
+        s.spawn(move || {
+            let _ = tx.send((i, throttled_write(fs, *fh, *off, data).0));
+        });
+    }
+    rx
+}
+
+#[test]
+fn stop_wakes_throttled_writers() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_dirty_limit(2 * MIB);
+    let mut files = four_writers(&fs);
+    fs.test_pause_flusher(true);
+    fs.test_set_flush_pass(20);
+    fs.test_set_throttle_wait(10_000);
+    let writes: Vec<(u64, u64, Vec<u8>)> = files.iter().map(|m| {
+        let (off, data) = m.piece(10);
+        (m.fh, off, data)
+    }).collect();
+    std::thread::scope(|s| {
+        let _stop = StopGuard(&fs);
+        let flusher = s.spawn(|| flusher::run_flusher(&fs));
+        assert!(wait_until(WAIT, || fs.test_flusher_running()), "the flusher runs");
+        fs.test_set_dirty_budget(fs.test_dirty_total());
+        let rx = spawn_writes(s, &fs, &writes);
+        assert!(wait_until(WAIT, || fs.test_throttled_now() == 4), "the four writers wait in the throttle");
+        assert!(!fs.test_flusher_stopping(), "no stop was asked before stop_flusher");
+        fs.stop_flusher();
+        assert!(fs.test_flusher_stopping(), "stop_flusher asked the stop");
+        all_writes_ok(&rx, 4, WAIT, "after the stop");
+        let st = fs.test_flusher_stats();
+        assert_eq!(st.timeouts, 0, "no throttle wait reached the limit: {st:?}");
+        assert_eq!(st.stop_exits, 4, "the four waits left at the stop: {st:?}");
+        assert!(wait_until(WAIT, || flusher.is_finished()), "the flusher thread ended");
+    });
+    for m in &mut files {
+        m.applied(10);
+        m.check(&fs, "handles open");
+        m.release(&fs);
+        m.check(&fs, "after release");
+    }
+}
+
+#[test]
+fn a_flusher_panic_wakes_throttled_writers() {
+    const NAME: &str = "test-flusher";
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_dirty_limit(2 * MIB);
+    // Q is the largest dirty file, so the first flusher step is on Q.
+    let mut q = dirty_file(&fs, 5, 4 * MIB, 24);
+    let mut files = four_writers(&fs);
+    // After the fill, so no fill write meets the hook.
+    let fired = Arc::new(AtomicBool::new(false));
+    {
+        let fired = Arc::clone(&fired);
+        fs.test_set_rebase_hook(Some(Arc::new(move || {
+            if std::thread::current().name() == Some(NAME) && !fired.swap(true, Ordering::SeqCst) {
+                panic!("test: a panic in a flusher step");
+            }
+        })));
+    }
+    fs.test_pause_flusher(true);
+    fs.test_set_flush_pass(20);
+    fs.test_set_throttle_wait(10_000);
+    let writes: Vec<(u64, u64, Vec<u8>)> = files.iter().map(|m| {
+        let (off, data) = m.piece(10);
+        (m.fh, off, data)
+    }).collect();
+    let (q_off, q_data) = q.piece(30);
+    std::thread::scope(|s| {
+        let _stop = StopGuard(&fs);
+        let flusher = std::thread::Builder::new()
+            .name(NAME.into())
+            .spawn_scoped(s, || flusher::run_flusher(&fs))
+            .unwrap();
+        assert!(wait_until(WAIT, || fs.test_flusher_running()), "the flusher runs");
+        fs.test_set_dirty_budget(fs.test_dirty_total());
+        let rx = spawn_writes(s, &fs, &writes);
+        assert!(wait_until(WAIT, || fs.test_throttled_now() == 4), "the four writers wait in the throttle");
+        fs.test_pause_flusher(false);
+        assert!(wait_until(WAIT, || flusher.is_finished()), "the flusher thread ended");
+        assert!(flusher.join().is_err(), "the join of the flusher gave Err (the panic)");
+        assert!(fired.load(Ordering::SeqCst), "the hook panicked");
+        all_writes_ok(&rx, 4, WAIT, "after the flusher panic");
+        assert!(!fs.test_flusher_running(), "no flusher runs");
+        // The step token of Q was cleared, so a write to Q does not wait for it.
+        let (r, _) = throttled_write(&fs, q.fh, q_off, &q_data);
+        assert!(matches!(r, WriteResult::Ok(k) if k as usize == PIECE), "the write to Q is in: {r:?}");
+    });
+    fs.test_set_rebase_hook(None);
+    q.applied(30);
+    for m in &mut files {
+        m.applied(10);
+    }
+    for m in std::iter::once(&q).chain(files.iter()) {
+        m.check(&fs, "handles open");
+        m.release(&fs);
+        m.check(&fs, "after release");
+    }
+}
+
+/// The text of a caught panic.
+#[cfg(debug_assertions)]
+fn panic_text(e: Box<dyn std::any::Any + Send>) -> String {
+    match e.downcast::<String>() {
+        Ok(s) => *s,
+        Err(e) => e.downcast::<&'static str>().map(|s| s.to_string()).unwrap_or_default(),
+    }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_throttle_with_a_lock_held_panics() {
+    let (fs, _dir) = fresh_fs();
+    let r = {
+        let _gate = fs.gate_shared();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fs.throttle_write()))
+    };
+    let e = r.expect_err("throttle_write with the gate held gave Err");
+    let text = panic_text(e);
+    assert!(text.contains("with a lock held"), "the panic names the held lock: {text}");
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_stop_with_a_lock_held_panics() {
+    let (fs, _dir) = fresh_fs();
+    let r = {
+        let _gate = fs.gate_shared();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fs.stop_flusher()))
+    };
+    let e = r.expect_err("stop_flusher with the gate held gave Err");
+    let text = panic_text(e);
+    assert!(text.contains("with a lock held"), "the panic names the held lock: {text}");
+}
+
+#[test]
+fn a_queued_commit_is_seen() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "c", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, b"commit").unwrap();
+    fs.test_release(ino, fh).unwrap();
+    std::thread::scope(|s| {
+        let gate = fs.gate_shared();
+        let (tx, rx) = mpsc::channel();
+        let fs_ref = &fs;
+        s.spawn(move || {
+            let _ = tx.send(timed_commit(fs_ref, &fs_ref.commit_gate()).map(|_| ()).map_err(|e| e.to_string()));
+        });
+        assert!(wait_until(WAIT, || fs.test_gate_exclusive_waiters() == 1), "the commit is queued for the exclusive gate");
+        assert!(rx.try_recv().is_err(), "the commit has not returned while the gate is held");
+        drop(gate);
+        let r = rx.recv_timeout(Duration::from_secs(10)).expect("the commit returns after the gate is released");
+        assert!(r.is_ok(), "the commit is Ok: {r:?}");
+        assert_eq!(fs.test_gate_exclusive_waiters(), 0, "no commit is queued now");
+    });
 }
