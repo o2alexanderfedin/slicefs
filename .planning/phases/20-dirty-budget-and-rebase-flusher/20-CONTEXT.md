@@ -80,3 +80,9 @@ Out of scope: the worker pool (Phase 21), WAL group commit (deferred), chunk pro
 </deferred>
 </content>
 </invoke>
+
+## Answers to the research open questions (decided autonomously, 2026-11-23)
+- [A10] "Buffer full" steps the largest *quiet* dirty file first (no write in the last few hundred ms). A file that is written all the time is not stepped by the flusher below the hard limits; its writer pays with its own step (Phase 19 path) when it is over its limit or over the budget after the wait. Reason: every overlay write moves the generation, so a flusher step on a busy file is always dropped. "Largest first" was an autonomous choice, not the user's rule; the user's three triggers (idle, max age, full) stay. Reversible.
+- [A3] Minimum value 4 MiB for `--dirty-budget` and `--dirty-limit`. A later release can lower a minimum without breaking a user; raising it would break one, so the minimum starts low enough. Reversible in that direction.
+- [A11] Run the P0 probe (serialize off, above the budget, Phase 19 code) in Wave 0 before the flusher work.
+- [Harness] The default harness `run()` does not start the flusher; a focused flusher/throttle test does. A small opt-in knob in the harness is allowed only if a criterion needs it.
