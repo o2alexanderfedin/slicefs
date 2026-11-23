@@ -19,7 +19,8 @@ The research doc lists 8 migration steps. Two things landed after it was written
 | 1d. `Mutex<StoreIo>` held across node reads and puts | **Open** | `crates/metadata/src/store.rs`: `with_dir`, `load_meta`, `flush_inodes`, `flush_dirs`, `set_manifest`, `get_manifest`, the xattr methods. Lock-free `NodeReader` / `NodeWriter` already exist in `crates/metadata/src/store_io.rs`. |
 | 1e. Global `dir_live` / `inode_live` caches | **Open** | `store.rs`: one `Mutex<Live<_>>` each; `with_dir` even loads a cold `DirList` from disk while holding `dir_live`. |
 | 0. Stress harness | **Open** | No test runs two request threads. `scripts/docker-linux-test/mt-linux.sh` is a mount smoke test ("mt" is "mount"), not a threading test. `crates/chunk-store/src/race_tests.rs` covers the chunk store only. |
-| 2-7 | **Open** | `open_files: Mutex<HashMap<fh, OpenFileState>>`, take-out pattern, `keep_budget` taking another file's state, `handle_write` logging after the apply, no flusher, no pool. |
+| 2-5 | **Landed** (Phase 19, Phase 20) | Phase 19: one `FileCell` per open inode in a sharded `ino -> cell` map, locked in place (the take-out pattern is gone); each log record is appended under the locks of its apply. Phase 20: `flusher.rs` (one flusher thread, one step per shared gate hold) and `SliceFsFilesystem::throttle_write` (a writer over the budget waits before any lock); the writer-side budget step is `pay_budget` and steps only its own file. |
+| 6-7 | **Open** | No worker pool (Phase 21); no WAL group commit. |
 
 Consequences for the spikes: S2 (inline pack fsync) is now a re-measure of code that already shipped, not a new experiment. S5 (gate fairness) now decides only the lock type, because the exclusive hold is already just the cut. One thing the research did not note: `begin_commit` clones six maps (`inode_map`, `inode_data`, `dir_data`, `manifest_data`, `xattr_data`, `refcounts`) while the gate is held exclusively. That is O(files) and is part of S5's measurement (`commit_timer` already logs `hold_ms`). It also links to #19 (a persistent map makes this clone O(1)).
 
@@ -96,7 +97,7 @@ benchmarks/
   chunk-bench/         # exists; already takes fastcdc:MIN:AVG:MAX              (#67)
 ```
 
-Rationale: every new concurrency piece lives next to `filesystem.rs` in `slicefs-cli` because that is where the take-out pattern and the gate are. The rehash walker lives in `metadata` because it must know the wire format of each node kind, which is private to `store.rs`, `directory.rs`, `manifest.rs` and `inode_map.rs`. The prolly prototype is its own crate so it cannot leak into `root_rec`.
+Rationale: every new concurrency piece lives next to `filesystem.rs` in `slicefs-cli` because that is where the per-file cells, the flusher and the gate are (the old take-out pattern is gone after Phase 20). The rehash walker lives in `metadata` because it must know the wire format of each node kind, which is private to `store.rs`, `directory.rs`, `manifest.rs` and `inode_map.rs`. The prolly prototype is its own crate so it cannot leak into `root_rec`.
 
 ## Part 1: Multithreaded request handling (#127, #21, #22)
 
@@ -105,7 +106,7 @@ Rationale: every new concurrency piece lives next to `filesystem.rs` in `slicefs
 | Today (function in `filesystem.rs` unless noted) | Change |
 |---|---|
 | `test_write`, `settle_pending`, `finalize_write`, `flush_handle`, `test_setattr_size`: `open_files.lock().remove(&fh)` then re-insert | Look up the `Arc<FileCell>`, lock `cell.state`, work in place. The state never leaves the map, so a second thread waits instead of seeing EBADF, a stale manifest read or a no-op fsync. |
-| `keep_budget`, `free_dirty`: take another file's state out of `open_files` | Delete the cross-file path. Replace with: each `FileCell` mirrors its dirty cost in `AtomicUsize`; a global `AtomicUsize` total; the writer only steps its own file inline as a fallback; the flusher steps the largest file. |
+| `keep_budget`, `free_dirty`: take another file's state out of `open_files` | **Done.** Phase 19 removed the take-out: each `FileCell` mirrors its dirty cost in `AtomicUsize`, with a global `AtomicUsize` total. Phase 20 renamed the writer-side step to `pay_budget` (own file only, after a throttle wait) and added the flusher, which steps the largest quiet file. |
 | `write_alias: Mutex<HashMap<fh, fh>>`, `owner_fh`, the heir logic in `test_release` | Each handle maps to the same `Arc<FileCell>`. `owner_fh` and the heir swap disappear. Release drops the Arc; the last drop runs `finalize_write`. |
 | `test_read`: scans all `open_files` for `s.ino == ino` under the global lock, clones a `Stream` | O(1) lookup by inode in a sharded `ino -> Arc<FileCell>` map; hold `cell.state` only to copy the overlay view or clone the stream, then read with no lock. This is the "read while write" half of #21. |
 | `write_handle_of`, `ino_of_fh`, `test_dirty_total` | Same lookups through the cell map. |

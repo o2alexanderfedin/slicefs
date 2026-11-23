@@ -1,0 +1,17 @@
+smoke-final: Docker Linux mount smoke (run.sh smoke) on the final Phase 20 code
+commit = d061ba2
+porcelain lines =        0
+RUSTC = rustc 1.100.0 (0ef1bc386 2026-11-09)
+  read: ok
+  echo-write: ok
+  cp-3MB: ok
+  cp-again: ok
+  readback: ok
+  mkdir-mv: ok
+  chmod: ok
+  truncate: ok
+  xattr: ok
+  rm: ok
+  unmount: ok
+  daemon-exit: ok
+exit = 0

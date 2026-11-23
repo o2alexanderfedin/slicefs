@@ -26,7 +26,7 @@ use crate::handlers::{
     handle_getxattr, handle_link, handle_listxattr, handle_lookup, handle_mkdir,
     handle_mknod, handle_open, handle_read, handle_readdir, handle_readlink,
     handle_release, handle_removexattr, handle_rename, handle_rmdir, handle_setattr,
-    handle_setxattr, handle_statfs, handle_symlink, handle_unlink, handle_write_flags,
+    handle_setxattr, handle_statfs, handle_symlink, handle_unlink, handle_write_admitted,
     AttrResult, CreateResult, DataResult, EmptyResult, EntryResult, LockResult,
     OpenResult, ReaddirResult, StatfsResult, WriteResult, XattrResult,
 };
@@ -60,9 +60,9 @@ impl Filesystem for MountedFs {
     }
 
     fn destroy(&mut self) {
-        let _op = self.gate_shared();
         eprintln!("[{}][FUSE] destroy: ENTRY — auto_snapshot={}", ts(), self.auto_snapshot);
-        let ok = self.test_destroy();
+        // Stop and join the flusher before the gate, then the destroy work.
+        let ok = self.shutdown();
         eprintln!("[{}][FUSE] destroy: EXIT — commit_ok={}", ts(), ok);
     }
 
@@ -432,17 +432,21 @@ impl Filesystem for MountedFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
+        // The budget admission comes before any lock (Phase 20).
+        let t_throttle = std::time::Instant::now();
+        let admit = self.throttle_write();
+        let throttle = t_throttle.elapsed();
         let t_gate = std::time::Instant::now();
         let _op = self.gate_shared();
         let gate_wait = t_gate.elapsed();
         eprintln!("[{}][FUSE] write: ENTRY ino={}, fh={}, offset={}, data_len={}, write_flags={:#x}, flags={:#x}, lock_owner={:?}", ts(), ino.0, fh.0, offset, data.len(), _write_flags.bits(), _flags.0, _lock_owner.map(|l| l.0));
         let t_handle = std::time::Instant::now();
         // The open flags of the request: O_APPEND writes at the end of file.
-        let handled = handle_write_flags(self, fh.0, offset, data, _flags.0);
+        let handled = handle_write_admitted(self, fh.0, offset, data, _flags.0, admit);
         let handle = t_handle.elapsed();
-        if (gate_wait + handle).as_millis() >= 50 {
-            eprintln!("[t={}][slow-write] ino={} offset={} len={} gate_wait_ms={} handle_ms={}",
-                crate::util::epoch(), ino.0, offset, data.len(), gate_wait.as_millis(), handle.as_millis());
+        if (throttle + gate_wait + handle).as_millis() >= 50 {
+            eprintln!("[t={}][slow-write] ino={} offset={} len={} throttle_ms={} gate_wait_ms={} handle_ms={}",
+                crate::util::epoch(), ino.0, offset, data.len(), throttle.as_millis(), gate_wait.as_millis(), handle.as_millis());
         }
         match handled {
             WriteResult::Ok(n) => {

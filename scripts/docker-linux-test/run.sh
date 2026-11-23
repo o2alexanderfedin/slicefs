@@ -11,7 +11,7 @@
 #        scripts/docker-linux-test/run.sh s1   (spike S1 control: the probe shows request overlap on Linux; by hand)
 #        scripts/docker-linux-test/run.sh s4   (spike S4: FUSE queue depth during random writes and readahead; by hand, not in CI)
 #        scripts/docker-linux-test/run.sh s6 [files]   (spike S6: small fsynced files per WAL strategy; by hand, not in CI)
-#        scripts/docker-linux-test/run.sh harness <test-name>   (one ignored test of the stress harness in release, no mount: s3_store_lock, s5_gate_fairness, s7_budget_baseline; HARNESS_FEATURES=lock-stats for lock rows; by hand, not in CI)
+#        scripts/docker-linux-test/run.sh harness <test-name>   (one ignored test of the stress harness in release, no mount: s3_store_lock, s5_gate_fairness, s7_budget_baseline (S7_SERIALIZE=0 for the parallel form, S7_FLUSHER=1 for the flusher form); HARNESS_FEATURES=lock-stats for lock rows; by hand, not in CI)
 #        scripts/docker-linux-test/run.sh index-bench [SIZES...]   (default sizes: 1000000 10000000)
 #        scripts/docker-linux-test/run.sh index-bench-cold [SIZES...]   (cold page cache; privileged; by hand)
 # SLICEFS_TARGET_VOL names the cargo target volume (default slicefs-target), so
@@ -45,7 +45,7 @@ case "${1:-all}" in
       -e CARGO_TARGET_DIR=/target -e HARNESS_FEATURES \
       -e STRESS_SEED -e STRESS_THREADS -e STRESS_SECS -e STRESS_FILE_MIB -e STRESS_SERIALIZE -e STRESS_MODE \
       -e S3_THREADS -e S3_FILE_MIB -e S3_SERIALIZE -e S5_FILES -e S5_SECS -e S5_HOLD_MS \
-      -e S6_FILES -e S7_FILE_MIB -e S7_WRITE_MIB -e S7_COMMIT_SECS \
+      -e S6_FILES -e S7_FILE_MIB -e S7_WRITE_MIB -e S7_COMMIT_SECS -e S7_SERIALIZE -e S7_FLUSHER \
       slicefs-fusetest bash -c '
         rustc -V
         cargo test -q --release -p slicefs-cli ${HARNESS_FEATURES:+--features "$HARNESS_FEATURES"} --test stress_harness -- --ignored --exact --nocapture "$@"' harness ${@+"$@"} ;;

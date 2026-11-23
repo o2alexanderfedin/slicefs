@@ -186,7 +186,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
 
 - [x] **Phase 18: Spikes, baseline and stress harness** (#127) - re-measure S1-S7 on the current code, build the N-thread harness, run S1 on macOS (completed 2026-11-21)
 - [x] **Phase 19: Fine-grained locks** (#21) - no global lock on the hot path, lock rank with a debug checker, log record under the same locks as its apply (completed 2026-11-22)
-- [ ] **Phase 20: Dirty budget and rebase flusher** (#21) - no cross-file take-out, a background flusher, writers throttled before they take locks, no deadlock with a commit
+- [x] **Phase 20: Dirty budget and rebase flusher** (#21) - no cross-file take-out, a background flusher, writers throttled before they take locks, no deadlock with a commit (completed 2026-11-23)
 - [ ] **Phase 21: Worker pool** (#22) - N worker threads by mount option, drain before `destroy()`, abort on panic, 4 workers pass pjdfstest
 - [ ] **Phase 22: Chunk profiles** (#67) - FastCDC min/avg/max fixed per store at `seed`, benchmark of five profiles, default unchanged (parallel track)
 - [ ] **Phase 23: Hashes and rehash** (#62) - SHA-256 write hash and an offline, crash-safe `slicefs rehash` (parallel track)
@@ -297,7 +297,34 @@ Plans:
   2. A background flusher lowers the shared dirty budget, a writer over the limit sleeps before it takes any lock, and every wait has a time limit
   3. A test with all workers throttled while a commit waits finishes without deadlock
   4. A Docker run with parallel random writers on large files keeps peak RSS (VmHWM) under one fixed cap
-**Plans**: TBD
+**Plans**: 8/8 plans complete
+
+One plan per wave; executors run them in order.
+
+Plans:
+**Wave 1** *(Wave 0 baseline)*
+- [x] 20-01-PLAN.md — S7 serialize knob and VmHWM; P_old and P0 in Docker; CAP_MIB fixed by a stated rule; `no_take_out` test and `pay_budget`
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 20-02-PLAN.md — Tracer: throttle before the gate, flusher pass with one step per gate hold, pay after the wait limit
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 20-03-PLAN.md — Stop and panic wake throttled writers; flusher thread with the mount; throttle in FUSE `write`; `shutdown` order
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 20-04-PLAN.md — All writers throttled while a commit waits (flusher paused; flusher in a step); no wait for a step token
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 20-05-PLAN.md — Idle and maximum-age triggers, hot rule, largest quiet file first, per-file limit trigger
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 20-06-PLAN.md — Mount options `--dirty-budget`, `--dirty-limit`, `--dirty-idle`, `--dirty-expire` with checks (costly: public CLI)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [x] 20-07-PLAN.md — Short dirty-bound test with parallel writers; S7 flusher form; P1 Docker runs under the fixed cap
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [x] 20-08-PLAN.md — Phase 20 result in the research doc, README options, requirement marks on evidence, phase gate
 
 ### Phase 21: Worker pool
 
@@ -363,7 +390,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 18. Spikes, baseline and stress harness | 7/7 | Complete    | 2026-11-21 |
 | 19. Fine-grained locks | 16/16 | Complete    | 2026-11-22 |
-| 20. Dirty budget and rebase flusher | 0/0 | Not started | - |
+| 20. Dirty budget and rebase flusher | 8/8 | Complete    | 2026-11-23 |
 | 21. Worker pool | 0/0 | Not started | - |
 | 22. Chunk profiles | 0/0 | Not started | - |
 | 23. Hashes and rehash | 0/0 | Not started | - |

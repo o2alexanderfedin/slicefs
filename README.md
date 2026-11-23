@@ -97,6 +97,25 @@ slicefs unmount /tmp/sfs
 
 Run `slicefs --help` (and `slicefs <subcommand> --help`) for the full CLI.
 
+### Dirty data (mount options)
+
+Dirty data is written file data that is not stored yet. It is kept in memory. Four `slicefs mount` options control it:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--dirty-budget <SIZE>` | `64M` | The most dirty data of all open files together. This is memory that the daemon may use for it. |
+| `--dirty-limit <SIZE>` | `32M`, or `--dirty-budget` if that is less | The most dirty data of one file. It must not be above `--dirty-budget`. |
+| `--dirty-idle <SECS>` | `5` | Store the dirty data of a file after this time with no write to it. |
+| `--dirty-expire <SECS>` | `30` | Store dirty data that is this old. |
+
+- SIZE is bytes, or a number with K, M or G. The units are 1024-based, so `64M` is 67108864 bytes. Each SIZE must be at least `4M`. There is no upper bound.
+- SECS must be at least 1.
+- A background flusher stores dirty data when a file is idle, when its data is old, or when the total is at half the budget or more.
+- A writer over the budget waits up to 5 s for the flusher. Then it writes, and stores part of its own file. The write does not fail. When the flusher cannot store data (for example, after a store error), the writer stops its wait after that flusher pass.
+- A file that is written with no pause of 300 ms or more is kept under its limit by its own writer.
+- `--dirty-limit` applies to a file that is changed in place (an overlay). A file that is written from start to end (a stream) can also hold writes that come out of order. These writes can use up to 64 MiB (a fixed window), whatever the limit is.
+- With a `--dirty-budget` below 64M, a stream with out-of-order writes can become an overlay when the total reaches the budget. The file then does not go back to a stream.
+
 ## Test
 
 ```sh

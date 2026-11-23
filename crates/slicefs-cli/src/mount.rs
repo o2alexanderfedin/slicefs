@@ -32,7 +32,7 @@ use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
-use crate::filesystem::SliceFsFilesystem;
+use crate::filesystem::{DirtyConfig, SliceFsFilesystem};
 use crate::util::ts;
 
 // ── Store loading ─────────────────────────────────────────────────────────────
@@ -245,6 +245,8 @@ fn check_mountpoint_not_in_use(mountpoint: &Path) -> Result<(), Box<dyn std::err
 /// `auto_snapshot` enables auto-snapshot on clean unmount (--auto-snapshot flag).
 /// `backend` is the FUSE-T backend (macOS only): "fskit", the default and only one.
 /// `force` is accepted but currently unused.
+/// `dirty` holds the dirty-data values; they are checked before any side
+/// effect and set before the write-log replay.
 #[allow(clippy::too_many_arguments)]
 pub fn run_mount(
     store_path: &Path,
@@ -261,7 +263,11 @@ pub fn run_mount(
     gc_interval_secs: u64,
     zstd_level: i32,
     hash: Option<&str>,
+    dirty: DirtyConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Pre-flight: refuse bad dirty-data values before anything changes.
+    dirty.check()?;
+
     // Pre-flight: create mountpoint directory if it doesn't exist.
     if !mountpoint.exists() {
         std::fs::create_dir_all(mountpoint)
@@ -353,6 +359,8 @@ pub fn run_mount(
         println!("Compression of new data: none.");
     }
 
+    fs.set_dirty_config(&dirty);
+
     // Replay the write log (#20): requests after the last root, made durable
     // by fsync before a crash. Then commit, which cuts the log. Not on a
     // snapshot mount (read-only; the log stays for the next normal mount).
@@ -370,6 +378,13 @@ pub fn run_mount(
         }
     }
     let fs = Arc::new(fs);
+
+    // The dirty-data flusher (Phase 20). Not on a snapshot mount (read-only).
+    // The clone is for the stop after mount() returns.
+    let flusher_fs = snapshot_ref.is_none().then(|| {
+        fs.start_flusher();
+        Arc::clone(&fs)
+    });
 
     // GC of the stored objects while mounted (#25). Not on a snapshot mount:
     // its metadata is the snapshot, not the current root.
@@ -461,6 +476,13 @@ pub fn run_mount(
         }
     }
 
+    // Stop the flusher, also when mount failed (after a clean unmount
+    // destroy() stopped it already; a second stop does nothing). The clone
+    // is dropped at once, so it does not keep the file system alive.
+    if let Some(fs) = flusher_fs {
+        fs.stop_flusher();
+    }
+
     // Stop the GC thread before mount.lock is released, also when mount failed.
     online_gc_shutdown.store(true, Ordering::SeqCst);
     if let Some(h) = online_gc_handle {
@@ -512,6 +534,39 @@ mod tests {
         meta.link(1, "hello.txt", ino).unwrap();
         meta.commit().unwrap();
         meta.shutdown_wal().unwrap();
+    }
+
+    #[test]
+    fn dirty_config_check_refuses_a_limit_above_the_budget() {
+        let mib = 1 << 20;
+        let cfg = DirtyConfig { budget: 8 * mib, limit: 8 * mib, ..DirtyConfig::default() };
+        assert_eq!(cfg.check(), Ok(()), "a limit equal to the budget is Ok");
+        assert_eq!(DirtyConfig::default().check(), Ok(()));
+        let cfg = DirtyConfig { budget: 8 * mib, limit: 16 * mib, ..DirtyConfig::default() };
+        let err = cfg.check().expect_err("a limit above the budget is refused");
+        assert!(err.contains("16777216") && err.contains("8388608"), "the message has both values: {err}");
+        for bad in [
+            DirtyConfig { budget: 0, limit: 0, ..DirtyConfig::default() },
+            DirtyConfig { limit: 4 * mib - 1, ..DirtyConfig::default() },
+            DirtyConfig { idle_secs: 0, ..DirtyConfig::default() },
+            DirtyConfig { expire_secs: 0, ..DirtyConfig::default() },
+            DirtyConfig { expire_secs: u64::MAX / 1000 + 1, ..DirtyConfig::default() },
+        ] {
+            assert!(bad.check().is_err(), "{bad:?} is refused");
+        }
+    }
+
+    /// A limit above the budget stops the mount before the mount point is
+    /// made (no mount is tried).
+    #[test]
+    fn run_mount_refuses_a_dirty_limit_above_the_budget_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let mnt = dir.path().join("mnt");
+        let cfg = DirtyConfig { budget: 8 << 20, limit: 16 << 20, ..DirtyConfig::default() };
+        let r = run_mount(&dir.path().join("no-store"), &mnt, true, false, 0, None, None, false, None, false, 0, 0, 0, None, cfg);
+        let err = r.expect_err("run_mount refuses the dirty values").to_string();
+        assert!(!mnt.exists(), "the mount point was not made ({err})");
+        assert!(err.contains("16777216") && err.contains("8388608"), "{err}");
     }
 
     #[test]

@@ -5,6 +5,7 @@ pub mod cli;
 pub mod commit_timer;
 pub mod content;
 pub mod filesystem;
+pub mod flusher;
 mod fuse_callbacks;
 #[doc(hidden)]
 pub mod handlers;

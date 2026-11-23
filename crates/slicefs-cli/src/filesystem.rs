@@ -8,9 +8,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chunk_store::lock_stats::Site;
 use chunk_store::pack_io::SyncWait;
@@ -132,12 +132,118 @@ pub const REBASE_STEP: usize = 1 << 20;
 /// whole overlay at once (#98).
 pub const FINAL_STEP: usize = 8 << 20;
 
-/// Budget of dirty bytes of all open files together (#105): when a write
-/// makes the sum pass it, the file with the most dirty bytes stores a step
-/// (an overlay rebase step; a stream's pending writes first become an
-/// overlay). Each file also keeps its own `DIRTY_LIMIT`. The same value as
-/// `REORDER_WINDOW`, so one stream can still use its whole window.
+/// Budget of dirty bytes of all open files together (#105, Phase 20). At
+/// half of it the flusher (`crate::flusher`) steps quiet files; a writer
+/// that finds the total at or above it waits in `throttle_write`, before it
+/// takes any lock, and after the wait it steps only its own file. Each file
+/// also keeps its own `DIRTY_LIMIT`. The default is the same value as
+/// `REORDER_WINDOW`, so one stream can still use its whole window. With a
+/// smaller `--dirty-budget`, a stream with pending writes can become an
+/// overlay when the total reaches the budget (one way).
 pub const DIRTY_BUDGET: usize = 64 << 20;
+
+/// The least value of `--dirty-budget` and `--dirty-limit` (Phase 20 A3):
+/// four rebase steps. A later release can lower it with no break for a
+/// user; a higher value would refuse values that work today.
+pub const MIN_DIRTY_BYTES: usize = 4 * REBASE_STEP;
+
+/// Most dirty cost one flusher step frees (Phase 20, Claude's discretion):
+/// larger than `REBASE_STEP` (less fixed cost per install), smaller than
+/// `FINAL_STEP` (a commit cut waits for the longest shared gate hold). The
+/// RSS cap rule of plan 20-01 (`CAP_MIB`, the "W 4" term) uses this value:
+/// do not change it without a new cap derivation.
+pub const FLUSH_STEP: usize = 4 << 20;
+
+/// Most time a writer over the budget waits for the flusher (Phase 20
+/// CONTEXT default); then it writes and pays with a step of its own file.
+const THROTTLE_WAIT: Duration = Duration::from_secs(5);
+
+/// One slice of a throttle wait: the writer looks at the total again after
+/// each slice, because a release or a writer's own step also lowers the
+/// total, with no notify.
+const THROTTLE_SLICE: Duration = Duration::from_millis(50);
+
+/// Time between two flusher passes when nothing wakes the flusher.
+const FLUSH_PASS: Duration = Duration::from_millis(100);
+
+/// The back-off of a cell after its first failed flusher step; it doubles
+/// with each failure in a row up to `FLUSH_RETRY_MAX` (Claude's
+/// discretion: one pass interval).
+const FLUSH_RETRY_MIN: Duration = FLUSH_PASS;
+
+/// The longest back-off of a cell after failed flusher steps.
+const FLUSH_RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// The flusher stores the dirty data of a file with no write for this time
+/// (Phase 20 CONTEXT default of `--dirty-idle`).
+const DIRTY_IDLE: Duration = Duration::from_secs(5);
+
+/// The flusher stores the dirty data of a file whose oldest dirty data is
+/// this old (Phase 20 CONTEXT default of `--dirty-expire`).
+const DIRTY_EXPIRE: Duration = Duration::from_secs(30);
+
+/// A file with a write in this window is hot: below the budget the flusher
+/// does not step it (plan 20-05 choice: three pass intervals, "a few
+/// hundred ms" of A10).
+const HOT_WINDOW: Duration = Duration::from_millis(300);
+
+/// The dirty-data values of a mount (`--dirty-budget`, `--dirty-limit`,
+/// `--dirty-idle`, `--dirty-expire`). `Default` gives the values of the
+/// constants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirtyConfig {
+    /// Most dirty bytes of all open files (`DIRTY_BUDGET`).
+    pub budget: usize,
+    /// Most dirty bytes of one file (`DIRTY_LIMIT`).
+    pub limit: usize,
+    /// The idle time of a file, in seconds (`DIRTY_IDLE`).
+    pub idle_secs: u64,
+    /// The maximum age of dirty data, in seconds (`DIRTY_EXPIRE`).
+    pub expire_secs: u64,
+}
+
+impl Default for DirtyConfig {
+    fn default() -> Self {
+        DirtyConfig {
+            budget: DIRTY_BUDGET,
+            limit: DIRTY_LIMIT,
+            idle_secs: DIRTY_IDLE.as_secs(),
+            expire_secs: DIRTY_EXPIRE.as_secs(),
+        }
+    }
+}
+
+impl DirtyConfig {
+    /// Refuse the values that the mount options refuse: a byte value below
+    /// `MIN_DIRTY_BYTES`, a limit above the budget, and a time of 0 s or of
+    /// more ms than a u64 holds. A caller that makes the struct directly
+    /// gets the same checks as the command line.
+    pub fn check(&self) -> Result<(), String> {
+        for (name, bytes) in [("--dirty-budget", self.budget), ("--dirty-limit", self.limit)] {
+            if bytes < MIN_DIRTY_BYTES {
+                return Err(format!(
+                    "{name} {bytes} is below the minimum of {}M ({MIN_DIRTY_BYTES} bytes)",
+                    MIN_DIRTY_BYTES >> 20
+                ));
+            }
+        }
+        if self.limit > self.budget {
+            return Err(format!(
+                "--dirty-limit {} is above --dirty-budget {} (bytes); the limit of one file must not be above the budget of all files",
+                self.limit, self.budget
+            ));
+        }
+        for (name, secs) in [("--dirty-idle", self.idle_secs), ("--dirty-expire", self.expire_secs)] {
+            if secs == 0 || secs > u64::MAX / 1000 {
+                return Err(format!("{name} {secs} is not in 1-{} seconds", u64::MAX / 1000));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The start of the flusher clock (`FlushCtl::now_ms`).
+static CLOCK_EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 /// One slice of a wait for the step in flight of a cell (with the cell
 /// unlocked; see `CellGuard::wait_step`). The waiter waits another slice
@@ -326,6 +432,21 @@ struct FileCell {
     /// `dirty_cost` of the state when its guard last synced (see
     /// `CellGuard`); `SliceFsFilesystem::dirty_total` is the sum.
     dirty: AtomicUsize,
+    /// True if the state was a stream when its guard last synced (the
+    /// flusher reads it with no cell lock, to step overlays first).
+    stream: AtomicBool,
+    /// The flusher clock (`FlushCtl::now_ms`) at the last applied write; 0
+    /// for none. `write_in_cell` stores it after the apply.
+    last_write: AtomicU64,
+    /// The flusher clock when the dirty cost went from 0 to above 0; 0 when
+    /// the cell is clean. The age of the dirty data starts again only when
+    /// the cell is clean (the Linux `dirtied_when` rule; `sync_dirty`).
+    dirty_since: AtomicU64,
+    /// Failed flusher steps in a row; 0 after a step that freed.
+    flush_fails: AtomicU32,
+    /// The flusher clock before which the flusher does not try the cell
+    /// again after a failed step; 0 for none.
+    flush_retry_at: AtomicU64,
 }
 
 impl FileCell {
@@ -353,6 +474,11 @@ impl FileCell {
             transient,
             state: sync::Mutex::new_keyed(Rank::Cell, ino, state).timed(Site::FileCell),
             dirty: AtomicUsize::new(0),
+            stream: AtomicBool::new(true),
+            last_write: AtomicU64::new(0),
+            dirty_since: AtomicU64::new(0),
+            flush_fails: AtomicU32::new(0),
+            flush_retry_at: AtomicU64::new(0),
         }
     }
 }
@@ -421,6 +547,8 @@ impl Drop for StepEnd<'_> {
 /// `dirty_cost`, with the cell lock still held.
 struct CellGuard<'a> {
     total: &'a AtomicUsize,
+    /// For the flusher clock of `sync_dirty`.
+    ctl: &'a FlushCtl,
     cell: &'a FileCell,
     /// `None` only inside `unlocked`.
     state: Option<sync::MutexGuard<'a, CellState>>,
@@ -509,7 +637,13 @@ impl CellGuard<'_> {
     fn sync_dirty(&self) {
         let Some(state) = &self.state else { return };
         let cost = if state.retired { 0 } else { dirty_cost(&state.file) };
+        self.cell.stream.store(matches!(state.file.write_mode, WriteMode::Streaming { .. }), Ordering::Relaxed);
         let old = self.cell.dirty.swap(cost, Ordering::Relaxed);
+        if old == 0 && cost > 0 {
+            self.cell.dirty_since.store(self.ctl.now_ms(), Ordering::Relaxed);
+        } else if cost == 0 {
+            self.cell.dirty_since.store(0, Ordering::Relaxed);
+        }
         if cost >= old {
             self.total.fetch_add(cost - old, Ordering::Relaxed);
         } else {
@@ -597,6 +731,261 @@ impl CellMap {
     }
 }
 
+/// The answer of `SliceFsFilesystem::throttle_write` to a write: with
+/// `pay`, the write pays for the budget with steps of its own file
+/// (`pay_budget`, the Phase 19 path); without it, it does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Admit {
+    pub pay: bool,
+}
+
+/// The flags of the flush control block, under its lock.
+#[derive(Default)]
+pub(crate) struct FlushFlags {
+    /// The flusher must end (set once, never cleared).
+    pub(crate) stop: bool,
+    /// A write found the total at or above half the budget: the flusher
+    /// makes a pass now, not at the end of its pass interval (see
+    /// `FlushCtl::empty_pass` for when a write does not kick).
+    pub(crate) kicked: bool,
+    /// Test hook: the flusher makes no pass.
+    pub(crate) paused: bool,
+    /// The number of the last pass that began (`flush_pass`).
+    pub(crate) pass_begun: u64,
+    /// The number of the last pass that came to its normal end.
+    pub(crate) pass_done: u64,
+    /// The pass `pass_done` could not free memory: it published no step,
+    /// and a step failed or its last pick found no candidate with the
+    /// total at or above the budget. A throttled writer then does not wait
+    /// for the limit (`throttle_write`).
+    pub(crate) pass_stuck: bool,
+}
+
+/// The flush control block (Phase 20): the flusher thread and throttled
+/// writers meet here. It is in its own `Arc`, so a flusher thread can wait
+/// on it with no `Arc` of the file system.
+pub(crate) struct FlushCtl {
+    /// `Rank::Short`; never held across another lock.
+    pub(crate) flags: sync::Mutex<FlushFlags>,
+    /// The flusher waits on it between passes.
+    pub(crate) wake: sync::Condvar,
+    /// Throttled writers wait on it; the flusher notifies it after each step.
+    pub(crate) freed: sync::Condvar,
+    /// True while a flusher loop runs. With no flusher, a writer over the
+    /// budget does not wait (it pays at once).
+    pub(crate) running: AtomicBool,
+    /// The wait limit of a throttled writer, in ms (`THROTTLE_WAIT`).
+    pub(crate) throttle_wait_ms: AtomicU64,
+    /// The pass interval of the flusher, in ms (`FLUSH_PASS`).
+    pub(crate) pass_ms: AtomicU64,
+    /// The idle time of a file, in ms (`DIRTY_IDLE`).
+    pub(crate) idle_ms: AtomicU64,
+    /// The maximum age of dirty data, in ms (`DIRTY_EXPIRE`).
+    pub(crate) expire_ms: AtomicU64,
+    /// The hot window, in ms (`HOT_WINDOW`).
+    pub(crate) hot_ms: AtomicU64,
+    /// Added to the flusher clock (`test_advance_clock`); 0 in production.
+    /// It is per file system, so tests that run in parallel do not move
+    /// the clock of each other.
+    clock_offset_ms: AtomicU64,
+    /// The last pass published no step, and its last pick found no
+    /// candidate with the total at or above half the budget. While it is
+    /// true, a write below the budget does not kick the flusher: with one
+    /// hot file, each write would else cause one more empty pass. A step
+    /// that was skipped, dropped or failed does not count: the cell was
+    /// busy (it is hot now) or is in its back-off, and only time makes it
+    /// a candidate again (the timed pass). A pass below
+    /// half the budget leaves it false, so the first write that finds the
+    /// total at half kicks. The next pass sets it again: a timed pass, or
+    /// a pass kicked at the budget.
+    pub(crate) empty_pass: AtomicBool,
+    /// Writers in a throttle wait now.
+    pub(crate) throttled_now: AtomicUsize,
+    pub(crate) passes: AtomicU64,
+    pub(crate) steps: AtomicU64,
+    pub(crate) published: AtomicU64,
+    pub(crate) drops: AtomicU64,
+    pub(crate) skips: AtomicU64,
+    pub(crate) errors: AtomicU64,
+    pub(crate) throttled: AtomicU64,
+    pub(crate) timeouts: AtomicU64,
+    pub(crate) stop_exits: AtomicU64,
+    pub(crate) no_room_exits: AtomicU64,
+    pub(crate) max_wait_ms: AtomicU64,
+}
+
+impl FlushCtl {
+    fn new() -> Self {
+        FlushCtl {
+            flags: sync::Mutex::new(Rank::Short, FlushFlags::default()),
+            wake: sync::Condvar::new(),
+            freed: sync::Condvar::new(),
+            running: AtomicBool::new(false),
+            throttle_wait_ms: AtomicU64::new(THROTTLE_WAIT.as_millis() as u64),
+            pass_ms: AtomicU64::new(FLUSH_PASS.as_millis() as u64),
+            idle_ms: AtomicU64::new(DIRTY_IDLE.as_millis() as u64),
+            expire_ms: AtomicU64::new(DIRTY_EXPIRE.as_millis() as u64),
+            hot_ms: AtomicU64::new(HOT_WINDOW.as_millis() as u64),
+            clock_offset_ms: AtomicU64::new(0),
+            empty_pass: AtomicBool::new(false),
+            throttled_now: AtomicUsize::new(0),
+            passes: AtomicU64::new(0),
+            steps: AtomicU64::new(0),
+            published: AtomicU64::new(0),
+            drops: AtomicU64::new(0),
+            skips: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            throttled: AtomicU64::new(0),
+            timeouts: AtomicU64::new(0),
+            stop_exits: AtomicU64::new(0),
+            no_room_exits: AtomicU64::new(0),
+            max_wait_ms: AtomicU64::new(0),
+        }
+    }
+
+    /// The flusher clock: ms since a process epoch plus the test offset,
+    /// always at least 1 (0 means "none" in the cell times).
+    pub(crate) fn now_ms(&self) -> u64 {
+        let base = CLOCK_EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64;
+        base + 1 + self.clock_offset_ms.load(Ordering::Relaxed)
+    }
+
+    /// Wake throttled writers after the total fell. The lock is taken and
+    /// released first: a writer checks the total under it, so it either saw
+    /// the new total or waits already and gets the notify.
+    pub(crate) fn notify_freed(&self) {
+        drop(self.flags.lock());
+        self.freed.notify_all();
+    }
+}
+
+/// The counters of the flusher and the throttle (a copy, for tests).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FlusherStats {
+    /// Flusher passes.
+    pub passes: u64,
+    /// Flusher steps tried (skipped ones too).
+    pub steps: u64,
+    /// Steps that lowered the cost of their file.
+    pub published: u64,
+    /// Steps that ran and freed nothing (a dropped result).
+    pub drops: u64,
+    /// Steps not started: the cell had a step in flight, a writer at the
+    /// hard cap, or was retired.
+    pub skips: u64,
+    /// Steps that failed.
+    pub errors: u64,
+    /// Writes that waited in the throttle.
+    pub throttled: u64,
+    /// Throttle waits that reached the wait limit.
+    pub timeouts: u64,
+    /// Throttle waits that ended because the flusher stopped or ended.
+    pub stop_exits: u64,
+    /// Throttle waits that ended because a flusher pass could not free
+    /// memory (`FlushFlags::pass_stuck`).
+    pub no_room_exits: u64,
+    /// The longest throttle wait, in ms.
+    pub max_wait_ms: u64,
+}
+
+/// A dirty cell that the flusher can step (see `flush_targets`).
+pub(crate) struct FlushTarget {
+    cell: Arc<FileCell>,
+}
+
+impl FlushTarget {
+    pub(crate) fn ino(&self) -> u64 {
+        self.cell.ino
+    }
+
+    /// The dirty cost of the cell when its guard last synced.
+    pub(crate) fn dirty(&self) -> usize {
+        self.cell.dirty.load(Ordering::Relaxed)
+    }
+
+    /// True if the cell was a stream when its guard last synced.
+    pub(crate) fn is_stream(&self) -> bool {
+        self.cell.stream.load(Ordering::Relaxed)
+    }
+
+    /// The flusher clock at the last applied write (0: none).
+    pub(crate) fn last_write(&self) -> u64 {
+        self.cell.last_write.load(Ordering::Relaxed)
+    }
+
+    /// The flusher clock when the cell became dirty (0: clean).
+    pub(crate) fn dirty_since(&self) -> u64 {
+        self.cell.dirty_since.load(Ordering::Relaxed)
+    }
+
+    /// True if the cell is in its back-off after a failed step at `now`.
+    pub(crate) fn backed_off(&self, now: u64) -> bool {
+        now < self.cell.flush_retry_at.load(Ordering::Relaxed)
+    }
+
+    /// Record a failed step at `now`: the next try comes after a back-off
+    /// of `FLUSH_RETRY_MIN`, doubled for each earlier failure in a row, at
+    /// most `FLUSH_RETRY_MAX`. Returns the back-off in ms.
+    pub(crate) fn note_failed(&self, now: u64) -> u64 {
+        let n = self.cell.flush_fails.fetch_add(1, Ordering::Relaxed).min(16);
+        let ms = ((FLUSH_RETRY_MIN.as_millis() as u64) << n).min(FLUSH_RETRY_MAX.as_millis() as u64);
+        self.cell.flush_retry_at.store(now.saturating_add(ms), Ordering::Relaxed);
+        ms
+    }
+
+    /// Record a step that freed: the back-off ends.
+    pub(crate) fn note_freed(&self) {
+        self.cell.flush_fails.store(0, Ordering::Relaxed);
+        self.cell.flush_retry_at.store(0, Ordering::Relaxed);
+    }
+}
+
+/// The result of one flusher step (`SliceFsFilesystem::flush_step`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FlushStep {
+    /// Not started (a step in flight, a writer at the cap, retired).
+    Skipped,
+    /// Ran and lowered the cost of the file by this many bytes.
+    Freed(usize),
+    /// Ran and freed nothing (a dropped result).
+    Nothing,
+    /// Failed with this errno (nothing was published).
+    Failed(i32),
+}
+
+/// Counts one waiter for the exclusive commit gate while it lives
+/// (`SliceFsFilesystem::exclusive_wait`).
+pub(crate) struct ExclusiveWait<'a>(&'a AtomicUsize);
+
+impl<'a> ExclusiveWait<'a> {
+    fn enter(n: &'a AtomicUsize) -> Self {
+        n.fetch_add(1, Ordering::Relaxed);
+        ExclusiveWait(n)
+    }
+}
+
+impl Drop for ExclusiveWait<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Lowers `FlushCtl::throttled_now` when dropped (every exit of a wait).
+struct ThrottledNow<'a>(&'a AtomicUsize);
+
+impl<'a> ThrottledNow<'a> {
+    fn enter(n: &'a AtomicUsize) -> Self {
+        n.fetch_add(1, Ordering::Relaxed);
+        ThrottledNow(n)
+    }
+}
+
+impl Drop for ThrottledNow<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// An open file handle: its inode and its mode.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Handle {
@@ -643,7 +1032,7 @@ pub struct SliceFsFilesystem {
     /// One cell per inode with open write handles; every handle of the
     /// inode uses it (POSIX: every handle writes the same file).
     cells: CellMap,
-    /// Sum of `FileCell::dirty` of all cells (see `keep_budget`).
+    /// Sum of `FileCell::dirty` of all cells (see `pay_budget`).
     dirty_total: AtomicUsize,
     /// File content store (`<store>/packs/`).
     pub(crate) content: Content,
@@ -708,6 +1097,17 @@ pub struct SliceFsFilesystem {
     /// One slice of a wait for a step in flight, in ms (`STEP_WAIT`; tests
     /// set it lower).
     step_wait_ms: AtomicU64,
+    /// The flush control block (Phase 20; see `FlushCtl`).
+    flush_ctl: Arc<FlushCtl>,
+    /// Set at the start of `shutdown()`, never cleared: a timed commit
+    /// that gets the gate later does no commit (`commit_unless_shut_down`).
+    shut_down: AtomicBool,
+    /// Threads that wait for the exclusive commit gate now (a test hook;
+    /// see `ExclusiveWait`).
+    gate_xwaiters: AtomicUsize,
+    /// The flusher thread of a mount (`start_flusher`); `stop_flusher`
+    /// takes it and joins it. `Rank::Short`.
+    flusher_thread: sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl SliceFsFilesystem {
@@ -758,6 +1158,10 @@ impl SliceFsFilesystem {
             steps_seen: AtomicUsize::new(0),
             fail_steps: AtomicUsize::new(0),
             step_wait_ms: AtomicU64::new(STEP_WAIT.as_millis() as u64),
+            flush_ctl: Arc::new(FlushCtl::new()),
+            shut_down: AtomicBool::new(false),
+            gate_xwaiters: AtomicUsize::new(0),
+            flusher_thread: sync::Mutex::new(Rank::Short, None),
         }
     }
 
@@ -779,6 +1183,26 @@ impl SliceFsFilesystem {
     /// Test hook: set the dirty budget of all open files to `bytes`.
     pub fn test_set_dirty_budget(&self, bytes: usize) {
         self.dirty_budget.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Set the dirty-data values of the mount options (Phase 20). The mount
+    /// calls it before the write-log replay, so the replay uses them too.
+    /// It does not check `cfg`: `DirtyConfig::check` does.
+    pub fn set_dirty_config(&self, cfg: &DirtyConfig) {
+        self.dirty_budget.store(cfg.budget, Ordering::Relaxed);
+        self.dirty_limit.store(cfg.limit, Ordering::Relaxed);
+        self.flush_ctl.idle_ms.store(cfg.idle_secs.saturating_mul(1000), Ordering::Relaxed);
+        self.flush_ctl.expire_ms.store(cfg.expire_secs.saturating_mul(1000), Ordering::Relaxed);
+    }
+
+    /// Test hook: the dirty-data values now in use.
+    pub fn test_dirty_config(&self) -> DirtyConfig {
+        DirtyConfig {
+            budget: self.dirty_budget.load(Ordering::Relaxed),
+            limit: self.dirty_limit.load(Ordering::Relaxed),
+            idle_secs: self.flush_ctl.idle_ms.load(Ordering::Relaxed) / 1000,
+            expire_secs: self.flush_ctl.expire_ms.load(Ordering::Relaxed) / 1000,
+        }
     }
 
     /// Test hook: set the step of the last release to `bytes`.
@@ -889,6 +1313,89 @@ impl SliceFsFilesystem {
         self.fail_steps.store(n, Ordering::Relaxed);
     }
 
+    /// Test hook: pause (`true`) or resume the flusher. A paused flusher
+    /// makes no pass; a resumed one makes a pass at once.
+    pub fn test_pause_flusher(&self, paused: bool) {
+        self.flush_ctl.flags.lock().paused = paused;
+        self.flush_ctl.wake.notify_all();
+    }
+
+    /// Test hook: set the wait limit of a throttled writer (`THROTTLE_WAIT`).
+    pub fn test_set_throttle_wait(&self, ms: u64) {
+        self.flush_ctl.throttle_wait_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: set the pass interval of the flusher (`FLUSH_PASS`).
+    pub fn test_set_flush_pass(&self, ms: u64) {
+        self.flush_ctl.pass_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: set the idle time of a file (`DIRTY_IDLE`).
+    pub fn test_set_dirty_idle(&self, ms: u64) {
+        self.flush_ctl.idle_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: set the maximum age of dirty data (`DIRTY_EXPIRE`).
+    pub fn test_set_dirty_expire(&self, ms: u64) {
+        self.flush_ctl.expire_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: set the hot window (`HOT_WINDOW`).
+    pub fn test_set_hot_window(&self, ms: u64) {
+        self.flush_ctl.hot_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: move the flusher clock of this file system forward.
+    pub fn test_advance_clock(&self, ms: u64) {
+        self.flush_ctl.clock_offset_ms.fetch_add(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: the writers in a throttle wait now.
+    pub fn test_throttled_now(&self) -> usize {
+        self.flush_ctl.throttled_now.load(Ordering::Relaxed)
+    }
+
+    /// Test hook: true while a flusher loop runs.
+    pub fn test_flusher_running(&self) -> bool {
+        self.flush_ctl.running.load(Ordering::Acquire)
+    }
+
+    /// Test hook: true when a stop of the flusher was asked.
+    pub fn test_flusher_stopping(&self) -> bool {
+        self.flush_ctl.flags.lock().stop
+    }
+
+    /// Test hook: commits (or GC starts) that wait for the exclusive gate now.
+    pub fn test_gate_exclusive_waiters(&self) -> usize {
+        self.gate_xwaiters.load(Ordering::Relaxed)
+    }
+
+    /// Count this thread as one that waits for the exclusive commit gate
+    /// until the returned guard drops (also on a panic). Take it just
+    /// before the wait and drop it when the gate is held.
+    pub(crate) fn exclusive_wait(&self) -> ExclusiveWait<'_> {
+        ExclusiveWait::enter(&self.gate_xwaiters)
+    }
+
+    /// Test hook: the counters of the flusher and the throttle.
+    pub fn test_flusher_stats(&self) -> FlusherStats {
+        let c = &*self.flush_ctl;
+        let v = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        FlusherStats {
+            passes: v(&c.passes),
+            steps: v(&c.steps),
+            published: v(&c.published),
+            drops: v(&c.drops),
+            skips: v(&c.skips),
+            errors: v(&c.errors),
+            throttled: v(&c.throttled),
+            timeouts: v(&c.timeouts),
+            stop_exits: v(&c.stop_exits),
+            no_room_exits: v(&c.no_room_exits),
+            max_wait_ms: v(&c.max_wait_ms),
+        }
+    }
+
     /// True if a test hook fails this rebase step (see `test_fail_steps`).
     fn forced_fail(&self) -> bool {
         self.fail_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
@@ -968,6 +1475,7 @@ impl SliceFsFilesystem {
     fn lock_cell<'a>(&'a self, cell: &'a FileCell) -> CellGuard<'a> {
         CellGuard {
             total: &self.dirty_total,
+            ctl: &self.flush_ctl,
             cell,
             state: Some(cell.state.lock()),
             notes: Vec::new(),
@@ -1240,7 +1748,9 @@ impl SliceFsFilesystem {
     /// its `Rank::Gate` entry (see `gate_shared`).
     pub fn gate_exclusive(&self) -> GateGuard<'_> {
         let rank = sync::rank::enter(Rank::Gate);
+        let waiting = self.exclusive_wait();
         let hold = GateHold::Exclusive { _g: self.commit_gate.write().unwrap_or_else(|e| e.into_inner()) };
+        drop(waiting);
         GateGuard { _hold: hold, _rank: rank }
     }
 
@@ -2409,6 +2919,8 @@ impl SliceFsFilesystem {
     /// for `log_write_out` (also after an error that came after the apply).
     /// `flags` are the open flags of the request: with `O_APPEND` (or on a
     /// handle opened with it) the write goes to the end of file (D-12).
+    /// This path always pays for the budget at once (`Admit { pay: true }`,
+    /// the Phase 19 path: replay and in-process callers).
     pub(crate) fn write_logged(
         &self,
         fh: u64,
@@ -2417,9 +2929,24 @@ impl SliceFsFilesystem {
         flags: i32,
         time: Option<(i64, u32)>,
     ) -> (Result<(u32, u64), i32>, Option<Lsn>) {
+        self.write_logged_admitted(fh, offset, data, flags, time, Admit { pay: true })
+    }
+
+    /// `write_logged` with the answer of `throttle_write`: `pay_budget`
+    /// runs only when `admit.pay`. The writer's own limit step and the hard
+    /// cap gate run in both cases.
+    pub(crate) fn write_logged_admitted(
+        &self,
+        fh: u64,
+        offset: u64,
+        data: &[u8],
+        flags: i32,
+        time: Option<(i64, u32)>,
+        admit: Admit,
+    ) -> (Result<(u32, u64), i32>, Option<Lsn>) {
         let mut lsn = None;
         let mut switch = None;
-        let r = self.write_in_cell(fh, offset, data, flags, time, &mut lsn, &mut switch);
+        let r = self.write_in_cell(fh, offset, data, flags, time, admit, &mut lsn, &mut switch);
         // The cell guard is gone: print the debug line of a switch now.
         if let Some(SwitchNote { ino, offset, expected, pending, fresh, overlap }) = switch {
             eprintln!("[{}][FUSE] write: fh={} ino={} switches to overlay (offset={} len={} expected={} pending={} fresh={} overlap={})",
@@ -2438,6 +2965,7 @@ impl SliceFsFilesystem {
         data: &[u8],
         flags: i32,
         time: Option<(i64, u32)>,
+        admit: Admit,
         lsn: &mut Option<Lsn>,
         switch: &mut Option<SwitchNote>,
     ) -> Result<(u32, u64), i32> {
@@ -2628,6 +3156,11 @@ impl SliceFsFilesystem {
                 drops += 1;
             }
         };
+        if result.is_ok() {
+            // For the idle and hot rules of the flusher: after the apply,
+            // before the own steps below.
+            cell.last_write.store(self.flush_ctl.now_ms(), Ordering::Relaxed);
+        }
 
         // An overlay past the dirty limit (also right after a switch that
         // moved pending writes in) stores a part of itself as a new root now,
@@ -2684,24 +3217,29 @@ impl SliceFsFilesystem {
             // the step was unlocked.
             return result.map(|n| (n, offset));
         }
-        // Then the budget of all open files (#105), with the same bound.
+        // Then the budget of all open files (#105), with the same bound,
+        // unless the throttle let the write in below the budget.
         let n = result?;
-        if let Err(e) = self.keep_budget(&mut g, added) {
-            after_err(&mut g, "the budget step", e);
+        if admit.pay {
+            if let Err(e) = self.pay_budget(&mut g, added) {
+                after_err(&mut g, "the budget step", e);
+            }
         }
         Ok((n, offset))
     }
 
-    /// Keep the dirty bytes of all open files within the budget (#105). `g`
-    /// is the locked cell of the file being written, and `added` the dirty
-    /// cost its write added. The check reads only the global total. If it
-    /// is above the budget, this file (and only this one, D-13: no other
-    /// cell is locked) stores steps until the cost `max(added, REBASE_STEP)`
-    /// is freed, the total is `REBASE_STEP` below the budget, or the file is
-    /// clean. A write can always free the bytes it added, so the total does
-    /// not grow while it is above the budget, and a write pays for at most
-    /// that much work. Moving work to other files is Phase 20 (flusher).
-    fn keep_budget(&self, g: &mut CellGuard<'_>, added: usize) -> Result<(), i32> {
+    /// The writer pays for its own file with steps (#105). `g` is the locked
+    /// cell of the file being written (only this cell is locked, D-13), and
+    /// `added` the dirty cost its write added. The check reads only the
+    /// global total. If it is above the budget, this file stores steps until
+    /// the cost `max(added, REBASE_STEP)` is freed, the total is
+    /// `REBASE_STEP` below the budget, or the file is clean. A write can
+    /// always free the bytes it added, so the total does not grow while it is
+    /// above the budget, and a write pays for at most that much work. This
+    /// runs when no flusher runs (replay, in-process callers) or after a
+    /// throttle wait ended with no room (Phase 20). Work on other files is
+    /// done only by the flusher thread, never by a request.
+    fn pay_budget(&self, g: &mut CellGuard<'_>, added: usize) -> Result<(), i32> {
         let budget = self.dirty_budget.load(Ordering::Relaxed);
         let target = budget.saturating_sub(REBASE_STEP);
         let mut cap: Option<usize> = None;
@@ -2726,6 +3264,209 @@ impl SliceFsFilesystem {
                 return Ok(());
             }
             freed += step;
+        }
+    }
+
+    /// Admission of a write (Phase 20). Call it before the commit gate, a
+    /// stripe or a cell: it holds no lock but the short lock of the flush
+    /// control block. Below the budget the write goes on and does not pay.
+    /// With no flusher running (replay, in-process callers) it pays at once
+    /// (the Phase 19 path). Else the writer waits, in slices of
+    /// `THROTTLE_SLICE`, until the total is below the budget (then it does
+    /// not pay), the flusher stopped or ended (`stop_flusher`, a panic), a
+    /// flusher pass that began in the wait could not free memory
+    /// (`FlushFlags::pass_stuck`, for example a store error: more wait
+    /// cannot help), or the wait limit passed: then it writes and pays with
+    /// steps of its own file (`pay_budget`); a write never fails here. A
+    /// waiting writer kicks the flusher again under the flags lock, so a
+    /// pass begins after its wait began. A total at or
+    /// above half the budget wakes the flusher at once, unless the last
+    /// pass published no step at half the budget or more and the total is
+    /// below the budget (`FlushCtl::empty_pass`). In a debug build it panics when the
+    /// thread holds any ranked lock (the gate too).
+    pub fn throttle_write(&self) -> Admit {
+        debug_assert!(
+            sync::rank::held().is_empty(),
+            "throttle_write with a lock held: {:?}",
+            sync::rank::held()
+        );
+        let ctl = &*self.flush_ctl;
+        let (total, budget) = self.dirty_now();
+        if total >= budget || (total >= budget / 2 && !ctl.empty_pass.load(Ordering::Relaxed)) {
+            self.kick_flusher();
+        }
+        if total < budget {
+            return Admit { pay: false };
+        }
+        if !ctl.running.load(Ordering::Acquire) {
+            return Admit { pay: true };
+        }
+        ctl.throttled.fetch_add(1, Ordering::Relaxed);
+        let _now = ThrottledNow::enter(&ctl.throttled_now);
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(ctl.throttle_wait_ms.load(Ordering::Relaxed));
+        let mut flags = ctl.flags.lock();
+        // Only a pass with a higher number began after this point.
+        let seen = flags.pass_begun;
+        flags.kicked = true;
+        ctl.wake.notify_all();
+        let pay = loop {
+            // Under the flags lock: the flusher lowers the total before it
+            // takes this lock to notify, so no wakeup is lost.
+            let (total, budget) = self.dirty_now();
+            if total < budget {
+                break false;
+            }
+            if flags.stop || !ctl.running.load(Ordering::Acquire) {
+                ctl.stop_exits.fetch_add(1, Ordering::Relaxed);
+                break true;
+            }
+            if flags.pass_done > seen && flags.pass_stuck {
+                ctl.no_room_exits.fetch_add(1, Ordering::Relaxed);
+                break true;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                ctl.timeouts.fetch_add(1, Ordering::Relaxed);
+                break true;
+            }
+            ctl.freed.wait_for(&mut flags, left.min(THROTTLE_SLICE));
+        };
+        drop(flags);
+        ctl.max_wait_ms.fetch_max(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+        Admit { pay }
+    }
+
+    /// Wake the flusher for a pass now (the background threshold, half the
+    /// budget, was reached, see `throttle_write`). Takes no lock when no
+    /// flusher runs.
+    fn kick_flusher(&self) {
+        let ctl = &*self.flush_ctl;
+        if !ctl.running.load(Ordering::Acquire) {
+            return;
+        }
+        ctl.flags.lock().kicked = true;
+        ctl.wake.notify_all();
+    }
+
+    /// Start the flusher thread of a mount (`flusher::spawn_flusher`). It
+    /// holds only a `Weak` of the file system; `stop_flusher` joins it.
+    pub fn start_flusher(self: &Arc<Self>) {
+        let h = crate::flusher::spawn_flusher(Arc::downgrade(self));
+        let old = self.flusher_thread.lock().replace(h);
+        debug_assert!(old.is_none(), "one flusher thread per file system");
+    }
+
+    /// Ask the flusher loop to end, wake every throttled writer (each one
+    /// then writes and pays with steps of its own file), then join the
+    /// flusher thread of `start_flusher`, if any. Calling it again does
+    /// nothing new. It does not join when it runs on the flusher thread
+    /// (no caller does that today; a test hook in a flusher step could,
+    /// and a join there would wait for its own thread). In a debug build it
+    /// panics when the thread holds any ranked lock (the gate too): a join
+    /// under the gate can wait for ever behind a queued commit.
+    ///
+    /// The join waits for at most one flusher step: the flusher checks the
+    /// stop flag before each gate hold and each step, and its sleep wakes
+    /// on the stop. One step is bounded by its own timed waits (store waits
+    /// of `STORE_WAIT` 10 s each, step-token waits in `STEP_WAIT` slices
+    /// with progress, at most `STEP_WAIT_MAX` 120 s).
+    pub fn stop_flusher(&self) {
+        debug_assert!(
+            sync::rank::held().is_empty(),
+            "stop_flusher with a lock held: {:?}",
+            sync::rank::held()
+        );
+        let ctl = &*self.flush_ctl;
+        // The stop is set under the flags lock: a writer checks it under
+        // that lock, so it sees it or waits already and gets the notify.
+        ctl.flags.lock().stop = true;
+        ctl.wake.notify_all();
+        ctl.freed.notify_all();
+        // Take the handle, then join with no lock held.
+        let Some(h) = self.flusher_thread.lock().take() else { return };
+        if h.thread().id() == std::thread::current().id() {
+            return;
+        }
+        if h.join().is_err() {
+            eprintln!("[{}][FLUSH] the flusher thread ended with a panic", ts());
+        }
+    }
+
+    /// The end of a mount (the FUSE `destroy` callback): stop and join the
+    /// flusher with no lock held, then take the gate shared and run
+    /// `test_destroy` (it writes open files with locked steps, so no
+    /// flusher step may run then). The join comes before the gate: under
+    /// the gate it could wait for a flusher that waits for the gate behind
+    /// a queued commit, and that commit waits for this hold. First it
+    /// marks the file system as shut down, so a timed commit that waits
+    /// for the gate now does no commit after the destroy work (see
+    /// `commit_timer::commit_unless_shut_down`). Returns the result of
+    /// `test_destroy` (true if the commit succeeded).
+    pub fn shutdown(&self) -> bool {
+        self.shut_down.store(true, Ordering::SeqCst);
+        self.stop_flusher();
+        let _op = self.gate_shared();
+        self.test_destroy()
+    }
+
+    /// True after `shutdown()` started.
+    pub fn is_shut_down(&self) -> bool {
+        self.shut_down.load(Ordering::SeqCst)
+    }
+
+    /// The flush control block.
+    pub(crate) fn flush_ctl(&self) -> &Arc<FlushCtl> {
+        &self.flush_ctl
+    }
+
+    /// The shared dirty total and the budget, now.
+    pub(crate) fn dirty_now(&self) -> (usize, usize) {
+        (self.dirty_total.load(Ordering::Relaxed), self.dirty_budget.load(Ordering::Relaxed))
+    }
+
+    /// The dirty limit of one file, now.
+    pub(crate) fn dirty_limit_now(&self) -> usize {
+        self.dirty_limit.load(Ordering::Relaxed)
+    }
+
+    /// Every cell with dirty cost that the flusher can step (not a
+    /// transient cell). Reads the cell map shard by shard and atomics only;
+    /// no cell is locked.
+    pub(crate) fn flush_targets(&self) -> Vec<FlushTarget> {
+        self.cells
+            .all()
+            .into_iter()
+            .filter(|c| !c.transient && c.dirty.load(Ordering::Relaxed) > 0)
+            .map(|cell| FlushTarget { cell })
+            .collect()
+    }
+
+    /// One flusher step of `t`: the commit gate shared, then the cell lock,
+    /// then `free_dirty` of about `want` bytes (its I/O with the cell
+    /// unlocked under the step token), then the cell and the gate are
+    /// released, in that order. A cell that is retired, has a step in
+    /// flight or a writer at the hard cap is skipped: the flusher never
+    /// waits for a step token with the gate held. A dirty cell with no
+    /// write handle (a failed last release) is stepped like any other; it
+    /// is never retired or removed here.
+    pub(crate) fn flush_step(&self, t: &FlushTarget, want: usize) -> FlushStep {
+        let gate = self.gate_shared();
+        let mut g = self.lock_cell(&t.cell);
+        if g.retired || t.cell.transient || g.stepping.is_some() || g.cap_writers > 0 {
+            drop(g);
+            drop(gate);
+            return FlushStep::Skipped;
+        }
+        let before = dirty_cost(&g.file);
+        let r = self.free_dirty(&mut g, want);
+        let after = if g.retired { 0 } else { dirty_cost(&g.file) };
+        drop(g);
+        drop(gate);
+        match r {
+            Err(e) => FlushStep::Failed(e),
+            Ok(()) if after < before => FlushStep::Freed(before - after),
+            Ok(()) => FlushStep::Nothing,
         }
     }
 
@@ -4385,6 +5126,7 @@ impl SliceFsFilesystem {
     /// Destroy: commit, optionally snapshot, and shut down WAL.
     /// Returns true if commit succeeded.
     pub fn test_destroy(&self) -> bool {
+        debug_assert!(!self.flush_ctl.running.load(Ordering::Acquire), "test_destroy while a flusher runs");
         // Write the content of handles that are still open (e.g. a forced
         // unmount), so the commit below keeps it.
         for cell in self.cells.all() {
@@ -5885,6 +6627,27 @@ mod tests {
             _ => 0,
         };
         fs.ino_of_fh(fh).and_then(|ino| fs.with_cell(ino, cost)).unwrap_or(0)
+    }
+
+    /// The mount options reach the atomics; the dirty data that is there
+    /// does not change.
+    #[test]
+    fn set_dirty_config_stores_the_budget_and_limit() {
+        let (fs, _dir) = fresh_fs();
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        fs.test_write(fh, 0, &seeded(1, 1 << 20)).unwrap();
+        fs.test_release(ino, fh).unwrap();
+        let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+        fs.test_write(fh, 4096, &seeded(2, 4096)).unwrap();
+        let total = fs.test_dirty_total();
+        assert!(total > 0, "the overlay write is dirty data");
+        assert_eq!(fs.test_dirty_config(), DirtyConfig::default());
+        let cfg = DirtyConfig { budget: 8 << 20, limit: 4 << 20, ..DirtyConfig::default() };
+        fs.set_dirty_config(&cfg);
+        let now = fs.test_dirty_config();
+        assert_eq!((now.budget, now.limit), (8 << 20, 4 << 20), "the dirty budget and limit are set");
+        assert_eq!(fs.test_dirty_total(), total, "the dirty total did not change");
+        fs.test_release(ino, fh).unwrap();
     }
 
     #[test]

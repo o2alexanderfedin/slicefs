@@ -211,6 +211,37 @@ pub fn parse_compression(s: &str) -> Result<i32, String> {
     }
 }
 
+/// Parse `--dirty-budget` and `--dirty-limit`: a whole number of bytes,
+/// with an optional binary suffix `K`, `M` or `G` (also `KiB`, `MiB`,
+/// `GiB`; any case; 1024-based). Refuses a sign, a fraction, another
+/// suffix, an overflow, and a value below `MIN_DIRTY_BYTES` (this also
+/// refuses 0).
+pub fn parse_dirty_bytes(s: &str) -> Result<usize, String> {
+    use crate::filesystem::MIN_DIRTY_BYTES;
+    let bad = || format!("invalid size {s:?}; use bytes, or a whole number with K, M or G (1024-based)");
+    let digits = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num, suffix) = s.split_at(digits);
+    if num.is_empty() {
+        return Err(bad());
+    }
+    let unit: usize = match suffix.to_ascii_lowercase().as_str() {
+        "" => 1,
+        "k" | "kib" => 1 << 10,
+        "m" | "mib" => 1 << 20,
+        "g" | "gib" => 1 << 30,
+        _ => return Err(bad()),
+    };
+    let bytes = num
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| n.checked_mul(unit))
+        .ok_or_else(|| format!("size {s:?} is too large"))?;
+    if bytes < MIN_DIRTY_BYTES {
+        return Err(format!("size {s:?} is below the minimum of {}M ({MIN_DIRTY_BYTES} bytes)", MIN_DIRTY_BYTES >> 20));
+    }
+    Ok(bytes)
+}
+
 pub use metadata::store_io::{to_key, to_id};
 
 /// A content stream of a file being written. `clone()` + `finish()` gives the content so far.
@@ -330,6 +361,30 @@ pub(crate) mod tests {
         assert!(parse_compression("zstd:0").is_err());
         assert!(parse_compression("zstd:23").is_err());
         assert!(parse_compression("lz4").is_err());
+    }
+
+    #[test]
+    fn dirty_bytes_parse_with_binary_suffixes() {
+        assert_eq!(parse_dirty_bytes("64M"), Ok(67108864));
+        assert_eq!(parse_dirty_bytes("4M"), Ok(4194304));
+        assert_eq!(parse_dirty_bytes("1G"), Ok(1073741824));
+        assert_eq!(parse_dirty_bytes("67108864"), Ok(67108864));
+        assert_eq!(parse_dirty_bytes("4MiB"), parse_dirty_bytes("4M"));
+        assert_eq!(parse_dirty_bytes("64m"), parse_dirty_bytes("64M"));
+        assert_eq!(parse_dirty_bytes("4096K"), parse_dirty_bytes("4M"));
+        assert_eq!(parse_dirty_bytes("4096kib"), Ok(4194304));
+        assert_eq!(parse_dirty_bytes("1gib"), Ok(1073741824));
+    }
+
+    #[test]
+    fn dirty_bytes_refuse_bad_values() {
+        for v in ["3M", "4194303"] {
+            let err = parse_dirty_bytes(v).expect_err(v);
+            assert!(err.contains("4M") && err.contains("4194304"), "{v}: the message names the minimum: {err}");
+        }
+        for v in ["0", "1.5M", "64X", "64MB", "", "M", "+4M", "-4M", " 4M", "99999999999G", "99999999999999999999999"] {
+            assert!(parse_dirty_bytes(v).is_err(), "{v:?} is refused");
+        }
     }
 
     /// A committed store whose root node is not in the chunk store (as with

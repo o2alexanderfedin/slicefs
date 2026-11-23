@@ -2,20 +2,21 @@
 gsd_state_version: "1.0"
 milestone: v2.2
 milestone_name: Concurrency & Store Evolution
-current_phase: 20
-current_phase_name: Dirty budget and rebase flusher
+current_phase: 21
+current_phase_name: Worker pool
+current_plan: Not started
 status: planning
-stopped_at: Phase 19 complete, ready to plan Phase 20
-last_updated: "2026-11-23T01:38:39.384Z"
-last_activity: 2026-11-22
-last_activity_desc: Phase 19 complete, transitioned to Phase 20
-state_head: a7ce72be435108dd0f51f3e51623fa2d06657e41
+stopped_at: Phase 20 complete, ready to plan Phase 21
+last_updated: "2026-11-23T14:57:29.685Z"
+last_activity: 2026-11-23
+last_activity_desc: Phase 20 complete, transitioned to Phase 21
+state_head: 31e30b75cd6ca019ff0d1dc86648b39f86a49124
 progress:
   total_phases: 7
-  completed_phases: 2
-  total_plans: 23
-  completed_plans: 23
-  percent: 29
+  completed_phases: 3
+  total_plans: 31
+  completed_plans: 31
+  percent: 43
 ---
 
 # Project State
@@ -29,12 +30,14 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Phase: 20 — Dirty budget and rebase flusher
-Plan: Not started
+Current Plan: Not started
+Total Plans in Phase: 8
+Phase: 21 — Worker pool
+Plan: 20-08 complete (8 of 8); next: phase verification
 Status: Ready to plan
-Last activity: 2026-11-22 — Phase 19 complete, transitioned to Phase 20
+Last activity: 2026-11-23 — Phase 20 complete, transitioned to Phase 21
 
-Progress: [███░░░░░░░] 29%
+Progress: [████░░░░░░] 43%
 
 ## Performance Metrics
 
@@ -69,6 +72,14 @@ Progress: [███░░░░░░░] 29%
 | Phase 19 P14 | 320min | 2 tasks | 3 files |
 | Phase 19 P15 | 85 min | 4 tasks | 4 files |
 | Phase 19 P16 | 35 min | 3 tasks | 8 files |
+| Phase 20 P01 | 60min | 3 tasks | 7 files |
+| Phase 20 P02 | 50min | 2 tasks | 6 files |
+| Phase 20 P03 | 45 min | 2 tasks | 7 files |
+| Phase 20 P04 | 40 min | 2 tasks | 1 files |
+| Phase 20 P05 | 39 min | 2 tasks | 3 files |
+| Phase 20 P06 | 36 min | 2 tasks | 6 files |
+| Phase 20 P07 | 55 min | 3 tasks | 4 files |
+| Phase 20 P08 | 75min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -148,6 +159,23 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: Hard-cap gate steps free at most final_step each; the writer steps again until it is under the cap (orchestrator-added)
 - [Phase 19]: 19-16: LOCK-01 and LOCK-05 complete on measured evidence (macOS and Docker Linux, 0 rows over the bar); LOCK-04 code part complete, the orchestrator applies the #21 body and marks it
 - [Phase 19]: 19-16 finding for the owner: unlink_logged holds its namespace stripes about 20 ms on macOS while reclaim_inode reads the manifest from the store; no global lock held; fix is an owner decision
+- [Phase 20]: 20-01: CAP_MIB = 320 from P_old/P0 by the stated rule (Pm 267 + F 8 + R 40, rounded to 8); above the Phase 18 cap of 256
+- [Phase 20]: 20-02: FLUSH_STEP 4 MiB, throttle wait 5 s in 50 ms slices, pass 100 ms, background threshold budget/2
+- [Phase 20]: 20-02: flusher step helper is SliceFsFilesystem::flush_step (gate shared, cell lock, free_dirty); FileCell::stream atomic lets the pick put overlays first
+- [Phase 20]: 20-03: throttle exits at a stop or with no flusher are counted in stop_exits, not timeouts
+- [Phase 20]: 20-03: shutdown = stop and join the flusher with no lock held, then the gate, then test_destroy; FUSE destroy calls it
+- [Phase 20]: 20-03: run_mount keeps an Arc clone only for the stop after mount() and drops it right after
+- [Phase 20]: 20-04: criterion 3 holds with no source change; the red runs are guard mutations (gate hold while paused; hold kept across the pass wait; wait_step in place of the skip)
+- [Phase 20]: 20-05: the flusher clock offset is per file system (FlushCtl field), so parallel tests do not move the clock of each other
+- [Phase 20]: 20-05: hot window 300 ms; below the budget the flusher never steps a hot cell, in any mode; at or above the budget hot cells are budget-full candidates
+- [Phase 20]: 20-05: budget-full pick is overlays first, then quiet cells, then the largest; a quiet cell at its own limit is stepped below half the budget
+- [Phase 20]: 20-06: MIN_DIRTY_BYTES (4 MiB) is a public constant used by parse_dirty_bytes and DirtyConfig::check
+- [Phase 20]: 20-06: run_mount checks DirtyConfig before the mount point is made and sets it before the write-log replay
+- [Phase 20]: 20-06: set_dirty_config is a plain store; DirtyConfig::check refuses times above u64::MAX / 1000 s like the clap range
+- [Phase 20]: 20-07: S7 flusher form asserts VmHWM (not getrusage) against CAP_MIB 320; P1 = 287 MiB, margin 33 MiB
+- [Phase 20]: Empty-pass fix (4d8ac3d): after a pass with no candidate, a write below the budget does not kick the flusher
+- [Phase 20]: LOCK-02 and LOCK-06 marked complete on evidence (gate, smoke 20-08, P1 under CAP_MIB)
+- [Phase 20]: Second empty-pass fix (e44d57d): flag set only when the last pick found no candidate at half the budget or more
 
 ### Pending Todos
 
@@ -171,8 +199,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-22T23:25:49.761Z
-Stopped at: Phase 19 complete, ready to plan Phase 20
+Last session: 2026-11-23T12:01:11.068Z
+Stopped at: Phase 20 complete, ready to plan Phase 21
 Resume file: None
 
 ## Operator Next Steps
