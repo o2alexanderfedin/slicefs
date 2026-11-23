@@ -333,7 +333,14 @@ impl FileCell {
     }
 
     fn make(ino: u64, transient: bool) -> Self {
-        let state = CellState { file: OpenFileState::new(ino), write_handles: 0, retired: false, stepping: None, last_published_gen: 0 };
+        let state = CellState {
+            file: OpenFileState::new(ino),
+            write_handles: 0,
+            retired: false,
+            stepping: None,
+            cap_writers: 0,
+            last_published_gen: 0,
+        };
         FileCell {
             ino,
             transient,
@@ -358,6 +365,13 @@ struct CellState {
     /// (`CellGuard::wait_step`); a writer over the limit skips its rebase
     /// step. Readers and flushes never take it or wait for it.
     stepping: Option<SyncWait>,
+    /// Writers of the cell at the hard cap (`CellGuard::enter_cap`). While
+    /// it is not 0, no ordinary rebase step starts (`rebase_cell`), and an
+    /// overlay writer waits for the step in flight before it applies
+    /// (`write_in_cell`), so the step of a writer at the cap publishes
+    /// (CR-01): a write that adds no cost (an overwrite) is not stopped by
+    /// the cap, and without this it would drop every step at the cap.
+    cap_writers: usize,
     /// The stream generation of the last flush snapshot that was installed,
     /// or a newer value after another install of the manifest (a switch to
     /// an overlay, a truncate to 0): a flush of an older snapshot is not
@@ -379,6 +393,8 @@ struct CellGuard<'a> {
     /// Set by a finalize after `FINAL_TRIES` forced drops in a row: the
     /// steps of this guard no longer consult the drop hook.
     no_drop_hook: bool,
+    /// This writer is counted in `CellState::cap_writers`.
+    at_cap: bool,
 }
 
 impl CellGuard<'_> {
@@ -420,6 +436,23 @@ impl CellGuard<'_> {
         Ok(())
     }
 
+    /// Count this writer as one at the hard cap (once) until `leave_cap`
+    /// or the drop of the guard.
+    fn enter_cap(&mut self) {
+        if !self.at_cap {
+            self.at_cap = true;
+            self.cap_writers += 1;
+        }
+    }
+
+    /// The writer is no longer at the hard cap.
+    fn leave_cap(&mut self) {
+        if self.at_cap {
+            self.at_cap = false;
+            self.cap_writers -= 1;
+        }
+    }
+
     fn sync_dirty(&self) {
         let Some(state) = &self.state else { return };
         let cost = if state.retired { 0 } else { dirty_cost(&state.file) };
@@ -447,6 +480,13 @@ impl DerefMut for CellGuard<'_> {
 
 impl Drop for CellGuard<'_> {
     fn drop(&mut self) {
+        if self.at_cap {
+            if self.state.is_none() {
+                // A panic in an unlocked phase: lock again to uncount.
+                self.state = Some(self.cell.state.lock());
+            }
+            self.leave_cap();
+        }
         self.sync_dirty();
         self.state = None;
         for line in self.notes.drain(..) {
@@ -606,6 +646,8 @@ pub struct SliceFsFilesystem {
     drop_steps: AtomicUsize,
     drop_every: AtomicUsize,
     steps_seen: AtomicUsize,
+    /// Test hook (see `test_fail_steps`): rebase steps to fail with EIO.
+    fail_steps: AtomicUsize,
 }
 
 impl SliceFsFilesystem {
@@ -653,6 +695,7 @@ impl SliceFsFilesystem {
             drop_steps: AtomicUsize::new(0),
             drop_every: AtomicUsize::new(0),
             steps_seen: AtomicUsize::new(0),
+            fail_steps: AtomicUsize::new(0),
         }
     }
 
@@ -765,6 +808,17 @@ impl SliceFsFilesystem {
         self.drop_every.store(k, Ordering::Relaxed);
     }
 
+    /// Test hook: the next `n` unlocked rebase steps fail with EIO after
+    /// their I/O phase, as a store error does (nothing is published).
+    pub fn test_fail_steps(&self, n: usize) {
+        self.fail_steps.store(n, Ordering::Relaxed);
+    }
+
+    /// True if a test hook fails this rebase step (see `test_fail_steps`).
+    fn forced_fail(&self) -> bool {
+        self.fail_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+    }
+
     /// Phase C of an unlocked step: true if a test hook drops its result.
     /// With `hook_off` (a finalize after `FINAL_TRIES` drops) the hook is
     /// not consulted.
@@ -837,7 +891,7 @@ impl SliceFsFilesystem {
     }
 
     fn lock_cell<'a>(&'a self, cell: &'a FileCell) -> CellGuard<'a> {
-        CellGuard { total: &self.dirty_total, cell, state: Some(cell.state.lock()), notes: Vec::new(), no_drop_hook: false }
+        CellGuard { total: &self.dirty_total, cell, state: Some(cell.state.lock()), notes: Vec::new(), no_drop_hook: false, at_cap: false }
     }
 
     /// Run `f` on the open write state of `ino` under its cell lock; `None`
@@ -1793,14 +1847,15 @@ impl SliceFsFilesystem {
 
     /// A rebase step of the writer's own locked cell `g` (D-02, D-13), with
     /// the I/O unlocked (`rebase_unlocked`): skipped if another step of the
-    /// cell is in flight; a dropped result is tried again, at most
+    /// cell is in flight or a writer of the cell is at the hard cap (its
+    /// step goes first, CR-01); a dropped result is tried again, at most
     /// `REBASE_TRIES` attempts. If all are dropped this returns Ok: the
     /// write is in the overlay already and under the hard cap (the cap gate
     /// of `write_in_cell`), and the next write, the release or a budget step
     /// tries again. Only this file waits.
     fn rebase_cell(&self, g: &mut CellGuard<'_>, free: usize) -> Result<(), i32> {
         for _ in 0..REBASE_TRIES {
-            if g.retired || g.stepping.is_some() || self.rebase_unlocked(g, free)? {
+            if g.retired || g.stepping.is_some() || g.cap_writers > 0 || self.rebase_unlocked(g, free)? {
                 return Ok(());
             }
         }
@@ -1814,6 +1869,9 @@ impl SliceFsFilesystem {
     /// copies no more than `final_step` in its Phase A hold; the caller
     /// steps again while it is above the cap). A dropped own step counts in
     /// `drops`, a published one resets it. The caller looks at the cost again.
+    /// The caller has counted itself at the cap (`CellGuard::enter_cap`):
+    /// no other writer changes the overlay while this step is in flight, so
+    /// only a forced drop (a test hook) or a retire drops it (CR-01).
     fn cap_step(&self, g: &mut CellGuard<'_>, excess: usize, drops: &mut usize) -> Result<(), i32> {
         if g.stepping.is_some() {
             return g.wait_step();
@@ -1858,6 +1916,9 @@ impl SliceFsFilesystem {
             return Ok(true);
         }
         let done = done?;
+        if self.forced_fail() {
+            return Err(libc::EIO);
+        }
         if self.forced_drop(g.no_drop_hook) {
             return Ok(false);
         }
@@ -2296,7 +2357,8 @@ impl SliceFsFilesystem {
             }
             if drops >= STEP_TRIES {
                 // No other write changes the stream while a step is in flight
-                // (they wait for the token), so only a forced drop (a test
+                // (they wait for the token), nor an overlay while a writer is
+                // at the hard cap (CR-01), so only a forced drop (a test
                 // hook), the retire of the cell, or an fsync that installs a
                 // newer snapshot (at most once) can drop this many steps in a
                 // row (a size change waits for the token too).
@@ -2325,14 +2387,24 @@ impl SliceFsFilesystem {
             cost_before = dirty_cost(&g.file);
             if let WriteMode::Overlay(ov) = &g.file.write_mode {
                 // The hard cap (#98): apply only if the dirty cost stays
-                // under it. Else wait for the step in flight, or run an own
-                // unlocked step, with no cell lock held, and look again. At
-                // the cap no writer changes the overlay, so a step publishes.
+                // under it. Else count this writer at the cap, wait for the
+                // step in flight or run an own unlocked step, with no cell
+                // lock held, and look again. While a writer is at the cap,
+                // every overlay writer (also one whose write adds no cost)
+                // waits for the step in flight before it applies, and no
+                // ordinary step starts, so the step at the cap publishes
+                // (CR-01).
                 let (cap, after) = (self.hard_cap(), ov.cost_after(offset, data.len()));
+                if g.cap_writers > 0 && g.stepping.is_some() {
+                    g.wait_step()?;
+                    continue;
+                }
                 if cost_before > 0 && after > cap {
+                    g.enter_cap();
                     self.cap_step(&mut g, after - cap, &mut drops)?;
                     continue;
                 }
+                g.leave_cap();
                 let r = Self::overlay_write(&mut g.file, offset, data);
                 if r.is_ok() {
                     log(lsn, offset);
@@ -2437,40 +2509,52 @@ impl SliceFsFilesystem {
         // is freed by the next steps, so a step does not grow with the limit.
         let limit = self.dirty_limit.load(Ordering::Relaxed);
         let added = dirty_cost(&g.file).saturating_sub(cost_before).min(data.len() + crate::overlay::EXTENT_OVERHEAD);
-        // A write never returns with the cost above the hard cap: if the
+        // From here the write is applied and logged (WR-01): a failed step
+        // below does not fail it (an `O_APPEND` write sent again would be
+        // in the file twice). The work is left to the next write, the
+        // release or a budget step; the reason is printed after the hold.
+        let after_err = |g: &mut CellGuard<'_>, what: &str, e: i32| {
+            g.notes.push(format!("[{}][FUSE] write: fh={fh} ino={ino}: {what} failed (errno {e}); the write is in, the next write or the release steps again", ts()));
+        };
+        // A write does not return with the cost above the hard cap: if the
         // apply passed it after all (the gate predicts the extent growth),
-        // step or wait as at the gate until the cost is under it.
+        // step or wait as at the gate until the cost is under it, unless a
+        // step fails.
         let cap = self.hard_cap();
         while result.is_ok() && !g.retired && matches!(&g.file.write_mode, WriteMode::Overlay(_)) && dirty_cost(&g.file) > cap {
             if drops >= STEP_TRIES {
-                drop(g);
-                eprintln!("[{}][FUSE] write: fh={fh} ino={ino}: {STEP_TRIES} steps in a row at the hard cap were dropped", ts());
-                return Err(libc::EIO);
+                after_err(&mut g, &format!("the hard cap: {STEP_TRIES} steps in a row were dropped, so the step"), libc::EIO);
+                break;
             }
             let excess = dirty_cost(&g.file) - cap;
-            self.cap_step(&mut g, excess, &mut drops)?;
+            g.enter_cap();
+            if let Err(e) = self.cap_step(&mut g, excess, &mut drops) {
+                after_err(&mut g, "the hard-cap step", e);
+                break;
+            }
         }
+        g.leave_cap();
         let cost = dirty_cost(&g.file);
         let over = matches!(&g.file.write_mode, WriteMode::Overlay(_)) && cost > limit;
         // The write is in the overlay already (a read sees all of it or
         // none): the step does its I/O with the cell unlocked (D-02).
-        let result = match result {
-            Ok(n) if over => {
-                let free = (cost - limit.saturating_sub(REBASE_STEP)).min(added.max(REBASE_STEP));
-                self.rebase_cell(&mut g, free).map(|_| n).map_err(|_| libc::EIO)
+        if result.is_ok() && over {
+            let free = (cost - limit.saturating_sub(REBASE_STEP)).min(added.max(REBASE_STEP));
+            if let Err(e) = self.rebase_cell(&mut g, free) {
+                after_err(&mut g, "the rebase step", e);
             }
-            r => r,
-        };
+        }
         if g.retired {
             // The last release finalized the file (with this write) while
             // the step was unlocked.
             return result.map(|n| (n, offset));
         }
         // Then the budget of all open files (#105), with the same bound.
-        match result {
-            Ok(n) => self.keep_budget(&mut g, added).map(|_| (n, offset)),
-            Err(e) => Err(e),
+        let n = result?;
+        if let Err(e) = self.keep_budget(&mut g, added) {
+            after_err(&mut g, "the budget step", e);
         }
+        Ok((n, offset))
     }
 
     /// The end of file for an append to the open state `s` (with its cell

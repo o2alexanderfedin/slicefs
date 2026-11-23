@@ -555,6 +555,95 @@ fn forced_drops_keep_content_and_the_cap() {
     assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
 }
 
+/// CR-01: two threads rewrite their own pieces of one file again and again
+/// (the cap does not stop them: an overwrite adds no cost), and a third
+/// thread grows the file past the hard cap. The steps of the growing writer
+/// at the cap must publish: no write gets EIO, the cost stays under the cap,
+/// and the content is right.
+#[test]
+fn overwriters_do_not_starve_a_writer_at_the_cap() {
+    use slicefs_cli::{filesystem::REBASE_STEP, overlay::GROW_DIV};
+    const LIMIT: usize = 256 * KIB;
+    const PIECE: usize = 64 * KIB;
+    const GROW: usize = 48; // 3 MiB, past the cap
+    const AT: usize = 1 << 20; // the growing writer starts here
+    let cap = LIMIT + LIMIT / GROW_DIV + 2 * REBASE_STEP;
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+    fs.test_write(fh, 0, &seeded(110, 2 * PIECE)).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    fs.test_set_dirty_limit(LIMIT);
+    // A short sleep in each I/O phase widens the window for the overwrites.
+    fs.test_set_rebase_hook(Some(Arc::new(|| std::thread::sleep(Duration::from_millis(2)))));
+    let hs: Vec<u64> = (0..3).map(|_| fs.test_open(ino, libc::O_RDWR).unwrap().0).collect();
+    let version = |t: usize, i: usize| seeded(((t as u64 + 1) << 32) | i as u64, PIECE);
+    let grow = |i: usize| seeded(1000 + i as u64, PIECE);
+    let done = AtomicBool::new(false);
+    let (grown, counts) = std::thread::scope(|s| {
+        let (fs, done, version) = (&fs, &done, &version);
+        let over: Vec<_> = (0..2)
+            .map(|t| {
+                let h = hs[t];
+                s.spawn(move || {
+                    let (mut i, t0) = (0, std::time::Instant::now());
+                    while !done.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(60) {
+                        assert_eq!(fs.test_write(h, (t * PIECE) as u64, &version(t, i)), Ok(PIECE as u32), "overwriter {t} write {i}");
+                        i += 1;
+                    }
+                    i
+                })
+            })
+            .collect();
+        let grown: Vec<_> = (0..GROW).map(|i| fs.test_write(hs[2], (AT + i * PIECE) as u64, &grow(i))).collect();
+        done.store(true, Ordering::SeqCst);
+        (grown, over.into_iter().map(|w| w.join().unwrap()).collect::<Vec<usize>>())
+    });
+    fs.test_set_rebase_hook(None);
+    for (i, r) in grown.iter().enumerate() {
+        assert_eq!(*r, Ok(PIECE as u32), "growing write {i} at the cap");
+    }
+    let cost = fs.test_dirty_cost(ino);
+    assert!(cost <= cap, "dirty cost {cost} > cap {cap}");
+    let mut model = vec![0u8; AT + GROW * PIECE];
+    for (t, &n) in counts.iter().enumerate() {
+        assert!(n > 0, "overwriter {t} ran");
+        put(&mut model, t * PIECE, &version(t, n - 1));
+    }
+    for i in 0..GROW {
+        put(&mut model, AT + i * PIECE, &grow(i));
+    }
+    let size = model.len() as u32;
+    assert!(fs.test_read(ino, 0, size).unwrap() == model, "content with the handles open");
+    for h in hs {
+        fs.test_release(ino, h).unwrap();
+    }
+    assert!(fs.test_read(ino, 0, size).unwrap() == model, "content after release");
+}
+
+/// WR-01: once a write is in the overlay (and logged), a failed rebase step
+/// after it does not fail the write. An `O_APPEND` write that returned EIO
+/// would be sent again, and its bytes would then be in the file twice.
+#[test]
+fn a_failed_step_after_the_apply_does_not_fail_the_write() {
+    let (fs, _dir) = fresh_fs();
+    let (ino, fh, mut model) = overlay_file(&fs);
+    let (app, _) = fs.test_open(ino, libc::O_RDWR | libc::O_APPEND).unwrap();
+    // Past the dirty limit of 64 KiB: the write runs a rebase step.
+    let tail = seeded(120, 128 * KIB);
+    let before = fs.test_rebase_count();
+    fs.test_fail_steps(1);
+    let r = fs.test_write_at(app, 0, &tail);
+    fs.test_fail_steps(0);
+    assert_eq!(fs.test_rebase_count(), before + 1, "the step ran and failed");
+    assert_eq!(r, Ok((tail.len() as u32, 1 << 20)), "the applied append returns success");
+    put(&mut model, 1 << 20, &tail);
+    assert_eq!(fs.test_getattr(ino).unwrap().size, model.len() as u64, "the bytes are in once");
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content with the handles open");
+    fs.test_release(ino, app).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
+}
+
 /// `STEP_TRIES` (16) dropped steps in a row: a stream write returns EIO and
 /// changes nothing; with the hook off the same write goes in.
 #[test]
