@@ -4,17 +4,18 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: 20
 current_phase_name: Dirty budget and rebase flusher
-status: planning
-stopped_at: Completed 20-04-PLAN.md
-last_updated: "2026-11-23T08:23:57.831Z"
+current_plan: 6
+status: executing
+stopped_at: Completed 20-05-PLAN.md
+last_updated: "2026-11-23T09:14:33.094Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 19 complete, transitioned to Phase 20
-state_head: df5de5f8bd714876e4174149fb74ec1d8f7c2b9b
+state_head: 63be44712bee57c906a2a40a94e1c913dee33cfe
 progress:
   total_phases: 7
   completed_phases: 2
   total_plans: 31
-  completed_plans: 27
+  completed_plans: 28
   percent: 29
 ---
 
@@ -29,12 +30,12 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 5
+Current Plan: 6
 Total Plans in Phase: 8
 Phase: 20 — Dirty budget and rebase flusher
-Plan: 20-04 complete (4 of 8); next 20-05
-Status: Executing
-Last activity: 2026-11-23 — 20-04 criterion 3 tests done (all writers throttled while a commit waits, flusher paused and flusher in a step; a flusher pass skips a cell with a step in flight)
+Plan: 20-05 complete (5 of 8); next 20-06
+Status: Ready to execute
+Last activity: 2026-11-23 — 20-05 flusher policy done (idle and maximum-age triggers on a test clock, hot rule, largest quiet file first, per-file limit trigger)
 
 Progress: [███░░░░░░░] 29%
 
@@ -75,6 +76,7 @@ Progress: [███░░░░░░░] 29%
 | Phase 20 P02 | 50min | 2 tasks | 6 files |
 | Phase 20 P03 | 45 min | 2 tasks | 7 files |
 | Phase 20 P04 | 40 min | 2 tasks | 1 files |
+| Phase 20 P05 | 39 min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -161,6 +163,9 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 20]: 20-03: shutdown = stop and join the flusher with no lock held, then the gate, then test_destroy; FUSE destroy calls it
 - [Phase 20]: 20-03: run_mount keeps an Arc clone only for the stop after mount() and drops it right after
 - [Phase 20]: 20-04: criterion 3 holds with no source change; the red runs are guard mutations (gate hold while paused; hold kept across the pass wait; wait_step in place of the skip)
+- [Phase 20]: 20-05: the flusher clock offset is per file system (FlushCtl field), so parallel tests do not move the clock of each other
+- [Phase 20]: 20-05: hot window 300 ms; below the budget the flusher never steps a hot cell, in any mode; at or above the budget hot cells are budget-full candidates
+- [Phase 20]: 20-05: budget-full pick is overlays first, then quiet cells, then the largest; a quiet cell at its own limit is stepped below half the budget
 
 ### Pending Todos
 
@@ -184,8 +189,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-23T08:23:57.492Z
-Stopped at: Completed 20-04-PLAN.md
+Last session: 2026-11-23T09:14:32.738Z
+Stopped at: Completed 20-05-PLAN.md
 Resume file: None
 
 ## Operator Next Steps

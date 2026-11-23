@@ -16,7 +16,7 @@
     {
       "number": "20",
       "name": "Dirty budget and rebase flusher",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "21",
@@ -41,8 +41,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (plan phase 20)",
-    "reason": "Phase 3 of 7 — needs a plan"
+    "label": "Advance to the next step",
+    "reason": "Phase 3 of 7 · 29% · executing"
   },
-  "updated_at": "2026-11-23T01:38:39.422Z"
+  "updated_at": "2026-11-23T09:14:28.653Z"
 }
