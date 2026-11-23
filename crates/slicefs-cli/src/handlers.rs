@@ -13,7 +13,7 @@
 
 use fuser::FileAttr;
 
-use crate::filesystem::{inode_to_file_attr, SliceFsFilesystem};
+use crate::filesystem::{inode_to_file_attr, Admit, SliceFsFilesystem};
 use metadata::wal::Lsn;
 use slicefs_traits::metadata::InodeMeta;
 
@@ -335,11 +335,25 @@ pub fn handle_write_flags(
     data: &[u8],
     flags: i32,
 ) -> WriteResult {
+    handle_write_admitted(fs, fh, offset, data, flags, Admit { pay: true })
+}
+
+/// `handle_write_flags` with the answer of `throttle_write` (Phase 20): the
+/// caller ran the throttle before it took the commit gate. With
+/// `admit.pay` false the write does not pay for the budget.
+pub fn handle_write_admitted(
+    fs: &SliceFsFilesystem,
+    fh: u64,
+    offset: u64,
+    data: &[u8],
+    flags: i32,
+    admit: Admit,
+) -> WriteResult {
     fs.note_write();
     let l = logged();
     // The record is appended in the cell-lock hold of the apply (D-08); it
     // is written out here, with no cell lock held, before the reply.
-    let (r, lsn) = fs.write_logged(fh, offset, data, flags, Some(l.time));
+    let (r, lsn) = fs.write_logged_admitted(fh, offset, data, flags, Some(l.time), admit);
     fs.log_write_out(lsn);
     match r {
         Ok((n, _)) => WriteResult::Ok(n),

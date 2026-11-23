@@ -8,9 +8,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chunk_store::lock_stats::Site;
 use chunk_store::pack_io::SyncWait;
@@ -138,6 +138,25 @@ pub const FINAL_STEP: usize = 8 << 20;
 /// overlay). Each file also keeps its own `DIRTY_LIMIT`. The same value as
 /// `REORDER_WINDOW`, so one stream can still use its whole window.
 pub const DIRTY_BUDGET: usize = 64 << 20;
+
+/// Most dirty cost one flusher step frees (Phase 20, Claude's discretion):
+/// larger than `REBASE_STEP` (less fixed cost per install), smaller than
+/// `FINAL_STEP` (a commit cut waits for the longest shared gate hold). The
+/// RSS cap rule of plan 20-01 (`CAP_MIB`, the "W 4" term) uses this value:
+/// do not change it without a new cap derivation.
+pub const FLUSH_STEP: usize = 4 << 20;
+
+/// Most time a writer over the budget waits for the flusher (Phase 20
+/// CONTEXT default); then it writes and pays with a step of its own file.
+const THROTTLE_WAIT: Duration = Duration::from_secs(5);
+
+/// One slice of a throttle wait: the writer looks at the total again after
+/// each slice, because a release or a writer's own step also lowers the
+/// total, with no notify.
+const THROTTLE_SLICE: Duration = Duration::from_millis(50);
+
+/// Time between two flusher passes when nothing wakes the flusher.
+const FLUSH_PASS: Duration = Duration::from_millis(100);
 
 /// One slice of a wait for the step in flight of a cell (with the cell
 /// unlocked; see `CellGuard::wait_step`). The waiter waits another slice
@@ -326,6 +345,9 @@ struct FileCell {
     /// `dirty_cost` of the state when its guard last synced (see
     /// `CellGuard`); `SliceFsFilesystem::dirty_total` is the sum.
     dirty: AtomicUsize,
+    /// True if the state was a stream when its guard last synced (the
+    /// flusher reads it with no cell lock, to step overlays first).
+    stream: AtomicBool,
 }
 
 impl FileCell {
@@ -353,6 +375,7 @@ impl FileCell {
             transient,
             state: sync::Mutex::new_keyed(Rank::Cell, ino, state).timed(Site::FileCell),
             dirty: AtomicUsize::new(0),
+            stream: AtomicBool::new(true),
         }
     }
 }
@@ -509,6 +532,7 @@ impl CellGuard<'_> {
     fn sync_dirty(&self) {
         let Some(state) = &self.state else { return };
         let cost = if state.retired { 0 } else { dirty_cost(&state.file) };
+        self.cell.stream.store(matches!(state.file.write_mode, WriteMode::Streaming { .. }), Ordering::Relaxed);
         let old = self.cell.dirty.swap(cost, Ordering::Relaxed);
         if cost >= old {
             self.total.fetch_add(cost - old, Ordering::Relaxed);
@@ -594,6 +618,161 @@ impl CellMap {
     /// Every cell, collected shard by shard (one shard lock at a time).
     fn all(&self) -> Vec<Arc<FileCell>> {
         self.0.iter().flat_map(|sh| sh.lock().values().cloned().collect::<Vec<_>>()).collect()
+    }
+}
+
+/// The answer of `SliceFsFilesystem::throttle_write` to a write: with
+/// `pay`, the write pays for the budget with steps of its own file
+/// (`pay_budget`, the Phase 19 path); without it, it does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Admit {
+    pub pay: bool,
+}
+
+/// The flags of the flush control block, under its lock.
+#[derive(Default)]
+pub(crate) struct FlushFlags {
+    /// The flusher must end (set once, never cleared).
+    pub(crate) stop: bool,
+    /// A write found the total at or above half the budget: the flusher
+    /// makes a pass now, not at the end of its pass interval.
+    pub(crate) kicked: bool,
+    /// Test hook: the flusher makes no pass.
+    pub(crate) paused: bool,
+}
+
+/// The flush control block (Phase 20): the flusher thread and throttled
+/// writers meet here. It is in its own `Arc`, so a flusher thread can wait
+/// on it with no `Arc` of the file system.
+pub(crate) struct FlushCtl {
+    /// `Rank::Short`; never held across another lock.
+    pub(crate) flags: sync::Mutex<FlushFlags>,
+    /// The flusher waits on it between passes.
+    pub(crate) wake: sync::Condvar,
+    /// Throttled writers wait on it; the flusher notifies it after each step.
+    pub(crate) freed: sync::Condvar,
+    /// True while a flusher loop runs. With no flusher, a writer over the
+    /// budget does not wait (it pays at once).
+    pub(crate) running: AtomicBool,
+    /// The wait limit of a throttled writer, in ms (`THROTTLE_WAIT`).
+    pub(crate) throttle_wait_ms: AtomicU64,
+    /// The pass interval of the flusher, in ms (`FLUSH_PASS`).
+    pub(crate) pass_ms: AtomicU64,
+    /// Writers in a throttle wait now.
+    pub(crate) throttled_now: AtomicUsize,
+    pub(crate) passes: AtomicU64,
+    pub(crate) steps: AtomicU64,
+    pub(crate) published: AtomicU64,
+    pub(crate) drops: AtomicU64,
+    pub(crate) skips: AtomicU64,
+    pub(crate) errors: AtomicU64,
+    pub(crate) throttled: AtomicU64,
+    pub(crate) timeouts: AtomicU64,
+    pub(crate) max_wait_ms: AtomicU64,
+}
+
+impl FlushCtl {
+    fn new() -> Self {
+        FlushCtl {
+            flags: sync::Mutex::new(Rank::Short, FlushFlags::default()),
+            wake: sync::Condvar::new(),
+            freed: sync::Condvar::new(),
+            running: AtomicBool::new(false),
+            throttle_wait_ms: AtomicU64::new(THROTTLE_WAIT.as_millis() as u64),
+            pass_ms: AtomicU64::new(FLUSH_PASS.as_millis() as u64),
+            throttled_now: AtomicUsize::new(0),
+            passes: AtomicU64::new(0),
+            steps: AtomicU64::new(0),
+            published: AtomicU64::new(0),
+            drops: AtomicU64::new(0),
+            skips: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            throttled: AtomicU64::new(0),
+            timeouts: AtomicU64::new(0),
+            max_wait_ms: AtomicU64::new(0),
+        }
+    }
+
+    /// Wake throttled writers after the total fell. The lock is taken and
+    /// released first: a writer checks the total under it, so it either saw
+    /// the new total or waits already and gets the notify.
+    pub(crate) fn notify_freed(&self) {
+        drop(self.flags.lock());
+        self.freed.notify_all();
+    }
+}
+
+/// The counters of the flusher and the throttle (a copy, for tests).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FlusherStats {
+    /// Flusher passes.
+    pub passes: u64,
+    /// Flusher steps tried (skipped ones too).
+    pub steps: u64,
+    /// Steps that lowered the cost of their file.
+    pub published: u64,
+    /// Steps that ran and freed nothing (a dropped result).
+    pub drops: u64,
+    /// Steps not started: the cell had a step in flight, a writer at the
+    /// hard cap, or was retired.
+    pub skips: u64,
+    /// Steps that failed.
+    pub errors: u64,
+    /// Writes that waited in the throttle.
+    pub throttled: u64,
+    /// Throttle waits that reached the wait limit.
+    pub timeouts: u64,
+    /// The longest throttle wait, in ms.
+    pub max_wait_ms: u64,
+}
+
+/// A dirty cell that the flusher can step (see `flush_targets`).
+pub(crate) struct FlushTarget {
+    cell: Arc<FileCell>,
+}
+
+impl FlushTarget {
+    pub(crate) fn ino(&self) -> u64 {
+        self.cell.ino
+    }
+
+    /// The dirty cost of the cell when its guard last synced.
+    pub(crate) fn dirty(&self) -> usize {
+        self.cell.dirty.load(Ordering::Relaxed)
+    }
+
+    /// True if the cell was a stream when its guard last synced.
+    pub(crate) fn is_stream(&self) -> bool {
+        self.cell.stream.load(Ordering::Relaxed)
+    }
+}
+
+/// The result of one flusher step (`SliceFsFilesystem::flush_step`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FlushStep {
+    /// Not started (a step in flight, a writer at the cap, retired).
+    Skipped,
+    /// Ran and lowered the cost of the file by this many bytes.
+    Freed(usize),
+    /// Ran and freed nothing (a dropped result).
+    Nothing,
+    /// Failed with this errno (nothing was published).
+    Failed(i32),
+}
+
+/// Lowers `FlushCtl::throttled_now` when dropped (every exit of a wait).
+struct ThrottledNow<'a>(&'a AtomicUsize);
+
+impl<'a> ThrottledNow<'a> {
+    fn enter(n: &'a AtomicUsize) -> Self {
+        n.fetch_add(1, Ordering::Relaxed);
+        ThrottledNow(n)
+    }
+}
+
+impl Drop for ThrottledNow<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -708,6 +887,8 @@ pub struct SliceFsFilesystem {
     /// One slice of a wait for a step in flight, in ms (`STEP_WAIT`; tests
     /// set it lower).
     step_wait_ms: AtomicU64,
+    /// The flush control block (Phase 20; see `FlushCtl`).
+    flush_ctl: Arc<FlushCtl>,
 }
 
 impl SliceFsFilesystem {
@@ -758,6 +939,7 @@ impl SliceFsFilesystem {
             steps_seen: AtomicUsize::new(0),
             fail_steps: AtomicUsize::new(0),
             step_wait_ms: AtomicU64::new(STEP_WAIT.as_millis() as u64),
+            flush_ctl: Arc::new(FlushCtl::new()),
         }
     }
 
@@ -887,6 +1069,50 @@ impl SliceFsFilesystem {
     /// their I/O phase, as a store error does (nothing is published).
     pub fn test_fail_steps(&self, n: usize) {
         self.fail_steps.store(n, Ordering::Relaxed);
+    }
+
+    /// Test hook: pause (`true`) or resume the flusher. A paused flusher
+    /// makes no pass; a resumed one makes a pass at once.
+    pub fn test_pause_flusher(&self, paused: bool) {
+        self.flush_ctl.flags.lock().paused = paused;
+        self.flush_ctl.wake.notify_all();
+    }
+
+    /// Test hook: set the wait limit of a throttled writer (`THROTTLE_WAIT`).
+    pub fn test_set_throttle_wait(&self, ms: u64) {
+        self.flush_ctl.throttle_wait_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: set the pass interval of the flusher (`FLUSH_PASS`).
+    pub fn test_set_flush_pass(&self, ms: u64) {
+        self.flush_ctl.pass_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: the writers in a throttle wait now.
+    pub fn test_throttled_now(&self) -> usize {
+        self.flush_ctl.throttled_now.load(Ordering::Relaxed)
+    }
+
+    /// Test hook: true while a flusher loop runs.
+    pub fn test_flusher_running(&self) -> bool {
+        self.flush_ctl.running.load(Ordering::Acquire)
+    }
+
+    /// Test hook: the counters of the flusher and the throttle.
+    pub fn test_flusher_stats(&self) -> FlusherStats {
+        let c = &*self.flush_ctl;
+        let v = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        FlusherStats {
+            passes: v(&c.passes),
+            steps: v(&c.steps),
+            published: v(&c.published),
+            drops: v(&c.drops),
+            skips: v(&c.skips),
+            errors: v(&c.errors),
+            throttled: v(&c.throttled),
+            timeouts: v(&c.timeouts),
+            max_wait_ms: v(&c.max_wait_ms),
+        }
     }
 
     /// True if a test hook fails this rebase step (see `test_fail_steps`).
@@ -2409,6 +2635,8 @@ impl SliceFsFilesystem {
     /// for `log_write_out` (also after an error that came after the apply).
     /// `flags` are the open flags of the request: with `O_APPEND` (or on a
     /// handle opened with it) the write goes to the end of file (D-12).
+    /// This path always pays for the budget at once (`Admit { pay: true }`,
+    /// the Phase 19 path: replay and in-process callers).
     pub(crate) fn write_logged(
         &self,
         fh: u64,
@@ -2417,9 +2645,24 @@ impl SliceFsFilesystem {
         flags: i32,
         time: Option<(i64, u32)>,
     ) -> (Result<(u32, u64), i32>, Option<Lsn>) {
+        self.write_logged_admitted(fh, offset, data, flags, time, Admit { pay: true })
+    }
+
+    /// `write_logged` with the answer of `throttle_write`: `pay_budget`
+    /// runs only when `admit.pay`. The writer's own limit step and the hard
+    /// cap gate run in both cases.
+    pub(crate) fn write_logged_admitted(
+        &self,
+        fh: u64,
+        offset: u64,
+        data: &[u8],
+        flags: i32,
+        time: Option<(i64, u32)>,
+        admit: Admit,
+    ) -> (Result<(u32, u64), i32>, Option<Lsn>) {
         let mut lsn = None;
         let mut switch = None;
-        let r = self.write_in_cell(fh, offset, data, flags, time, &mut lsn, &mut switch);
+        let r = self.write_in_cell(fh, offset, data, flags, time, admit, &mut lsn, &mut switch);
         // The cell guard is gone: print the debug line of a switch now.
         if let Some(SwitchNote { ino, offset, expected, pending, fresh, overlap }) = switch {
             eprintln!("[{}][FUSE] write: fh={} ino={} switches to overlay (offset={} len={} expected={} pending={} fresh={} overlap={})",
@@ -2438,6 +2681,7 @@ impl SliceFsFilesystem {
         data: &[u8],
         flags: i32,
         time: Option<(i64, u32)>,
+        admit: Admit,
         lsn: &mut Option<Lsn>,
         switch: &mut Option<SwitchNote>,
     ) -> Result<(u32, u64), i32> {
@@ -2684,10 +2928,13 @@ impl SliceFsFilesystem {
             // the step was unlocked.
             return result.map(|n| (n, offset));
         }
-        // Then the budget of all open files (#105), with the same bound.
+        // Then the budget of all open files (#105), with the same bound,
+        // unless the throttle let the write in below the budget.
         let n = result?;
-        if let Err(e) = self.pay_budget(&mut g, added) {
-            after_err(&mut g, "the budget step", e);
+        if admit.pay {
+            if let Err(e) = self.pay_budget(&mut g, added) {
+                after_err(&mut g, "the budget step", e);
+            }
         }
         Ok((n, offset))
     }
@@ -2728,6 +2975,103 @@ impl SliceFsFilesystem {
                 return Ok(());
             }
             freed += step;
+        }
+    }
+
+    /// Admission of a write (Phase 20). Call it before the commit gate, a
+    /// stripe or a cell: it holds no lock but the short lock of the flush
+    /// control block. Below the budget the write goes on and does not pay.
+    /// With no flusher running (replay, in-process callers) it pays at once
+    /// (the Phase 19 path). Else the writer waits, in slices of
+    /// `THROTTLE_SLICE`, until the total is below the budget (then it does
+    /// not pay) or the wait limit passed.
+    pub fn throttle_write(&self) -> Admit {
+        let ctl = &*self.flush_ctl;
+        let (total, budget) = self.dirty_now();
+        if total < budget {
+            return Admit { pay: false };
+        }
+        if !ctl.running.load(Ordering::Acquire) {
+            return Admit { pay: true };
+        }
+        ctl.throttled.fetch_add(1, Ordering::Relaxed);
+        let _now = ThrottledNow::enter(&ctl.throttled_now);
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(ctl.throttle_wait_ms.load(Ordering::Relaxed));
+        let mut flags = ctl.flags.lock();
+        let pay = loop {
+            // Under the flags lock: the flusher lowers the total before it
+            // takes this lock to notify, so no wakeup is lost.
+            let (total, budget) = self.dirty_now();
+            if total < budget {
+                break false;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                ctl.timeouts.fetch_add(1, Ordering::Relaxed);
+                break false;
+            }
+            ctl.freed.wait_for(&mut flags, left.min(THROTTLE_SLICE));
+        };
+        drop(flags);
+        ctl.max_wait_ms.fetch_max(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+        Admit { pay }
+    }
+
+    /// Ask the flusher loop to end (plan 20-03 adds the writer wake and
+    /// the join).
+    pub fn stop_flusher(&self) {
+        self.flush_ctl.flags.lock().stop = true;
+        self.flush_ctl.wake.notify_all();
+    }
+
+    /// The flush control block.
+    pub(crate) fn flush_ctl(&self) -> &Arc<FlushCtl> {
+        &self.flush_ctl
+    }
+
+    /// The shared dirty total and the budget, now.
+    pub(crate) fn dirty_now(&self) -> (usize, usize) {
+        (self.dirty_total.load(Ordering::Relaxed), self.dirty_budget.load(Ordering::Relaxed))
+    }
+
+    /// Every cell with dirty cost that the flusher can step (not a
+    /// transient cell). Reads the cell map shard by shard and atomics only;
+    /// no cell is locked.
+    pub(crate) fn flush_targets(&self) -> Vec<FlushTarget> {
+        self.cells
+            .all()
+            .into_iter()
+            .filter(|c| !c.transient && c.dirty.load(Ordering::Relaxed) > 0)
+            .map(|cell| FlushTarget { cell })
+            .collect()
+    }
+
+    /// One flusher step of `t`: the commit gate shared, then the cell lock,
+    /// then `free_dirty` of about `want` bytes (its I/O with the cell
+    /// unlocked under the step token), then the cell and the gate are
+    /// released, in that order. A cell that is retired, has a step in
+    /// flight or a writer at the hard cap is skipped: the flusher never
+    /// waits for a step token with the gate held. A dirty cell with no
+    /// write handle (a failed last release) is stepped like any other; it
+    /// is never retired or removed here.
+    pub(crate) fn flush_step(&self, t: &FlushTarget, want: usize) -> FlushStep {
+        let gate = self.gate_shared();
+        let mut g = self.lock_cell(&t.cell);
+        if g.retired || t.cell.transient || g.stepping.is_some() || g.cap_writers > 0 {
+            drop(g);
+            drop(gate);
+            return FlushStep::Skipped;
+        }
+        let before = dirty_cost(&g.file);
+        let r = self.free_dirty(&mut g, want);
+        let after = if g.retired { 0 } else { dirty_cost(&g.file) };
+        drop(g);
+        drop(gate);
+        match r {
+            Err(e) => FlushStep::Failed(e),
+            Ok(()) if after < before => FlushStep::Freed(before - after),
+            Ok(()) => FlushStep::Nothing,
         }
     }
 
