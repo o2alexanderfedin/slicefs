@@ -1099,6 +1099,9 @@ pub struct SliceFsFilesystem {
     step_wait_ms: AtomicU64,
     /// The flush control block (Phase 20; see `FlushCtl`).
     flush_ctl: Arc<FlushCtl>,
+    /// Set at the start of `shutdown()`, never cleared: a timed commit
+    /// that gets the gate later does no commit (`commit_unless_shut_down`).
+    shut_down: AtomicBool,
     /// Threads that wait for the exclusive commit gate now (a test hook;
     /// see `ExclusiveWait`).
     gate_xwaiters: AtomicUsize,
@@ -1156,6 +1159,7 @@ impl SliceFsFilesystem {
             fail_steps: AtomicUsize::new(0),
             step_wait_ms: AtomicU64::new(STEP_WAIT.as_millis() as u64),
             flush_ctl: Arc::new(FlushCtl::new()),
+            shut_down: AtomicBool::new(false),
             gate_xwaiters: AtomicUsize::new(0),
             flusher_thread: sync::Mutex::new(Rank::Short, None),
         }
@@ -3357,7 +3361,8 @@ impl SliceFsFilesystem {
     /// then writes and pays with steps of its own file), then join the
     /// flusher thread of `start_flusher`, if any. Calling it again does
     /// nothing new. It does not join when it runs on the flusher thread
-    /// (the last `Arc` can drop there after a pass). In a debug build it
+    /// (no caller does that today; a test hook in a flusher step could,
+    /// and a join there would wait for its own thread). In a debug build it
     /// panics when the thread holds any ranked lock (the gate too): a join
     /// under the gate can wait for ever behind a queued commit.
     ///
@@ -3393,12 +3398,21 @@ impl SliceFsFilesystem {
     /// `test_destroy` (it writes open files with locked steps, so no
     /// flusher step may run then). The join comes before the gate: under
     /// the gate it could wait for a flusher that waits for the gate behind
-    /// a queued commit, and that commit waits for this hold. Returns the
-    /// result of `test_destroy` (true if the commit succeeded).
+    /// a queued commit, and that commit waits for this hold. First it
+    /// marks the file system as shut down, so a timed commit that waits
+    /// for the gate now does no commit after the destroy work (see
+    /// `commit_timer::commit_unless_shut_down`). Returns the result of
+    /// `test_destroy` (true if the commit succeeded).
     pub fn shutdown(&self) -> bool {
+        self.shut_down.store(true, Ordering::SeqCst);
         self.stop_flusher();
         let _op = self.gate_shared();
         self.test_destroy()
+    }
+
+    /// True after `shutdown()` started.
+    pub fn is_shut_down(&self) -> bool {
+        self.shut_down.load(Ordering::SeqCst)
     }
 
     /// The flush control block.

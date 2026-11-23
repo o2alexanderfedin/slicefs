@@ -1065,7 +1065,8 @@ fn an_idle_file_is_flushed() {
 }
 
 /// The idle time of the mount options reaches the flusher (plan 20-06).
-/// The clock moves past the hot window, so the hot rule does not act.
+/// The clock moves past the hot window, so the hot rule does not act. The
+/// first pass is 10 s before the idle time (real time also moves the clock).
 #[test]
 fn a_configured_idle_time_is_used() {
     let _dog = watchdog(Duration::from_secs(60));
@@ -1073,19 +1074,19 @@ fn a_configured_idle_time_is_used() {
     // Values that the config must replace: with them, F stays dirty.
     fs.test_set_dirty_idle(HOUR_MS);
     fs.test_set_dirty_expire(HOUR_MS);
-    let cfg = DirtyConfig { idle_secs: 7, expire_secs: 3600, ..DirtyConfig::default() };
+    let cfg = DirtyConfig { idle_secs: 60, expire_secs: 3600, ..DirtyConfig::default() };
     cfg.check().unwrap();
     fs.set_dirty_config(&cfg);
     // 512 KiB of dirty data; the default budget is far above it.
     let f = dirty_file(&fs, 1, BIG, 16);
     let cost = fs.test_dirty_cost(f.ino);
     assert!(cost >= 512 * KIB, "F is dirty: {cost}");
-    fs.test_advance_clock(6_000);
+    fs.test_advance_clock(50_000);
     let st = flusher::flush_pass(&fs);
-    assert_eq!(fs.test_dirty_cost(f.ino), cost, "a pass at 6 s leaves F (idle time 7 s): {st:?}");
-    fs.test_advance_clock(2_000);
+    assert_eq!(fs.test_dirty_cost(f.ino), cost, "a pass at 50 s leaves F (idle time 60 s): {st:?}");
+    fs.test_advance_clock(20_000);
     let st = flusher::flush_pass(&fs);
-    assert_eq!(fs.test_dirty_cost(f.ino), 0, "F's cost is 0 at 8 s (idle time 7 s): {st:?}");
+    assert_eq!(fs.test_dirty_cost(f.ino), 0, "F's cost is 0 at 70 s (idle time 60 s): {st:?}");
     assert_eq!(fs.test_dirty_config(), cfg, "the config reads back");
     f.check(&fs, "handle open");
     f.release(&fs);
