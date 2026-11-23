@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 20
 current_phase_name: Dirty budget and rebase flusher
 status: planning
-stopped_at: Phase 19 complete, ready to plan Phase 20
-last_updated: "2026-11-23T01:38:39.384Z"
+stopped_at: Completed 20-01-PLAN.md
+last_updated: "2026-11-23T05:47:53.363Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 19 complete, transitioned to Phase 20
-state_head: a7ce72be435108dd0f51f3e51623fa2d06657e41
+state_head: e4bc8d3b9ac1a85ec2d9455d1f7eefc0bdf0c034
 progress:
   total_phases: 7
   completed_phases: 2
-  total_plans: 23
-  completed_plans: 23
+  total_plans: 31
+  completed_plans: 24
   percent: 29
 ---
 
@@ -30,9 +30,9 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 20 — Dirty budget and rebase flusher
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-11-22 — Phase 19 complete, transitioned to Phase 20
+Plan: 20-01 complete (1 of 8); next 20-02
+Status: Executing
+Last activity: 2026-11-22 — 20-01 Wave 0 baseline done (CAP_MIB = 320, no_take_out, pay_budget)
 
 Progress: [███░░░░░░░] 29%
 
@@ -69,6 +69,7 @@ Progress: [███░░░░░░░] 29%
 | Phase 19 P14 | 320min | 2 tasks | 3 files |
 | Phase 19 P15 | 85 min | 4 tasks | 4 files |
 | Phase 19 P16 | 35 min | 3 tasks | 8 files |
+| Phase 20 P01 | 60min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -148,6 +149,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 19]: Hard-cap gate steps free at most final_step each; the writer steps again until it is under the cap (orchestrator-added)
 - [Phase 19]: 19-16: LOCK-01 and LOCK-05 complete on measured evidence (macOS and Docker Linux, 0 rows over the bar); LOCK-04 code part complete, the orchestrator applies the #21 body and marks it
 - [Phase 19]: 19-16 finding for the owner: unlink_logged holds its namespace stripes about 20 ms on macOS while reclaim_inode reads the manifest from the store; no global lock held; fix is an owner decision
+- [Phase 20]: 20-01: CAP_MIB = 320 from P_old/P0 by the stated rule (Pm 267 + F 8 + R 40, rounded to 8); above the Phase 18 cap of 256
 
 ### Pending Todos
 
@@ -171,8 +173,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-22T23:25:49.761Z
-Stopped at: Phase 19 complete, ready to plan Phase 20
+Last session: 2026-11-23T05:47:53.069Z
+Stopped at: Completed 20-01-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
