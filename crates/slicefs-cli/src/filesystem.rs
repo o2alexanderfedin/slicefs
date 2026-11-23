@@ -166,6 +166,11 @@ const DIRTY_IDLE: Duration = Duration::from_secs(5);
 /// this old (Phase 20 CONTEXT default of `--dirty-expire`).
 const DIRTY_EXPIRE: Duration = Duration::from_secs(30);
 
+/// A file with a write in this window is hot: below the budget the flusher
+/// does not step it (plan 20-05 choice: three pass intervals, "a few
+/// hundred ms" of A10).
+const HOT_WINDOW: Duration = Duration::from_millis(300);
+
 /// The start of the flusher clock (`FlushCtl::now_ms`).
 static CLOCK_EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
@@ -689,6 +694,8 @@ pub(crate) struct FlushCtl {
     pub(crate) idle_ms: AtomicU64,
     /// The maximum age of dirty data, in ms (`DIRTY_EXPIRE`).
     pub(crate) expire_ms: AtomicU64,
+    /// The hot window, in ms (`HOT_WINDOW`).
+    pub(crate) hot_ms: AtomicU64,
     /// Added to the flusher clock (`test_advance_clock`); 0 in production.
     /// It is per file system, so tests that run in parallel do not move
     /// the clock of each other.
@@ -718,6 +725,7 @@ impl FlushCtl {
             pass_ms: AtomicU64::new(FLUSH_PASS.as_millis() as u64),
             idle_ms: AtomicU64::new(DIRTY_IDLE.as_millis() as u64),
             expire_ms: AtomicU64::new(DIRTY_EXPIRE.as_millis() as u64),
+            hot_ms: AtomicU64::new(HOT_WINDOW.as_millis() as u64),
             clock_offset_ms: AtomicU64::new(0),
             throttled_now: AtomicUsize::new(0),
             passes: AtomicU64::new(0),
@@ -1180,6 +1188,11 @@ impl SliceFsFilesystem {
     /// Test hook: set the maximum age of dirty data (`DIRTY_EXPIRE`).
     pub fn test_set_dirty_expire(&self, ms: u64) {
         self.flush_ctl.expire_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: set the hot window (`HOT_WINDOW`).
+    pub fn test_set_hot_window(&self, ms: u64) {
+        self.flush_ctl.hot_ms.store(ms, Ordering::Relaxed);
     }
 
     /// Test hook: move the flusher clock of this file system forward.
@@ -3234,6 +3247,11 @@ impl SliceFsFilesystem {
     /// The shared dirty total and the budget, now.
     pub(crate) fn dirty_now(&self) -> (usize, usize) {
         (self.dirty_total.load(Ordering::Relaxed), self.dirty_budget.load(Ordering::Relaxed))
+    }
+
+    /// The dirty limit of one file, now.
+    pub(crate) fn dirty_limit_now(&self) -> usize {
+        self.dirty_limit.load(Ordering::Relaxed)
     }
 
     /// Every cell with dirty cost that the flusher can step (not a

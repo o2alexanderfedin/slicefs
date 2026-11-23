@@ -250,6 +250,11 @@ fn the_flusher_lowers_the_total() {
     let b = dirty_file(&fs, 2, 4 * MIB, 32);
     let (a_cost, b_cost) = (fs.test_dirty_cost(a.ino), fs.test_dirty_cost(b.ino));
     fs.test_set_dirty_budget(4 * MIB);
+    // Only the budget-full mode acts: the files are quiet (the clock is
+    // past the hot window) and neither idle nor old.
+    fs.test_set_dirty_idle(HOUR_MS);
+    fs.test_set_dirty_expire(HOUR_MS);
+    fs.test_advance_clock(1_000);
     assert!(fs.test_dirty_total() >= 2 * MIB, "the total is at or above half the budget");
     let st = flusher::flush_pass(&fs);
     assert!(fs.test_dirty_total() < 2 * MIB, "the pass lowered the total below half the budget: {st:?}");
@@ -272,6 +277,11 @@ fn a_pass_ends_when_no_step_frees() {
     let b = dirty_file(&fs, 2, 4 * MIB, 32);
     fs.test_set_dirty_budget(4 * MIB);
     assert!(fs.test_dirty_total() >= 2 * MIB, "the total is at or above half the budget");
+    // Only the budget-full mode acts: the files are quiet (the clock is
+    // past the hot window) and neither idle nor old.
+    fs.test_set_dirty_idle(HOUR_MS);
+    fs.test_set_dirty_expire(HOUR_MS);
+    fs.test_advance_clock(1_000);
     fs.test_drop_every(1);
     let st = std::thread::scope(|s| {
         let (tx, rx) = mpsc::channel();
@@ -843,6 +853,12 @@ fn the_flusher_skips_a_cell_with_a_step_in_flight() {
         parked.recv_timeout(WAIT).expect("the writer's own step on X is parked");
         let x_parked = fs.test_dirty_cost(x.ino);
         assert!(x_parked > 2 * MIB, "X is over its limit with the write: {x_parked}");
+        // X and Y are quiet now, and only the budget-full mode acts: X is
+        // over its limit and the largest, so the pass skips it at its step
+        // token, not by the hot rule.
+        fs.test_set_dirty_idle(HOUR_MS);
+        fs.test_set_dirty_expire(HOUR_MS);
+        fs.test_advance_clock(1_000);
 
         let (p_tx, p_rx) = mpsc::channel();
         s.spawn(move || {
@@ -929,4 +945,128 @@ fn an_expired_file_is_flushed() {
     f.check(&fs, "handle open");
     f.release(&fs);
     f.check(&fs, "after release");
+}
+
+#[test]
+fn the_flusher_steps_the_quiet_file_first() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_dirty_idle(HOUR_MS);
+    fs.test_set_dirty_expire(HOUR_MS);
+    fs.test_set_hot_window(60_000);
+    fs.test_set_dirty_limit(4 * MIB);
+    let q = dirty_file(&fs, 1, BIG, 48);
+    fs.test_advance_clock(120_000);
+    // H is written after the clock move: it is hot, Q is quiet.
+    let h = dirty_file(&fs, 2, BIG, 96);
+    let (q_cost, h_cost) = (fs.test_dirty_cost(q.ino), fs.test_dirty_cost(h.ino));
+    assert!(q_cost >= 3 * MIB / 2 && h_cost >= 3 * MIB, "Q has 1.5 MiB and H 3 MiB dirty: {q_cost} {h_cost}");
+    fs.test_set_dirty_budget(8 * MIB);
+    let total = fs.test_dirty_total();
+    assert!(total >= 4 * MIB && total < 8 * MIB, "the total is at or above half the budget and below it: {total}");
+    let st = flusher::flush_pass(&fs);
+    assert_eq!(fs.test_dirty_cost(h.ino), h_cost, "H's cost is the same: {st:?}");
+    assert_eq!(fs.test_dirty_cost(q.ino), 0, "Q's cost is 0: {st:?}");
+    assert_eq!(st.drops, 0, "no step was dropped: {st:?}");
+    for m in [&q, &h] {
+        m.check(&fs, "handles open");
+        m.release(&fs);
+        m.check(&fs, "after release");
+    }
+}
+
+#[test]
+fn a_hot_file_is_left_to_its_own_writer() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_dirty_idle(HOUR_MS);
+    fs.test_set_dirty_expire(HOUR_MS);
+    fs.test_set_hot_window(60_000);
+    let limit = 6 * MIB;
+    fs.test_set_dirty_limit(limit);
+    let mut h = dirty_file(&fs, 1, BIG, 144);
+    fs.test_set_dirty_budget(8 * MIB);
+    let h_cost = fs.test_dirty_cost(h.ino);
+    assert!(h_cost >= 9 * MIB / 2 && h_cost < limit, "H has 4.5 MiB dirty: {h_cost}");
+    assert!(fs.test_dirty_total() >= 4 * MIB, "the total is at or above half the budget");
+    for _ in 0..5 {
+        flusher::flush_pass(&fs);
+    }
+    let st = fs.test_flusher_stats();
+    assert_eq!(st.steps, 0, "5 passes made 0 steps on the hot file: {st:?}");
+    assert_eq!(st.drops, 0, "0 drops: {st:?}");
+    assert_eq!(fs.test_dirty_cost(h.ino), h_cost, "H's cost is the same after 5 passes");
+    // H's dirty data is older than 1 ms: H is expired, and still hot.
+    fs.test_set_dirty_expire(1);
+    flusher::flush_pass(&fs);
+    let st = fs.test_flusher_stats();
+    assert_eq!(st.steps, 0, "a pass made no step on the expired hot file: {st:?}");
+    assert_eq!(fs.test_dirty_cost(h.ino), h_cost, "H's cost is the same after the expired pass");
+    // The writer adds 2 MiB: its own limit step keeps H under the hard cap.
+    let cap = limit + limit / slicefs_cli::overlay::GROW_DIV + 2 * slicefs_cli::filesystem::REBASE_STEP;
+    let mut crossed = None;
+    for slot in 145..145 + 64 {
+        let before = fs.test_dirty_cost(h.ino);
+        let (off, data) = h.piece(slot);
+        let (r, rebase) = throttled_write(&fs, h.fh, off, &data);
+        assert!(matches!(r, WriteResult::Ok(n) if n as usize == PIECE), "the write is in: {r:?}");
+        h.applied(slot);
+        let after = fs.test_dirty_cost(h.ino);
+        assert!(after <= cap, "H's cost {after} stays at or below the hard cap {cap}");
+        if crossed.is_none() && before <= limit && before + PIECE + slicefs_cli::overlay::EXTENT_OVERHEAD > limit {
+            crossed = Some(rebase);
+        }
+    }
+    let rebase = crossed.expect("one write passed the limit");
+    assert!(rebase > 0, "the write that passed the limit ran its own step");
+    h.check(&fs, "handle open");
+    h.release(&fs);
+    h.check(&fs, "after release");
+}
+
+#[test]
+fn a_quiet_file_over_its_limit_is_flushed() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_dirty_idle(HOUR_MS);
+    fs.test_set_dirty_expire(HOUR_MS);
+    fs.test_set_dirty_limit(4 * MIB);
+    let q = dirty_file(&fs, 1, BIG, 96);
+    let cost = fs.test_dirty_cost(q.ino);
+    assert!(cost >= 3 * MIB, "Q has 3 MiB dirty: {cost}");
+    fs.test_advance_clock(120_000);
+    // Q is quiet and over its new limit; the total is far below half the
+    // default budget.
+    fs.test_set_dirty_limit(2 * MIB);
+    assert!(fs.test_dirty_total() < slicefs_cli::filesystem::DIRTY_BUDGET / 2, "the total is below half the budget");
+    let st = flusher::flush_pass(&fs);
+    let after = fs.test_dirty_cost(q.ino);
+    assert!(after <= 2 * MIB, "Q's cost {after} is 2 MiB or less: {st:?}");
+    q.check(&fs, "handle open");
+    q.release(&fs);
+    q.check(&fs, "after release");
+}
+
+#[test]
+fn at_the_budget_a_hot_file_is_stepped() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_dirty_idle(HOUR_MS);
+    fs.test_set_dirty_expire(HOUR_MS);
+    fs.test_set_hot_window(60_000);
+    fs.test_set_dirty_limit(4 * MIB);
+    let h1 = dirty_file(&fs, 1, BIG, 80);
+    let h2 = dirty_file(&fs, 2, BIG, 64);
+    let h1_cost = fs.test_dirty_cost(h1.ino);
+    let budget = 4 * MIB;
+    fs.test_set_dirty_budget(budget);
+    assert!(fs.test_dirty_total() >= budget, "the total is at or above the budget");
+    let st = flusher::flush_pass(&fs);
+    assert!(fs.test_dirty_cost(h1.ino) < h1_cost, "H1's cost fell: {st:?}");
+    assert!(fs.test_dirty_total() < budget, "the total is below the budget: {st:?}");
+    for m in [&h1, &h2] {
+        m.check(&fs, "handles open");
+        m.release(&fs);
+        m.check(&fs, "after release");
+    }
 }

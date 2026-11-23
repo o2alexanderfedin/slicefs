@@ -110,12 +110,27 @@ fn flusher_loop(ctl: &FlushCtl, mut pass: impl FnMut() -> bool) {
 /// One flusher pass (also the entry of the tests), in two modes.
 ///
 /// Budget-full mode: while the shared total is at or above half the
-/// budget, step the candidate with the most dirty cost, overlays before
-/// streams. Idle and expire mode: then step each dirty cell once whose
-/// last write is at least the idle time old, or whose dirty data is at
-/// least the maximum age old (`FileCell::dirty_since`); later passes go on
-/// until the cell is clean. In this mode a stream with pending writes may
-/// become an overlay (it is idle or old).
+/// budget, or a quiet cell is at or above its own limit, step one
+/// candidate: overlays before streams, quiet cells before hot ones, then
+/// the largest. Below half the budget only a quiet cell at its limit is a
+/// candidate. Idle and expire mode: then step each quiet dirty cell once
+/// whose last write is at least the idle time old, or whose dirty data is
+/// at least the maximum age old (`FileCell::dirty_since`); later passes go
+/// on until the cell is clean. In this mode a stream with pending writes
+/// may become an overlay (it is idle or old).
+///
+/// The hot rule: a cell with a write in the hot window is hot. Below the
+/// budget the flusher never steps a hot cell, in any mode; if no quiet
+/// candidate is left, the pass ends. It is "never" and not "prefer quiet":
+/// at the default values the per-file limit is half the budget, so one
+/// busy file at its limit keeps the budget-full mode on, with no other
+/// candidate. Every write to an overlay moves its generation, so a step
+/// of a file that is written during the step's I/O is dropped; and while
+/// the flusher holds the step token, the writer's own limit step is
+/// skipped. The writer of a hot file pays with its own limit steps, which
+/// keep the file under the hard cap. At or above the budget, hot cells are
+/// candidates of the budget-full mode: their writers wait in the throttle,
+/// so the step publishes.
 ///
 /// Each step is `FLUSH_STEP` in one gate hold
 /// (`SliceFsFilesystem::flush_step`, which calls `free_dirty` on the
@@ -129,22 +144,25 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
     let mut st = PassStats::default();
     // Cells whose step freed nothing in this pass.
     let mut tried: HashSet<u64> = HashSet::new();
+    let hot_ms = ctl.hot_ms.load(Ordering::Relaxed);
+    let hot = |t: &FlushTarget, now: u64| now.saturating_sub(t.last_write()) < hot_ms;
     loop {
         if ctl.flags.lock().stop {
             return st;
         }
         let (total, budget) = fs.dirty_now();
-        if total < budget / 2 {
-            break;
-        }
-        // Overlays first, then the largest; a stream with pending writes
-        // only when no overlay candidate is left (its writer would lose
-        // streaming).
+        let limit = fs.dirty_limit_now();
+        let now = ctl.now_ms();
+        let (at_budget, full) = (total >= budget, total >= budget / 2);
+        // A stream with pending writes only when no overlay candidate is
+        // left (its writer would lose streaming).
         let Some(target) = fs
             .flush_targets()
             .into_iter()
             .filter(|t| !tried.contains(&t.ino()))
-            .max_by_key(|t| (!t.is_stream(), t.dirty()))
+            .filter(|t| at_budget || !hot(t, now))
+            .filter(|t| full || t.dirty() >= limit)
+            .max_by_key(|t| (!t.is_stream(), !hot(t, now), t.dirty()))
         else {
             break;
         };
@@ -157,7 +175,7 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
         if ctl.flags.lock().stop {
             return st;
         }
-        if tried.contains(&target.ino()) {
+        if tried.contains(&target.ino()) || hot(&target, now) {
             continue;
         }
         let since = target.dirty_since();
