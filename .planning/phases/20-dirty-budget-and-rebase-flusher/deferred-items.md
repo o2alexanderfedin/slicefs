@@ -11,7 +11,7 @@
 
 ## Decided (closed for Phase 20)
 
-- **Commit timer during unmount (found in 20-03, older than Phase 20).** The code review (IN-01) found no data loss, but one extra commit could run after `shutdown_wal` and `content.close`. Fixed in b912aed: `shutdown()` marks the file system as shut down first, and the timer's commit checks the mark with the exclusive gate held and then does no commit.
+- **Commit timer during unmount (found in 20-03, older than Phase 20).** The code review (IN-01) found no data loss, but one extra commit could run after `shutdown_wal` and `content.close`. Fixed in b912aed: `shutdown()` marks the file system as shut down first, and the timer's commit checks the mark with the exclusive gate held and then does no commit. Test of the timer loop in db225bb.
 
 - **No upper bound on `--dirty-budget` / `--dirty-limit` (found in 20-06).** Decision (orchestrator, reversible while there are no deployments): no upper bound. Overflow is safe (`saturating_add`). The help text and the README say that the budget is memory the daemon may use, and that there is no upper bound.
 - **Empty flusher passes from the kick (found in 20-05, measured in 20-07).** Fixed in 4d8ac3d and e44d57d: after a pass that found no candidate with the total at half the budget or more, a write below the budget does not wake the flusher. See `20-FIX-empty-pass.md`.

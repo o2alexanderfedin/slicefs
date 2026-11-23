@@ -63,7 +63,7 @@ No recorded decision in the 20-01 to 20-08 summaries, `20-FIX-empty-pass.md` or 
 | WR-02 | fixed in c0d10d0 |
 | WR-03 | fixed in c0d10d0 |
 | WR-04 | fixed in 7ff8c3c |
-| IN-01 | fixed in b912aed |
+| IN-01 | fixed in b912aed (timer-loop test in db225bb) |
 | IN-02 | accepted, no change |
 | IN-03 | accepted, no change |
 | IN-04 | fixed in 7ff8c3c |
@@ -125,7 +125,7 @@ Then write in the help text "Default 32M, or --dirty-budget if that is less". Ad
 
 ### IN-01: Deferred item: the commit timer during unmount is not a real race
 
-**Status:** Fixed in b912aed. `shutdown()` marks the file system as shut down first; the timer calls `commit_unless_shut_down`, which checks the mark before the sync and again with the exclusive gate held, and then does no commit. `timed_commit` keeps its behavior. Test `no_timed_commit_after_shutdown`: red, the timer call made a full commit after `shutdown()`.
+**Status:** Fixed in b912aed. `shutdown()` marks the file system as shut down first; the timer calls `commit_unless_shut_down`, which checks the mark before the sync and again with the exclusive gate held, and then does no commit. `timed_commit` keeps its behavior. Test `no_timed_commit_after_shutdown`: red, the timer call made a full commit after `shutdown()`. Timer-loop test `the_timer_does_not_commit_after_shutdown` in db225bb: red with the old call in the loop (the timer did not end within 10 s).
 **File:** `crates/slicefs-cli/src/mount.rs:483-496`, `crates/slicefs-cli/src/commit_timer.rs:85-92`, `crates/slicefs-cli/src/filesystem.rs:5042-5070`, `crates/metadata/src/store.rs:1049-1050`, `:1099`
 **Issue:** The commit timer stops only after `mount()` returns (`mount.rs:494`). Two cases were traced.
 1. A timed commit is in `commit_cut_finish` (no gate) when `destroy` starts. `begin_commit` takes `commit_lock`, and the `PreparedCommit` keeps it until `finish_commit` ends (`store.rs:1050`, `:1099`). The `meta.commit()` of `destroy` waits for it. So the two commits do not interleave, and the root of `destroy` comes last.
