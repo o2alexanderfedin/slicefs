@@ -327,7 +327,7 @@ Still open after Phase 19:
 Phase 20 (issue #21) did step 5 of the migration: the dirty budget is safe with N writers (LOCK-02, LOCK-06).
 
 The design in short:
-- **Throttle.** A write calls `throttle_write` before it takes the commit gate, a stripe or a cell. Below the budget it goes on. Over the budget it waits with no lock held, in 50 ms slices, until the flusher frees memory, for at most 5 s. Then it writes and pays with steps of its own file (`pay_budget`). A write never fails here.
+- **Throttle.** A write calls `throttle_write` before it takes the commit gate, a stripe or a cell. Below the budget it goes on. Over the budget it waits with no lock held, in 50 ms slices, until the flusher frees memory, for at most 5 s (200 ms since the change after Phase 20). Then it writes and pays with steps of its own file (`pay_budget`). A write never fails here.
 - **Flusher.** One thread per mount (`slicefs-flusher`). It takes the commit gate shared for one step of one file (`FLUSH_STEP`, 4 MiB), and never across a wait. It skips a cell that has a step in flight; it does not wait for it. It never takes a cell out of the cell map.
 - **Triggers.** A file with no write for the idle time (5 s). Dirty data that reached the maximum age (30 s). The buffer is full: the total is at half the budget or more, or one quiet file is at its own limit; then the largest quiet file goes first.
 - **The hot rule.** A file with a write in the last 300 ms is hot. Below the budget the flusher never steps a hot file, because every write to it would drop the step. Its own writer keeps it under its limit. At the budget a hot file can be stepped, because its writers wait in the throttle.
@@ -361,7 +361,7 @@ The delay of one write is its throttle wait plus its write time. These are two s
 The S7 numbers above were measured in plan 20-07, before the empty-pass fix. In those runs, 98.6 % to 99.7 % of the flusher passes found no candidate (up to about 900 passes per second): each write at half the budget or more woke the flusher, also when the only dirty file was hot. After the runs, a fix stopped this: after a pass that found no candidate with the total at half the budget or more, a write below the budget does not wake the flusher. The timed pass (every 100 ms) and a write at the full budget still do. A pass below half the budget does not stop the next kick (`a_write_past_half_the_budget_kicks_the_flusher`). The test `a_hot_file_above_half_the_budget_does_not_kick_after_an_empty_pass` shows 1 pass for 200 writes (200 before the fix). The S7 runs were not done again after the fix.
 
 Limits:
-- The daemon still has one dispatch thread until Phase 21. In a mount, a throttled write also stops reads and all other requests for up to the wait limit (5 s). The S7 run in process is the evidence for parallel writers.
+- The daemon still has one dispatch thread until Phase 21. In a mount, a throttled write also stops reads and all other requests for up to the wait limit (5 s in Phase 20; 200 ms after it). The S7 run in process is the evidence for parallel writers.
 - A stream can hold out-of-order writes up to a fixed 64 MiB window, whatever `--dirty-limit` is.
 
 Still open after Phase 20: see `.planning/phases/20-dirty-budget-and-rebase-flusher/deferred-items.md` (and the Phase 19 list that it points to).
