@@ -185,7 +185,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
 **Research flags** (run `/gsd-plan-phase <N> --research-phase`): Phase 18 (S5 gate fairness on both platforms), Phase 20 (budget, flusher and gate deadlock protocol), Phase 21 (FUSE-T and FSKit overlap, reply under load), Phase 23 (old-to-new map strategy, GC interaction, snapshot record supersession), Phase 24 (boundary rule details). Skip for Phases 19 and 22: standard patterns.
 
 - [x] **Phase 18: Spikes, baseline and stress harness** (#127) - re-measure S1-S7 on the current code, build the N-thread harness, run S1 on macOS (completed 2026-11-21)
-- [ ] **Phase 19: Fine-grained locks** (#21) - no global lock on the hot path, lock rank with a debug checker, log record under the same locks as its apply
+- [x] **Phase 19: Fine-grained locks** (#21) - no global lock on the hot path, lock rank with a debug checker, log record under the same locks as its apply (completed 2026-11-22)
 - [ ] **Phase 20: Dirty budget and rebase flusher** (#21) - no cross-file take-out, a background flusher, writers throttled before they take locks, no deadlock with a commit
 - [ ] **Phase 21: Worker pool** (#22) - N worker threads by mount option, drain before `destroy()`, abort on panic, 4 workers pass pjdfstest
 - [ ] **Phase 22: Chunk profiles** (#67) - FastCDC min/avg/max fixed per store at `seed`, benchmark of five profiles, default unchanged (parallel track)
@@ -234,7 +234,7 @@ Plans:
   4. Locks have one fixed rank, with two inodes locked in ascending stripe order (inode number hashed to a stripe); a test that breaks the rank fails in a debug build
   5. After a crash, replay of the log from the mixed-operation harness gives the same state as the apply, including creates by logged inode number, and the #21 body matches this rule
   6. With several handles on one inode in different modes (read-only, read-write, `O_APPEND`), the harness shows the POSIX.1 2.9.7 rules: a completed write through one handle is visible through every other handle, a read sees all or none of a concurrent write, and concurrent appends never overlap and lose no bytes. The research for this phase checks how the kernel FUSE client computes the append offset in the SliceFS mount mode
-**Plans**: 16/16 plans executed (11/11 executed; 5 gap-closure plans 19-12..19-16 for LOCK-01, LOCK-04, LOCK-05)
+**Plans**: 16/16 plans complete (11/11 executed; 5 gap-closure plans 19-12..19-16 for LOCK-01, LOCK-04, LOCK-05)
 
 One plan per wave; executors run them in order.
 
@@ -362,7 +362,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 18. Spikes, baseline and stress harness | 7/7 | Complete    | 2026-11-21 |
-| 19. Fine-grained locks | 16/16 | In Progress | - |
+| 19. Fine-grained locks | 16/16 | Complete    | 2026-11-22 |
 | 20. Dirty budget and rebase flusher | 0/0 | Not started | - |
 | 21. Worker pool | 0/0 | Not started | - |
 | 22. Chunk profiles | 0/0 | Not started | - |

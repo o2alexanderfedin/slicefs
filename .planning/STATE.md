@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v2.2
 milestone_name: Concurrency & Store Evolution
-current_phase: 19
-current_phase_name: Fine-grained locks
-status: executing
-stopped_at: Completed 19-16-PLAN.md
-last_updated: "2026-11-22T23:25:49.998Z"
+current_phase: 20
+current_phase_name: Dirty budget and rebase flusher
+status: planning
+stopped_at: Phase 19 complete, ready to plan Phase 20
+last_updated: "2026-11-23T01:38:39.384Z"
 last_activity: 2026-11-22
-last_activity_desc: Phase 19 execution started
-state_head: f37913e500207ac7f2a48d7eb9bc36d1b2f22b64
+last_activity_desc: Phase 19 complete, transitioned to Phase 20
+state_head: a7ce72be435108dd0f51f3e51623fa2d06657e41
 progress:
   total_phases: 7
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 23
   completed_plans: 23
-  percent: 14
+  percent: 29
 ---
 
 # Project State
@@ -29,12 +29,12 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Phase: 19 (Fine-grained locks) — EXECUTING (gap closure)
-Plan: 16 of 16
-Status: Gap-closure plans 19-12..19-16 ready to execute (LOCK-01, LOCK-04, LOCK-05)
-Last activity: 2026-11-22 — Gap-closure plans 19-12..19-16 written
+Phase: 20 — Dirty budget and rebase flusher
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-11-22 — Phase 19 complete, transitioned to Phase 20
 
-Progress: [█░░░░░░░░░] 14%
+Progress: [███░░░░░░░] 29%
 
 ## Performance Metrics
 
@@ -172,7 +172,7 @@ None.
 ## Session Continuity
 
 Last session: 2026-11-22T23:25:49.761Z
-Stopped at: Completed 19-16-PLAN.md
+Stopped at: Phase 19 complete, ready to plan Phase 20
 Resume file: None
 
 ## Operator Next Steps
