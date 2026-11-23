@@ -6,8 +6,9 @@
 //! writes and pays with a step of its own file.
 //!
 //! The tests use event waits only (`wait_until` with a limit, channels), no
-//! fixed sleeps for order and no upper bounds on durations: the machine can
-//! run at a high load. Each file is checked against a block-version model,
+//! fixed sleeps for order, and no upper bounds on durations: the machine can
+//! run at a high load. One exception: a wait that must end early has a
+//! bound far below its wait limit, as a second check after the counters. Each file is checked against a block-version model,
 //! never against a byte copy of the file. A watchdog aborts a test that
 //! does not end.
 //!

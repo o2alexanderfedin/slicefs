@@ -209,6 +209,26 @@ mod tests {
         assert_eq!(fs.meta().current_root(), root, "the root of the destroy work stays");
     }
 
+    // IN-01: the timer loop after `shutdown()`. A change after the destroy
+    // work makes the timer try a commit; it makes none, and the timer ends.
+    #[test]
+    fn the_timer_does_not_commit_after_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = fs_on_disk(dir.path());
+        assert!(fs.shutdown(), "the destroy commit succeeded");
+        let root = fs.meta().current_root();
+        fs.test_create(1, "late", 0o100_644, 0o022, 0, 0).unwrap();
+        assert!(fs.meta().has_uncommitted_changes(), "a change after the destroy work");
+        let stop = Arc::new(AtomicBool::new(false));
+        let h = spawn_commit_timer(Arc::downgrade(&fs), fs.commit_gate(), Duration::from_millis(50), stop.clone());
+        let ended = wait_until(Duration::from_secs(10), || h.is_finished());
+        stop.store(true, Ordering::SeqCst);
+        h.join().unwrap();
+        assert!(ended, "the timer ended when it found the file system shut down");
+        assert!(fs.meta().has_uncommitted_changes(), "the timer made no commit");
+        assert_eq!(fs.meta().current_root(), root, "the root of the destroy work stays");
+    }
+
     // #108 / S5: a timed commit holds the gate exclusively only to switch the
     // generation. Writing the metadata nodes and the syncs run with the gate
     // released, so a write that comes during the commit does not wait for it.
