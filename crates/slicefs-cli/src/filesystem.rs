@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -162,6 +162,14 @@ const THROTTLE_SLICE: Duration = Duration::from_millis(50);
 
 /// Time between two flusher passes when nothing wakes the flusher.
 const FLUSH_PASS: Duration = Duration::from_millis(100);
+
+/// The back-off of a cell after its first failed flusher step; it doubles
+/// with each failure in a row up to `FLUSH_RETRY_MAX` (Claude's
+/// discretion: one pass interval).
+const FLUSH_RETRY_MIN: Duration = FLUSH_PASS;
+
+/// The longest back-off of a cell after failed flusher steps.
+const FLUSH_RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// The flusher stores the dirty data of a file with no write for this time
 /// (Phase 20 CONTEXT default of `--dirty-idle`).
@@ -428,6 +436,11 @@ struct FileCell {
     /// the cell is clean. The age of the dirty data starts again only when
     /// the cell is clean (the Linux `dirtied_when` rule; `sync_dirty`).
     dirty_since: AtomicU64,
+    /// Failed flusher steps in a row; 0 after a step that freed.
+    flush_fails: AtomicU32,
+    /// The flusher clock before which the flusher does not try the cell
+    /// again after a failed step; 0 for none.
+    flush_retry_at: AtomicU64,
 }
 
 impl FileCell {
@@ -458,6 +471,8 @@ impl FileCell {
             stream: AtomicBool::new(true),
             last_write: AtomicU64::new(0),
             dirty_since: AtomicU64::new(0),
+            flush_fails: AtomicU32::new(0),
+            flush_retry_at: AtomicU64::new(0),
         }
     }
 }
@@ -767,10 +782,13 @@ pub(crate) struct FlushCtl {
     /// It is per file system, so tests that run in parallel do not move
     /// the clock of each other.
     clock_offset_ms: AtomicU64,
-    /// The last pass tried no step, and its last pick found no candidate
-    /// with the total at or above half the budget. While it is true, a
-    /// write below the budget does not kick the flusher: with one hot
-    /// file, each write would else cause one more empty pass. A pass below
+    /// The last pass published no step, and its last pick found no
+    /// candidate with the total at or above half the budget. While it is
+    /// true, a write below the budget does not kick the flusher: with one
+    /// hot file, each write would else cause one more empty pass. A step
+    /// that was skipped, dropped or failed does not count: the cell was
+    /// busy (it is hot now) or is in its back-off, and only time makes it
+    /// a candidate again (the timed pass). A pass below
     /// half the budget leaves it false, so the first write that finds the
     /// total at half kicks. The next pass sets it again: a timed pass, or
     /// a pass kicked at the budget.
@@ -892,6 +910,27 @@ impl FlushTarget {
     /// The flusher clock when the cell became dirty (0: clean).
     pub(crate) fn dirty_since(&self) -> u64 {
         self.cell.dirty_since.load(Ordering::Relaxed)
+    }
+
+    /// True if the cell is in its back-off after a failed step at `now`.
+    pub(crate) fn backed_off(&self, now: u64) -> bool {
+        now < self.cell.flush_retry_at.load(Ordering::Relaxed)
+    }
+
+    /// Record a failed step at `now`: the next try comes after a back-off
+    /// of `FLUSH_RETRY_MIN`, doubled for each earlier failure in a row, at
+    /// most `FLUSH_RETRY_MAX`. Returns the back-off in ms.
+    pub(crate) fn note_failed(&self, now: u64) -> u64 {
+        let n = self.cell.flush_fails.fetch_add(1, Ordering::Relaxed).min(16);
+        let ms = ((FLUSH_RETRY_MIN.as_millis() as u64) << n).min(FLUSH_RETRY_MAX.as_millis() as u64);
+        self.cell.flush_retry_at.store(now.saturating_add(ms), Ordering::Relaxed);
+        ms
+    }
+
+    /// Record a step that freed: the back-off ends.
+    pub(crate) fn note_freed(&self) {
+        self.cell.flush_fails.store(0, Ordering::Relaxed);
+        self.cell.flush_retry_at.store(0, Ordering::Relaxed);
     }
 }
 
@@ -3232,7 +3271,7 @@ impl SliceFsFilesystem {
     /// waiting writer kicks the flusher again under the flags lock, so a
     /// pass begins after its wait began. A total at or
     /// above half the budget wakes the flusher at once, unless the last
-    /// pass found no candidate at half the budget or more and the total is
+    /// pass published no step at half the budget or more and the total is
     /// below the budget (`FlushCtl::empty_pass`). In a debug build it panics when the
     /// thread holds any ranked lock (the gate too).
     pub fn throttle_write(&self) -> Admit {

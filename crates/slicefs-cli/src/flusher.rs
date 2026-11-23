@@ -24,6 +24,8 @@ use crate::util::ts;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PassStats {
     /// Steps tried (skipped ones too); at most one failed try per cell.
+    /// A pass with steps but none published is "empty" for the kick
+    /// (`FlushCtl::empty_pass`).
     pub steps: u64,
     /// Steps that lowered the cost of their file.
     pub published: u64,
@@ -136,9 +138,12 @@ fn flusher_loop(ctl: &FlushCtl, mut pass: impl FnMut() -> bool) {
 /// (`SliceFsFilesystem::flush_step`, which calls `free_dirty` on the
 /// locked cell); the pick reads only atomics. After each step the
 /// throttled writers are woken. A cell whose step freed nothing (skipped,
-/// dropped or failed) is not tried again in this pass. A stop ends the
-/// pass. At its end the pass records whether it tried no step although
-/// the total was at or above half the budget (`FlushCtl::empty_pass`):
+/// dropped or failed) is not tried again in this pass. A failed step also
+/// puts the cell in a back-off (`FlushTarget::note_failed`: 100 ms, doubled
+/// for each failure in a row, at most 30 s; a freed step ends it): no pass
+/// tries the cell in its back-off, in any mode. A stop ends the pass. At
+/// its end the pass records whether no step published although the total
+/// was at or above half the budget (`FlushCtl::empty_pass`):
 /// then writes below the budget do not kick the flusher until a later
 /// pass sets it again. It also records whether it could not free memory
 /// (`FlushFlags::pass_stuck`): no step published, and a step failed or the
@@ -176,7 +181,7 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
         let Some(target) = fs
             .flush_targets()
             .into_iter()
-            .filter(|t| !tried.contains(&t.ino()))
+            .filter(|t| !tried.contains(&t.ino()) && !t.backed_off(now))
             .filter(|t| at_budget || !hot(t, now))
             .filter(|t| full || t.dirty() >= limit)
             .max_by_key(|t| (!t.is_stream(), !hot(t, now), t.dirty()))
@@ -192,7 +197,7 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
         if ctl.flags.lock().stop {
             return st;
         }
-        if tried.contains(&target.ino()) || hot(&target, now) {
+        if tried.contains(&target.ino()) || hot(&target, now) || target.backed_off(now) {
             continue;
         }
         let since = target.dirty_since();
@@ -202,7 +207,7 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
             step(fs, &target, &mut st, &mut tried);
         }
     }
-    ctl.empty_pass.store(st.steps == 0 && last_full, Ordering::Relaxed);
+    ctl.empty_pass.store(st.published == 0 && last_full, Ordering::Relaxed);
     let stuck = st.published == 0 && (st.errors > 0 || last_at_budget);
     {
         let mut f = ctl.flags.lock();
@@ -227,6 +232,7 @@ fn step(fs: &SliceFsFilesystem, target: &FlushTarget, st: &mut PassStats, tried:
     let counter = match step {
         FlushStep::Freed(_) => {
             st.published += 1;
+            target.note_freed();
             &ctl.published
         }
         FlushStep::Nothing => {
@@ -239,7 +245,14 @@ fn step(fs: &SliceFsFilesystem, target: &FlushTarget, st: &mut PassStats, tried:
         }
         FlushStep::Failed(e) => {
             st.errors += 1;
-            eprintln!("[{}][FLUSH] step of ino={} failed (errno {e}); the file keeps its dirty data", ts(), target.ino());
+            // One line per failure: the back-off limits the rate to one
+            // line per cell in each back-off (at most 30 s).
+            let ms = target.note_failed(ctl.now_ms());
+            eprintln!(
+                "[{}][FLUSH] step of ino={} failed (errno {e}); the file keeps its dirty data; next try in {ms} ms",
+                ts(),
+                target.ino()
+            );
             &ctl.errors
         }
     };

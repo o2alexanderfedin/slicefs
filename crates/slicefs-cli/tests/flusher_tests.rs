@@ -567,9 +567,14 @@ fn stop_wakes_throttled_writers() {
         fs.stop_flusher();
         assert!(fs.test_flusher_stopping(), "stop_flusher asked the stop");
         all_writes_ok(&rx, 4, WAIT, "after the stop");
+        // The first writer that wakes leaves at the stop and pays; its step
+        // can bring the total below the budget, so a later writer can leave
+        // with room (no stop exit). Every wait left before the limit.
         let st = fs.test_flusher_stats();
+        assert_eq!(st.throttled, 4, "four writes waited: {st:?}");
         assert_eq!(st.timeouts, 0, "no throttle wait reached the limit: {st:?}");
-        assert_eq!(st.stop_exits, 4, "the four waits left at the stop: {st:?}");
+        assert_eq!(st.no_room_exits, 0, "no flusher pass ran: {st:?}");
+        assert!((1..=4).contains(&st.stop_exits), "at least one wait left at the stop: {st:?}");
         assert!(wait_until(WAIT, || flusher.is_finished()), "the flusher thread ended");
     });
     for m in &mut files {
@@ -1082,6 +1087,87 @@ fn a_configured_idle_time_is_used() {
     let st = flusher::flush_pass(&fs);
     assert_eq!(fs.test_dirty_cost(f.ino), 0, "F's cost is 0 at 8 s (idle time 7 s): {st:?}");
     assert_eq!(fs.test_dirty_config(), cfg, "the config reads back");
+    f.check(&fs, "handle open");
+    f.release(&fs);
+    f.check(&fs, "after release");
+}
+
+/// Failed flusher steps in a row that bring the back-off to its cap of 30 s.
+const FAILS: usize = 10;
+
+/// Fail the next `FAILS` flusher steps of the one dirty file, one step per
+/// pass, with the test clock moved past each back-off (at most 30 s).
+fn fail_to_the_cap(fs: &SliceFsFilesystem) {
+    fs.test_fail_steps(FAILS);
+    for i in 0..FAILS {
+        fs.test_advance_clock(31_000);
+        let st = flusher::flush_pass(fs);
+        assert_eq!(st.errors, 1, "pass {i}: the step failed: {st:?}");
+    }
+}
+
+/// A failed flusher step puts its cell in a back-off that doubles with
+/// each failure in a row, from 100 ms up to 30 s; a step that frees ends
+/// it. The test clock moves the time; the "no try" assert has a margin of
+/// 15 s.
+#[test]
+fn a_failed_step_backs_off() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_dirty_idle(1_000);
+    fs.test_set_dirty_expire(HOUR_MS);
+    // About 7.8 MiB of dirty data, more than one flusher step (4 MiB). The
+    // default budget is far above it, so only the idle mode acts.
+    let f = dirty_file(&fs, 1, BIG, 250);
+    fail_to_the_cap(&fs);
+    fs.test_advance_clock(15_000);
+    let st = flusher::flush_pass(&fs);
+    assert_eq!(st.steps, 0, "15 s after the last failure the cell is in its back-off of 30 s: {st:?}");
+    fs.test_advance_clock(20_000);
+    let st = flusher::flush_pass(&fs);
+    assert_eq!(st.published, 1, "after the back-off the flusher steps the cell: {st:?}");
+    // The freed step ended the back-off: a new failure gives 100 ms.
+    fs.test_fail_steps(1);
+    fs.test_advance_clock(1_000);
+    let st = flusher::flush_pass(&fs);
+    assert_eq!(st.errors, 1, "the next step fails: {st:?}");
+    fs.test_advance_clock(1_000);
+    let st = flusher::flush_pass(&fs);
+    assert_eq!(st.published, 1, "1 s after that failure the flusher steps the cell again: {st:?}");
+    f.check(&fs, "handle open");
+    f.release(&fs);
+    f.check(&fs, "after release");
+}
+
+/// A store error that lasts: the only dirty file is in its back-off, so a
+/// flusher pass at the budget finds no candidate. A throttled writer then
+/// does not wait for the limit: it writes and pays with a step of its own
+/// file. The back-off has 30 s of margin.
+#[test]
+fn a_write_does_not_wait_for_a_cell_in_its_back_off() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_dirty_idle(1_000);
+    fs.test_set_dirty_expire(HOUR_MS);
+    let mut f = dirty_file(&fs, 1, BIG, 64);
+    fail_to_the_cap(&fs);
+    fs.test_set_flush_pass(60_000);
+    fs.test_set_throttle_wait(10_000);
+    let (off, data) = f.piece(100);
+    std::thread::scope(|s| {
+        let _stop = StopGuard(&fs);
+        s.spawn(|| flusher::run_flusher(&fs));
+        assert!(wait_until(WAIT, || fs.test_flusher_running()), "the flusher runs");
+        fs.test_set_dirty_budget(fs.test_dirty_total());
+        let (r, rebase) = throttled_write(&fs, f.fh, off, &data);
+        let st = fs.test_flusher_stats();
+        assert!(matches!(r, WriteResult::Ok(n) if n as usize == PIECE), "the write is in: {r:?}");
+        assert_eq!(st.errors, FAILS as u64, "the flusher did not try the cell in its back-off: {st:?}");
+        assert_eq!(st.timeouts, 0, "the wait did not reach the limit: {st:?}");
+        assert_eq!(st.no_room_exits, 1, "the wait ended after the pass with no candidate: {st:?}");
+        assert!(rebase > 0, "the writer paid with a step of its own file");
+    });
+    f.applied(100);
     f.check(&fs, "handle open");
     f.release(&fs);
     f.check(&fs, "after release");
