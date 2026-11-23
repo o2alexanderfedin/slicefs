@@ -97,7 +97,7 @@ pub enum Cmd {
         /// Most dirty file data (data that is not stored yet) of all open
         /// files together. This is memory that the daemon may use. SIZE is
         /// bytes, or a number with K, M or G (1024-based). Default 64M, at
-        /// least 4M, no upper bound. A writer over it waits up to 5 s for
+        /// least 4M, no upper bound. A writer over it waits up to 200 ms for
         /// the background flusher, then stores part of its own file. Below
         /// 64M, a file that is written from start to end with out-of-order
         /// writes (a stream) can become a file changed in place (an
