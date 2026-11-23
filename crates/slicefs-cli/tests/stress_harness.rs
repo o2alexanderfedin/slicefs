@@ -1977,7 +1977,13 @@ fn s6_small_fsync() {
 #[ignore = "spike S7 baseline: S7_FILE_MIB S7_WRITE_MIB S7_COMMIT_SECS S7_SERIALIZE; use --release"]
 fn s7_budget_baseline() {
     const THREADS: usize = 4;
-    const CAP_MIB: u64 = 256;
+    // CAP_MIB = Pm + F + R, rounded up to a multiple of 8 (B + N x W + O + F + R).
+    // Inputs: Pm = 267 (largest VmHWM of 3 P_old and 3 P0 runs), Spread = 20,
+    // F = 8 (one flusher step), R = max(16, ceil(Pm / 10), 2 x Spread) = 40.
+    // The cap was fixed in plan 20-01 from P_old and P0 before the flusher
+    // existed; do not change it to fit a later run (phase 20 runs/s7-wave0.log
+    // and runs/s7-wave0-NOTES.md).
+    const CAP_MIB: u64 = 320;
     let file_mib = env_num("S7_FILE_MIB", 1024, 4, 8192);
     let write_mib = env_num("S7_WRITE_MIB", 128, 2, 4096);
     let commit_secs = env_num("S7_COMMIT_SECS", 30, 1, 600);
