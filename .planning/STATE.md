@@ -5,16 +5,16 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 20
 current_phase_name: Dirty budget and rebase flusher
 status: planning
-stopped_at: Completed 20-02-PLAN.md
-last_updated: "2026-11-23T06:42:16.140Z"
-last_activity: 2026-11-22
+stopped_at: Completed 20-03-PLAN.md
+last_updated: "2026-11-23T07:38:21.729Z"
+last_activity: 2026-11-23
 last_activity_desc: Phase 19 complete, transitioned to Phase 20
-state_head: ca740000871697fc0595473c978f86cee763dcee
+state_head: aa853f2b6704215219e0dba33b3d90187ce5bc31
 progress:
   total_phases: 7
   completed_phases: 2
   total_plans: 31
-  completed_plans: 25
+  completed_plans: 26
   percent: 29
 ---
 
@@ -30,9 +30,9 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Phase: 20 — Dirty budget and rebase flusher
-Plan: 20-02 complete (2 of 8); next 20-03
+Plan: 20-03 complete (3 of 8); next 20-04
 Status: Executing
-Last activity: 2026-11-23 — 20-02 tracer done (throttle_write, flusher pass, pay after the wait limit, kick at half the budget)
+Last activity: 2026-11-23 — 20-03 flusher lifecycle done (flusher thread with the mount, throttle in the FUSE write, shutdown order, stop and panic wake throttled writers)
 
 Progress: [███░░░░░░░] 29%
 
@@ -71,6 +71,7 @@ Progress: [███░░░░░░░] 29%
 | Phase 19 P16 | 35 min | 3 tasks | 8 files |
 | Phase 20 P01 | 60min | 3 tasks | 7 files |
 | Phase 20 P02 | 50min | 2 tasks | 6 files |
+| Phase 20 P03 | 45 min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -153,6 +154,9 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 20]: 20-01: CAP_MIB = 320 from P_old/P0 by the stated rule (Pm 267 + F 8 + R 40, rounded to 8); above the Phase 18 cap of 256
 - [Phase 20]: 20-02: FLUSH_STEP 4 MiB, throttle wait 5 s in 50 ms slices, pass 100 ms, background threshold budget/2
 - [Phase 20]: 20-02: flusher step helper is SliceFsFilesystem::flush_step (gate shared, cell lock, free_dirty); FileCell::stream atomic lets the pick put overlays first
+- [Phase 20]: 20-03: throttle exits at a stop or with no flusher are counted in stop_exits, not timeouts
+- [Phase 20]: 20-03: shutdown = stop and join the flusher with no lock held, then the gate, then test_destroy; FUSE destroy calls it
+- [Phase 20]: 20-03: run_mount keeps an Arc clone only for the stop after mount() and drops it right after
 
 ### Pending Todos
 
@@ -176,8 +180,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-23T06:42:15.864Z
-Stopped at: Completed 20-02-PLAN.md
+Last session: 2026-11-23T07:38:21.436Z
+Stopped at: Completed 20-03-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
