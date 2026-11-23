@@ -13,14 +13,14 @@
 
 ### From 19-16
 
-- **file_cell holds of 3.6-13 ms, span not measured.** On macOS the one-file mode had `file_cell` holds of 3.6-7.9 ms in every run, on Linux one of 13 ms. The probe caught only 3.2-4.8 ms holds, released in `write_in_cell`. The parked tests show no writer I/O in a cell hold. Owner: Phase 20 (a span probe).
+- **file_cell holds of 3.6-13 ms, span not measured.** On macOS the one-file mode had `file_cell` holds of 3.6-7.9 ms in every run, on Linux one of 13 ms. The probe caught only 3.2-4.8 ms holds, released in `write_in_cell`. The parked tests show no writer I/O in a cell hold. Owner: v2.2 backlog (a span probe; Phase 20 did not need it, see 20-VERIFICATION.md).
 - **WAL group commit** (REQUIREMENTS future item; spike S6 decides). Owner: a later phase.
-- **The Phase 20 flusher and throttle:** the background rebase flusher, writers throttled before they take a lock, and the cross-file dirty budget (LOCK-02, LOCK-06). Owner: Phase 20.
+- **The Phase 20 flusher and throttle:** the background rebase flusher, writers throttled before they take a lock, and the cross-file dirty budget (LOCK-02, LOCK-06). Done in Phase 20 (LOCK-02, LOCK-06 complete).
 
 ### From the 19-REVIEW fixes
 
-- **A writer at the hard cap makes the other writers of its file wait (CR-01 fix).** While a writer is counted at the cap, the other overlay writers of that file wait for the cap step, so the step publishes. Readers do not wait. The performance effect is not measured. Owner: Phase 20 (flusher, throttle).
-- **A cell kept by a failed last release (WR-04 fix)** is stored only by a later open and release, or by destroy; each commit cut logs its extents again until then. A retry (for example by the Phase 20 flusher) is not done. Owner: Phase 20.
+- **A writer at the hard cap makes the other writers of its file wait (CR-01 fix).** While a writer is counted at the cap, the other overlay writers of that file wait for the cap step, so the step publishes. Readers do not wait. The performance effect is not measured. The wait has a time limit (STEP_WAIT_MAX). Owner: v2.2 backlog (a measurement).
+- **A cell kept by a failed last release (WR-04 fix)** is stored only by a later open and release, or by destroy; each commit cut logs its extents again until then. A retry is not done; the Phase 20 flusher steps such a cell, so its dirty data is freed, but the cell is not retired. Owner: v2.2 backlog.
 - **The step-wait progress count (WR-05 fix)** moves only with chunk-store work on the holder's thread. A step with more than 15 s of CPU work and no store call would give its waiters EIO. No step does that today. Owner: none until a step like that exists.
 
 ## Closed by the 19-REVIEW fixes

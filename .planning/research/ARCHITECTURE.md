@@ -97,7 +97,7 @@ benchmarks/
   chunk-bench/         # exists; already takes fastcdc:MIN:AVG:MAX              (#67)
 ```
 
-Rationale: every new concurrency piece lives next to `filesystem.rs` in `slicefs-cli` because that is where the take-out pattern and the gate are. The rehash walker lives in `metadata` because it must know the wire format of each node kind, which is private to `store.rs`, `directory.rs`, `manifest.rs` and `inode_map.rs`. The prolly prototype is its own crate so it cannot leak into `root_rec`.
+Rationale: every new concurrency piece lives next to `filesystem.rs` in `slicefs-cli` because that is where the per-file cells, the flusher and the gate are (the old take-out pattern is gone after Phase 20). The rehash walker lives in `metadata` because it must know the wire format of each node kind, which is private to `store.rs`, `directory.rs`, `manifest.rs` and `inode_map.rs`. The prolly prototype is its own crate so it cannot leak into `root_rec`.
 
 ## Part 1: Multithreaded request handling (#127, #21, #22)
 
