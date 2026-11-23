@@ -1,11 +1,11 @@
 # Phase 20 fix: no flusher kick after a pass with no candidate
 
-**Commit:** 4d8ac3d (`fix(20): no flusher kick after a pass with no candidate`)
+**Commits:** 4d8ac3d (`fix(20): no flusher kick after a pass with no candidate`) and e44d57d (`fix(20): an idle pass below half the budget does not stop the kick`)
 **Decision:** orchestrator, after 20-07 (reversible).
 
 ## What
 
-- `FlushCtl` has a new atomic `empty_pass`. At the normal end of each pass, `flush_pass` stores `steps == 0` in it (the pass tried no step, so it found no candidate).
+- `FlushCtl` has a new atomic `empty_pass`. At the normal end of each pass, `flush_pass` stores true only when the pass tried no step and its last pick found no candidate with the total at or above half the budget. A pass below half the budget stores false.
 - `throttle_write` kicks the flusher when the total is at or above the budget, or when the total is at or above half the budget and `empty_pass` is false.
 - No new lock. The kick check is one more atomic load. The throttle wait and its stop exit did not change.
 
@@ -18,7 +18,14 @@ What can make a candidate again:
 - The total reaches the budget: then hot files are candidates. A write at the budget always kicks.
 - A pass that tries a step clears `empty_pass`.
 
-A write to a hot file cannot make another file quiet, so a kick below the budget after an empty pass finds no candidate.
+A write to a hot file cannot make another file quiet, so a kick below the budget after an empty pass at half the budget or more finds no candidate.
+
+## Second fix (e44d57d)
+
+The first form (4d8ac3d) stored `steps == 0` after every pass. In a mount the timed pass (100 ms) also runs with no load, below half the budget, and tries no step. So the flag was true before the load started. Then the first write that found the total at half the budget did not kick, although the move across half is what makes quiet files candidates. The delay was at most one pass interval. The second fix stores true only when the last pick of the pass saw the total at or above half the budget.
+
+- Red run (4d8ac3d plus a stronger `a_write_past_half_the_budget_kicks_the_flusher`: one `flush_pass` below half the budget before the writes): failed at `the second write kicked the flusher` after its 5 s wait (5.13 s).
+- Green run: both tests ok; the hot-file test still gives `passes=1`. `flusher_tests` 23 passed, and 23 passed with `--features deadlock-detect`.
 
 ## Test
 
