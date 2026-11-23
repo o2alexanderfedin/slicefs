@@ -7,10 +7,10 @@ current_phase_name: Dirty budget and rebase flusher
 current_plan: 8
 status: verifying
 stopped_at: Completed 20-08-PLAN.md
-last_updated: "2026-11-23T12:01:11.363Z"
+last_updated: "2026-11-23T12:34:11.333Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 19 complete, transitioned to Phase 20
-state_head: 192ebc0c99eb6d77bcf30001aa0afcb4a1fe6842
+state_head: cbb1182fe5bda1c9eb51f22a2eb33289d91ba537
 progress:
   total_phases: 7
   completed_phases: 2
@@ -175,6 +175,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 20]: 20-07: S7 flusher form asserts VmHWM (not getrusage) against CAP_MIB 320; P1 = 287 MiB, margin 33 MiB
 - [Phase 20]: Empty-pass fix (4d8ac3d): after a pass with no candidate, a write below the budget does not kick the flusher
 - [Phase 20]: LOCK-02 and LOCK-06 marked complete on evidence (gate, smoke 20-08, P1 under CAP_MIB)
+- [Phase 20]: Second empty-pass fix (e44d57d): flag set only when the last pick found no candidate at half the budget or more
 
 ### Pending Todos
 

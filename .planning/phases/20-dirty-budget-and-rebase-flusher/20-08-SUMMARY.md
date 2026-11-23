@@ -24,13 +24,13 @@ estimate:
   tokens: 60000
   tasks: 2
 actuals:
-  tokens: 3200      # chars/4 over the added lines of 192ebc0 (11620) and the smoke log (1002); this file is extra
+  tokens: 7800      # chars/4 over the added lines of 2e36e9c..cbb1182 (31213, this file in its first form included) and the smoke log
   tasks: 2
-  commits: 1
+  commits: 4
 
 plan_head_before: 2e36e9c2ac8ea1cbb4383ad54a10a8db1a5b4d28
-plan_head_after: 192ebc0
-commits: 1
+plan_head_after: cbb1182fe5bda1c9eb51f22a2eb33289d91ba537
+commits: 4
 
 tech-stack:
   added: []
@@ -51,6 +51,7 @@ key-files:
 decisions:
   - "The mount help text says that the budget is memory the daemon may use, that the size options have no upper bound, and that --dirty-limit is for overlays (a stream can hold up to a fixed 64 MiB reorder window)"
   - "LOCK-02 and LOCK-06 are marked complete: every listed check passed (orchestrator rule for this plan)"
+  - "Second empty-pass fix (e44d57d): the flag is set only when the last pick found no candidate at half the budget or more"
 
 metrics:
   duration: "about 75 min for 20-08 (one gate run of 1244 s for the workspace tests, one Docker smoke)"
@@ -59,7 +60,7 @@ metrics:
 
 # Phase 20 Plan 08: Phase close (docs, marks, gate) Summary
 
-The research doc has a `## Phase 20 result` section with the S7 numbers of 20-07 and a note that the empty-pass fix came after them. The README and the mount help text document the four dirty-data options. The stale take-out rows of the architecture text now match the code. The deferred list has an Open part. The phase gate is green, a Docker smoke mount on the final tree passed, and LOCK-02 and LOCK-06 are marked complete.
+The research doc has a `## Phase 20 result` section with the S7 numbers of 20-07 and a note that the empty-pass fix came after them. The README and the mount help text document the four dirty-data options. The stale take-out rows of the architecture text now match the code. The deferred list has an Open part. A review of the first empty-pass fix found a gap; a second fix (e44d57d) closed it. The phase gate is green on the final code (e44d57d), a Docker smoke mount on the final tree (cbb1182) passed, and LOCK-02 and LOCK-06 are marked complete.
 
 ## Before this plan: the empty-pass fix (orchestrator job)
 
@@ -71,13 +72,25 @@ The research doc has a `## Phase 20 result` section with the S7 numbers of 20-07
 - `FlushCtl::empty_pass` (atomic). Each pass stores `steps == 0` at its normal end. `throttle_write` kicks when the total is at or above the budget, or at half the budget or more and `empty_pass` is false. No new lock. The throttle wait and its stop exit did not change.
 - Test `a_hot_file_above_half_the_budget_does_not_kick_after_an_empty_pass`: one hot file, 200 writes with the total between half the budget and the budget, pass interval 60 s, hot window 1 h. Bound: at most 2 passes. Red run (on 9659188 plus the test): `passes=200`, failed at the bound assert in 0.11 s. Green: `passes=1`. A write at the full budget still kicks (checked at the end of the test).
 - Details: `20-FIX-empty-pass.md`.
+- First workspace run of the 4d8ac3d tree: exit 101. `the_idle_merge_leaves_at_most_two_runs_with_the_same_answers` (chunk-store, `index_crash_tests.rs:516`, an idle merge that depends on time) failed. Three runs of it alone passed, and the second workspace run exited 0 (69 ok lines) before the commit.
+
+## Second empty-pass fix (during this plan)
+
+| Commit | Subject |
+|---|---|
+| e44d57d | fix(20): an idle pass below half the budget does not stop the kick |
+| cbb1182 | docs(20): the second empty-pass fix in the note, the doc and the list |
+
+- Gap in 4d8ac3d: every pass stored `steps == 0`. In a mount the timed pass (100 ms) also runs with no load, below half the budget, and tries no step. So the flag was true before the load started, and the first write that found the total at half did not kick (a delay of at most one pass interval; no bound broke).
+- Fix: the flag is true only when the pass tried no step and its last pick saw the total at or above half the budget.
+- Red run: `a_write_past_half_the_budget_kicks_the_flusher` now runs one `flush_pass` below half the budget before the writes. On 4d8ac3d it failed at `the second write kicked the flusher` after its 5 s wait (5.13 s). Green with the fix; the hot-file test still gives `passes=1`; `flusher_tests` 23 passed in debug and 23 with `deadlock-detect`.
 
 ## Tasks
 
 | Task | Name | Commit | Files |
 |---|---|---|---|
 | 1 | Phase 20 result in the research doc; README mount options; architecture text; deferred list | 192ebc0 | multithreaded-request-handling.md, README.md, cli.rs, ARCHITECTURE.md, deferred-items.md |
-| 2 | Requirement marks on evidence; phase gate with a Docker smoke mount | docs commit | REQUIREMENTS.md, runs/smoke-20-08.log, this file |
+| 2 | Requirement marks on evidence; phase gate with a Docker smoke mount | 12d2043, then the final docs commit | REQUIREMENTS.md, runs/smoke-20-08.log, this file |
 
 ## Task 1
 
@@ -88,15 +101,15 @@ The research doc has a `## Phase 20 result` section with the S7 numbers of 20-07
 - ARCHITECTURE.md: the row "2-7 Open" became "2-5 Landed (Phase 19, Phase 20)" and "6-7 Open"; the `keep_budget` row now says "Done" and names `pay_budget`.
 - deferred-items.md: it existed already (the plan said "new"). It now has `## Open` (commit timer at unmount, harness time, reorder window, kept-cell finalize retry, delay curve, the Phase 19 pointer, and a flaky chunk-store test) and `## Decided (closed for Phase 20)` (no upper bound; the empty pass, fixed in 4d8ac3d).
 
-Verify: `## Phase 20 result` count 1; licensing or home path words in the section 0; `--dirty-*` lines in README 5; licensing or home path words in the added lines (README, research doc, ARCHITECTURE, cli.rs, deferred list) 0; `pay_budget` in ARCHITECTURE 2; `## Open` 1.
+Verify: `## Phase 20 result` count 1; forbidden words or home paths in the section 0; `--dirty-*` lines in README 5; forbidden words or home paths in the added lines (README, research doc, ARCHITECTURE, cli.rs, deferred list, fix note) 0; `pay_budget` in ARCHITECTURE 2; `## Open` 1.
 
 ## Task 2: the phase gate
 
-Tree: 192ebc0 (the gate ran on the working tree, and that tree was committed after the workspace tests ended, with no other change). Machine: macOS host, debug.
+The gate ran two times, each on the working tree that was then committed with no other change. Machine: macOS host, debug. Run 1 was on 192ebc0 (all exit 0; workspace 1244 s, `stress_harness` 9.83 s). Run 2 is on e44d57d, the final code (the later commits change only docs and planning files):
 
 | Command | Exit | Result |
 |---|---|---|
-| `cargo test --workspace` | 0 | 69 `test result: ok` lines, 0 failed, 1244 s; `flusher_tests` 23 passed; `stress_harness` 6 passed in 9.83 s |
+| `cargo test --workspace` | 0 | 69 `test result: ok` lines, 0 failed, 1069 s; `flusher_tests` 23 passed; `stress_harness` 6 passed in 12.01 s (host load high) |
 | `cargo check --workspace --all-targets` | 0 | |
 | `cargo check --workspace --all-targets --features slicefs-cli/lock-stats` | 0 | |
 | `cargo check -p slicefs-cli --all-targets --features deadlock-detect` | 0 | |
@@ -110,11 +123,11 @@ No "deadlock detected", "lock rank violation" or "test result: FAILED" in the ga
 
 ## Task 2: Docker smoke mount
 
-- `docker build` from the same Dockerfile (orchestrator correction; the image ID was not compared). `rustc -V` in the image: `rustc 1.100.0 (0ef1bc386 2026-11-09)`. This is the same as the `RUSTC =` line of `runs/s7-wave0-NOTES.md`. Image ID, for reference only: `sha256:0e6232ea9854206cb698661e86a045f4e3f093a743e0abbb75043da25db6dc35`.
-- Tree: `git archive HEAD` of 192ebc0 (porcelain 0 lines) as a tar stream, target volume `slicefs-target-p20`, debug build, wait until the container is 45 s old, then `scripts/docker-linux-test/mt-linux.sh /target/debug/slicefs`.
-- `Linux 89a9dd633256 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux`
-- read, echo-write, cp-3MB, cp-again, readback, mkdir-mv, chmod, truncate, xattr, rm: ok; `unmount: ok`; `daemon-exit: ok`; script exit 0. Host load 13.96 / 21.49 / 39.92 at the start.
-- Log: `runs/smoke-20-08.log`.
+- `docker build` from the same Dockerfile (orchestrator correction; the image ID was not compared). `rustc -V` in the image: `rustc 1.100.0 (0ef1bc386 2026-11-09)`. This is the same as the `RUSTC =` line of `runs/s7-wave0-NOTES.md`. Image ID, for reference only: `sha256:e46c2bd769aa90e27459e6d4bca75167de66046999f9d57549214985845c9678`.
+- Tree: `git archive HEAD` of cbb1182 (porcelain 0 lines) as a tar stream, target volume `slicefs-target-p20`, debug build, wait until the container is 45 s old, then `scripts/docker-linux-test/mt-linux.sh /target/debug/slicefs`.
+- `Linux bbe5ccf082fa 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux`
+- read, echo-write, cp-3MB, cp-again, readback, mkdir-mv, chmod, truncate, xattr, rm: ok; `unmount: ok`; `daemon-exit: ok`; script exit 0. Host load 53.77 / 52.99 / 44.28 at the start.
+- Log: `runs/smoke-20-08.log`. An earlier smoke on 192ebc0 (before the second fix) also passed with the same rustc; this log replaced its log.
 
 ## Task 2: the cap did not move
 
@@ -130,10 +143,10 @@ The plan's awk on `runs/s7-wave0.log` prints `runs=6 modes=2 pm=267 spread=20 r=
 
 **LOCK-06: marked `[x]`, traceability Complete.** Evidence:
 - Every `flusher_tests` test green: 23 passed in debug and 23 passed with `deadlock-detect` (criteria 2 and 3, including `all_writers_throttled_while_a_commit_waits_flusher_paused` and `..._flusher_in_a_step`).
-- The 20-03 smoke mount (aa853f2) and the 20-08 smoke mount (192ebc0) passed (`unmount: ok`, `daemon-exit: ok`).
+- The 20-03 smoke mount (aa853f2) and the 20-08 smoke mount (cbb1182) passed (`unmount: ok`, `daemon-exit: ok`).
 - The 20-07 P1 runs passed under CAP_MIB: VmHWM 257, 278, 287 MiB, cap 320, `test result: ok` 3 times, with rustc 1.100.0 equal to the 20-01 `RUSTC =` line (the image was rebuilt, as the orchestrator correction allows).
 - The cap check above passed.
-- Note: the P1 runs are on efc1e9b, before the empty-pass fix (4d8ac3d). They were not run again (orchestrator rule). The fix only removes flusher kicks below the budget; the doc and this file say so.
+- Note: the P1 runs are on efc1e9b, before the empty-pass fixes (4d8ac3d, e44d57d). They were not run again (orchestrator rule). The fixes only remove flusher kicks below the budget after an empty pass at half the budget or more; the doc and this file say so.
 
 ## Deviations from Plan
 
@@ -151,13 +164,13 @@ None.
 
 **4. Extra gate command.** `cargo test -p slicefs-cli --test no_take_out` was added to the gate, because the LOCK-02 mark depends on it.
 
-**5. One extra Open item: a flaky chunk-store test.** In the first workspace run of the empty-pass fix, `the_idle_merge_leaves_at_most_two_runs_with_the_same_answers` (`index_crash_tests.rs:516`) failed: the idle merge (50 ms) ran before the tombstone assert. Three runs alone and the next two workspace runs passed. No chunk-store code changed in Phase 20. It is in the deferred list.
+**5. One extra Open item: a flaky chunk-store test.** In the first workspace run of the empty-pass fix, `the_idle_merge_leaves_at_most_two_runs_with_the_same_answers` (`index_crash_tests.rs:516`) failed: the idle merge (50 ms) ran before the tombstone assert. Three runs alone and all later workspace runs passed. No chunk-store code changed in Phase 20. It is in the deferred list.
 
 **6. The research doc Phase 20 section has more test names than the plan lists** (the shutdown test under criterion 3, and the empty-pass test). Both are in `flusher_tests.rs`.
 
 ## Open points (for a decision)
 
-- **Harness time.** `stress_harness` took 12.36 s in the empty-pass workspace run and 9.83 s in the gate run (limit 10 s). The host load was high. No quiet machine was available to check it again. It stays open.
+- **Harness time.** `stress_harness` took 12.36 s in the first empty-pass workspace run, 9.83 s in gate run 1 and 12.01 s in gate run 2 (limit 10 s). The host load was high. No quiet machine was available to check it again. It stays open.
 - **P1 margin.** P1 is 20 MiB above P0 and the margin to the cap is 33 MiB (about one spread). One `MALLOC_ARENA_MAX=2` flusher run would show if the extra memory is arenas. Not run.
 - **S7 after the fix.** The S7 numbers are from before the empty-pass fix. The fix should lower the flusher CPU, and it does not change a step or a wait at the budget. A new S7 run is needed only if the owner wants numbers on the final code.
 - **Commit timer at unmount, reorder window, kept-cell finalize retry, delay curve, Phase 19 items:** open in `deferred-items.md`.
@@ -176,5 +189,5 @@ None.
 ## Self-Check: PASSED
 
 - FOUND: docs/research/multithreaded-request-handling.md (`## Phase 20 result`), README.md (`--dirty-budget`), deferred-items.md (`## Open`), runs/smoke-20-08.log, 20-FIX-empty-pass.md
-- FOUND: 4d8ac3d, 2e36e9c and 192ebc0 in HEAD
-- `commits: 1` is measured with `git rev-list --count 2e36e9c..HEAD` before the docs commit of this file.
+- FOUND: 4d8ac3d, 2e36e9c, 192ebc0, 12d2043, e44d57d and cbb1182 in HEAD
+- `commits: 4` is measured with `git rev-list --count 2e36e9c..HEAD` (192ebc0, 12d2043, e44d57d, cbb1182) before the final docs commit of this file.
