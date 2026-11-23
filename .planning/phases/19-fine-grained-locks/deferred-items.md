@@ -33,3 +33,8 @@
 - **The WAL writer lock held for the record pwrite (from 19-11).** Fixed in 19-13: every strategy writes its records with a positional write and no WAL lock, one write in flight per segment; a cut creates its next segment before it takes the writer lock. 19-16 measured `wal_writer` hold max 38-1776 us (macOS) and 101-1019 us (Linux).
 - **Locked fallbacks with writer I/O in the cell hold (from 19-11).** Fixed in 19-14 (step token, unlocked retries of dropped steps, the hard-cap gate, reads that compose pending writes from memory) and 19-15 (the finalize and the size change of an open file run only unlocked steps; a hard-cap gate step copies at most the final step). The locked step forms are used only by destroy and the commit cut (exclusive gate).
 - **mkdir: the new directory could be reached by its name before its `Mkdir` record (from 19-10).** Fixed in 19-13: mkdir reserves the number first, locks the stripes of the parent and of the new directory, then links it and appends the record in that hold.
+
+## From the Phase 19 verification (2026-11-23)
+
+- Chunk store `put`: the locked re-lookup after an index change can read a run page with the store lock held; the `try_clone` failure fallback appends or syncs under the store lock. Rare; accepted for Phase 19 by override. Follow-up: do the re-lookup with the lock released and re-check the index generation.
+- IN-02 (append reads the committed size with the cell unlocked) has no direct test for two first appends on a non-empty file.

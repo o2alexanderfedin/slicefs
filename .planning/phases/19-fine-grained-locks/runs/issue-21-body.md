@@ -70,7 +70,7 @@ A debug build checks this order on each lock and fails the test on a violation.
 
 `fsync` releases all locks before it waits for `durable_lsn`. The committer uses the frozen overlays; it locks a file cell only in the commit cut, under the exclusive gate.
 
-Some work off the read and write paths still does I/O under a lock: GC, the commit cut (under the exclusive gate, when no request runs) and offline log rotate. On a request path, two operations still do I/O under a lock: a size change of a closed file does its I/O under its own transient cell (reads do not wait for it), and an unlink of the last link reclaims the inode with the namespace stripes held.
+Some work off the read and write paths still does I/O under a lock: GC, the commit cut (under the exclusive gate, when no request runs) and offline log rotate. On a request path, a size change of a closed file still does its I/O under its own transient cell (reads do not wait for it). An unlink of the last link reads the manifest and drops the refcounts after the namespace stripes are released. In the chunk store, a put can read an index page from disk with the store lock held (after an index change), and a pack whose file handle cannot be cloned keeps a locked append or sync.
 
 ## Acceptance criteria
 
