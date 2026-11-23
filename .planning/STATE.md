@@ -4,18 +4,18 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: 21
 current_phase_name: Worker pool
-current_plan: Not started
-status: planning
-stopped_at: Phase 20 complete, ready to plan Phase 21
-last_updated: "2026-11-23T14:57:29.685Z"
+current_plan: 2
+status: executing
+stopped_at: Completed 21-01-PLAN.md
+last_updated: "2026-11-23T23:26:20.141Z"
 last_activity: 2026-11-23
-last_activity_desc: Phase 20 complete, transitioned to Phase 21
-state_head: 31e30b75cd6ca019ff0d1dc86648b39f86a49124
+last_activity_desc: 21-01 complete (worker pool tracer); next 21-02
+state_head: 4c70d3908ba9d2a3d333d532d604a27b008aa33c
 progress:
   total_phases: 7
   completed_phases: 3
-  total_plans: 31
-  completed_plans: 31
+  total_plans: 40
+  completed_plans: 32
   percent: 43
 ---
 
@@ -26,16 +26,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-20)
 
 **Core value:** High-ratio data deduplication that works transparently as a real, daily-driver POSIX filesystem
-**Current focus:** Phase 19 — Fine-grained locks
+**Current focus:** Phase 21 — Worker pool
 
 ## Current Position
 
-Current Plan: Not started
-Total Plans in Phase: 8
+Current Plan: 2
+Total Plans in Phase: 9
 Phase: 21 — Worker pool
-Plan: 20-08 complete (8 of 8); next: phase verification
-Status: Ready to plan
-Last activity: 2026-11-23 — Phase 20 complete, transitioned to Phase 21
+Plan: 21-01 complete (1 of 9); next: 21-02
+Status: Executing
+Last activity: 2026-11-23 — 21-01 complete (worker pool tracer, smoke with 4 workers)
 
 Progress: [████░░░░░░] 43%
 
@@ -80,6 +80,7 @@ Progress: [████░░░░░░] 43%
 | Phase 20 P06 | 36 min | 2 tasks | 6 files |
 | Phase 20 P07 | 55 min | 3 tasks | 4 files |
 | Phase 20 P08 | 75min | 2 tasks | 7 files |
+| Phase 21 P01 | 70 min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -176,6 +177,9 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 20]: Empty-pass fix (4d8ac3d): after a pass with no candidate, a write below the budget does not kick the flusher
 - [Phase 20]: LOCK-02 and LOCK-06 marked complete on evidence (gate, smoke 20-08, P1 under CAP_MIB)
 - [Phase 20]: Second empty-pass fix (e44d57d): flag set only when the last pick found no candidate at half the budget or more
+- [Phase 21]: 21-01: request queue is max(2 x N, 4) slots and 8 MiB; an empty queue admits one job of any weight
+- [Phase 21]: 21-01: a pool worker counts its exit with a drop guard, so a panicked worker does not hold the drain to its limit
+- [Phase 21]: 21-01: a pool spawn error becomes the mount error and goes through the stop steps after mount()
 
 ### Pending Todos
 
@@ -199,8 +203,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-23T12:01:11.068Z
-Stopped at: Phase 20 complete, ready to plan Phase 21
+Last session: 2026-11-23T23:26:19.717Z
+Stopped at: Completed 21-01-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
