@@ -136,7 +136,8 @@ None.
 ## Open points
 
 - **Requirements.** LOCK-06 is in the plan frontmatter, but it is not marked complete (orchestrator rule). REQUIREMENTS.md did not change.
-- **Upper bound of the byte options.** There is no upper bound: `--dirty-budget 1000G` is accepted. The hard cap uses `saturating_add`, so a very large limit does not overflow. The plan asks for no upper bound.
+- **Upper bound of the byte options (for a decision).** There is no upper bound: `--dirty-budget 1000G` is accepted. The hard cap uses `saturating_add`, so a very large limit does not overflow. The plan asks for no upper bound. These are public options: a bound that a later release adds would refuse values that work today (the A3 rule in the other direction). So "no upper bound" is the choice that is costly to change, and the owner should accept it.
+- **`--dirty-limit` and the reorder window of a stream (for 20-07 and 20-08).** The per-file limit acts on overlays only (`write_in_cell`: `over` needs `WriteMode::Overlay`). A stream keeps out-of-order writes as pending writes up to `REORDER_WINDOW` (64 MiB, a constant), whatever `--dirty-limit` is. Only the budget path (`pay_budget`, after the throttle) moves them to an overlay. So with `--dirty-limit 4M`, one stream can hold more than 4 MiB of dirty data, up to about the budget. This behavior is older than this plan. The help text of `--dirty-limit` ("most dirty file data of one file") does not say it. Plan 20-08 (docs) can name it, or a later plan can tie the window to the limit. No code changed here.
 - **`stress_harness` time.** 10.06 s and 9.45 s in the two workspace runs (load average about 15). This plan did not change the write path; the item stays in `deferred-items.md`.
 - **Deferred items** (commit timer at unmount, empty passes, harness time) are not in the scope of this plan and did not change.
 
