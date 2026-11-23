@@ -95,15 +95,17 @@ pub enum Cmd {
         #[arg(long, value_name = "NAME", value_parser = crate::content::parse_hash)]
         hash: Option<String>,
         /// Most dirty file data (data that is not stored yet) of all open
-        /// files together. SIZE is bytes, or a number with K, M or G
-        /// (1024-based). Default 64M, at least 4M. A writer over it waits up
-        /// to 5 s for the background flusher, then stores part of its own
-        /// file.
+        /// files together. This is memory that the daemon may use. SIZE is
+        /// bytes, or a number with K, M or G (1024-based). Default 64M, at
+        /// least 4M, no upper bound. A writer over it waits up to 5 s for
+        /// the background flusher, then stores part of its own file.
         #[arg(long, value_name = "SIZE", default_value = "64M", value_parser = crate::content::parse_dirty_bytes)]
         dirty_budget: usize,
-        /// Most dirty file data of one file. SIZE is bytes, or a number with
-        /// K, M or G (1024-based). Default 32M, at least 4M, not above
-        /// --dirty-budget.
+        /// Most dirty file data of one file that is changed in place (an
+        /// overlay). SIZE is bytes, or a number with K, M or G (1024-based).
+        /// Default 32M, at least 4M, not above --dirty-budget. A file that is
+        /// written from start to end (a stream) can also hold out-of-order
+        /// writes up to a fixed 64 MiB window, whatever this limit is.
         #[arg(long, value_name = "SIZE", default_value = "32M", value_parser = crate::content::parse_dirty_bytes)]
         dirty_limit: usize,
         /// Store the dirty data of a file after SECS seconds with no write

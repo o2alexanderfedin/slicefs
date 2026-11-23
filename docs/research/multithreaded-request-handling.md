@@ -242,6 +242,8 @@ On Linux the buffered strategies are faster than PerOp: in pass 2, 358.4 and 320
 
 S7 ran in one process, with no mount, on commit d24da49, in the container (rustc 1.100.0, store on overlayfs, 32 CPUs). The writes are serialized, because `keep_budget` takes the state of another file, and that is not safe with free threads. There are 4 threads. Each thread has its own 1 GiB file, written in 1 MiB writes. Then each thread writes 128 MiB of the bigwrite mix (1 MiB and 4 KiB random writes, half of the bytes each). Each thread does an fsync every 64 MiB. A commit runs every 30 s. This is one run. The data check, which compares every block with its version, passed.
 
+The reason for the serialized run does not hold after Phase 19: no function takes the state of another file now. The "Phase 20 result" section below has the numbers of the parallel runs.
+
 | Value | Result |
 |---|---|
 | Peak RSS (resident set size) of the test process | 234 MiB, against the cap of 256 MiB (`within_cap=true`) |
@@ -319,6 +321,50 @@ Still open after Phase 19:
   - `stripe`: on macOS, the many-files mode had a hold of about 20 ms in each of the 3 runs (21.5, 20.2 and 20.2 ms); on Linux the max was 1.1-2.6 ms. A probe named `unlink_logged`: the first store read of the manifest in `reclaim_inode` takes about 20 ms, with the parent and child stripes held. No global lock is held then (store hold max 122 us, `io` hold max 0.5 ms in that mode). Why the read takes 20 ms is not measured. The review fix IN-01 moved that read after the stripes are released; at the fix commit the macOS stripe hold max was 298.5 us.
   - `file_cell`: on macOS the one-file mode had holds of 3.6-7.9 ms in every run; on Linux one hold of 13 ms. The probe caught only holds of 3.2-4.8 ms, released in `write_in_cell`; their span is not measured. The parked tests show that no writer I/O is in a cell hold.
 - Known windows, older than Phase 19: a size change of a closed file has no stripe, so it can race an unlink or a setattr of other fields of the same inode; there is no ancestor check for a cross-directory rename. (mkdir now takes the new number first and locks the stripes of the parent and of the new directory, so its window is closed.)
+
+## Phase 20 result
+
+Phase 20 (issue #21) did step 5 of the migration: the dirty budget is safe with N writers (LOCK-02, LOCK-06).
+
+The design in short:
+- **Throttle.** A write calls `throttle_write` before it takes the commit gate, a stripe or a cell. Below the budget it goes on. Over the budget it waits with no lock held, in 50 ms slices, until the flusher frees memory, for at most 5 s. Then it writes and pays with steps of its own file (`pay_budget`). A write never fails here.
+- **Flusher.** One thread per mount (`slicefs-flusher`). It takes the commit gate shared for one step of one file (`FLUSH_STEP`, 4 MiB), and never across a wait. It skips a cell that has a step in flight; it does not wait for it. It never takes a cell out of the cell map.
+- **Triggers.** A file with no write for the idle time (5 s). Dirty data that reached the maximum age (30 s). The buffer is full: the total is at half the budget or more, or one quiet file is at its own limit; then the largest quiet file goes first.
+- **The hot rule.** A file with a write in the last 300 ms is hot. Below the budget the flusher never steps a hot file, because every write to it would drop the step. Its own writer keeps it under its limit. At the budget a hot file can be stepped, because its writers wait in the throttle.
+- **Stop.** At unmount the flusher stops and is joined before the destroy work takes the gate. The stop, and a flusher panic, wake every throttled writer at once.
+
+Mount options: `--dirty-budget` (default 64M), `--dirty-limit` (default 32M), `--dirty-idle` (default 5 s) and `--dirty-expire` (default 30 s). See the README.
+
+Tests per ROADMAP Phase 20 criterion:
+1. No take-out: `only_four_functions_remove_a_cell`, `the_budget_step_is_own_file_only` and `the_flusher_takes_no_cell_out` (`no_take_out.rs`). Only four functions remove a cell from the cell map, and the writer-side step (`pay_budget`) steps only its own file. The rank rule: the flusher thread runs with the gate check of the rank checker (a cell only inside a shared gate hold), and a thread never holds two cells (`two_cells_panic_even_in_key_order`).
+2. Flusher and throttle (`flusher_tests.rs`): `a_writer_over_the_budget_waits_for_the_flusher`, `the_flusher_lowers_the_total`, `a_throttled_writer_writes_after_the_limit`, `a_write_past_half_the_budget_kicks_the_flusher`, `stop_wakes_throttled_writers`, `a_flusher_panic_wakes_throttled_writers`, `a_throttle_with_a_lock_held_panics`, `an_idle_file_is_flushed`, `an_expired_file_is_flushed`, `a_hot_file_is_left_to_its_own_writer`, `at_the_budget_a_hot_file_is_stepped` and `dirty_total_stays_bounded_with_parallel_writers`. The last one shows that with 4 parallel writers the largest sampled total (4.07 MiB) stays under the budget plus 4 writes plus one rebase step (5.13 MiB).
+3. No deadlock: `all_writers_throttled_while_a_commit_waits_flusher_paused` and `all_writers_throttled_while_a_commit_waits_flusher_in_a_step`. Also `shutdown_with_a_parked_flusher_step_and_a_queued_commit_ends`.
+4. Peak RSS under one fixed cap: the S7 run (in process, no mount) in OrbStack Docker, kernel `Linux 7.2.12-orbstack x86_64`, 32 CPUs, rustc 1.100.0, release. 4 writers, 1 GiB file each, 128 MiB of the bigwrite mix each, budget 64 MiB.
+
+| Value | Result |
+|---|---|
+| P_old: Phase 19 code, writes serialized (3 runs, VmHWM max) | 260 MiB |
+| P0: Phase 19 code, writes parallel (3 runs, VmHWM max) | 267 MiB |
+| Cap rule (set before the runs) | P0 max + one flusher step (8) + a reserve (max of 16, 10 % of P0, 2 x spread = 40), rounded up to a multiple of 8 |
+| CAP_MIB | 320 MiB |
+| P1: Phase 20 code with the flusher, writes parallel (3 runs, VmHWM) | 257, 278, 287 MiB; max 287 MiB, margin 33 MiB |
+| Flusher steps (published) per run | 128, 120, 118 (all published) |
+| Dropped steps | 0 |
+| Throttle waits per run / timeouts | 428, 437, 411 / 0 |
+| Slowest write (no throttle wait in it) | 321.1, 2485.1, 1238.4 ms |
+| Largest throttle wait | 1015, 525, 282 ms |
+| Largest commit gate wait | 692.6, 12.4, 105.8 ms |
+| Largest dirty total | 65 MiB |
+
+The delay of one write is its throttle wait plus its write time. These are two separate maxima, so the worst write delay is at most their sum. P1 is 20 MiB above P0, with the same dirty total. A part of the extra memory can be the malloc arenas of the flusher thread (a P0 run with `MALLOC_ARENA_MAX=2` gave 230 MiB); P1 did not measure it.
+
+The S7 numbers above were measured in plan 20-07, before the empty-pass fix. In those runs, 98.6 % to 99.7 % of the flusher passes found no candidate (up to about 900 passes per second): each write at half the budget or more woke the flusher, also when the only dirty file was hot. After the runs, a fix stopped this: after a pass with no candidate, a write below the budget does not wake the flusher. The timed pass (every 100 ms) and a write at the full budget still do. The test `a_hot_file_above_half_the_budget_does_not_kick_after_an_empty_pass` shows 1 pass for 200 writes (200 before the fix). The S7 runs were not done again after the fix.
+
+Limits:
+- The daemon still has one dispatch thread until Phase 21. In a mount, a throttled write also stops reads and all other requests for up to the wait limit (5 s). The S7 run in process is the evidence for parallel writers.
+- A stream can hold out-of-order writes up to a fixed 64 MiB window, whatever `--dirty-limit` is.
+
+Still open after Phase 20: see `.planning/phases/20-dirty-budget-and-rebase-flusher/deferred-items.md` (and the Phase 19 list that it points to).
 
 ## Conclusion
 
