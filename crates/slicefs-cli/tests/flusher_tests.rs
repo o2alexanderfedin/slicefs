@@ -623,3 +623,189 @@ fn shutdown_with_a_parked_flusher_step_and_a_queued_commit_ends() {
     a.check(&fs, "after reload and replay");
     b.check(&fs, "after reload and replay");
 }
+
+// ROADMAP criterion 3: all writers throttled while a commit waits.
+
+/// The hook type of `test_set_rebase_hook`.
+type Hook = Arc<dyn Fn() + Send + Sync>;
+
+/// A rebase hook that parks its first call until `go` sends or drops (at
+/// most 30 s) and tells `parked` when it gets there. Later calls do not park.
+fn park_first_rebase() -> (Hook, mpsc::Receiver<()>, mpsc::Sender<()>) {
+    let (parked_tx, parked_rx) = mpsc::channel::<()>();
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    let park = Mutex::new(Some((parked_tx, go_rx)));
+    let hook: Hook = Arc::new(move || {
+        let Some((parked, go)) = park.lock().unwrap().take() else { return };
+        let _ = parked.send(());
+        let _ = go.recv_timeout(Duration::from_secs(30));
+    });
+    (hook, parked_rx, go_tx)
+}
+
+/// Writes per writer thread in the criterion 3 tests, and the first grid
+/// slot they write (clean slots, so each write adds its full size).
+const WRITES: usize = 8;
+const FIRST_SLOT: usize = 40;
+
+/// A logged file system (a commit works) with four overlay files of 4 MiB,
+/// each with 35 dirty pieces (about 1.1 MiB, about 4.4 MiB in total), all
+/// filled with the default budget. Dirty limit 2 MiB, throttle wait limit
+/// 30 s (a writer that leaves early is a bug, not a timeout), pass 20 ms,
+/// and the flusher paused. The budget is not lowered yet.
+fn throttle_setup(store: &std::path::Path) -> (SliceFsFilesystem, Vec<Model>) {
+    let fs = common::new_fs_with(store, WalConfig::PerOp);
+    fs.test_set_dirty_limit(2 * MIB);
+    let files: Vec<Model> = (1..=4).map(|f| dirty_file(&fs, f, 4 * MIB, 35)).collect();
+    for m in &files {
+        let cost = fs.test_dirty_cost(m.ino);
+        assert!(cost >= MIB && cost < 2 * MIB, "file {} has about 1.1 MiB dirty: {cost}", m.file);
+    }
+    fs.test_pause_flusher(true);
+    fs.test_set_flush_pass(20);
+    fs.test_set_throttle_wait(30_000);
+    (fs, files)
+}
+
+/// The writes of one writer thread: `WRITES` pieces from `FIRST_SLOT`.
+type Writes = Vec<(u64, Vec<u8>)>;
+
+fn writer_pieces(m: &Model) -> Writes {
+    (FIRST_SLOT..FIRST_SLOT + WRITES).map(|slot| m.piece(slot)).collect()
+}
+
+/// One scoped writer thread per file; each makes its throttled writes in
+/// order and sends its results at the end.
+fn spawn_writers<'s, 'e: 's>(
+    s: &'s std::thread::Scope<'s, 'e>,
+    fs: &'e SliceFsFilesystem,
+    writes: &'e [(u64, Writes)],
+) -> mpsc::Receiver<(usize, Vec<WriteResult>)> {
+    let (tx, rx) = mpsc::channel();
+    for (i, (fh, pieces)) in writes.iter().enumerate() {
+        let tx = tx.clone();
+        s.spawn(move || {
+            let r = pieces.iter().map(|(off, data)| throttled_write(fs, *fh, *off, data).0).collect();
+            let _ = tx.send((i, r));
+        });
+    }
+    rx
+}
+
+/// Receive the results of `n` writer threads within `limit` in total, and
+/// check that each write put one piece in.
+fn all_writers_ok(rx: &mpsc::Receiver<(usize, Vec<WriteResult>)>, n: usize, limit: Duration) {
+    let deadline = Instant::now() + limit;
+    for _ in 0..n {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let (i, rs) = rx.recv_timeout(left).unwrap_or_else(|_| panic!("all writers return within {limit:?}"));
+        assert_eq!(rs.len(), WRITES, "writer {i} made all its writes");
+        for r in rs {
+            assert!(matches!(r, WriteResult::Ok(k) if k as usize == PIECE), "a write of writer {i} is in: {r:?}");
+        }
+    }
+}
+
+/// Mark the writer pieces as written, check the files with the handles
+/// open and after release, then drop the file system and check them again
+/// after a reload and a replay of the write log.
+fn check_after_writers(fs: SliceFsFilesystem, mut files: Vec<Model>, store: &std::path::Path) {
+    for m in &mut files {
+        for slot in FIRST_SLOT..FIRST_SLOT + WRITES {
+            m.applied(slot);
+        }
+        m.check(&fs, "handles open");
+    }
+    for m in &files {
+        m.release(&fs);
+        m.check(&fs, "after release");
+    }
+    drop(fs);
+    let fs = common::reload_and_replay(store);
+    for m in &files {
+        m.check(&fs, "after reload and replay");
+    }
+}
+
+#[test]
+fn all_writers_throttled_while_a_commit_waits_flusher_paused() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    let (fs, files) = throttle_setup(&store);
+    let budget = 4 * MIB;
+    let writes: Vec<(u64, Writes)> = files.iter().map(|m| (m.fh, writer_pieces(m))).collect();
+    std::thread::scope(|s| {
+        let _stop = StopGuard(&fs);
+        s.spawn(|| flusher::run_flusher(&fs));
+        assert!(wait_until(WAIT, || fs.test_flusher_running()), "the flusher runs");
+        fs.test_set_dirty_budget(budget);
+        assert!(fs.test_dirty_total() >= budget, "the total is at or above the budget");
+        let rx = spawn_writers(s, &fs, &writes);
+        assert!(wait_until(WAIT, || fs.test_throttled_now() == 4), "the four writers wait in the throttle");
+
+        let (commit_tx, commit_rx) = mpsc::channel();
+        let fs_ref = &fs;
+        s.spawn(move || {
+            let _ = commit_tx.send(timed_commit(fs_ref, &fs_ref.commit_gate()).map(|_| ()).map_err(|e| e.to_string()));
+        });
+        let c = commit_rx.recv_timeout(Duration::from_secs(10)).expect("the commit returns within 10 s");
+        assert!(c.is_ok(), "the commit is Ok: {c:?}");
+        assert_eq!(fs.test_throttled_now(), 4, "the commit did not need a writer to move");
+
+        fs.test_pause_flusher(false);
+        all_writers_ok(&rx, 4, Duration::from_secs(10));
+        let bound = budget + 4 * (PIECE + slicefs_cli::overlay::EXTENT_OVERHEAD);
+        let total = fs.test_dirty_total();
+        assert!(total < bound, "the total {total} is below the budget plus one write per writer ({bound})");
+    });
+    check_after_writers(fs, files, &store);
+}
+
+#[test]
+fn all_writers_throttled_while_a_commit_waits_flusher_in_a_step() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    let (fs, files) = throttle_setup(&store);
+    let budget = 4 * MIB;
+    let writes: Vec<(u64, Writes)> = files.iter().map(|m| (m.fh, writer_pieces(m))).collect();
+    // After the fill, so no fill write meets the hook. The writers wait in
+    // the throttle and do not pay, so the first rebase is a flusher step.
+    let (hook, parked, go) = park_first_rebase();
+    fs.test_set_rebase_hook(Some(hook));
+    std::thread::scope(|s| {
+        let _stop = StopGuard(&fs);
+        // Dropped before the scope joins (also on a failed assert): the
+        // parked step goes on.
+        let mut go = Some(go);
+        s.spawn(|| flusher::run_flusher(&fs));
+        assert!(wait_until(WAIT, || fs.test_flusher_running()), "the flusher runs");
+        fs.test_set_dirty_budget(budget);
+        assert!(fs.test_dirty_total() >= budget, "the total is at or above the budget");
+        let rx = spawn_writers(s, &fs, &writes);
+        assert!(wait_until(WAIT, || fs.test_throttled_now() == 4), "the four writers wait in the throttle");
+
+        fs.test_pause_flusher(false);
+        // The flusher's first step is in its I/O phase and holds the gate shared.
+        parked.recv_timeout(WAIT).expect("the flusher step is parked");
+
+        let (commit_tx, commit_rx) = mpsc::channel();
+        let fs_ref = &fs;
+        s.spawn(move || {
+            let _ = commit_tx.send(timed_commit(fs_ref, &fs_ref.commit_gate()).map(|_| ()).map_err(|e| e.to_string()));
+        });
+        assert!(wait_until(Duration::from_secs(10), || fs.test_gate_exclusive_waiters() == 1),
+            "the commit is queued for the exclusive gate");
+        assert!(commit_rx.try_recv().is_err(), "the commit has not returned while the step holds the gate");
+
+        go.take();
+        let c = commit_rx.recv_timeout(Duration::from_secs(10)).expect("the commit returns within 10 s");
+        assert!(c.is_ok(), "the commit is Ok: {c:?}");
+        all_writers_ok(&rx, 4, Duration::from_secs(10));
+        let st = fs.test_flusher_stats();
+        assert!(st.published >= 1, "the flusher published a step: {st:?}");
+    });
+    fs.test_set_rebase_hook(None);
+    check_after_writers(fs, files, &store);
+}
