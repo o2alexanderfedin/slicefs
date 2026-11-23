@@ -337,34 +337,37 @@ Plans:
   3. A worker panic aborts the daemon; the next mount replays the write log, and no request is served after a half-done update
   4. All tests and pjdfstest pass with 4 workers on Linux (Docker CI), and the tests pass on macOS FSKit CI with the macOS default
   5. Parallel I/O on different files scales with the number of workers on Linux, and the measured result is recorded
-**Plans**: 8 plans
+**Plans**: 9 plans
 
 One plan per wave; executors run them in order.
 
 Plans:
 **Wave 1** *(tracer)*
-- [ ] 21-01-PLAN.md — Tracer: `--workers` (costly: public CLI), pool with a bounded queue, getattr through `serve`, drain before `shutdown`; Docker smoke with 4 workers
+- [ ] 21-01-PLAN.md — Tracer: `--workers` (costly: public CLI), pool with a bounded queue and [Stats] counters, getattr through `serve`, drain before `shutdown`; Docker smoke with 4 workers
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 21-02-PLAN.md — All 31 callbacks through `run` and `serve` (reply after the gate), trace switch, source scan; smoke with 4 and 1 workers
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 21-03-PLAN.md — Abort hook for request threads; child-process replay tests; injected panic in a Linux mount at 4 and 1 workers
+- [ ] 21-03-PLAN.md — Abort hook for request threads; child-process replay tests; injected panic in a Linux mount at 4 and 1 workers (red with a no-op hook)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 21-04-PLAN.md — `S7_THREADS` and before-runs at 8 and 16 writers; global step limit (2 save steps, 200 ms slot wait, May and Must steps)
+- [ ] 21-04-PLAN.md — `S7_THREADS` knob (cap asserted at 1 to 8 writers); S7 before-runs at 1, 2, 8 and 16 writers
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 21-05-PLAN.md — S7 with the step limit at 1, 2, 4 (7 runs), 8 and 16 writers under CAP_MIB 320; CAP(N)
+- [ ] 21-05-PLAN.md — Global step limit (2 save steps, 200 ms slot wait, May and Must steps), release admission, [Stats] step counters
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 21-06-PLAN.md — CI: `SLICEFS_WORKERS: 4` in the Linux job and its scripts, loud Workers check; local all, verify, pjdfstest with 4 workers
+- [ ] 21-06-PLAN.md — S7 with the step limit: hard bar 320 MiB at 1, 2, 4 (7 runs) and 8 writers; 16 reported; CAP(N)
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 21-07-PLAN.md — Bench at 1/2/4/8/16 workers (MB/s, VmHWM), 1.5x bar set first; macOS bench workflow
+- [ ] 21-07-PLAN.md — CI: `SLICEFS_WORKERS: 4` in the Linux job and its scripts, loud Workers check (red run); local all, verify, pjdfstest with 4 workers
 
 **Wave 8** *(blocked on Wave 7 completion)*
-- [ ] 21-08-PLAN.md — Phase 21 result, README `--workers`, deferred list, POOL marks on evidence, phase gate
+- [ ] 21-08-PLAN.md — Bench at 1/2/4/8/16 workers (MB/s, VmHWM), 1.5x bar and 320 MiB memory bar set first; macOS bench workflow; final CI evidence
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 21-09-PLAN.md — Phase 21 result, README `--workers`, deferred list, POOL marks on evidence, phase gate
 
 ### Phase 22: Chunk profiles
 

@@ -649,38 +649,47 @@ fn a_worker_panic_aborts_and_the_remount_replays() {
 
 ## Open Questions
 
-1. **What does the reader do when the queue stays full?**
+1. **What does the reader do when the queue stays full? (RESOLVED)**
    - What we know: the reader holds no lock; each running job ends within its own bounded waits (throttle 200 ms, step waits ≤ 120 s, store waits 10 s).
    - What's unclear: whether the wait "ends at unmount" ([Waits]). It does not: while the reader is blocked in `submit`, it does not read the channel, so it never sees ENODEV or DESTROY, `destroy()` never runs, and the drain limit never starts. A worker that is stuck for ever with a full queue would hang the unmount for ever.
    - Recommendation (meets [Waits]): give `submit` the same limit and action as the drain. Wait in 1 s slices with no lock held, print a warning after 10 s, and at `SUBMIT_WAIT` = 150 s with no free slot, print which jobs run and `abort()`; the write log replays at the next mount. Each wake-up from a finished job restarts nothing: the limit counts from the start of this `submit`, and a slot frees only when a job ends, so 150 s with no slot means that every worker has been in one job for longer than any bounded wait (`STEP_WAIT_MAX` 120 s + `STORE_WAIT` 10 s + the throttle). Do not reply EIO to a valid request. A test with a short test-only limit shows the abort path in a child process, and a second test shows that `submit` returns as soon as a job ends.
+   - **Adopted:** the recommendation: `SUBMIT_WAIT` 150 s in 1 s slices with no lock held, then abort (plan 21-01; the abort is tested in a child process in plan 21-03).
 
-2. **Should a flusher (or GC) panic also abort?**
+2. **Should a flusher (or GC) panic also abort? (RESOLVED)**
    - What we know: Phase 20 made a flusher panic survivable (it wakes throttled writers; `a_flusher_panic_wakes_throttled_writers`). The flusher step holds the gate shared and a cell; its unwind releases them with no poison.
    - Recommendation: in this phase abort only request threads (`fuser-*`, `slicefs-worker-*`). Add a deferred item: "a flusher panic during a publish can leave a half-done cell; consider abort for `slicefs-flusher` too". Reversible.
+   - **Adopted:** only request threads (`fuser-*`, `slicefs-worker-*`) abort; abort on a flusher panic is a deferred item (plans 21-03 and 21-09).
 
-3. **Drain limit value and action.**
+3. **Drain limit value and action. (RESOLVED)**
    - Recommendation: 150 s (above `STEP_WAIT_MAX` 120 s + `STORE_WAIT` 10 s + the throttle), then abort with a message. A test with a short test-only limit and a parked job shows that `drain_and_join` returns `Err` and does not hang.
+   - **Adopted:** `DRAIN_WAIT` 150 s, then abort with a message (plan 21-01, `drain_limit_reports_a_stuck_worker`). The sum it covers includes the 200 ms step-slot wait of plan 21-05.
 
-4. **Queue depth.**
+4. **Queue depth. (RESOLVED)**
    - Recommendation: `slots = 2 x N` (at least 4) and `max_bytes = 8 MiB`, admit any job when the queue is empty. The pool term (at most about 16 MiB at the default cap of 8) is small next to the per-worker step and arena term (Q7), so the queue is not the part that limits N.
+   - **Adopted:** max(2 x N, 4) slots and 8 MiB, one oversize job when the queue is empty (plan 21-01).
 
-5. **Where to start the workers.**
+5. **Where to start the workers. (RESOLVED)**
    - Recommendation: create the `Pool` in `run_mount` and pass it in `MountedFs`, with `Pool::drop` as the safety net when `mount()` fails before the session. Simpler than spawning in `init(&mut self)`, and the worker count is printed before the mount.
+   - **Adopted:** the `Pool` is built in `run_mount` and passed in `MountedFs::new`, with `Pool::drop` as the safety net (plan 21-01).
 
-6. **A trace switch for the per-request log lines.**
+6. **A trace switch for the per-request log lines. (RESOLVED)**
    - What we know: two `eprintln!` lines per request take the global stderr lock; no switch exists; `pjdfstest.sh` filters these lines.
    - Recommendation: add `SLICEFS_FUSE_TRACE=0` (read once at mount; default on, so logs do not change) for the bench only. Do not change the default in this phase.
+   - **Adopted:** `SLICEFS_FUSE_TRACE=0`, read once, default on (plan 21-02); the bench runs trace-off pairs (plan 21-08).
 
-7. **The rule for "scales" (POOL-05).**
+7. **The rule for "scales" (POOL-05). (RESOLVED)**
    - Recommendation: at N = 4 the median aggregate write or read MB/s is at least 1.5 times the N = 1 median, with 0 mismatches. If neither phase reaches it, record the numbers and a lock-stats run of the N = 4 point, and report POOL-05 as not met instead of changing the bar. The owner should confirm the 1.5x bar before the runs (A10).
+   - **Adopted:** owner answer [Scale bar]: 1.5x at 4 workers against 1; metric: the median of 3 runs, trace on, of the write phase or the read phase; on a miss the numbers and the cause are recorded and the pool ships (plan 21-08).
 
-8. **Memory cap for more than 4 writers.**
+8. **Memory cap for more than 4 writers. (RESOLVED)**
    - What we know: `CAP_MIB` = 320 was fixed from 4-writer runs; the rule's only explicit per-writer term is one 1 MiB write; own-step copies (up to 2 x 8 MiB at a release) and arenas grow with N.
    - What's unclear: the real `Pm(8)` and `Pm(16)`.
    - Recommendation: keep 320 for 4 writers; add `CAP(N) = Pm(N) + F + R` from 3 runs at N writers (S7 in process with `S7_THREADS`, and the mount bench); state `CAP(8)` in the Phase 21 result. If `Pm(8)` is more than one budget (64 MiB) above `Pm(4)`, stop and report to the owner before the default cap of 8 ships, as the Phase 20 rule did for P0.
+   - **Adopted:** owner answer [Step limit] with the orchestrator reading (21-CONTEXT.md): a global step limit (plan 21-05); 320 MiB is a hard bar at 1, 2, 4 and 8 writers (S7, plan 21-06) and workers (bench daemon VmHWM, plan 21-08); 16 is reported only; `CAP(N)` is recorded; the 64 MiB rise rule is a report signal only.
 
-9. **Phase 19 windows under N ≥ 2.**
+9. **Phase 19 windows under N ≥ 2. (RESOLVED)**
    - Recommendation: keep them deferred (CONTEXT); add one line to the Phase 21 result that they are now reachable on FUSE-T with `--workers ≥ 2`, and that pjdfstest passed with 4 workers on Linux.
+   - **Adopted:** kept deferred; the Phase 21 result names them as reachable with 2 or more workers (plan 21-09).
 
 ## Environment Availability
 
