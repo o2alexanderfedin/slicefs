@@ -98,10 +98,11 @@ Each mutation was planted, run with `timeout 600` or `timeout 900`, and reverted
 
 ## Green runs
 
-- `cargo test --workspace` exited 0 before each code commit: f4856c3 (Task 1), 3aaff2f (Task 2) and 4c70d39 (Task 3). Each run had 70 `test result: ok` lines and no `FAILED`.
+- `cargo test --workspace` exited 0 before each code commit: f4856c3 (Task 1, 69 `test result: ok` lines; `pool_tests` did not exist yet), 3aaff2f (Task 2, 70 lines) and 4c70d39 (Task 3, 70 lines). No run had `FAILED`.
 - `pool_tests`: 9 passed (also 5 more runs at load about 17, all 9 passed each time, about 0.2 s).
 - Task 3 filter: 8 passed (`workers_*` x4, `workers_for_cpus_halves_and_clamps`, `default_workers_is_one_on_macos`, `run_without_a_pool_runs_on_the_caller`, `destroy_drains_before_shutdown`).
 - VALIDATION full-suite extras: `cargo check --workspace --all-targets --features slicefs-cli/lock-stats` exit 0; `cargo check -p slicefs-cli --all-targets --features deadlock-detect` exit 0; `--features deadlock-detect` `flusher_tests` 26 passed, `pool_tests` 9 passed, `stress_harness serialize_off_target` 1 passed.
+- Linux (Docker harness form, tar of the clean tree at 49e4850, `rustc 1.100.0 (0ef1bc386 2026-11-09)`): `pool_tests` 9 passed; the Task 3 filter 8 passed, with `default_workers_is_in_range` in place of the macOS test. This is the only run of `default_workers_is_in_range`, and the only Linux run of the 200 ms timing tests.
 - No clippy note in the new lines (the notes at cli.rs 311 and mount.rs 60 and 304 were there before this plan).
 
 ## Deviations from Plan
@@ -152,6 +153,8 @@ None. No new surface outside the plan's threat model.
 
 ## Open points for a decision
 
+- **Idle wait of a worker.** A worker waits on "not empty" with no time limit. The wait ends when a job comes or at the close (unmount, or the drop of the pool). The plan and [Waits] say "a time limit or ends at unmount", so this agrees with them. If the rule is "a time limit and ends at unmount", the wait must use 1 s slices. That is a small change, but it needs one more workspace run.
+- **State tool.** `state.advance-plan` returned output but did not write the position. The position in STATE.md was set by hand (plan 2 of 9).
 - **Thread name length on Linux.** `slicefs-worker-<k>` has 16 or more bytes. The Linux thread name (comm) holds 15 bytes, so `top` and `ps` show `slicefs-worker-` for all workers. `std::thread::current().name()` keeps the full name, so the name test of the 21-03 abort hook works. A shorter name (for example `slicefs-w<k>`) would show the index in `top`, but the plan and the research fix the name `slicefs-worker-<k>`. This choice can be changed later.
 
 ## Self-Check: PASSED
