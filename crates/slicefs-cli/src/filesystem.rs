@@ -154,9 +154,13 @@ pub const MIN_DIRTY_BYTES: usize = 4 * REBASE_STEP;
 /// do not change it without a new cap derivation.
 pub const FLUSH_STEP: usize = 4 << 20;
 
-/// Most time a writer over the budget waits for the flusher (Phase 20
-/// CONTEXT default); then it writes and pays with a step of its own file.
-const THROTTLE_WAIT: Duration = Duration::from_secs(5);
+/// Most time a writer over the budget waits for the flusher; then it
+/// writes and pays with a step of its own file, so the memory bound does
+/// not depend on this value. 200 ms is the per-call pause cap of Linux
+/// `balance_dirty_pages` (`MAX_PAUSE`); ZFS caps one write delay at 100 ms.
+/// (Phase 20 used 5 s; one dispatch thread made a long wait stop the whole
+/// mount.)
+const THROTTLE_WAIT: Duration = Duration::from_millis(200);
 
 /// One slice of a throttle wait: the writer looks at the total again after
 /// each slice, because a release or a writer's own step also lowers the
