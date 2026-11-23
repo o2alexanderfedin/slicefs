@@ -86,3 +86,7 @@ Out of scope: the worker pool (Phase 21), WAL group commit (deferred), chunk pro
 - [A3] Minimum value 4 MiB for `--dirty-budget` and `--dirty-limit`. A later release can lower a minimum without breaking a user; raising it would break one, so the minimum starts low enough. Reversible in that direction.
 - [A11] Run the P0 probe (serialize off, above the budget, Phase 19 code) in Wave 0 before the flusher work.
 - [Harness] The default harness `run()` does not start the flusher; a focused flusher/throttle test does. A small opt-in knob in the harness is allowed only if a criterion needs it.
+
+## Orchestrator correction after 20-01 (2026-11-23)
+- [Docker image check] Docker here uses the containerd image store, so each `docker build` gives a new image ID even when every step comes from the cache. The IMAGE_ID check in 20-03, 20-07 and 20-08 is replaced: those plans may run `docker build` from the same Dockerfile, and must instead check that `rustc -V` inside the image equals the `RUSTC = ...` line in `runs/s7-wave0-NOTES.md`. A different `rustc -V` is a stop (report to the orchestrator). Record the new image ID in the log for reference only.
+- [CAP_MIB] 320 MiB, derived by the stated rule from P_old max 260 and P0 max 267 (a `MALLOC_ARENA_MAX=2` run gave 230). Accepted. 20-07 asserts VmHWM (not the getrusage peak) against CAP_MIB.
