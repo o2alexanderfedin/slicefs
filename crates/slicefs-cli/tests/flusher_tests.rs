@@ -15,7 +15,7 @@
 //! budget during the fill, the fill writes would pay at once and no writer
 //! would ever wait.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,9 +26,10 @@ use metadata::store::DictMetadataStore;
 use metadata::wal::WalConfig;
 use metadata::store_io::StoreIo;
 use slicefs_cli::commit_timer::timed_commit;
-use slicefs_cli::filesystem::{DirtyConfig, SliceFsFilesystem};
+use slicefs_cli::filesystem::{DirtyConfig, SliceFsFilesystem, REBASE_STEP};
 use slicefs_cli::flusher;
 use slicefs_cli::handlers::{self as h, WriteResult};
+use slicefs_cli::overlay::EXTENT_OVERHEAD;
 use tempfile::TempDir;
 
 const KIB: usize = 1 << 10;
@@ -93,10 +94,27 @@ impl Drop for StopGuard<'_> {
 /// held, then the commit gate, then the handler. Returns the result and
 /// the rebase bytes of this thread's write (0: it ran no step).
 fn throttled_write(fs: &SliceFsFilesystem, fh: u64, offset: u64, data: &[u8]) -> (WriteResult, u64) {
+    throttled_write_sampled(fs, fh, offset, data, || (), |()| ())
+}
+
+/// `throttled_write` that also runs `before` and `after` in the gate hold,
+/// just before and just after the handler (samples of the dirty counts).
+/// The value of `before` goes to `after`.
+fn throttled_write_sampled<B>(
+    fs: &SliceFsFilesystem,
+    fh: u64,
+    offset: u64,
+    data: &[u8],
+    before: impl FnOnce() -> B,
+    after: impl FnOnce(B),
+) -> (WriteResult, u64) {
     let admit = fs.throttle_write();
     let r = {
         let _gate = fs.gate_shared();
-        h::handle_write_admitted(fs, fh, offset, data, 0, admit)
+        let b = before();
+        let r = h::handle_write_admitted(fs, fh, offset, data, 0, admit);
+        after(b);
+        r
     };
     (r, fs.test_last_write_rebase_bytes())
 }
@@ -1093,6 +1111,72 @@ fn at_the_budget_a_hot_file_is_stepped() {
     assert!(fs.test_dirty_cost(h1.ino) < h1_cost, "H1's cost fell: {st:?}");
     assert!(fs.test_dirty_total() < budget, "the total is below the budget: {st:?}");
     for m in [&h1, &h2] {
+        m.check(&fs, "handles open");
+        m.release(&fs);
+        m.check(&fs, "after release");
+    }
+}
+
+/// The dirty bound with the throttle (research Q4). A writer passes the
+/// throttle only below the budget, so with N writers the shared total stays
+/// at or below budget + N x (write + EXTENT_OVERHEAD), plus one rebase step
+/// in flight. Each write here touches no other extent (32 KiB pieces on the
+/// 64 KiB grid), so it adds at most its bytes + EXTENT_OVERHEAD to its own
+/// file: the test checks that premise for each write.
+#[test]
+fn dirty_total_stays_bounded_with_parallel_writers() {
+    const WRITERS: u64 = 4;
+    const FILE: usize = 8 * MIB;
+    const WRITES_EACH: usize = 200;
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_dirty_limit(2 * MIB);
+    // With the default budget: about 0.9 MiB dirty per file.
+    let files: Vec<Model> = (1..=WRITERS).map(|f| dirty_file(&fs, f, FILE, 28)).collect();
+    fs.test_set_flush_pass(20);
+    fs.test_set_throttle_wait(10_000);
+    let budget = 4 * MIB;
+    let per_write = PIECE + EXTENT_OVERHEAD;
+    let bound = budget + WRITERS as usize * per_write + REBASE_STEP;
+    let max_total = AtomicUsize::new(0);
+    let max_growth = AtomicUsize::new(0);
+    let files: Vec<Model> = std::thread::scope(|s| {
+        let _stop = StopGuard(&fs);
+        s.spawn(|| flusher::run_flusher(&fs));
+        assert!(wait_until(WAIT, || fs.test_flusher_running()), "the flusher runs");
+        fs.test_set_dirty_budget(budget);
+        let writers: Vec<_> = files
+            .into_iter()
+            .map(|mut m| {
+                let (fs, max_total, max_growth) = (&fs, &max_total, &max_growth);
+                s.spawn(move || {
+                    let mut x = 0x9E37_79B9_7F4A_7C15_u64 ^ m.file;
+                    for _ in 0..WRITES_EACH {
+                        x ^= x << 13;
+                        x ^= x >> 7;
+                        x ^= x << 17;
+                        let slot = (x % (FILE / GRID) as u64) as usize;
+                        let (off, data) = m.piece(slot);
+                        let ino = m.ino;
+                        let (r, _) = throttled_write_sampled(fs, m.fh, off, &data, || fs.test_dirty_cost(ino), |before| {
+                            max_growth.fetch_max(fs.test_dirty_cost(ino).saturating_sub(before), Ordering::SeqCst);
+                            max_total.fetch_max(fs.test_dirty_total(), Ordering::SeqCst);
+                        });
+                        assert!(matches!(r, WriteResult::Ok(n) if n as usize == PIECE), "file {}: the write is in: {r:?}", m.file);
+                        m.applied(slot);
+                    }
+                    m
+                })
+            })
+            .collect();
+        writers.into_iter().map(|w| w.join().expect("a writer panicked")).collect()
+    });
+    let (total, growth) = (max_total.load(Ordering::SeqCst), max_growth.load(Ordering::SeqCst));
+    let st = fs.test_flusher_stats();
+    println!("BOUND max_total={total} bound={bound} max_own_growth={growth} per_write={per_write} stats={st:?}");
+    assert!(growth <= per_write, "a write added {growth} bytes to its own file, more than {per_write}");
+    assert!(total <= bound, "the largest sampled total {total} is above the bound {bound}: {st:?}");
+    for m in &files {
         m.check(&fs, "handles open");
         m.release(&fs);
         m.check(&fs, "after release");
