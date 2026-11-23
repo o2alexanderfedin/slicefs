@@ -1118,6 +1118,8 @@ impl SliceFsFilesystem {
     pub fn set_dirty_config(&self, cfg: &DirtyConfig) {
         self.dirty_budget.store(cfg.budget, Ordering::Relaxed);
         self.dirty_limit.store(cfg.limit, Ordering::Relaxed);
+        self.flush_ctl.idle_ms.store(cfg.idle_secs.saturating_mul(1000), Ordering::Relaxed);
+        self.flush_ctl.expire_ms.store(cfg.expire_secs.saturating_mul(1000), Ordering::Relaxed);
     }
 
     /// Test hook: the dirty-data values now in use.

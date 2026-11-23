@@ -106,6 +106,15 @@ pub enum Cmd {
         /// --dirty-budget.
         #[arg(long, value_name = "SIZE", default_value = "32M", value_parser = crate::content::parse_dirty_bytes)]
         dirty_limit: usize,
+        /// Store the dirty data of a file after SECS seconds with no write
+        /// to it (default 5, at least 1).
+        #[arg(long, value_name = "SECS", default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=u64::MAX / 1000))]
+        dirty_idle: u64,
+        /// Store dirty data that is SECS seconds old (default 30, at least
+        /// 1). A file that is written with no pause of 300 ms or more is
+        /// kept under its limit by its own writer instead.
+        #[arg(long, value_name = "SECS", default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=u64::MAX / 1000))]
+        dirty_expire: u64,
     },
 
     /// Unmount a SliceFS filesystem mounted at the given path.
@@ -299,6 +308,31 @@ mod tests {
         }
         for extra in [&["--dirty-budget", "-5"][..], &["--dirty-budget=-5"], &["--dirty-limit", "0"], &["--dirty-limit", "3M"]] {
             assert!(dirty_sizes(extra).is_err(), "{extra:?} is refused");
+        }
+    }
+
+    /// The idle and expire times of `slicefs mount ... extra`.
+    fn dirty_times(extra: &[&str]) -> Result<(u64, u64), String> {
+        let args: Vec<&str> = ["slicefs", "mount", "/mnt", "--store", "/data"].into_iter().chain(extra.iter().copied()).collect();
+        match Cli::try_parse_from(&args).map_err(|e| e.to_string())?.command {
+            Cmd::Mount { dirty_idle, dirty_expire, .. } => Ok((dirty_idle, dirty_expire)),
+            _ => panic!("expected Mount"),
+        }
+    }
+
+    #[test]
+    fn dirty_time_options_parse() {
+        let def = crate::filesystem::DirtyConfig::default();
+        assert_eq!(dirty_times(&[]), Ok((5, 30)));
+        assert_eq!((def.idle_secs, def.expire_secs), (5, 30), "the defaults are the constants");
+        assert_eq!(dirty_times(&["--dirty-idle", "7", "--dirty-expire", "60"]), Ok((7, 60)));
+        let max = (u64::MAX / 1000).to_string();
+        assert_eq!(dirty_times(&["--dirty-expire", &max]), Ok((5, u64::MAX / 1000)));
+        let over = (u64::MAX / 1000 + 1).to_string();
+        for opt in ["--dirty-idle", "--dirty-expire"] {
+            for v in ["0", "-1", over.as_str()] {
+                assert!(dirty_times(&[opt, v]).is_err(), "{opt} {v} is refused");
+            }
         }
     }
 

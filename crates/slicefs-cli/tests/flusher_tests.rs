@@ -26,7 +26,7 @@ use metadata::store::DictMetadataStore;
 use metadata::wal::WalConfig;
 use metadata::store_io::StoreIo;
 use slicefs_cli::commit_timer::timed_commit;
-use slicefs_cli::filesystem::SliceFsFilesystem;
+use slicefs_cli::filesystem::{DirtyConfig, SliceFsFilesystem};
 use slicefs_cli::flusher;
 use slicefs_cli::handlers::{self as h, WriteResult};
 use tempfile::TempDir;
@@ -913,6 +913,34 @@ fn an_idle_file_is_flushed() {
     fs.test_advance_clock(6_000);
     let st = flusher::flush_pass(&fs);
     assert_eq!(fs.test_dirty_cost(f.ino), 0, "F's cost is 0 after the idle time: {st:?}");
+    f.check(&fs, "handle open");
+    f.release(&fs);
+    f.check(&fs, "after release");
+}
+
+/// The idle time of the mount options reaches the flusher (plan 20-06).
+/// The clock moves past the hot window, so the hot rule does not act.
+#[test]
+fn a_configured_idle_time_is_used() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let (fs, _dir) = fresh_fs();
+    // Values that the config must replace: with them, F stays dirty.
+    fs.test_set_dirty_idle(HOUR_MS);
+    fs.test_set_dirty_expire(HOUR_MS);
+    let cfg = DirtyConfig { idle_secs: 7, expire_secs: 3600, ..DirtyConfig::default() };
+    cfg.check().unwrap();
+    fs.set_dirty_config(&cfg);
+    // 512 KiB of dirty data; the default budget is far above it.
+    let f = dirty_file(&fs, 1, BIG, 16);
+    let cost = fs.test_dirty_cost(f.ino);
+    assert!(cost >= 512 * KIB, "F is dirty: {cost}");
+    fs.test_advance_clock(6_000);
+    let st = flusher::flush_pass(&fs);
+    assert_eq!(fs.test_dirty_cost(f.ino), cost, "a pass at 6 s leaves F (idle time 7 s): {st:?}");
+    fs.test_advance_clock(2_000);
+    let st = flusher::flush_pass(&fs);
+    assert_eq!(fs.test_dirty_cost(f.ino), 0, "F's cost is 0 at 8 s (idle time 7 s): {st:?}");
+    assert_eq!(fs.test_dirty_config(), cfg, "the config reads back");
     f.check(&fs, "handle open");
     f.release(&fs);
     f.check(&fs, "after release");
