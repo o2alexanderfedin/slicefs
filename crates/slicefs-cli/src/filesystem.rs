@@ -913,6 +913,9 @@ pub struct SliceFsFilesystem {
     /// Threads that wait for the exclusive commit gate now (a test hook;
     /// see `ExclusiveWait`).
     gate_xwaiters: AtomicUsize,
+    /// The flusher thread of a mount (`start_flusher`); `stop_flusher`
+    /// takes it and joins it. `Rank::Short`.
+    flusher_thread: sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl SliceFsFilesystem {
@@ -965,6 +968,7 @@ impl SliceFsFilesystem {
             step_wait_ms: AtomicU64::new(STEP_WAIT.as_millis() as u64),
             flush_ctl: Arc::new(FlushCtl::new()),
             gate_xwaiters: AtomicUsize::new(0),
+            flusher_thread: sync::Mutex::new(Rank::Short, None),
         }
     }
 
@@ -3090,10 +3094,27 @@ impl SliceFsFilesystem {
         ctl.wake.notify_all();
     }
 
-    /// Ask the flusher loop to end and wake every throttled writer (each
-    /// one then writes and pays with steps of its own file). Calling it
-    /// again does nothing new. In a debug build it panics when the thread
-    /// holds any ranked lock (the gate too).
+    /// Start the flusher thread of a mount (`flusher::spawn_flusher`). It
+    /// holds only a `Weak` of the file system; `stop_flusher` joins it.
+    pub fn start_flusher(self: &Arc<Self>) {
+        let h = crate::flusher::spawn_flusher(Arc::downgrade(self));
+        let old = self.flusher_thread.lock().replace(h);
+        debug_assert!(old.is_none(), "one flusher thread per file system");
+    }
+
+    /// Ask the flusher loop to end, wake every throttled writer (each one
+    /// then writes and pays with steps of its own file), then join the
+    /// flusher thread of `start_flusher`, if any. Calling it again does
+    /// nothing new. It does not join when it runs on the flusher thread
+    /// (the last `Arc` can drop there after a pass). In a debug build it
+    /// panics when the thread holds any ranked lock (the gate too): a join
+    /// under the gate can wait for ever behind a queued commit.
+    ///
+    /// The join waits for at most one flusher step: the flusher checks the
+    /// stop flag before each gate hold and each step, and its sleep wakes
+    /// on the stop. One step is bounded by its own timed waits (store waits
+    /// of `STORE_WAIT` 10 s each, step-token waits in `STEP_WAIT` slices
+    /// with progress, at most `STEP_WAIT_MAX` 120 s).
     pub fn stop_flusher(&self) {
         debug_assert!(
             sync::rank::held().is_empty(),
@@ -3106,6 +3127,27 @@ impl SliceFsFilesystem {
         ctl.flags.lock().stop = true;
         ctl.wake.notify_all();
         ctl.freed.notify_all();
+        // Take the handle, then join with no lock held.
+        let Some(h) = self.flusher_thread.lock().take() else { return };
+        if h.thread().id() == std::thread::current().id() {
+            return;
+        }
+        if h.join().is_err() {
+            eprintln!("[{}][FLUSH] the flusher thread ended with a panic", ts());
+        }
+    }
+
+    /// The end of a mount (the FUSE `destroy` callback): stop and join the
+    /// flusher with no lock held, then take the gate shared and run
+    /// `test_destroy` (it writes open files with locked steps, so no
+    /// flusher step may run then). The join comes before the gate: under
+    /// the gate it could wait for a flusher that waits for the gate behind
+    /// a queued commit, and that commit waits for this hold. Returns the
+    /// result of `test_destroy` (true if the commit succeeded).
+    pub fn shutdown(&self) -> bool {
+        self.stop_flusher();
+        let _op = self.gate_shared();
+        self.test_destroy()
     }
 
     /// The flush control block.
@@ -4814,6 +4856,7 @@ impl SliceFsFilesystem {
     /// Destroy: commit, optionally snapshot, and shut down WAL.
     /// Returns true if commit succeeded.
     pub fn test_destroy(&self) -> bool {
+        debug_assert!(!self.flush_ctl.running.load(Ordering::Acquire), "test_destroy while a flusher runs");
         // Write the content of handles that are still open (e.g. a forced
         // unmount), so the commit below keeps it.
         for cell in self.cells.all() {

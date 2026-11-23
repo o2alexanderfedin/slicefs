@@ -13,6 +13,8 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Weak};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::filesystem::{FlushCtl, FlushStep, SliceFsFilesystem, FLUSH_STEP};
@@ -46,13 +48,42 @@ impl Drop for Running<'_> {
     }
 }
 
-/// The flusher loop: wait for the pass interval, a kick or a stop (the
-/// first wait comes before the first pass), then make a pass, until
-/// `stop_flusher`. A paused flusher (a test hook) makes no pass. Runs on
-/// the calling thread; tests run it in a scoped thread.
+/// The flusher loop on the calling thread (tests run it in a scoped
+/// thread): see `flusher_loop`.
 pub fn run_flusher(fs: &SliceFsFilesystem) {
+    flusher_loop(fs.flush_ctl(), || {
+        flush_pass(fs);
+        true
+    });
+}
+
+/// The flusher thread of a mount (`slicefs-flusher`), with the loop of
+/// `run_flusher`. It holds the flush control block and a `Weak` of the
+/// file system: it sleeps with no `Arc` of the file system, upgrades the
+/// `Weak` for one pass only, and ends when the upgrade fails or at
+/// `stop_flusher`.
+pub fn spawn_flusher(fs: Weak<SliceFsFilesystem>) -> JoinHandle<()> {
+    let ctl = fs.upgrade().map(|fs| Arc::clone(fs.flush_ctl()));
+    std::thread::Builder::new()
+        .name("slicefs-flusher".into())
+        .spawn(move || {
+            let Some(ctl) = ctl else { return };
+            flusher_loop(&ctl, || match fs.upgrade() {
+                Some(fs) => {
+                    flush_pass(&fs);
+                    true
+                }
+                None => false,
+            });
+        })
+        .expect("spawn flusher thread")
+}
+
+/// Wait for the pass interval, a kick or a stop (the first wait comes
+/// before the first pass), then run `pass`, until `stop_flusher` or until
+/// `pass` returns false. A paused flusher (a test hook) makes no pass.
+fn flusher_loop(ctl: &FlushCtl, mut pass: impl FnMut() -> bool) {
     chunk_store::sync::rank::require_gate(true);
-    let ctl = fs.flush_ctl();
     ctl.running.store(true, Ordering::Release);
     let _running = Running(ctl);
     loop {
@@ -70,7 +101,9 @@ pub fn run_flusher(fs: &SliceFsFilesystem) {
                 continue;
             }
         }
-        flush_pass(fs);
+        if !pass() {
+            return;
+        }
     }
 }
 
@@ -134,4 +167,62 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
         }
     }
     st
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use metadata::store::DictMetadataStore;
+    use metadata::store_io::StoreIo;
+    use std::sync::{mpsc, Mutex};
+    use std::time::Instant;
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    fn arc_fs(dir: &std::path::Path) -> Arc<SliceFsFilesystem> {
+        let io = Arc::new(Mutex::new(StoreIo::open(dir).unwrap()));
+        Arc::new(SliceFsFilesystem::new(DictMetadataStore::new(io.clone()), io, None))
+    }
+
+    fn wait_until(limit: Duration, f: impl Fn() -> bool) -> bool {
+        let t = Instant::now();
+        while t.elapsed() < limit {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        f()
+    }
+
+    #[test]
+    fn a_spawned_flusher_stops_and_joins() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = arc_fs(dir.path());
+        fs.start_flusher();
+        assert!(wait_until(WAIT, || fs.test_flusher_running()), "the flusher runs");
+        let (tx, rx) = mpsc::channel();
+        let fs2 = Arc::clone(&fs);
+        std::thread::spawn(move || {
+            fs2.stop_flusher();
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(WAIT).expect("stop_flusher returns within 5 s (the join ended)");
+        assert!(!fs.test_flusher_running(), "no flusher runs after the join");
+    }
+
+    #[test]
+    fn a_spawned_flusher_ends_when_the_fs_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = arc_fs(dir.path());
+        let h = spawn_flusher(Arc::downgrade(&fs));
+        assert!(wait_until(WAIT, || fs.test_flusher_running()), "the flusher runs");
+        drop(fs);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(h.join().is_ok());
+        });
+        let ok = rx.recv_timeout(WAIT).expect("the flusher thread ends within 5 s after the drop");
+        assert!(ok, "the flusher thread ended with no panic");
+    }
 }

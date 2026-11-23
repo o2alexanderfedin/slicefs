@@ -371,6 +371,13 @@ pub fn run_mount(
     }
     let fs = Arc::new(fs);
 
+    // The dirty-data flusher (Phase 20). Not on a snapshot mount (read-only).
+    // The clone is for the stop after mount() returns.
+    let flusher_fs = snapshot_ref.is_none().then(|| {
+        fs.start_flusher();
+        Arc::clone(&fs)
+    });
+
     // GC of the stored objects while mounted (#25). Not on a snapshot mount:
     // its metadata is the snapshot, not the current root.
     let online_gc_shutdown = Arc::new(AtomicBool::new(false));
@@ -459,6 +466,13 @@ pub fn run_mount(
                 crate::backend::ENABLE_FSKIT_HINT,
             )));
         }
+    }
+
+    // Stop the flusher, also when mount failed (after a clean unmount
+    // destroy() stopped it already; a second stop does nothing). The clone
+    // is dropped at once, so it does not keep the file system alive.
+    if let Some(fs) = flusher_fs {
+        fs.stop_flusher();
     }
 
     // Stop the GC thread before mount.lock is released, also when mount failed.

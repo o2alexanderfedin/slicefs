@@ -20,7 +20,10 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod common;
+
 use metadata::store::DictMetadataStore;
+use metadata::wal::WalConfig;
 use metadata::store_io::StoreIo;
 use slicefs_cli::commit_timer::timed_commit;
 use slicefs_cli::filesystem::SliceFsFilesystem;
@@ -541,4 +544,82 @@ fn a_queued_commit_is_seen() {
         assert!(r.is_ok(), "the commit is Ok: {r:?}");
         assert_eq!(fs.test_gate_exclusive_waiters(), 0, "no commit is queued now");
     });
+}
+
+/// Lets the parked flusher step go and stops the flusher when dropped, so a
+/// failed assert does not leave a thread parked or a flusher running.
+struct EndGuard {
+    go: Option<mpsc::Sender<()>>,
+    fs: Arc<SliceFsFilesystem>,
+}
+
+impl Drop for EndGuard {
+    fn drop(&mut self) {
+        self.go.take();
+        self.fs.stop_flusher();
+    }
+}
+
+#[test]
+fn shutdown_with_a_parked_flusher_step_and_a_queued_commit_ends() {
+    let _dog = watchdog(Duration::from_secs(60));
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    let fs = Arc::new(common::new_fs_with(&store, WalConfig::PerOp));
+    fs.test_set_dirty_limit(2 * MIB);
+    let a = dirty_file(&fs, 1, 4 * MIB, 48);
+    let b = dirty_file(&fs, 2, 4 * MIB, 32);
+    // After the fill: the budget and the hook.
+    fs.test_set_dirty_budget(4 * MIB);
+    assert!(fs.test_dirty_total() >= 2 * MIB, "the total is at or above half the budget");
+    // The first rebase (the flusher step, with the gate held shared) tells
+    // the test and waits until `go` sends or drops (30 s at most).
+    let (parked_tx, parked_rx) = mpsc::channel::<()>();
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    let park = Mutex::new(Some((parked_tx, go_rx)));
+    fs.test_set_rebase_hook(Some(Arc::new(move || {
+        let Some((parked, go)) = park.lock().unwrap().take() else { return };
+        let _ = parked.send(());
+        let _ = go.recv_timeout(Duration::from_secs(30));
+    })));
+    fs.start_flusher();
+    let mut end = EndGuard { go: Some(go_tx), fs: Arc::clone(&fs) };
+    parked_rx.recv_timeout(Duration::from_secs(10)).expect("the flusher step is parked");
+
+    let (commit_tx, commit_rx) = mpsc::channel();
+    {
+        let fs = Arc::clone(&fs);
+        std::thread::spawn(move || {
+            let r = timed_commit(&fs, &fs.commit_gate()).map(|_| ()).map_err(|e| e.to_string());
+            drop(fs);
+            let _ = commit_tx.send(r);
+        });
+    }
+    assert!(wait_until(Duration::from_secs(10), || fs.test_gate_exclusive_waiters() == 1),
+        "the commit is queued for the exclusive gate");
+
+    let (down_tx, down_rx) = mpsc::channel();
+    {
+        let fs = Arc::clone(&fs);
+        std::thread::spawn(move || {
+            let r = fs.shutdown();
+            drop(fs);
+            let _ = down_tx.send(r);
+        });
+    }
+    assert!(wait_until(Duration::from_secs(10), || fs.test_flusher_stopping()), "the shutdown asked the stop");
+    // Only now does the parked step go on.
+    end.go.take();
+    let c = commit_rx.recv_timeout(Duration::from_secs(10)).expect("the commit ends");
+    assert!(c.is_ok(), "the commit is Ok: {c:?}");
+    let down = down_rx.recv_timeout(Duration::from_secs(10)).expect("the shutdown ends");
+    assert!(down, "shutdown returns true");
+    assert!(wait_until(Duration::from_secs(10), || !fs.test_flusher_running()), "the flusher ended");
+
+    fs.test_set_rebase_hook(None);
+    drop(end);
+    drop(fs);
+    let fs = common::reload_and_replay(&store);
+    a.check(&fs, "after reload and replay");
+    b.check(&fs, "after reload and replay");
 }
