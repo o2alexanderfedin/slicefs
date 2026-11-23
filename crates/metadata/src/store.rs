@@ -1352,6 +1352,18 @@ impl DictMetadataStore {
         Ok(digest)
     }
 
+    /// The manifest digest of `ino`, if it has one: memory only, under the
+    /// short manifest map lock.
+    pub fn manifest_digest(&self, ino: InodeId) -> Option<ObjectKey> {
+        self.manifest_data.lock().get(&ino).copied()
+    }
+
+    /// The entries of the manifest node `digest` (a node read, no lock of
+    /// this store held across it).
+    pub fn manifest_entries(&self, digest: &ObjectKey) -> Result<Vec<ObjectKey>, MetaError> {
+        load_manifest(&mut self.reader(), digest)
+    }
+
     /// Make `digest` (from `prepare_manifest`) the manifest of `ino`: memory
     /// only, under the short manifest map lock.
     pub fn set_manifest_digest(&self, ino: InodeId, digest: ObjectKey) -> Result<(), MetaError> {

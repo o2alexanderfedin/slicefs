@@ -691,6 +691,10 @@ pub struct SliceFsFilesystem {
     /// and before its record is appended, with its stripes held (for
     /// tests: a parked mkdir or create).
     mkdir_hook: sync::Mutex<Option<RebaseHook>>,
+    /// Run in each release of the content of a reclaimed inode, before its
+    /// manifest node is read, with no stripe held (for tests: a parked
+    /// unlink).
+    reclaim_hook: sync::Mutex<Option<RebaseHook>>,
     /// Write requests so far (write, create, setattr): the online GC gives
     /// way to writes by it (`gc_pacing`).
     write_activity: Arc<AtomicU64>,
@@ -747,6 +751,7 @@ impl SliceFsFilesystem {
             read_hook: sync::Mutex::new(Rank::Short, None),
             push_hook: sync::Mutex::new(Rank::Short, None),
             mkdir_hook: sync::Mutex::new(Rank::Short, None),
+            reclaim_hook: sync::Mutex::new(Rank::Short, None),
             write_activity: Arc::new(AtomicU64::new(0)),
             drop_steps: AtomicUsize::new(0),
             drop_every: AtomicUsize::new(0),
@@ -851,6 +856,12 @@ impl SliceFsFilesystem {
     /// held (`None`: no hook).
     pub fn test_set_mkdir_hook(&self, hook: Option<RebaseHook>) {
         *self.mkdir_hook.lock() = hook;
+    }
+
+    /// Test hook: run `hook` in each release of the content of a reclaimed
+    /// inode, before its manifest node is read (`None`: no hook).
+    pub fn test_set_reclaim_hook(&self, hook: Option<RebaseHook>) {
+        *self.reclaim_hook.lock() = hook;
     }
 
     /// Test hook: drop the results of the next `n` unlocked steps (stream
@@ -1423,33 +1434,35 @@ impl SliceFsFilesystem {
 
     /// One handle of `ino` is gone. If it was the last one of an orphaned
     /// inode, reclaim the inode. Locks `stripe(ino)`, so the last-close and
-    /// the last-unlink decisions of one inode cannot interleave.
+    /// the last-unlink decisions of one inode cannot interleave; the content
+    /// is released after the stripe (IN-01).
     fn uncount(&self, ino: u64) {
-        let _ns = self.ns.lock(&[ino]);
-        self.uncount_held(ino);
-    }
-
-    /// `uncount` with `stripe(ino)` already held by the caller.
-    fn uncount_held(&self, ino: u64) {
-        let reclaim = {
-            let mut t = self.handles.lock();
-            let n = t.open_count.get_mut(&ino).expect("an open handle is counted");
-            *n -= 1;
-            *n == 0 && {
-                t.open_count.remove(&ino);
-                t.orphans.remove(&ino)
-            }
+        let freed = {
+            let _ns = self.ns.lock(&[ino]);
+            let reclaim = {
+                let mut t = self.handles.lock();
+                let n = t.open_count.get_mut(&ino).expect("an open handle is counted");
+                *n -= 1;
+                *n == 0 && {
+                    t.open_count.remove(&ino);
+                    t.orphans.remove(&ino)
+                }
+            };
+            // The store work runs after the table lock is released.
+            if reclaim { self.reclaim_inode(ino) } else { None }
         };
-        // The store work runs after the table lock is released.
-        if reclaim {
-            self.reclaim_inode(ino);
-        }
+        self.release_content(freed);
     }
 
-    /// Delete a non-directory inode that has no links left and release its content.
-    /// A cell left with no write handle by a failed last release (WR-04)
-    /// goes too: its bytes belong to a deleted inode.
-    fn reclaim_inode(&self, ino: u64) {
+    /// Delete a non-directory inode that has no links left, in memory only
+    /// (IN-01), so its caller can hold its stripes. A cell left with no
+    /// write handle by a failed last release (WR-04) goes too: its bytes
+    /// belong to a deleted inode. Returns the manifest digest of the inode:
+    /// the caller passes it to `release_content` after its stripes are
+    /// released, inside the same shared commit gate (no commit cut and no
+    /// GC start fall between; a replay of the request's record reclaims
+    /// the inode from the old root again).
+    fn reclaim_inode(&self, ino: u64) -> Option<ObjectKey> {
         if let Some(cell) = self.cells.get(ino).filter(|c| !c.transient) {
             let mut g = self.lock_cell(&cell);
             if !g.retired && g.write_handles == 0 {
@@ -1457,19 +1470,34 @@ impl SliceFsFilesystem {
                 self.cells.remove(&cell);
             }
         }
-        if let Ok(manifest) = self.meta.get_manifest(ino) {
-            for digest in &manifest {
-                self.meta.decrement_refcount(digest);
-            }
-        }
+        let digest = self.meta.manifest_digest(ino);
         self.readers.lock().remove(&ino);
         let _ = self.meta.delete_inode(ino);
+        digest
+    }
+
+    /// Release the content of a reclaimed inode (see `reclaim_inode`): read
+    /// the manifest node `digest` and drop one reference of each entry.
+    /// With no stripe held: the node read can take a while (IN-01). The
+    /// decrements commute with the refcount changes of other requests.
+    fn release_content(&self, digest: Option<ObjectKey>) {
+        let Some(digest) = digest else { return };
+        let hook = self.reclaim_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+        if let Ok(manifest) = self.meta.manifest_entries(&digest) {
+            for key in &manifest {
+                self.meta.decrement_refcount(key);
+            }
+        }
     }
 
     /// The last link of a non-directory inode was removed: reclaim it now, or
     /// keep it as an orphan (nlink 0) while handles are still open. The
-    /// caller holds `stripe(ino)` (open and last close take it too).
-    fn drop_last_link(&self, inode: InodeMeta) -> Result<(), i32> {
+    /// caller holds `stripe(ino)` (open and last close take it too), and
+    /// passes the result to `release_content` after its stripes (IN-01).
+    fn drop_last_link(&self, inode: InodeMeta) -> Result<Option<ObjectKey>, i32> {
         let ino = inode.ino;
         if self.handles.lock().open_count.contains_key(&ino) {
             self.meta.modify_inode(ino, |m| m.nlinks = 0).map_err(|e| meta_error_to_errno(&e))?;
@@ -1477,11 +1505,10 @@ impl SliceFsFilesystem {
             let mut t = self.handles.lock();
             if t.open_count.contains_key(&ino) {
                 t.orphans.insert(ino);
-                return Ok(());
+                return Ok(None);
             }
         }
-        self.reclaim_inode(ino);
-        Ok(())
+        Ok(self.reclaim_inode(ino))
     }
 
     /// End a clone of a streaming state as a stored root, first appending
@@ -2271,7 +2298,8 @@ impl SliceFsFilesystem {
     fn reclaim_all_orphans(&self) {
         let orphans: Vec<u64> = self.handles.lock().orphans.drain().collect();
         for ino in orphans {
-            self.reclaim_inode(ino);
+            let freed = self.reclaim_inode(ino);
+            self.release_content(freed);
         }
     }
 
@@ -2468,8 +2496,24 @@ impl SliceFsFilesystem {
                 // The end of file now, under the cell lock. Each turn takes
                 // it again: an unlocked step can move it, and then its
                 // publish is dropped (the generation moved) and this turn
-                // runs again.
-                offset = self.append_eof(&g.file);
+                // runs again. A fresh stream on an existing file takes the
+                // committed size: the inode read (a node read if the inode
+                // is not cached) runs as a step with the cell unlocked, and
+                // counts only if the stream did not change meanwhile (the
+                // size of an open inode changes only under its cell lock;
+                // IN-02). No step is in flight: a stream writer waited above.
+                let s = &g.file;
+                offset = if s.byte_count > 0 || matches!(s.write_mode, WriteMode::Overlay(_)) {
+                    s.byte_count
+                } else {
+                    let generation = s.generation;
+                    let size = g.run_step(|| self.meta.get_inode(ino).map_or(0, |m| m.size));
+                    if g.retired || g.file.generation != generation {
+                        drops += 1;
+                        continue;
+                    }
+                    size
+                };
                 end = match offset.checked_add(data.len() as u64) {
                     Some(e) if e <= MAX_FILE_SIZE => e,
                     _ => return Err(libc::EFBIG),
@@ -2646,16 +2690,6 @@ impl SliceFsFilesystem {
             after_err(&mut g, "the budget step", e);
         }
         Ok((n, offset))
-    }
-
-    /// The end of file for an append to the open state `s` (with its cell
-    /// locked): the state's size if it has bytes or is an overlay, else the
-    /// committed size (a fresh cell on an existing file).
-    fn append_eof(&self, s: &OpenFileState) -> u64 {
-        if s.byte_count > 0 || matches!(s.write_mode, WriteMode::Overlay(_)) {
-            return s.byte_count;
-        }
-        self.meta.get_inode(s.ino).map_or(0, |m| m.size)
     }
 
     /// Keep the dirty bytes of all open files within the budget (#105). `g`
@@ -3678,7 +3712,18 @@ impl SliceFsFilesystem {
     }
 
     /// `simulate_unlink` that logs its record in the stripe hold (D-08).
+    /// The content of a reclaimed inode is released after the stripes
+    /// (IN-01).
     pub(crate) fn unlink_logged(&self, parent_ino: u64, name: &str, log: LogOp<'_>) -> Result<(), i32> {
+        let mut freed = None;
+        let r = self.unlink_held(parent_ino, name, log, &mut freed);
+        self.release_content(freed);
+        r
+    }
+
+    /// The body of `unlink_logged`, with the stripes held; `freed` gets the
+    /// manifest of an inode it reclaimed.
+    fn unlink_held(&self, parent_ino: u64, name: &str, log: LogOp<'_>, freed: &mut Option<ObjectKey>) -> Result<(), i32> {
         // Resolve name, with the parent and child stripes held.
         let (_ns, found) = self.lock_namespace(false, &[parent_ino], &[(parent_ino, name)]);
         let ino = found[0].as_ref().map_err(meta_error_to_errno).copied()?;
@@ -3697,7 +3742,7 @@ impl SliceFsFilesystem {
         let inode = self.drop_link(ino)?;
         if inode.nlinks == 0 {
             // Reclaim now, or keep as an orphan while handles are open.
-            self.drop_last_link(inode)?;
+            *freed = self.drop_last_link(inode)?;
         }
         self.touch_dir(parent_ino)?;
         log(crate::oplog::Op::Unlink { parent: parent_ino, name: name.to_string() });
@@ -3772,6 +3817,8 @@ impl SliceFsFilesystem {
     }
 
     /// `simulate_rename` that logs its record in the stripe hold (D-08).
+    /// The content of a replaced file that is reclaimed is released after
+    /// the stripes (IN-01).
     pub(crate) fn rename_logged(
         &self,
         parent_ino: u64,
@@ -3780,6 +3827,25 @@ impl SliceFsFilesystem {
         newname: &str,
         flags: u32,
         log: LogOp<'_>,
+    ) -> Result<(), i32> {
+        let mut freed = None;
+        let r = self.rename_held(parent_ino, name, newparent_ino, newname, flags, log, &mut freed);
+        self.release_content(freed);
+        r
+    }
+
+    /// The body of `rename_logged`, with the stripes held; `freed` gets the
+    /// manifest of a replaced inode it reclaimed.
+    #[allow(clippy::too_many_arguments)]
+    fn rename_held(
+        &self,
+        parent_ino: u64,
+        name: &str,
+        newparent_ino: u64,
+        newname: &str,
+        flags: u32,
+        log: LogOp<'_>,
+        freed: &mut Option<ObjectKey>,
     ) -> Result<(), i32> {
         let op = || crate::oplog::Op::Rename {
             parent: parent_ino, name: name.to_string(), newparent: newparent_ino, newname: newname.to_string(), flags,
@@ -3844,7 +3910,7 @@ impl SliceFsFilesystem {
                 let left = self.drop_link(dst_ino)?;
                 if left.nlinks == 0 {
                     // Reclaim now, or keep as an orphan while handles are open.
-                    self.drop_last_link(left)?;
+                    *freed = self.drop_last_link(left)?;
                 }
             }
         }

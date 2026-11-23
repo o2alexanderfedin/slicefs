@@ -1433,3 +1433,46 @@ fn many_files_no_cross_file_wait() {
     assert!(fs.test_read(x, 0, 2 << 20).unwrap() == model_x, "X after release");
     assert!(fs.test_read(y, 0, 1 << 20).unwrap() == data_y, "Y after release");
 }
+
+/// IN-01: the unlink of a last link reads the manifest node of the inode
+/// and releases its content with no stripe held: a chmod of the parent
+/// directory (it takes the parent's stripe) goes on while that read is
+/// parked. The content is released once; an orphan is released at its
+/// last close.
+#[test]
+fn an_unlink_releases_the_content_with_no_stripe_held() {
+    let (fs, _dir) = fresh_fs();
+    let file = |name: &str, seed: u64| {
+        let (ino, fh) = fs.test_create(1, name, 0o644, 0, 0, 0).unwrap();
+        fs.test_write(fh, 0, &seeded(seed, 64 * KIB)).unwrap();
+        fs.test_release(ino, fh).unwrap();
+        let root = fs.meta().get_manifest(ino).unwrap()[0];
+        assert_eq!(fs.meta().get_refcount(&root), 1);
+        (ino, root)
+    };
+    let (ino, root) = file("f", 150);
+    let (hook, parked, go) = parker();
+    fs.test_set_reclaim_hook(Some(hook));
+    std::thread::scope(|s| {
+        let u = s.spawn(|| fs.simulate_unlink(1, "f"));
+        parked.recv_timeout(WAIT).expect("the unlink reached its content release");
+        let (tx, rx) = channel();
+        let fs = &fs;
+        s.spawn(move || tx.send(fs.test_setattr_mode(1, 0o755)).ok());
+        let chmod = rx.recv_timeout(WAIT);
+        go.send(()).ok();
+        assert_eq!(chmod.expect("the chmod of the parent waited for the unlink's stripes"), Ok(()));
+        assert_eq!(u.join().unwrap(), Ok(()));
+    });
+    fs.test_set_reclaim_hook(None);
+    assert_eq!(fs.meta().get_refcount(&root), 0, "the content was released");
+    assert!(fs.test_getattr(ino).is_err(), "the inode is gone");
+    // An orphan: the last close releases the content.
+    let (ino, root) = file("g", 151);
+    let (fh, _) = fs.test_open(ino, libc::O_RDONLY).unwrap();
+    fs.simulate_unlink(1, "g").unwrap();
+    assert_eq!(fs.meta().get_refcount(&root), 1, "the orphan keeps its content");
+    fs.test_release(ino, fh).unwrap();
+    assert_eq!(fs.meta().get_refcount(&root), 0, "the last close released it");
+    assert!(fs.test_getattr(ino).is_err(), "the orphan is gone");
+}
