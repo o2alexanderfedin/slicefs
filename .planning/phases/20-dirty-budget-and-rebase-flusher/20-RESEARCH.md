@@ -544,7 +544,13 @@ pub fn parse_size(s: &str) -> Result<usize, String> {
 | A10 | Below the budget the flusher never steps a hot cell (narrows the locked "largest dirty file first" to "largest quiet dirty file first") | Q2 | If the user wants strict "largest first", the flusher wastes dropped steps on a hot file and blocks its own limit steps. Confirm in plan review. |
 | A11 | A run with serialize off above the budget is safe on Phase 19 code | Q4 | Never run (ROADMAP line 183). If it fails, the P0 probe finds a Phase 19 bug before the flusher work. |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+- Q1 (flusher in the default harness runs): RESOLVED by 20-CONTEXT.md "Answers to the research open questions", [Harness]: the default `run()` does not start the flusher; a focused test does, and the harness gets only a small opt-in knob (plan 20-07 `S7_FLUSHER`).
+- Q2 (throttle also counts the `Write` record copy): RESOLVED as the research recommends (no). CONTEXT has no separate answer; the copy is bounded by N x write size and freed before the reply, inside the bound of plan 20-07.
+- Q3 (expire on a file that never becomes clean): RESOLVED by 20-CONTEXT.md A10: a file that is written all the time is not stepped by the flusher below the hard limits; its writer pays with its own steps (plan 20-05).
+
+The original questions follow.
 
 1. **Does the flusher run in the default harness runs (`serialize_off_target`)?**
    - What we know: those runs stay below the budget (tests/stress_harness.rs:1421-1437), so the flusher would only do idle/expire work. CONTEXT says "do not grow `stress_harness.rs` without need".
