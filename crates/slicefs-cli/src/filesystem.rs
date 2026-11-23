@@ -139,10 +139,17 @@ pub const FINAL_STEP: usize = 8 << 20;
 /// `REORDER_WINDOW`, so one stream can still use its whole window.
 pub const DIRTY_BUDGET: usize = 64 << 20;
 
-/// Most time a writer waits for the step in flight of its cell (with the
-/// cell unlocked), then EIO. Above the 10 s `STORE_WAIT` of the chunk store,
-/// because the step can itself wait that long in a store put.
+/// One slice of a wait for the step in flight of a cell (with the cell
+/// unlocked; see `CellGuard::wait_step`). The waiter waits another slice
+/// only if the step made progress in this one (a store put or read of the
+/// holder, or a store wait of it that ended), else it gives EIO. Above the
+/// 10 s `STORE_WAIT` of the chunk store: every store wait ends within that,
+/// so a holder that is slow but not stuck moves its count in each slice.
 const STEP_WAIT: Duration = Duration::from_secs(15);
+
+/// Most time a writer waits for one step in flight, even while the step
+/// makes progress (WR-05), then EIO.
+const STEP_WAIT_MAX: Duration = Duration::from_secs(120);
 
 /// Most dropped steps in a row one write tries again (with the I/O
 /// unlocked), then EIO.
@@ -364,7 +371,7 @@ struct CellState {
     /// time. Stream writers wait for it with the cell unlocked
     /// (`CellGuard::wait_step`); a writer over the limit skips its rebase
     /// step. Readers and flushes never take it or wait for it.
-    stepping: Option<SyncWait>,
+    stepping: Option<StepToken>,
     /// Writers of the cell at the hard cap (`CellGuard::enter_cap`). While
     /// it is not 0, no ordinary rebase step starts (`rebase_cell`), and an
     /// overlay writer waits for the step in flight before it applies
@@ -377,6 +384,36 @@ struct CellState {
     /// an overlay, a truncate to 0): a flush of an older snapshot is not
     /// installed (RESEARCH Pitfall 5).
     last_published_gen: u64,
+}
+
+/// The step token of a cell (`CellState::stepping`): it ends (`done`) when
+/// the step ends, and its progress count moves with each store put or read
+/// of the step's I/O (`chunk_store::with_progress`, WR-05).
+#[derive(Clone, Default)]
+struct StepToken {
+    done: SyncWait,
+    progress: Arc<AtomicU64>,
+}
+
+/// Ends the step token of `run_step` when it is dropped. On a panic in the
+/// step's I/O it also clears the token from the cell (WR-06), so waiters
+/// and later steps do not wait for a step that never ends.
+struct StepEnd<'a> {
+    cell: &'a FileCell,
+    token: &'a StepToken,
+}
+
+impl Drop for StepEnd<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            // The panic came from the I/O phase: the cell is unlocked.
+            let mut state = self.cell.state.lock();
+            if state.stepping.as_ref().is_some_and(|t| Arc::ptr_eq(&t.progress, &self.token.progress)) {
+                state.stepping = None;
+            }
+        }
+        self.token.done.done();
+    }
 }
 
 /// A locked cell. When it is dropped (and at `sync_dirty`), it moves
@@ -395,6 +432,8 @@ struct CellGuard<'a> {
     no_drop_hook: bool,
     /// This writer is counted in `CellState::cap_writers`.
     at_cap: bool,
+    /// One slice of `wait_step` (`STEP_WAIT`; tests set it lower).
+    step_wait: Duration,
 }
 
 impl CellGuard<'_> {
@@ -410,26 +449,40 @@ impl CellGuard<'_> {
     }
 
     /// Run `io` as the one step in flight of the cell: set a fresh token,
-    /// run `io` with the cell unlocked, lock again, then clear the token and
-    /// wake its waiters. `io` returns its error as a value, so the token is
-    /// cleared on every path. The caller makes sure no token is set, and
-    /// checks `retired`, the mode and the generation after it.
+    /// run `io` with the cell unlocked (its store work moves the token's
+    /// progress count), lock again, then clear the token and wake its
+    /// waiters. `io` returns its error as a value; a panic in it clears
+    /// the token too (`StepEnd`, WR-06). The caller makes sure no token is
+    /// set, and checks `retired`, the mode and the generation after it.
     fn run_step<R>(&mut self, io: impl FnOnce() -> R) -> R {
         debug_assert!(self.stepping.is_none(), "one step in flight per cell");
-        let token = SyncWait::default();
+        let token = StepToken::default();
         self.stepping = Some(token.clone());
-        let r = self.unlocked(io);
+        let _end = StepEnd { cell: self.cell, token: &token };
+        let r = self.unlocked(|| chunk_store::with_progress(&token.progress, io));
         self.stepping = None;
-        token.done();
         r
     }
 
     /// Wait, with the cell unlocked, until no step of the cell is in flight
-    /// (`STEP_WAIT` for each step, then EIO). The caller checks `retired`
-    /// and the mode again after it.
+    /// (WR-05). The wait for one step goes in slices of `step_wait`: after a
+    /// slice in which the step moved its progress count, it waits again;
+    /// after a slice with no progress, or `STEP_WAIT_MAX` for that step, it
+    /// gives EIO. The caller checks `retired` and the mode again after it.
     fn wait_step(&mut self) -> Result<(), i32> {
+        let slice = self.step_wait;
+        let mut since: Option<(Arc<AtomicU64>, std::time::Instant)> = None;
         while let Some(token) = self.stepping.clone() {
-            if !self.unlocked(|| token.wait_timeout(STEP_WAIT)) {
+            let start = match &since {
+                Some((p, t)) if Arc::ptr_eq(p, &token.progress) => *t,
+                _ => std::time::Instant::now(),
+            };
+            since = Some((Arc::clone(&token.progress), start));
+            let seen = token.progress.load(Ordering::Relaxed);
+            if self.unlocked(|| token.done.wait_timeout(slice)) {
+                continue;
+            }
+            if token.progress.load(Ordering::Relaxed) == seen || start.elapsed() >= STEP_WAIT_MAX {
                 return Err(libc::EIO);
             }
         }
@@ -648,6 +701,9 @@ pub struct SliceFsFilesystem {
     steps_seen: AtomicUsize,
     /// Test hook (see `test_fail_steps`): rebase steps to fail with EIO.
     fail_steps: AtomicUsize,
+    /// One slice of a wait for a step in flight, in ms (`STEP_WAIT`; tests
+    /// set it lower).
+    step_wait_ms: AtomicU64,
 }
 
 impl SliceFsFilesystem {
@@ -696,6 +752,7 @@ impl SliceFsFilesystem {
             drop_every: AtomicUsize::new(0),
             steps_seen: AtomicUsize::new(0),
             fail_steps: AtomicUsize::new(0),
+            step_wait_ms: AtomicU64::new(STEP_WAIT.as_millis() as u64),
         }
     }
 
@@ -809,6 +866,12 @@ impl SliceFsFilesystem {
         self.drop_every.store(k, Ordering::Relaxed);
     }
 
+    /// Test hook: set one slice of a wait for a step in flight (see
+    /// `STEP_WAIT`) to `d`.
+    pub fn test_set_step_wait(&self, d: Duration) {
+        self.step_wait_ms.store(d.as_millis() as u64, Ordering::Relaxed);
+    }
+
     /// Test hook: the next `n` unlocked rebase steps fail with EIO after
     /// their I/O phase, as a store error does (nothing is published).
     pub fn test_fail_steps(&self, n: usize) {
@@ -892,7 +955,15 @@ impl SliceFsFilesystem {
     }
 
     fn lock_cell<'a>(&'a self, cell: &'a FileCell) -> CellGuard<'a> {
-        CellGuard { total: &self.dirty_total, cell, state: Some(cell.state.lock()), notes: Vec::new(), no_drop_hook: false, at_cap: false }
+        CellGuard {
+            total: &self.dirty_total,
+            cell,
+            state: Some(cell.state.lock()),
+            notes: Vec::new(),
+            no_drop_hook: false,
+            at_cap: false,
+            step_wait: Duration::from_millis(self.step_wait_ms.load(Ordering::Relaxed)),
+        }
     }
 
     /// Run `f` on the open write state of `ino` under its cell lock; `None`
@@ -975,12 +1046,15 @@ impl SliceFsFilesystem {
     /// the cell and remove it from the map in the same cell-lock hold (cell
     /// rank, then shard rank; RESEARCH Pitfall 4). If a write handle is
     /// opened meanwhile, stop: the cell lives on, and its next last release
-    /// finalizes. After an error the cell is retired too, unless a write
-    /// handle is open again.
+    /// finalizes. After an error the cell is retired only if its state is
+    /// clean (WR-04): a dirty one stays in the map with no write handle, so
+    /// no unstored byte is lost. Reads still see it, a commit cut flushes it
+    /// or logs it again, and the next open and last release (or destroy)
+    /// store it; an unlink of the last link drops it (`reclaim_inode`).
     fn finalize(&self, cell: &Arc<FileCell>, g: &mut CellGuard<'_>) -> Result<(), i32> {
         let r = self.finalize_steps(g);
         g.no_drop_hook = false;
-        if g.retired || g.write_handles > 0 {
+        if g.retired || g.write_handles > 0 || (r.is_err() && !Self::is_clean(&g.file)) {
             return r;
         }
         g.retired = true;
@@ -1057,6 +1131,18 @@ impl SliceFsFilesystem {
                 drops = 0;
             } else {
                 drops += 1;
+            }
+        }
+    }
+
+    /// True if `s` holds no byte that is not in its stored content: a clean
+    /// overlay, or a stream with no pending write that is empty or whose
+    /// last flush is current.
+    fn is_clean(s: &OpenFileState) -> bool {
+        match &s.write_mode {
+            WriteMode::Overlay(ov) => ov.is_clean(),
+            WriteMode::Streaming { pending, .. } => {
+                pending.is_empty() && (s.byte_count == 0 || (s.cas_committed && s.last_committed_root.is_some()))
             }
         }
     }
@@ -1361,7 +1447,16 @@ impl SliceFsFilesystem {
     }
 
     /// Delete a non-directory inode that has no links left and release its content.
+    /// A cell left with no write handle by a failed last release (WR-04)
+    /// goes too: its bytes belong to a deleted inode.
     fn reclaim_inode(&self, ino: u64) {
+        if let Some(cell) = self.cells.get(ino).filter(|c| !c.transient) {
+            let mut g = self.lock_cell(&cell);
+            if !g.retired && g.write_handles == 0 {
+                g.retired = true;
+                self.cells.remove(&cell);
+            }
+        }
         if let Ok(manifest) = self.meta.get_manifest(ino) {
             for digest in &manifest {
                 self.meta.decrement_refcount(digest);
@@ -3187,8 +3282,9 @@ impl SliceFsFilesystem {
 
     /// The size change of `test_setattr_size` on the locked cell `g`. A
     /// size change is writer-side: each pass first waits for the step token
-    /// with the cell released (`wait_step`, `STEP_WAIT`, then EIO), also for
-    /// the memory-only changes, so it never drops a step in flight (of a
+    /// with the cell released (`wait_step`: EIO only for a step with no
+    /// progress), also for the memory-only changes, so it never drops a
+    /// step in flight (of a
     /// write or of the last release, see `finalize_steps`). Its own I/O
     /// runs as unlocked steps under the token: the content check of a
     /// stream extension, the manifest read and the empty manifest of a

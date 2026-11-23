@@ -800,6 +800,84 @@ fn a_read_of_pending_writes_runs_no_stream_step() {
     assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content after release");
 }
 
+/// WR-05: a stream writer waits for the step in flight while the step makes
+/// progress (store work on its thread), and gets EIO only after a slice of
+/// the wait with no progress. The slice is 200 ms here.
+#[test]
+fn a_writer_waits_for_a_step_while_it_makes_progress() {
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_step_wait(Duration::from_millis(200));
+    let (ino, fh) = fs.test_create(1, "s", 0o644, 0, 0, 0).unwrap();
+    let mut model = seeded(130, 64 * KIB);
+    fs.test_write(fh, 0, &model).unwrap();
+    let (other, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    // A step of 1 s: with a store put each 20 ms (progress), or none.
+    let run = |fs: &SliceFsFilesystem, at: usize, puts: bool| {
+        let (parked_tx, parked) = channel();
+        let (once, cs) = (AtomicBool::new(true), Arc::clone(fs.content()));
+        fs.test_set_push_hook(Some(Arc::new(move || {
+            if once.swap(false, Ordering::SeqCst) {
+                parked_tx.send(()).ok();
+                let (t0, mut i) = (std::time::Instant::now(), 0u64);
+                while t0.elapsed() < Duration::from_secs(1) {
+                    if puts {
+                        cs.put(&(at as u64 * 1000 + i).to_le_bytes()).unwrap();
+                        i += 1;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        })));
+        let (a, b) = (seeded(at as u64, 64 * KIB), seeded(at as u64 + 1, 64 * KIB));
+        let r = std::thread::scope(|s| {
+            let w = s.spawn(|| fs.test_write(fh, at as u64, &a));
+            parked.recv_timeout(WAIT).expect("the step reached its I/O phase");
+            let r = fs.test_write(other, (at + 64 * KIB) as u64, &b);
+            assert_eq!(w.join().unwrap(), Ok(a.len() as u32));
+            r
+        });
+        fs.test_set_push_hook(None);
+        (a, b, r)
+    };
+    let (a, b, r) = run(&fs, 64 * KIB, true);
+    assert_eq!(r, Ok(b.len() as u32), "the writer waits while the step makes progress");
+    put(&mut model, 64 * KIB, &a);
+    put(&mut model, 128 * KIB, &b);
+    let (a, _, r) = run(&fs, 192 * KIB, false);
+    assert_eq!(r, Err(libc::EIO), "a step with no progress for a slice gives EIO");
+    put(&mut model, 192 * KIB, &a);
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content with the handles open");
+    fs.test_release(ino, other).unwrap();
+    fs.test_release(ino, fh).unwrap();
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content after release");
+}
+
+/// WR-06: a panic in the I/O phase of a step clears the step token, so the
+/// next writer of the cell does not wait for a step that never ends.
+#[test]
+fn a_panic_in_a_step_clears_the_step_token() {
+    let (fs, _dir) = fresh_fs();
+    fs.test_set_step_wait(Duration::from_millis(200));
+    let (ino, fh) = fs.test_create(1, "s", 0o644, 0, 0, 0).unwrap();
+    let mut model = seeded(140, 64 * KIB);
+    fs.test_write(fh, 0, &model).unwrap();
+    let once = AtomicBool::new(true);
+    fs.test_set_push_hook(Some(Arc::new(move || {
+        if once.swap(false, Ordering::SeqCst) {
+            panic!("a test panic in the I/O phase of a step");
+        }
+    })));
+    let more = seeded(141, 64 * KIB);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fs.test_write(fh, 64 * KIB as u64, &more)));
+    assert!(r.is_err(), "the step panicked");
+    fs.test_set_push_hook(None);
+    assert_eq!(fs.test_write(fh, 64 * KIB as u64, &more), Ok(more.len() as u32), "the next write");
+    put(&mut model, 64 * KIB, &more);
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content with the handle open");
+    fs.test_release(ino, fh).unwrap();
+    assert!(fs.test_read(ino, 0, 1 << 20).unwrap() == model, "content after release");
+}
+
 /// A hook that counts its calls.
 fn counter(fs: &SliceFsFilesystem) -> Arc<std::sync::atomic::AtomicUsize> {
     let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1021,6 +1099,39 @@ fn finalize_ends_under_forced_drops() {
     assert_eq!(fs.test_dirty_cost(ino), 0, "the cell is retired");
     assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after release");
     assert_replays(fs, dir.path());
+}
+
+/// WR-04: a last release whose step fails keeps the bytes it could not
+/// store. The cell stays with no write handle: reads see the bytes, a
+/// commit cut keeps them, and the next open and release store them. An
+/// unlink of the file drops such a cell with the inode.
+#[test]
+fn a_failed_last_release_keeps_the_unstored_bytes() {
+    let (fs, _dir) = fresh_fs();
+    let mut ino = 0;
+    let (fh, model) = dirty_overlay(&fs, &mut ino);
+    fs.test_fail_steps(1);
+    let r = fs.test_release(ino, fh);
+    fs.test_fail_steps(0);
+    assert_eq!(r, Err(libc::EIO), "the release reports the failed step");
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "the unstored bytes are kept");
+    assert!(fs.test_dirty_cost(ino) > 0, "the cell keeps its dirty state");
+    fs.commit_cut().expect("a commit with the kept cell");
+    let (fh2, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    fs.test_release(ino, fh2).unwrap();
+    assert_eq!(fs.test_dirty_cost(ino), 0, "the next release stored the bytes");
+    assert!(fs.test_read(ino, 0, 2 << 20).unwrap() == model, "content after the next release");
+    // Keep a dirty cell again, then unlink the file.
+    let (fh3, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    fs.test_write(fh3, 4 * KIB as u64, &seeded(51, 4 * KIB)).unwrap();
+    fs.test_fail_steps(1);
+    let r = fs.test_release(ino, fh3);
+    fs.test_fail_steps(0);
+    assert_eq!(r, Err(libc::EIO));
+    assert!(fs.test_dirty_cost(ino) > 0, "the cell is kept again");
+    fs.simulate_unlink(1, "f").unwrap();
+    assert_eq!(fs.test_dirty_cost(ino), 0, "the unlink dropped the kept cell");
+    fs.commit_cut().expect("a commit after the unlink");
 }
 
 /// The last release of a stream flushes it with the cell unlocked: a read

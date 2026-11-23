@@ -371,6 +371,38 @@ thread_local! {
         const { std::cell::RefCell::new(Scratch { zstd: None, compressed: Vec::new(), record: Vec::new() }) };
 }
 
+thread_local! {
+    /// The progress count of the caller on this thread (see `with_progress`).
+    static PROGRESS: std::cell::RefCell<Option<Arc<std::sync::atomic::AtomicU64>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `count` as the progress count of this thread: each put and
+/// each read of a [`ChunkStore`] on this thread adds 1 to it, and so does
+/// each store wait of a put that ends in time. Another thread that waits
+/// for `f` can so tell a slow `f` (the count moves) from a stuck one. Every
+/// store wait ends within `STORE_WAIT`.
+pub fn with_progress<R>(count: &Arc<std::sync::atomic::AtomicU64>, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<Arc<std::sync::atomic::AtomicU64>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let old = self.0.take();
+            PROGRESS.with(|p| *p.borrow_mut() = old);
+        }
+    }
+    let _restore = Restore(PROGRESS.with(|p| p.borrow_mut().replace(Arc::clone(count))));
+    f()
+}
+
+/// Add 1 to the progress count of this thread, if it has one.
+fn note_progress() {
+    PROGRESS.with(|p| {
+        if let Some(c) = &*p.borrow() {
+            c.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+}
+
 impl Scratch {
     /// Compress `data` into `self.compressed`; false if it does not get
     /// smaller by 1/8 or the compressor fails.
@@ -1451,6 +1483,7 @@ impl ChunkStore {
     /// touched (for a running GC) and checked under the lock in the same
     /// way.
     pub fn put(&self, data: &[u8]) -> Result<ObjectId> {
+        note_progress();
         if self.opts.read_only {
             return Err(Error::Io(io::Error::other("the chunk store is open read-only")));
         }
@@ -1523,6 +1556,7 @@ impl ChunkStore {
                             if !w.wait_timeout(STORE_WAIT) {
                                 return Err(timed_out("a pack create, a record write, a seal or a background sync"));
                             }
+                            note_progress();
                             inner = self.inner.lock();
                         }
                         Some(Before::Create(num, done)) => {
@@ -1852,6 +1886,7 @@ impl ChunkStore {
             if !w.wait_timeout(STORE_WAIT) {
                 return Err(timed_out(what));
             }
+            note_progress();
         }
     }
 
@@ -2725,6 +2760,7 @@ impl ChunkStore {
     /// again, the place must still be the current one (else the read starts
     /// over at the new place), so the pack was still there.
     pub fn read(&self, id: &ObjectId) -> Result<Vec<u8>> {
+        note_progress();
         let hasher = hasher_by_tag(id.tag()).ok_or(Error::UnknownHash(*id))?;
         let gen = self.index.gen();
         // An index read error is returned, never taken as "missing".
@@ -3051,6 +3087,7 @@ impl ChunkStore {
             if !w.wait_timeout(STORE_WAIT) {
                 return Err(timed_out("a pack seal"));
             }
+            note_progress();
         }
     }
 
