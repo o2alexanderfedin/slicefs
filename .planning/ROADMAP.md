@@ -373,7 +373,7 @@ Plans:
 ### Phase 21.1: Store header and format policy (#154) (INSERTED)
 
 **Goal:** A store has one header file with a store format number and compat, ro-compat and incompat feature flags, and a written format policy says when the number changes and when a flag is added, so Phases 22 and 23 can add their changes as flags (#154)
-**Requirements**: TBD
+**Requirements**: FMT-01, FMT-02, FMT-03, FMT-04, FMT-05
 **Depends on:** Phase 21
 **Success Criteria** (what must be TRUE):
   1. `init` writes a store header file at the store root with a store format number (separate from the release number) and three flag sets: compat, ro-compat and incompat
