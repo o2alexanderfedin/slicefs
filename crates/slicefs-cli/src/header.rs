@@ -198,9 +198,23 @@ pub fn msg_mount_read_only(store: &Path, flag: &Flag) -> String {
     format!("Mounting read-only: {store} uses the feature {name}, which needs SliceFS {release} or later to write.")
 }
 
-fn msg_ro_write(store: &Path, flag: &Flag) -> String {
+/// A write command (or a writable load) on a store with the unknown
+/// ro_compat flag `flag`.
+pub fn msg_ro_write(store: &Path, flag: &Flag) -> String {
     let (store, name, release) = (store.display(), &flag.name, &flag.release);
     format!("{store} uses the feature {name}, which needs SliceFS {release} or later to write. This SliceFS can only read it.")
+}
+
+/// `--hash` on a ro_compat mount.
+pub fn msg_ro_hash(store: &Path, flag: &Flag) -> String {
+    let (store, name, release) = (store.display(), &flag.name, &flag.release);
+    format!("{store} can only be mounted read-only (feature {name} needs SliceFS {release} or later to write), so --hash cannot change its write hash.")
+}
+
+/// `--auto-snapshot` on a ro_compat mount.
+pub fn msg_ro_auto_snapshot(store: &Path, flag: &Flag) -> String {
+    let (store, name, release) = (store.display(), &flag.name, &flag.release);
+    format!("{store} can only be mounted read-only (feature {name} needs SliceFS {release} or later to write), so --auto-snapshot cannot make a snapshot at unmount.")
 }
 
 /// A ro_compat mount of a store whose write log has `n` records to replay.

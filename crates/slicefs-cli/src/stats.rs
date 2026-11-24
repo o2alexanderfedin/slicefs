@@ -174,7 +174,7 @@ pub fn run_stats(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
         ).into());
     }
 
-    crate::content::check_format(store_path)?;
+    crate::header::check(store_path, crate::header::Want::Read)?;
     let segs_dir = store_path.join("segments");
 
     // Load store from segment replay.

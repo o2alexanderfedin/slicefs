@@ -40,6 +40,9 @@ pub fn run_snapshot_create(
     store_path: &Path,
     name: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // The store header first, before anything writes.
+    crate::header::check(store_path, crate::header::Want::Write)?;
+
     // Refuse to run on a mounted store.
     let lock_path = store_path.join("mount.lock");
     if lock_path.exists() {
@@ -94,6 +97,7 @@ pub fn run_snapshot_create(
 
 /// List all snapshots in the store.
 pub fn run_snapshot_list(store_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    crate::header::check(store_path, crate::header::Want::Read)?;
     let segs_dir = store_path.join("segments");
 
     // Load snapshot list from segment replay (no need to reconstruct full store).
@@ -137,6 +141,9 @@ pub fn run_snapshot_switch(
     store_path: &Path,
     version_or_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // The store header first, before anything writes.
+    crate::header::check(store_path, crate::header::Want::Write)?;
+
     // Refuse to run on a mounted store.
     let lock_path = store_path.join("mount.lock");
     if lock_path.exists() {

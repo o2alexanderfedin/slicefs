@@ -84,7 +84,7 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
         ).into());
     }
 
-    crate::content::check_format(store_path)?;
+    crate::header::check(store_path, crate::header::Want::Read)?;
     let segs_dir = store_path.join("segments");
 
     // Load last committed root + all snapshot roots from segment replay.

@@ -30,13 +30,13 @@ use crate::header::{self, Header, Line, Want};
 /// is no header or no hash line. A name this build does not know is an
 /// error.
 pub fn write_hasher(store: &Path) -> std::io::Result<&'static dyn ObjectHasher> {
-    let Some(text) = header::read(store)? else { return Ok(DEFAULT_HASHER) };
-    hasher_of(store, &header::parse(store, &text)?)
+    let h = header::read(store)?.map(|text| header::parse(store, &text)).transpose()?;
+    hasher_of(store, h.as_ref())
 }
 
 /// The write hash of the parsed header `h` of `store` (see [`write_hasher`]).
-fn hasher_of(store: &Path, h: &Header) -> std::io::Result<&'static dyn ObjectHasher> {
-    let Some(name) = h.hash() else { return Ok(DEFAULT_HASHER) };
+fn hasher_of(store: &Path, h: Option<&Header>) -> std::io::Result<&'static dyn ObjectHasher> {
+    let Some(name) = h.and_then(Header::hash) else { return Ok(DEFAULT_HASHER) };
     hasher_by_name(name).ok_or_else(|| {
         std::io::Error::other(format!(
             "{} records the write hash {name:?}, which this SliceFS does not know (known: {})",
@@ -67,7 +67,7 @@ pub fn select_hash(store: &Path, name: Option<&str>) -> std::io::Result<()> {
     let existed = store.join(FORMAT_FILE).exists();
     let opened = header::check(store, Want::Write)?;
     let mut h = opened.header.ok_or_else(|| std::io::Error::other(format!("{}/FORMAT is missing after its write", store.display())))?;
-    let current = hasher_of(store, &h)?;
+    let current = hasher_of(store, Some(&h))?;
     if current.name() == new.name() {
         return Ok(());
     }
@@ -81,63 +81,18 @@ pub fn select_hash(store: &Path, name: Option<&str>) -> std::io::Result<()> {
     header::write_header(store, &h)
 }
 
-/// Refuse a store of an older format, whose format changed without a
-/// migration. A store passes if it has the format marker, or if it has no
-/// marker and its current root node is in the chunk store (a new store, or
-/// one made by code that writes no marker, as in tests).
-/// Call this before the store is opened (mount, gc, stats, scrub).
-pub fn check_format(store: &Path) -> std::io::Result<()> {
-    let older_as = |what: &str| {
-        std::io::Error::other(format!(
-            "{} was made by an older SliceFS ({what}). The store \
-             format changed without a migration: copy the files out with the \
-             older version, then into a new store",
-            store.display()
-        ))
-    };
-    let older = || older_as("metadata in vt0/");
-    match std::fs::read_to_string(store.join(FORMAT_FILE)) {
-        Ok(s) if s.starts_with(FORMAT) => return Ok(()),
-        Ok(s) if s.starts_with("slicefs-store 5 ") => return Err(older_as("224-bit object IDs")),
-        Ok(s) if s.starts_with("slicefs-store ") => return Err(older()),
-        Ok(s) => {
-            return Err(std::io::Error::other(format!(
-                "{}: unknown store format {:?}",
-                store.display(),
-                s.trim()
-            )))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-    let segs = store.join("segments");
-    if !segs.is_dir() {
-        return Ok(());
-    }
-    let Ok((Some(root), _)) = metadata::segment::load_store_from_segments(&segs) else {
-        return Ok(()); // nothing committed (or a damaged log: later steps report it)
-    };
-    if open_read_only(store)?.contains(&to_id(&root)) {
-        Ok(())
-    } else {
-        Err(older())
-    }
-}
-
 /// The temp files of a full GC (`<store>/gc-tmp`; a writable open removes
 /// what a crash left).
 pub const GC_TMP_DIR: &str = "gc-tmp";
 
-/// Open the content store of `store` (creating it and the format marker if
-/// needed).
+/// Open the content store of `store` to write. The header check comes
+/// first (`Want::Write`): a new store gets its header durably before the
+/// chunk store makes `packs/`; a store that this build may not write is
+/// refused.
 pub fn open(store: &Path) -> std::io::Result<Content> {
-    std::fs::create_dir_all(store)?;
-    let path = store.join(FORMAT_FILE);
-    if !path.exists() {
-        // The header first, durably, before the chunk store makes `packs/`.
-        crate::header::create(store)?;
-    }
-    let opts = Options { hasher: write_hasher(store)?, gc_tmp_dir: Some(store.join(GC_TMP_DIR)), ..Options::default() };
+    let opened = header::check(store, Want::Write)?;
+    let hasher = hasher_of(store, opened.header.as_ref())?;
+    let opts = Options { hasher, gc_tmp_dir: Some(store.join(GC_TMP_DIR)), ..Options::default() };
     let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
     Ok(Arc::new(cs))
 }
@@ -164,9 +119,12 @@ pub fn store_io_read_only(store: &Path) -> std::io::Result<metadata::store_io::S
 }
 
 /// Open the content store of `store` for reading only: nothing on disk
-/// changes, also while a mount writes to it (for `scrub`).
+/// changes, also while a mount writes to it (for `scrub`). The header
+/// check comes first (`Want::Read`).
 pub fn open_read_only(store: &Path) -> std::io::Result<Content> {
-    let opts = Options { read_only: true, hasher: write_hasher(store)?, ..Options::default() };
+    let opened = header::check(store, Want::Read)?;
+    let hasher = hasher_of(store, opened.header.as_ref())?;
+    let opts = Options { read_only: true, hasher, ..Options::default() };
     let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
     Ok(Arc::new(cs))
 }
@@ -367,37 +325,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// A committed store whose root node is not in the chunk store (as with
-    /// metadata in vt0/).
-    fn make_old_store(dir: &Path) {
-        use metadata::store::DictMetadataStore;
-        use slicefs_traits::metadata::{InodeMeta, MetadataStore};
-        std::fs::create_dir_all(dir.join("segments")).unwrap();
-        let wal = metadata::wal::create_wal(metadata::wal::WalConfig::PerOp, dir, 1).unwrap();
-        let io = Arc::new(std::sync::Mutex::new(metadata::store_io::StoreIo::open(dir).unwrap()));
-        let mut meta = DictMetadataStore::new(io);
-        meta.set_wal(wal);
-        let ino = meta.create_inode(&InodeMeta::new_file(0, 0, 0, 0o100644)).unwrap();
-        meta.link(1, "f", ino).unwrap();
-        meta.set_manifest(ino, &[ObjectKey::example(1)]).unwrap();
-        meta.commit().unwrap();
-        meta.shutdown_wal().unwrap();
-        drop(meta);
-        std::fs::remove_dir_all(dir.join("packs")).unwrap();
-    }
-
-    /// A marker of an older format is refused at once.
-    #[test]
-    fn an_older_format_marker_is_refused() {
-        let d = tempfile::TempDir::new().unwrap();
-        std::fs::write(d.path().join(FORMAT_FILE), "slicefs-store 4 (file content in packs)\n").unwrap();
-        let err = check_format(d.path()).err().unwrap().to_string();
-        assert!(err.contains("older SliceFS (metadata in vt0/)"), "{err}");
-        std::fs::write(d.path().join(FORMAT_FILE), "slicefs-store 5 (metadata and file content in packs)\n").unwrap();
-        let err = check_format(d.path()).err().unwrap().to_string();
-        assert!(err.contains("older SliceFS (224-bit object IDs)"), "{err}");
-    }
-
     /// Pseudo-random bytes (xorshift64): no FastCDC cut is at a fixed place.
     pub(crate) fn random_bytes(n: usize, mut seed: u64) -> Vec<u8> {
         (0..n)
@@ -438,20 +365,22 @@ pub(crate) mod tests {
         assert_eq!(to_id(&to_key(id)), id);
     }
 
+    /// [New store]: a new store gets the header at its first open; a store
+    /// with data and no header is refused by both opens, and no header is
+    /// written.
     #[test]
-    fn a_new_store_gets_the_marker_and_an_old_store_is_refused() {
+    fn a_new_store_gets_the_header_and_data_with_no_header_is_refused() {
         let d = tempfile::TempDir::new().unwrap();
         let cs = open(d.path()).unwrap();
         let k = put_all(&cs, b"hello").unwrap();
         assert_eq!(get_all(&cs, &k).unwrap(), b"hello");
-        assert_eq!(std::fs::read_to_string(d.path().join(FORMAT_FILE)).unwrap(), marker(DEFAULT_HASHER));
         drop(cs);
-        assert!(check_format(d.path()).is_ok(), "a store with the marker passes");
-        assert!(check_format(tempfile::TempDir::new().unwrap().path()).is_ok(), "an empty store passes");
-
-        let old = tempfile::TempDir::new().unwrap();
-        make_old_store(old.path());
-        let err = check_format(old.path()).err().unwrap().to_string();
-        assert!(err.contains("older SliceFS"), "{err}");
+        assert_eq!(std::fs::read_to_string(d.path().join(FORMAT_FILE)).unwrap(), marker(DEFAULT_HASHER));
+        std::fs::remove_file(d.path().join(FORMAT_FILE)).unwrap();
+        for err in [open(d.path()).err(), open_read_only(d.path()).err()] {
+            let err = err.expect("refused").to_string();
+            assert!(err.contains("FORMAT is missing"), "{err}");
+        }
+        assert!(!d.path().join(FORMAT_FILE).exists(), "no header is written");
     }
 }

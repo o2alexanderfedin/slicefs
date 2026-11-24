@@ -72,6 +72,12 @@ pub fn load_store(
         ).into());
     }
 
+    // The store header, before the lock. The read-only mode is
+    // `load_store_read_only`, chosen by `start`: refuse it here.
+    if let header::Access::ReadOnly(flag) = header::check(store_path, header::Want::Mount)?.access {
+        return Err(header::msg_ro_write(store_path, &flag).into());
+    }
+
     // Step 2: Acquire mount lock.
     // DirtyMount means a previous mount crashed — segments already contain all
     // durably written mutations, so re-loading segments is idempotent WAL replay.
@@ -366,6 +372,15 @@ pub fn start(
 ) -> Result<Started, Box<dyn std::error::Error>> {
     // The store header first, before anything writes to the store.
     let access = header::check(store_path, header::Want::Mount)?.access;
+    // A read-only mount writes nothing: refuse the options that write.
+    if let header::Access::ReadOnly(flag) = &access {
+        if args.hash.is_some() {
+            return Err(header::msg_ro_hash(store_path, flag).into());
+        }
+        if args.auto_snapshot {
+            return Err(header::msg_ro_auto_snapshot(store_path, flag).into());
+        }
+    }
     let snapshot_ref = args.snapshot_ref.as_deref();
     let wal_config = parse_wal_config(args.wal_strategy.as_deref());
 
@@ -608,8 +623,8 @@ pub fn run_mount(
     // Pre-flight: reject if mountpoint is already in use.
     check_mountpoint_not_in_use(mountpoint)?;
 
-    // Pre-flight: refuse a store of an older format (metadata in vt0/).
-    crate::content::check_format(store_path)?;
+    // Pre-flight: the store header (an early refusal, before the backend choice).
+    header::check(store_path, header::Want::Mount)?;
 
     // ── macOS: Backend selection ──────────────────────────────────────────────
     //

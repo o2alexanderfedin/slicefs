@@ -176,7 +176,7 @@ fn seed_hash_is_recorded_and_unknown_names_are_refused() {
     let plain = TempDir::new().unwrap();
     std::fs::write(plain.path().join(FORMAT_FILE), FORMAT).unwrap();
     assert_eq!(content::write_hasher(plain.path()).unwrap().name(), "blake3-256");
-    content::check_format(plain.path()).unwrap();
+    slicefs_cli::header::check(plain.path(), slicefs_cli::header::Want::Read).unwrap();
 
     // `--hash` on a store of an older format: refused, the marker stays.
     let old = TempDir::new().unwrap();
