@@ -10,8 +10,8 @@
 //!
 //! The tests use the in-memory pack storage of the chunk store, with its
 //! syncs held (the slow disk), a short `store_wait`, and the real file system
-//! core. No fixed sleeps decide an order: a thread frees the disk after a
-//! number of `store_wait` periods, and the writer must go on after it.
+//! core. No fixed sleeps decide an order: a thread frees the disk when the
+//! file system has tried a write again twice, and the writer must go on after it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -31,8 +31,6 @@ use slicefs_cli::handlers::{self as h, CreateResult, DataResult, EmptyResult, Wr
 const MIB: usize = 1 << 20;
 /// A store call waits this long for a held sync before it gives a busy error.
 const STORE_WAIT: Duration = Duration::from_millis(150);
-/// The disk is held this long (a few busy errors of one write).
-const HELD: Duration = Duration::from_millis(900);
 /// Pieces of one MiB, more than the unsynced cap of a pack: the writes meet it.
 const PIECES: usize = KEEP_CAP / MIB + 6;
 const WAIT: Duration = Duration::from_secs(60);
@@ -95,12 +93,33 @@ fn request_write(fs: &SliceFsFilesystem, fh: u64, offset: u64, data: &[u8], flag
     })
 }
 
-/// The disk finishes its syncs after `after`.
-fn free_disk_after(mem: &MemIo, after: Duration) -> thread::JoinHandle<()> {
-    let mem = mem.clone();
-    thread::spawn(move || {
-        thread::sleep(after);
-        mem.hold_syncs(false);
+/// Sets the flag when it drops (also on a panic).
+struct SetOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for SetOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Hold the syncs of the disk and run `body`. The disk finishes its syncs as
+/// soon as the file system has tried a write again twice after a busy store:
+/// an event, not a timer, so a slow machine cannot miss the busy case. If
+/// that never happens, the disk is freed after 30 s (the test then fails on
+/// its own checks).
+fn with_slow_disk<R>(r: &Rig, body: impl FnOnce() -> R) -> R {
+    r.mem.hold_syncs(true);
+    let done = AtomicBool::new(false);
+    thread::scope(|s| {
+        s.spawn(|| {
+            let t = Instant::now();
+            while r.fs.store_busy_retries() < 2 && !done.load(Ordering::SeqCst) && t.elapsed() < Duration::from_secs(30) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            r.mem.hold_syncs(false);
+        });
+        let _end = SetOnDrop(&done);
+        body()
     })
 }
 
@@ -120,17 +139,16 @@ fn a_write_waits_for_a_busy_store_and_succeeds() {
     let _dog = watchdog();
     let r = rig();
     let (ino, fh) = create(&r.fs, "big", 0);
-    r.mem.hold_syncs(true);
-    let free = free_disk_after(&r.mem, HELD);
     let t = Instant::now();
-    for i in 0..PIECES {
-        match request_write(&r.fs, fh, (i * MIB) as u64, &piece(i), 0) {
-            WriteResult::Ok(n) => assert_eq!(n as usize, MIB, "short write {i}"),
-            WriteResult::Error(e) => panic!("write {i} of {PIECES} MiB failed with errno {e} after {:?}", t.elapsed()),
+    with_slow_disk(&r, || {
+        for i in 0..PIECES {
+            match request_write(&r.fs, fh, (i * MIB) as u64, &piece(i), 0) {
+                WriteResult::Ok(n) => assert_eq!(n as usize, MIB, "short write {i}"),
+                WriteResult::Error(e) => panic!("write {i} of {PIECES} MiB failed with errno {e} after {:?}", t.elapsed()),
+            }
         }
-    }
-    free.join().unwrap();
-    assert!(r.fs.store_busy_retries() >= 1, "no write met a busy store: the test did not run the case");
+    });
+    assert!(r.fs.store_busy_retries() >= 2, "no write met a busy store: the test did not run the case");
     check_content(&r.fs, ino, PIECES);
     let _op = r.fs.gate_shared();
     assert!(matches!(h::handle_release(&r.fs, ino, fh), EmptyResult::Ok));
@@ -141,17 +159,16 @@ fn an_append_that_meets_a_busy_store_is_in_the_file_once() {
     let _dog = watchdog();
     let r = rig();
     let (ino, fh) = create(&r.fs, "log", libc::O_APPEND);
-    r.mem.hold_syncs(true);
-    let free = free_disk_after(&r.mem, HELD);
-    for i in 0..PIECES {
-        // The offset is ignored: the write goes to the end of file.
-        match request_write(&r.fs, fh, 0, &piece(i), libc::O_APPEND) {
-            WriteResult::Ok(n) => assert_eq!(n as usize, MIB, "short append {i}"),
-            WriteResult::Error(e) => panic!("append {i} of {PIECES} MiB failed with errno {e}"),
+    with_slow_disk(&r, || {
+        for i in 0..PIECES {
+            // The offset is ignored: the write goes to the end of file.
+            match request_write(&r.fs, fh, 0, &piece(i), libc::O_APPEND) {
+                WriteResult::Ok(n) => assert_eq!(n as usize, MIB, "short append {i}"),
+                WriteResult::Error(e) => panic!("append {i} of {PIECES} MiB failed with errno {e}"),
+            }
         }
-    }
-    free.join().unwrap();
-    assert!(r.fs.store_busy_retries() >= 1, "no write met a busy store: the test did not run the case");
+    });
+    assert!(r.fs.store_busy_retries() >= 2, "no write met a busy store: the test did not run the case");
     check_content(&r.fs, ino, PIECES);
     let _op = r.fs.gate_shared();
     match h::handle_getattr(&r.fs, ino) {
