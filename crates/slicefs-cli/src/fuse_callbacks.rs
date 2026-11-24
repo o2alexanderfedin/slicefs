@@ -414,12 +414,6 @@ impl Filesystem for MountedFs {
         });
     }
 
-    /// Flush any buffered writes for `fh` to CAS and sync the WAL to disk.
-    ///
-    /// `datasync` is ignored — SliceFS treats fsync and fdatasync identically.
-    /// If `fh` has a write buffer, it is flushed through the CAS pipeline and
-    /// the buffer is reset to empty (file handle stays open for subsequent writes).
-    /// The WAL is then synced to disk to ensure durability.
     /// Make the directory changes so far durable (see `handle_fsyncdir`).
     fn fsyncdir(
         &self,
@@ -441,6 +435,12 @@ impl Filesystem for MountedFs {
         });
     }
 
+    /// Flush any buffered writes for `fh` to CAS and sync the WAL to disk.
+    ///
+    /// `datasync` is ignored — SliceFS treats fsync and fdatasync identically.
+    /// If `fh` has a write buffer, it is flushed through the CAS pipeline and
+    /// the buffer is reset to empty (file handle stays open for subsequent writes).
+    /// The WAL is then synced to disk to ensure durability.
     fn fsync(
         &self,
         _req: &Request,
@@ -977,8 +977,8 @@ impl Filesystem for MountedFs {
     /// fallback — ENOSYS causes the NFS4 LOCK compound to fail, and with hard
     /// mount semantics the NFS client retries forever, hanging all reads/writes.
     ///
-    /// Since SliceFS runs single-threaded (fuser on macOS), there is no actual
-    /// lock contention. Return "no conflicting lock" (F_UNLCK) unconditionally.
+    /// SliceFS keeps no lock table. Return "no conflicting lock" (F_UNLCK)
+    /// unconditionally.
     fn getlk(
         &self,
         _req: &Request,
@@ -1009,8 +1009,8 @@ impl Filesystem for MountedFs {
     ///
     /// FUSE-T on macOS translates NFS4 LOCK/LOCKU operations to FUSE setlk.
     /// Must return success (not ENOSYS) to prevent NFS client from hanging on
-    /// hard-mount retry. Since fuser runs single-threaded on macOS, there is no
-    /// real lock contention — all lock requests succeed as no-ops.
+    /// hard-mount retry. SliceFS keeps no lock table: all lock requests
+    /// succeed as no-ops.
     fn setlk(
         &self,
         _req: &Request,

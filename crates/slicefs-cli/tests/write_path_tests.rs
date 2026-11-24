@@ -382,7 +382,7 @@ fn test_setattr_size_zero_on_new_file_without_manifest() {
 ///
 /// Under FUSE-T, macOS maps NFS4 CLOSE → FUSE flush.  If flush returns ENOSYS
 /// the NFS client stalls indefinitely.  The flush callback now calls
-/// `flush_buffer_for_fsync` which flushes the buffer to CAS without closing the
+/// `flush_logged` which flushes the buffer to CAS without closing the
 /// handle, then returns ok().  This test exercises that exact path via
 /// `test_fsync` (which shares the same helper).
 #[test]
@@ -398,7 +398,7 @@ fn test_flush_write_read_roundtrip() {
     fs.test_write(fh, 0, b"test\n").expect("write should succeed");
 
     // Step 3: flush (NFS4 CLOSE → FUSE flush)
-    // flush_buffer_for_fsync is the same helper used by the flush() callback
+    // flush_logged is the same helper used by the flush() callback
     fs.test_fsync(ino, fh).expect("flush (via test_fsync) must not return ENOSYS");
 
     // Step 4: release (NFS4 final close → FUSE release)

@@ -3,8 +3,8 @@
 # writes, readahead, and both. The depth is the `waiting` file of the connection
 # in fusectl (/sys/fs/fuse/connections/<id>/waiting), sampled about every 2 ms.
 # Limits: `waiting` counts the whole connection, not one inode, so only one file
-# is active; SliceFS has one dispatch thread, so only the kernel-side queue is
-# visible. A sanity step first stops the daemon and checks that the counter moves.
+# is active; SliceFS had one dispatch thread when S4 ran (Phase 18), so only the
+# kernel-side queue was visible. A sanity step first stops the daemon and checks that the counter moves.
 # Runs inside the Docker container (run.sh s4). By hand only, not in CI.
 # Usage: s4-waiting.sh <slicefs-binary>
 B=$1

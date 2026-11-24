@@ -11,9 +11,9 @@
 //!   - test_write: fallback from Streaming to Buffered with empty streaming state
 //!   - test_release: already-closed fh (Ok)
 //!   - test_release: fsync-already-committed skip path (cas_committed + same digest)
-//!   - flush_buffer_for_fsync buffered mode
-//!   - flush_buffer_for_fsync empty file (byte_count==0) fast path
-//!   - flush_buffer_for_fsync closed fh no-op
+//!   - flush_handle buffered mode
+//!   - flush_handle empty file (byte_count==0) fast path
+//!   - flush_handle closed fh no-op
 //!   - test_setattr_size: open Buffered handle to zero
 //!   - test_setattr_size: open Buffered handle to nonzero
 //!   - test_setattr_size: open Streaming handle to nonzero (materialize+resize)
