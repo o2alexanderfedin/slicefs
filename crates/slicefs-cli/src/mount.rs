@@ -122,12 +122,16 @@ pub fn load_store(
 /// Load a store for the read-only daemon mode (a store with the unknown
 /// ro_compat flag `flag`): the root and the snapshots from the segments,
 /// a read-only chunk store and index, no write hash change, no write log,
-/// no `mount.lock`. Nothing on disk changes.
+/// no `mount.lock`. Nothing on disk changes. Refuses a store that needs a
+/// writer first: `mount.lock` exists (a crash, or a mount runs now), or the
+/// write log has records to replay.
 pub fn load_store_read_only(
     store_path: &Path,
     flag: &header::Flag,
 ) -> Result<(DictMetadataStore, Arc<Mutex<StoreIo>>), Box<dyn std::error::Error>> {
-    let _ = flag;
+    if store_path.join("mount.lock").exists() {
+        return Err(header::msg_lock_present(store_path, flag).into());
+    }
     if store_path.join("dictionary.bin").exists() {
         return Err(format!(
             "legacy store format detected at {}. Re-seed required: slicefs seed <store> <source>",
@@ -140,8 +144,11 @@ pub fn load_store_read_only(
         ).into());
     }
     let segs_dir = store_path.join("segments");
-    let (last_root, snapshots, _log) = metadata::segment::scan_store_with_log(&segs_dir)
+    let (last_root, snapshots, log) = metadata::segment::scan_store_with_log(&segs_dir)
         .map_err(|e| format!("failed to load segments: {}", e))?;
+    if !log.is_empty() {
+        return Err(header::msg_log_pending(store_path, log.len(), flag).into());
+    }
     let root = last_root.ok_or_else(|| {
         format!("no committed state found in segments at {}", segs_dir.display())
     })?;
@@ -1317,5 +1324,64 @@ mod tests {
         s.stop();
         let t2 = tree(&store);
         assert!(t2 != t0, "a normal mount changes the store tree");
+    }
+
+    /// [Mount lock]: a ro_compat mount refuses a store with `mount.lock` (a
+    /// crash, or a mount that runs now), and writes nothing.
+    #[test]
+    fn ro_compat_refuses_a_mount_lock() {
+        let dir = ro_fixture(true);
+        let store = dir.path().join("store");
+        std::fs::write(store.join("mount.lock"), b"").unwrap();
+        let t0 = tree(&store);
+        let err = start(&store, &ro_args(), None).err().expect("the mount is refused").to_string();
+        for part in ["mount.lock", "test-ro-feature", "r-test"] {
+            assert!(err.contains(part), "the message has {part:?}: {err}");
+        }
+        let t1 = tree(&store);
+        assert!(t1 == t0, "the refusal changed the store tree:\n{}", diff(&t0, &t1));
+    }
+
+    /// [Ro-compat]: a ro_compat mount refuses a store whose write log has
+    /// records to replay (a crash, with `mount.lock` removed), and writes
+    /// nothing.
+    #[test]
+    fn ro_compat_refuses_a_pending_write_log() {
+        let dir = ro_fixture(false);
+        let store = dir.path().join("store");
+        {
+            let (meta, io, lock) = load_store(&store, WalConfig::PerOp, None).unwrap();
+            let fs = SliceFsFilesystem::new(meta, io, Some(store.clone()));
+            assert!(matches!(handlers::handle_mkdir(&fs, 1, "d", 0o755, 0, 0, 0), EntryResult::Ok(..)), "mkdir");
+            fs.meta().flush_wal().unwrap();
+            std::mem::forget(fs); // a crash: no commit, no destroy
+            drop(lock); // as `slicefs unmount --store` removes it
+        }
+        append_line(&store, RO_FLAG_LINE);
+        let n = metadata::segment::scan_store_with_log(&store.join("segments")).unwrap().2.len();
+        assert!(n >= 1, "the write log has the mkdir record");
+        let t0 = tree(&store);
+        let err = start(&store, &ro_args(), None).err().expect("the mount is refused").to_string();
+        for part in ["write log", &format!("{n} request(s)"), "test-ro-feature", "r-test"] {
+            assert!(err.contains(part), "the message has {part:?}: {err}");
+        }
+        let t1 = tree(&store);
+        assert!(t1 == t0, "the refusal changed the store tree:\n{}", diff(&t0, &t1));
+    }
+
+    /// An empty write log after the last root (a clean unmount) does not
+    /// refuse a ro_compat mount.
+    #[test]
+    fn a_ro_compat_mount_with_an_empty_log_is_not_refused() {
+        let dir = ro_fixture(false);
+        let store = dir.path().join("store");
+        let s = start(&store, &ro_args(), None).expect("a normal start");
+        fuser::Filesystem::destroy(&mut crate::fuse_callbacks::MountedFs::new(Arc::clone(&s.fs), None));
+        s.stop();
+        append_line(&store, RO_FLAG_LINE);
+        let s = start(&store, &ro_args(), None).expect("an empty log is not refused");
+        assert_eq!(s.access, ro_access());
+        fuser::Filesystem::destroy(&mut crate::fuse_callbacks::MountedFs::new(Arc::clone(&s.fs), None));
+        s.stop();
     }
 }

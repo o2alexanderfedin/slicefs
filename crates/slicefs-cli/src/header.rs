@@ -188,6 +188,18 @@ fn msg_ro_write(store: &Path, flag: &Flag) -> String {
     format!("{store} uses the feature {name}, which needs SliceFS {release} or later to write. This SliceFS can only read it.")
 }
 
+/// A ro_compat mount of a store whose write log has `n` records to replay.
+pub fn msg_log_pending(store: &Path, n: usize, flag: &Flag) -> String {
+    let (store, name, release) = (store.display(), &flag.name, &flag.release);
+    format!("{store} has {n} request(s) in its write log. They must be replayed, but this SliceFS can only mount the store read-only (feature {name} needs SliceFS {release} or later). Mount it once with SliceFS {release} or later.")
+}
+
+/// A ro_compat mount of a store with `mount.lock`.
+pub fn msg_lock_present(store: &Path, flag: &Flag) -> String {
+    let (store, name, release) = (store.display(), &flag.name, &flag.release);
+    format!("{store}/mount.lock exists: the last mount did not end cleanly, or a mount runs now. This SliceFS can only mount the store read-only (feature {name} needs SliceFS {release} or later) and cannot replay the write log.")
+}
+
 fn msg_bad_line(store: &Path, k: usize, reason: &str, line: &str) -> String {
     let store = store.display();
     format!("{store}/FORMAT line {k}: {reason}: {line:?}")
