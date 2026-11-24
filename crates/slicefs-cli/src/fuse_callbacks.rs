@@ -187,6 +187,8 @@ impl Filesystem for MountedFs {
         }
         // Stop and join the flusher before the gate, then the destroy work.
         let ok = self.shutdown();
+        // The save-step counters ([Stats]), after the flusher stopped.
+        eprintln!("[{}][FUSE] destroy: {}", ts(), self.fs.steps_line());
         eprintln!("[{}][FUSE] destroy: EXIT — commit_ok={}", ts(), ok);
     }
 

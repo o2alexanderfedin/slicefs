@@ -816,6 +816,12 @@ pub(crate) struct FlushCtl {
     pub(crate) stop_exits: AtomicU64,
     pub(crate) no_room_exits: AtomicU64,
     pub(crate) max_wait_ms: AtomicU64,
+    /// Overlay save steps (`rebase_unlocked`) that published, from any
+    /// thread, and the dirty cost they freed ([Stats]).
+    pub(crate) save_steps: AtomicU64,
+    pub(crate) freed_bytes: AtomicU64,
+    /// The flusher clock when the flusher loop last started (0: never).
+    pub(crate) started_ms: AtomicU64,
 }
 
 impl FlushCtl {
@@ -844,6 +850,9 @@ impl FlushCtl {
             stop_exits: AtomicU64::new(0),
             no_room_exits: AtomicU64::new(0),
             max_wait_ms: AtomicU64::new(0),
+            save_steps: AtomicU64::new(0),
+            freed_bytes: AtomicU64::new(0),
+            started_ms: AtomicU64::new(0),
         }
     }
 
@@ -890,6 +899,10 @@ pub struct FlusherStats {
     pub no_room_exits: u64,
     /// The longest throttle wait, in ms.
     pub max_wait_ms: u64,
+    /// Overlay save steps that published (flusher and request threads).
+    pub save_steps: u64,
+    /// The dirty cost that those steps freed, in bytes.
+    pub freed_bytes: u64,
 }
 
 /// A dirty cell that the flusher can step (see `flush_targets`).
@@ -1399,7 +1412,20 @@ impl SliceFsFilesystem {
             stop_exits: v(&c.stop_exits),
             no_room_exits: v(&c.no_room_exits),
             max_wait_ms: v(&c.max_wait_ms),
+            save_steps: v(&c.save_steps),
+            freed_bytes: v(&c.freed_bytes),
         }
+    }
+
+    /// The `steps:` line of the unmount ([Stats]): save steps, steps per
+    /// second since the flusher started, and freed bytes per step.
+    pub fn steps_line(&self) -> String {
+        let c = &*self.flush_ctl;
+        let (n, freed) = (c.save_steps.load(Ordering::Relaxed), c.freed_bytes.load(Ordering::Relaxed));
+        let start = c.started_ms.load(Ordering::Relaxed);
+        let secs = if start == 0 { 0.0 } else { c.now_ms().saturating_sub(start) as f64 / 1000.0 };
+        let per_s = if secs > 0.0 { n as f64 / secs } else { 0.0 };
+        format!("steps: save_steps={n} steps_per_s={per_s:.2} freed_per_step={} freed_bytes={freed}", freed.checked_div(n).unwrap_or(0))
     }
 
     /// True if a test hook fails this rebase step (see `test_fail_steps`).
@@ -2552,7 +2578,18 @@ impl SliceFsFilesystem {
         if self.forced_drop(g.no_drop_hook) {
             return Ok(false);
         }
-        self.step_publish(ino, &mut g.file, plan, done)
+        let cost_before = plan.cost_before;
+        let published = self.step_publish(ino, &mut g.file, plan, done)?;
+        if published {
+            let after = match &g.file.write_mode {
+                WriteMode::Overlay(ov) => ov.cost(),
+                _ => 0,
+            };
+            let c = &*self.flush_ctl;
+            c.save_steps.fetch_add(1, Ordering::Relaxed);
+            c.freed_bytes.fetch_add(cost_before.saturating_sub(after) as u64, Ordering::Relaxed);
+        }
+        Ok(published)
     }
 
     /// Phase A of a rebase step (memory only): the pieces to store, the

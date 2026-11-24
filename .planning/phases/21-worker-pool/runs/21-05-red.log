@@ -1,0 +1,22 @@
+# 21-05 red run: alloc_tune_tests with tune_at_start as a stub (no mallopt call), Docker Linux, volume slicefs-target-p21
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+running 2 tests
+tune_at_start_fixes_the_mmap_threshold --- FAILED
+thread 'tune_at_start_fixes_the_mmap_threshold' (924) panicked at crates/slicefs-cli/tests/alloc_tune_tests.rs:20:5:
+a 1 MiB block after a 4 MiB free is not mmapped: hblkhd 0 -> 0
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+# green run after the mallopt call
+test stats_show_a_live_heap ... ok
+test tune_at_start_fixes_the_mmap_threshold ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+# 21-05 red run 2: the_flusher_lowers_the_total with the save_steps and freed_bytes adds removed from rebase_unlocked (macOS host)
+test the_flusher_lowers_the_total ... FAILED
+thread 'the_flusher_lowers_the_total' (130418031) panicked at crates/slicefs-cli/tests/flusher_tests.rs:285:5:
+the pass counted its save steps: FlusherStats { passes: 1, steps: 1, published: 1, drops: 0, skips: 0, errors: 0, throttled: 0, timeouts: 0, stop_exits: 0, no_room_exits: 0, max_wait_ms: 0, save_steps: 0, freed_bytes: 0 }
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.35s
+
+# green run with the adds
+test the_flusher_lowers_the_total ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.44s

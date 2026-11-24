@@ -1569,14 +1569,18 @@ fn vmhwm_mib() -> Option<u64> {
     Some(kb >> 10)
 }
 
-/// S7 memory diagnosis (glibc only). `mem_now` gives the live heap from
-/// `mallinfo2` (in use = uordblks + hblkhd) and `VmRSS`, `RssAnon`, `RssFile`
-/// of `/proc/self/status`, all in MiB.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+/// S7 memory diagnosis. `mem_now` gives the allocator numbers of
+/// `alloc_tune::stats` (live heap and free kept by malloc) and `VmRSS`,
+/// `RssAnon`, `RssFile` of `/proc/self/status` (0 where there is none), all
+/// in MiB. `None` where the allocator gives no numbers.
 mod s7mem {
+    use slicefs_cli::alloc_tune;
+
     #[derive(Clone, Copy, Default)]
     pub struct Mem {
         pub live: u64,
+        pub free: u64,
+        pub mmap: u64,
         pub rss: u64,
         pub anon: u64,
         pub file: u64,
@@ -1586,19 +1590,26 @@ mod s7mem {
         status.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()).unwrap_or(0) >> 10
     }
 
-    pub fn mem_now() -> Mem {
-        // SAFETY: mallinfo2 takes no pointers; glibc owns the state.
-        let mi = unsafe { libc::mallinfo2() };
+    pub fn mem_now() -> Option<Mem> {
+        let a = alloc_tune::stats()?;
         let st = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-        Mem { live: ((mi.uordblks + mi.hblkhd) >> 20) as u64, rss: status_mib(&st, "VmRSS:"), anon: status_mib(&st, "RssAnon:"), file: status_mib(&st, "RssFile:") }
+        Some(Mem {
+            live: a.live_bytes >> 20,
+            free: a.free_bytes >> 20,
+            mmap: a.mmap_bytes >> 20,
+            rss: status_mib(&st, "VmRSS:"),
+            anon: status_mib(&st, "RssAnon:"),
+            file: status_mib(&st, "RssFile:"),
+        })
     }
 
     /// Sample `mem_now` every 50 ms until `stop`; the sample with the most
-    /// live heap and the sample with the most RSS.
-    pub fn sample(stop: &std::sync::atomic::AtomicBool) -> (Mem, Mem) {
-        let (mut by_live, mut by_rss) = (Mem::default(), Mem::default());
+    /// live heap and the sample with the most RSS. `None` at once when the
+    /// allocator gives no numbers.
+    pub fn sample(stop: &std::sync::atomic::AtomicBool) -> Option<(Mem, Mem)> {
+        let (mut by_live, mut by_rss) = (mem_now()?, Mem::default());
         while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-            let m = mem_now();
+            let m = mem_now()?;
             if m.live > by_live.live {
                 by_live = m;
             }
@@ -1607,35 +1618,18 @@ mod s7mem {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        (by_live, by_rss)
+        Some((by_live, by_rss))
     }
 
-    /// One `S7 heap` line: the two peak samples, then the state now, then
-    /// `malloc_trim(0)` and the RSS after it.
-    pub fn print(peaks: (Mem, Mem)) {
-        let (pl, pr) = peaks;
-        // SAFETY: as above.
-        let mi = unsafe { libc::mallinfo2() };
-        let now = mem_now();
-        let released = unsafe { libc::malloc_trim(0) };
-        let after = mem_now();
+    /// One `S7 heap` line: the two peak samples, then the state now.
+    pub fn print(peaks: Option<(Mem, Mem)>) {
+        let (Some((pl, pr)), Some(now)) = (peaks, mem_now()) else { return };
         println!(
             "S7 heap peak_live_mib={} rss_at_peak_live_mib={} peak_rss_sample_mib={} live_at_peak_rss_mib={} anon_at_peak_rss_mib={} file_at_peak_rss_mib={} \
-             end_live_mib={} end_mmap_mib={} end_arena_mib={} end_free_in_arenas_mib={} end_rss_mib={} end_anon_mib={} end_file_mib={} rss_after_trim_mib={} anon_after_trim_mib={} trim_released={released}",
-            pl.live, pl.rss, pr.rss, pr.live, pr.anon, pr.file,
-            now.live, mi.hblkhd >> 20, mi.arena >> 20, mi.fordblks >> 20, now.rss, now.anon, now.file, after.rss, after.anon
+             end_live_mib={} end_mmap_mib={} end_malloc_free_mib={} end_rss_mib={} end_anon_mib={} end_file_mib={}",
+            pl.live, pl.rss, pr.rss, pr.live, pr.anon, pr.file, now.live, now.mmap, now.free, now.rss, now.anon, now.file
         );
     }
-}
-
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-mod s7mem {
-    #[derive(Clone, Copy, Default)]
-    pub struct Mem;
-    pub fn sample(_stop: &std::sync::atomic::AtomicBool) -> (Mem, Mem) {
-        (Mem, Mem)
-    }
-    pub fn print(_peaks: (Mem, Mem)) {}
 }
 
 fn ms(v: u64) -> f64 {
@@ -2051,6 +2045,8 @@ fn s6_small_fsync() {
 #[test]
 #[ignore = "spike S7 baseline: S7_THREADS S7_FILE_MIB S7_WRITE_MIB S7_COMMIT_SECS S7_SERIALIZE S7_FLUSHER; use --release"]
 fn s7_budget_baseline() {
+    // As the daemon does at start (`run_mount`), before the threads of S7 start.
+    let mmap_threshold = slicefs_cli::alloc_tune::tune_at_start();
     let threads = env_num("S7_THREADS", 4, 1, 64) as usize;
     // CAP_MIB = Pm + F + R, rounded up to a multiple of 8 (B + N x W + O + F + R).
     // Inputs: Pm = 267 (largest VmHWM of 3 P_old and 3 P0 runs), Spread = 20,
@@ -2083,6 +2079,7 @@ fn s7_budget_baseline() {
     let mut commits = CommitHists::new();
     let mut rss_writes = 0;
     let mut models: Vec<Vec<u32>> = Vec::new();
+    let mut mem_peaks = None;
     std::thread::scope(|s| {
         let (ctx, max_dirty) = (&ctx, &max_dirty);
         // Flusher form: the flusher runs in the scope. The guard stops it after
@@ -2167,7 +2164,8 @@ fn s7_budget_baseline() {
         }
         rss_writes = peak_rss_mib();
         mem_stop.store(true, Ordering::SeqCst);
-        s7mem::print(sampler.join().expect("S7 memory sampler panicked"));
+        mem_peaks = sampler.join().expect("S7 memory sampler panicked");
+        s7mem::print(mem_peaks);
         // Check phase: every block of every file against its version.
         let checkers: Vec<_> = files
             .iter()
@@ -2222,7 +2220,8 @@ fn s7_budget_baseline() {
     let vmhwm = hwm.map_or_else(|| "na".to_string(), |v| v.to_string());
     let fl = ctx.fs.test_flusher_stats();
     println!(
-        "S7 threads={threads} serialize={serialize} flusher={} cap_checked={cap_checked} file_mib={file_mib} write_mib={write_mib} peak_rss_mib={peak} vmhwm_mib={vmhwm} cap_mib={CAP_MIB} within_cap={} slowest_write_ms={:.1} rebase_steps={} max_dirty_mib={} rss_start_mib={rss_start} rss_after_writes_mib={rss_writes} commit_every_s={commit_secs} commits={} commit_hold_max_ms={:.1} commit_total_max_ms={:.1} commit_gate_wait_max_ms={:.1} flusher_passes={} flusher_steps={} flusher_published={} flusher_drops={} flusher_skips={} flusher_errors={} throttled={} throttle_timeouts={} throttle_wait_max_ms={}",
+        "S7 threads={threads} serialize={serialize} flusher={} cap_checked={cap_checked} file_mib={file_mib} write_mib={write_mib} peak_rss_mib={peak} vmhwm_mib={vmhwm} cap_mib={CAP_MIB} within_cap={} slowest_write_ms={:.1} rebase_steps={} max_dirty_mib={} rss_start_mib={rss_start} rss_after_writes_mib={rss_writes} commit_every_s={commit_secs} commits={} commit_hold_max_ms={:.1} commit_total_max_ms={:.1} commit_gate_wait_max_ms={:.1} flusher_passes={} flusher_steps={} flusher_published={} flusher_drops={} flusher_skips={} flusher_errors={} throttled={} throttle_timeouts={} throttle_wait_max_ms={} \
+         mmap_threshold={} heap_live_at_peak_rss_mib={} malloc_free_at_peak_rss_mib={} save_steps={} freed_bytes={}",
         u8::from(flusher_on),
         peak <= CAP_MIB,
         ms(slowest),
@@ -2240,7 +2239,12 @@ fn s7_budget_baseline() {
         fl.errors,
         fl.throttled,
         fl.timeouts,
-        fl.max_wait_ms
+        fl.max_wait_ms,
+        mmap_threshold.map_or_else(|| "default".to_string(), |b| b.to_string()),
+        mem_peaks.map_or_else(|| "na".to_string(), |(_, pr)| pr.live.to_string()),
+        mem_peaks.map_or_else(|| "na".to_string(), |(_, pr)| pr.free.to_string()),
+        fl.save_steps,
+        fl.freed_bytes
     );
     println!("S7 peak_rss_mib is the whole test process (getrusage), also the model and the check buffers");
     print_first("S7", seed, &mismatches);

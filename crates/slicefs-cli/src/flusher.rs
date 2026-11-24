@@ -86,6 +86,7 @@ pub fn spawn_flusher(fs: Weak<SliceFsFilesystem>) -> JoinHandle<()> {
 /// `pass` returns false. A paused flusher (a test hook) makes no pass.
 fn flusher_loop(ctl: &FlushCtl, mut pass: impl FnMut() -> bool) {
     chunk_store::sync::rank::require_gate(true);
+    ctl.started_ms.store(ctl.now_ms(), Ordering::Relaxed);
     ctl.running.store(true, Ordering::Release);
     let _running = Running(ctl);
     loop {
