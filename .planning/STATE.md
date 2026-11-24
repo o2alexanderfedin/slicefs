@@ -4,18 +4,18 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: "21.1"
 current_phase_name: "Store header and format policy (#154)"
-current_plan: 3
+current_plan: 4
 status: executing
-stopped_at: Completed 21.1-02-PLAN.md
-last_updated: "2026-11-24T21:03:01.447Z"
+stopped_at: Completed 21.1-03-PLAN.md
+last_updated: "2026-11-24T21:53:12.509Z"
 last_activity: 2026-11-24
 last_activity_desc: 21.1-01 complete (store header core, read-only daemon mode, tracer)
-state_head: 88df6fc6e56ac2730a94a4fb31a931ab110b4257
+state_head: 98308db58bf9bc537ac94865916a77453eadd4ff
 progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 44
-  completed_plans: 42
+  completed_plans: 43
   percent: 50
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 3
+Current Plan: 4
 Total Plans in Phase: 4
 Phase: 21.1 — Store header and format policy (#154)
 Plan: 21.1-01 complete (1 of 4); next: 21.1-02 (the header check at every open point)
@@ -91,6 +91,7 @@ Progress: [█████░░░░░] 50%
 | Phase 21 P09 | 60 min | 2 tasks | 8 files |
 | Phase 21.1 P01 | 74min | 3 tasks | 7 files |
 | Phase 21.1 P02 | 57min | 3 tasks | 16 files |
+| Phase 21.1 P03 | 50min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -208,6 +209,8 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21.1]: 21.1-01: --hash and --auto-snapshot are ignored (nothing written) on a ro_compat mount until plan 21.1-02 adds M11 and M12
 - [Phase 21.1]: 21.1-02: header::check is the first statement of every command that writes; a store with data and no header is refused (M1) for every Want
 - [Phase 21.1]: 21.1-02: write commands on a path with no store write FORMAT before they fail (gc, snapshot create/switch); a later small fix can refuse a path with no segments/ first
+- [Phase 21.1]: stats shows format (null with no header), flags by class (name, release, known) and access, in text and JSON
+- [Phase 21.1]: gc, snapshot create and snapshot switch refuse a path with no segments/ before the header check (content::require_store); seed and mount still make new stores
 
 ### Pending Todos
 
@@ -235,8 +238,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-24T21:02:53.434Z
-Stopped at: Completed 21.1-02-PLAN.md
+Last session: 2026-11-24T21:53:11.999Z
+Stopped at: Completed 21.1-03-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
