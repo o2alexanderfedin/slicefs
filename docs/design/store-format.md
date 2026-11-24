@@ -193,8 +193,9 @@ A read-only mount makes no `mount.lock`, so the commands that look for
   after their `mount.lock` check, and hold it while they run. If it is held,
   they are refused (M14).
 - `stats` shows `Mounted` as `yes` when `mount.lock` exists or the store
-  lock is held. (It takes the lock exclusive and drops it at once, so a
-  read-only mount that starts at the same moment can be refused, M13.)
+  lock is held, also while an offline `gc` runs. (It takes the lock
+  exclusive and drops it at once, so a read-only mount, `gc` or snapshot
+  command that starts at the same moment can be refused, M13 or M14.)
 - On a file system with no `flock`, there is no lock, and the commands run
   as with no read-only mount.
 
