@@ -11,9 +11,12 @@
 //! without requiring fuser types (which cannot be constructed in unit tests).
 
 
+use std::time::{Duration, Instant};
+
 use fuser::FileAttr;
 
-use crate::filesystem::{inode_to_file_attr, Admit, SliceFsFilesystem};
+use crate::filesystem::{clear_store_busy, inode_to_file_attr, take_store_busy, Admit, SliceFsFilesystem};
+use crate::util::ts;
 use metadata::wal::Lsn;
 use slicefs_traits::metadata::InodeMeta;
 
@@ -359,6 +362,56 @@ pub fn handle_write_admitted(
     match r {
         Ok((n, _)) => WriteResult::Ok(n),
         Err(e) => WriteResult::Error(e),
+    }
+}
+
+/// The first pause between two attempts of a write that met a busy store.
+const BUSY_PAUSE_MIN: Duration = Duration::from_millis(50);
+/// The longest pause between two attempts (the pause doubles for each one).
+const BUSY_PAUSE_MAX: Duration = Duration::from_secs(1);
+
+/// The entry of one write request (the FUSE write job, the S7 harness and the
+/// tests): `attempt` makes one try. It takes the commit gate for its own span
+/// and returns with the gate released (the FUSE job:
+/// `serve(handle_write_admitted)`), so no lock is held while this waits.
+///
+/// If the try ends in EIO because a store wait ended in a busy error (a slow
+/// pack seal or background sync, issue #170), nothing of the write was
+/// applied (the error comes before the apply and the log record, also for
+/// `O_APPEND`: the end of file is read again in each try). This function then
+/// pauses, with no lock held, and calls `attempt` again, as long as a new try
+/// starts before `SliceFsFilesystem::store_busy_limit` has passed since the
+/// first one and the file system is not shut down. Each try waits for the
+/// store itself, up to the store wait limit. After that limit the last EIO
+/// goes to the caller. Any other result goes to the caller at once.
+pub fn handle_write_retrying(fs: &SliceFsFilesystem, mut attempt: impl FnMut() -> WriteResult) -> WriteResult {
+    let start = Instant::now();
+    let limit = fs.store_busy_limit();
+    let mut pause = BUSY_PAUSE_MIN;
+    let mut tries = 0u32;
+    loop {
+        clear_store_busy();
+        let r = attempt();
+        if !matches!(r, WriteResult::Error(libc::EIO)) || !take_store_busy() {
+            return r;
+        }
+        let waited = start.elapsed();
+        if waited >= limit || fs.is_shut_down() {
+            eprintln!("[{}][FUSE] write: the chunk store stayed busy for {:.1} s ({tries} new tries); the write fails with EIO", ts(), waited.as_secs_f64());
+            return r;
+        }
+        tries += 1;
+        fs.count_store_busy_retry();
+        if tries == 1 {
+            eprintln!("[{}][FUSE] write: the chunk store is busy (a slow seal or sync); the write waits and tries again for up to {:.0} s", ts(), limit.as_secs_f64());
+        }
+        debug_assert!(
+            chunk_store::sync::rank::held().is_empty(),
+            "a write pause with a lock held: {:?}",
+            chunk_store::sync::rank::held()
+        );
+        std::thread::sleep(pause.min(limit - waited));
+        pause = (pause * 2).min(BUSY_PAUSE_MAX);
     }
 }
 

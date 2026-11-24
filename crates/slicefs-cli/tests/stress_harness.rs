@@ -1502,8 +1502,13 @@ fn env_list(name: &str, default: &str, lo: u64, hi: u64) -> Vec<u64> {
 /// A context for the spike tests: no mode, no models; the file system, the
 /// gate and the harness mutex only.
 fn spike_ctx(serialize: bool, seed: u64, threads: usize, wal: WalConfig) -> Ctx {
+    spike_ctx_with(serialize, seed, threads, wal, chunk_store::Options::default())
+}
+
+/// `spike_ctx` with chunk store options.
+fn spike_ctx_with(serialize: bool, seed: u64, threads: usize, wal: WalConfig, opts: chunk_store::Options) -> Ctx {
     let dir = TempDir::new().unwrap();
-    let fs = new_fs(dir.path(), wal.clone());
+    let fs = common::new_fs_with_options(dir.path(), wal.clone(), opts);
     let gate = fs.commit_gate();
     Ctx {
         fs,
@@ -2049,7 +2054,7 @@ fn s6_small_fsync() {
 /// counts that the default worker count can give, phase 21 [Step limit]).
 /// Above that count the S7 line shows the result and nothing is asserted.
 #[test]
-#[ignore = "spike S7 baseline: S7_THREADS S7_FILE_MIB S7_WRITE_MIB S7_COMMIT_SECS S7_SERIALIZE S7_FLUSHER; use --release"]
+#[ignore = "spike S7 baseline: S7_THREADS S7_FILE_MIB S7_WRITE_MIB S7_COMMIT_SECS S7_SERIALIZE S7_FLUSHER S7_STORE_WAIT_MS; use --release"]
 fn s7_budget_baseline() {
     let threads = env_num("S7_THREADS", 4, 1, 64) as usize;
     // CAP_MIB = Pm + F + R, rounded up to a multiple of 8 (B + N x W + O + F + R).
@@ -2071,7 +2076,15 @@ fn s7_budget_baseline() {
     // Serialize on is the Phase 18 baseline form. With serialize off the writers
     // run in parallel (Phase 19 removed the cross-file take-out). The flusher
     // form has serialize off.
-    let ctx = spike_ctx(serialize, seed, threads, WalConfig::PerOp);
+    // `S7_STORE_WAIT_MS` (0: the store default, 10 s) shortens the wait of a store
+    // call for a slow background sync, so that an ordinary run meets a busy
+    // store often (issue #170): the writes and the flusher must go on.
+    let store_wait_ms = env_num("S7_STORE_WAIT_MS", 0, 0, 60_000);
+    let mut store_opts = chunk_store::Options::default();
+    if store_wait_ms > 0 {
+        store_opts.store_wait = Duration::from_millis(store_wait_ms);
+    }
+    let ctx = spike_ctx_with(serialize, seed, threads, WalConfig::PerOp, store_opts);
     let files: Vec<(u64, u64)> = (0..threads).map(|t| create_file(&ctx.fs, ROOT, &format!("s7-{t}"), seed)).collect();
     let blocks = file_mib as usize * MIB_BLOCKS;
     let rss_start = peak_rss_mib();
@@ -2125,10 +2138,14 @@ fn s7_budget_baseline() {
                         let admit = if flusher_on { ctx.fs.throttle_write() } else { Admit { pay: true } };
                         // Sample inside `gated`, after the write, while the harness mutex is held:
                         // no other write is changing a dirty count then.
-                        let r = ctx.gated(hs, Kind::Write, || {
-                            let r = h::handle_write_admitted(&ctx.fs, fh, (first * BLOCK) as u64, buf, 0, admit);
-                            max_dirty.fetch_max(ctx.fs.test_dirty_total(), Ordering::SeqCst);
-                            r
+                        // One request: a busy store makes the request try again with the
+                        // gate released between the attempts (as in the FUSE write job).
+                        let r = h::handle_write_retrying(&ctx.fs, || {
+                            ctx.gated(hs, Kind::Write, || {
+                                let r = h::handle_write_admitted(&ctx.fs, fh, (first * BLOCK) as u64, buf, 0, admit);
+                                max_dirty.fetch_max(ctx.fs.test_dirty_total(), Ordering::SeqCst);
+                                r
+                            })
                         });
                         match r {
                             WriteResult::Ok(k) if k as usize == buf.len() => {}
@@ -2222,7 +2239,7 @@ fn s7_budget_baseline() {
     let vmhwm = hwm.map_or_else(|| "na".to_string(), |v| v.to_string());
     let fl = ctx.fs.test_flusher_stats();
     println!(
-        "S7 threads={threads} serialize={serialize} flusher={} cap_checked={cap_checked} file_mib={file_mib} write_mib={write_mib} peak_rss_mib={peak} vmhwm_mib={vmhwm} cap_mib={CAP_MIB} within_cap={} slowest_write_ms={:.1} rebase_steps={} max_dirty_mib={} rss_start_mib={rss_start} rss_after_writes_mib={rss_writes} commit_every_s={commit_secs} commits={} commit_hold_max_ms={:.1} commit_total_max_ms={:.1} commit_gate_wait_max_ms={:.1} flusher_passes={} flusher_steps={} flusher_published={} flusher_drops={} flusher_skips={} flusher_errors={} throttled={} throttle_timeouts={} throttle_wait_max_ms={}",
+        "S7 threads={threads} serialize={serialize} flusher={} cap_checked={cap_checked} file_mib={file_mib} write_mib={write_mib} store_wait_ms={store_wait_ms} peak_rss_mib={peak} vmhwm_mib={vmhwm} cap_mib={CAP_MIB} within_cap={} slowest_write_ms={:.1} rebase_steps={} max_dirty_mib={} rss_start_mib={rss_start} rss_after_writes_mib={rss_writes} commit_every_s={commit_secs} commits={} commit_hold_max_ms={:.1} commit_total_max_ms={:.1} commit_gate_wait_max_ms={:.1} flusher_passes={} flusher_steps={} flusher_published={} flusher_drops={} flusher_skips={} flusher_errors={} flusher_busy={} throttled={} throttle_timeouts={} throttle_wait_max_ms={} write_busy_retries={}",
         u8::from(flusher_on),
         peak <= CAP_MIB,
         ms(slowest),
@@ -2238,9 +2255,11 @@ fn s7_budget_baseline() {
         fl.drops,
         fl.skips,
         fl.errors,
+        fl.busy,
         fl.throttled,
         fl.timeouts,
-        fl.max_wait_ms
+        fl.max_wait_ms,
+        ctx.fs.store_busy_retries()
     );
     println!("S7 peak_rss_mib is the whole test process (getrusage), also the model and the check buffers");
     print_first("S7", seed, &mismatches);

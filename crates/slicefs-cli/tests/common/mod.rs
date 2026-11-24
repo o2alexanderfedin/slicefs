@@ -24,9 +24,16 @@ const DUMP_PIECE: u64 = 64 << 10;
 
 /// A new store at `store` with a write log in mode `config`, committed once.
 pub fn new_fs_with(store: &Path, config: WalConfig) -> SliceFsFilesystem {
+    new_fs_with_options(store, config, chunk_store::Options::default())
+}
+
+/// `new_fs_with` with chunk store options (for example a short
+/// `store_wait`, which makes a slow background sync a busy store).
+pub fn new_fs_with_options(store: &Path, config: WalConfig, opts: chunk_store::Options) -> SliceFsFilesystem {
     std::fs::create_dir_all(store.join("segments")).unwrap();
     let wal = create_wal(config, store, 1).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
+    let cs = chunk_store::ChunkStore::open(store, opts).unwrap();
+    let io = Arc::new(Mutex::new(StoreIo::new(store, Arc::new(cs))));
     let mut meta = DictMetadataStore::new(io.clone());
     meta.set_wal(wal);
     let fs = SliceFsFilesystem::new(meta, io, Some(store.to_path_buf()));

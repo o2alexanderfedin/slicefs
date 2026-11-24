@@ -35,6 +35,9 @@ pub struct PassStats {
     pub skips: u64,
     /// Steps that failed.
     pub errors: u64,
+    /// Steps that met a busy chunk store (not failures; the cell is in a
+    /// back-off).
+    pub busy: u64,
 }
 
 /// Clears `running` when the loop ends (also on a panic) and wakes every
@@ -141,7 +144,10 @@ fn flusher_loop(ctl: &FlushCtl, mut pass: impl FnMut() -> bool) {
 /// dropped or failed) is not tried again in this pass. A failed step also
 /// puts the cell in a back-off (`FlushTarget::note_failed`: 100 ms, doubled
 /// for each failure in a row, at most 30 s; a freed step ends it): no pass
-/// tries the cell in its back-off, in any mode. A stop ends the pass. At
+/// tries the cell in its back-off, in any mode. A step that meets a busy
+/// chunk store (a store wait ended in a busy error, `FlushStep::Busy`, issue
+/// #170) is no failure: it gets the same back-off and counts as `busy`, not
+/// as an error. A stop ends the pass. At
 /// its end the pass records whether no step published although the total
 /// was at or above half the budget (`FlushCtl::empty_pass`):
 /// then writes below the budget do not kick the flusher until a later
@@ -208,7 +214,7 @@ pub fn flush_pass(fs: &SliceFsFilesystem) -> PassStats {
         }
     }
     ctl.empty_pass.store(st.published == 0 && last_full, Ordering::Relaxed);
-    let stuck = st.published == 0 && (st.errors > 0 || last_at_budget);
+    let stuck = st.published == 0 && (st.errors > 0 || st.busy > 0 || last_at_budget);
     {
         let mut f = ctl.flags.lock();
         if seq > f.pass_done {
@@ -241,6 +247,18 @@ fn step(fs: &SliceFsFilesystem, target: &FlushTarget, st: &mut PassStats, tried:
         FlushStep::Skipped => {
             st.skips += 1;
             &ctl.skips
+        }
+        FlushStep::Busy => {
+            st.busy += 1;
+            // The store is slow (a seal or a sync), not failed: the same
+            // back-off as a failure keeps the flusher from adding load to it.
+            let ms = target.note_failed(ctl.now_ms());
+            eprintln!(
+                "[{}][FLUSH] step of ino={} met a busy chunk store (a slow seal or sync); the file keeps its dirty data; next try in {ms} ms",
+                ts(),
+                target.ino()
+            );
+            &ctl.busy
         }
         FlushStep::Failed(e) => {
             st.errors += 1;

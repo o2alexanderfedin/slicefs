@@ -24,14 +24,15 @@ pub const DEFAULT_WORKERS_MAX: usize = 8;
 
 /// The longest time that `submit` waits for space in the queue; then the
 /// daemon aborts. A slot frees only when a job ends, and one request ends
-/// within `STEP_WAIT_MAX` 120 s + `STORE_WAIT` 10 s + the 200 ms throttle
-/// wait + the 200 ms step-slot wait (130.4 s), so a full queue for this
-/// long means that the workers are stuck.
-pub const SUBMIT_WAIT: Duration = Duration::from_secs(150);
+/// within `STORE_BUSY_RETRY_MAX` 60 s (a write that meets a busy store tries
+/// again, issue #170) + `STEP_WAIT_MAX` 120 s + `STORE_WAIT` 10 s + the
+/// 200 ms throttle wait + the 200 ms step-slot wait (190.4 s), so a full
+/// queue for this long means that the workers are stuck.
+pub const SUBMIT_WAIT: Duration = Duration::from_secs(200);
 
 /// The longest time that the drain at unmount waits for the workers; then
-/// the daemon aborts. It covers the same sum as `SUBMIT_WAIT` (130.4 s).
-pub const DRAIN_WAIT: Duration = Duration::from_secs(150);
+/// the daemon aborts. It covers the same sum as `SUBMIT_WAIT` (190.4 s).
+pub const DRAIN_WAIT: Duration = Duration::from_secs(200);
 
 /// The most payload bytes in the queue. One job that is larger is
 /// admitted when the queue is empty.
