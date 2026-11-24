@@ -2,21 +2,21 @@
 gsd_state_version: "1.0"
 milestone: v2.2
 milestone_name: Concurrency & Store Evolution
-current_phase: 21
-current_phase_name: Worker pool
-current_plan: 9
-status: verifying
-stopped_at: Completed 21-09-PLAN.md
-last_updated: "2026-11-24T16:50:05.389Z"
+current_phase: 22
+current_phase_name: Chunk profiles
+current_plan: Not started
+status: planning
+stopped_at: Phase 21 complete, ready to plan Phase 22
+last_updated: "2026-11-24T17:12:09.840Z"
 last_activity: 2026-11-24
-last_activity_desc: "21-09 complete (Phase 21 result, README --workers, deferred list, POOL-01..05 Complete on evidence, gate green); next: Phase 21 review and verification"
-state_head: 6291c933fc5151f7126ac54579da3f6cd97bb17c
+last_activity_desc: Phase 21 complete, transitioned to Phase 22
+state_head: 78c7f7e342e244d479104cf0699a4821495d325b
 progress:
   total_phases: 7
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 40
   completed_plans: 40
-  percent: 43
+  percent: 57
 ---
 
 # Project State
@@ -30,14 +30,14 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 9
+Current Plan: Not started
 Total Plans in Phase: 9
-Phase: 21 — Worker pool
+Phase: 22 — Chunk profiles
 Plan: 21-09 complete (9 of 9); next: review and verification of Phase 21 (the orchestrator runs phase complete)
-Status: Phase complete — ready for verification
-Last activity: 2026-11-24 — 21-09 complete (Phase 21 result in the research doc; README --workers and SLICEFS_FUSE_TRACE=1; deferred list; POOL-01 to POOL-05 Complete on evidence; gate: full suite exit 0, Docker smoke and live checks with 4 workers PASS)
+Status: Ready to plan
+Last activity: 2026-11-24 — Phase 21 complete, transitioned to Phase 22
 
-Progress: [████░░░░░░] 43%
+Progress: [██████░░░░] 57%
 
 ## Performance Metrics
 
@@ -225,7 +225,7 @@ None.
 ## Session Continuity
 
 Last session: 2026-11-24T16:49:44.957Z
-Stopped at: Completed 21-09-PLAN.md
+Stopped at: Phase 21 complete, ready to plan Phase 22
 Resume file: None
 
 ## Operator Next Steps

@@ -21,7 +21,7 @@
     {
       "number": "21",
       "name": "Worker pool",
-      "status": "in_progress"
+      "status": "complete"
     },
     {
       "number": "22",
@@ -41,8 +41,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (verify)",
-    "reason": "Phase 4 of 7 · 43% · ready to verify"
+    "label": "Advance to the next step (plan phase 22)",
+    "reason": "Phase 5 of 7 — needs a plan"
   },
-  "updated_at": "2026-11-24T16:49:43.161Z"
+  "updated_at": "2026-11-24T17:12:09.875Z"
 }
