@@ -24,7 +24,7 @@ FAILS=0
 mount_fs() {
   $B mount --store $R/store --backend $BK $R/mnt </dev/null >>$R/mount.log 2>>$R/mount.err &
   MP=$!
-  for i in $(seq 1 60); do mount | grep -q " $R/mnt " && return 0; sleep 1; done
+  for i in $(seq 1 60); do mount | grep -q " $R/mnt " && { echo "  workers: $(grep '^Workers:' $R/mount.log | tail -1)"; return 0; }; sleep 1; done
   echo "MOUNT FAILED"; tail -5 $R/mount.log $R/mount.err; exit 1
 }
 unmount_fs() {
