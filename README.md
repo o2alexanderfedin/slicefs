@@ -13,7 +13,7 @@ SliceFS splits files into variable-sized content-addressed blocks, stores each u
 
 ## Status
 
-- **v1.0 shipped** — all POSIX semantics, mount/unmount/seed/gc/snapshot/stats/scrub. Linux CI runs `cargo test` and [pjdfstest](https://github.com/pjd/pjdfstest) (no macOS CI job yet).
+- **v1.0 shipped** — all POSIX semantics, mount/unmount/seed/gc/snapshot/stats/scrub. CI runs `cargo test` and [pjdfstest](https://github.com/pjd/pjdfstest) on Linux, and `cargo test` on macOS.
 - **v2.0 complete** — streaming writes via the incremental push API, removal of write-path compression (dedup on raw content), refcount-overflow fix, realistic `statfs`, O(1) snapshot lookup.
 - **1287 tests** passing workspace-wide (last full run: 2026-04-03, end of Phase 12).
 
@@ -40,7 +40,7 @@ Windows is deferred because `winfsp-rs` is GPL-3; native Projected FS or Dokan a
 │   ├── metadata/              # Inodes, directories, manifests, xattrs, WAL, segments, snapshots, GC mark
 │   └── slicefs-cli/           # `slicefs` binary — mount, unmount, seed, gc, snapshot, stats, scrub
 ├── benchmarks/
-├── .github/workflows/ci.yml   # Linux CI: cargo test + pjdfstest
+├── .github/workflows/ci.yml   # CI: cargo test + pjdfstest (Linux), cargo test (macOS)
 └── .planning/                 # Design docs, roadmap, phase artifacts
 ```
 

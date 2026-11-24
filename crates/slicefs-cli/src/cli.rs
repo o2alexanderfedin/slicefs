@@ -38,7 +38,7 @@ pub enum Cmd {
         /// Do not update access times (recommended for dedup workloads).
         #[arg(long, default_value_t = true)]
         noatime: bool,
-        /// In-memory read cache size in bytes (0 = disabled).
+        /// Accepted for compatibility; it has no effect now (there is no read cache).
         #[arg(long, default_value_t = 0)]
         cache_size: usize,
         /// Allow other users to access the mount (passes allow_other to FUSE).
@@ -153,8 +153,8 @@ pub enum Cmd {
 
     /// Run offline garbage collection on a SliceFS block store.
     ///
-    /// The store must NOT be mounted when this command is run.
-    /// Use the background GC thread for in-process GC during active mounts.
+    /// On a mounted store, this asks the GC thread of the mount to run the
+    /// GC and waits for the result.
     Gc {
         /// Path to the SliceFS block store directory.
         store: PathBuf,

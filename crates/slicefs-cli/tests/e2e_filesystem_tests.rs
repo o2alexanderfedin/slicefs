@@ -1202,7 +1202,7 @@ fn test_fsync_then_write_different_data_then_release() {
     fs.test_write(fh, 0, b"initial").unwrap();
     fs.test_fsync(ino, fh).unwrap();
 
-    // Overwrite with different data (triggers fallback to buffered)
+    // Overwrite with different data (triggers the switch to an overlay)
     fs.test_write(fh, 0, b"changed").unwrap();
     fs.test_release(ino, fh).unwrap();
 

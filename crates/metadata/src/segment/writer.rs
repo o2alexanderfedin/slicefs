@@ -177,7 +177,8 @@ impl SegmentWriter {
     ///
     /// Does nothing when no bytes were written since the last successful sync.
     /// `sync_all` is a full disk flush (F_FULLFSYNC on macOS, ~10-20 ms), and
-    /// FUSE fsync calls this on every file close over NFS.
+    /// With the NFS backend (now removed), FUSE fsync called this on every
+    /// file close.
     pub fn sync(&mut self) -> io::Result<()> {
         self.injected_fault()?;
         self.write_buf()?;

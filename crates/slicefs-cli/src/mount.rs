@@ -8,8 +8,8 @@
 //!     segment-000001.seg   # Append-only WAL segment
 //!     segment-000002.seg   # ...
 //!   mount.lock             # Created on mount, removed on clean unmount
-//!   dictionary.bin         # Legacy format — auto-migrated to segments/ on first mount
-//!   root.bin               # Legacy format — auto-migrated to segments/ on first mount
+//!   dictionary.bin         # Legacy format — refused at mount; re-seed needed
+//!   root.bin               # Legacy format — not read
 //! ```
 //!
 //! ## Usage
@@ -150,7 +150,7 @@ pub(crate) fn next_segment_id(segs_dir: &Path) -> u64 {
 ///
 /// Always includes: `FSName("slicefs")`, `DefaultPermissions`.
 /// Adds `NoAtime` when `noatime` is true.
-/// Adds `AllowOther` when `allow_other` is true.
+/// Sets the ACL to `SessionACL::All` when `allow_other` is true.
 /// On macOS, adds `CUSTOM("backend=<name>")` when a backend is provided.
 /// ACL defaults to `Owner` (only the mounting user can access the filesystem).
 pub fn build_mount_options(
@@ -265,7 +265,7 @@ fn set_test_panic_create(fs: &SliceFsFilesystem) {
 /// `fuser::mount` session. Blocks until the session ends (SIGTERM, Ctrl+C,
 /// or `slicefs unmount`).
 ///
-/// `_cache_size` is accepted but unused in Phase 3. Placeholder for Phase 4.
+/// `_cache_size` is accepted but unused (there is no read cache).
 /// `allow_other` passes the `allow_other` FUSE mount option (multi-user access).
 /// `snapshot_ref` mounts a specific snapshot read-only (by version number or name).
 /// `auto_snapshot` enables auto-snapshot on clean unmount (--auto-snapshot flag).
