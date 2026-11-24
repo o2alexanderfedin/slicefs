@@ -1969,18 +1969,20 @@ fn s6_small_fsync() {
 
 // ---- S7: dirty-budget baseline ----------------------------------------------------
 
-/// S7 (D-08), the dirty-budget baseline: 4 threads, each with its own big
-/// file, the bigwrite random-write mix, peak RSS against the cap. The cap is
+/// S7 (D-08), the dirty-budget baseline: `S7_THREADS` writer threads
+/// (1..=64, default 4), each with its own big file, the bigwrite random-write mix, peak RSS against the cap. The cap is
 /// NOT asserted (a baseline); the model check is. The model is one version per
 /// 4 KiB block, so no file bytes are held. `S7_SERIALIZE` (default 1) selects
 /// the serialized form or the parallel form. `S7_FLUSHER=1` (plan 20-07) is
 /// the flusher form: serialize off, the flusher thread runs, and each write
 /// goes through `throttle_write` before the gate. It asserts VmHWM <= CAP_MIB
-/// on Linux.
+/// on Linux when the writer count is at most `pool::DEFAULT_WORKERS_MAX` (the
+/// counts that the default worker count can give, phase 21 [Step limit]).
+/// Above that count the S7 line shows the result and nothing is asserted.
 #[test]
-#[ignore = "spike S7 baseline: S7_FILE_MIB S7_WRITE_MIB S7_COMMIT_SECS S7_SERIALIZE S7_FLUSHER; use --release"]
+#[ignore = "spike S7 baseline: S7_THREADS S7_FILE_MIB S7_WRITE_MIB S7_COMMIT_SECS S7_SERIALIZE S7_FLUSHER; use --release"]
 fn s7_budget_baseline() {
-    const THREADS: usize = 4;
+    let threads = env_num("S7_THREADS", 4, 1, 64) as usize;
     // CAP_MIB = Pm + F + R, rounded up to a multiple of 8 (B + N x W + O + F + R).
     // Inputs: Pm = 267 (largest VmHWM of 3 P_old and 3 P0 runs), Spread = 20,
     // F = 8 (one flusher step), R = max(16, ceil(Pm / 10), 2 x Spread) = 40.
@@ -1993,13 +1995,15 @@ fn s7_budget_baseline() {
     let commit_secs = env_num("S7_COMMIT_SECS", 30, 1, 600);
     let flusher_on = env_num("S7_FLUSHER", 0, 0, 1) == 1;
     let serialize = !flusher_on && env_num("S7_SERIALIZE", 1, 0, 1) == 1;
+    // The cap is a hard bar only at the writer counts the default worker count can give.
+    let cap_checked = flusher_on && threads <= slicefs_cli::pool::DEFAULT_WORKERS_MAX;
     let seed = seed_from_env();
     let _watchdog = watchdog(Duration::from_secs(60 * 60), seed);
     // Serialize on is the Phase 18 baseline form. With serialize off the writers
     // run in parallel (Phase 19 removed the cross-file take-out). The flusher
     // form has serialize off.
-    let ctx = spike_ctx(serialize, seed, THREADS, WalConfig::PerOp);
-    let files: Vec<(u64, u64)> = (0..THREADS).map(|t| create_file(&ctx.fs, ROOT, &format!("s7-{t}"), seed)).collect();
+    let ctx = spike_ctx(serialize, seed, threads, WalConfig::PerOp);
+    let files: Vec<(u64, u64)> = (0..threads).map(|t| create_file(&ctx.fs, ROOT, &format!("s7-{t}"), seed)).collect();
     let blocks = file_mib as usize * MIB_BLOCKS;
     let rss_start = peak_rss_mib();
     let max_dirty = AtomicUsize::new(0);
@@ -2142,7 +2146,7 @@ fn s7_budget_baseline() {
     let vmhwm = hwm.map_or_else(|| "na".to_string(), |v| v.to_string());
     let fl = ctx.fs.test_flusher_stats();
     println!(
-        "S7 threads={THREADS} serialize={serialize} flusher={} file_mib={file_mib} write_mib={write_mib} peak_rss_mib={peak} vmhwm_mib={vmhwm} cap_mib={CAP_MIB} within_cap={} slowest_write_ms={:.1} rebase_steps={} max_dirty_mib={} rss_start_mib={rss_start} rss_after_writes_mib={rss_writes} commit_every_s={commit_secs} commits={} commit_hold_max_ms={:.1} commit_total_max_ms={:.1} commit_gate_wait_max_ms={:.1} flusher_passes={} flusher_steps={} flusher_published={} flusher_drops={} flusher_skips={} flusher_errors={} throttled={} throttle_timeouts={} throttle_wait_max_ms={}",
+        "S7 threads={threads} serialize={serialize} flusher={} cap_checked={cap_checked} file_mib={file_mib} write_mib={write_mib} peak_rss_mib={peak} vmhwm_mib={vmhwm} cap_mib={CAP_MIB} within_cap={} slowest_write_ms={:.1} rebase_steps={} max_dirty_mib={} rss_start_mib={rss_start} rss_after_writes_mib={rss_writes} commit_every_s={commit_secs} commits={} commit_hold_max_ms={:.1} commit_total_max_ms={:.1} commit_gate_wait_max_ms={:.1} flusher_passes={} flusher_steps={} flusher_published={} flusher_drops={} flusher_skips={} flusher_errors={} throttled={} throttle_timeouts={} throttle_wait_max_ms={}",
         u8::from(flusher_on),
         peak <= CAP_MIB,
         ms(slowest),
@@ -2165,7 +2169,7 @@ fn s7_budget_baseline() {
     println!("S7 peak_rss_mib is the whole test process (getrusage), also the model and the check buffers");
     print_first("S7", seed, &mismatches);
     assert!(mismatches.is_empty(), "seed={seed}: S7 found {} mismatches", mismatches.len());
-    if flusher_on {
+    if cap_checked {
         match hwm {
             Some(v) => assert!(v <= CAP_MIB, "seed={seed}: S7 flusher form: VmHWM {v} MiB is above the cap {CAP_MIB} MiB"),
             None => println!("S7 cap not checked: no VmHWM on this system"),
