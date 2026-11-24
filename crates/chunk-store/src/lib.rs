@@ -174,11 +174,17 @@ pub struct Options {
     /// entries of its `.idx` answer the next dedup checks from RAM (at most
     /// 65,536 entries). Off: every dedup check goes to the index.
     pub locality_cache: bool,
+    /// The longest wait of one store call for a slow job of another thread
+    /// (a seal, a pack create, a background sync); see `STORE_WAIT`. At the
+    /// limit the call fails with a busy error ([`is_store_busy`]). A test
+    /// knob: the default is `STORE_WAIT` (10 s).
+    pub store_wait: Duration,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Options {
+            store_wait: STORE_WAIT,
             pack_limit: 64 << 20,
             zstd_level: 3,
             read_only: false,
@@ -304,14 +310,17 @@ const COPY_BATCH: usize = 1024;
 const MIN_COMPRESS: usize = 64;
 
 /// The longest wait of a store call for a slow job of another thread (a
-/// seal, a pack create, a background sync). At the limit the call fails
-/// with an I/O error of kind `TimedOut`; the store is not failed, since
-/// nothing was lost.
+/// seal, a pack create, a background sync); the default of
+/// `Options::store_wait`. At the limit the call fails with an I/O error of
+/// kind `TimedOut`; the store is not failed, since nothing was lost. A caller
+/// that can wait more tells this error from a disk error with
+/// [`is_store_busy`].
 const STORE_WAIT: Duration = Duration::from_secs(10);
 
-/// The error of a wait that reached `STORE_WAIT`.
-fn timed_out(what: &str) -> Error {
-    let msg = format!("the chunk store waited {} s for {what}", STORE_WAIT.as_secs());
+/// The error of a wait that reached `limit` (`Options::store_wait`).
+fn timed_out(what: &str, limit: Duration) -> Error {
+    let secs = if limit.subsec_nanos() == 0 { format!("{} s", limit.as_secs()) } else { format!("{} ms", limit.as_millis()) };
+    let msg = format!("the chunk store waited {secs} for {what}");
     Error::Io(io::Error::new(io::ErrorKind::TimedOut, StoreWaitTimeout(msg)))
 }
 
@@ -331,6 +340,23 @@ impl std::error::Error for StoreWaitTimeout {}
 /// True for an error of `timed_out`.
 fn is_store_wait(e: &Error) -> bool {
     matches!(e, Error::Io(e) if e.get_ref().is_some_and(|r| r.is::<StoreWaitTimeout>()))
+}
+
+/// True if `e` is the timeout of a store wait (`Options::store_wait`): the
+/// store is busy (a slow seal, pack create or background sync), nothing was
+/// lost, the store is not failed, and the same call can be tried again later.
+/// `e` is a [`Error`], or any error that wraps one as its source (for example
+/// the `io::Error::other(e)` that the CLI makes). It is not true for another
+/// error of kind `TimedOut` (a disk or a WAL wait), nor for a failed store.
+pub fn is_store_busy(e: &(dyn std::error::Error + 'static)) -> bool {
+    if let Some(e) = e.downcast_ref::<Error>() {
+        return is_store_wait(e);
+    }
+    // `io::Error::source` skips the wrapped error, so look at it directly.
+    if let Some(e) = e.downcast_ref::<io::Error>() {
+        return e.get_ref().is_some_and(|inner| is_store_busy(inner));
+    }
+    false
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1553,8 +1579,8 @@ impl ChunkStore {
                         Some(Before::Wait(w)) => {
                             drop(inner);
                             self.note_wait();
-                            if !w.wait_timeout(STORE_WAIT) {
-                                return Err(timed_out("a pack create, a record write, a seal or a background sync"));
+                            if !w.wait_timeout(self.opts.store_wait) {
+                                return Err(timed_out("a pack create, a record write, a seal or a background sync", self.opts.store_wait));
                             }
                             note_progress();
                             inner = self.inner.lock();
@@ -1883,8 +1909,8 @@ impl ChunkStore {
             let inner = self.inner.lock();
             let Some(w) = busy(&inner) else { return Ok(inner) };
             drop(inner);
-            if !w.wait_timeout(STORE_WAIT) {
-                return Err(timed_out(what));
+            if !w.wait_timeout(self.opts.store_wait) {
+                return Err(timed_out(what, self.opts.store_wait));
             }
             note_progress();
         }
@@ -2262,9 +2288,9 @@ impl ChunkStore {
                 // record write in flight too.
                 let Some(w) = inner.writing() else { break inner };
                 drop(inner);
-                if !w.wait_timeout(STORE_WAIT) {
+                if !w.wait_timeout(self.opts.store_wait) {
                     drop(plans);
-                    return Err(self.gc_abandon(timed_out("a record write"), &pending, holds));
+                    return Err(self.gc_abandon(timed_out("a record write", self.opts.store_wait), &pending, holds));
                 }
             };
             let during = inner.touched.take().unwrap_or_else(Touched::exact);
@@ -3084,8 +3110,8 @@ impl ChunkStore {
                 return Ok(inner);
             };
             drop(inner);
-            if !w.wait_timeout(STORE_WAIT) {
-                return Err(timed_out("a pack seal"));
+            if !w.wait_timeout(self.opts.store_wait) {
+                return Err(timed_out("a pack seal", self.opts.store_wait));
             }
             note_progress();
         }
