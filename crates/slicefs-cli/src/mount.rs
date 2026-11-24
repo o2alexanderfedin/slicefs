@@ -429,7 +429,10 @@ pub fn start(
     );
     fs.set_auto_snapshot(args.auto_snapshot);
     fs.set_read_only(!access.is_read_write());
-    if fs.content().punches_holes() {
+    // A read-only mount runs no GC, and its store does no punch probe.
+    if !access.is_read_write() {
+        println!("Chunk store: read-only.");
+    } else if fs.content().punches_holes() {
         println!("Chunk store: GC frees space with hole punching and compaction.");
     } else {
         println!("Chunk store: this file system cannot punch holes; GC frees space by compaction only.");
