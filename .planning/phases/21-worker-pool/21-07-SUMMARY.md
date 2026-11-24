@@ -78,12 +78,12 @@ The Linux CI path now mounts with `--workers $SLICEFS_WORKERS` in every script, 
 
 ## Local Docker results (4 workers)
 
-All runs used the mount form, a tar stream of the committed tree at 1ca0f2c, the volume `slicefs-target-p21`, `-e SLICEFS_WORKERS=4` and the 45 s wait. The toolchain was `rustc 1.100.0 (0ef1bc386 2026-11-09)`, the same as the 20-01 notes. The host had 32 CPUs. The logs are raw (the cargo warning blocks are kept) and have no home paths.
+All runs used the mount form, a tar stream of the tree at 1ca0f2c (the code of HEAD: `git diff --stat 1ca0f2c HEAD -- . ':!.planning'` is empty; see the tree note under Deviations), the volume `slicefs-target-p21`, `-e SLICEFS_WORKERS=4` and the 45 s wait. The toolchain was `rustc 1.100.0 (0ef1bc386 2026-11-09)`, the same as the 20-01 notes. The host had 32 CPUs. The logs are raw (the cargo warning blocks are kept) and have no home paths.
 
 | Mode | Result | Time |
 | ---- | ------ | ---- |
 | red run (debug) | both copies FAIL on the Workers line, `red-exit=1` twice | 50 s |
-| all | workspace tests 1569 passed, 0 failed, 12 ignored (75 test binaries); vendored fuser 54 passed; mt-linux.sh all steps ok, `daemon-exit: ok`, pool line `jobs=163` over 4 workers (39,41,41,42); dedup-probe.sh `content ok` | 166 s (mounts start at 161 s) |
+| all | workspace tests 1515 passed, 0 failed, 12 ignored (74 `test result` lines, doc tests included); vendored fuser 54 passed, 0 failed; mt-linux.sh all steps ok, `daemon-exit: ok`, pool line `jobs=163` over 4 workers (39,41,41,42); dedup-probe.sh `content ok` | 166 s (mounts start at 161 s) |
 | verify | `RESULT verify-phases: PASS`; `RESULT panic-replay: PASS` (w4 and w1); large copy VmHWM 78 MiB at unmount (cap 512) | 165 s |
 | pjdfstest (release) | `Files=237, Tests=8792, 190 wallclock secs`, `Result: PASS`; `open/25.t` rc=0 `Result: PASS`; no failing test files; `daemon alive after run: yes` | 245 s |
 
@@ -110,6 +110,7 @@ These steps are an early check of the CI wiring. POOL-04 is marked only on the C
 - **One workspace test run for Tasks 1 and 2.** I made both edits first. One macOS `cargo test --workspace` run (exit 0, 1009 s) came before both commits. The code did not change after it. A second run on the same code came before the log and docs commits.
 - **Workers line pattern.** The scripts read the line with `grep -o 'Workers: [0-9]* ([a-z]*)'`, not `grep '^Workers:'`. In verify-phases.sh, a daemon killed with kill -9 can leave a cut last line. The next mount then appends its first line to that cut line, and `^Workers:` would not find it. The compare with `Workers: $SLICEFS_WORKERS (set)` is as the plan says.
 - **macOS scripts print the last line, not the first.** The plan says "the first `Workers:` line of the mount log". Both macOS scripts append to one log across several mounts. So `tail -1` gives the line of the mount that just came up. With the same default, the text is the same.
+- **Tree note for three runs.** The tar takes `git ls-files -co`, and I copied each log into `runs/` before the next container. So the `all` tree also had 1 untracked log file, `verify` had 2 and `pjdfstest` had 3. Only the red run had a clean tree. These files are logs under `.planning/`, and the code was that of 1ca0f2c in every run, so the results stand (the same case as the header of `verify-21-03.log`). The committed log headers say "committed tree at 1ca0f2c"; this note makes that exact. The 686 s green macOS run was on the same code, so the SUMMARY fix commit did not need a third run.
 - **dedup-probe.sh exit.** The exit status is that of the last unmount (as before), and 1 when a Workers line was wrong.
 
 ## Threat model
