@@ -24,11 +24,11 @@
 
 ### Worker pool (#22)
 
-- [ ] **POOL-01**: One FUSE reader hands each request to a SliceFS worker pool. The number of workers is a mount option; with one worker the handler runs inline as today.
-- [ ] **POOL-02**: Unmount drains the queue and joins the workers before `destroy()`. Replies are sent after all locks are released.
-- [ ] **POOL-03**: A worker panic aborts the daemon; the write log replays at the next mount (no request is served after a half-done update).
-- [ ] **POOL-04**: All tests and pjdfstest pass with 4 workers on Linux (Docker CI). On macOS FSKit CI, tests pass with the macOS default from SPIKE-03.
-- [ ] **POOL-05**: Parallel I/O on different files scales with the number of workers, measured on Linux, and the result is recorded.
+- [x] **POOL-01**: One FUSE reader hands each request to a SliceFS worker pool. The number of workers is a mount option; with one worker the handler runs inline as today.
+- [x] **POOL-02**: Unmount drains the queue and joins the workers before `destroy()`. Replies are sent after all locks are released.
+- [x] **POOL-03**: A worker panic aborts the daemon; the write log replays at the next mount (no request is served after a half-done update).
+- [x] **POOL-04**: All tests and pjdfstest pass with 4 workers on Linux (Docker CI). On macOS FSKit CI, tests pass with the macOS default from SPIKE-03.
+- [x] **POOL-05**: Parallel I/O on different files scales with the number of workers, measured on Linux, and the result is recorded.
 
 ### Chunk profiles (#67)
 
@@ -87,11 +87,11 @@ Deferred; tracked, not in this roadmap.
 | LOCK-04 | Phase 19 | Complete |
 | LOCK-05 | Phase 19 | Complete |
 | LOCK-06 | Phase 20 | Complete |
-| POOL-01 | Phase 21 | Pending |
-| POOL-02 | Phase 21 | Pending |
-| POOL-03 | Phase 21 | Pending |
-| POOL-04 | Phase 21 | Pending |
-| POOL-05 | Phase 21 | Pending |
+| POOL-01 | Phase 21 | Complete |
+| POOL-02 | Phase 21 | Complete |
+| POOL-03 | Phase 21 | Complete |
+| POOL-04 | Phase 21 | Complete |
+| POOL-05 | Phase 21 | Complete |
 | PROF-01 | Phase 22 | Pending |
 | PROF-02 | Phase 22 | Pending |
 | PROF-03 | Phase 22 | Pending |
