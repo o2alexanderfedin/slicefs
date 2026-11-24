@@ -381,7 +381,7 @@ Plans:
   3. A store with no header is refused with a clear message (no backward compatibility)
   4. `slicefs stats` prints the format number and the flags
   5. `docs/design/store-format.md` gives the header layout, the flag classes, the flag list, the error messages and the format policy, and matches the code; the README has one line and a link
-**Plans:** 3/4 plans executed
+**Plans:** 4/4 plans executed
 
 One plan per wave; executors run them in order.
 
@@ -396,7 +396,7 @@ Plans:
 - [x] 21.1-03-PLAN.md — `stats` format, flags and access (text and `--json`); Linux Docker check: ro-compat mount is read-only, EROFS, store unchanged, incompat refused (`-j 1`, `build-exit=0`)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 21.1-04-PLAN.md — `docs/design/store-format.md` and the README line, deferred list, FMT marks on evidence, phase gate
+- [x] 21.1-04-PLAN.md — `docs/design/store-format.md` and the README line, deferred list, FMT marks on evidence, phase gate
 
 ### Phase 22: Chunk profiles
 

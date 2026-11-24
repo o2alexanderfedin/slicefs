@@ -5,17 +5,17 @@ milestone_name: Concurrency & Store Evolution
 current_phase: "21.1"
 current_phase_name: "Store header and format policy (#154)"
 current_plan: 4
-status: executing
-stopped_at: Completed 21.1-03-PLAN.md
-last_updated: "2026-11-24T21:53:12.509Z"
+status: verifying
+stopped_at: Completed 21.1-04-PLAN.md
+last_updated: "2026-11-24T22:17:54.295Z"
 last_activity: 2026-11-24
 last_activity_desc: 21.1-01 complete (store header core, read-only daemon mode, tracer)
-state_head: 98308db58bf9bc537ac94865916a77453eadd4ff
+state_head: 40d39f5eb3ebfb22900a9ea8da1559a48897c932
 progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 44
-  completed_plans: 43
+  completed_plans: 44
   percent: 50
 ---
 
@@ -34,7 +34,7 @@ Current Plan: 4
 Total Plans in Phase: 4
 Phase: 21.1 — Store header and format policy (#154)
 Plan: 21.1-01 complete (1 of 4); next: 21.1-02 (the header check at every open point)
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-11-24 — 21.1-01 complete: store header core, read-only daemon mode, tracer
 
 Progress: [█████░░░░░] 50%
@@ -92,6 +92,7 @@ Progress: [█████░░░░░] 50%
 | Phase 21.1 P01 | 74min | 3 tasks | 7 files |
 | Phase 21.1 P02 | 57min | 3 tasks | 16 files |
 | Phase 21.1 P03 | 50min | 3 tasks | 7 files |
+| Phase 21.1 P04 | 45min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -211,6 +212,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21.1]: 21.1-02: write commands on a path with no store write FORMAT before they fail (gc, snapshot create/switch); a later small fix can refuse a path with no segments/ first
 - [Phase 21.1]: stats shows format (null with no header), flags by class (name, release, known) and access, in text and JSON
 - [Phase 21.1]: gc, snapshot create and snapshot switch refuse a path with no segments/ before the header check (content::require_store); seed and mount still make new stores
+- [Phase 21.1]: store-format.md leaves out the unverified ext4 journal-replay claim (RESEARCH A1); deferred list item
 
 ### Pending Todos
 
@@ -238,8 +240,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-24T21:53:11.999Z
-Stopped at: Completed 21.1-03-PLAN.md
+Last session: 2026-11-24T22:17:53.780Z
+Stopped at: Completed 21.1-04-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
