@@ -123,13 +123,15 @@ No requirement stays open.
 
 **5. The gate ran beside the host suite.** The Docker gate and the host suite ran at the same time. Both passed, so no rerun was needed.
 
-**6. Code text that is wrong and not fixed (no code change in this plan).** The `SUBMIT_WAIT` doc comment in `pool.rs` names "the 200 ms step-slot wait" (no step slot exists). The getlk and setlk doc comments still say "single-threaded". Both are in the deferred list. A fix would change `crates` and make the CI evidence old.
+**6. [Rule 1] Two doc sentences corrected after review (commit after ced8efb).** The S7 "before" runs are on the code before plan 21-05 (2dc170d; 4 writers on 9861aa5), not on "the same code". The Limits bullet and the deferred item said that the Linux kernel holds its own inode locks for the Phase 19 window calls; no note or log shows this. Both now say only what was measured (pjdfstest and the live checks passed with 4 workers; FUSE-T with more than 1 worker is not measured). Two open points of 21-04 and 21-05 were added to the deferred list.
+
+**7. Code text that is wrong and not fixed (no code change in this plan).** The `SUBMIT_WAIT` doc comment in `pool.rs` names "the 200 ms step-slot wait" (no step slot exists). The getlk and setlk doc comments still say "single-threaded". Both are in the deferred list. A fix would change `crates` and make the CI evidence old.
 
 ## Deferred list (`deferred-items.md`, `## Open`)
 
 - Owner reports: S7 at 16 writers (R2, R3); writes do not scale; 16 workers give no gain; cost of the trace lines.
 - Later work: macOS default above 1 (with the macOS numbers); per-inode WRITE order on FUSE-T (A6); abort on a flusher panic (Open Question 2); the Phase 19 windows with 2 or more workers; a rise of the cap of 8 by the rule; WAL group commit; the Phase 19 and 20 open items; adaptive control (#152) with the `pool:` and `steps:` counters; #170 follow-ups (fsync, release, replay and commit still give EIO on a busy store; the retry does not stop during the pool drain, because the shutdown mark comes after it).
-- Found and not fixed: the stale `SUBMIT_WAIT` comment; getlk/setlk comments; the gate taken for nothing in 4 callbacks; the worker thread name cut to 15 bytes; the idle worker wait with no time limit; the abort line `0 s` at a short limit; `pool_panic_tests` time on a loaded macOS host; `freed_bytes=0` in the smoke; the 1-writer S7 peak 9 MiB higher; CAP(8) = 336 above 320 with a 30 MiB margin; the 7 s writes at 16 writers; one 68 ms `stripe` hold; the `inode_map` wait; the macOS bench log `run=1` on every `macbench` line.
+- Found and not fixed: the stale `SUBMIT_WAIT` comment; getlk/setlk comments; the gate taken for nothing in 4 callbacks; the worker thread name cut to 15 bytes; the idle worker wait with no time limit; the abort line `0 s` at a short limit; `pool_panic_tests` time on a loaded macOS host; `freed_bytes=0` in the smoke; the macOS `stats()` path used only by a test; the 9.4 s 1-writer writes of 21-04; the 1-writer S7 peak 9 MiB higher; CAP(8) = 336 above 320 with a 30 MiB margin; the 7 s writes at 16 writers; one 68 ms `stripe` hold; the `inode_map` wait; the macOS bench log `run=1` on every `macbench` line.
 - Closed: the [Step limit] item (R1=pass, mem_bar=pass); the POOL-05 bar (no follow-up issue).
 
 ## Known Stubs

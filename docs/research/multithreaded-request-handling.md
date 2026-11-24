@@ -391,7 +391,7 @@ Tests per ROADMAP Phase 21 criterion:
 4. Tests with 4 workers: in Docker, the workspace tests, the FUSE smoke, the live checks and pjdfstest (8792 tests, PASS) with `--workers 4`. CI for the last code commit: the ci.yml Linux job with `Workers: 4 (set)` checked in each of its three steps, the ci.yml macOS job, and macos-mounts.yml on FSKit with `Workers: 1 (default)`. The busy-store fix: `store_busy_tests` (`a_write_waits_for_a_busy_store_and_succeeds`, `an_append_that_meets_a_busy_store_is_in_the_file_once`, `a_store_that_stays_busy_ends_the_write_with_eio_at_the_limit`, `a_flusher_step_that_meets_a_busy_store_is_not_an_error_and_goes_again`).
 5. Scale with the worker count: the bench below.
 
-**S7 with the allocator setting (plan 21-06).** S7 in process, Docker Linux, 32 CPUs, release, 1 GiB file and 128 MiB of the mix for each writer, budget 64 MiB, flusher on. 19 runs. Pm(N) is the largest VmHWM at N writers. "Before" is the same code with no allocator setting.
+**S7 with the allocator setting (plan 21-06).** S7 in process, Docker Linux, 32 CPUs, release, 1 GiB file and 128 MiB of the mix for each writer, budget 64 MiB, flusher on. 19 runs. Pm(N) is the largest VmHWM at N writers. "Before" is the code before plan 21-05, with no allocator setting.
 
 | Writers | 1 | 2 | 4 | 8 | 16 |
 |---|---|---|---|---|---|
@@ -438,7 +438,7 @@ The runner was loaded and the numbers vary a lot. They do not show a gain with 2
 **Rule for a later rise of the default cap of 8.** Raise it only when the median at 16 workers is at least 1.1 times the median at 8 in some phase, and the largest VmHWM at 16 workers is under CAP(16) = 480 MiB. Now the ratios at 16 against 8 are 0.84 to 1.04 in all phases, and VmHWM is 223 MiB. The rule is not met, so the cap stays 8.
 
 Limits:
-- With 2 or more workers, the Phase 19 windows can now occur: a size change of a closed file can race an unlink or a setattr of other fields of the same inode, and a cross-directory rename has no ancestor check. On Linux the kernel holds its own inode locks for these calls, and pjdfstest passed with 4 workers. FUSE-T gives no such order, so the risk is mostly on macOS with more than 1 worker.
+- With 2 or more workers, the Phase 19 windows can now occur: a size change of a closed file can race an unlink or a setattr of other fields of the same inode, and a cross-directory rename has no ancestor check. On Linux, pjdfstest and the live checks passed with 4 workers. The risk on FUSE-T with more than 1 worker is not measured.
 - With 2 or more workers on FUSE-T, WRITEs of one file can arrive in parallel (research A6). This was not measured.
 - With 2 or more workers, a throttled write no longer stops the other requests. The Phase 20 limit "one dispatch thread" now holds only with 1 worker (the macOS default).
 - fsync, release, replay and commit still give EIO for a busy store. Only the write path tries again.

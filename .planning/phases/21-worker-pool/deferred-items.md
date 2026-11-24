@@ -12,7 +12,7 @@ Later work:
 - **macOS default above 1.** Raise it only after a measured FSKit gain. Now (`runs/pool-bench-macos.log`, 3 CPUs, load about 50): write medians 25.2 MB/s with 1 worker and 37.3 with 2, read medians 265.6 and 165.7. The runs vary a lot, and they show no gain. Check the per-inode WRITE order first (next item).
 - **Per-inode WRITE order on FUSE-T with 2 or more workers** (21-RESEARCH A6). FUSE-T can send parallel WRITEs of one file. Not measured. Check it before a macOS default above 1.
 - **Abort on a flusher panic too** (21-RESEARCH Open Question 2). Only request threads abort now. A flusher panic during a publish can leave a half-done cell.
-- **The Phase 19 windows with 2 or more workers.** A size change of a closed file against an unlink or a setattr of the same inode, and no ancestor check for a cross-directory rename. With 2 or more workers these can occur, mostly on FUSE-T (the Linux kernel holds its own inode locks; pjdfstest passed with 4 workers). See `.planning/phases/19-fine-grained-locks/deferred-items.md`.
+- **The Phase 19 windows with 2 or more workers.** A size change of a closed file against an unlink or a setattr of the same inode, and no ancestor check for a cross-directory rename. With 2 or more workers these can occur. On Linux, pjdfstest passed with 4 workers. FUSE-T with more than 1 worker is not measured. See `.planning/phases/19-fine-grained-locks/deferred-items.md`.
 - **A rise of the Linux default cap of 8.** Only by the rule of the Phase 21 result: the median at 16 workers is at least 1.1 times the median at 8 in some phase, and the largest VmHWM at 16 is under CAP(16) = 480 MiB. Not met now.
 - **WAL group commit** (step 7 of the migration; spike S6 decides).
 - **Phase 19 and Phase 20 open items.** See `.planning/phases/19-fine-grained-locks/deferred-items.md` and `.planning/phases/20-dirty-budget-and-rebase-flusher/deferred-items.md`. Phase 21 did not change them.
@@ -29,6 +29,8 @@ Found in the plans and not fixed:
 - **Abort line at a short submit limit** (21-03): it gives whole seconds, so a test limit of 300 ms prints `0 s`.
 - **`pool_panic_tests` on a loaded macOS host** (21-03): 23 to 60 s, from the start time of the test binary. Each run writes 3 crash reports on macOS.
 - **`freed_bytes=0` for the one save step of the smoke** (21-05). Not examined. The S7 runs and `the_flusher_lowers_the_total` show that the counter works.
+- **macOS `alloc_tune::stats()` path** (21-05): only the test `stats_show_a_live_heap` uses it. S7 does not run on macOS.
+- **Slow 1-writer writes before the allocator setting** (21-04): 9.4 s and 9.6 s in 2 of 3 runs, cause not measured. The 21-06 runs show 0.7 to 1.6 s.
 - **1-writer S7 peak 9 MiB higher with the allocator setting** (21-06): 106 MiB against 97. Not examined (possible cause: page rounding of mmapped blocks).
 - **Small S7 margin at 8 writers** (21-06): CAP(8) = 336 is above CAP_MIB 320. Pm(8) = 290 leaves 30 MiB, from 3 runs. A later 8-writer run can miss the assert.
 - **Slow writes at 16 writers** (21-06): 7.1 s and 7.5 s, cause not found. This is near the 10 s store wait. The slowest write is above 500 ms in 12 of 19 S7 runs. The Phase 20 delay-curve condition (research Q9) holds only as a borderline case at 8 and 16 writers.
