@@ -46,6 +46,47 @@ const SUBMIT_WARN: Duration = Duration::from_secs(10);
 /// One request job. It sends its own reply.
 pub type Job = Box<dyn FnOnce() + Send + 'static>;
 
+/// The name prefixes of request threads: the fuser reader (`fuser-<i>`,
+/// which also runs the requests with one worker) and the pool workers.
+const REQUEST_THREADS: [&str; 2] = ["fuser-", "slicefs-worker-"];
+
+/// Install the process-wide panic hook that aborts on a request thread
+/// (POOL-03). Call it once before the mount; a second call does nothing.
+///
+/// The hook first calls the hook that was set before (the message and the
+/// backtrace go to stderr). Then, when the panic is on a request thread, it
+/// prints one line and calls `std::process::abort()`. The hook runs at the
+/// panic point, before the unwind: the locks of the half-done request stay
+/// held (no other request can use the half-done state), no reply is sent,
+/// and fuser cannot drop its file system holder, whose drop calls
+/// `destroy()` and would commit the half-done state. The next mount
+/// replays the write log, which has only the records of finished requests.
+///
+/// Why not `catch_unwind` around each job: a catch runs after the unwind.
+/// The unwind releases the locks (they have no poison), so other workers
+/// can serve requests on the half-done state, and the drop of the reply
+/// sends EIO for the half-done request.
+///
+/// Other threads (the flusher, the GC, the commit timer, test threads) keep
+/// the default behavior: their panic does not abort (Phase 20: a flusher
+/// panic wakes the throttled writers). An abort on a flusher panic is a
+/// deferred item.
+pub fn install_abort_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            prev(info);
+            let t = std::thread::current();
+            let name = t.name().unwrap_or("");
+            if REQUEST_THREADS.iter().any(|p| name.starts_with(p)) {
+                eprintln!("request thread {name} panicked: abort; the write log replays at the next mount");
+                std::process::abort();
+            }
+        }));
+    });
+}
+
 /// The default worker count for `cpus` CPUs: half, at least 1 and at most
 /// `DEFAULT_WORKERS_MAX`.
 pub fn workers_for_cpus(cpus: usize) -> usize {
