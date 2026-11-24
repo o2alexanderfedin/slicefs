@@ -4,18 +4,18 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: 21
 current_phase_name: Worker pool
-current_plan: 4
+current_plan: 5
 status: executing
-stopped_at: Completed 21-03-PLAN.md
-last_updated: "2026-11-24T01:46:05.212Z"
+stopped_at: Completed 21-04-PLAN.md
+last_updated: "2026-11-24T03:35:53.986Z"
 last_activity: 2026-11-23
-last_activity_desc: 21-03 complete (abort on a request-thread panic, replay tests, POOL-03 live check); next 21-04
-state_head: 5e57d3edc76a380af2ac662c9d9d1a72bd280226
+last_activity_desc: "21-04 complete (S7_THREADS knob; S7 before-runs at 1, 2, 8, 16 writers: 8 writers 419-441 MiB, above the cap); next 21-05"
+state_head: ef26ea276038ccb256649ae15faa78ee8a3c3ab5
 progress:
   total_phases: 7
   completed_phases: 3
   total_plans: 40
-  completed_plans: 34
+  completed_plans: 35
   percent: 43
 ---
 
@@ -30,10 +30,10 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 4
+Current Plan: 5
 Total Plans in Phase: 9
 Phase: 21 — Worker pool
-Plan: 21-03 complete (3 of 9); next: 21-04 (plan 4 of 9)
+Plan: 21-04 complete (4 of 9); next: 21-05 (plan 5 of 9)
 Status: Ready to execute
 Last activity: 2026-11-23 — 21-03 complete (abort hook for request threads, child-process replay tests, POOL-03 Docker block at 4 and 1 workers)
 
@@ -83,6 +83,7 @@ Progress: [████░░░░░░] 43%
 | Phase 21 P01 | 70 min | 3 tasks | 10 files |
 | Phase 21 P02 | 55 min | 3 tasks | 5 files |
 | Phase 21 P03 | 66 min | 2 tasks | 7 files |
+| Phase 21 P04 | 46 min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -187,6 +188,8 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21]: 21-03: a panic on a request thread (fuser- or slicefs-worker-) aborts from the panic hook before the unwind; no reply, no destroy() commit; the write log replays at the next mount
 - [Phase 21]: 21-03: only request threads abort; the flusher, the GC and the commit timer keep the Phase 20 behavior (abort on a flusher panic is a deferred item)
 - [Phase 21]: 21-03: SLICEFS_TEST_PANIC_CREATE=k (debug builds only) makes the k-th new entry of a mount panic; panic-replay.sh checks it at 4 and 1 workers
+- [Phase 21]: 21-04: S7 cap_checked = flusher form and writers <= DEFAULT_WORKERS_MAX (8); it does not depend on VmHWM
+- [Phase 21]: 21-04: before the step limit, S7 VmHWM is 90-97 MiB at 1 writer, 198-216 at 2, 419-441 at 8 (above CAP_MIB 320 in all 3 runs), 688-730 at 16
 
 ### Pending Todos
 
@@ -210,8 +213,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-24T01:45:38.003Z
-Stopped at: Completed 21-03-PLAN.md
+Last session: 2026-11-24T03:35:39.070Z
+Stopped at: Completed 21-04-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
