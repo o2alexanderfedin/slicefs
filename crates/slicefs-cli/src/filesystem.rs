@@ -1110,6 +1110,9 @@ pub struct SliceFsFilesystem {
     next_fh: AtomicU64,
     pub(crate) store_path: Option<PathBuf>,
     pub(crate) auto_snapshot: bool,
+    /// The read-only daemon mode of a mount of a store with an unknown
+    /// ro_compat flag: `destroy` writes nothing (see `test_destroy`).
+    read_only: bool,
     /// Shared by FUSE callbacks, exclusive for a timed commit (see `commit_gate()`).
     commit_gate: Arc<RwLock<()>>,
     /// True while the write log is replayed: requests are not logged again.
@@ -1208,6 +1211,7 @@ impl SliceFsFilesystem {
             next_fh: AtomicU64::new(0),
             store_path,
             auto_snapshot: false,
+            read_only: false,
             commit_gate: Arc::new(RwLock::new(())),
             replaying: std::sync::atomic::AtomicBool::new(false),
             dirty_limit: AtomicUsize::new(DIRTY_LIMIT),
@@ -1533,6 +1537,17 @@ impl SliceFsFilesystem {
     /// Enable auto-snapshot on clean unmount.
     pub fn set_auto_snapshot(&mut self, enabled: bool) {
         self.auto_snapshot = enabled;
+    }
+
+    /// Set the read-only daemon mode (a mount of a store with an unknown
+    /// ro_compat flag): `destroy` commits nothing. Set once, before the mount.
+    pub fn set_read_only(&mut self, on: bool) {
+        self.read_only = on;
+    }
+
+    /// True in the read-only daemon mode (see `set_read_only`).
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Every FUSE callback holds this gate shared; the commit timer holds it
@@ -5251,6 +5266,13 @@ impl SliceFsFilesystem {
     /// Destroy: commit, optionally snapshot, and shut down WAL.
     /// Returns true if commit succeeded.
     pub fn test_destroy(&self) -> bool {
+        // The read-only daemon mode writes nothing. The kernel sends no
+        // write with the `RO` mount option; a write that reached the
+        // read-only chunk store failed. Nothing is committed, so the store
+        // does not change.
+        if self.read_only {
+            return true;
+        }
         debug_assert!(!self.flush_ctl.running.load(Ordering::Acquire), "test_destroy while a flusher runs");
         // Write the content of handles that are still open (e.g. a forced
         // unmount), so the commit below keeps it.

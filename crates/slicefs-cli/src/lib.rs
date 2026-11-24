@@ -10,6 +10,7 @@ pub mod flusher;
 mod fuse_callbacks;
 #[doc(hidden)]
 pub mod handlers;
+pub mod header;
 pub mod locks;
 pub mod oplog;
 pub mod overlay;

@@ -36,5 +36,7 @@ parking_lot    = { workspace = true }
 # of a change of the write hash.
 chunk-store = { path = "../chunk-store", features = ["test-hasher"] }
 tempfile = { workspace = true }
+# Content hashes of the store tree in the read-only mount tracer.
+blake3 = { workspace = true }
 # Latency histograms of the stress harness (`tests/stress_harness.rs`).
 hdrhistogram = { version = "7.6", default-features = false }

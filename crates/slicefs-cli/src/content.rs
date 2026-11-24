@@ -21,24 +21,15 @@ use chunk_store::{hasher_by_name, hasher_names, ChunkStore, ObjectHasher, Option
 /// Shared handle of the content store.
 pub type Content = Arc<ChunkStore>;
 
-/// Marker file of the store format with file content in packs.
-pub const FORMAT_FILE: &str = "FORMAT";
-/// The first line of the marker.
-pub const FORMAT: &str = "slicefs-store 6 (metadata and file content in packs, tagged object IDs)\n";
+/// The store header (`FORMAT`, its first line and the header of a new
+/// store) is owned by `crate::header`.
+pub use crate::header::{marker, FORMAT, FORMAT_FILE};
 /// Prefix of the marker line that records the write hash.
 const HASH_LINE: &str = "hash ";
 
-/// The marker of a store whose new objects use `hasher`.
-pub fn marker(hasher: &dyn ObjectHasher) -> String {
-    format!("{FORMAT}{HASH_LINE}{}\n", hasher.name())
-}
-
+/// The header text of `store` (a bounded read, see `header::read`).
 fn read_marker(store: &Path) -> std::io::Result<Option<String>> {
-    match std::fs::read_to_string(store.join(FORMAT_FILE)) {
-        Ok(s) => Ok(Some(s)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
+    crate::header::read(store)
 }
 
 /// The write hash that the marker of `store` records: blake3-256 if there is
@@ -84,22 +75,7 @@ pub fn select_hash(store: &Path, name: Option<&str>) -> std::io::Result<()> {
         }
         println!("New objects use hash {} (was {}); stored objects stay readable.", new.name(), current.name());
     }
-    write_marker(store, new)
-}
-
-/// Write the format marker durably: a synced temp file renamed over the old
-/// marker, then a sync of the directory. A power loss leaves the old marker
-/// or the new one, never an empty or torn file.
-fn write_marker(store: &Path, hasher: &dyn ObjectHasher) -> std::io::Result<()> {
-    use std::io::Write;
-    let tmp = store.join(format!("{FORMAT_FILE}.tmp"));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(marker(hasher).as_bytes())?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, store.join(FORMAT_FILE))?;
-    std::fs::File::open(store)?.sync_all()
+    crate::header::write_text(store, &marker(new))
 }
 
 /// Refuse a store of an older format, whose format changed without a
@@ -155,7 +131,8 @@ pub fn open(store: &Path) -> std::io::Result<Content> {
     std::fs::create_dir_all(store)?;
     let path = store.join(FORMAT_FILE);
     if !path.exists() {
-        write_marker(store, DEFAULT_HASHER)?;
+        // The header first, durably, before the chunk store makes `packs/`.
+        crate::header::create(store)?;
     }
     let opts = Options { hasher: write_hasher(store)?, gc_tmp_dir: Some(store.join(GC_TMP_DIR)), ..Options::default() };
     let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
