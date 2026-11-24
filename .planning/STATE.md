@@ -35,7 +35,7 @@ Total Plans in Phase: 9
 Phase: 21 — Worker pool
 Plan: 21-06 complete (6 of 9); next: 21-07 (plan 7 of 9)
 Status: Ready to execute
-Last activity: 2026-11-24 — 21-06 complete (S7 with the 21-05 mmap threshold: R1=pass, VmHWM 101-290 MiB at 1, 2, 4 and 8 writers; 16 writers 412-426 MiB, R2=miss and R3=miss, report only; no step limit needed)
+Last activity: 2026-11-24 — 21-06 complete (S7 with the 21-05 mmap threshold: R1=pass, VmHWM 101-290 MiB at 1, 2, 4 and 8 writers; 16 writers 412-426 MiB, R2=miss and R3=miss, report only; no step limit needed for the S7 bar; the 21-08 mem_bar is still open)
 
 Progress: [████░░░░░░] 43%
 
@@ -193,7 +193,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21]: 21-04: S7 cap_checked = flusher form and writers <= DEFAULT_WORKERS_MAX (8); it does not depend on VmHWM
 - [Phase 21]: 21-04: before the step limit, S7 VmHWM is 90-97 MiB at 1 writer, 198-216 at 2, 419-441 at 8 (above CAP_MIB 320 in all 3 runs), 688-730 at 16
 - [Phase 21]: 21-05: mallopt(M_MMAP_THRESHOLD, 128 KiB) first in run_mount on Linux glibc; all allocator calls in alloc_tune.rs; no step limit unless 21-06 misses CAP_MIB 320
-- [Phase 21]: 21-06: S7 with the 21-05 mmap threshold passes the 320 MiB bar at 1-8 writers (R1=pass, Pm(8)=290); 16 writers 412-426 MiB (R2, R3 miss, report only); no step limit needed
+- [Phase 21]: 21-06: S7 with the 21-05 mmap threshold passes the 320 MiB bar at 1-8 writers (R1=pass, Pm(8)=290); 16 writers 412-426 MiB (R2, R3 miss, report only); no step limit needed for the S7 bar; the 21-08 mem_bar is still open
 
 ### Pending Todos
 

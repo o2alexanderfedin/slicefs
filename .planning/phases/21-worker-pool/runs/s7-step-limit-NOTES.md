@@ -75,7 +75,7 @@ These values are recorded only. `CAP_MIB` stays 320 (`const CAP_MIB: u64 = 320` 
 
 ## Before and after the setting, at the same writer count
 
-The "before" runs had no allocator setting. The 4-writer runs are in `runs/s7-throttle-200ms.log` (7 runs on 9861aa5, as the plan states). The 1-, 2-, 8- and 16-writer runs are in `runs/s7-before-limit.log` (2dc170d).
+The "before" runs had no allocator setting. The 4-writer runs are in `runs/s7-throttle-200ms.log` (262 to 340 MiB in 7 runs, as the plan states; that log also has runs of an earlier commit). The 1-, 2-, 8- and 16-writer runs are in `runs/s7-before-limit.log` (2dc170d).
 
 | N | Before: VmHWM (Pm) | After: VmHWM (Pm) | Pm after - before |
 |---|---|---|---|
@@ -118,7 +118,7 @@ Pm(N) minus the harness term (3 MiB x N): 103 (1), 167 (2), 215 (4), 266 (8), 37
 
 ## Slowest write
 
-Research Q9 names a slowest write above 500 ms, with time limits in most throttle waits, as a reason for a delay curve (a Phase 20 deferred item). Here, the slowest write is above 500 ms in 15 of 19 runs (up to 2.1 s at 8 writers and 7.5 s at 16 writers). But the throttle waits that reach their time limit are a minority at 4 writers (12 to 45 %) and about half at 8 and 16 writers (40 to 56 %). So the Q9 condition holds only as a borderline case at 8 and 16 writers, and does not hold at 4 writers. The 7.1 s and 7.5 s writes at 16 writers have `write_busy_retries=0`, so they are throttle and commit waits, not store-busy waits.
+Research Q9 names a slowest write above 500 ms, with time limits in most throttle waits, as a reason for a delay curve (a Phase 20 deferred item). Here, the slowest write is above 500 ms in 12 of 19 runs (up to 2.1 s at 8 writers and 7.5 s at 16 writers). But the throttle waits that reach their time limit are a minority at 4 writers (10 to 45 %) and about half at 8 and 16 writers (40 to 56 %). So the Q9 condition holds only as a borderline case at 8 and 16 writers, and does not hold at 4 writers. The cause of the 7.1 s and 7.5 s writes at 16 writers is not identified. In those runs the largest throttle wait is 442 and 639 ms, the largest commit gate wait is 519 and 227 ms, and the largest commit is 1443 and 713 ms. These do not add up to 7 s. `write_busy_retries=0` shows only that no write met a busy store.
 
 ## Open points for the owner (R2 and R3, report only)
 
@@ -126,3 +126,5 @@ Research Q9 names a slowest write above 500 ms, with time limits in most throttl
 - **R3=miss:** Pm(16) - Pm(4) = 199 MiB (rule: <= 64). Pm(8) - Pm(4) = 63 MiB passes by 1 MiB.
 - The cause above 8 writers is mostly the live heap (about 10 MiB for each writer) and mapped files that follow the stored bytes. It is not malloc retention. If the owner wants 16 writers under 320 MiB, the options are the step limit, the byte step pool (commit 964e13e) or a buffer reuse pool, measured on the live part. 16 writers is above the default worker cap of 8.
 - No R1 miss, so the `MALLOC_ARENA_MAX=2` branch run did not apply and was not made.
+- A 7.5 s write at 16 writers is near the 10 s store wait. A write that meets a busy store now retries (#170), but the margin is small at 16 writers.
+- CAP(8) = 336 is above CAP_MIB 320. Pm(8) = 290 is 30 MiB below the cap, from only 3 runs (Spread 19 at 8 writers, 28 at 4). A later 8-writer run (for example in 21-08) can miss the assert.

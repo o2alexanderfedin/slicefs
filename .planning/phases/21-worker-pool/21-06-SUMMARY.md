@@ -116,11 +116,13 @@ Docker Linux, harness form, release. Volume `slicefs-target-p21`. `rustc 1.100.0
 
 - 16 writers: 412 to 426 MiB, above 320 (it does not block, because 16 is above the default worker cap of 8). If the owner wants 16 writers under 320, the next options are the step limit, the byte step pool (964e13e) or a buffer reuse pool, aimed at the live heap.
 - Pm(8) - Pm(4) = 63 MiB is only 1 MiB below the R3 limit.
-- Slowest write: above 500 ms in 15 of 19 runs (up to 7.5 s at 16 writers). Throttle waits reach their time limit in 12 to 45 % of waits at 4 writers and in 40 to 56 % at 8 and 16 writers. So the research Q9 delay-curve condition holds only as a borderline case at 8 and 16 writers.
+- Slowest write: above 500 ms in 12 of 19 runs (up to 7.5 s at 16 writers; the cause of the 7 s writes is not identified, and the throttle, gate and commit maxima do not add up to it). Throttle waits reach their time limit in 10 to 45 % of waits at 4 writers and in 40 to 56 % at 8 and 16 writers. So the research Q9 delay-curve condition holds only as a borderline case at 8 and 16 writers.
 
 ## Open points
 
 - The 1-writer Pm is 9 MiB higher than before (106 against 97). This was not examined. Page rounding of mmapped blocks is a possible cause.
+- CAP(8) = 336 is above CAP_MIB 320. Pm(8) = 290 leaves 30 MiB, from only 3 runs (Spread 19 at 8 writers, 28 at 4). A later 8-writer run can miss the assert.
+- A 7.5 s write at 16 writers is near the 10 s store wait. The #170 retry covers a busy store, but the margin is small.
 - The daemon VmHWM at 1, 2, 4 and 8 workers (the `mem_bar` of the bench) is still to be measured in 21-08. POOL-05 needs both results.
 
 ## Known Stubs
