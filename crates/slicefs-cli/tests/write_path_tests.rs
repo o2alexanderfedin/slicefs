@@ -286,13 +286,14 @@ fn test_mknod_unknown_type_returns_einval() {
 
 /// Test that mknod creates a regular file that can then be opened and written to.
 ///
-/// This is the FUSE-T NFS4 file creation path: MKNOD + OPEN (instead of CREATE).
-/// If mknod returns ENOSYS for regular files, FUSE-T's NFS layer stalls.
+/// This was the file creation path of the FUSE-T NFS4 backend (now removed):
+/// MKNOD + OPEN (instead of CREATE). If mknod returned ENOSYS for regular
+/// files, FUSE-T's NFS layer stalled.
 #[test]
 fn test_mknod_regular_file_then_open_write_release() {
     let (fs, _dir) = fresh_fs();
 
-    // Step 1: mknod creates the inode (like FUSE-T's NFS server would)
+    // Step 1: mknod creates the inode (as the removed FUSE-T NFS server did)
     let ino = fs.test_mknod(1, "newfile.txt", S_IFREG | 0o644, 1000, 1000, 0o022)
         .expect("mknod for regular file should succeed");
     assert!(ino > 1, "new inode must be > 1");
@@ -380,8 +381,8 @@ fn test_setattr_size_zero_on_new_file_without_manifest() {
 
 /// Regression test for FUSE-T write hang.
 ///
-/// Under FUSE-T, macOS maps NFS4 CLOSE → FUSE flush.  If flush returns ENOSYS
-/// the NFS client stalls indefinitely.  The flush callback now calls
+/// Under the FUSE-T NFS backend (now removed), macOS mapped NFS4 CLOSE → FUSE
+/// flush.  If flush returned ENOSYS the NFS client stalled indefinitely.  The flush callback now calls
 /// `flush_logged` which flushes the buffer to CAS without closing the
 /// handle, then returns ok().  This test exercises that exact path via
 /// `test_fsync` (which shares the same helper).

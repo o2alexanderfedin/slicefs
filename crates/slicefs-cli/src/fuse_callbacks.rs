@@ -157,7 +157,7 @@ impl Filesystem for MountedFs {
         // the create()/open() flags rather than sending a separate setattr(size=0)
         // after the create. Without this, FUSE-T sends setattr(size=0) for every
         // O_CREAT|O_TRUNC open, which fails with EIO on a brand-new inode (no manifest
-        // entry yet) and causes FUSE-T's NFS layer to stall/hang indefinitely.
+        // entry yet) and made FUSE-T's NFS layer (a removed backend) hang.
         let r1 = config.add_capabilities(InitFlags::FUSE_ATOMIC_O_TRUNC);
         // Request FUSE_BIG_WRITES so write requests can exceed a single page (4KB).
         // On macOS, fuser's defaults omit this flag, limiting write throughput.
@@ -378,17 +378,17 @@ impl Filesystem for MountedFs {
         });
     }
 
-    /// Flush any buffered writes for `fh` to CAS in response to a `close(2)` syscall.
+    /// Write the streamed content of the file of `fh` into its manifest, in
+    /// response to a `close(2)` syscall (see `flush_cell`; an overlay needs
+    /// nothing here).
     ///
-    /// Under FUSE-T on macOS, the NFS layer translates the NFS4 CLOSE operation into a
-    /// FUSE flush call. Returning ENOSYS (the fuser default) causes the macOS NFS client
-    /// to stall indefinitely, making every write hang. This implementation flushes the
-    /// write buffer through the CAS pipeline and replies ok(), unblocking the NFS CLOSE.
+    /// With the NFS backend of FUSE-T (now removed), an NFS4 CLOSE came as a FUSE
+    /// flush, and ENOSYS (the fuser default) made the macOS NFS client stall, so
+    /// every write hung. This implementation replies ok().
     ///
-    /// Unlike `fsync`, the WAL is NOT synced here — durability is provided by a subsequent
-    /// `release` or explicit `fsync`. `flush` may be called multiple times for the same
-    /// file handle (once per dup'd fd that is closed), so the buffer is preserved
-    /// (reset to empty) rather than the handle being removed.
+    /// Unlike `fsync`, the WAL is NOT synced here — a later `fsync`, `fsyncdir`
+    /// or commit makes it durable. `flush` may be called multiple times for the same
+    /// file handle (once per dup'd fd that is closed), so the handle stays open.
     fn flush(
         &self,
         _req: &Request,
@@ -435,12 +435,12 @@ impl Filesystem for MountedFs {
         });
     }
 
-    /// Flush any buffered writes for `fh` to CAS and sync the WAL to disk.
+    /// Write the streamed content of the file of `fh` into its manifest (as
+    /// `flush`), then sync the WAL to disk.
     ///
     /// `datasync` is ignored — SliceFS treats fsync and fdatasync identically.
-    /// If `fh` has a write buffer, it is flushed through the CAS pipeline and
-    /// the buffer is reset to empty (file handle stays open for subsequent writes).
-    /// The WAL is then synced to disk to ensure durability.
+    /// The file handle stays open for subsequent writes. An overlay is not
+    /// stored here: the WAL sync makes its writes durable.
     fn fsync(
         &self,
         _req: &Request,
@@ -971,11 +971,11 @@ impl Filesystem for MountedFs {
 
     /// Test for a POSIX file lock.
     ///
-    /// FUSE-T on macOS translates NFS4 LOCK operations to FUSE getlk/setlk.
     /// The fuser default returns ENOSYS, which on Linux causes kernel fallback
-    /// to local locking. However, FUSE-T's NFS server does NOT implement this
-    /// fallback — ENOSYS causes the NFS4 LOCK compound to fail, and with hard
-    /// mount semantics the NFS client retries forever, hanging all reads/writes.
+    /// to local locking. With the NFS backend of FUSE-T (now removed), NFS4
+    /// LOCK operations came as FUSE getlk/setlk, and ENOSYS made the NFS4 LOCK
+    /// compound fail; with hard mount semantics the NFS client retried forever,
+    /// so all reads/writes hung.
     ///
     /// SliceFS keeps no lock table. Return "no conflicting lock" (F_UNLCK)
     /// unconditionally.
@@ -1007,9 +1007,9 @@ impl Filesystem for MountedFs {
 
     /// Acquire, modify or release a POSIX file lock.
     ///
-    /// FUSE-T on macOS translates NFS4 LOCK/LOCKU operations to FUSE setlk.
-    /// Must return success (not ENOSYS) to prevent NFS client from hanging on
-    /// hard-mount retry. SliceFS keeps no lock table: all lock requests
+    /// Returns success, not ENOSYS: with the NFS backend of FUSE-T (now
+    /// removed), NFS4 LOCK/LOCKU came as FUSE setlk, and ENOSYS made the NFS
+    /// client hang on hard-mount retry. SliceFS keeps no lock table: all lock requests
     /// succeed as no-ops.
     fn setlk(
         &self,
@@ -1030,7 +1030,7 @@ impl Filesystem for MountedFs {
             let type_str = match typ { x if x == libc::F_RDLCK as i32 => "F_RDLCK", x if x == libc::F_WRLCK as i32 => "F_WRLCK", x if x == libc::F_UNLCK as i32 => "F_UNLCK", _ => "UNKNOWN" };
             fuse_trace!("[{}][FUSE] setlk: ENTRY ino={}, fh={}, lock_owner={}, start={}, end={}, type={}({}), pid={}, sleep={}", ts(), ino, fh, owner, _start, _end, type_str, typ, _pid, _sleep);
             serve(&fs, || ());
-            fuse_trace!("[{}][FUSE] setlk: EXIT ino={}, fh={} -> ok (no-op, single-threaded)", ts(), ino, fh);
+            fuse_trace!("[{}][FUSE] setlk: EXIT ino={}, fh={} -> ok (no-op, no lock table)", ts(), ino, fh);
             reply.ok();
         });
     }
@@ -1051,7 +1051,7 @@ impl Filesystem for MountedFs {
             fuse_trace!("[{}][FUSE] fallocate: ENTRY ino={}, fh={}, offset={}, length={}, mode={:#x}", ts(), ino, fh, _offset, _length, _mode);
             serve(&fs, || ());
             // Return ENOSYS (not supported) instead of EROFS (read-only filesystem).
-            // EROFS would incorrectly signal to the NFS client that the filesystem is
+            // EROFS would incorrectly signal to the client that the filesystem is
             // read-only, potentially blocking all subsequent write operations.
             fuse_trace!("[{}][FUSE] fallocate: EXIT ino={} -> ENOSYS (not supported)", ts(), ino);
             reply.error(Errno::ENOSYS);

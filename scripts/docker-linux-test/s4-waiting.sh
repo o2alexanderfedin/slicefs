@@ -84,7 +84,7 @@ SH
 
 SHA=$(git -c safe.directory=/src -C /src rev-parse --short HEAD 2>/dev/null || echo unknown)
 echo "# S4 queue depth, commit $SHA, kernel $(uname -r), file ${FILE_MIB} MiB, ${DUR} s per pass"
-echo "# note: waiting counts the whole FUSE connection; one active file only; one daemon dispatch thread"
+echo "# note: waiting counts the whole FUSE connection; one active file only; one daemon dispatch thread when S4 ran (Phase 18)"
 
 # fusectl: mount it if needed; fail clearly if the directory stays empty.
 mountpoint -q $FUSECTL 2>/dev/null || mount -t fusectl none $FUSECTL 2>$R/fusectl.err

@@ -202,7 +202,8 @@ pub fn handle_release(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> EmptyResult 
     }
 }
 
-/// Handle `flush`: flush write buffer for `fh` without closing the handle.
+/// Handle `flush`: write the streamed content of `fh` into its manifest
+/// without closing the handle (`flush_cell`).
 /// Only a flush that did work appends a `Flush` record, in the hold of its
 /// install; it is written out here.
 pub fn handle_flush(fs: &SliceFsFilesystem, _ino: u64, fh: u64) -> EmptyResult {
@@ -215,7 +216,7 @@ pub fn handle_flush(fs: &SliceFsFilesystem, _ino: u64, fh: u64) -> EmptyResult {
     }
 }
 
-/// Handle `fsync`: flush and sync write buffer for `fh`.
+/// Handle `fsync`: as `flush`, then sync the write log.
 pub fn handle_fsync(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> EmptyResult {
     // Write the manifest (logged as a flush), then make the log durable: the
     // sync covers this file's records and the flush record itself (#20).

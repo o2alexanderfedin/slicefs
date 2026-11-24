@@ -1,10 +1,11 @@
 //! End the FUSE-T session when the mount goes away (macOS).
 //!
 //! FUSE-T serves the mount from a `go-nfsv4` child process. With the NFS
-//! backend, that child exits when the volume is unmounted, the FUSE channel
-//! reaches EOF, and the session ends (destroy, final commit). With the SMB
-//! backend the child keeps running after the unmount: the session never ends
-//! and the daemon never exits.
+//! backend (now removed), that child exited when the volume was unmounted,
+//! the FUSE channel reached EOF, and the session ended (destroy, final
+//! commit). With the SMB backend (now removed) the child kept running after
+//! the unmount: the session never ended and the daemon never exited. The
+//! FSKit server may also not exit, so the watcher stays.
 //!
 //! This watcher polls the kernel mount table (`getfsstat`, which never
 //! touches the FUSE mount, so it cannot hang on it). When the mount it saw is
