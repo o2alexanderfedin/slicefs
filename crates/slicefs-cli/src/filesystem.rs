@@ -318,8 +318,8 @@ enum WriteMode {
     Streaming {
         state: Stream,
         next_expected_offset: u64,
-        /// Writes that arrived ahead of `next_expected_offset` (NFS sends
-        /// WRITEs in parallel). Non-overlapping; drained into `state` when
+        /// Writes that arrived ahead of `next_expected_offset` (writes can
+        /// arrive in parallel). Non-overlapping; drained into `state` when
         /// the gap closes. Bounded by `REORDER_WINDOW` bytes.
         pending: BTreeMap<u64, Vec<u8>>,
     },
@@ -1012,6 +1012,12 @@ struct HandleTable {
     orphans: HashSet<u64>,
 }
 
+/// A commit after its generation switch (`SliceFsFilesystem::commit_cut_begin`),
+/// to be finished with the commit gate released (#108).
+pub struct CommitCut<'a> {
+    prepared: metadata::store::PreparedCommit<'a>,
+}
+
 /// FUSE filesystem adapter backed by a [`DictMetadataStore`].
 ///
 /// `meta` provides all inode/directory/manifest metadata.
@@ -1022,14 +1028,9 @@ struct HandleTable {
 /// `cells` holds the open write state of each inode; `next_fh` allocates unique handles.
 /// `store_path` is the on-disk store root used by `destroy()` to persist state.
 ///
-/// Raw bytes flow directly into the Merkle tree (v3 store format — no compression header).
+/// Raw bytes flow directly into the Merkle tree; the chunk store compresses
+/// each object (zstd) after its ID is computed.
 /// ObjectKey is computed on raw bytes, enabling content-addressed deduplication.
-/// A commit after its generation switch (`SliceFsFilesystem::commit_cut_begin`),
-/// to be finished with the commit gate released (#108).
-pub struct CommitCut<'a> {
-    prepared: metadata::store::PreparedCommit<'a>,
-}
-
 pub struct SliceFsFilesystem {
     pub(crate) meta: Arc<DictMetadataStore>,
     pub(crate) io: Arc<Mutex<StoreIo>>,
@@ -1122,7 +1123,8 @@ impl SliceFsFilesystem {
     /// `store_path` is the on-disk store root; when `Some`, `destroy()` persists
     /// state after the FUSE session ends.
     ///
-    /// Raw bytes flow directly into the Merkle tree (v3 store format — no compression).
+    /// Raw bytes flow directly into the Merkle tree (the chunk store compresses
+    /// each object).
     pub fn new(
         meta: DictMetadataStore,
         io: Arc<Mutex<StoreIo>>,
@@ -3103,8 +3105,8 @@ impl SliceFsFilesystem {
             let pending_bytes: usize = pending.values().map(Vec::len).sum();
 
             if fresh && !overlaps_pending && offset > next + REORDER_WINDOW as u64 {
-                // A jump past the reorder window is a sparse write, not NFS
-                // reordering: stream the pending writes and the gap as zeros
+                // A jump past the reorder window is a sparse write, not
+                // reordered writes: stream the pending writes and the gap as zeros
                 // (O(1) memory), one step at a time, and go on.
                 let piece = pending.first_key_value().filter(|(o, _)| **o < offset).map(|(&o, v)| (o, v.clone()));
                 let r = match &piece {
@@ -3885,7 +3887,7 @@ impl SliceFsFilesystem {
         }
         if s.cas_committed && s.last_committed_root.is_some() {
             // No write since the last fsync: the manifest is current.
-            // (NFS sends a COMMIT per group of writes; skip the re-hash.)
+            // (The NFS backend sent a COMMIT per group of writes; skip the re-hash.)
             return Ok(false);
         }
         let WriteMode::Streaming { state, next_expected_offset, .. } = &s.write_mode else {
@@ -3943,7 +3945,8 @@ impl SliceFsFilesystem {
     /// - Overlay: only the size and the extents change (no I/O, no allocation
     ///   by size); a resize to 0 goes back to a fresh stream.
     /// A size change goes to the open write state of the inode whatever
-    /// handle it names (the NFS SETATTR from cp carries no handle).
+    /// handle it names (an NFS SETATTR from cp, with the removed NFS
+    /// backend, carried no handle).
     pub fn test_setattr_size(&self, ino: u64, _fh: Option<u64>, new_size: u64) -> Result<(), i32> {
         self.setattr_size_logged(ino, new_size, &mut |_| {})
     }
@@ -4733,7 +4736,7 @@ impl SliceFsFilesystem {
         };
         Self::stamp_new(&mut symlink_meta);
 
-        // Store target as CAS content (raw bytes — v3 format, no compression),
+        // Store target as CAS content (raw bytes; the chunk store compresses it),
         // before the parent's stripe: no stripe is held across content I/O.
         // If the create fails, the object is garbage for the GC.
         let content_digest = content::put_all(&self.content, target_bytes).map_err(|_| libc::EIO)?;

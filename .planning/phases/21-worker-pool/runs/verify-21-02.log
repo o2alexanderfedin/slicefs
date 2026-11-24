@@ -1,0 +1,94 @@
+# host: tar of the committed clean tree at ef8c991; docker mount form, volume slicefs-target-p21, debug build, no SLICEFS_WORKERS
+# verify 21-02 at tree
+Linux e9fedd758732 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+2.21 1.92 1.91 3/940 20
+build-exit=0
+== Phase 03: read-only mount (seeded tree, snapshot mounted read-only)
+  ls: ok
+  cat: ok
+  stat: ok
+  diff: ok
+  touch-erofs: ok
+  unmount: ok
+== Phase 04: end-to-end write session, survives remount
+  echo-cat: ok
+  mv: ok
+  symlink: ok
+  hardlink: ok
+  mkdir-rmdir: ok
+  unmount: ok
+  after-remount: ok
+== Phase 05: kill -9 during a large write, then remount
+scripts/docker-linux-test/verify-phases.sh: line 75:   213 Killed                  "${PRE[@]}" $B mount --store $s "$@" $m < /dev/null >> $R/mount.log 2>&1
+  kill -9 mid-write: ok
+  remount after crash: ok
+  committed-intact: ok
+  seeded-intact: ok
+  closed-file-survives-crash: ok
+  partial-consistent: ok
+    partial.bin after crash: 22654976 bytes
+  write-after-crash: ok
+  scrub: ok
+== Phase 05b: fsync is durable without a commit (write log, #20)
+scripts/docker-linux-test/verify-phases.sh: line 94:   299 Killed                  "${PRE[@]}" $B mount --store $s "$@" $m < /dev/null >> $R/mount.log 2>&1
+  remount after crash (replay): ok
+    Replayed 62 request(s) from the write log (0 skipped).
+  fsynced-file-survives: ok
+  renamed-file-survives: ok
+  old-name-gone: ok
+  scrub-after-replay: ok
+== Phase 05c: a rename is durable after an fsync of the directory only (write log, #20)
+scripts/docker-linux-test/verify-phases.sh: line 117:   374 Killed                  "${PRE[@]}" $B mount --store $s "$@" $m < /dev/null >> $R/mount.log 2>&1
+    Replayed 36 request(s) from the write log (0 skipped).
+  rename-survives-dir-fsync: ok
+  old-name-gone-after-dir-fsync: ok
+scripts/docker-linux-test/verify-phases.sh: line 138:   444 Killed                  "${PRE[@]}" $B mount --store $s "$@" $m < /dev/null >> $R/mount.log 2>&1
+  control-rename-without-sync-lost: ok
+== Phase 05d: a torn last record does not stop the mount (write log, #20)
+scripts/docker-linux-test/verify-phases.sh: line 160:   505 Killed                  "${PRE[@]}" $B mount --store $s "$@" $m < /dev/null >> $R/mount.log 2>&1
+    cut 3 bytes of segment-000002.seg
+  mount-with-torn-last-record: ok
+    Replayed 19 request(s) from the write log (0 skipped).
+  records-before-the-tear-kept: ok
+  torn-record-not-applied: ok
+  write-after-torn-tail: ok
+  scrub-after-torn-tail: ok
+== Phase 05e: periodic mode keeps a write with no fsync after its 5 s sync (write log, #133)
+scripts/docker-linux-test/verify-phases.sh: line 177:   586 Killed                  "${PRE[@]}" $B mount --store $s "$@" $m < /dev/null >> $R/mount.log 2>&1
+  periodic-write-survives-kill: ok
+  scrub-after-periodic-kill: ok
+== FUSET-05: SIGTERM, SIGINT (Ctrl+C) and SIGHUP end the mount cleanly (final commit, no mount.lock)
+  SIGTERM-exits: ok
+  SIGTERM-no-mount-lock: ok
+  SIGTERM-write-kept: ok
+  SIGINT-exits: ok
+  SIGINT-no-mount-lock: ok
+  SIGINT-write-kept: ok
+  SIGHUP-exits: ok
+  SIGHUP-no-mount-lock: ok
+  SIGHUP-write-kept: ok
+== Phase 06: two snapshots of the same state do not double-count storage
+    CAS bytes: before=2100621 snapA=2100621 snapB=2100621
+  no-double-count: ok
+  snapshot-list: ok
+== Large copy (#20): 1 GiB in order and out of order, bounded daemon memory
+  big-copy-in-order: ok
+  big-write-out-of-order: ok
+  big-in-order-cmp: ok
+  big-out-of-order-cmp: ok
+  daemon-rss-bounded: ok
+  no-switch-to-overlay: ok
+    timing: cp 40 s, out-of-order write 13 s, cmp 15 s
+  daemon-rss-bounded-at-unmount: ok
+    daemon VmHWM: after cp 58 MiB, after out-of-order write 144 MiB, after cmp 175 MiB, at unmount 175 MiB (cap 512 MiB)
+  big-in-order-cmp-after-remount: ok
+  big-out-of-order-cmp-after-remount: ok
+    section time: 88 s
+RESULT verify-phases: PASS
+verify-exit=0
+workers-first: Workers: 8 (default)
+lock-held-asserts=0
+# host: docker exit=0
+host-exit=0

@@ -1,0 +1,37 @@
+s7-throttle-200ms: S7_SERIALIZE=0 S7_FLUSHER=1 s7_budget_baseline in Docker Linux (in process, no mount); 885015a = 5 s throttle limit, 9861aa5 = 200 ms
+
+## First three runs on 9861aa5
+commit = 9861aa5
+12:15  up 32 days, 16:36, 8 users, load averages: 15.51 17.51 18.47
+vmhwm_mib=262 within_cap=true throttle_timeouts=36 throttle_wait_max_ms=222
+vmhwm_mib=293 within_cap=true throttle_timeouts=173 throttle_wait_max_ms=201
+vmhwm_mib=340 within_cap=false throttle_timeouts=32 throttle_wait_max_ms=202
+12:19  up 32 days, 16:39, 8 users, load averages: 19.40 18.98 18.93
+
+## Alternating runs
+12:19  up 32 days, 16:40, 8 users, load averages: 19.46 19.06 18.96
+=== 885015a run 1
+vmhwm_mib=283 throttle_timeouts=0 throttle_wait_max_ms=315
+ok
+=== 9861aa5 run 1
+vmhwm_mib=262 throttle_timeouts=138 throttle_wait_max_ms=290
+ok
+=== 885015a run 2
+vmhwm_mib=255 throttle_timeouts=0 throttle_wait_max_ms=387
+ok
+=== 9861aa5 run 2
+vmhwm_mib=304 throttle_timeouts=13 throttle_wait_max_ms=200
+ok
+=== 885015a run 3
+vmhwm_mib=286 throttle_timeouts=0 throttle_wait_max_ms=606
+ok
+=== 9861aa5 run 3
+vmhwm_mib=312 throttle_timeouts=33 throttle_wait_max_ms=202
+ok
+=== 885015a run 4
+vmhwm_mib=289 throttle_timeouts=0 throttle_wait_max_ms=669
+ok
+=== 9861aa5 run 4
+vmhwm_mib=295 throttle_timeouts=3 throttle_wait_max_ms=200
+ok
+12:27  up 32 days, 16:48, 8 users, load averages: 13.50 15.01 17.02

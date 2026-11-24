@@ -4,18 +4,18 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: 21
 current_phase_name: Worker pool
-current_plan: Not started
-status: planning
-stopped_at: Phase 20 complete, ready to plan Phase 21
-last_updated: "2026-11-23T14:57:29.685Z"
+current_plan: 4
+status: executing
+stopped_at: Completed 21-03-PLAN.md
+last_updated: "2026-11-24T01:46:05.212Z"
 last_activity: 2026-11-23
-last_activity_desc: Phase 20 complete, transitioned to Phase 21
-state_head: 31e30b75cd6ca019ff0d1dc86648b39f86a49124
+last_activity_desc: 21-03 complete (abort on a request-thread panic, replay tests, POOL-03 live check); next 21-04
+state_head: 5e57d3edc76a380af2ac662c9d9d1a72bd280226
 progress:
   total_phases: 7
   completed_phases: 3
-  total_plans: 31
-  completed_plans: 31
+  total_plans: 40
+  completed_plans: 34
   percent: 43
 ---
 
@@ -26,16 +26,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-20)
 
 **Core value:** High-ratio data deduplication that works transparently as a real, daily-driver POSIX filesystem
-**Current focus:** Phase 19 — Fine-grained locks
+**Current focus:** Phase 21 — Worker pool
 
 ## Current Position
 
-Current Plan: Not started
-Total Plans in Phase: 8
+Current Plan: 4
+Total Plans in Phase: 9
 Phase: 21 — Worker pool
-Plan: 20-08 complete (8 of 8); next: phase verification
-Status: Ready to plan
-Last activity: 2026-11-23 — Phase 20 complete, transitioned to Phase 21
+Plan: 21-03 complete (3 of 9); next: 21-04 (plan 4 of 9)
+Status: Ready to execute
+Last activity: 2026-11-23 — 21-03 complete (abort hook for request threads, child-process replay tests, POOL-03 Docker block at 4 and 1 workers)
 
 Progress: [████░░░░░░] 43%
 
@@ -80,6 +80,9 @@ Progress: [████░░░░░░] 43%
 | Phase 20 P06 | 36 min | 2 tasks | 6 files |
 | Phase 20 P07 | 55 min | 3 tasks | 4 files |
 | Phase 20 P08 | 75min | 2 tasks | 7 files |
+| Phase 21 P01 | 70 min | 3 tasks | 10 files |
+| Phase 21 P02 | 55 min | 3 tasks | 5 files |
+| Phase 21 P03 | 66 min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -176,6 +179,14 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 20]: Empty-pass fix (4d8ac3d): after a pass with no candidate, a write below the budget does not kick the flusher
 - [Phase 20]: LOCK-02 and LOCK-06 marked complete on evidence (gate, smoke 20-08, P1 under CAP_MIB)
 - [Phase 20]: Second empty-pass fix (e44d57d): flag set only when the last pick found no candidate at half the budget or more
+- [Phase 21]: 21-01: request queue is max(2 x N, 4) slots and 8 MiB; an empty queue admits one job of any weight
+- [Phase 21]: 21-01: a pool worker counts its exit with a drop guard, so a panicked worker does not hold the drain to its limit
+- [Phase 21]: 21-01: a pool spawn error becomes the mount error and goes through the stop steps after mount()
+- [Phase 21]: 21-02: all 31 request callbacks run as jobs and take the gate only inside serve; the reply is sent after serve; write borrows its payload with 1 worker and copies it with a pool
+- [Phase 21]: 21-02: SLICEFS_FUSE_TRACE=0 (read once) turns off the per-request ENTRY and EXIT lines; default on
+- [Phase 21]: 21-03: a panic on a request thread (fuser- or slicefs-worker-) aborts from the panic hook before the unwind; no reply, no destroy() commit; the write log replays at the next mount
+- [Phase 21]: 21-03: only request threads abort; the flusher, the GC and the commit timer keep the Phase 20 behavior (abort on a flusher panic is a deferred item)
+- [Phase 21]: 21-03: SLICEFS_TEST_PANIC_CREATE=k (debug builds only) makes the k-th new entry of a mount panic; panic-replay.sh checks it at 4 and 1 workers
 
 ### Pending Todos
 
@@ -199,8 +210,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-23T12:01:11.068Z
-Stopped at: Phase 20 complete, ready to plan Phase 21
+Last session: 2026-11-24T01:45:38.003Z
+Stopped at: Completed 21-03-PLAN.md
 Resume file: None
 
 ## Operator Next Steps

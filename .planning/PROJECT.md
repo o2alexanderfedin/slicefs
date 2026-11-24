@@ -63,7 +63,7 @@ Other candidates (not in v2.2): idle-merge control (#141), several roots, commit
 - ✓ Realistic statfs reporting — v2.0
 - ✓ O(1) snapshot lookup by version and by name — v2.0
 - ✓ Clean shutdown on SIGTERM/SIGINT/SIGHUP (final commit) — v2.0
-- ✓ Refcount overflow — superseded: refcounts replaced by reachability GC — v2.0
+- ✓ Refcount overflow — superseded: GC is reachability (mark-and-sweep) since v2.0; the in-memory reference-count table is still kept (read only by `stats` and `scrub`), its removal is #165
 
 ### Validated (v2.1)
 

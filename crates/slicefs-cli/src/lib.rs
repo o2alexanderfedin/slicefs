@@ -12,6 +12,7 @@ pub mod handlers;
 pub mod locks;
 pub mod oplog;
 pub mod overlay;
+pub mod pool;
 pub mod gc;
 pub mod gc_pacing;
 pub mod online_gc;

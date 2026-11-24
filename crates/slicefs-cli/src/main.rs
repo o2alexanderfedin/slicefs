@@ -12,7 +12,7 @@ fn main() {
 
     let dirty = cli.command.dirty_config();
     match cli.command {
-        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force, commit_interval, gc_interval, compression, hash, .. } => {
+        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force, commit_interval, gc_interval, compression, hash, workers, .. } => {
             let dirty = dirty.expect("mount has dirty values");
             if let Err(e) = mount::run_mount(
                 &store,
@@ -30,6 +30,7 @@ fn main() {
                 compression,
                 hash.as_deref(),
                 dirty,
+                workers,
             ) {
                 if json {
                     eprintln!("{{\"error\": \"{e}\"}}");

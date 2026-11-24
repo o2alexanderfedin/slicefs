@@ -38,7 +38,7 @@ pub enum Cmd {
         /// Do not update access times (recommended for dedup workloads).
         #[arg(long, default_value_t = true)]
         noatime: bool,
-        /// In-memory read cache size in bytes (0 = disabled).
+        /// Accepted for compatibility; it has no effect now (there is no read cache).
         #[arg(long, default_value_t = 0)]
         cache_size: usize,
         /// Allow other users to access the mount (passes allow_other to FUSE).
@@ -121,6 +121,12 @@ pub enum Cmd {
         /// kept under its limit by its own writer instead.
         #[arg(long, value_name = "SECS", default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=u64::MAX / 1000))]
         dirty_expire: u64,
+        /// Request worker threads. Default on Linux: half the CPUs, at least
+        /// 1 and at most 8; default on macOS: 1. With 1, each request runs
+        /// on the FUSE reader thread. At least 1; an explicit value above 8
+        /// is allowed.
+        #[arg(long, value_name = "N", value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+        workers: Option<usize>,
     },
 
     /// Unmount a SliceFS filesystem mounted at the given path.
@@ -147,8 +153,8 @@ pub enum Cmd {
 
     /// Run offline garbage collection on a SliceFS block store.
     ///
-    /// The store must NOT be mounted when this command is run.
-    /// Use the background GC thread for in-process GC during active mounts.
+    /// On a mounted store, this asks the GC thread of the mount to run the
+    /// GC and waits for the result.
     Gc {
         /// Path to the SliceFS block store directory.
         store: PathBuf,
@@ -552,5 +558,36 @@ mod tests {
     fn test_no_json_flag_default() {
         let cli = Cli::try_parse_from(["slicefs", "stats", "/data"]).unwrap();
         assert!(!cli.json, "expected --json to default to false");
+    }
+
+    /// The `--workers` value of `slicefs mount` with `extra` options.
+    fn workers(extra: &[&str]) -> Result<Option<usize>, clap::Error> {
+        let mut args = vec!["slicefs", "mount", "/mnt", "--store", "/data"];
+        args.extend_from_slice(extra);
+        match Cli::try_parse_from(args)?.command {
+            Cmd::Mount { workers, .. } => Ok(workers),
+            _ => panic!("expected Mount"),
+        }
+    }
+
+    #[test]
+    fn workers_flag_parses() {
+        assert_eq!(workers(&["--workers", "4"]).unwrap(), Some(4));
+    }
+
+    #[test]
+    fn workers_zero_is_refused() {
+        let e = workers(&["--workers", "0"]).expect_err("--workers 0 is refused");
+        assert_eq!(e.kind(), clap::error::ErrorKind::ValueValidation, "{e}");
+    }
+
+    #[test]
+    fn workers_absent_is_none() {
+        assert_eq!(workers(&[]).unwrap(), None);
+    }
+
+    #[test]
+    fn workers_above_eight_is_accepted() {
+        assert_eq!(workers(&["--workers", "16"]).unwrap(), Some(16));
     }
 }

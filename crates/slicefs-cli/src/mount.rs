@@ -8,8 +8,8 @@
 //!     segment-000001.seg   # Append-only WAL segment
 //!     segment-000002.seg   # ...
 //!   mount.lock             # Created on mount, removed on clean unmount
-//!   dictionary.bin         # Legacy format — auto-migrated to segments/ on first mount
-//!   root.bin               # Legacy format — auto-migrated to segments/ on first mount
+//!   dictionary.bin         # Legacy format — refused at mount; re-seed needed
+//!   root.bin               # Legacy format — not read
 //! ```
 //!
 //! ## Usage
@@ -150,7 +150,7 @@ pub(crate) fn next_segment_id(segs_dir: &Path) -> u64 {
 ///
 /// Always includes: `FSName("slicefs")`, `DefaultPermissions`.
 /// Adds `NoAtime` when `noatime` is true.
-/// Adds `AllowOther` when `allow_other` is true.
+/// Sets the ACL to `SessionACL::All` when `allow_other` is true.
 /// On macOS, adds `CUSTOM("backend=<name>")` when a backend is provided.
 /// ACL defaults to `Owner` (only the mounting user can access the filesystem).
 pub fn build_mount_options(
@@ -231,6 +231,32 @@ fn check_mountpoint_not_in_use(mountpoint: &Path) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+/// Debug builds only (POOL-03 live check): with the variable below set to
+/// a number k of 1 or more, the k-th new entry of this mount panics at its
+/// half-done point (linked, its record not appended). Creates, mknods,
+/// symlinks and mkdirs count together. Any other value is ignored.
+#[cfg(debug_assertions)]
+fn set_test_panic_create(fs: &SliceFsFilesystem) {
+    let Ok(v) = std::env::var("SLICEFS_TEST_PANIC_CREATE") else { return };
+    let k = match v.trim().parse::<u64>() {
+        Ok(k) if k >= 1 => k,
+        _ => {
+            eprintln!("[{}] WARNING: SLICEFS_TEST_PANIC_CREATE={v:?} is not a number of 1 or more; ignored", ts());
+            return;
+        }
+    };
+    eprintln!(
+        "[{}] WARNING: test panic set: new entry number {k} panics (creates, mknods, symlinks and mkdirs count together)",
+        ts()
+    );
+    let seen = std::sync::atomic::AtomicU64::new(0);
+    fs.test_set_mkdir_hook(Some(Arc::new(move || {
+        if seen.fetch_add(1, Ordering::SeqCst) + 1 == k {
+            panic!("SLICEFS_TEST_PANIC_CREATE: test panic in new entry number {k}");
+        }
+    })));
+}
+
 // ── run_mount ─────────────────────────────────────────────────────────────────
 
 /// Run the `mount` subcommand.
@@ -239,7 +265,7 @@ fn check_mountpoint_not_in_use(mountpoint: &Path) -> Result<(), Box<dyn std::err
 /// `fuser::mount` session. Blocks until the session ends (SIGTERM, Ctrl+C,
 /// or `slicefs unmount`).
 ///
-/// `_cache_size` is accepted but unused in Phase 3. Placeholder for Phase 4.
+/// `_cache_size` is accepted but unused (there is no read cache).
 /// `allow_other` passes the `allow_other` FUSE mount option (multi-user access).
 /// `snapshot_ref` mounts a specific snapshot read-only (by version number or name).
 /// `auto_snapshot` enables auto-snapshot on clean unmount (--auto-snapshot flag).
@@ -247,6 +273,8 @@ fn check_mountpoint_not_in_use(mountpoint: &Path) -> Result<(), Box<dyn std::err
 /// `force` is accepted but currently unused.
 /// `dirty` holds the dirty-data values; they are checked before any side
 /// effect and set before the write-log replay.
+/// `workers` is the number of request worker threads (`None`: the default
+/// of `pool::default_workers`); with 1 there is no pool.
 #[allow(clippy::too_many_arguments)]
 pub fn run_mount(
     store_path: &Path,
@@ -264,9 +292,20 @@ pub fn run_mount(
     zstd_level: i32,
     hash: Option<&str>,
     dirty: DirtyConfig,
+    workers: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Pre-flight: refuse bad dirty-data values before anything changes.
     dirty.check()?;
+
+    // The request worker count, read once (Phase 21).
+    let (n_workers, how) = match workers {
+        Some(n) => (n, "set"),
+        None => (crate::pool::default_workers(), "default"),
+    };
+    if n_workers == 0 {
+        return Err("--workers must be at least 1".into());
+    }
+    println!("Workers: {n_workers} ({how})");
 
     // Pre-flight: create mountpoint directory if it doesn't exist.
     if !mountpoint.exists() {
@@ -458,8 +497,23 @@ pub fn run_mount(
     let unmount_watch =
         crate::fuset_watch::spawn_unmount_watcher(mountpoint, mounted_msg, Arc::clone(&unmount_watch_shutdown));
 
+    // POOL-03: a panic on a request thread (the reader or a worker) aborts
+    // the daemon before the unwind: no reply for the half-done request and
+    // no destroy() commit of it; the write log replays at the next mount.
+    crate::pool::install_abort_hook();
+    // Debug builds only: the test panic of the POOL-03 live check. It is set
+    // after the write-log replay, so the entries of the replay do not count.
+    #[cfg(debug_assertions)]
+    set_test_panic_create(&fs);
+
+    // The request pool: only for 2 or more workers (1 runs each request on
+    // the reader thread). A spawn error is a mount error, and goes through
+    // the stop steps below.
     #[allow(unused_mut)]
-    let mut mounted = mount(crate::fuse_callbacks::MountedFs(fs), mountpoint, &config);
+    let mut mounted = match (n_workers >= 2).then(|| crate::pool::Pool::new(n_workers)).transpose() {
+        Ok(pool) => mount(crate::fuse_callbacks::MountedFs::new(fs, pool), mountpoint, &config),
+        Err(e) => Err(std::io::Error::other(format!("cannot start {n_workers} request workers: {e}"))),
+    };
 
     #[cfg(target_os = "macos")]
     {
@@ -563,7 +617,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mnt = dir.path().join("mnt");
         let cfg = DirtyConfig { budget: 8 << 20, limit: 16 << 20, ..DirtyConfig::default() };
-        let r = run_mount(&dir.path().join("no-store"), &mnt, true, false, 0, None, None, false, None, false, 0, 0, 0, None, cfg);
+        let r = run_mount(&dir.path().join("no-store"), &mnt, true, false, 0, None, None, false, None, false, 0, 0, 0, None, cfg, None);
         let err = r.expect_err("run_mount refuses the dirty values").to_string();
         assert!(!mnt.exists(), "the mount point was not made ({err})");
         assert!(err.contains("16777216") && err.contains("8388608"), "{err}");

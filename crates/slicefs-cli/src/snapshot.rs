@@ -201,7 +201,7 @@ pub fn run_snapshot_switch(
 
 /// Write a `RootUpdate` WAL entry pointing at `new_root`.
 ///
-/// The simplest way: use `commit_to_root` via internal WAL logging.
+/// The simplest way: use `commit_root` via internal WAL logging.
 /// We write the new root entry directly to the WAL via the store's log mechanism.
 fn write_root_update(
     meta: &DictMetadataStore,
