@@ -4,18 +4,18 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: 21
 current_phase_name: Worker pool
-current_plan: 2
+current_plan: 3
 status: executing
-stopped_at: Completed 21-01-PLAN.md
-last_updated: "2026-11-23T23:26:20.141Z"
-last_activity: 2026-11-23
-last_activity_desc: 21-01 complete (worker pool tracer); next 21-02
-state_head: 4c70d3908ba9d2a3d333d532d604a27b008aa33c
+stopped_at: Completed 21-02-PLAN.md
+last_updated: "2026-11-24T00:29:41.346Z"
+last_activity: 2026-11-24
+last_activity_desc: 21-02 complete (all callbacks on the pool, reply after the gate); next 21-03
+state_head: 925f8a3f3404ae5fa7b24675572ee2ac660f16a3
 progress:
   total_phases: 7
   completed_phases: 3
   total_plans: 40
-  completed_plans: 32
+  completed_plans: 33
   percent: 43
 ---
 
@@ -30,12 +30,12 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 2
+Current Plan: 3
 Total Plans in Phase: 9
 Phase: 21 — Worker pool
-Plan: 21-01 complete (1 of 9); next: 21-02
-Status: Executing
-Last activity: 2026-11-23 — 21-01 complete (worker pool tracer, smoke with 4 workers)
+Plan: 21-02 complete (2 of 9); next: 21-03 (plan 3 of 9)
+Status: Ready to execute
+Last activity: 2026-11-24 — 21-02 complete (31 callbacks through serve, trace switch, smoke with 4 and 1 workers, live checks with 8)
 
 Progress: [████░░░░░░] 43%
 
@@ -81,6 +81,7 @@ Progress: [████░░░░░░] 43%
 | Phase 20 P07 | 55 min | 3 tasks | 4 files |
 | Phase 20 P08 | 75min | 2 tasks | 7 files |
 | Phase 21 P01 | 70 min | 3 tasks | 10 files |
+| Phase 21 P02 | 55 min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -180,6 +181,8 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21]: 21-01: request queue is max(2 x N, 4) slots and 8 MiB; an empty queue admits one job of any weight
 - [Phase 21]: 21-01: a pool worker counts its exit with a drop guard, so a panicked worker does not hold the drain to its limit
 - [Phase 21]: 21-01: a pool spawn error becomes the mount error and goes through the stop steps after mount()
+- [Phase 21]: 21-02: all 31 request callbacks run as jobs and take the gate only inside serve; the reply is sent after serve; write borrows its payload with 1 worker and copies it with a pool
+- [Phase 21]: 21-02: SLICEFS_FUSE_TRACE=0 (read once) turns off the per-request ENTRY and EXIT lines; default on
 
 ### Pending Todos
 
@@ -203,8 +206,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-23T23:26:19.717Z
-Stopped at: Completed 21-01-PLAN.md
+Last session: 2026-11-24T00:29:40.867Z
+Stopped at: Completed 21-02-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
