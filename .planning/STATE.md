@@ -8,7 +8,7 @@ current_plan: 3
 status: executing
 stopped_at: Completed 21-02-PLAN.md
 last_updated: "2026-11-24T00:29:41.346Z"
-last_activity: 2026-11-24
+last_activity: 2026-11-23
 last_activity_desc: 21-02 complete (all callbacks on the pool, reply after the gate); next 21-03
 state_head: 925f8a3f3404ae5fa7b24675572ee2ac660f16a3
 progress:
@@ -35,7 +35,7 @@ Total Plans in Phase: 9
 Phase: 21 — Worker pool
 Plan: 21-02 complete (2 of 9); next: 21-03 (plan 3 of 9)
 Status: Ready to execute
-Last activity: 2026-11-24 — 21-02 complete (31 callbacks through serve, trace switch, smoke with 4 and 1 workers, live checks with 8)
+Last activity: 2026-11-23 — 21-02 complete (31 callbacks through serve, trace switch, smoke with 4 and 1 workers, live checks with 8)
 
 Progress: [████░░░░░░] 43%
 

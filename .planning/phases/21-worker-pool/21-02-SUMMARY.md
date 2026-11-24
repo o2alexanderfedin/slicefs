@@ -52,7 +52,7 @@ decisions:
 
 metrics:
   duration: "about 55 min"
-  completed: 2026-11-24
+  completed: 2026-11-23
 ---
 
 # Phase 21 Plan 02: All request callbacks on the pool, reply after the gate Summary
