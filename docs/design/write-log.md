@@ -11,8 +11,8 @@ part 2)".
 loss) after `fsync` returns does not lose it. A crash never makes the store
 unmountable.
 
-Today `fsync` syncs a WAL that gets records only at commit, so the metadata
-of a file reaches disk only at the next timer commit (30 s by default).
+Before part 1, `fsync` synced a WAL that got records only at commit, so the
+metadata of a file reached disk only at the next timer commit (30 s by default).
 
 ## Model
 
@@ -156,7 +156,7 @@ bytes that are overwritten before a rebase are stored once, at the rebase.
 ## Tests
 
 1. Write, fsync, `kill -9`, remount with `--commit-interval 0`: content is
-   the same. Also for create, rename, unlink, setattr, xattr. Fails today.
+   the same. Also for create, rename, unlink, setattr, xattr.
 2. Unit test: `fsync` syncs the log (count real syncs).
 3. A torn last record (cut the file in the middle of a record, and also
    flip a byte): the mount works and has every record before it.
