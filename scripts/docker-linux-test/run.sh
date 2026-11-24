@@ -12,6 +12,7 @@
 #        scripts/docker-linux-test/run.sh s4   (spike S4: FUSE queue depth during random writes and readahead; by hand, not in CI)
 #        scripts/docker-linux-test/run.sh s6 [files]   (spike S6: small fsynced files per WAL strategy; by hand, not in CI)
 #        scripts/docker-linux-test/run.sh harness <test-name>   (one ignored test of the stress harness in release, no mount: s3_store_lock, s5_gate_fairness, s7_budget_baseline (S7_SERIALIZE=0 for the parallel form, S7_FLUSHER=1 for the flusher form, S7_THREADS=n writers, default 4; S7_STORE_WAIT_MS=n shortens the store wait of 10 s, so a slow sync gives busy stores); HARNESS_FEATURES=lock-stats for lock rows; by hand, not in CI)
+#        scripts/docker-linux-test/run.sh pool-bench   (POOL-05 bench: 16 clients at 1-16 workers, release; POOL_BENCH_QUICK=1, POOL_BENCH_N, POOL_BENCH_ROUNDS, POOL_BENCH_EXTRA; by hand, not in CI)
 #        scripts/docker-linux-test/run.sh index-bench [SIZES...]   (default sizes: 1000000 10000000)
 #        scripts/docker-linux-test/run.sh index-bench-cold [SIZES...]   (cold page cache; privileged; by hand)
 # SLICEFS_WORKERS (for example 4) passes --workers to the mounts of the scripts.
@@ -22,7 +23,8 @@ HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 docker build -q -t slicefs-fusetest "$HERE" >/dev/null
 RUN=(docker run --rm --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined
   -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry
-  -v "$HERE":/dk:ro -e CARGO_TARGET_DIR=/target -e BW_KEEP -e BW_QUIET_REF -e SLICEFS_WORKERS slicefs-fusetest unshare -m --propagation private)
+  -v "$HERE":/dk:ro -e CARGO_TARGET_DIR=/target -e BW_KEEP -e BW_QUIET_REF -e SLICEFS_WORKERS
+  -e POOL_BENCH_QUICK -e POOL_BENCH_N -e POOL_BENCH_ROUNDS -e POOL_BENCH_EXTRA slicefs-fusetest unshare -m --propagation private)
 case "${1:-all}" in
   smoke) "${RUN[@]}" bash -c 'cargo build -q -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/mt-linux.sh /target/debug/slicefs && /dk/dedup-probe.sh /target/debug/slicefs' ;;
   test)  "${RUN[@]}" bash -c 'cargo test -q --workspace && rm -rf /tmp/fuser && cp -r vendor/fuser /tmp/fuser && cd /tmp/fuser && cargo test -q --lib' ;;
@@ -34,6 +36,7 @@ case "${1:-all}" in
   s4)
     # --privileged only if the fusectl mount fails with SYS_ADMIN alone (see s4-waiting.sh).
     shift; "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/s4-waiting.sh /target/release/slicefs "$@"' _ ${@+"$@"} ;;
+  pool-bench) "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/pool-bench.sh /target/release/slicefs' ;;
   s6) shift; "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/s6-smallfsync.sh /target/release/slicefs "$@"' _ ${@+"$@"} ;;
   harness)
     # One ignored test of the stress harness (spikes S3, S5, S6, S7), in release.
@@ -92,5 +95,5 @@ case "${1:-all}" in
           done; done
           echo "# size $n, load after: $(cat /proc/loadavg)"
         done' index-bench ${*:-1000000 10000000} ;;
-  *) echo "usage: $0 [smoke|test|all|verify|pjdfstest] | bigwrite [size-MiB ...] (by hand; not in CI) | s1 (by hand) | s4 (by hand; not in CI) | s6 [files] (by hand; not in CI) | harness <test-name> (by hand; not in CI; HARNESS_FEATURES=lock-stats for lock rows) | index-bench [SIZES...] | index-bench-cold [SIZES...]"; exit 2 ;;
+  *) echo "usage: $0 [smoke|test|all|verify|pjdfstest] | bigwrite [size-MiB ...] (by hand; not in CI) | s1 (by hand) | s4 (by hand; not in CI) | s6 [files] (by hand; not in CI) | pool-bench (by hand; not in CI) | harness <test-name> (by hand; not in CI; HARNESS_FEATURES=lock-stats for lock rows) | index-bench [SIZES...] | index-bench-cold [SIZES...]"; exit 2 ;;
 esac

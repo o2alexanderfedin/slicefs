@@ -46,6 +46,18 @@ pub enum Site {
     CellMap,
     /// A namespace stripe of the file system core (`NamespaceLocks`).
     Stripe,
+    /// `inode_map` of the metadata store (inode allocator and table).
+    InodeMap,
+    /// `inode_data` of the metadata store (inode -> data key as of the last flush).
+    InodeData,
+    /// `dir_data` of the metadata store (directory -> entry list key).
+    DirData,
+    /// `manifest_data` of the metadata store (file -> manifest key).
+    ManifestData,
+    /// `xattr_data` of the metadata store (inode -> xattr set key).
+    XattrData,
+    /// `refcounts` of the metadata store (content key -> reference count).
+    Refcounts,
 }
 
 impl Site {
@@ -64,6 +76,12 @@ impl Site {
         Site::FileCell,
         Site::CellMap,
         Site::Stripe,
+        Site::InodeMap,
+        Site::InodeData,
+        Site::DirData,
+        Site::ManifestData,
+        Site::XattrData,
+        Site::Refcounts,
     ];
 
     pub fn label(self) -> &'static str {
@@ -81,6 +99,12 @@ impl Site {
             Site::FileCell => "file_cell",
             Site::CellMap => "cell_map",
             Site::Stripe => "stripe",
+            Site::InodeMap => "inode_map",
+            Site::InodeData => "inode_data",
+            Site::DirData => "dir_data",
+            Site::ManifestData => "manifest_data",
+            Site::XattrData => "xattr_data",
+            Site::Refcounts => "refcounts",
         }
     }
 }
