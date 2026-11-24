@@ -59,3 +59,12 @@ was found and not fixed.
     while a read-only mount runs. The rule for later releases is in
     `docs/design/store-format.md` (Store lock).
 
+From the code review (21.1-REVIEW.md), not fixed:
+
+13. IN-01: the `--json` error output is not valid JSON when the message has `"` (M4, M9).
+14. IN-02: `stats` cannot show an incompat flag, so its incompat branch is dead (no change needed; a comment could say why).
+15. IN-03: the strict parse refuses a header for a blank line, a trailing space, CRLF, or a number above `u32::MAX` (M4, not M3).
+16. IN-04: `content::write_hasher` has no production caller and does not call the open decision.
+17. IN-05: `Started` has no `Drop`, so a drop with no `stop` leaves the threads running and removes `mount.lock`.
+18. IN-06: the Docker FMT-02 check compares the store tree only after the unmount, not while mounted.
+19. IN-07: `create` does not sync the parent directory when it makes the store directory.
