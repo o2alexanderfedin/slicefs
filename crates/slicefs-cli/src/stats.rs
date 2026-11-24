@@ -221,7 +221,8 @@ pub fn run_stats(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
 ///
 /// Returns an error if segment files cannot be read.
 pub fn store_stats(store_path: &Path) -> Result<StoreStats, Box<dyn std::error::Error>> {
-    let mounted = store_path.join("mount.lock").exists();
+    // A read-only mount makes no mount.lock; it holds the store lock.
+    let mounted = store_path.join("mount.lock").exists() || crate::header::store_lock_held(store_path);
 
     // Reject legacy format.
     if store_path.join("dictionary.bin").exists() {

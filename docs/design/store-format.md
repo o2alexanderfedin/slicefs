@@ -151,6 +151,8 @@ A mount of a store with an unknown ro_compat flag is read-only:
 
 - The mount has the FUSE `RO` option.
 - It makes no `mount.lock` and no write-log segment.
+- It holds a shared `flock` on the store directory for the life of the
+  mount (the store lock, see below). This writes nothing to the store.
 - It opens the chunk store and the index read-only.
 - It does no write-log replay, and it starts no flusher, no online GC, no
   segment GC and no commit timer.
@@ -161,6 +163,8 @@ The mount is refused when (SliceFS does the checks in this order):
 
 - `--hash` is given (M11).
 - `--auto-snapshot` is given (M12).
+- The store lock is held exclusive: a command that needs no live mount
+  runs now (M13).
 - `mount.lock` exists: the last mount did not end cleanly, or a mount runs
   now (M8).
 - The write log has records to replay (M7).
@@ -173,6 +177,33 @@ committed.
 Commands that read: `stats`, `scrub`, `snapshot list`, and `mount` in this
 read-only mode. Commands that write: `seed`, `gc`, `snapshot create`,
 `snapshot switch`.
+
+### Store lock
+
+A read-only mount makes no `mount.lock`, so the commands that look for
+`mount.lock` do not see it. The store lock is how they see it:
+
+- The lock is a `flock` on the store directory (not on `FORMAT`: a header
+  rewrite replaces the `FORMAT` file, and a lock on the old file then
+  protects nothing).
+- A read-only mount takes it shared, with no wait, before it reads the
+  store, and holds it until the mount ends.
+- The commands that need no live mount (`gc` with no `mount.lock`,
+  `snapshot create`, `snapshot switch`) take it exclusive, with no wait,
+  after their `mount.lock` check, and hold it while they run. If it is held,
+  they are refused (M14).
+- `stats` shows `Mounted` as `yes` when `mount.lock` exists or the store
+  lock is held. (It takes the lock exclusive and drops it at once, so a
+  read-only mount that starts at the same moment can be refused, M13.)
+- On a file system with no `flock`, there is no lock, and the commands run
+  as with no read-only mount.
+
+Rule for later releases: only a SliceFS that knows the ro_compat flag can
+write the store. Before it writes a store that a read-only mount can use,
+each of its commands that writes takes the store lock exclusive (or
+refuses), also a read-write mount, `seed` and a header rewrite. In this
+release, only `gc`, `snapshot create` and `snapshot switch` take it; a
+read-write mount and `seed` do not.
 
 This mode is only for an unknown ro_compat flag. A snapshot mount of a
 store with no unknown flag also has `RO`, but it still opens the store to
@@ -197,6 +228,8 @@ write.
 | M10 | FORMAT is larger than 64 KiB. | `{store}/FORMAT is larger than 64 KiB; it is not a SliceFS store header.` |
 | M11 | A read-only mount with the option --hash. | `{store} can only be mounted read-only (feature {name} needs SliceFS {release} or later to write), so --hash cannot change its write hash.` |
 | M12 | A read-only mount with the option --auto-snapshot. | `{store} can only be mounted read-only (feature {name} needs SliceFS {release} or later to write), so --auto-snapshot cannot make a snapshot at unmount.` |
+| M13 | A read-only mount while gc, snapshot create or snapshot switch holds the store lock. | `{store} is in use: a command that writes it (gc, snapshot create or snapshot switch) runs now. Mount it when that command ends.` |
+| M14 | gc (offline), snapshot create or snapshot switch while a read-only mount or another of these commands holds the store lock. | `{store} is in use: it is mounted read-only, or another command (gc, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.` |
 
 The values in the texts:
 

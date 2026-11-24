@@ -54,3 +54,8 @@ was found and not fixed.
 11. **Red-run limits** (21.1-02 and 21.1-03 SUMMARYs): each red test
     stopped at its first failed assert, so not every command and option
     was shown red one by one. The asserts pass after the change.
+12. **A read-write mount and `seed` do not take the store lock** (review
+    fix WR-02). Only `gc`, `snapshot create` and `snapshot switch` refuse
+    while a read-only mount runs. The rule for later releases is in
+    `docs/design/store-format.md` (Store lock).
+

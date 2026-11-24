@@ -8,7 +8,8 @@
 //! slicefs snapshot switch <store> <version_or_name>
 //! ```
 //!
-//! All snapshot commands require the store to be **unmounted** (no `mount.lock`).
+//! `create` and `switch` require the store to be **unmounted**: no `mount.lock`,
+//! and no read-only mount (it holds the store lock, see `header::lock_offline`).
 
 use std::path::Path;
 
@@ -53,6 +54,8 @@ pub fn run_snapshot_create(
         )
         .into());
     }
+    // A read-only mount makes no mount.lock: it holds the store lock.
+    let _store_lock = crate::header::lock_offline(store_path)?;
 
     let segs_dir = store_path.join("segments");
 
@@ -155,6 +158,8 @@ pub fn run_snapshot_switch(
         )
         .into());
     }
+    // A read-only mount makes no mount.lock: it holds the store lock.
+    let _store_lock = crate::header::lock_offline(store_path)?;
 
     let segs_dir = store_path.join("segments");
 

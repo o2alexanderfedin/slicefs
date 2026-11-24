@@ -354,6 +354,9 @@ pub struct Started {
     commit_shutdown: Arc<AtomicBool>,
     /// `mount.lock` (`None`: no lock taken). Dropped last.
     lock: Option<MountLock>,
+    /// The shared store lock of a read-only mount (`None`: not taken).
+    /// Dropped last.
+    store_lock: Option<header::StoreLock>,
 }
 
 /// The setup of a mount, from the store load to the commit timer: load the
@@ -385,16 +388,19 @@ pub fn start(
     let wal_config = parse_wal_config(args.wal_strategy.as_deref());
 
     // Read and write: today's load (lock, write hash, writable store, write
-    // log). Read-only: no lock, no write log, a read-only store.
-    let (meta, io, mount_lock) = match &access {
+    // log). Read-only: no mount.lock, no write log, a read-only store; the
+    // shared store lock first, so a SliceFS that can write the store sees
+    // the mount (no file is written for it).
+    let (meta, io, mount_lock, store_lock) = match &access {
         header::Access::ReadWrite => {
             let (meta, io, lock) = load_store(store_path, wal_config, args.hash.as_deref())?;
-            (meta, io, Some(lock))
+            (meta, io, Some(lock), None)
         }
         header::Access::ReadOnly(flag) => {
+            let store_lock = header::lock_read_mount(store_path)?;
             let (meta, io) = load_store_read_only(store_path, flag)?;
             println!("{}", header::msg_mount_read_only(store_path, flag));
-            (meta, io, None)
+            (meta, io, None, Some(store_lock))
         }
     };
     // Replay, flusher and online GC: only a writable mount of the current
@@ -516,6 +522,7 @@ pub fn start(
         commit_timer,
         commit_shutdown,
         lock: mount_lock,
+        store_lock,
     })
 }
 
@@ -536,6 +543,7 @@ impl Started {
             commit_timer,
             commit_shutdown,
             lock,
+            store_lock,
         } = self;
         // After a clean unmount destroy() stopped the flusher already; a
         // second stop does nothing.
@@ -555,8 +563,9 @@ impl Started {
             gc.shutdown();
         }
         drop(fs);
-        // mount.lock goes last.
+        // mount.lock and the store lock go last.
         drop(lock);
+        drop(store_lock);
     }
 }
 
@@ -1327,6 +1336,40 @@ mod tests {
         assert!(t2 == t0, "destroy and stop changed the store tree:\n{}", diff(&t0, &t2));
         assert_eq!(threads, [false; 4], "no thread started (flusher, online GC, segment GC, commit timer)");
         assert!(!lock, "no mount lock held");
+    }
+
+    /// WR-02: a read-only mount holds a shared lock on the store directory
+    /// while it runs. A SliceFS that knows the flag (here: the header with
+    /// no flag line) sees it: offline gc, snapshot create and snapshot
+    /// switch refuse, and stats shows the store as mounted. After `stop`, gc
+    /// runs.
+    #[test]
+    fn offline_commands_see_a_ro_compat_mount() {
+        let dir = ro_fixture(true);
+        let store = dir.path().join("store");
+        let s = start(&store, &ro_args(), None).expect("start");
+        std::fs::write(store.join(header::FORMAT_FILE), header::marker(chunk_store::DEFAULT_HASHER)).unwrap();
+        let s2 = |r: Result<(), Box<dyn std::error::Error>>| r.map_err(|e| e.to_string());
+        let results = [
+            ("gc", crate::gc::gc_report(&store, false).map(drop).map_err(|e| e.to_string())),
+            ("snapshot create", s2(crate::snapshot::run_snapshot_create(&store, None))),
+            ("snapshot switch", s2(crate::snapshot::run_snapshot_switch(&store, "1"))),
+        ];
+        for (name, r) in results {
+            let err = r.err().unwrap_or_else(|| panic!("{name} is refused while a read-only mount runs"));
+            assert!(err.contains("is in use"), "{name}: {err}");
+        }
+        assert!(crate::stats::store_stats(&store).unwrap().mounted, "stats shows the read-only mount");
+        fuser::Filesystem::destroy(&mut crate::fuse_callbacks::MountedFs::new(Arc::clone(&s.fs), None));
+        s.stop();
+        assert!(!crate::stats::store_stats(&store).unwrap().mounted, "not mounted after stop");
+        crate::gc::gc_report(&store, false).expect("gc runs after the unmount");
+        // A read-only mount is refused while such a command runs.
+        append_line(&store, RO_FLAG_LINE);
+        let held = header::lock_offline(&store).unwrap();
+        let err = start(&store, &ro_args(), None).err().expect("the mount is refused").to_string();
+        assert!(err.contains("is in use"), "{err}");
+        drop(held);
     }
 
     /// Control of the tracer: the same steps on a normal store change its

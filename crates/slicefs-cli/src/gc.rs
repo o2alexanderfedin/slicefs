@@ -99,6 +99,10 @@ pub fn gc_report(store_path: &Path, full: bool) -> Result<String, Box<dyn std::e
         return if outcome.starts_with("ok") { Ok(report) } else { Err(report.into()) };
     }
 
+    // An offline GC: refused while a read-only mount runs (it holds the
+    // store lock shared and makes no mount.lock). Held to the end.
+    let _store_lock = crate::header::lock_offline(store_path)?;
+
     let before = store_usage(store_path);
     let segs_dir = store_path.join("segments");
 
