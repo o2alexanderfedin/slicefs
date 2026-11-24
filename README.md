@@ -137,6 +137,19 @@ Dirty data is written file data that is not stored yet. It is kept in memory. Fo
 - `--dirty-limit` applies to a file that is changed in place (an overlay). A file that is written from start to end (a stream) can also hold writes that come out of order. These writes can use up to 64 MiB (a fixed window), whatever the limit is.
 - With a `--dirty-budget` below 64M, a stream with out-of-order writes can become an overlay when the total reaches the budget. The file then does not go back to a stream.
 
+### Request workers (mount option)
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--workers <N>` | Linux: half the CPUs, at least 1 and at most 8. macOS: 1. | Request worker threads. With 1, each request runs on the FUSE reader thread. |
+
+- N must be at least 1. An explicit value above 8 is allowed.
+- At start, the daemon prints the count: `Workers: <N> (set)` or `Workers: <N> (default)`.
+- More workers help parallel reads of different files. In a Linux test with 16 clients on different files, reads with 4 workers were 2.7 times as fast as with 1 worker. Writes gain little after 2 workers (1.3 times with 4 workers).
+- Each worker adds some memory. In the same test, the peak memory of the daemon was 124 MiB with 1 worker and 178 MiB with 8 workers. On Linux the daemon sets a fixed glibc mmap threshold (128 KiB) at start, so that freed memory goes back to the system. It prints `Allocator: mmap threshold 131072 bytes (fixed)`.
+- On macOS the default stays 1 until a test shows a gain on FSKit.
+- Request trace: set `SLICEFS_FUSE_TRACE=1` in the environment of `slicefs mount` to print one ENTRY line and one EXIT line on stderr for each request. It is a debug aid and is off by default (no value, or `0`). The lines slow every request, and with more than 1 worker the workers wait for each other at stderr.
+
 ## Test
 
 ```sh
