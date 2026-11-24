@@ -381,10 +381,22 @@ Plans:
   3. A store with no header is refused with a clear message (no backward compatibility)
   4. `slicefs stats` prints the format number and the flags
   5. `docs/design/store-format.md` gives the header layout, the flag classes, the flag list, the error messages and the format policy, and matches the code; the README has one line and a link
-**Plans:** 0 plans
+**Plans:** 4 plans
+
+One plan per wave; executors run them in order.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 21.1 to break down)
+**Wave 1** *(tracer)*
+- [ ] 21.1-01-PLAN.md — Tracer: header core (format 7, flag lines, parse order), `mount::start`/`Started::stop` split, read-only daemon mode for an unknown ro_compat flag (in-process tree test, red with only `RO`), refusals for `mount.lock` and a pending write log
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 21.1-02-PLAN.md — Header check at every open point before any write; refusals: no header with data, incompat, format 6 and other numbers, bad lines; rewrite keeps flags and lines; write commands, `--hash` and `--auto-snapshot` refused on ro-compat; one helper in the 13 test builders
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 21.1-03-PLAN.md — `stats` format, flags and access (text and `--json`); Linux Docker check: ro-compat mount is read-only, EROFS, store unchanged, incompat refused (`-j 1`, `build-exit=0`)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 21.1-04-PLAN.md — `docs/design/store-format.md` and the README line, deferred list, FMT marks on evidence, phase gate
 
 ### Phase 22: Chunk profiles
 
