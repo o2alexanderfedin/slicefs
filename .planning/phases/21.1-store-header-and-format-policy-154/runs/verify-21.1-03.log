@@ -1,0 +1,292 @@
+# tree: ef59a1544a5692640e46474175f1085ad75fb197 (tar stream of the committed tree; docker mount form; volume slicefs-target-p21; debug build, -j 1; SLICEFS_WORKERS=4 as in CI)
+Linux 2b11cfc624ae 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+0.00 0.00 0.00 1/772 20
+SLICEFS_WORKERS=4
+warning: unused workspace dependency `anyhow`
+  --> Cargo.toml:33:1
+   |
+33 | anyhow     = "1"
+   | ^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `anyhow`
+warning: unused workspace dependency `bincode`
+  --> Cargo.toml:22:1
+   |
+22 | bincode    = "2"
+   | ^^^^^^^
+   |
+help: consider removing the workspace dependency `bincode`
+warning: unused workspace dependency `criterion`
+  --> Cargo.toml:24:1
+   |
+24 | criterion  = { version = "0.5", features = ["html_reports"] }
+   | ^^^^^^^^^
+   |
+help: consider removing the workspace dependency `criterion`
+warning: unused workspace dependency `redb`
+  --> Cargo.toml:29:1
+   |
+29 | redb       = "3.1"
+   | ^^^^
+   |
+help: consider removing the workspace dependency `redb`
+warning: unused workspace dependency `tokio`
+  --> Cargo.toml:31:1
+   |
+31 | tokio      = { version = "1", features = ["full"] }
+   | ^^^^^
+   |
+help: consider removing the workspace dependency `tokio`
+warning: unreachable pattern
+   --> crates/chunk-store/src/pack_io.rs:491:34
+    |
+491 |         Some(libc::EOPNOTSUPP) | Some(libc::ENOTSUP) => io::Error::new(io::ErrorKind::Unsupported, e),
+    |         ----------------------   ^^^^^^^^^^^^^^^^^^^ no value can reach this
+    |         |
+    |         matches all the relevant values
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates/metadata/src/store.rs:842:32
+    |
+842 |             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+    |                                ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+842 -             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+842 +             self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+    |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/metadata/src/store.rs:1451:32
+     |
+1451 |             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+     |                                ^^^^^^^^^^^^
+     |
+help: replace the use of the deprecated method
+     |
+1451 -             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+1451 +             self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+     |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/metadata/src/store.rs:1457:26
+     |
+1457 |         self.inode_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+     |                          ^^^^^^^^^^^^
+     |
+help: replace the use of the deprecated method
+     |
+1457 -         self.inode_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+1457 +         self.inode_count.try_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+     |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/slicefs-cli/src/filesystem.rs:1511:25
+     |
+1511 |         self.fail_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+     |                         ^^^^^^^^^^^^
+     |
+     = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+     |
+1511 -         self.fail_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+1511 +         self.fail_steps.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+     |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/slicefs-cli/src/filesystem.rs:1526:25
+     |
+1526 |         self.drop_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+     |                         ^^^^^^^^^^^^
+     |
+help: replace the use of the deprecated method
+     |
+1526 -         self.drop_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+1526 +         self.drop_steps.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+     |
+
+warning: unused dependency `sha2-compress`
+  --> crates/slicefs-cli/Cargo.toml:31:1
+   |
+31 | sha2-compress  = { workspace = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `sha2-compress`
+build-exit=0
+== Phase 03: read-only mount (seeded tree, snapshot mounted read-only)
+    workers-line: Workers: 4 (set)
+  ls: ok
+  cat: ok
+  stat: ok
+  diff: ok
+  touch-erofs: ok
+  unmount: ok
+== FMT-02 (Phase 21.1): an unknown ro_compat flag mounts read-only; an unknown incompat flag is refused
+  tree-check-sees-a-change: ok
+  ro-stats: ok
+  ro-gc-refused: ok
+    workers-line: Workers: 4 (set)
+  ro-no-lock: ok
+  ro-cat: ok
+  ro-touch-erofs: ok
+  ro-line: ok
+  ro-store-unchanged: ok
+  incompat-refused: ok
+== Phase 04: end-to-end write session, survives remount
+    workers-line: Workers: 4 (set)
+  echo-cat: ok
+  mv: ok
+  symlink: ok
+  hardlink: ok
+  mkdir-rmdir: ok
+  unmount: ok
+    workers-line: Workers: 4 (set)
+  after-remount: ok
+== Phase 05: kill -9 during a large write, then remount
+    workers-line: Workers: 4 (set)
+    workers-line: Workers: 4 (set)
+scripts/docker-linux-test/verify-phases.sh: line 114:   632 Killed                  "${PRE[@]}" $B mount --store $s "$@" "${w[@]}" $m < /dev/null >> $R/mount.log 2>&1
+  kill -9 mid-write: ok
+    workers-line: Workers: 4 (set)
+  remount after crash: ok
+  committed-intact: ok
+  seeded-intact: ok
+  closed-file-survives-crash: ok
+  partial-consistent: ok
+    partial.bin after crash: 51576832 bytes
+  write-after-crash: ok
+  scrub: ok
+== Phase 05b: fsync is durable without a commit (write log, #20)
+    workers-line: Workers: 4 (set)
+scripts/docker-linux-test/verify-phases.sh: line 133:   726 Killed                  "${PRE[@]}" $B mount --store $s "$@" "${w[@]}" $m < /dev/null >> $R/mount.log 2>&1
+    workers-line: Workers: 4 (set)
+  remount after crash (replay): ok
+    Replayed 62 request(s) from the write log (0 skipped).
+  fsynced-file-survives: ok
+  renamed-file-survives: ok
+  old-name-gone: ok
+  scrub-after-replay: ok
+== Phase 05c: a rename is durable after an fsync of the directory only (write log, #20)
+    workers-line: Workers: 4 (set)
+scripts/docker-linux-test/verify-phases.sh: line 156:   803 Killed                  "${PRE[@]}" $B mount --store $s "$@" "${w[@]}" $m < /dev/null >> $R/mount.log 2>&1
+    workers-line: Workers: 4 (set)
+    Replayed 36 request(s) from the write log (0 skipped).
+  rename-survives-dir-fsync: ok
+  old-name-gone-after-dir-fsync: ok
+    workers-line: Workers: 4 (set)
+scripts/docker-linux-test/verify-phases.sh: line 177:   875 Killed                  "${PRE[@]}" $B mount --store $s "$@" "${w[@]}" $m < /dev/null >> $R/mount.log 2>&1
+    workers-line: Workers: 4 (set)
+  control-rename-without-sync-lost: ok
+== Phase 05d: a torn last record does not stop the mount (write log, #20)
+    workers-line: Workers: 4 (set)
+scripts/docker-linux-test/verify-phases.sh: line 199:   938 Killed                  "${PRE[@]}" $B mount --store $s "$@" "${w[@]}" $m < /dev/null >> $R/mount.log 2>&1
+    cut 3 bytes of segment-000002.seg
+    workers-line: Workers: 4 (set)
+  mount-with-torn-last-record: ok
+    Replayed 19 request(s) from the write log (0 skipped).
+  records-before-the-tear-kept: ok
+  torn-record-not-applied: ok
+  write-after-torn-tail: ok
+  scrub-after-torn-tail: ok
+== Phase 05e: periodic mode keeps a write with no fsync after its 5 s sync (write log, #133)
+    workers-line: Workers: 4 (set)
+scripts/docker-linux-test/verify-phases.sh: line 216:  1021 Killed                  "${PRE[@]}" $B mount --store $s "$@" "${w[@]}" $m < /dev/null >> $R/mount.log 2>&1
+    workers-line: Workers: 4 (set)
+  periodic-write-survives-kill: ok
+  scrub-after-periodic-kill: ok
+== FUSET-05: SIGTERM, SIGINT (Ctrl+C) and SIGHUP end the mount cleanly (final commit, no mount.lock)
+    workers-line: Workers: 4 (set)
+  SIGTERM-exits: ok
+  SIGTERM-no-mount-lock: ok
+    workers-line: Workers: 4 (set)
+  SIGTERM-write-kept: ok
+    workers-line: Workers: 4 (set)
+  SIGINT-exits: ok
+  SIGINT-no-mount-lock: ok
+    workers-line: Workers: 4 (set)
+  SIGINT-write-kept: ok
+    workers-line: Workers: 4 (set)
+  SIGHUP-exits: ok
+  SIGHUP-no-mount-lock: ok
+    workers-line: Workers: 4 (set)
+  SIGHUP-write-kept: ok
+== POOL-03: a request panic aborts the daemon; the remount replays the write log
+scripts/docker-linux-test/panic-replay.sh: line 25:  1308 Aborted                 "${PRE[@]}" $B mount --store $s "$@" $m < /dev/null >> $R/mount.log 2>&1
+  panic-aborts-w4: ok
+  panic-line-w4: ok
+  fsynced-file-replayed-w4: ok
+  half-done-entry-absent-w4: ok
+scripts/docker-linux-test/panic-replay.sh: line 25:  1365 Aborted                 "${PRE[@]}" $B mount --store $s "$@" $m < /dev/null >> $R/mount.log 2>&1
+  panic-aborts-w1: ok
+  panic-line-w1: ok
+  fsynced-file-replayed-w1: ok
+  half-done-entry-absent-w1: ok
+RESULT panic-replay: PASS
+== Phase 06: two snapshots of the same state do not double-count storage
+    workers-line: Workers: 4 (set)
+    CAS bytes: before=2102268 snapA=2102268 snapB=2102268
+  no-double-count: ok
+  snapshot-list: ok
+== Large copy (#20): 1 GiB in order and out of order, bounded daemon memory
+    workers-line: Workers: 4 (set)
+  big-copy-in-order: ok
+  big-write-out-of-order: ok
+  big-in-order-cmp: ok
+  big-out-of-order-cmp: ok
+  daemon-rss-bounded: ok
+  no-switch-to-overlay: ok
+    timing: cp 25 s, out-of-order write 10 s, cmp 10 s
+  daemon-rss-bounded-at-unmount: ok
+    daemon VmHWM: after cp 48 MiB, after out-of-order write 76 MiB, after cmp 76 MiB, at unmount 76 MiB (cap 512 MiB)
+    workers-line: Workers: 4 (set)
+  big-in-order-cmp-after-remount: ok
+  big-out-of-order-cmp-after-remount: ok
+    section time: 61 s
+RESULT verify-phases: PASS
+docker-exit=0
