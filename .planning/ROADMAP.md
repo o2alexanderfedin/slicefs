@@ -337,7 +337,7 @@ Plans:
   3. A worker panic aborts the daemon; the next mount replays the write log, and no request is served after a half-done update
   4. All tests and pjdfstest pass with 4 workers on Linux (Docker CI), and the tests pass on macOS FSKit CI with the macOS default
   5. Parallel I/O on different files scales with the number of workers on Linux, and the measured result is recorded
-**Plans**: 2/9 plans executed
+**Plans**: 3/9 plans executed
 
 One plan per wave; executors run them in order.
 
@@ -349,7 +349,7 @@ Plans:
 - [x] 21-02-PLAN.md — All 31 callbacks through `run` and `serve` (reply after the gate), trace switch, source scan; smoke with 4 and 1 workers
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 21-03-PLAN.md — Abort hook for request threads; child-process replay tests; injected panic in a Linux mount at 4 and 1 workers (red with a no-op hook)
+- [x] 21-03-PLAN.md — Abort hook for request threads; child-process replay tests; injected panic in a Linux mount at 4 and 1 workers (red with a no-op hook)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 21-04-PLAN.md — `S7_THREADS` knob (cap asserted at 1 to 8 writers); S7 before-runs at 1, 2, 8 and 16 writers
@@ -421,7 +421,7 @@ Plans:
 | 18. Spikes, baseline and stress harness | 7/7 | Complete    | 2026-11-21 |
 | 19. Fine-grained locks | 16/16 | Complete    | 2026-11-22 |
 | 20. Dirty budget and rebase flusher | 8/8 | Complete    | 2026-11-23 |
-| 21. Worker pool | 2/9 | In Progress | - |
+| 21. Worker pool | 3/9 | In Progress | - |
 | 22. Chunk profiles | 0/0 | Not started | - |
 | 23. Hashes and rehash | 0/0 | Not started | - |
 | 24. Prolly evaluation | 0/0 | Not started | - |
