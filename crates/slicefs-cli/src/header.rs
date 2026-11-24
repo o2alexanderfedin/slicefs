@@ -432,17 +432,34 @@ fn has_data(store: &Path) -> std::io::Result<bool> {
 /// Make the header of a new store: the first step of a new store, before
 /// `packs/` or `segments/` exist. Makes the store directory if needed and
 /// writes [`marker`]`(DEFAULT_HASHER)` durably. Refuses (`AlreadyExists`)
-/// when FORMAT exists; the file stays as it is. Tests that build a store
-/// with `StoreIo::open` or `ChunkStore::open` call it first.
+/// when FORMAT exists; the file stays as it is. Safe for parallel creates:
+/// the header is written to a temp file of its own, synced, and installed
+/// with a hard link, which never replaces a FORMAT that another create
+/// installed first. Tests that build a store with `StoreIo::open` or
+/// `ChunkStore::open` call it first.
 pub fn create(store: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(store)?;
-    if store.join(FORMAT_FILE).exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("{}/FORMAT exists", store.display()),
-        ));
+    let format = store.join(FORMAT_FILE);
+    if format.exists() {
+        return Err(already_exists(store));
     }
-    write_text(store, &marker(DEFAULT_HASHER))
+    let tmp = write_tmp(store, &marker(DEFAULT_HASHER))?;
+    let linked = match std::fs::hard_link(&tmp, &format) {
+        // A file system with no hard links: the rename of before (it can
+        // replace a header that a parallel create wrote at the same time).
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists && !format.exists() => std::fs::rename(&tmp, &format),
+        r => r,
+    };
+    let _ = std::fs::remove_file(&tmp);
+    match linked {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(already_exists(store)),
+        Err(e) => Err(e),
+        Ok(()) => std::fs::File::open(store)?.sync_all(),
+    }
+}
+
+fn already_exists(store: &Path) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{}/FORMAT exists", store.display()))
 }
 
 /// Write `header` as the header of `store`, durably (see [`write_text`]).
@@ -454,15 +471,33 @@ pub fn write_header(store: &Path, header: &Header) -> std::io::Result<()> {
 /// renamed over the old header, then a sync of the directory. A power loss
 /// leaves the old header or the new one, never an empty or torn file.
 fn write_text(store: &Path, text: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    let tmp = store.join(format!("{FORMAT_FILE}.tmp"));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(text.as_bytes())?;
-        f.sync_all()?;
+    let tmp = write_tmp(store, text)?;
+    if let Err(e) = std::fs::rename(&tmp, store.join(FORMAT_FILE)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
-    std::fs::rename(&tmp, store.join(FORMAT_FILE))?;
     std::fs::File::open(store)?.sync_all()
+}
+
+/// Write `text` to a new temp file in `store` and sync it. The name
+/// (`FORMAT.tmp.<pid>.<n>`) is unique to this process and this call, so two
+/// writers never write the same temp file. On an error the file is removed.
+fn write_tmp(store: &Path, text: &str) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = store.join(format!("{FORMAT_FILE}.tmp.{}.{n}", std::process::id()));
+    let written = std::fs::File::options().write(true).create_new(true).open(&tmp).and_then(|mut f| {
+        f.write_all(text.as_bytes())?;
+        f.sync_all()
+    });
+    match written {
+        Ok(()) => Ok(tmp),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -484,6 +519,32 @@ mod tests {
 
     fn ro_flag() -> Flag {
         Flag { class: Class::RoCompat, name: "test-ro-feature".to_string(), release: "r-test".to_string() }
+    }
+
+    /// WR-01: two parallel creates of the same new store both succeed and
+    /// agree on one full header; no temp file stays.
+    #[test]
+    fn two_parallel_creates_of_a_new_store_agree() {
+        for _ in 0..20 {
+            let d = tempfile::tempdir().unwrap();
+            let store = d.path().join("store");
+            let go = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let threads: Vec<_> = (0..2)
+                .map(|_| {
+                    let (store, go) = (store.clone(), std::sync::Arc::clone(&go));
+                    std::thread::spawn(move || {
+                        go.wait();
+                        check(&store, Want::Write).map(|o| o.access).map_err(|e| e.to_string())
+                    })
+                })
+                .collect();
+            for t in threads {
+                assert_eq!(t.join().unwrap(), Ok(Access::ReadWrite));
+            }
+            assert_eq!(read(&store).unwrap(), Some(marker(DEFAULT_HASHER)));
+            let names: Vec<_> = std::fs::read_dir(&store).unwrap().map(|e| e.unwrap().file_name()).collect();
+            assert_eq!(names, [FORMAT_FILE], "only FORMAT is in the store");
+        }
     }
 
     /// FMT-01, [Durable first]: a new store gets the format-7 header; `create`

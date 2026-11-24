@@ -12,8 +12,13 @@ The code is `crates/slicefs-cli/src/header.rs`.
 - It is text, one item on each line, and each line ends with `\n`. SliceFS
   writes only ASCII. A file that is not UTF-8 text is refused.
 - It is at most 64 KiB (`MAX_HEADER`). A larger file is refused.
-- SliceFS writes it durably: it writes `FORMAT.tmp`, syncs it, renames it
-  to `FORMAT`, then syncs the store directory.
+- SliceFS writes it durably: it writes a temp file of its own
+  (`FORMAT.tmp.<pid>.<n>`), syncs it, puts it in place as `FORMAT`, then
+  syncs the store directory. For a new store, the temp file becomes
+  `FORMAT` with a hard link, which never replaces a `FORMAT` that a
+  parallel create wrote first; that create then uses the existing header.
+  A rewrite renames the temp file over `FORMAT`. A crash can leave a temp
+  file; SliceFS does not read it.
 - For a new store, the header is written before `packs/` and `segments/`
   exist. Thus a crash cannot leave data with no header.
 - A rewrite (`--hash` on `mount` or `seed`) changes only the hash line. All
