@@ -15,19 +15,32 @@ jobs:
   linux:
     name: Linux (tests, FUSE smoke, live checks, pjdfstest — in Docker)
     runs-on: ubuntu-latest
+    # POOL-04: the Linux mounts run with 4 request workers; each step fails
+    # without the Workers line of that value.
+    env:
+      SLICEFS_WORKERS: "4"
     steps:
       - uses: actions/checkout@v4
 
       # The harness runs in a container with /dev/fuse, so a hung mount dies
       # with the container (see scripts/docker-linux-test/run.sh).
       - name: Unit tests and Linux FUSE smoke test
-        run: scripts/docker-linux-test/run.sh all
+        run: |
+          set -o pipefail
+          scripts/docker-linux-test/run.sh all 2>&1 | tee "$RUNNER_TEMP/all.log"
+          grep -q 'Workers: 4 (set)' "$RUNNER_TEMP/all.log" || { echo "no 'Workers: 4 (set)' line in the output"; exit 1; }
 
       - name: Live checks (read-only mount, crash + remount, snapshots)
-        run: scripts/docker-linux-test/run.sh verify
+        run: |
+          set -o pipefail
+          scripts/docker-linux-test/run.sh verify 2>&1 | tee "$RUNNER_TEMP/verify.log"
+          grep -q 'Workers: 4 (set)' "$RUNNER_TEMP/verify.log" || { echo "no 'Workers: 4 (set)' line in the output"; exit 1; }
 
       - name: pjdfstest (must report PASS)
-        run: scripts/docker-linux-test/run.sh pjdfstest
+        run: |
+          set -o pipefail
+          scripts/docker-linux-test/run.sh pjdfstest 2>&1 | tee "$RUNNER_TEMP/pjdfstest.log"
+          grep -q 'Workers: 4 (set)' "$RUNNER_TEMP/pjdfstest.log" || { echo "no 'Workers: 4 (set)' line in the output"; exit 1; }
 
   macos:
     name: macOS (cargo test, FUSE-T build)

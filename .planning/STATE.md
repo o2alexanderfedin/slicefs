@@ -4,18 +4,18 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: 21
 current_phase_name: Worker pool
-current_plan: 4
+current_plan: 8
 status: executing
-stopped_at: Completed 21-03-PLAN.md
-last_updated: "2026-11-24T01:46:05.212Z"
-last_activity: 2026-11-23
-last_activity_desc: 21-03 complete (abort on a request-thread panic, replay tests, POOL-03 live check); next 21-04
-state_head: 5e57d3edc76a380af2ac662c9d9d1a72bd280226
+stopped_at: Completed 21-07-PLAN.md
+last_updated: "2026-11-24T11:03:34.143Z"
+last_activity: 2026-11-24
+last_activity_desc: "21-07 complete (CI Linux job with SLICEFS_WORKERS=4 and a Workers check per step; local Docker all, verify and pjdfstest pass with 4 workers); orchestrator CI check, then 21-08"
+state_head: bc0d9279991d62e97e8f1b57bd3fbfe440d27c70
 progress:
   total_phases: 7
   completed_phases: 3
   total_plans: 40
-  completed_plans: 34
+  completed_plans: 38
   percent: 43
 ---
 
@@ -30,12 +30,12 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 4
+Current Plan: 8
 Total Plans in Phase: 9
 Phase: 21 — Worker pool
-Plan: 21-03 complete (3 of 9); next: 21-04 (plan 4 of 9)
+Plan: 21-07 complete (7 of 9); next: 21-08 (plan 8 of 9), after the orchestrator CI check of 21-07
 Status: Ready to execute
-Last activity: 2026-11-23 — 21-03 complete (abort hook for request threads, child-process replay tests, POOL-03 Docker block at 4 and 1 workers)
+Last activity: 2026-11-24 — 21-07 complete (every Linux CI mount takes --workers from SLICEFS_WORKERS and fails on a wrong Workers line; ci.yml Linux job SLICEFS_WORKERS=4 with a "Workers: 4 (set)" grep per step; local Docker with 4 workers: all PASS, verify PASS, pjdfstest Files=237 Tests=8792 Result: PASS; red run FAIL as expected; POOL-04 stays open until the CI evidence after 21-08)
 
 Progress: [████░░░░░░] 43%
 
@@ -83,6 +83,10 @@ Progress: [████░░░░░░] 43%
 | Phase 21 P01 | 70 min | 3 tasks | 10 files |
 | Phase 21 P02 | 55 min | 3 tasks | 5 files |
 | Phase 21 P03 | 66 min | 2 tasks | 7 files |
+| Phase 21 P04 | 46 min | 2 tasks | 3 files |
+| Phase 21 P05 | 40 min | 2 tasks | 11 files |
+| Phase 21 P06 | 45 min | 2 tasks | 2 files |
+| Phase 21 P07 | 75 min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -187,6 +191,11 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21]: 21-03: a panic on a request thread (fuser- or slicefs-worker-) aborts from the panic hook before the unwind; no reply, no destroy() commit; the write log replays at the next mount
 - [Phase 21]: 21-03: only request threads abort; the flusher, the GC and the commit timer keep the Phase 20 behavior (abort on a flusher panic is a deferred item)
 - [Phase 21]: 21-03: SLICEFS_TEST_PANIC_CREATE=k (debug builds only) makes the k-th new entry of a mount panic; panic-replay.sh checks it at 4 and 1 workers
+- [Phase 21]: 21-04: S7 cap_checked = flusher form and writers <= DEFAULT_WORKERS_MAX (8); it does not depend on VmHWM
+- [Phase 21]: 21-04: before the step limit, S7 VmHWM is 90-97 MiB at 1 writer, 198-216 at 2, 419-441 at 8 (above CAP_MIB 320 in all 3 runs), 688-730 at 16
+- [Phase 21]: 21-05: mallopt(M_MMAP_THRESHOLD, 128 KiB) first in run_mount on Linux glibc; all allocator calls in alloc_tune.rs; no step limit unless 21-06 misses CAP_MIB 320
+- [Phase 21]: 21-06: S7 with the 21-05 mmap threshold passes the 320 MiB bar at 1-8 writers (R1=pass, Pm(8)=290); 16 writers 412-426 MiB (R2, R3 miss, report only); no step limit needed for the S7 bar; the 21-08 mem_bar is still open
+- [Phase 21]: 21-07: the Linux CI scripts add --workers from SLICEFS_WORKERS only when a mount names none, and read the Workers line with grep -o (a cut line of a killed daemon cannot hide it)
 
 ### Pending Todos
 
@@ -210,8 +219,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-24T01:45:38.003Z
-Stopped at: Completed 21-03-PLAN.md
+Last session: 2026-11-24T11:03:33.708Z
+Stopped at: Completed 21-07-PLAN.md
 Resume file: None
 
 ## Operator Next Steps

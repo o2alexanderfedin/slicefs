@@ -1,0 +1,90 @@
+s7-memory-diagnosis: S7_SERIALIZE=0 S7_FLUSHER=1 s7_budget_baseline in Docker Linux (harness form, in process, no mount), release, tar stream of the working tree at 1a0c354 plus the test-only S7 heap probe; one container at a time
+filter: only the ===, rustc, nproc, load, S7, MISMATCH, panic, test result and exit lines are kept
+--- run 0: first probe form (end-of-writes sample only, no peak sampler)
+=== base8 S7_THREADS=8
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+load before: 3.21 2.38 3.21 3/943 184
+S7 heap at=after_writes live_mib=88 mmap_mib=9 arena_mib=385 free_in_arenas_mib=306 rss_mib=436 rss_after_trim_mib=319 trim_released=1
+S7 threads=8 serialize=false flusher=1 cap_checked=true file_mib=1024 write_mib=128 peak_rss_mib=433 vmhwm_mib=433 cap_mib=320 within_cap=false slowest_write_ms=780.1 rebase_steps=807 max_dirty_mib=65 rss_start_mib=42 rss_after_writes_mib=433 commit_every_s=30 commits=5 commit_hold_max_ms=237.8 commit_total_max_ms=701.0 commit_gate_wait_max_ms=318.0 flusher_passes=998 flusher_steps=161 flusher_published=114 flusher_drops=32 flusher_skips=15 flusher_errors=0 throttled=1469 throttle_timeouts=725 throttle_wait_max_ms=433
+S7 peak_rss_mib is the whole test process (getrusage), also the model and the check buffers
+thread 's7_budget_baseline' (198) panicked at crates/slicefs-cli/tests/stress_harness.rs:2205:24:
+seed=1795492066890758376: S7 flusher form: VmHWM 433 MiB is above the cap 320 MiB
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 134.82s
+exit=101
+--- runs 1-6: probe with the peak sampler
+=== base8 S7_THREADS=8
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+load before: 2.77 3.12 3.39 3/954 185
+S7 heap peak_live_mib=174 rss_at_peak_live_mib=364 peak_rss_sample_mib=409 live_at_peak_rss_mib=110 anon_at_peak_rss_mib=363 file_at_peak_rss_mib=45 end_live_mib=93 end_mmap_mib=9 end_arena_mib=354 end_free_in_arenas_mib=269 end_rss_mib=405 end_anon_mib=359 end_file_mib=45 rss_after_trim_mib=304 anon_after_trim_mib=259 trim_released=1
+S7 threads=8 serialize=false flusher=1 cap_checked=true file_mib=1024 write_mib=128 peak_rss_mib=403 vmhwm_mib=403 cap_mib=320 within_cap=false slowest_write_ms=1168.1 rebase_steps=794 max_dirty_mib=66 rss_start_mib=41 rss_after_writes_mib=403 commit_every_s=30 commits=4 commit_hold_max_ms=100.8 commit_total_max_ms=323.7 commit_gate_wait_max_ms=112.1 flusher_passes=900 flusher_steps=184 flusher_published=117 flusher_drops=31 flusher_skips=36 flusher_errors=0 throttled=1460 throttle_timeouts=705 throttle_wait_max_ms=372
+S7 peak_rss_mib is the whole test process (getrusage), also the model and the check buffers
+thread 's7_budget_baseline' (199) panicked at crates/slicefs-cli/tests/stress_harness.rs:2250:24:
+seed=1795492445958928699: S7 flusher form: VmHWM 403 MiB is above the cap 320 MiB
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 125.47s
+exit=101
+=== arena1-8 S7_THREADS=8 MALLOC_ARENA_MAX=1
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+load before: 5.75 4.24 3.77 5/939 31
+S7 heap peak_live_mib=173 rss_at_peak_live_mib=253 peak_rss_sample_mib=268 live_at_peak_rss_mib=127 anon_at_peak_rss_mib=225 file_at_peak_rss_mib=42 end_live_mib=94 end_mmap_mib=9 end_arena_mib=197 end_free_in_arenas_mib=112 end_rss_mib=250 end_anon_mib=207 end_file_mib=43 rss_after_trim_mib=149 anon_after_trim_mib=106 trim_released=1
+S7 threads=8 serialize=false flusher=1 cap_checked=true file_mib=1024 write_mib=128 peak_rss_mib=262 vmhwm_mib=262 cap_mib=320 within_cap=true slowest_write_ms=799.0 rebase_steps=899 max_dirty_mib=65 rss_start_mib=42 rss_after_writes_mib=262 commit_every_s=30 commits=6 commit_hold_max_ms=203.6 commit_total_max_ms=751.3 commit_gate_wait_max_ms=454.3 flusher_passes=1040 flusher_steps=204 flusher_published=93 flusher_drops=60 flusher_skips=51 flusher_errors=0 throttled=1825 throttle_timeouts=798 throttle_wait_max_ms=296
+S7 peak_rss_mib is the whole test process (getrusage), also the model and the check buffers
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 167.87s
+exit=0
+=== mmap128k-8 S7_THREADS=8 MALLOC_MMAP_THRESHOLD_=131072
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+load before: 5.55 4.85 4.09 1/948 31
+S7 heap peak_live_mib=176 rss_at_peak_live_mib=266 peak_rss_sample_mib=267 live_at_peak_rss_mib=175 anon_at_peak_rss_mib=232 file_at_peak_rss_mib=34 end_live_mib=96 end_mmap_mib=48 end_arena_mib=151 end_free_in_arenas_mib=98 end_rss_mib=237 end_anon_mib=193 end_file_mib=44 rss_after_trim_mib=136 anon_after_trim_mib=111 trim_released=1
+S7 threads=8 serialize=false flusher=1 cap_checked=true file_mib=1024 write_mib=128 peak_rss_mib=264 vmhwm_mib=264 cap_mib=320 within_cap=true slowest_write_ms=643.3 rebase_steps=681 max_dirty_mib=66 rss_start_mib=41 rss_after_writes_mib=264 commit_every_s=30 commits=4 commit_hold_max_ms=177.3 commit_total_max_ms=405.3 commit_gate_wait_max_ms=113.4 flusher_passes=916 flusher_steps=220 flusher_published=149 flusher_drops=24 flusher_skips=47 flusher_errors=0 throttled=1499 throttle_timeouts=530 throttle_wait_max_ms=209
+S7 peak_rss_mib is the whole test process (getrusage), also the model and the check buffers
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 111.20s
+exit=0
+=== base1 S7_THREADS=1
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+load before: 5.03 5.18 4.32 1/935 31
+S7 heap peak_live_mib=69 rss_at_peak_live_mib=82 peak_rss_sample_mib=92 live_at_peak_rss_mib=68 anon_at_peak_rss_mib=87 file_at_peak_rss_mib=4 end_live_mib=58 end_mmap_mib=6 end_arena_mib=77 end_free_in_arenas_mib=25 end_rss_mib=88 end_anon_mib=83 end_file_mib=4 rss_after_trim_mib=72 anon_after_trim_mib=68 trim_released=1
+S7 threads=1 serialize=false flusher=1 cap_checked=true file_mib=1024 write_mib=128 peak_rss_mib=95 vmhwm_mib=95 cap_mib=320 within_cap=true slowest_write_ms=112.5 rebase_steps=99 max_dirty_mib=32 rss_start_mib=42 rss_after_writes_mib=91 commit_every_s=30 commits=1 commit_hold_max_ms=0.3 commit_total_max_ms=30.1 commit_gate_wait_max_ms=0.0 flusher_passes=143 flusher_steps=0 flusher_published=0 flusher_drops=0 flusher_skips=0 flusher_errors=0 throttled=0 throttle_timeouts=0 throttle_wait_max_ms=0
+S7 peak_rss_mib is the whole test process (getrusage), also the model and the check buffers
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 14.69s
+exit=0
+=== base2 S7_THREADS=2
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+load before: 4.44 5.04 4.29 1/995 31
+S7 heap peak_live_mib=129 rss_at_peak_live_mib=178 peak_rss_sample_mib=180 live_at_peak_rss_mib=119 anon_at_peak_rss_mib=175 file_at_peak_rss_mib=4 end_live_mib=107 end_mmap_mib=12 end_arena_mib=157 end_free_in_arenas_mib=62 end_rss_mib=174 end_anon_mib=169 end_file_mib=4 rss_after_trim_mib=131 anon_after_trim_mib=126 trim_released=1
+S7 threads=2 serialize=false flusher=1 cap_checked=true file_mib=1024 write_mib=128 peak_rss_mib=180 vmhwm_mib=180 cap_mib=320 within_cap=true slowest_write_ms=99.8 rebase_steps=157 max_dirty_mib=64 rss_start_mib=41 rss_after_writes_mib=180 commit_every_s=30 commits=1 commit_hold_max_ms=0.1 commit_total_max_ms=54.1 commit_gate_wait_max_ms=0.0 flusher_passes=217 flusher_steps=54 flusher_published=29 flusher_drops=4 flusher_skips=21 flusher_errors=0 throttled=53 throttle_timeouts=1 throttle_wait_max_ms=200
+S7 peak_rss_mib is the whole test process (getrusage), also the model and the check buffers
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 23.33s
+exit=0
+=== base4-2048 S7_THREADS=4 S7_FILE_MIB=2048
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+load before: 4.64 5.03 4.31 5/975 31
+S7 heap peak_live_mib=197 rss_at_peak_live_mib=261 peak_rss_sample_mib=284 live_at_peak_rss_mib=126 anon_at_peak_rss_mib=251 file_at_peak_rss_mib=32 end_live_mib=111 end_mmap_mib=9 end_arena_mib=234 end_free_in_arenas_mib=132 end_rss_mib=275 end_anon_mib=243 end_file_mib=32 rss_after_trim_mib=185 anon_after_trim_mib=152 trim_released=1
+S7 threads=4 serialize=false flusher=1 cap_checked=true file_mib=2048 write_mib=128 peak_rss_mib=278 vmhwm_mib=278 cap_mib=320 within_cap=true slowest_write_ms=16995.3 rebase_steps=2341 max_dirty_mib=124 rss_start_mib=40 rss_after_writes_mib=278 commit_every_s=30 commits=6 commit_hold_max_ms=182.8 commit_total_max_ms=45634.0 commit_gate_wait_max_ms=467.1 flusher_passes=4017 flusher_steps=2009 flusher_published=1876 flusher_drops=27 flusher_skips=103 flusher_errors=3 throttled=7481 throttle_timeouts=542 throttle_wait_max_ms=262
+S7 peak_rss_mib is the whole test process (getrusage), also the model and the check buffers
+S7 MISMATCH seed=1795492903707110156 op=write block=None errno 5
+S7 MISMATCH seed=1795492903707110156 op=write block=None errno 5
+S7 MISMATCH seed=1795492903707110156 op=write block=None errno 5
+S7 MISMATCH seed=1795492903707110156 op=write block=None errno 5
+S7 MISMATCH seed=1795492903707110156 op=read block=Some(52480) thread 0: block differs from version 1
+S7 MISMATCH seed=1795492903707110156 op=read block=Some(52480) thread 1: block differs from version 1
+S7 MISMATCH seed=1795492903707110156 op=read block=Some(51712) thread 2: block differs from version 1
+S7 MISMATCH seed=1795492903707110156 op=read block=Some(52224) thread 3: block differs from version 1
+thread 's7_budget_baseline' (45) panicked at crates/slicefs-cli/tests/stress_harness.rs:2247:5:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 244.50s
+exit=101
+--- run 7: repeat of 4 writers x 2048 MiB
+=== base4-2048-r2 S7_THREADS=4 S7_FILE_MIB=2048
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+load before: 3.74 4.45 4.26 3/975 31
+S7 heap peak_live_mib=151 rss_at_peak_live_mib=223 peak_rss_sample_mib=303 live_at_peak_rss_mib=114 anon_at_peak_rss_mib=268 file_at_peak_rss_mib=35 end_live_mib=101 end_mmap_mib=9 end_arena_mib=257 end_free_in_arenas_mib=165 end_rss_mib=301 end_anon_mib=266 end_file_mib=35 rss_after_trim_mib=182 anon_after_trim_mib=147 trim_released=1
+S7 threads=4 serialize=false flusher=1 cap_checked=true file_mib=2048 write_mib=128 peak_rss_mib=297 vmhwm_mib=297 cap_mib=320 within_cap=true slowest_write_ms=498.9 rebase_steps=285 max_dirty_mib=65 rss_start_mib=41 rss_after_writes_mib=297 commit_every_s=30 commits=4 commit_hold_max_ms=91.8 commit_total_max_ms=219.5 commit_gate_wait_max_ms=30.8 flusher_passes=937 flusher_steps=150 flusher_published=91 flusher_drops=12 flusher_skips=47 flusher_errors=0 throttled=459 throttle_timeouts=166 throttle_wait_max_ms=205
+S7 peak_rss_mib is the whole test process (getrusage), also the model and the check buffers
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 106.15s
+exit=0

@@ -265,6 +265,13 @@ const STEP_WAIT_MAX: Duration = Duration::from_secs(120);
 /// unlocked), then EIO.
 const STEP_TRIES: usize = 16;
 
+/// The longest time that one write request keeps trying again after the
+/// chunk store was busy (a wait of `STORE_WAIT` 10 s for a slow seal or
+/// background sync ended with a busy error, issue #170), then EIO. A new
+/// attempt starts only before this time has passed since the first one, so
+/// one request ends within this + 130.4 s (the sum that `pool::SUBMIT_WAIT` covers).
+pub const STORE_BUSY_RETRY_MAX: Duration = Duration::from_secs(60);
+
 /// Unlocked attempts of the rebase step of a write over the dirty limit. If
 /// all are dropped the write returns (its bytes are in the overlay, under
 /// the hard cap); the next write, the release or a budget step tries again
@@ -297,6 +304,33 @@ thread_local! {
     /// Most bytes one unlocked rebase step of this thread's last write
     /// copied in its Phase A hold (for tests).
     static WRITE_MAX_COPY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// A store call of this thread ended on a busy store since the mark was
+    /// last cleared (see `note_store_busy`).
+    static STORE_BUSY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Note that the store call that gave `e` ended on a busy store (the timeout
+/// of a store wait, issue #170): its caller still maps `e` to EIO, as every
+/// other store error. A step runs on the thread of its caller, so a caller
+/// that can wait (the retry of a write request, the flusher) clears the mark
+/// before its call and asks `take_store_busy` after an error, and tells "the
+/// store was busy, try again" from a real failure. No errno is added: the
+/// chain of `Result<_, i32>` below the write path stays as it was.
+fn note_store_busy(e: &(dyn std::error::Error + 'static)) {
+    if chunk_store::is_store_busy(e) {
+        STORE_BUSY.with(|b| b.set(true));
+    }
+}
+
+/// Clear the busy mark of this thread (see `note_store_busy`).
+pub(crate) fn clear_store_busy() {
+    STORE_BUSY.with(|b| b.set(false));
+}
+
+/// True if a store call of this thread ended on a busy store since the last
+/// `clear_store_busy`; clears the mark.
+pub(crate) fn take_store_busy() -> bool {
+    STORE_BUSY.with(|b| b.replace(false))
 }
 
 /// Add `n` to a thread-local counter.
@@ -811,11 +845,18 @@ pub(crate) struct FlushCtl {
     pub(crate) drops: AtomicU64,
     pub(crate) skips: AtomicU64,
     pub(crate) errors: AtomicU64,
+    pub(crate) busy: AtomicU64,
     pub(crate) throttled: AtomicU64,
     pub(crate) timeouts: AtomicU64,
     pub(crate) stop_exits: AtomicU64,
     pub(crate) no_room_exits: AtomicU64,
     pub(crate) max_wait_ms: AtomicU64,
+    /// Overlay save steps (`rebase_unlocked`) that published, from any
+    /// thread, and the dirty cost they freed ([Stats]).
+    pub(crate) save_steps: AtomicU64,
+    pub(crate) freed_bytes: AtomicU64,
+    /// The flusher clock when the flusher loop last started (0: never).
+    pub(crate) started_ms: AtomicU64,
 }
 
 impl FlushCtl {
@@ -839,11 +880,15 @@ impl FlushCtl {
             drops: AtomicU64::new(0),
             skips: AtomicU64::new(0),
             errors: AtomicU64::new(0),
+            busy: AtomicU64::new(0),
             throttled: AtomicU64::new(0),
             timeouts: AtomicU64::new(0),
             stop_exits: AtomicU64::new(0),
             no_room_exits: AtomicU64::new(0),
             max_wait_ms: AtomicU64::new(0),
+            save_steps: AtomicU64::new(0),
+            freed_bytes: AtomicU64::new(0),
+            started_ms: AtomicU64::new(0),
         }
     }
 
@@ -879,6 +924,9 @@ pub struct FlusherStats {
     pub skips: u64,
     /// Steps that failed.
     pub errors: u64,
+    /// Steps that met a busy chunk store and were left for a later pass (not
+    /// failures).
+    pub busy: u64,
     /// Writes that waited in the throttle.
     pub throttled: u64,
     /// Throttle waits that reached the wait limit.
@@ -890,6 +938,10 @@ pub struct FlusherStats {
     pub no_room_exits: u64,
     /// The longest throttle wait, in ms.
     pub max_wait_ms: u64,
+    /// Overlay save steps that published (flusher and request threads).
+    pub save_steps: u64,
+    /// The dirty cost that those steps freed, in bytes.
+    pub freed_bytes: u64,
 }
 
 /// A dirty cell that the flusher can step (see `flush_targets`).
@@ -953,6 +1005,10 @@ pub(crate) enum FlushStep {
     Freed(usize),
     /// Ran and freed nothing (a dropped result).
     Nothing,
+    /// The chunk store was busy (a store wait ended in a busy error, issue
+    /// #170): nothing was published, nothing failed; the cell goes in a
+    /// back-off and is tried again later.
+    Busy,
     /// Failed with this errno (nothing was published).
     Failed(i32),
 }
@@ -1102,6 +1158,12 @@ pub struct SliceFsFilesystem {
     /// One slice of a wait for a step in flight, in ms (`STEP_WAIT`; tests
     /// set it lower).
     step_wait_ms: AtomicU64,
+    /// The longest time that one write request keeps trying again after a
+    /// busy store, in ms (`STORE_BUSY_RETRY_MAX`; tests set it lower).
+    store_busy_limit_ms: AtomicU64,
+    /// Write attempts that ended on a busy store and were tried again (for
+    /// the S7 line and tests).
+    store_busy_retries: AtomicU64,
     /// The flush control block (Phase 20; see `FlushCtl`).
     flush_ctl: Arc<FlushCtl>,
     /// Set at the start of `shutdown()`, never cleared: a timed commit
@@ -1164,6 +1226,8 @@ impl SliceFsFilesystem {
             steps_seen: AtomicUsize::new(0),
             fail_steps: AtomicUsize::new(0),
             step_wait_ms: AtomicU64::new(STEP_WAIT.as_millis() as u64),
+            store_busy_limit_ms: AtomicU64::new(STORE_BUSY_RETRY_MAX.as_millis() as u64),
+            store_busy_retries: AtomicU64::new(0),
             flush_ctl: Arc::new(FlushCtl::new()),
             shut_down: AtomicBool::new(false),
             gate_xwaiters: AtomicUsize::new(0),
@@ -1214,6 +1278,28 @@ impl SliceFsFilesystem {
     /// Test hook: set the step of the last release to `bytes`.
     pub fn test_set_final_step(&self, bytes: usize) {
         self.final_step.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Test hook: set the longest time that one write request keeps trying
+    /// again after a busy store (`STORE_BUSY_RETRY_MAX`).
+    pub fn test_set_store_busy_limit(&self, limit: Duration) {
+        self.store_busy_limit_ms.store(limit.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// The longest time that one write request keeps trying again after a
+    /// busy store (see `handlers::handle_write_retrying`).
+    pub(crate) fn store_busy_limit(&self) -> Duration {
+        Duration::from_millis(self.store_busy_limit_ms.load(Ordering::Relaxed))
+    }
+
+    /// Count one write attempt that ended on a busy store and is tried again.
+    pub(crate) fn count_store_busy_retry(&self) {
+        self.store_busy_retries.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Write attempts so far that ended on a busy store and were tried again.
+    pub fn store_busy_retries(&self) -> u64 {
+        self.store_busy_retries.load(Ordering::Relaxed)
     }
 
     /// Test hook: the number of rebases so far.
@@ -1394,12 +1480,26 @@ impl SliceFsFilesystem {
             drops: v(&c.drops),
             skips: v(&c.skips),
             errors: v(&c.errors),
+            busy: v(&c.busy),
             throttled: v(&c.throttled),
             timeouts: v(&c.timeouts),
             stop_exits: v(&c.stop_exits),
             no_room_exits: v(&c.no_room_exits),
             max_wait_ms: v(&c.max_wait_ms),
+            save_steps: v(&c.save_steps),
+            freed_bytes: v(&c.freed_bytes),
         }
+    }
+
+    /// The `steps:` line of the unmount ([Stats]): save steps, steps per
+    /// second since the flusher started, and freed bytes per step.
+    pub fn steps_line(&self) -> String {
+        let c = &*self.flush_ctl;
+        let (n, freed) = (c.save_steps.load(Ordering::Relaxed), c.freed_bytes.load(Ordering::Relaxed));
+        let start = c.started_ms.load(Ordering::Relaxed);
+        let secs = if start == 0 { 0.0 } else { c.now_ms().saturating_sub(start) as f64 / 1000.0 };
+        let per_s = if secs > 0.0 { n as f64 / secs } else { 0.0 };
+        format!("steps: save_steps={n} steps_per_s={per_s:.2} freed_per_step={} freed_bytes={freed}", freed.checked_div(n).unwrap_or(0))
     }
 
     /// True if a test hook fails this rebase step (see `test_fail_steps`).
@@ -2292,6 +2392,7 @@ impl SliceFsFilesystem {
     ) -> Result<(Option<ObjectKey>, u64, Option<ObjectKey>, ObjectKey), i32> {
         let cs = &*self.content;
         let store_err = |e: std::io::Error| {
+            note_store_busy(&e);
             eprintln!("[{}][FUSE] overlay: content store error: {e}", ts());
             libc::EIO
         };
@@ -2365,6 +2466,7 @@ impl SliceFsFilesystem {
             io(&mut st)
         };
         if let Err(e) = r {
+            note_store_busy(&e);
             eprintln!("[{}][FUSE] stream: content store error: {e}", ts());
             return Err(libc::EIO);
         }
@@ -2552,7 +2654,18 @@ impl SliceFsFilesystem {
         if self.forced_drop(g.no_drop_hook) {
             return Ok(false);
         }
-        self.step_publish(ino, &mut g.file, plan, done)
+        let cost_before = plan.cost_before;
+        let published = self.step_publish(ino, &mut g.file, plan, done)?;
+        if published {
+            let after = match &g.file.write_mode {
+                WriteMode::Overlay(ov) => ov.cost(),
+                _ => 0,
+            };
+            let c = &*self.flush_ctl;
+            c.save_steps.fetch_add(1, Ordering::Relaxed);
+            c.freed_bytes.fetch_add(cost_before.saturating_sub(after) as u64, Ordering::Relaxed);
+        }
+        Ok(published)
     }
 
     /// Phase A of a rebase step (memory only): the pieces to store, the
@@ -2589,6 +2702,7 @@ impl SliceFsFilesystem {
     fn step_io(&self, ino: u64, src: &Overlay, plan: &StepPlan) -> Result<(Option<ObjectKey>, ObjectKey, String), i32> {
         let cs = &*self.content;
         let store_err = |e: std::io::Error| {
+            note_store_busy(&e);
             eprintln!("[{}][FUSE] rebase: content store error: {e}", ts());
             libc::EIO
         };
@@ -3465,11 +3579,15 @@ impl SliceFsFilesystem {
             return FlushStep::Skipped;
         }
         let before = dirty_cost(&g.file);
+        clear_store_busy();
         let r = self.free_dirty(&mut g, want);
         let after = if g.retired { 0 } else { dirty_cost(&g.file) };
         drop(g);
         drop(gate);
         match r {
+            // A busy store (a slow seal or sync) is no failure: the file
+            // keeps its dirty data and the step is tried again later.
+            Err(_) if take_store_busy() => FlushStep::Busy,
             Err(e) => FlushStep::Failed(e),
             Ok(()) if after < before => FlushStep::Freed(before - after),
             Ok(()) => FlushStep::Nothing,

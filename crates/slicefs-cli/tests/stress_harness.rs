@@ -1502,8 +1502,13 @@ fn env_list(name: &str, default: &str, lo: u64, hi: u64) -> Vec<u64> {
 /// A context for the spike tests: no mode, no models; the file system, the
 /// gate and the harness mutex only.
 fn spike_ctx(serialize: bool, seed: u64, threads: usize, wal: WalConfig) -> Ctx {
+    spike_ctx_with(serialize, seed, threads, wal, chunk_store::Options::default())
+}
+
+/// `spike_ctx` with chunk store options.
+fn spike_ctx_with(serialize: bool, seed: u64, threads: usize, wal: WalConfig, opts: chunk_store::Options) -> Ctx {
     let dir = TempDir::new().unwrap();
-    let fs = new_fs(dir.path(), wal.clone());
+    let fs = common::new_fs_with_options(dir.path(), wal.clone(), opts);
     let gate = fs.commit_gate();
     Ctx {
         fs,
@@ -1567,6 +1572,69 @@ fn vmhwm_mib() -> Option<u64> {
     let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
     let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
     Some(kb >> 10)
+}
+
+/// S7 memory diagnosis. `mem_now` gives the allocator numbers of
+/// `alloc_tune::stats` (live heap and free kept by malloc) and `VmRSS`,
+/// `RssAnon`, `RssFile` of `/proc/self/status` (0 where there is none), all
+/// in MiB. `None` where the allocator gives no numbers.
+mod s7mem {
+    use slicefs_cli::alloc_tune;
+
+    #[derive(Clone, Copy, Default)]
+    pub struct Mem {
+        pub live: u64,
+        pub free: u64,
+        pub mmap: u64,
+        pub rss: u64,
+        pub anon: u64,
+        pub file: u64,
+    }
+
+    fn status_mib(status: &str, key: &str) -> u64 {
+        status.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()).unwrap_or(0) >> 10
+    }
+
+    pub fn mem_now() -> Option<Mem> {
+        let a = alloc_tune::stats()?;
+        let st = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        Some(Mem {
+            live: a.live_bytes >> 20,
+            free: a.free_bytes >> 20,
+            mmap: a.mmap_bytes >> 20,
+            rss: status_mib(&st, "VmRSS:"),
+            anon: status_mib(&st, "RssAnon:"),
+            file: status_mib(&st, "RssFile:"),
+        })
+    }
+
+    /// Sample `mem_now` every 50 ms until `stop`; the sample with the most
+    /// live heap and the sample with the most RSS. `None` at once when the
+    /// allocator gives no numbers.
+    pub fn sample(stop: &std::sync::atomic::AtomicBool) -> Option<(Mem, Mem)> {
+        let (mut by_live, mut by_rss) = (mem_now()?, Mem::default());
+        while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+            let m = mem_now()?;
+            if m.live > by_live.live {
+                by_live = m;
+            }
+            if m.rss > by_rss.rss {
+                by_rss = m;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Some((by_live, by_rss))
+    }
+
+    /// One `S7 heap` line: the two peak samples, then the state now.
+    pub fn print(peaks: Option<(Mem, Mem)>) {
+        let (Some((pl, pr)), Some(now)) = (peaks, mem_now()) else { return };
+        println!(
+            "S7 heap peak_live_mib={} rss_at_peak_live_mib={} peak_rss_sample_mib={} live_at_peak_rss_mib={} anon_at_peak_rss_mib={} file_at_peak_rss_mib={} \
+             end_live_mib={} end_mmap_mib={} end_malloc_free_mib={} end_rss_mib={} end_anon_mib={} end_file_mib={}",
+            pl.live, pl.rss, pr.rss, pr.live, pr.anon, pr.file, now.live, now.mmap, now.free, now.rss, now.anon, now.file
+        );
+    }
 }
 
 fn ms(v: u64) -> f64 {
@@ -1969,18 +2037,22 @@ fn s6_small_fsync() {
 
 // ---- S7: dirty-budget baseline ----------------------------------------------------
 
-/// S7 (D-08), the dirty-budget baseline: 4 threads, each with its own big
-/// file, the bigwrite random-write mix, peak RSS against the cap. The cap is
+/// S7 (D-08), the dirty-budget baseline: `S7_THREADS` writer threads
+/// (1..=64, default 4), each with its own big file, the bigwrite random-write mix, peak RSS against the cap. The cap is
 /// NOT asserted (a baseline); the model check is. The model is one version per
 /// 4 KiB block, so no file bytes are held. `S7_SERIALIZE` (default 1) selects
 /// the serialized form or the parallel form. `S7_FLUSHER=1` (plan 20-07) is
 /// the flusher form: serialize off, the flusher thread runs, and each write
 /// goes through `throttle_write` before the gate. It asserts VmHWM <= CAP_MIB
-/// on Linux.
+/// on Linux when the writer count is at most `pool::DEFAULT_WORKERS_MAX` (the
+/// counts that the default worker count can give, phase 21 [Step limit]).
+/// Above that count the S7 line shows the result and nothing is asserted.
 #[test]
-#[ignore = "spike S7 baseline: S7_FILE_MIB S7_WRITE_MIB S7_COMMIT_SECS S7_SERIALIZE S7_FLUSHER; use --release"]
+#[ignore = "spike S7 baseline: S7_THREADS S7_FILE_MIB S7_WRITE_MIB S7_COMMIT_SECS S7_SERIALIZE S7_FLUSHER S7_STORE_WAIT_MS; use --release"]
 fn s7_budget_baseline() {
-    const THREADS: usize = 4;
+    // As the daemon does at start (`run_mount`), before the threads of S7 start.
+    let mmap_threshold = slicefs_cli::alloc_tune::tune_at_start();
+    let threads = env_num("S7_THREADS", 4, 1, 64) as usize;
     // CAP_MIB = Pm + F + R, rounded up to a multiple of 8 (B + N x W + O + F + R).
     // Inputs: Pm = 267 (largest VmHWM of 3 P_old and 3 P0 runs), Spread = 20,
     // F = 8 (one flusher step), R = max(16, ceil(Pm / 10), 2 x Spread) = 40.
@@ -1993,22 +2065,34 @@ fn s7_budget_baseline() {
     let commit_secs = env_num("S7_COMMIT_SECS", 30, 1, 600);
     let flusher_on = env_num("S7_FLUSHER", 0, 0, 1) == 1;
     let serialize = !flusher_on && env_num("S7_SERIALIZE", 1, 0, 1) == 1;
+    // The cap is a hard bar only at the writer counts the default worker count can give.
+    let cap_checked = flusher_on && threads <= slicefs_cli::pool::DEFAULT_WORKERS_MAX;
     let seed = seed_from_env();
     let _watchdog = watchdog(Duration::from_secs(60 * 60), seed);
     // Serialize on is the Phase 18 baseline form. With serialize off the writers
     // run in parallel (Phase 19 removed the cross-file take-out). The flusher
     // form has serialize off.
-    let ctx = spike_ctx(serialize, seed, THREADS, WalConfig::PerOp);
-    let files: Vec<(u64, u64)> = (0..THREADS).map(|t| create_file(&ctx.fs, ROOT, &format!("s7-{t}"), seed)).collect();
+    // `S7_STORE_WAIT_MS` (0: the store default, 10 s) shortens the wait of a store
+    // call for a slow background sync, so that an ordinary run meets a busy
+    // store often (issue #170): the writes and the flusher must go on.
+    let store_wait_ms = env_num("S7_STORE_WAIT_MS", 0, 0, 60_000);
+    let mut store_opts = chunk_store::Options::default();
+    if store_wait_ms > 0 {
+        store_opts.store_wait = Duration::from_millis(store_wait_ms);
+    }
+    let ctx = spike_ctx_with(serialize, seed, threads, WalConfig::PerOp, store_opts);
+    let files: Vec<(u64, u64)> = (0..threads).map(|t| create_file(&ctx.fs, ROOT, &format!("s7-{t}"), seed)).collect();
     let blocks = file_mib as usize * MIB_BLOCKS;
     let rss_start = peak_rss_mib();
     let max_dirty = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
+    let mem_stop = &AtomicBool::new(false);
     let mut slowest = 0u64;
     let mut mismatches: Vec<Mismatch> = Vec::new();
     let mut commits = CommitHists::new();
     let mut rss_writes = 0;
     let mut models: Vec<Vec<u32>> = Vec::new();
+    let mut mem_peaks = None;
     std::thread::scope(|s| {
         let (ctx, max_dirty) = (&ctx, &max_dirty);
         // Flusher form: the flusher runs in the scope. The guard stops it after
@@ -2023,6 +2107,10 @@ fn s7_budget_baseline() {
             }
         }
         let committer = s.spawn(|| ctx.commit_loop_every(&stop, Duration::from_secs(commit_secs)));
+        // Memory diagnosis: peak live heap and peak RSS during the write phase.
+        let sampler = s.spawn(|| s7mem::sample(mem_stop));
+        // Stops the sampler also when a writer panics, so the scope join does not wait.
+        let _mem_guard = SetOnDrop(mem_stop);
         // Write phase: the whole file in 1 MiB writes, then the random mix.
         let writers: Vec<_> = files
             .iter()
@@ -2047,10 +2135,14 @@ fn s7_budget_baseline() {
                         let admit = if flusher_on { ctx.fs.throttle_write() } else { Admit { pay: true } };
                         // Sample inside `gated`, after the write, while the harness mutex is held:
                         // no other write is changing a dirty count then.
-                        let r = ctx.gated(hs, Kind::Write, || {
-                            let r = h::handle_write_admitted(&ctx.fs, fh, (first * BLOCK) as u64, buf, 0, admit);
-                            max_dirty.fetch_max(ctx.fs.test_dirty_total(), Ordering::SeqCst);
-                            r
+                        // One request: a busy store makes the request try again with the
+                        // gate released between the attempts (as in the FUSE write job).
+                        let r = h::handle_write_retrying(&ctx.fs, || {
+                            ctx.gated(hs, Kind::Write, || {
+                                let r = h::handle_write_admitted(&ctx.fs, fh, (first * BLOCK) as u64, buf, 0, admit);
+                                max_dirty.fetch_max(ctx.fs.test_dirty_total(), Ordering::SeqCst);
+                                r
+                            })
                         });
                         match r {
                             WriteResult::Ok(k) if k as usize == buf.len() => {}
@@ -2088,6 +2180,9 @@ fn s7_budget_baseline() {
             models.push(ver);
         }
         rss_writes = peak_rss_mib();
+        mem_stop.store(true, Ordering::SeqCst);
+        mem_peaks = sampler.join().expect("S7 memory sampler panicked");
+        s7mem::print(mem_peaks);
         // Check phase: every block of every file against its version.
         let checkers: Vec<_> = files
             .iter()
@@ -2142,7 +2237,8 @@ fn s7_budget_baseline() {
     let vmhwm = hwm.map_or_else(|| "na".to_string(), |v| v.to_string());
     let fl = ctx.fs.test_flusher_stats();
     println!(
-        "S7 threads={THREADS} serialize={serialize} flusher={} file_mib={file_mib} write_mib={write_mib} peak_rss_mib={peak} vmhwm_mib={vmhwm} cap_mib={CAP_MIB} within_cap={} slowest_write_ms={:.1} rebase_steps={} max_dirty_mib={} rss_start_mib={rss_start} rss_after_writes_mib={rss_writes} commit_every_s={commit_secs} commits={} commit_hold_max_ms={:.1} commit_total_max_ms={:.1} commit_gate_wait_max_ms={:.1} flusher_passes={} flusher_steps={} flusher_published={} flusher_drops={} flusher_skips={} flusher_errors={} throttled={} throttle_timeouts={} throttle_wait_max_ms={}",
+        "S7 threads={threads} serialize={serialize} flusher={} cap_checked={cap_checked} file_mib={file_mib} write_mib={write_mib} store_wait_ms={store_wait_ms} peak_rss_mib={peak} vmhwm_mib={vmhwm} cap_mib={CAP_MIB} within_cap={} slowest_write_ms={:.1} rebase_steps={} max_dirty_mib={} rss_start_mib={rss_start} rss_after_writes_mib={rss_writes} commit_every_s={commit_secs} commits={} commit_hold_max_ms={:.1} commit_total_max_ms={:.1} commit_gate_wait_max_ms={:.1} flusher_passes={} flusher_steps={} flusher_published={} flusher_drops={} flusher_skips={} flusher_errors={} flusher_busy={} throttled={} throttle_timeouts={} throttle_wait_max_ms={} write_busy_retries={} \
+         mmap_threshold={} heap_live_at_peak_rss_mib={} malloc_free_at_peak_rss_mib={} save_steps={} freed_bytes={}",
         u8::from(flusher_on),
         peak <= CAP_MIB,
         ms(slowest),
@@ -2158,18 +2254,34 @@ fn s7_budget_baseline() {
         fl.drops,
         fl.skips,
         fl.errors,
+        fl.busy,
         fl.throttled,
         fl.timeouts,
-        fl.max_wait_ms
+        fl.max_wait_ms,
+        ctx.fs.store_busy_retries(),
+        mmap_threshold.map_or_else(|| "default".to_string(), |b| b.to_string()),
+        mem_peaks.map_or_else(|| "na".to_string(), |(_, pr)| pr.live.to_string()),
+        mem_peaks.map_or_else(|| "na".to_string(), |(_, pr)| pr.free.to_string()),
+        fl.save_steps,
+        fl.freed_bytes
     );
     println!("S7 peak_rss_mib is the whole test process (getrusage), also the model and the check buffers");
     print_first("S7", seed, &mismatches);
     assert!(mismatches.is_empty(), "seed={seed}: S7 found {} mismatches", mismatches.len());
-    if flusher_on {
+    if cap_checked {
         match hwm {
             Some(v) => assert!(v <= CAP_MIB, "seed={seed}: S7 flusher form: VmHWM {v} MiB is above the cap {CAP_MIB} MiB"),
             None => println!("S7 cap not checked: no VmHWM on this system"),
         }
+    }
+}
+
+/// Sets the flag when it drops (also on a panic).
+struct SetOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for SetOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
     }
 }
 

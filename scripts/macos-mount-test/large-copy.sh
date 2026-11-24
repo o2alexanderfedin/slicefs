@@ -63,7 +63,8 @@ run() {
 mount_fs() {
   $B mount --store "$W/store" --backend "$BK" "$W/mnt" </dev/null >>"$W/mount.log" 2>&1 &
   MP=$!
-  waitmnt
+  waitmnt || return
+  echo "  workers: $(grep '^Workers:' "$W/mount.log" | tail -1)"
 }
 unmount_fs() {
   # The unmount has its own short limit, so all limits fit in the CI step.

@@ -31,5 +31,10 @@ if [ -n "${SLICEFS_WORKERS:-}" ] && [ "$WL" != "Workers: $SLICEFS_WORKERS (set)"
 PL=$(grep -m1 -o 'pool: workers=.*' $R/mount.log)
 echo "  pool-line: ${PL:-none}"
 if [ "${SLICEFS_WORKERS:-0}" -ge 2 ] 2>/dev/null && ! grep -qE 'pool: workers=[0-9]+ jobs=[1-9]' $R/mount.log; then echo "  pool-line: FAIL"; F=1; fi
+AL=$(grep -m1 '^Allocator:' $R/mount.log)
+echo "  allocator-line: ${AL:-none}"
+if [ "$AL" != "Allocator: mmap threshold 131072 bytes (fixed)" ]; then echo "  allocator-line: FAIL (glibc daemon start)"; F=1; fi
+SL=$(grep -m1 -o 'steps: save_steps=.*' $R/mount.log)
+echo "  steps-line: ${SL:-none}"
 $B stats $R/store 2>/dev/null | grep -iE "dedup|CAS" | head -3
 exit $F

@@ -275,10 +275,20 @@ fn the_flusher_lowers_the_total() {
     fs.test_set_dirty_expire(HOUR_MS);
     fs.test_advance_clock(1_000);
     assert!(fs.test_dirty_total() >= 2 * MIB, "the total is at or above half the budget");
+    let s0 = fs.test_flusher_stats();
     let st = flusher::flush_pass(&fs);
     assert!(fs.test_dirty_total() < 2 * MIB, "the pass lowered the total below half the budget: {st:?}");
     assert!(fs.test_dirty_cost(a.ino) < a_cost, "the largest file was stepped");
     assert_eq!(fs.test_dirty_cost(b.ino), b_cost, "the pass stopped below half the budget");
+    // [Stats]: the save steps of the pass and the cost they freed (only A).
+    let s1 = fs.test_flusher_stats();
+    assert!(s1.save_steps > s0.save_steps, "the pass counted its save steps: {s1:?}");
+    assert_eq!(
+        (s1.freed_bytes - s0.freed_bytes) as usize,
+        a_cost - fs.test_dirty_cost(a.ino),
+        "the freed bytes are the drop of the cost of A"
+    );
+    assert!(fs.steps_line().starts_with("steps: save_steps="), "{}", fs.steps_line());
     a.check(&fs, "handles open");
     b.check(&fs, "handles open");
     a.release(&fs);

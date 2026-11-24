@@ -6,10 +6,18 @@ ok(){ echo "  $1: ok"; }; bad(){ echo "  $1: FAIL ${2:-}"; F=1; }
 step(){ local n=$1 t=$2; shift 2
   if timeout -s KILL $t "$@" >$R/step.out 2>&1; then ok "$n"; else bad "$n" "($(head -c 200 $R/step.out))"; fi; }
 mnt(){ # mnt <store> <mountpoint> [extra args...]
-  local s=$1 m=$2; shift 2; mkdir -p $m
-  "${PRE[@]}" $B mount --store $s "$@" $m </dev/null >>$R/mount.log 2>&1 & MP=$!
-  for i in $(seq 1 20); do mountpoint -q $m && return 0; sleep 0.5; done
+  # SLICEFS_WORKERS=N adds --workers N when the caller gives no --workers; the
+  # Workers line of that mount must then be "Workers: N (set)".
+  local s=$1 m=$2 n=0 w=(); shift 2; mkdir -p $m
+  case " $* " in *" --workers "*|*" --workers="*) ;; *) [ -n "${SLICEFS_WORKERS:-}" ] && w=(--workers "$SLICEFS_WORKERS") ;; esac
+  [ -f $R/mount.log ] && n=$(wc -l < $R/mount.log)
+  "${PRE[@]}" $B mount --store $s "$@" "${w[@]}" $m </dev/null >>$R/mount.log 2>&1 & MP=$!
+  for i in $(seq 1 20); do mountpoint -q $m && { wline $n ${#w[@]} $m; return 0; }; sleep 0.5; done
   echo "  NOT MOUNTED: $m"; tail -5 $R/mount.log; F=1; return 1; }
+wline(){ # wline <log lines before the mount> <count of added args> <mountpoint>
+  local L; L=$(tail -n +$(($1 + 1)) $R/mount.log | grep -m1 -o 'Workers: [0-9]* ([a-z]*)')
+  echo "    workers-line: ${L:-none}"
+  if [ "$2" -gt 0 ] && [ "$L" != "Workers: $SLICEFS_WORKERS (set)" ]; then bad "workers-line $3" "(${L:-none})"; fi; }
 umnt(){ # umnt <mountpoint>: unmount and require the daemon to exit
   timeout -s KILL 15 $B unmount $1 >/dev/null 2>&1 || fusermount -u $1 2>/dev/null
   for i in $(seq 20); do kill -0 $MP 2>/dev/null || return 0; sleep 0.5; done

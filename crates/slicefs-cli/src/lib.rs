@@ -1,5 +1,6 @@
 //! SliceFS CLI library — exposes filesystem adapter for integration tests.
 
+pub mod alloc_tune;
 pub mod backend;
 pub mod cli;
 pub mod commit_timer;

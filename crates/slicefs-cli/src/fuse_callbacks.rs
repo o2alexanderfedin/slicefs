@@ -11,7 +11,7 @@
 use std::ffi::OsStr;
 use std::io;
 use std::sync::{Arc, OnceLock};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileHandle, Filesystem, FopenFlags,
@@ -28,7 +28,7 @@ use crate::handlers::{
     handle_getxattr, handle_link, handle_listxattr, handle_lookup, handle_mkdir,
     handle_mknod, handle_open, handle_read, handle_readdir, handle_readlink,
     handle_release, handle_removexattr, handle_rename, handle_rmdir, handle_setattr,
-    handle_setxattr, handle_statfs, handle_symlink, handle_unlink, handle_write_admitted,
+    handle_setxattr, handle_statfs, handle_symlink, handle_unlink, handle_write_admitted, handle_write_retrying,
     AttrResult, CreateResult, DataResult, EmptyResult, EntryResult, LockResult,
     OpenResult, ReaddirResult, StatfsResult, WriteResult, XattrResult,
 };
@@ -126,11 +126,16 @@ fn write_job(fs: &SliceFsFilesystem, w: WriteReq, data: &[u8], reply: ReplyWrite
     let throttle = t_throttle.elapsed();
     fuse_trace!("[{}][FUSE] write: ENTRY ino={}, fh={}, offset={}, data_len={}, write_flags={:#x}, flags={:#x}, lock_owner={:?}", ts(), w.ino, w.fh, w.offset, data.len(), w.write_flags, w.flags, w.lock_owner);
     let t_serve = Instant::now();
-    let (handled, handle) = serve(fs, || {
-        let t_handle = Instant::now();
-        // The open flags of the request: O_APPEND writes at the end of file.
-        let r = handle_write_admitted(fs, w.fh, w.offset, data, w.flags, admit);
-        (r, t_handle.elapsed())
+    let mut handle = Duration::ZERO;
+    let handled = handle_write_retrying(fs, || {
+        let (r, handled_in) = serve(fs, || {
+            let t_handle = Instant::now();
+            // The open flags of the request: O_APPEND writes at the end of file.
+            let r = handle_write_admitted(fs, w.fh, w.offset, data, w.flags, admit);
+            (r, t_handle.elapsed())
+        });
+        handle += handled_in;
+        r
     });
     // The serve time less the handler time: the gate wait (and its release).
     let gate_wait = t_serve.elapsed().saturating_sub(handle);
@@ -187,6 +192,8 @@ impl Filesystem for MountedFs {
         }
         // Stop and join the flusher before the gate, then the destroy work.
         let ok = self.shutdown();
+        // The save-step counters ([Stats]), after the flusher stopped.
+        eprintln!("[{}][FUSE] destroy: {}", ts(), self.fs.steps_line());
         eprintln!("[{}][FUSE] destroy: EXIT — commit_ok={}", ts(), ok);
     }
 

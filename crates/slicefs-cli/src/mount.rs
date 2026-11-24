@@ -294,6 +294,8 @@ pub fn run_mount(
     dirty: DirtyConfig,
     workers: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // The allocator first, before any thread of the mount starts (Phase 21 [Allocator]).
+    let mmap_threshold = crate::alloc_tune::tune_at_start();
     // Pre-flight: refuse bad dirty-data values before anything changes.
     dirty.check()?;
 
@@ -306,6 +308,10 @@ pub fn run_mount(
         return Err("--workers must be at least 1".into());
     }
     println!("Workers: {n_workers} ({how})");
+    match mmap_threshold {
+        Some(b) => println!("Allocator: mmap threshold {b} bytes (fixed)"),
+        None => println!("Allocator: system default"),
+    }
 
     // Pre-flight: create mountpoint directory if it doesn't exist.
     if !mountpoint.exists() {
