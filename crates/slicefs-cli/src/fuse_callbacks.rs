@@ -33,13 +33,14 @@ use crate::handlers::{
     OpenResult, ReaddirResult, StatfsResult, WriteResult, XattrResult,
 };
 
-/// False when `SLICEFS_FUSE_TRACE` is `0`, else true. It is read once, at
-/// the first request. The bench of plan 21-08 turns the per-request lines
-/// off to measure the cost of the global stderr lock; the default does not
-/// change the logs.
+/// True when `SLICEFS_FUSE_TRACE` is set to a value other than `0`; off by
+/// default. It is read once, at the first request. The per-request ENTRY
+/// and EXIT lines are for debugging only: stderr is unbuffered and takes one
+/// global lock, so with the lines on, every request of every worker writes
+/// to it under that lock.
 fn trace_on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("SLICEFS_FUSE_TRACE").is_none_or(|v| v != "0"))
+    *ON.get_or_init(|| std::env::var_os("SLICEFS_FUSE_TRACE").is_some_and(|v| v != "0"))
 }
 
 /// `eprintln!` for one per-request ENTRY or EXIT line. When `trace_on()`
