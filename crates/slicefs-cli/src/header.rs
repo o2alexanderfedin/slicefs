@@ -364,3 +364,132 @@ pub(crate) fn write_text(store: &Path, text: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, store.join(FORMAT_FILE))?;
     std::fs::File::open(store)?.sync_all()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store path for the parse and decide tests (no file is read).
+    const STORE: &str = "store";
+    const HASH: &str = "hash blake3-256\n";
+    const RO: &str = "ro_compat test-ro-feature r-test\n";
+    const COMPAT: &str = "compat test-compat-feature r-test\n";
+    const INCOMPAT: &str = "incompat test-new-feature r-test\n";
+    const ALL: [Want; 3] = [Want::Read, Want::Write, Want::Mount];
+
+    fn decide_text(text: &str, want: Want) -> std::io::Result<Access> {
+        let store = Path::new(STORE);
+        decide(store, &parse(store, text)?, want)
+    }
+
+    fn ro_flag() -> Flag {
+        Flag { class: Class::RoCompat, name: "test-ro-feature".to_string(), release: "r-test".to_string() }
+    }
+
+    /// FMT-01, [Durable first]: a new store gets the format-7 header; `create`
+    /// makes the header only, and never writes over a header.
+    #[test]
+    fn a_new_store_gets_a_header() {
+        let d = tempfile::tempdir().unwrap();
+        let store = d.path().join("store");
+        crate::content::open(&store).unwrap();
+        let text = read(&store).unwrap().expect("FORMAT exists");
+        assert_eq!(text, marker(DEFAULT_HASHER));
+        assert_eq!(text, format!("slicefs-store 7 (store header with feature flags)\n{HASH}"));
+        let h = parse(&store, &text).unwrap();
+        assert_eq!((h.format, h.flags().count(), h.hash()), (7, 0, Some("blake3-256")));
+
+        let other = d.path().join("other");
+        create(&other).unwrap();
+        assert_eq!(read(&other).unwrap(), Some(marker(DEFAULT_HASHER)));
+        assert!(!other.join("packs").exists() && !other.join("segments").exists(), "create makes no packs/ and no segments/");
+        let kept = format!("{}{COMPAT}", marker(DEFAULT_HASHER));
+        std::fs::write(other.join(FORMAT_FILE), &kept).unwrap();
+        let err = create(&other).expect_err("a second create is refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(read(&other).unwrap(), Some(kept), "the header is the same");
+    }
+
+    /// [Number parse]: the number of the first line is parsed; its free text
+    /// is not compared.
+    #[test]
+    fn the_number_is_parsed_not_the_line() {
+        let h = parse(Path::new(STORE), &format!("slicefs-store 7 other free text\n{HASH}")).unwrap();
+        assert_eq!(h.format, 7);
+        assert_eq!(decide(Path::new(STORE), &h, Want::Write).unwrap(), Access::ReadWrite);
+        assert_eq!(parse(Path::new(STORE), "slicefs-store 7\n").unwrap().format, 7);
+        for first in ["slicefs-store x", "slicefs-store 8 (x)"] {
+            let err = parse(Path::new(STORE), &format!("{first}\n{HASH}")).expect_err(first).to_string();
+            assert!(err.contains("unknown store format") && err.contains(first), "{err}");
+        }
+    }
+
+    /// [Flags]: an unknown ro_compat flag gives read-only access; a write is
+    /// refused with the name and the release.
+    #[test]
+    fn unknown_ro_compat_is_read_only() {
+        let text = format!("{FORMAT}{HASH}{RO}");
+        for want in [Want::Read, Want::Mount] {
+            assert_eq!(decide_text(&text, want).unwrap(), Access::ReadOnly(ro_flag()), "{want:?}");
+        }
+        let err = decide_text(&text, Want::Write).expect_err("a write is refused").to_string();
+        assert!(err.contains("test-ro-feature") && err.contains("r-test") && err.contains("can only read"), "{err}");
+    }
+
+    /// [Flags]: an unknown compat flag changes nothing.
+    #[test]
+    fn unknown_compat_is_read_write() {
+        let text = format!("{FORMAT}{HASH}{COMPAT}");
+        for want in ALL {
+            assert_eq!(decide_text(&text, want).unwrap(), Access::ReadWrite, "{want:?}");
+        }
+    }
+
+    /// [Incompat], [Parse order]: an unknown incompat flag refuses every
+    /// `Want`, also next to a ro_compat flag (the strongest flag decides).
+    #[test]
+    fn unknown_incompat_is_refused_by_the_decision() {
+        for text in [format!("{FORMAT}{HASH}{INCOMPAT}"), format!("{FORMAT}{HASH}{RO}{INCOMPAT}")] {
+            for want in ALL {
+                let err = decide_text(&text, want).expect_err("refused").to_string();
+                assert!(err.contains("test-new-feature") && err.contains("r-test") && err.contains("cannot open"), "{want:?}: {err}");
+            }
+        }
+    }
+
+    /// [Parse order]: a line of an unknown kind is refused when no flag is
+    /// unknown, and allowed (and kept in its place) next to an unknown flag.
+    #[test]
+    fn an_unknown_line_needs_an_unknown_flag() {
+        let line = "chunk-profile 16 64 256";
+        let err = decide_text(&format!("{FORMAT}{line}\n"), Want::Read).expect_err("refused").to_string();
+        assert!(err.contains("FORMAT line 2: unknown setting") && err.contains(line), "{err}");
+        let text = format!("{FORMAT}{line}\n{COMPAT}");
+        assert_eq!(decide_text(&text, Want::Write).unwrap(), Access::ReadWrite);
+        assert_eq!(parse(Path::new(STORE), &text).unwrap().to_text(), text, "the line stays in its place");
+        assert_eq!(decide_text(&format!("{FORMAT}{line}\n{RO}"), Want::Mount).unwrap(), Access::ReadOnly(ro_flag()));
+    }
+
+    /// [Flags]: a flag line has three words.
+    #[test]
+    fn a_flag_line_has_three_words() {
+        let err = parse(Path::new(STORE), &format!("{FORMAT}{HASH}ro_compat test-ro-feature\n")).expect_err("refused").to_string();
+        assert!(err.contains("line 3: bad feature flag line"), "{err}");
+    }
+
+    /// T-21.1-01: the read is bounded to 64 KiB, and the header is UTF-8 text.
+    #[test]
+    fn a_large_header_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let max = format!("{FORMAT}{}\n", "x".repeat(MAX_HEADER - FORMAT.len() - 1));
+        assert_eq!(max.len(), MAX_HEADER);
+        std::fs::write(d.path().join(FORMAT_FILE), &max).unwrap();
+        assert_eq!(read(d.path()).unwrap().map(|s| s.len()), Some(MAX_HEADER), "64 KiB is read");
+        std::fs::write(d.path().join(FORMAT_FILE), format!("{max}x")).unwrap();
+        let err = read(d.path()).expect_err("refused").to_string();
+        assert!(err.contains("larger than 64 KiB"), "{err}");
+        std::fs::write(d.path().join(FORMAT_FILE), b"slicefs-store 7 \xff\xfe\n").unwrap();
+        let err = read(d.path()).expect_err("not UTF-8");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err}");
+    }
+}
