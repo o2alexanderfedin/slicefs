@@ -37,7 +37,6 @@ pub fn run_seed(store_path: &Path, source_dir: &Path, hash: Option<&str>) -> Res
     // The store header first: a new store gets it durably before `packs/`
     // and `segments/` exist; a store that this build may not write is refused.
     crate::header::check(store_path, crate::header::Want::Write)?;
-    std::fs::create_dir_all(store_path)?;
     content::select_hash(store_path, hash)?;
 
     let io = Arc::new(Mutex::new(content::store_io(store_path)?));
