@@ -167,6 +167,21 @@ pub struct Opened {
 // Each text is one `format!` literal on one line (docs/design/store-format.md
 // lists them).
 
+fn msg_no_header(store: &Path) -> String {
+    let store = store.display();
+    format!("{store} has data but no store header (the file FORMAT is missing). This SliceFS does not open a store with no header.")
+}
+
+fn msg_older(store: &Path, what: &str) -> String {
+    let store = store.display();
+    format!("{store} was made by an older SliceFS ({what}). The store format changed without a migration: copy the files out with the older version, then into a new store")
+}
+
+fn msg_newer(store: &Path, n: u32) -> String {
+    let (store, known) = (store.display(), FORMAT_NUMBER);
+    format!("{store} was made by a newer SliceFS (store format {n}). This SliceFS reads store format {known} only.")
+}
+
 fn msg_unknown_format(store: &Path, line: &str) -> String {
     let store = store.display();
     format!("{store}: unknown store format {line:?}")
@@ -240,9 +255,12 @@ pub fn read(store: &Path) -> std::io::Result<Option<String>> {
 
 /// Parse the header text of `store`. The first line must be
 /// `slicefs-store <n>` with an optional free text after one space; the
-/// number is parsed (the free text is not compared). Every later line is
-/// kept in its order: `hash <name>`, a flag line of three words, or a line
-/// of another kind. A flag line of another word count is an error.
+/// number is parsed (the free text is not compared). A number below or
+/// above [`FORMAT_NUMBER`] is refused, and the other lines are not read
+/// (another format can have any layout). Every later line is kept in its
+/// order: `hash <name>` (at most one), a flag line `<class> <name>
+/// <release>` (see [`valid_name`] and [`valid_release`]; a name once in
+/// the whole header), or a line of another kind.
 pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
     let mut pieces: Vec<&str> = text.split('\n').collect();
     if text.ends_with('\n') {
@@ -250,25 +268,62 @@ pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
     }
     let first = pieces.first().copied().unwrap_or("");
     let format = parse_first_line(first).ok_or_else(|| refuse(msg_unknown_format(store, first)))?;
-    if format != FORMAT_NUMBER {
-        return Err(refuse(msg_unknown_format(store, first)));
+    match format {
+        n if n < FORMAT_NUMBER => {
+            let what = match n {
+                0..=4 => "metadata in vt0/",
+                5 => "224-bit object IDs",
+                _ => "store format 6, no feature flags",
+            };
+            return Err(refuse(msg_older(store, what)));
+        }
+        n if n > FORMAT_NUMBER => return Err(refuse(msg_newer(store, n))),
+        _ => {}
     }
-    let mut lines = Vec::new();
+    let mut lines: Vec<Line> = Vec::new();
     for (i, &line) in pieces.iter().enumerate().skip(1) {
+        let bad = |reason: &str| refuse(msg_bad_line(store, i + 1, reason, line));
         let words: Vec<&str> = line.split(' ').collect();
         let parsed = match (words[0], Class::from_word(words[0])) {
-            ("hash", _) if words.len() == 2 => Line::Hash(words[1].to_string()),
-            (_, Some(class)) => {
-                if words.len() != 3 {
-                    return Err(refuse(msg_bad_line(store, i + 1, "bad feature flag line", line)));
+            ("hash", _) if words.len() == 2 => {
+                if lines.iter().any(|l| matches!(l, Line::Hash(_))) {
+                    return Err(bad("two hash lines"));
                 }
-                Line::Flag(Flag { class, name: words[1].to_string(), release: words[2].to_string() })
+                Line::Hash(words[1].to_string())
+            }
+            (_, Some(class)) => {
+                if words.len() != 3 || !valid_name(words[1]) || !valid_release(words[2]) {
+                    return Err(bad("bad feature flag line"));
+                }
+                let name = words[1];
+                if lines.iter().any(|l| matches!(l, Line::Flag(f) if f.name == name)) {
+                    return Err(bad(&format!("the feature {name} is listed twice")));
+                }
+                Line::Flag(Flag { class, name: name.to_string(), release: words[2].to_string() })
             }
             _ => Line::Other(line.to_string()),
         };
         lines.push(parsed);
     }
     Ok(Header { format, first: first.to_string(), lines })
+}
+
+/// A flag name: 1 to 64 of `a-z`, `0-9` and `-`, a letter or digit at each
+/// end, no `--`.
+fn valid_name(name: &str) -> bool {
+    let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    let b = name.as_bytes();
+    (1..=64).contains(&b.len())
+        && b.iter().all(|&c| alnum(c) || c == b'-')
+        && alnum(b[0])
+        && alnum(b[b.len() - 1])
+        && !name.contains("--")
+}
+
+/// A release: 1 to 32 visible ASCII characters (no space). It is shown in
+/// messages, never compared.
+fn valid_release(release: &str) -> bool {
+    (1..=32).contains(&release.len()) && release.bytes().all(|b| b.is_ascii_graphic())
 }
 
 /// The format number of a first line `slicefs-store <digits>[ <free text>]`.
@@ -316,14 +371,16 @@ pub fn decide(store: &Path, header: &Header, want: Want) -> std::io::Result<Acce
 
 /// The one check of the store header: read it, parse it, decide.
 ///
-/// No header: with `Want::Write` the store gets a new header ([`create`])
-/// and the check goes on with it; with `Want::Read` or `Want::Mount`
-/// nothing is written and the access is read and write (`header: None`; a
-/// mount needs `segments/`, and `load_store` refuses a store with no
-/// committed state).
+/// No header: a store with data (an entry in `packs/` or `segments/`) is
+/// refused, for every `want`. A store with no data is new: with
+/// `Want::Write` it gets a new header ([`create`]) and the check goes on
+/// with it; with `Want::Read` or `Want::Mount` nothing is written and the
+/// access is read and write (`header: None`; a mount needs `segments/`, and
+/// `load_store` refuses a store with no committed state).
 pub fn check(store: &Path, want: Want) -> std::io::Result<Opened> {
     let text = match read(store)? {
         Some(text) => text,
+        None if has_data(store)? => return Err(refuse(msg_no_header(store))),
         None if want == Want::Write => {
             match create(store) {
                 Ok(()) => {}
@@ -337,6 +394,23 @@ pub fn check(store: &Path, want: Want) -> std::io::Result<Opened> {
     let header = parse(store, &text)?;
     let access = decide(store, &header, want)?;
     Ok(Opened { header: Some(header), access })
+}
+
+/// True when `packs/` or `segments/` of `store` has an entry (a missing or
+/// empty directory is no data). Reads one entry of each, not the full list.
+fn has_data(store: &Path) -> std::io::Result<bool> {
+    for dir in ["packs", "segments"] {
+        match std::fs::read_dir(store.join(dir)) {
+            Ok(mut entries) => {
+                if entries.next().transpose()?.is_some() {
+                    return Ok(true);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(false)
 }
 
 // ── Write ─────────────────────────────────────────────────────────────────────
@@ -365,7 +439,7 @@ pub fn write_header(store: &Path, header: &Header) -> std::io::Result<()> {
 /// Write `text` as the header of `store` durably: a synced temp file
 /// renamed over the old header, then a sync of the directory. A power loss
 /// leaves the old header or the new one, never an empty or torn file.
-pub(crate) fn write_text(store: &Path, text: &str) -> std::io::Result<()> {
+fn write_text(store: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     let tmp = store.join(format!("{FORMAT_FILE}.tmp"));
     {
@@ -430,10 +504,10 @@ mod tests {
         assert_eq!(h.format, 7);
         assert_eq!(decide(Path::new(STORE), &h, Want::Write).unwrap(), Access::ReadWrite);
         assert_eq!(parse(Path::new(STORE), "slicefs-store 7\n").unwrap().format, 7);
-        for first in ["slicefs-store x", "slicefs-store 8 (x)"] {
-            let err = parse(Path::new(STORE), &format!("{first}\n{HASH}")).expect_err(first).to_string();
-            assert!(err.contains("unknown store format") && err.contains(first), "{err}");
-        }
+        let err = parse(Path::new(STORE), &format!("slicefs-store x\n{HASH}")).expect_err("x").to_string();
+        assert!(err.contains("unknown store format") && err.contains("slicefs-store x"), "{err}");
+        let err = parse(Path::new(STORE), &format!("slicefs-store 8 (x)\n{HASH}")).expect_err("8").to_string();
+        assert!(err.contains("newer SliceFS (store format 8)"), "{err}");
     }
 
     /// [Flags]: an unknown ro_compat flag gives read-only access; a write is
@@ -487,6 +561,102 @@ mod tests {
     fn a_flag_line_has_three_words() {
         let err = parse(Path::new(STORE), &format!("{FORMAT}{HASH}ro_compat test-ro-feature\n")).expect_err("refused").to_string();
         assert!(err.contains("line 3: bad feature flag line"), "{err}");
+    }
+
+    /// [New store]: data (an entry in `packs/` or `segments/`) and no header
+    /// is refused for every `Want`; with no data, only `Want::Write` writes
+    /// the header.
+    #[test]
+    fn data_and_no_header_is_refused() {
+        for dir in ["packs", "segments"] {
+            let d = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(d.path().join(dir)).unwrap();
+            std::fs::write(d.path().join(dir).join("x"), b"").unwrap();
+            for want in ALL {
+                let err = check(d.path(), want).expect_err("refused").to_string();
+                assert!(err.contains("FORMAT is missing") && err.contains("no store header"), "{dir} {want:?}: {err}");
+            }
+            assert!(!d.path().join(FORMAT_FILE).exists(), "{dir}: no header is written");
+        }
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("packs")).unwrap();
+        std::fs::create_dir_all(d.path().join("segments")).unwrap();
+        for want in [Want::Read, Want::Mount] {
+            assert_eq!(check(d.path(), want).unwrap(), Opened { header: None, access: Access::ReadWrite }, "{want:?}");
+            assert!(!d.path().join(FORMAT_FILE).exists(), "{want:?} writes nothing");
+        }
+        assert!(check(d.path(), Want::Write).unwrap().header.is_some());
+        assert_eq!(read(d.path()).unwrap(), Some(marker(DEFAULT_HASHER)));
+    }
+
+    /// [Number]: a format below 7 gets the older-SliceFS text, above 7 the
+    /// newer-SliceFS text, another first line `unknown store format`. The
+    /// lines after another number are not read.
+    #[test]
+    fn older_and_newer_formats_are_refused() {
+        let cases = [
+            ("slicefs-store 4 (file content in packs)", "older SliceFS (metadata in vt0/)"),
+            ("slicefs-store 5 (metadata and file content in packs)", "older SliceFS (224-bit object IDs)"),
+            ("slicefs-store 6 (metadata and file content in packs, tagged object IDs)", "older SliceFS (store format 6, no feature flags)"),
+            ("slicefs-store 8 (x)", "newer SliceFS (store format 8)"),
+            ("slicefs-store", "unknown store format"),
+            ("slicefs-store +7", "unknown store format"),
+            ("hello", "unknown store format"),
+        ];
+        for (first, want) in cases {
+            let err = parse(Path::new(STORE), &format!("{first}\nany other layout\n")).expect_err(first).to_string();
+            assert!(err.contains(want), "{first}: {err}");
+        }
+    }
+
+    /// [Flags]: a name is 1 to 64 of `a-z`, `0-9`, `-` (a letter or digit at
+    /// each end, no `--`); a release is 1 to 32 visible ASCII characters.
+    #[test]
+    fn flag_names_and_releases_follow_the_grammar() {
+        let flag = |name: &str, release: &str| parse(Path::new(STORE), &format!("{FORMAT}{HASH}compat {name} {release}\n"));
+        let long = "a".repeat(65);
+        for name in ["Test-x", "-a", "a-", "a--b", "a_b", long.as_str()] {
+            let err = flag(name, "r-test").expect_err(name).to_string();
+            assert!(err.contains("line 3: bad feature flag line"), "{name}: {err}");
+        }
+        for release in ["r".repeat(33), "r\u{1}t".to_string()] {
+            let err = flag("test-x", &release).expect_err("release").to_string();
+            assert!(err.contains("line 3: bad feature flag line"), "{release:?}: {err}");
+        }
+        assert!(flag(&"a".repeat(64), &"r".repeat(32)).is_ok());
+        assert!(flag("test-x2", "r-test").is_ok());
+    }
+
+    /// [Flags]: one name appears once in the whole header.
+    #[test]
+    fn a_flag_is_listed_once() {
+        for class in ["compat", "ro_compat"] {
+            let text = format!("{FORMAT}compat test-x r-test\n{class} test-x r-test\n");
+            let err = parse(Path::new(STORE), &text).expect_err(class).to_string();
+            assert!(err.contains("line 3: the feature test-x is listed twice"), "{class}: {err}");
+        }
+    }
+
+    /// [Hash line]: at most one `hash` line.
+    #[test]
+    fn one_hash_line_at_most() {
+        let err = parse(Path::new(STORE), &format!("{FORMAT}{HASH}{HASH}")).expect_err("refused").to_string();
+        assert!(err.contains("line 3: two hash lines"), "{err}");
+    }
+
+    /// [Compat], [Parse order]: a rewrite by `select_hash` keeps every flag
+    /// line and every unknown line in its order; only the hash line changes.
+    #[test]
+    fn compat_flags_and_unknown_lines_are_kept_on_rewrite() {
+        let d = tempfile::tempdir().unwrap();
+        let (line, new) = ("chunk-profile 16 64 256\n", "hash test-keyed-blake3\n");
+        let old = format!("{FORMAT}{COMPAT}{line}{HASH}");
+        std::fs::write(d.path().join(FORMAT_FILE), &old).unwrap();
+        crate::content::select_hash(d.path(), Some("test-keyed-blake3")).unwrap();
+        assert_eq!(read(d.path()).unwrap().unwrap(), old.replace(HASH, new));
+        std::fs::write(d.path().join(FORMAT_FILE), format!("{FORMAT}{COMPAT}{line}")).unwrap();
+        crate::content::select_hash(d.path(), Some("test-keyed-blake3")).unwrap();
+        assert_eq!(read(d.path()).unwrap().unwrap(), format!("{FORMAT}{new}{COMPAT}{line}"), "the hash line is line 2");
     }
 
     /// T-21.1-01: the read is bounded to 64 KiB, and the header is UTF-8 text.

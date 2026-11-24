@@ -24,21 +24,19 @@ pub type Content = Arc<ChunkStore>;
 /// The store header (`FORMAT`, its first line and the header of a new
 /// store) is owned by `crate::header`.
 pub use crate::header::{marker, FORMAT, FORMAT_FILE};
-/// Prefix of the marker line that records the write hash.
-const HASH_LINE: &str = "hash ";
+use crate::header::{self, Header, Line, Want};
 
-/// The header text of `store` (a bounded read, see `header::read`).
-fn read_marker(store: &Path) -> std::io::Result<Option<String>> {
-    crate::header::read(store)
+/// The write hash that the header of `store` records: blake3-256 if there
+/// is no header or no hash line. A name this build does not know is an
+/// error.
+pub fn write_hasher(store: &Path) -> std::io::Result<&'static dyn ObjectHasher> {
+    let Some(text) = header::read(store)? else { return Ok(DEFAULT_HASHER) };
+    hasher_of(store, &header::parse(store, &text)?)
 }
 
-/// The write hash that the marker of `store` records: blake3-256 if there is
-/// no marker or no hash line. A name this build does not know is an error.
-pub fn write_hasher(store: &Path) -> std::io::Result<&'static dyn ObjectHasher> {
-    let Some(m) = read_marker(store)? else { return Ok(DEFAULT_HASHER) };
-    let Some(name) = m.lines().skip(1).find_map(|l| l.strip_prefix(HASH_LINE)).map(str::trim) else {
-        return Ok(DEFAULT_HASHER);
-    };
+/// The write hash of the parsed header `h` of `store` (see [`write_hasher`]).
+fn hasher_of(store: &Path, h: &Header) -> std::io::Result<&'static dyn ObjectHasher> {
+    let Some(name) = h.hash() else { return Ok(DEFAULT_HASHER) };
     hasher_by_name(name).ok_or_else(|| {
         std::io::Error::other(format!(
             "{} records the write hash {name:?}, which this SliceFS does not know (known: {})",
@@ -57,25 +55,30 @@ pub fn parse_hash(s: &str) -> Result<String, String> {
 
 /// Make `name` (if given) the write hash of `store`: new objects use it,
 /// objects of the old hash stay readable (each is verified by its own tag).
-/// Records it in the marker (made for a new store) and, if it changes the
-/// hash of an existing store, prints one line. Call before the store opens.
+/// Records it in the header (made for a new store) and, if it changes the
+/// hash of an existing store, prints one line. The header is checked first
+/// (`Want::Write`), so a store that this build may not write is never
+/// rewritten. The rewrite changes only the hash line (it is line 2 when
+/// there was none); every other line stays in its order. Call before the
+/// store opens.
 pub fn select_hash(store: &Path, name: Option<&str>) -> std::io::Result<()> {
     let Some(name) = name else { return Ok(()) };
     let new = hasher_by_name(name).ok_or_else(|| std::io::Error::other(parse_hash(name).unwrap_err()))?;
-    std::fs::create_dir_all(store)?;
-    let old = read_marker(store)?;
-    if let Some(m) = &old {
-        if !m.starts_with(FORMAT) {
-            check_format(store)?; // the message for an older format
-            return Err(std::io::Error::other(format!("{}: unknown store format {:?}", store.display(), m.trim())));
-        }
-        let current = write_hasher(store)?;
-        if current.name() == new.name() {
-            return Ok(());
-        }
+    let existed = store.join(FORMAT_FILE).exists();
+    let opened = header::check(store, Want::Write)?;
+    let mut h = opened.header.ok_or_else(|| std::io::Error::other(format!("{}/FORMAT is missing after its write", store.display())))?;
+    let current = hasher_of(store, &h)?;
+    if current.name() == new.name() {
+        return Ok(());
+    }
+    if existed {
         println!("New objects use hash {} (was {}); stored objects stay readable.", new.name(), current.name());
     }
-    crate::header::write_text(store, &marker(new))
+    match h.lines.iter_mut().find(|l| matches!(l, Line::Hash(_))) {
+        Some(l) => *l = Line::Hash(new.name().to_string()),
+        None => h.lines.insert(0, Line::Hash(new.name().to_string())),
+    }
+    header::write_header(store, &h)
 }
 
 /// Refuse a store of an older format, whose format changed without a
