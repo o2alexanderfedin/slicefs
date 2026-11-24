@@ -381,7 +381,7 @@ CI: clap has no `env` feature, so pass the value through the scripts:
 |------|------------------------|---------------|--------------|
 | All N workers throttled | Each worker, no ranked lock (asserted in `throttle_write`) | The flusher thread | Yes: it is not a worker; it takes the gate shared per step. Each wait also ends at 200 ms; the writer then pays with its own file. |
 | All workers throttled, a commit waits for the exclusive gate | The commit timer thread | Shared holders | Throttled workers hold no gate; flusher holds end per step (`all_writers_throttled_while_a_commit_waits_*`). |
-| Queue full, reader blocked in `submit` | The reader, no lock | Any worker | Yes: each running job ends within its own bounded waits; if none ends for `SUBMIT_WAIT` (150 s), abort (the reader cannot see the unmount while it waits). |
+| Queue full, reader blocked in `submit` | The reader, no lock | Any worker | Yes: each running job ends within its own bounded waits; if none ends for `SUBMIT_WAIT` (200 s; 150 s before the #170 fix), abort (the reader cannot see the unmount while it waits). |
 | Workers wait for a step token that the flusher holds | Workers, cell released (Phase 19) | The flusher step | Yes: the flusher never waits for a worker; `STEP_WAIT` slices with progress, at most 120 s. |
 | Drain at unmount with throttled writers in the queue | `destroy` on the mount thread, no lock | The flusher (still running), or the 200 ms limit | Yes: the flusher stops only after the drain, inside `shutdown()`. |
 | A slow `fsync` holds the gate shared | A commit waits; new requests wait behind the commit (writer-preferring std `RwLock`, S5) | The fsync | Yes, after the disk sync; latency only (WAL group commit is deferred). |
@@ -437,7 +437,7 @@ What the 200 ms limit means for the pool:
                                 |
  unmount / SIGTERM -> reader ends (ENODEV or DESTROY)
         -> fuser joins reader -> MountedFs::destroy:
-             pool.drain_and_join(150 s; at the limit: abort)
+             pool.drain_and_join(200 s, 150 s before the #170 fix; at the limit: abort)
              -> shutdown(): stop flusher -> gate -> test_destroy (commit)
 
  Not workers: slicefs-flusher (frees dirty memory), commit timer (exclusive gate),
@@ -467,7 +467,7 @@ scripts/macos-mount-test/pool-bench.sh   # NEW (CI by hand)
 
 **What:** `Pool::new(n, name)` spawns `n` threads named `slicefs-worker-{k}`. `submit(weight, job)` pushes `(Box<dyn FnOnce() + Send>, weight)`. It waits (in 1 s slices, a warning after 10 s, no lock held, at most `SUBMIT_WAIT` = 150 s and then abort) while `len >= slots` or `bytes + weight > max_bytes`, except that a job is always admitted when the queue is empty (so one write larger than the byte cap gets through). A worker pops, notifies "not full", runs the job, and repeats until the queue is closed and empty. Each worker sets `rank::require_gate(true)` in debug builds, as the flusher does (flusher.rs:88), so a cell or stripe lock outside the gate panics.
 **When to use:** workers ≥ 2.
-**Memory:** queued payload ≤ 8 MiB, plus at most N payloads in workers, plus the existing reader buffer. `submit` waits in 1 s slices, with no lock held, up to `SUBMIT_WAIT` (150 s, then abort; Open Question 1). fuser asks for `max_write` 16 MiB with `FUSE_MAX_PAGES` (lib.rs:121-122, 232); the Linux kernel limits a request to its `max_pages` limit, by default 256 pages = 1 MiB [ASSUMED]. So at N = 4 on Linux the pool adds at most about 12 MiB, at N = 8 about 16 MiB, and at N = 16 about 24 MiB. The S7 margin under `CAP_MIB` was 33 MiB (P1 max 287 of 320), but only for 4 writers; above 4 the own-step and arena term of Q7 is larger than the pool term. The pool prints the largest WRITE it saw at unmount, so the plan can confirm the Linux value from the smoke log.
+**Memory:** queued payload ≤ 8 MiB, plus at most N payloads in workers, plus the existing reader buffer. `submit` waits in 1 s slices, with no lock held, up to `SUBMIT_WAIT` (200 s, 150 s before the #170 fix, then abort; Open Question 1). fuser asks for `max_write` 16 MiB with `FUSE_MAX_PAGES` (lib.rs:121-122, 232); the Linux kernel limits a request to its `max_pages` limit, by default 256 pages = 1 MiB [ASSUMED]. So at N = 4 on Linux the pool adds at most about 12 MiB, at N = 8 about 16 MiB, and at N = 16 about 24 MiB. The S7 margin under `CAP_MIB` was 33 MiB (P1 max 287 of 320), but only for 4 writers; above 4 the own-step and arena term of Q7 is larger than the pool term. The pool prints the largest WRITE it saw at unmount, so the plan can confirm the Linux value from the smoke log.
 
 ### Pattern 2: One `run` helper for inline and pool
 
@@ -653,7 +653,7 @@ fn a_worker_panic_aborts_and_the_remount_replays() {
    - What we know: the reader holds no lock; each running job ends within its own bounded waits (throttle 200 ms, step waits ≤ 120 s, store waits 10 s).
    - What's unclear: whether the wait "ends at unmount" ([Waits]). It does not: while the reader is blocked in `submit`, it does not read the channel, so it never sees ENODEV or DESTROY, `destroy()` never runs, and the drain limit never starts. A worker that is stuck for ever with a full queue would hang the unmount for ever.
    - Recommendation (meets [Waits]): give `submit` the same limit and action as the drain. Wait in 1 s slices with no lock held, print a warning after 10 s, and at `SUBMIT_WAIT` = 150 s with no free slot, print which jobs run and `abort()`; the write log replays at the next mount. Each wake-up from a finished job restarts nothing: the limit counts from the start of this `submit`, and a slot frees only when a job ends, so 150 s with no slot means that every worker has been in one job for longer than any bounded wait (`STEP_WAIT_MAX` 120 s + `STORE_WAIT` 10 s + the throttle). Do not reply EIO to a valid request. A test with a short test-only limit shows the abort path in a child process, and a second test shows that `submit` returns as soon as a job ends.
-   - **Adopted:** the recommendation: `SUBMIT_WAIT` 150 s in 1 s slices with no lock held, then abort (plan 21-01; the abort is tested in a child process in plan 21-03).
+   - **Adopted:** the recommendation: `SUBMIT_WAIT` 150 s (200 s since the #170 fix) in 1 s slices with no lock held, then abort (plan 21-01; the abort is tested in a child process in plan 21-03).
 
 2. **Should a flusher (or GC) panic also abort? (RESOLVED)**
    - What we know: Phase 20 made a flusher panic survivable (it wakes throttled writers; `a_flusher_panic_wakes_throttled_writers`). The flusher step holds the gate shared and a cell; its unwind releases them with no poison.
@@ -662,7 +662,7 @@ fn a_worker_panic_aborts_and_the_remount_replays() {
 
 3. **Drain limit value and action. (RESOLVED)**
    - Recommendation: 150 s (above `STEP_WAIT_MAX` 120 s + `STORE_WAIT` 10 s + the throttle), then abort with a message. A test with a short test-only limit and a parked job shows that `drain_and_join` returns `Err` and does not hang.
-   - **Adopted:** `DRAIN_WAIT` 150 s, then abort with a message (plan 21-01, `drain_limit_reports_a_stuck_worker`). The sum it covers includes the 200 ms step-slot wait of plan 21-05.
+   - **Adopted:** `DRAIN_WAIT` 150 s (200 s since the #170 fix), then abort with a message (plan 21-01, `drain_limit_reports_a_stuck_worker`). The sum it covers includes the 200 ms step-slot wait of plan 21-05. [Correction: plan 21-05 built no step slot. The 200 s cover a 60 s busy-store retry (#170), the 120 s step wait, the 10 s store wait and the 200 ms throttle wait.]
 
 4. **Queue depth. (RESOLVED)**
    - Recommendation: `slots = 2 x N` (at least 4) and `max_bytes = 8 MiB`, admit any job when the queue is empty. The pool term (at most about 16 MiB at the default cap of 8) is small next to the per-worker step and arena term (Q7), so the queue is not the part that limits N.
@@ -675,7 +675,7 @@ fn a_worker_panic_aborts_and_the_remount_replays() {
 6. **A trace switch for the per-request log lines. (RESOLVED)**
    - What we know: two `eprintln!` lines per request take the global stderr lock; no switch exists; `pjdfstest.sh` filters these lines.
    - Recommendation: add `SLICEFS_FUSE_TRACE=0` (read once at mount; default on, so logs do not change) for the bench only. Do not change the default in this phase.
-   - **Adopted:** `SLICEFS_FUSE_TRACE=0`, read once, default on (plan 21-02); the bench runs trace-off pairs (plan 21-08).
+   - **Adopted:** `SLICEFS_FUSE_TRACE=0`, read once, default on (plan 21-02); the bench runs trace-off pairs (plan 21-08). [Changed by Amendment 2 of 21-08: the lines are off by default, and `SLICEFS_FUSE_TRACE=1` turns them on; the bench runs trace-on pairs.]
 
 7. **The rule for "scales" (POOL-05). (RESOLVED)**
    - Recommendation: at N = 4 the median aggregate write or read MB/s is at least 1.5 times the N = 1 median, with 0 mismatches. If neither phase reaches it, record the numbers and a lock-stats run of the N = 4 point, and report POOL-05 as not met instead of changing the bar. The owner should confirm the 1.5x bar before the runs (A10).
@@ -775,7 +775,7 @@ No `security_enforcement` key in `.planning/config.json`, so the section is incl
 |---------|--------|---------------------|
 | Memory exhaustion by many large queued WRITEs | Denial of service | Queue bounded in slots and bytes; the reader blocks (kernel back-pressure) |
 | Requests served on half-done state after a panic | Tampering | Abort in the panic hook before the unwind; replay at the next mount |
-| A request that never ends blocks unmount | Denial of service | Drain limit and `submit` limit (150 s each), then abort (crash-safe) |
+| A request that never ends blocks unmount | Denial of service | Drain limit and `submit` limit (200 s each; 150 s before the #170 fix), then abort (crash-safe) |
 | Reply sent while a lock is held (slow peer stalls commits) | Denial of service | `serve` helper, debug assert, source scan |
 | A debug-only panic injection env var reaches a release build | Tampering | `#[cfg(debug_assertions)]` on the env read |
 

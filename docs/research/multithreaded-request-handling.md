@@ -83,7 +83,7 @@ Each step ships alone and is kept small. Steps 1-4 still run on one dispatch thr
 | 3 | Log append under the inode lock; replay with the logged inode number | Item 8 | #20 |
 | 4 | Directory locks, rename mutex, rank-order checker; read-modify-write under locks | Items 9-11 | #21 |
 | 5 | Rebase flusher thread under the shared gate; soft and hard thresholds; writer-pays sleep; remove cross-file `keep_budget` | #108 option 1; bounded memory under N | #108, #98 |
-| 6 | Reader plus worker pool, N configurable, default 1. Raise the default on Linux in CI first, then on macOS after spike S1; drain workers before `destroy` | Concurrency on | #22 |
+| 6 | Reader plus worker pool, N configurable, default 1. Raise the default on Linux in CI first, then on macOS after spike S1; drain workers before `destroy` [SHIPPED: Phase 21, `--workers N`, default on Linux half the CPUs (1 to 8), on macOS 1; see the Phase 21 result] | Concurrency on | #22 |
 | 7 | WAL group-commit flusher; then gate generation switch if S5 shows stalls [SUPERSEDED: the switch shipped as #133; S5 now decides the gate lock type; see the S5 result] | Durable fsync throughput; 1.3 s commit stall | #20, #21 |
 
 The largest risk is **deadlock between the gate, the budget and the flusher**. The guard is the drop-locks-before-waiting rule, plus a test in which every worker is throttled while a commit waits. The second risk is **replay divergence** if any handler logs outside its lock. A crash-replay test with N threads should run on every change to `handlers.rs`. The third risk is that **macOS gains nothing**. If FUSE-T keeps one request outstanding, the pool only adds handoff cost, and the right result is then to leave N=1 on macOS. An older, blockset-era measurement on the macOS Boost copy put SliceFS's own `write` and `fsync` calls at about one third of the copy time, with FSKit taking the rest ([chunk-store.md](https://github.com/o2alexanderfedin/slicefs/blob/6fd1e11/docs/design/chunk-store.md)). It was not measured again for the pack store, but it suggests that the macOS gain from SliceFS-side threads has a low upper bound. The fourth risk is **the single store lock becoming the new bottleneck** once CPU work runs in parallel. FastCDC 8 KiB plus BLAKE3 runs at 530-910 MB/s ([chunk-store.md](https://github.com/o2alexanderfedin/slicefs/blob/6fd1e11/docs/design/chunk-store.md)), so a few workers could saturate one appender. That would justify per-worker packs, but only after measurement. Two smaller risks remain. Out-of-order replies on FUSE-T are unverified ([channel.rs](https://github.com/o2alexanderfedin/slicefs/blob/6fd1e11/vendor/fuser/src/channel.rs#L141-L160)). And the test-time budget limits how long the stress runs can be in CI.
@@ -365,6 +365,85 @@ Limits:
 - A stream can hold out-of-order writes up to a fixed 64 MiB window, whatever `--dirty-limit` is.
 
 Still open after Phase 20: see `.planning/phases/20-dirty-budget-and-rebase-flusher/deferred-items.md` (and the Phase 19 list that it points to).
+
+## Phase 21 result
+
+Phase 21 (issue #22) did step 6 of the migration: requests run on a pool of worker threads (POOL-01 to POOL-05).
+
+The design in short:
+- **Reader and pool.** One fuser reader thread reads the requests. With N of 2 or more, it gives each request to a SliceFS pool of N threads (`slicefs-worker-<k>`). The reader copies the arguments and the write data into the job. With N = 1 there is no pool: each request runs on the reader thread, as before.
+- **Queue.** The queue has max(2N, 4) slots and holds at most 8 MiB of payload. One larger job goes in when the queue is empty. The reader waits for space with no lock held, in 1 s slices.
+- **Gate and reply.** A job takes the commit gate only inside `serve`. The worker sends the reply after `serve` returns, so no reply goes out with a lock held. A debug build asserts this at each reply.
+- **Unmount.** `destroy` first closes the queue, runs every queued job and joins the workers. Then it calls the Phase 20 `shutdown` (flusher stop, then the gate).
+- **Wait limits.** `submit` and the drain wait at most 200 s (`SUBMIT_WAIT`, `DRAIN_WAIT`). Then the daemon aborts, and the write log replays at the next mount. The 200 s cover the longest request: a 60 s busy-store retry, a 120 s step wait, the 10 s store wait and the 200 ms throttle wait.
+- **Panic.** A panic hook aborts the daemon when the panic is on a request thread (`fuser-*` or `slicefs-worker-*`). The locks of the half-done request stay held, no reply goes out, and `destroy` does not run, so nothing commits the half-done state. The next mount replays the write log. A panic on another thread (for example the flusher) does not abort.
+- **Busy store (#170).** A slow pack sync can keep the chunk store busy for more than its 10 s wait. A write that meets a busy store now pauses with no lock held (the commit gate is released between the tries) and tries again for up to 60 s. Then it gives EIO. A flusher step that meets a busy store is not an error: it counts as `flusher_busy` and backs off. With this fix, `SUBMIT_WAIT` and `DRAIN_WAIT` went from 150 s to 200 s.
+- **Memory (the [Step limit] item).** No step limit was built. The growth for each S7 writer was glibc arena retention, not live data. On Linux glibc the daemon calls `mallopt(M_MMAP_THRESHOLD, 128 KiB)` at start. The mount log prints `Allocator: mmap threshold 131072 bytes (fixed)`. The unmount prints a `steps:` line (save steps, freed bytes).
+- **Trace lines.** The per-request ENTRY and EXIT lines are off by default. `SLICEFS_FUSE_TRACE=1` turns them on (each value other than `0` does). Stderr has one global lock, so with the lines on, the workers wait for each other.
+- **Counters.** The unmount prints a `pool:` line: jobs, jobs for each worker, the largest queue depth, the largest job weight and the longest queue wait.
+
+The option: `--workers N`. The default on Linux is half the CPUs, at least 1 and at most 8. The default on macOS is 1. An explicit value above 8 is allowed, and 0 is refused. The cap of 8 has two reasons. CAP_MIB 320 was measured with 4 writers, and each busy worker adds memory (its own save steps and an allocator arena). The bench below shows no gain from 8 to 16 workers.
+
+Tests per ROADMAP Phase 21 criterion:
+1. One reader, the pool, the option, inline with 1: `pool_tests` (`jobs_run_in_parallel`, `jobs_run_on_named_workers`, `submit_blocks_at_the_slot_bound`, `submit_blocks_at_the_byte_bound`, `an_oversize_job_passes_when_the_queue_is_empty`, `stats_count_the_queue_and_the_jobs_per_worker`, `a_submit_with_a_lock_held_panics`). The option: `workers_flag_parses`, `workers_zero_is_refused`, `workers_absent_is_none`, `workers_above_eight_is_accepted`, `workers_for_cpus_halves_and_clamps`, `default_workers_is_one_on_macos` and `default_workers_is_in_range` (Linux). Inline: `run_without_a_pool_runs_on_the_caller`. Docker smoke mounts with 4 and 1 workers.
+2. Drain before `destroy`, reply after the locks: `drain_runs_every_queued_job`, `drain_limit_reports_a_stuck_worker`, `destroy_drains_before_shutdown`, `the_gate_is_taken_only_in_serve_and_init`, `every_request_callback_uses_serve` and `serve_panics_when_a_lock_is_held_at_the_reply`. The SIGTERM, SIGINT and SIGHUP live checks pass with 4 workers.
+3. Panic aborts, the remount replays: `pool_panic_tests` (`a_worker_panic_aborts_and_the_remount_replays`, `a_reader_thread_panic_aborts_and_the_remount_replays`, `a_full_queue_that_stays_full_aborts`, `a_panic_on_another_thread_does_not_abort`). The live check `panic-replay.sh` passes with 4 and with 1 worker.
+4. Tests with 4 workers: in Docker, the workspace tests, the FUSE smoke, the live checks and pjdfstest (8792 tests, PASS) with `--workers 4`. CI for the last code commit: the ci.yml Linux job with `Workers: 4 (set)` checked in each of its three steps, the ci.yml macOS job, and macos-mounts.yml on FSKit with `Workers: 1 (default)`. The busy-store fix: `store_busy_tests` (`a_write_waits_for_a_busy_store_and_succeeds`, `an_append_that_meets_a_busy_store_is_in_the_file_once`, `a_store_that_stays_busy_ends_the_write_with_eio_at_the_limit`, `a_flusher_step_that_meets_a_busy_store_is_not_an_error_and_goes_again`).
+5. Scale with the worker count: the bench below.
+
+**S7 with the allocator setting (plan 21-06).** S7 in process, Docker Linux, 32 CPUs, release, 1 GiB file and 128 MiB of the mix for each writer, budget 64 MiB, flusher on. 19 runs. Pm(N) is the largest VmHWM at N writers. "Before" is the same code with no allocator setting.
+
+| Writers | 1 | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| Runs | 3 | 3 | 7 | 3 | 3 |
+| Pm before (MiB) | 97 | 216 | 340 | 441 | 730 |
+| Pm after (MiB) | 106 | 173 | 227 | 290 | 426 |
+| Spread after (MiB) | 5 | 5 | 28 | 19 | 14 |
+| CAP(N) (MiB) | | | 296 | 336 | 480 |
+
+- CAP(N) = Pm(N) + 8 + the largest of 16, Pm(N) / 10 and 2 x Spread(N), rounded up to a multiple of 8. The values are recorded only. CAP_MIB stays 320.
+- **R1=pass (hard bar).** All 16 runs at 1, 2, 4 and 8 writers stay at or under 320 MiB (largest 290 MiB at 8 writers), with 0 mismatches and no EIO. So the 320 MiB bar holds at 1, 2, 4 and 8 writers.
+- **R2=miss (report to the owner).** 16 writers give 412 to 426 MiB. 16 is above the default cap of 8, so this does not block.
+- **R3=miss (report to the owner).** Pm(16) - Pm(4) = 199 MiB (rule: at most 64). Pm(8) - Pm(4) = 63 MiB passes by 1 MiB.
+- The harness term (the version model, the write buffer and the check read of S7) is about 3 MiB for each writer. It does not explain the rise. Above 8 writers, most of the rise is live heap (about 10 MiB for each writer) and mapped files that follow the stored bytes, not malloc retention.
+- The [Step limit] item is closed: R1=pass, and the bench gives mem_bar=pass.
+
+**Linux bench (plan 21-08).** Docker Linux (OrbStack), 32 CPUs, release, mount form. 16 clients on different files at each worker count. Write: 16 parallel `dd` of 64 MiB with fsync. Read: the same files from a cold cache. Random write: 64 writes of 1 MiB for each file, then fsync. Metadata: each client creates, stats, reads and unlinks 250 files of 4 KiB. Medians of 3 runs with the default trace setting (off). VmHWM is the largest daemon value of the write mount and the read mount in the 3 runs. All 22 runs have 0 content mismatches.
+
+| Workers | Write MB/s | Read MB/s | Random write MB/s | Create files/s | Stat ops/s | Read ops/s | Unlink ops/s | VmHWM max (MiB) |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 134.9 | 345.8 | 115.2 | 5000 | 57971 | 11527 | 27972 | 124 |
+| 2 | 178.8 | 550.8 | 128.3 | 5839 | 61539 | 12158 | 31496 | 140 |
+| 4 | 169.5 | 931.8 | 145.6 | 6579 | 60606 | 16260 | 41667 | 152 |
+| 8 | 165.6 | 1304.5 | 151.4 | 6601 | 58824 | 16327 | 40816 | 178 |
+| 16 | 149.1 | 1190.7 | 131.4 | 5571 | 55556 | 16000 | 42553 | 223 |
+
+- **Verdict.** The bar: at 4 workers the median write or read MB/s is at least 1.5 times the value at 1 worker. `ratio_write_4_1=1.26`, `ratio_read_4_1=2.69`, so `verdict=PASS`. The pass comes from the reads.
+- **Writes do not scale.** They rise from 1 to 2 workers and then stay flat or fall. In the lock-stats runs, the `store` lock has the largest wait in the write phase (p99 90.9 us at 4 workers and 249.0 us at 8, max 13.5 ms). All writers append to the store under this one lock (the single pack appender). This is the likely cause, but the bench does not rule out fsync or disk limits.
+- **Memory.** The largest VmHWM at 1, 2, 4 and 8 workers is 178 MiB, under the 320 MiB bar: `mem_bar=pass`. At 16 workers it is 223 MiB (`mem16_max_mib=223`). VmHWM grows by about 6.6 MiB for each worker.
+- **Metadata.** The create, read and unlink rates rise to 4 workers and then stay flat. At 8 workers the `store`, `inode_map`, `wal_writer` and `readers` locks have a wait p99 of about 100 to 160 us. The stat rate is partly a kernel-cache rate (about 2200 of 4000 stats reach the daemon).
+- **Trace lines on** (`SLICEFS_FUSE_TRACE=1`, one run pair after each round): no cost for writes, 16 % (1 worker) and 34 % (4 workers) of the read rate, and 51 % to 77 % of the metadata rates. With the lines on, the create rate is the same at 1 and 4 workers (2430 and 2477 files/s). This is the reason for the default off.
+- **Arena run** (16 workers, `MALLOC_ARENA_MAX=2`, one run): 9 to 13 MiB less VmHWM with a similar rate. Recorded only.
+- No follow-up issue is necessary for the bar. The write plateau is a report to the owner.
+
+**macOS bench (FSKit CI, 3 CPUs, load about 50).** 3 runs at each worker count, 0 mismatches.
+
+| Workers | Write MB/s (runs) | Write median | Read MB/s (runs) | Read median | Max RSS (MiB) |
+|---|---|---|---|---|---|
+| 1 | 25.2, 23.4, 60.8 | 25.2 | 330.7, 171.1, 265.6 | 265.6 | 63 |
+| 2 | 77.7, 13.3, 37.3 | 37.3 | 116.5, 206.8, 165.7 | 165.7 | 69 |
+
+The runner was loaded and the numbers vary a lot. They do not show a gain with 2 workers on FSKit, so the macOS default stays 1. A rise needs a measured FSKit gain.
+
+**Rule for a later rise of the default cap of 8.** Raise it only when the median at 16 workers is at least 1.1 times the median at 8 in some phase, and the largest VmHWM at 16 workers is under CAP(16) = 480 MiB. Now the ratios at 16 against 8 are 0.84 to 1.04 in all phases, and VmHWM is 223 MiB. The rule is not met, so the cap stays 8.
+
+Limits:
+- With 2 or more workers, the Phase 19 windows can now occur: a size change of a closed file can race an unlink or a setattr of other fields of the same inode, and a cross-directory rename has no ancestor check. On Linux the kernel holds its own inode locks for these calls, and pjdfstest passed with 4 workers. FUSE-T gives no such order, so the risk is mostly on macOS with more than 1 worker.
+- With 2 or more workers on FUSE-T, WRITEs of one file can arrive in parallel (research A6). This was not measured.
+- With 2 or more workers, a throttled write no longer stops the other requests. The Phase 20 limit "one dispatch thread" now holds only with 1 worker (the macOS default).
+- fsync, release, replay and commit still give EIO for a busy store. Only the write path tries again.
+
+Still open after Phase 21: see `.planning/phases/21-worker-pool/deferred-items.md` (and the Phase 19 and Phase 20 lists that it points to).
 
 ## Conclusion
 

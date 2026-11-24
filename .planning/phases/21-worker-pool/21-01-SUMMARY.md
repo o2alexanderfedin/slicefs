@@ -68,7 +68,7 @@ metrics:
 ## What was built
 
 - **Option.** `--workers N` in `Cmd::Mount`. The clap range parser refuses 0, and there is no upper bound. With no flag, the count is `clamp(available_parallelism / 2, 1, 8)` on Linux and 1 on macOS. `run_mount` reads the count once, prints `Workers: N (set)` or `Workers: N (default)`, and builds `Pool::new(n)` only for n >= 2.
-- **Pool.** A std `Mutex` and three condvars (not empty, not full, done). The lock is held only to move a job in or out. `submit` asserts an empty rank stack in debug builds. It waits in 1 s slices, prints one warning after 10 s, and aborts after `SUBMIT_WAIT` (150 s). A worker sets `require_gate(true)` and runs jobs until the queue is closed and empty. `drain_and_join(limit)` closes the queue and runs every queued job (no job is dropped). Then it joins the workers, or returns `Err(busy)` at the limit. `Drop` is the safety net for a mount that fails before the session. The counters are atomics: queue depth now and the largest depth, jobs, jobs per worker, the largest weight, and the longest queue wait.
+- **Pool.** A std `Mutex` and three condvars (not empty, not full, done). The lock is held only to move a job in or out. `submit` asserts an empty rank stack in debug builds. It waits in 1 s slices, prints one warning after 10 s, and aborts after `SUBMIT_WAIT` (150 s; 200 s since the #170 fix). A worker sets `require_gate(true)` and runs jobs until the queue is closed and empty. `drain_and_join(limit)` closes the queue and runs every queued job (no job is dropped). Then it joins the workers, or returns `Err(busy)` at the limit. `Drop` is the safety net for a mount that fails before the session. The counters are atomics: queue depth now and the largest depth, jobs, jobs per worker, the largest weight, and the longest queue wait.
 - **Callbacks.** `MountedFs { fs, pool }` keeps `Deref`, so the 30 callbacks that are not converted compile with no change. getattr copies `ino` and `fh`, clones the `Arc`, and calls `self.run(0, ...)`. In `destroy`, the drain comes first, then one `[ts][FUSE] destroy: pool: ...` line, then `shutdown()`. At the drain limit, the daemon prints one line and aborts (the write log replays at the next mount).
 - **Scripts.** `run.sh` passes `-e SLICEFS_WORKERS`. `mt-linux.sh` mounts with `--workers $SLICEFS_WORKERS` when the variable is set. After the daemon-exit check, it prints `workers-line:` and `pool-line:`. It fails when the Workers line differs, and when N >= 2 but no pool line shows jobs above 0.
 
@@ -111,7 +111,7 @@ Each mutation was planted, run with `timeout 600` or `timeout 900`, and reverted
 
 **1. [Rule 2 - Correctness] A worker counts its exit also when its job panics**
 - **Found during:** Task 1
-- **Issue:** If a job panicked, the worker thread would end with no exit count, and the drain would wait until its 150 s limit and then abort.
+- **Issue:** If a job panicked, the worker thread would end with no exit count, and the drain would wait until its 150 s limit (200 s since the #170 fix) and then abort.
 - **Fix:** A drop guard (`Exit`) adds 1 to the exit count and wakes the drain. It does this on a normal end and on an unwind. Plan 21-03 adds the abort hook.
 - **Files modified:** crates/slicefs-cli/src/pool.rs
 - **Commit:** f4856c3
