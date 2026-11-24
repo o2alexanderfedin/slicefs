@@ -1,0 +1,68 @@
+# host: tar of the committed clean tree at ef8c991; docker mount form, volume slicefs-target-p21, debug build
+# smoke 21-02 at tree
+Linux 0404288ed888 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+1.18 1.44 1.78 3/939 20
+build-exit=0
+=== smoke workers=4 trace=on
+  read: ok
+  echo-write: ok
+  cp-3MB: ok
+  cp-again: ok
+  readback: ok
+  mkdir-mv: ok
+  chmod: ok
+  truncate: ok
+  xattr: ok
+  rm: ok
+  unmount: ok
+  daemon-exit: ok
+  workers-line: Workers: 4 (set)
+  pool-line: pool: workers=4 jobs=163 max_weight=131072 max_queue_wait_ms=1 queue_max=2 jobs_per_worker=35,42,43,43
+CAS bytes        : 2.91 MiB (3047126 bytes) (packs/, apparent size)
+CAS on disk      : 2.91 MiB (3055616 bytes) (packs/, allocated blocks)
+File dedup ratio : 1.00x (logical / unique content; whole-file duplicates)
+trace-on-entry-lines=5
+=== smoke workers=1 trace=on
+  read: ok
+  echo-write: ok
+  cp-3MB: ok
+  cp-again: ok
+  readback: ok
+  mkdir-mv: ok
+  chmod: ok
+  truncate: ok
+  xattr: ok
+  rm: ok
+  unmount: ok
+  daemon-exit: ok
+  workers-line: Workers: 1 (set)
+  pool-line: none
+CAS bytes        : 2.90 MiB (3045192 bytes) (packs/, apparent size)
+CAS on disk      : 2.91 MiB (3051520 bytes) (packs/, allocated blocks)
+File dedup ratio : 1.00x (logical / unique content; whole-file duplicates)
+pool-lines-1-worker=0
+=== smoke workers=4 trace=off
+  read: ok
+  echo-write: ok
+  cp-3MB: ok
+  cp-again: ok
+  readback: ok
+  mkdir-mv: ok
+  chmod: ok
+  truncate: ok
+  xattr: ok
+  rm: ok
+  unmount: ok
+  daemon-exit: ok
+  workers-line: Workers: 4 (set)
+  pool-line: pool: workers=4 jobs=163 max_weight=131072 max_queue_wait_ms=0 queue_max=2 jobs_per_worker=39,41,36,47
+CAS bytes        : 2.90 MiB (3045434 bytes) (packs/, apparent size)
+CAS on disk      : 2.91 MiB (3051520 bytes) (packs/, allocated blocks)
+File dedup ratio : 1.00x (logical / unique content; whole-file duplicates)
+trace-off-entry-lines=0
+lock-held-asserts=0
+smoke-exit=0
+# host: docker exit=0
+host-exit=0
