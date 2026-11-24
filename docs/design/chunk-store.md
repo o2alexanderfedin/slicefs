@@ -1159,9 +1159,10 @@ files:
 
 So a root never refers to an object that is not durable.
 
-`fsync` of a file: today it makes the file's objects durable. With packs it
-syncs the active pack once (all files written since the last sync are
-covered), then the write log. A second `fsync` with no new data returns
+`fsync` of a file: it writes the streamed content of the file into its
+manifest, then syncs only the write log (`handle_fsync`). It does not sync
+the pack: the `Write` records in the log make the data durable, and replay
+writes it again after a crash. A second `fsync` with no new data returns
 without a disk flush.
 
 At open:
