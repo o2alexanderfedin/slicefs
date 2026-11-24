@@ -74,7 +74,7 @@ Short local runs (macOS, debug, `S7_FILE_MIB=4 S7_WRITE_MIB=2 S7_COMMIT_SECS=1 S
 
 On macOS there is no VmHWM, so the runs with `cap_checked=true` also print `S7 cap not checked: no VmHWM on this system`. All five runs exited 0.
 
-`cargo test --workspace` exited 0 before the code commit 2dc170d (72 `test result: ok` lines, 0 `FAILED`). Acceptance counts: `S7_THREADS` 3 lines in stress_harness.rs and 2 in run.sh, `DEFAULT_WORKERS_MAX` 2, `const THREADS: usize` 0.
+`cargo test --workspace` exited 0 before the code commit 2dc170d (72 `test result: ok` lines, 0 `FAILED`). VALIDATION full-suite extras on ef26ea2 (same code as 2dc170d): `cargo check --workspace --all-targets --features slicefs-cli/lock-stats` exit 0; `cargo check -p slicefs-cli --all-targets --features deadlock-detect` exit 0; `--features deadlock-detect` `stress_harness serialize_off_target` 1 passed, `flusher_tests` 26 passed. Acceptance counts: `S7_THREADS` 3 lines in stress_harness.rs and 2 in run.sh, `DEFAULT_WORKERS_MAX` 2, `const THREADS: usize` 0.
 
 ## Docker before-runs (Task 2)
 
@@ -119,9 +119,11 @@ S7 runs in process and calls the handlers directly, with no FUSE session. The pe
 
 None.
 
-### Other notes
+### Deviation: the committed log is filtered
 
-- **Filtered log.** The raw log was 1.8 MB (10403 lines): 8312 `[rebase]` debug lines, 1752 lines of cargo warning blocks (the same blocks in each run) and 81 `[FUSE] ... switches to overlay` lines. The committed log (16.7 KB) removes only these three kinds. Its third line states the filter and the counts. All S7 lines, `=== ` lines, load lines, panic texts, `test result` lines and `exit=` lines are as printed.
+- The plan says "copy the log". The raw log was 1.8 MB (10403 lines): 8312 `[rebase]` debug lines, 1752 lines of cargo warning blocks (the same blocks in each run) and 81 `[FUSE] ... switches to overlay` lines. The committed log (16.7 KB) removes only these three kinds. Its third line states the filter and the counts. All S7 lines, `=== ` lines, load lines, panic texts, `test result` lines and `exit=` lines are as printed. The raw log was kept only in a temporary folder of the session and is not in the repository.
+
+### Other notes
 - **Extra local run at 8 writers.** The plan verify covers 2 and 9 writers. One more short run at 8 shows `cap_checked=true` at the edge of the bar.
 - **Docker form.** The harness form of the 21-01 method (tar stream, no bind mount), not `run.sh harness`: `run.sh` uses the bind mount and prints no `rustc -V` line. The container had a name, so a `timeout` kill could not leave it running.
 - **Build before the runs.** The container built the test binary with `--no-run` before the first run, so no run includes build time.
@@ -139,7 +141,7 @@ None. T-21-27: tar stream of the committed tree, the 20-01 `rustc -V` line, defa
 
 - **8 writers are above the cap before the limit (419-441 MiB).** This is the gap that plan 21-05 (step limit) must close: the bar is hard at 8 writers. The growth is about 35 MiB per writer above 2, and the throttle timeouts grow with the writer count (0-5 at 2 writers, 361-783 at 8, 1595-2088 at 16). The 21-06 judgement uses these runs as the "before" side.
 - **The harness's own memory grows with the writer count.** Each writer has a 1 MiB version model (one u32 per 4 KiB block), a 1 MiB write buffer, and a 1 MiB read buffer in the check phase: about 3 MiB per writer, 24 MiB at 8 writers. This counts against the 320 MiB bar. It is small next to the 35 MiB per writer that the run shows, so no change was made.
-- **1 writer: one very slow write in 2 of 3 runs (9.4 s and 9.6 s).** At 1 writer the dirty total stays at 32 MiB, the flusher does no step (`flusher_steps=0`) and nothing is throttled, so the writer pays its own save steps. The slowest write then includes a long step. The run ends in about 20-30 s. This is outside the memory bar, but it is a latency value that the step limit (21-05) should not make worse; 21-06 can compare it.
+- **1 writer: one very slow write in 2 of 3 runs (9.4 s and 9.6 s; the third run 734 ms).** The cause is not measured. All three 1-writer runs have the same counters (`rebase_steps=97`, `flusher_steps=0`, `throttled=0`, `max_dirty_mib=32`), so the counters do not explain the difference. Two possible causes: (a) a long save step that the writer pays itself, or (b) the host: each 1-writer run starts directly after a 16-writer run that wrote 16 GiB, so the page cache and the disk can still be busy. The value is outside the memory bar. 21-06 can compare it after the step limit; a run order with a pause before the 1-writer runs would separate (a) from (b).
 - **16 writers: slowest write 4.6 to 6.5 s** and VmHWM 688-730 MiB. Above the default cap of 8, so recorded and reported to the owner, not a stop.
 
 ## Self-Check: PASSED
