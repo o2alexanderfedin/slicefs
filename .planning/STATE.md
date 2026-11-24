@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v2.2
 milestone_name: Concurrency & Store Evolution
-current_phase: 22
-current_phase_name: Chunk profiles
-current_plan: Not started
-status: planning
-stopped_at: Phase 21 complete, ready to plan Phase 22
-last_updated: "2026-11-24T17:22:52.154Z"
+current_phase: 21.1
+current_phase_name: Store header and format policy (#154)
+current_plan: 2
+status: executing
+stopped_at: Completed 21.1-01-PLAN.md
+last_updated: "2026-11-24T19:53:32.739Z"
 last_activity: 2026-11-24
-last_activity_desc: Phase 21 complete, transitioned to Phase 22
-state_head: fd6632bd84dbb12f5da41f89e1c2a16a4dab2e48
+last_activity_desc: 21.1-01 complete (store header core, read-only daemon mode, tracer)
+state_head: 8de8f33a9ed3c2f351ca39c85ced3d69b3e46662
 progress:
   total_phases: 8
   completed_phases: 4
-  total_plans: 40
-  completed_plans: 40
+  total_plans: 44
+  completed_plans: 41
   percent: 50
 ---
 
@@ -30,12 +30,12 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: Not started
-Total Plans in Phase: 9
-Phase: 22 — Chunk profiles
-Plan: 21-09 complete (9 of 9); next: review and verification of Phase 21 (the orchestrator runs phase complete)
-Status: Ready to plan
-Last activity: 2026-11-24 — Phase 21 complete, transitioned to Phase 22
+Current Plan: 2
+Total Plans in Phase: 4
+Phase: 21.1 — Store header and format policy (#154)
+Plan: 21.1-01 complete (1 of 4); next: 21.1-02 (the header check at every open point)
+Status: In progress
+Last activity: 2026-11-24 — 21.1-01 complete: store header core, read-only daemon mode, tracer
 
 Progress: [█████░░░░░] 50%
 
@@ -89,6 +89,7 @@ Progress: [█████░░░░░] 50%
 | Phase 21 P07 | 75 min | 3 tasks | 10 files |
 | Phase 21 P08 | 50 min | 3 tasks | 12 files |
 | Phase 21 P09 | 60 min | 2 tasks | 8 files |
+| Phase 21.1 P01 | 74min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -201,6 +202,9 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21]: 21-08: POOL-05 bench verdict=PASS on the read phase (ratio_read_4_1=2.69; write 1.26), mem_bar=pass (178 MiB at 8 workers), mem16_max_mib=223; the metadata phase runs in its own mount so lock-stats rows cover it alone
 - [Phase 21]: 21-09: POOL-01..05 Complete on evidence (POOL-04 on ci-evidence for 7853542; POOL-05 on verdict=PASS, mem_bar=pass, R1=pass); [Step limit] closed by the 21-05 mmap threshold, no step limit
 - [Phase 21]: 21-09: no follow-up issue for POOL-05; write plateau (1.26x), S7 R2/R3 at 16 writers and no gain at 16 workers are owner reports in deferred-items.md
+- [Phase 21.1]: 21.1-01: header::read checks the 64 KiB bound before UTF-8; a header that is not UTF-8 has its own text (msg_not_text), to document next to M10
+- [Phase 21.1]: 21.1-01: Started::stop drops the file system before mount.lock; on a failed mount it also stops the commit timer and the segment GC
+- [Phase 21.1]: 21.1-01: --hash and --auto-snapshot are ignored (nothing written) on a ro_compat mount until plan 21.1-02 adds M11 and M12
 
 ### Pending Todos
 
@@ -228,8 +232,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-24T16:49:44.957Z
-Stopped at: Phase 21 complete, ready to plan Phase 22
+Last session: 2026-11-24T19:53:29.906Z
+Stopped at: Completed 21.1-01-PLAN.md
 Resume file: None
 
 ## Operator Next Steps

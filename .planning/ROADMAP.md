@@ -381,13 +381,13 @@ Plans:
   3. A store with no header is refused with a clear message (no backward compatibility)
   4. `slicefs stats` prints the format number and the flags
   5. `docs/design/store-format.md` gives the header layout, the flag classes, the flag list, the error messages and the format policy, and matches the code; the README has one line and a link
-**Plans:** 4 plans
+**Plans:** 1/4 plans executed
 
 One plan per wave; executors run them in order.
 
 Plans:
 **Wave 1** *(tracer)*
-- [ ] 21.1-01-PLAN.md — Tracer: header core (format 7, flag lines, parse order), `mount::start`/`Started::stop` split, read-only daemon mode for an unknown ro_compat flag (in-process tree test, red with only `RO`), refusals for `mount.lock` and a pending write log
+- [x] 21.1-01-PLAN.md — Tracer: header core (format 7, flag lines, parse order), `mount::start`/`Started::stop` split, read-only daemon mode for an unknown ro_compat flag (in-process tree test, red with only `RO`), refusals for `mount.lock` and a pending write log
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 21.1-02-PLAN.md — Header check at every open point before any write; refusals: no header with data, incompat, format 6 and other numbers, bad lines; rewrite keeps flags and lines; write commands, `--hash` and `--auto-snapshot` refused on ro-compat; one helper in the 13 test builders
