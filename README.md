@@ -11,6 +11,27 @@ SliceFS splits files into variable-sized content-addressed blocks, stores each u
 - **Compression**: zstd per object (dedup works on the original bytes, before compression). `slicefs mount --compression zstd[:LEVEL]|none` sets it for the new data of a mount. 8 Boost releases (1.80 to 1.87, as tars) in one store: 6,222 MiB of data in 891 MiB (6.99x).
 - **Hash agility**: an object ID names its hash (a tag byte, then a 32-byte digest). `slicefs mount --hash NAME` (or `seed --hash`) changes the hash of new objects and records it in the store; objects of the old hash stay readable and verifiable.
 
+## Why SliceFS (compared with dedup in other file systems)
+
+SliceFS is a normal mountable POSIX file system with transparent dedup, not a backup tool or an archive format. It runs on top of any existing file system on Linux and macOS: the store is a directory, with no kernel module, no own disk and no reformat.
+
+| | SliceFS | Other file systems |
+|---|---|---|
+| Block boundaries | Content-defined (FastCDC, 4-32 KiB): after an insert, the boundaries move with the data, so duplicates are still found | ZFS dedup, VDO and similar use fixed-size blocks: one byte inserted near the start shifts all later blocks, so they no longer match |
+| When dedup runs | Inline, at write, always | btrfs and XFS share data only for explicit copies (`cp --reflink`) or after an offline pass (for example `duperemove`); APFS shares only clones |
+| RAM for dedup | The chunk index is on disk (sorted runs and Bloom filters): 2.2-3.3 bytes of RAM per object; a store of 100 million objects opens in 0.49 s | Classic ZFS dedup keeps its dedup table (DDT) in RAM, commonly cited at hundreds of bytes per block, so it is often not recommended (OpenZFS 2.3 "fast dedup" lowers the cost) |
+| Compression | zstd per object, after dedup (dedup works on the original bytes) | Varies |
+| Object IDs | Content addresses (BLAKE3-256 by default): the same block has the same ID in every store, for later sync and distributed use | Block pointers local to one pool or volume |
+
+Example: 8 Boost releases (1.80 to 1.87, as tars), 6,222 MiB of data, take 891 MiB in one store (6.99x).
+
+Best fit: many similar versions of data (source trees, build output, releases, archives), and machines where ZFS dedup costs too much RAM and reflink copies are not practical.
+
+Limits today:
+- SliceFS is a FUSE file system in user space. Each request has a cost, so it is slower than an in-kernel file system. Multithreaded request handling is in progress (#22).
+- Status is preview: the on-disk store format can still change between releases.
+- It is not yet a good fit for databases or VM images with heavy random I/O.
+
 ## Status
 
 - **v1.0 shipped** — all POSIX semantics, mount/unmount/seed/gc/snapshot/stats/scrub. CI runs `cargo test` and [pjdfstest](https://github.com/pjd/pjdfstest) on Linux, and `cargo test` on macOS.
