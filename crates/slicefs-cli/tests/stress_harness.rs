@@ -1569,6 +1569,75 @@ fn vmhwm_mib() -> Option<u64> {
     Some(kb >> 10)
 }
 
+/// S7 memory diagnosis (glibc only). `mem_now` gives the live heap from
+/// `mallinfo2` (in use = uordblks + hblkhd) and `VmRSS`, `RssAnon`, `RssFile`
+/// of `/proc/self/status`, all in MiB.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+mod s7mem {
+    #[derive(Clone, Copy, Default)]
+    pub struct Mem {
+        pub live: u64,
+        pub rss: u64,
+        pub anon: u64,
+        pub file: u64,
+    }
+
+    fn status_mib(status: &str, key: &str) -> u64 {
+        status.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()).unwrap_or(0) >> 10
+    }
+
+    pub fn mem_now() -> Mem {
+        // SAFETY: mallinfo2 takes no pointers; glibc owns the state.
+        let mi = unsafe { libc::mallinfo2() };
+        let st = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        Mem { live: ((mi.uordblks + mi.hblkhd) >> 20) as u64, rss: status_mib(&st, "VmRSS:"), anon: status_mib(&st, "RssAnon:"), file: status_mib(&st, "RssFile:") }
+    }
+
+    /// Sample `mem_now` every 50 ms until `stop`; the sample with the most
+    /// live heap and the sample with the most RSS.
+    pub fn sample(stop: &std::sync::atomic::AtomicBool) -> (Mem, Mem) {
+        let (mut by_live, mut by_rss) = (Mem::default(), Mem::default());
+        while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+            let m = mem_now();
+            if m.live > by_live.live {
+                by_live = m;
+            }
+            if m.rss > by_rss.rss {
+                by_rss = m;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        (by_live, by_rss)
+    }
+
+    /// One `S7 heap` line: the two peak samples, then the state now, then
+    /// `malloc_trim(0)` and the RSS after it.
+    pub fn print(peaks: (Mem, Mem)) {
+        let (pl, pr) = peaks;
+        // SAFETY: as above.
+        let mi = unsafe { libc::mallinfo2() };
+        let now = mem_now();
+        let released = unsafe { libc::malloc_trim(0) };
+        let after = mem_now();
+        println!(
+            "S7 heap peak_live_mib={} rss_at_peak_live_mib={} peak_rss_sample_mib={} live_at_peak_rss_mib={} anon_at_peak_rss_mib={} file_at_peak_rss_mib={} \
+             end_live_mib={} end_mmap_mib={} end_arena_mib={} end_free_in_arenas_mib={} end_rss_mib={} end_anon_mib={} end_file_mib={} rss_after_trim_mib={} anon_after_trim_mib={} trim_released={released}",
+            pl.live, pl.rss, pr.rss, pr.live, pr.anon, pr.file,
+            now.live, mi.hblkhd >> 20, mi.arena >> 20, mi.fordblks >> 20, now.rss, now.anon, now.file, after.rss, after.anon
+        );
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+mod s7mem {
+    #[derive(Clone, Copy, Default)]
+    pub struct Mem;
+    pub fn sample(_stop: &std::sync::atomic::AtomicBool) -> (Mem, Mem) {
+        (Mem, Mem)
+    }
+    pub fn print(_peaks: (Mem, Mem)) {}
+}
+
 fn ms(v: u64) -> f64 {
     v as f64 / 1_000_000.0
 }
@@ -2008,6 +2077,7 @@ fn s7_budget_baseline() {
     let rss_start = peak_rss_mib();
     let max_dirty = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
+    let mem_stop = &AtomicBool::new(false);
     let mut slowest = 0u64;
     let mut mismatches: Vec<Mismatch> = Vec::new();
     let mut commits = CommitHists::new();
@@ -2027,6 +2097,10 @@ fn s7_budget_baseline() {
             }
         }
         let committer = s.spawn(|| ctx.commit_loop_every(&stop, Duration::from_secs(commit_secs)));
+        // Memory diagnosis: peak live heap and peak RSS during the write phase.
+        let sampler = s.spawn(|| s7mem::sample(mem_stop));
+        // Stops the sampler also when a writer panics, so the scope join does not wait.
+        let _mem_guard = SetOnDrop(mem_stop);
         // Write phase: the whole file in 1 MiB writes, then the random mix.
         let writers: Vec<_> = files
             .iter()
@@ -2092,6 +2166,8 @@ fn s7_budget_baseline() {
             models.push(ver);
         }
         rss_writes = peak_rss_mib();
+        mem_stop.store(true, Ordering::SeqCst);
+        s7mem::print(sampler.join().expect("S7 memory sampler panicked"));
         // Check phase: every block of every file against its version.
         let checkers: Vec<_> = files
             .iter()
@@ -2174,6 +2250,15 @@ fn s7_budget_baseline() {
             Some(v) => assert!(v <= CAP_MIB, "seed={seed}: S7 flusher form: VmHWM {v} MiB is above the cap {CAP_MIB} MiB"),
             None => println!("S7 cap not checked: no VmHWM on this system"),
         }
+    }
+}
+
+/// Sets the flag when it drops (also on a panic).
+struct SetOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for SetOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
     }
 }
 
