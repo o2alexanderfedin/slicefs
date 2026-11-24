@@ -337,7 +337,7 @@ Plans:
   3. A worker panic aborts the daemon; the next mount replays the write log, and no request is served after a half-done update
   4. All tests and pjdfstest pass with 4 workers on Linux (Docker CI), and the tests pass on macOS FSKit CI with the macOS default
   5. Parallel I/O on different files scales with the number of workers on Linux, and the measured result is recorded
-**Plans**: 8/9 plans executed
+**Plans**: 9/9 plans executed
 
 One plan per wave; executors run them in order.
 
@@ -367,7 +367,7 @@ Plans:
 - [x] 21-08-PLAN.md — Bench at 1/2/4/8/16 workers (MB/s, VmHWM), 1.5x bar and 320 MiB memory bar set first; macOS bench workflow; final CI evidence
 
 **Wave 9** *(blocked on Wave 8 completion)*
-- [ ] 21-09-PLAN.md — Phase 21 result, README `--workers`, deferred list, POOL marks on evidence, phase gate
+- [x] 21-09-PLAN.md — Phase 21 result, README `--workers`, deferred list, POOL marks on evidence, phase gate
 
 ### Phase 22: Chunk profiles
 
@@ -421,7 +421,7 @@ Plans:
 | 18. Spikes, baseline and stress harness | 7/7 | Complete    | 2026-11-21 |
 | 19. Fine-grained locks | 16/16 | Complete    | 2026-11-22 |
 | 20. Dirty budget and rebase flusher | 8/8 | Complete    | 2026-11-23 |
-| 21. Worker pool | 8/9 | In Progress | - |
+| 21. Worker pool | 9/9 | In Progress | - |
 | 22. Chunk profiles | 0/0 | Not started | - |
 | 23. Hashes and rehash | 0/0 | Not started | - |
 | 24. Prolly evaluation | 0/0 | Not started | - |

@@ -5,17 +5,17 @@ milestone_name: Concurrency & Store Evolution
 current_phase: 21
 current_phase_name: Worker pool
 current_plan: 9
-status: executing
-stopped_at: Completed 21-08-PLAN.md
-last_updated: "2026-11-24T15:03:40.604Z"
+status: verifying
+stopped_at: Completed 21-09-PLAN.md
+last_updated: "2026-11-24T16:50:05.389Z"
 last_activity: 2026-11-24
-last_activity_desc: "21-08 complete (Linux pool bench verdict=PASS, read 2.69x at 4 workers, write 1.26x; mem_bar=pass); orchestrator: macOS bench on ci-pool/**, CI evidence for 7853542, then 21-09"
-state_head: f6149bb781705afd3a400360065096c35da1c564
+last_activity_desc: "21-09 complete (Phase 21 result, README --workers, deferred list, POOL-01..05 Complete on evidence, gate green); next: Phase 21 review and verification"
+state_head: 6291c933fc5151f7126ac54579da3f6cd97bb17c
 progress:
   total_phases: 7
   completed_phases: 3
   total_plans: 40
-  completed_plans: 39
+  completed_plans: 40
   percent: 43
 ---
 
@@ -33,9 +33,9 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 Current Plan: 9
 Total Plans in Phase: 9
 Phase: 21 — Worker pool
-Plan: 21-07 complete (7 of 9); next: 21-08 (plan 8 of 9), after the orchestrator CI check of 21-07
-Status: Ready to execute
-Last activity: 2026-11-24 — 21-07 complete (every Linux CI mount takes --workers from SLICEFS_WORKERS and fails on a wrong Workers line; ci.yml Linux job SLICEFS_WORKERS=4 with a "Workers: 4 (set)" grep per step; local Docker with 4 workers: all PASS, verify PASS, pjdfstest Files=237 Tests=8792 Result: PASS; red run FAIL as expected; POOL-04 stays open until the CI evidence after 21-08)
+Plan: 21-09 complete (9 of 9); next: review and verification of Phase 21 (the orchestrator runs phase complete)
+Status: Phase complete — ready for verification
+Last activity: 2026-11-24 — 21-09 complete (Phase 21 result in the research doc; README --workers and SLICEFS_FUSE_TRACE=1; deferred list; POOL-01 to POOL-05 Complete on evidence; gate: full suite exit 0, Docker smoke and live checks with 4 workers PASS)
 
 Progress: [████░░░░░░] 43%
 
@@ -88,6 +88,7 @@ Progress: [████░░░░░░] 43%
 | Phase 21 P06 | 45 min | 2 tasks | 2 files |
 | Phase 21 P07 | 75 min | 3 tasks | 10 files |
 | Phase 21 P08 | 50 min | 3 tasks | 12 files |
+| Phase 21 P09 | 60 min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -198,6 +199,8 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21]: 21-06: S7 with the 21-05 mmap threshold passes the 320 MiB bar at 1-8 writers (R1=pass, Pm(8)=290); 16 writers 412-426 MiB (R2, R3 miss, report only); no step limit needed for the S7 bar; the 21-08 mem_bar is still open
 - [Phase 21]: 21-07: the Linux CI scripts add --workers from SLICEFS_WORKERS only when a mount names none, and read the Workers line with grep -o (a cut line of a killed daemon cannot hide it)
 - [Phase 21]: 21-08: POOL-05 bench verdict=PASS on the read phase (ratio_read_4_1=2.69; write 1.26), mem_bar=pass (178 MiB at 8 workers), mem16_max_mib=223; the metadata phase runs in its own mount so lock-stats rows cover it alone
+- [Phase 21]: 21-09: POOL-01..05 Complete on evidence (POOL-04 on ci-evidence for 7853542; POOL-05 on verdict=PASS, mem_bar=pass, R1=pass); [Step limit] closed by the 21-05 mmap threshold, no step limit
+- [Phase 21]: 21-09: no follow-up issue for POOL-05; write plateau (1.26x), S7 R2/R3 at 16 writers and no gain at 16 workers are owner reports in deferred-items.md
 
 ### Pending Todos
 
@@ -221,8 +224,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-24T15:03:40.177Z
-Stopped at: Completed 21-08-PLAN.md
+Last session: 2026-11-24T16:49:44.957Z
+Stopped at: Completed 21-09-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
