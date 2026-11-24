@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v2.2
 milestone_name: Concurrency & Store Evolution
-current_phase: 21.1
-current_phase_name: Store header and format policy (#154)
-current_plan: 2
+current_phase: "21.1"
+current_phase_name: "Store header and format policy (#154)"
+current_plan: 3
 status: executing
-stopped_at: Completed 21.1-01-PLAN.md
-last_updated: "2026-11-24T19:53:32.739Z"
+stopped_at: Completed 21.1-02-PLAN.md
+last_updated: "2026-11-24T21:03:01.447Z"
 last_activity: 2026-11-24
 last_activity_desc: 21.1-01 complete (store header core, read-only daemon mode, tracer)
-state_head: 8de8f33a9ed3c2f351ca39c85ced3d69b3e46662
+state_head: 88df6fc6e56ac2730a94a4fb31a931ab110b4257
 progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 44
-  completed_plans: 41
+  completed_plans: 42
   percent: 50
 ---
 
@@ -30,11 +30,11 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 2
+Current Plan: 3
 Total Plans in Phase: 4
 Phase: 21.1 — Store header and format policy (#154)
 Plan: 21.1-01 complete (1 of 4); next: 21.1-02 (the header check at every open point)
-Status: In progress
+Status: Ready to execute
 Last activity: 2026-11-24 — 21.1-01 complete: store header core, read-only daemon mode, tracer
 
 Progress: [█████░░░░░] 50%
@@ -90,6 +90,7 @@ Progress: [█████░░░░░] 50%
 | Phase 21 P08 | 50 min | 3 tasks | 12 files |
 | Phase 21 P09 | 60 min | 2 tasks | 8 files |
 | Phase 21.1 P01 | 74min | 3 tasks | 7 files |
+| Phase 21.1 P02 | 57min | 3 tasks | 16 files |
 
 ## Accumulated Context
 
@@ -205,6 +206,8 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21.1]: 21.1-01: header::read checks the 64 KiB bound before UTF-8; a header that is not UTF-8 has its own text (msg_not_text), to document next to M10
 - [Phase 21.1]: 21.1-01: Started::stop drops the file system before mount.lock; on a failed mount it also stops the commit timer and the segment GC
 - [Phase 21.1]: 21.1-01: --hash and --auto-snapshot are ignored (nothing written) on a ro_compat mount until plan 21.1-02 adds M11 and M12
+- [Phase 21.1]: 21.1-02: header::check is the first statement of every command that writes; a store with data and no header is refused (M1) for every Want
+- [Phase 21.1]: 21.1-02: write commands on a path with no store write FORMAT before they fail (gc, snapshot create/switch); a later small fix can refuse a path with no segments/ first
 
 ### Pending Todos
 
@@ -232,8 +235,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-24T19:53:29.906Z
-Stopped at: Completed 21.1-01-PLAN.md
+Last session: 2026-11-24T21:02:53.434Z
+Stopped at: Completed 21.1-02-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
