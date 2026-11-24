@@ -40,7 +40,7 @@ Largest values of the 3 default runs:
 | 8 | 85 | 178 | 43 | 38 | 564 | 1048576 |
 | 16 | 102 | 223 | 45 | 40 | 115 | 1048576 |
 
-The largest queue waits are on the write mount A. The WRITE jobs of 16 clients wait behind the fsync and save work of the other jobs. The largest WRITE the pool saw is 1 MiB at every worker count. The metadata mount has a max queue wait of 2 to 3 ms.
+The largest queue waits are on the write mount A. This is consistent with WRITE jobs that wait behind the fsync and save work of other jobs, but the bench does not isolate the cause. The largest WRITE the pool saw is 1 MiB at every worker count. The metadata mount has a max queue wait of 2 to 3 ms.
 
 Spread: the read phase varies a lot between runs. At 8 workers the values are 490.2, 1324.7 and 1304.5. At 16 they are 1190.7, 1365.3 and 438.5. The median removes one low run at each of these counts.
 
@@ -135,9 +135,9 @@ Metadata phase (mount M), the sites with the largest waits, in us:
 - At 8 workers, one `stripe` hold was 68 ms and one wait was 47 ms. The p99 wait is 0.0, so this is one long hold, not a steady contention. The log does not show what held the stripe so long.
 - These numbers match the flat metadata rates: create files/s is 6579 at 4 and 6601 at 8 workers.
 
-Write phase (mount A): `store` has the largest wait. Its wait p99 is 90.9 us at 4 workers and 249.0 us at 8, and its wait max is 4.2 ms and 13.5 ms. Its hold max is 3.5 ms and 13.1 ms. All writers append to the store under this one lock (the single pack appender). This is the measured reason why the write phase stops rising at 2 workers (ratio 1.26). The read phase does not take this lock for long, and it scales.
+Write phase (mount A): `store` has the largest wait. Its wait p99 is 90.9 us at 4 workers and 249.0 us at 8, and its wait max is 4.2 ms and 13.5 ms. Its hold max is 3.5 ms and 13.1 ms. All writers append to the store under this one lock (the single pack appender). This is consistent with a write phase that stops rising at 2 workers (ratio 1.26). The cause is not isolated: the lock rows give p99 and max waits, not the total wait time, so fsync and disk limits are not ruled out. The read phase does not take this lock for long, and it scales.
 
 ## Notes
 
-- The pass comes from the read phase. The write phase does not reach 1.5x. Its limit is the store lock (above), as S3 and the research foresaw ("the single pack appender remains").
+- The pass comes from the read phase. The write phase does not reach 1.5x. The store lock waits (above) are consistent with the single pack appender that S3 and the research named ("the single pack appender remains"), but the bench does not prove it is the only limit.
 - The memory bar passes with a wide margin: 178 of 320 MiB at 8 workers.

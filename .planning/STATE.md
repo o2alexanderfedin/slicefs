@@ -4,18 +4,18 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: 21
 current_phase_name: Worker pool
-current_plan: 8
+current_plan: 9
 status: executing
-stopped_at: Completed 21-07-PLAN.md
-last_updated: "2026-11-24T11:03:34.143Z"
+stopped_at: Completed 21-08-PLAN.md
+last_updated: "2026-11-24T15:03:40.604Z"
 last_activity: 2026-11-24
-last_activity_desc: "21-07 complete (CI Linux job with SLICEFS_WORKERS=4 and a Workers check per step; local Docker all, verify and pjdfstest pass with 4 workers); orchestrator CI check, then 21-08"
-state_head: bc0d9279991d62e97e8f1b57bd3fbfe440d27c70
+last_activity_desc: "21-08 complete (Linux pool bench verdict=PASS, read 2.69x at 4 workers, write 1.26x; mem_bar=pass); orchestrator: macOS bench on ci-pool/**, CI evidence for 7853542, then 21-09"
+state_head: f6149bb781705afd3a400360065096c35da1c564
 progress:
   total_phases: 7
   completed_phases: 3
   total_plans: 40
-  completed_plans: 38
+  completed_plans: 39
   percent: 43
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 8
+Current Plan: 9
 Total Plans in Phase: 9
 Phase: 21 — Worker pool
 Plan: 21-07 complete (7 of 9); next: 21-08 (plan 8 of 9), after the orchestrator CI check of 21-07
@@ -87,6 +87,7 @@ Progress: [████░░░░░░] 43%
 | Phase 21 P05 | 40 min | 2 tasks | 11 files |
 | Phase 21 P06 | 45 min | 2 tasks | 2 files |
 | Phase 21 P07 | 75 min | 3 tasks | 10 files |
+| Phase 21 P08 | 50 min | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -196,6 +197,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21]: 21-05: mallopt(M_MMAP_THRESHOLD, 128 KiB) first in run_mount on Linux glibc; all allocator calls in alloc_tune.rs; no step limit unless 21-06 misses CAP_MIB 320
 - [Phase 21]: 21-06: S7 with the 21-05 mmap threshold passes the 320 MiB bar at 1-8 writers (R1=pass, Pm(8)=290); 16 writers 412-426 MiB (R2, R3 miss, report only); no step limit needed for the S7 bar; the 21-08 mem_bar is still open
 - [Phase 21]: 21-07: the Linux CI scripts add --workers from SLICEFS_WORKERS only when a mount names none, and read the Workers line with grep -o (a cut line of a killed daemon cannot hide it)
+- [Phase 21]: 21-08: POOL-05 bench verdict=PASS on the read phase (ratio_read_4_1=2.69; write 1.26), mem_bar=pass (178 MiB at 8 workers), mem16_max_mib=223; the metadata phase runs in its own mount so lock-stats rows cover it alone
 
 ### Pending Todos
 
@@ -219,8 +221,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-24T11:03:33.708Z
-Stopped at: Completed 21-07-PLAN.md
+Last session: 2026-11-24T15:03:40.177Z
+Stopped at: Completed 21-08-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
