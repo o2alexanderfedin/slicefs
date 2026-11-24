@@ -241,7 +241,7 @@ fn two_write_handles_on_one_file_share_their_writes() {
     });
 }
 
-// A commit logs the bytes of a Buffered handle again (they are only in RAM).
+// A commit logs the bytes of an overlay handle again (they are only in RAM).
 // After a crash, replay must give the file the mtime of its last write and
 // the ctime of its last change, not the time of the commit or of the replay.
 #[test]
@@ -255,7 +255,7 @@ fn a_commit_keeps_the_times_of_a_buffered_file() {
             let _t = oplog::Clock::freeze_at((1_700_000_000, 0));
             let (ino, fh) = create(&fs, 1, "buf.bin");
             write(&fs, fh, 0, &data(10, 50_000));
-            write(&fs, fh, 100, &[0xEE; 300]); // not sequential: Buffered
+            write(&fs, fh, 100, &[0xEE; 300]); // not sequential: Overlay
             (ino, fh)
         };
         assert!(!fs.test_is_streaming(fh));
@@ -294,7 +294,7 @@ fn fsynced_buffered_bytes_survive_a_commit_and_a_crash() {
         let fs = new_fs_with(dir.path(), WalConfig::FlushOnFsync);
         let (ino, fh) = create(&fs, 1, "buf.bin");
         write(&fs, fh, 0, &data(11, 2_000));
-        write(&fs, fh, 100, &[0xEE; 300]); // not sequential: Buffered
+        write(&fs, fh, 100, &[0xEE; 300]); // not sequential: Overlay
         assert!(!fs.test_is_streaming(fh));
         fsync(&fs, ino, fh);
         fs.commit_cut().unwrap();

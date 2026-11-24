@@ -344,7 +344,7 @@ fn test_nonseq_fallback_on_gap() {
     // Write 5 bytes at offset 0 (sequential)
     fs.test_write(fh, 0, b"AAAAA").expect("write 1 should succeed");
 
-    // Write 5 bytes at offset 20 (gap triggers fallback)
+    // Write 5 bytes at offset 20 (the gap makes it a pending write in the stream)
     fs.test_write(fh, 20, b"BBBBB").expect("write 2 should succeed");
 
     // Release
@@ -393,7 +393,7 @@ fn test_pwrite_new_file_gap_zero_pads() {
     let (ino, fh) = fs.test_create(1, "pwrite_new.txt", S_IFREG | 0o644, 0o022, 1000, 1000)
         .expect("create should succeed");
 
-    // Write 5 bytes at offset 50 on a brand new file (byte_count=0, triggers immediate fallback)
+    // Write 5 bytes at offset 50 on a brand new file (byte_count=0, a pending write in the stream)
     fs.test_write(fh, 50, b"hello").expect("write should succeed");
 
     // Release
@@ -406,7 +406,7 @@ fn test_pwrite_new_file_gap_zero_pads() {
     assert_eq!(&content[50..55], b"hello");
 }
 
-// ── Test 16: read in buffered mode (STRM-02e) ──
+// ── Test 16: read with a pending write (STRM-02e) ──
 
 #[test]
 fn test_read_in_buffered_mode() {
@@ -417,10 +417,10 @@ fn test_read_in_buffered_mode() {
     // Write 10 bytes at offset 0 (sequential)
     fs.test_write(fh, 0, b"AAAAAAAAAA").expect("write 1 should succeed");
 
-    // Write 5 bytes at offset 20 (non-sequential, triggers fallback)
+    // Write 5 bytes at offset 20 (non-sequential: a pending write in the stream)
     fs.test_write(fh, 20, b"BBBBB").expect("write 2 should succeed");
 
-    // DO NOT release -- read back via test_read while still open (buffered mode)
+    // DO NOT release -- read back via test_read while still open (pending write)
     let content = fs.test_read(ino, 0, 1024).expect("read should succeed");
     assert_eq!(content.len(), 25);
     assert_eq!(&content[0..10], b"AAAAAAAAAA");
@@ -431,7 +431,7 @@ fn test_read_in_buffered_mode() {
     fs.test_release(ino, fh).expect("release should succeed");
 }
 
-// ── Test 17: fsync in buffered mode (STRM-02f) ──
+// ── Test 17: fsync with a pending write (STRM-02f) ──
 
 #[test]
 fn test_fsync_in_buffered_mode() {
@@ -442,10 +442,10 @@ fn test_fsync_in_buffered_mode() {
     // Write 10 bytes at offset 0 (sequential)
     fs.test_write(fh, 0, b"AAAAAAAAAA").expect("write 1 should succeed");
 
-    // Write 5 bytes at offset 20 (triggers fallback)
+    // Write 5 bytes at offset 20 (a pending write in the stream)
     fs.test_write(fh, 20, b"BBBBB").expect("write 2 should succeed");
 
-    // fsync mid-stream in buffered mode
+    // fsync mid-stream with a pending write
     fs.test_fsync(ino, fh).expect("fsync should succeed");
 
     // Write 5 more bytes at offset 30
@@ -464,7 +464,7 @@ fn test_fsync_in_buffered_mode() {
     assert_eq!(&content[30..35], b"CCCCC");
 }
 
-// ── Test 18: truncate in buffered mode (STRM-02g) ──
+// ── Test 18: truncate with a pending write (STRM-02g) ──
 
 #[test]
 fn test_truncate_in_buffered_mode() {
@@ -475,7 +475,7 @@ fn test_truncate_in_buffered_mode() {
     // Write 10 bytes at offset 0 (sequential)
     fs.test_write(fh, 0, b"AAAAAAAAAA").expect("write 1 should succeed");
 
-    // Write 5 bytes at offset 20 (triggers fallback)
+    // Write 5 bytes at offset 20 (a pending write in the stream)
     fs.test_write(fh, 20, b"BBBBB").expect("write 2 should succeed");
 
     // Truncate to 15 -- removes the non-sequential part at offset 20
@@ -500,7 +500,7 @@ fn test_out_of_order_writes() {
         .expect("create should succeed");
 
     // Write chunks in reverse order simulating writeback_cache reordering
-    fs.test_write(fh, 30, b"CCCC").expect("write C should succeed"); // offset 30, triggers immediate fallback
+    fs.test_write(fh, 30, b"CCCC").expect("write C should succeed"); // offset 30, a pending write in the stream
     fs.test_write(fh, 0, b"AAAA").expect("write A should succeed");
     fs.test_write(fh, 15, b"BBBB").expect("write B should succeed");
 
