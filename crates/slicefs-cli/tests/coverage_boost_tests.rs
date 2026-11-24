@@ -259,7 +259,7 @@ fn test_write_nonsequential_after_write_loads_from_streaming_state() {
     // "hello" with positions 3-4 overwritten: "helXX" → wait, offset 3 = 'l','o' → "helXXo"? No:
     // "hello" = [h,e,l,l,o] at [0,1,2,3,4]
     // pwrite at offset 3 with "XX" → [h,e,l,X,X]
-    assert_eq!(content, b"helXX", "fallback to buffered must produce correct merged content");
+    assert_eq!(content, b"helXX", "the switch to an overlay must give the correct merged content");
 }
 
 #[test]
@@ -361,7 +361,7 @@ fn test_fsync_buffered_mode_flushes_to_cas() {
     fs.test_fsync(ino, fh).unwrap();
 
     let manifest = fs.meta().get_manifest(ino).unwrap();
-    assert!(!manifest.is_empty(), "manifest must be set after fsync in buffered mode");
+    assert!(!manifest.is_empty(), "manifest must be set after fsync in overlay mode");
 
     // Verify content is correct
     let content = fs.read_content(&manifest[0]).unwrap();
@@ -1141,7 +1141,7 @@ fn test_statfs_with_store_path_and_written_data() {
 #[test]
 fn test_write_fallback_with_prior_committed_root_decrements_refcount() {
     // Streaming write → fsync (commits root) → non-sequential write (switch to an overlay)
-    // This exercises lines 344-345: decrement_refcount on the old_root in streaming fallback
+    // This exercises: decrement_refcount on the old_root at the switch to an overlay
     let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "fallback_root.txt", S_IFREG | 0o644, 0, 0, 0)
         .unwrap();
@@ -1175,7 +1175,7 @@ fn test_write_fallback_with_prior_committed_root_decrements_refcount() {
 #[test]
 fn test_write_fallback_loads_from_manifest_when_streaming_empty() {
     // File has committed content → open fresh handle (byte_count=0) → non-sequential write
-    // This exercises lines 322-324: loading from committed manifest when streaming state is empty
+    // This exercises: loading from committed manifest when streaming state is empty
     let (fs, _dir) = fresh_fs();
 
     // Create file with committed content
@@ -1205,7 +1205,7 @@ fn test_write_fallback_loads_from_manifest_when_streaming_empty() {
     fs.test_fsync(ino2, fh2).unwrap(); // Now byte_count > 0 (8) and committed
 
     // Write at non-sequential offset → triggers fallback with existing streaming state
-    // (not the empty streaming path, but still covers lines 322-324 via the else branch)
+    // (not the empty streaming path, but still covers the load from the committed manifest via the else branch)
     fs.test_write(fh2, 0, b"override").unwrap(); // offset 0 < next_expected=8 → fallback
     fs.test_release(ino2, fh2).unwrap();
 
@@ -1217,7 +1217,7 @@ fn test_write_fallback_loads_from_manifest_when_streaming_empty() {
 
 #[test]
 fn test_setattr_size_zero_buffered_with_prior_committed_root() {
-    // Exercises line 660: decrement_refcount in Buffered zero-truncate
+    // Exercises: decrement_refcount in an overlay zero-truncate
     let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "buf_committed_zero.txt", S_IFREG | 0o644, 0, 0, 0)
         .unwrap();
@@ -1248,7 +1248,7 @@ fn test_setattr_size_zero_buffered_with_prior_committed_root() {
 
 #[test]
 fn test_setattr_size_streaming_resize_with_prior_committed_root() {
-    // Exercises line 729: decrement_refcount in Streaming non-zero resize with prior root
+    // Exercises: decrement_refcount in Streaming non-zero resize with prior root
     let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "strm_committed_resize.txt", S_IFREG | 0o644, 0, 0, 0)
         .unwrap();
@@ -1305,7 +1305,7 @@ fn test_dir_size_exercised_via_compute_statfs() {
     assert!(files >= 1, "must have at least root inode");
     assert!(bsize >= 512, "bsize must be reasonable");
     // On normal filesystems blocks > 0
-    // This also exercises the statvfs path in compute_statfs (lines 918-925)
+    // This also exercises the statvfs path in compute_statfs
     let _ = blocks; // may be 0 on some test envs, that's ok
 }
 
@@ -1313,7 +1313,7 @@ fn test_dir_size_exercised_via_compute_statfs() {
 
 #[test]
 fn test_statfs_no_store_path_returns_zero_blocks() {
-    // exercises the "None" branch in compute_statfs (fallback line 931)
+    // exercises the "None" branch in compute_statfs (the fallback)
     let (fs, _dir) = fresh_fs(); // store_path = None
     let (blocks, bfree, bavail, _files, _ffree, _bsize) = fs.test_statfs_values();
     assert_eq!(blocks, 0, "no store_path should give 0 blocks");

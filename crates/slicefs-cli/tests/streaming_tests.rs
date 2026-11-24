@@ -614,7 +614,7 @@ fn sparse_write_far_past_end_stays_streaming() {
     let far = 80u64 << 20; // beyond the 64 MiB reorder window
     fs.test_write(fh, far, b"X").unwrap();
     fs.test_fsync(ino, fh).unwrap();
-    assert!(fs.test_is_streaming(fh), "a gap must not switch the handle to Buffered mode");
+    assert!(fs.test_is_streaming(fh), "a gap must not switch the handle to an overlay");
     fs.test_write(fh, far + 1, b"tail").unwrap();
     assert!(fs.test_is_streaming(fh));
     fs.test_release(ino, fh).unwrap();

@@ -194,7 +194,7 @@ fn a_commit_keeps_out_of_order_bytes_pending_and_the_handle_streaming() {
         let _gate = fs.commit_gate();
         fs.commit_cut().unwrap();
         write(&fs, fh, 1 << 20, b); // the late write fills the gap
-        assert!(fs.test_is_streaming(fh), "the cut must not push the handle into Buffered mode");
+        assert!(fs.test_is_streaming(fh), "the cut must not push the handle into an overlay");
         assert_eq!(fs.test_read(ino, 0, want.len() as u32 + 1).unwrap(), want);
         fsync(&fs, ino, fh);
         std::mem::forget(fs);
