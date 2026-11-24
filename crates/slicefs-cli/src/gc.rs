@@ -88,7 +88,9 @@ pub fn run_gc_mode(store_path: &Path, full: bool) -> Result<(), Box<dyn std::err
 
 /// Run the GC and return its report (the lines that `slicefs gc` prints).
 pub fn gc_report(store_path: &Path, full: bool) -> Result<String, Box<dyn std::error::Error>> {
-    // The store header first, before anything writes (also a GC request).
+    // An existing store only, then the store header, before anything writes
+    // (also a GC request).
+    crate::content::require_store(store_path)?;
     crate::header::check(store_path, crate::header::Want::Write)?;
     // Step 1: A mounted store runs the GC itself: ask the mount and wait.
     if store_path.join("mount.lock").exists() {

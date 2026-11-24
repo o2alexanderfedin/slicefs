@@ -212,3 +212,23 @@ fn an_empty_store_read_writes_nothing() {
     stats::run_stats(dir.path(), false).unwrap();
     assert!(!dir.path().join(FORMAT_FILE).exists(), "no header is written");
 }
+
+/// A command that writes an existing store (gc, snapshot create and switch)
+/// refuses a path with no store and makes nothing there.
+#[test]
+fn a_write_command_on_no_store_makes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let (missing, empty) = (dir.path().join("missing"), dir.path().join("empty"));
+    std::fs::create_dir_all(&empty).unwrap();
+    for store in [&missing, &empty] {
+        let s = |r: Result<(), Box<dyn std::error::Error>>| r.map_err(|e| e.to_string());
+        let results = [
+            ("gc", gc::gc_report(store, false).map(drop).map_err(|e| e.to_string())),
+            ("snapshot create", s(snapshot::run_snapshot_create(store, None))),
+            ("snapshot switch", s(snapshot::run_snapshot_switch(store, "1"))),
+        ];
+        assert_refused(&results, &["failed to load segments: store not found at"]);
+    }
+    assert!(!missing.exists(), "no directory is made");
+    assert_eq!(std::fs::read_dir(&empty).unwrap().count(), 0, "nothing is made");
+}

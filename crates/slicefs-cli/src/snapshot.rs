@@ -40,7 +40,8 @@ pub fn run_snapshot_create(
     store_path: &Path,
     name: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // The store header first, before anything writes.
+    // An existing store only, then the store header, before anything writes.
+    crate::content::require_store(store_path)?;
     crate::header::check(store_path, crate::header::Want::Write)?;
 
     // Refuse to run on a mounted store.
@@ -141,7 +142,8 @@ pub fn run_snapshot_switch(
     store_path: &Path,
     version_or_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // The store header first, before anything writes.
+    // An existing store only, then the store header, before anything writes.
+    crate::content::require_store(store_path)?;
     crate::header::check(store_path, crate::header::Want::Write)?;
 
     // Refuse to run on a mounted store.

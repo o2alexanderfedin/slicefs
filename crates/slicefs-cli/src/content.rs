@@ -26,6 +26,17 @@ pub type Content = Arc<ChunkStore>;
 pub use crate::header::{marker, FORMAT, FORMAT_FILE};
 use crate::header::{self, Header, Line, Want};
 
+/// Refuse a path that is not an existing store (no `segments/` directory).
+/// The commands that write an existing store (gc, snapshot create and
+/// switch) call it before the header check, so that they make nothing on
+/// such a path. `seed` and `mount` make new stores and do not call it.
+pub fn require_store(store: &Path) -> Result<(), String> {
+    if store.join("segments").is_dir() {
+        return Ok(());
+    }
+    Err(format!("failed to load segments: store not found at {}: no segments/ directory", store.display()))
+}
+
 /// The write hash that the header of `store` records: blake3-256 if there
 /// is no header or no hash line. A name this build does not know is an
 /// error.
