@@ -15,6 +15,7 @@ use slicefs_traits::metadata::MetadataStore;
 use tempfile::TempDir;
 
 fn make_fs(store: &Path) -> SliceFsFilesystem {
+    slicefs_cli::header::create(store).unwrap();
     std::fs::create_dir_all(store.join("segments")).unwrap();
     let wal = create_wal(WalConfig::PerOp, store, 1).unwrap();
     let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));

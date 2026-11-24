@@ -262,6 +262,7 @@ mod tests {
 
     /// Create a valid segment-format store with a committed file.
     fn make_seeded_store(store_dir: &TempDir) {
+        crate::header::create(store_dir.path()).unwrap();
         use metadata::store_io::StoreIo;
         use metadata::wal::create_wal;
         use std::sync::{Arc, Mutex};

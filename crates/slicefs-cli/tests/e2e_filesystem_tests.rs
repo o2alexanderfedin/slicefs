@@ -1272,6 +1272,7 @@ fn test_crash_recovery_directory_structure_survives() {
     let store_dir = TempDir::new().unwrap();
 
     {
+        slicefs_cli::header::create(store_dir.path()).unwrap();
         std::fs::create_dir_all(store_dir.path().join("segments")).unwrap();
         let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
         let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));

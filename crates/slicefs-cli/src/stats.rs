@@ -316,6 +316,7 @@ mod tests {
 
     /// Write a valid seeded store in segment format.
     fn write_segment_store(dir: &TempDir) {
+        crate::header::create(dir.path()).unwrap();
         use metadata::wal::create_wal;
         let segs_dir = dir.path().join("segments");
         std::fs::create_dir_all(&segs_dir).unwrap();

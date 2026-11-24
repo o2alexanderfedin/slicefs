@@ -26,6 +26,7 @@ use tempfile::TempDir;
 
 /// Create a `SliceFsFilesystem` backed by a fresh PerOpWal store in `store_dir`.
 fn make_fs_per_op(store_dir: &TempDir) -> SliceFsFilesystem {
+    slicefs_cli::header::create(store_dir.path()).unwrap();
     std::fs::create_dir_all(store_dir.path().join("segments")).unwrap();
     let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
     let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));
