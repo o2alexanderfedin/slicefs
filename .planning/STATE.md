@@ -7,16 +7,16 @@ current_phase_name: Chunk profiles
 current_plan: Not started
 status: planning
 stopped_at: Phase 21 complete, ready to plan Phase 22
-last_updated: "2026-11-24T17:12:09.840Z"
+last_updated: "2026-11-24T17:22:52.154Z"
 last_activity: 2026-11-24
 last_activity_desc: Phase 21 complete, transitioned to Phase 22
-state_head: 78c7f7e342e244d479104cf0699a4821495d325b
+state_head: fd6632bd84dbb12f5da41f89e1c2a16a4dab2e48
 progress:
-  total_phases: 7
+  total_phases: 8
   completed_phases: 4
   total_plans: 40
   completed_plans: 40
-  percent: 57
+  percent: 50
 ---
 
 # Project State
@@ -37,7 +37,7 @@ Plan: 21-09 complete (9 of 9); next: review and verification of Phase 21 (the or
 Status: Ready to plan
 Last activity: 2026-11-24 — Phase 21 complete, transitioned to Phase 22
 
-Progress: [██████░░░░] 57%
+Progress: [█████░░░░░] 50%
 
 ## Performance Metrics
 
@@ -215,6 +215,10 @@ None.
 - Idle index merge can rewrite GBs after a short pause and is not stopped by new writes (#141). Not in v2.2.
 - LOCK-01 open: store lock held across an fsync (ChunkStore::sync second phase) and record pwrites under the store and WAL writer locks stall 20-36 ms behind a concurrent fsync on macOS (19-11 lock rows; deferred-items.md). Decided (G1, G2); plans 19-12 (store) and 19-13 (WAL), measured in 19-16.
 - LOCK-05 open: finalize and the write path fall back to a rebase step or flush with the cell locked after a dropped or concurrent step (19-06/07), so a reader can wait for a writer's I/O under contention (19-11 SUMMARY Finding 5; deferred-items.md). Decided (G3); plans 19-14 (step token, write and read paths) and 19-15 (finalize, setattr, forced-drop evidence).
+
+### Roadmap Evolution
+
+- Phase 21.1 inserted after Phase 21: Store header with compat, ro-compat and incompat feature flags, and a written format policy (#154); owner agreed #154 joins v2.2 after Phase 21
 
 ## Deferred Items
 

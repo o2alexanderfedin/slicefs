@@ -188,6 +188,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
 - [x] **Phase 19: Fine-grained locks** (#21) - no global lock on the hot path, lock rank with a debug checker, log record under the same locks as its apply (completed 2026-11-22)
 - [x] **Phase 20: Dirty budget and rebase flusher** (#21) - no cross-file take-out, a background flusher, writers throttled before they take locks, no deadlock with a commit (completed 2026-11-23)
 - [x] **Phase 21: Worker pool** (#22) - N worker threads by mount option, drain before `destroy()`, abort on panic, 4 workers pass pjdfstest (completed 2026-11-24)
+- [ ] **Phase 21.1: Store header and format policy (#154)** (INSERTED) - one store header with format number and compat/ro-compat/incompat flags, format policy doc
 - [ ] **Phase 22: Chunk profiles** (#67) - FastCDC min/avg/max fixed per store at `seed`, benchmark of five profiles, default unchanged (parallel track)
 - [ ] **Phase 23: Hashes and rehash** (#62) - SHA-256 write hash and an offline, crash-safe `slicefs rehash` (parallel track)
 - [ ] **Phase 24: Prolly evaluation** (#19) - one-map prototype, benchmark on Boost trees, written decision (parallel track)
@@ -368,6 +369,22 @@ Plans:
 
 **Wave 9** *(blocked on Wave 8 completion)*
 - [x] 21-09-PLAN.md — Phase 21 result, README `--workers`, deferred list, POOL marks on evidence, phase gate
+
+### Phase 21.1: Store header and format policy (#154) (INSERTED)
+
+**Goal:** A store has one header file with a store format number and compat, ro-compat and incompat feature flags, and a written format policy says when the number changes and when a flag is added, so Phases 22 and 23 can add their changes as flags (#154)
+**Requirements**: TBD
+**Depends on:** Phase 21
+**Success Criteria** (what must be TRUE):
+  1. `init` writes a store header file at the store root with a store format number (separate from the release number) and three flag sets: compat, ro-compat and incompat
+  2. At open, a store with an unknown incompat flag is refused, and a store with an unknown ro-compat flag mounts read-only; the message names the flag and the lowest release that knows it
+  3. A store with no header is refused with a clear message (no backward compatibility)
+  4. `slicefs stats` prints the format number and the flags
+  5. `docs/design/store-format.md` gives the header layout, the flag classes, the flag list, the error messages and the format policy, and matches the code; the README has one line and a link
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 21.1 to break down)
 
 ### Phase 22: Chunk profiles
 
