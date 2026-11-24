@@ -32,11 +32,11 @@
 
 ### Store format (#154)
 
-- [ ] **FMT-01**: `init` (the first open of a new store) writes a store header at the store root with a store format number and compat, ro-compat and incompat flag sets.
-- [ ] **FMT-02**: A store with an unknown incompat flag is refused; with an unknown ro-compat flag it mounts read-only. The message names the flag and the lowest release that knows it.
-- [ ] **FMT-03**: A store with data and no header is refused with a clear message.
-- [ ] **FMT-04**: `slicefs stats` prints the format number and the flags.
-- [ ] **FMT-05**: `docs/design/store-format.md` gives the header layout, the flag classes, the flag list, the error messages and the format policy, and matches the code; the README links it.
+- [x] **FMT-01**: `init` (the first open of a new store) writes a store header at the store root with a store format number and compat, ro-compat and incompat flag sets.
+- [x] **FMT-02**: A store with an unknown incompat flag is refused; with an unknown ro-compat flag it mounts read-only. The message names the flag and the lowest release that knows it.
+- [x] **FMT-03**: A store with data and no header is refused with a clear message.
+- [x] **FMT-04**: `slicefs stats` prints the format number and the flags.
+- [x] **FMT-05**: `docs/design/store-format.md` gives the header layout, the flag classes, the flag list, the error messages and the format policy, and matches the code; the README links it.
 
 ### Chunk profiles (#67)
 
@@ -100,11 +100,11 @@ Deferred; tracked, not in this roadmap.
 | POOL-03 | Phase 21 | Complete |
 | POOL-04 | Phase 21 | Complete |
 | POOL-05 | Phase 21 | Complete |
-| FMT-01 | Phase 21.1 | Pending |
-| FMT-02 | Phase 21.1 | Pending |
-| FMT-03 | Phase 21.1 | Pending |
-| FMT-04 | Phase 21.1 | Pending |
-| FMT-05 | Phase 21.1 | Pending |
+| FMT-01 | Phase 21.1 | Complete |
+| FMT-02 | Phase 21.1 | Complete |
+| FMT-03 | Phase 21.1 | Complete |
+| FMT-04 | Phase 21.1 | Complete |
+| FMT-05 | Phase 21.1 | Complete |
 | PROF-01 | Phase 22 | Pending |
 | PROF-02 | Phase 22 | Pending |
 | PROF-03 | Phase 22 | Pending |

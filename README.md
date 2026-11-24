@@ -29,7 +29,7 @@ Best fit: many similar versions of data (source trees, build output, releases, a
 
 Limits today:
 - SliceFS is a FUSE file system in user space. Each request has a cost, so it is slower than an in-kernel file system. Multithreaded request handling is in progress (#22).
-- Status is preview: the on-disk store format can still change between releases.
+- Status is preview: the on-disk store format can still change between releases (see the store header and the format policy in [docs/design/store-format.md](docs/design/store-format.md)).
 - It is not yet a good fit for databases or VM images with heavy random I/O.
 
 ## Status
