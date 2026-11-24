@@ -4,18 +4,18 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: 21
 current_phase_name: Worker pool
-current_plan: 6
+current_plan: 7
 status: executing
-stopped_at: Completed 21-05-PLAN.md
-last_updated: "2026-11-24T08:32:33.332Z"
+stopped_at: Completed 21-06-PLAN.md
+last_updated: "2026-11-24T10:14:01.530Z"
 last_activity: 2026-11-24
-last_activity_desc: "21-05 complete (mallopt 128 KiB mmap threshold at daemon start and in S7; alloc_tune; save-step counters; no step limit); next 21-06"
-state_head: 9fa563a3e16e7b3d8f5990aada34495936d7360d
+last_activity_desc: "21-06 complete (S7 with the mmap threshold: R1=pass, 101-290 MiB at 1-8 writers; R2 and R3 miss at 16 writers, report only); next 21-07"
+state_head: 7b5a923323bac9c16ed227a22a6ceaeadc72a58b
 progress:
   total_phases: 7
   completed_phases: 3
   total_plans: 40
-  completed_plans: 36
+  completed_plans: 37
   percent: 43
 ---
 
@@ -30,12 +30,12 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 6
+Current Plan: 7
 Total Plans in Phase: 9
 Phase: 21 — Worker pool
-Plan: 21-05 complete (5 of 9); next: 21-06 (plan 6 of 9)
+Plan: 21-06 complete (6 of 9); next: 21-07 (plan 7 of 9)
 Status: Ready to execute
-Last activity: 2026-11-24 — 21-05 complete (Amendment 2: mallopt(M_MMAP_THRESHOLD, 128 KiB) at daemon start and in S7, alloc_tune module, save-step counters; no step limit)
+Last activity: 2026-11-24 — 21-06 complete (S7 with the 21-05 mmap threshold: R1=pass, VmHWM 101-290 MiB at 1, 2, 4 and 8 writers; 16 writers 412-426 MiB, R2=miss and R3=miss, report only; no step limit needed)
 
 Progress: [████░░░░░░] 43%
 
@@ -85,6 +85,7 @@ Progress: [████░░░░░░] 43%
 | Phase 21 P03 | 66 min | 2 tasks | 7 files |
 | Phase 21 P04 | 46 min | 2 tasks | 3 files |
 | Phase 21 P05 | 40 min | 2 tasks | 11 files |
+| Phase 21 P06 | 45 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -192,6 +193,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21]: 21-04: S7 cap_checked = flusher form and writers <= DEFAULT_WORKERS_MAX (8); it does not depend on VmHWM
 - [Phase 21]: 21-04: before the step limit, S7 VmHWM is 90-97 MiB at 1 writer, 198-216 at 2, 419-441 at 8 (above CAP_MIB 320 in all 3 runs), 688-730 at 16
 - [Phase 21]: 21-05: mallopt(M_MMAP_THRESHOLD, 128 KiB) first in run_mount on Linux glibc; all allocator calls in alloc_tune.rs; no step limit unless 21-06 misses CAP_MIB 320
+- [Phase 21]: 21-06: S7 with the 21-05 mmap threshold passes the 320 MiB bar at 1-8 writers (R1=pass, Pm(8)=290); 16 writers 412-426 MiB (R2, R3 miss, report only); no step limit needed
 
 ### Pending Todos
 
@@ -215,8 +217,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-24T08:32:32.828Z
-Stopped at: Completed 21-05-PLAN.md
+Last session: 2026-11-24T10:14:00.952Z
+Stopped at: Completed 21-06-PLAN.md
 Resume file: None
 
 ## Operator Next Steps

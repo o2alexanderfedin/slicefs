@@ -337,7 +337,7 @@ Plans:
   3. A worker panic aborts the daemon; the next mount replays the write log, and no request is served after a half-done update
   4. All tests and pjdfstest pass with 4 workers on Linux (Docker CI), and the tests pass on macOS FSKit CI with the macOS default
   5. Parallel I/O on different files scales with the number of workers on Linux, and the measured result is recorded
-**Plans**: 5/9 plans executed
+**Plans**: 6/9 plans executed
 
 One plan per wave; executors run them in order.
 
@@ -358,7 +358,7 @@ Plans:
 - [x] 21-05-PLAN.md — Amendment 2: glibc mmap threshold 128 KiB at daemon start and in S7 (`alloc_tune`), allocator numbers in S7, [Stats] save-step counters; step limit not built (back only if 21-06 misses 320 MiB)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 21-06-PLAN.md — S7 with the 21-05 allocator setting (amended): hard bar 320 MiB at 1, 2, 4 (7 runs) and 8 writers; 16 reported; CAP(N)
+- [x] 21-06-PLAN.md — S7 with the 21-05 allocator setting (amended): hard bar 320 MiB at 1, 2, 4 (7 runs) and 8 writers; 16 reported; CAP(N)
 
 **Wave 7** *(blocked on Wave 6 completion)*
 - [ ] 21-07-PLAN.md — CI: `SLICEFS_WORKERS: 4` in the Linux job and its scripts, loud Workers check (red run); local all, verify, pjdfstest with 4 workers
@@ -421,7 +421,7 @@ Plans:
 | 18. Spikes, baseline and stress harness | 7/7 | Complete    | 2026-11-21 |
 | 19. Fine-grained locks | 16/16 | Complete    | 2026-11-22 |
 | 20. Dirty budget and rebase flusher | 8/8 | Complete    | 2026-11-23 |
-| 21. Worker pool | 5/9 | In Progress | - |
+| 21. Worker pool | 6/9 | In Progress | - |
 | 22. Chunk profiles | 0/0 | Not started | - |
 | 23. Hashes and rehash | 0/0 | Not started | - |
 | 24. Prolly evaluation | 0/0 | Not started | - |
