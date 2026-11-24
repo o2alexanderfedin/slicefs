@@ -4,18 +4,18 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: 21
 current_phase_name: Worker pool
-current_plan: 5
+current_plan: 6
 status: executing
-stopped_at: Completed 21-04-PLAN.md
-last_updated: "2026-11-24T03:35:53.986Z"
-last_activity: 2026-11-23
-last_activity_desc: "21-04 complete (S7_THREADS knob; S7 before-runs at 1, 2, 8, 16 writers: 8 writers 419-441 MiB, above the cap); next 21-05"
-state_head: ef26ea276038ccb256649ae15faa78ee8a3c3ab5
+stopped_at: Completed 21-05-PLAN.md
+last_updated: "2026-11-24T08:32:33.332Z"
+last_activity: 2026-11-24
+last_activity_desc: "21-05 complete (mallopt 128 KiB mmap threshold at daemon start and in S7; alloc_tune; save-step counters; no step limit); next 21-06"
+state_head: 9fa563a3e16e7b3d8f5990aada34495936d7360d
 progress:
   total_phases: 7
   completed_phases: 3
   total_plans: 40
-  completed_plans: 35
+  completed_plans: 36
   percent: 43
 ---
 
@@ -30,12 +30,12 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 5
+Current Plan: 6
 Total Plans in Phase: 9
 Phase: 21 — Worker pool
-Plan: 21-04 complete (4 of 9); next: 21-05 (plan 5 of 9)
+Plan: 21-05 complete (5 of 9); next: 21-06 (plan 6 of 9)
 Status: Ready to execute
-Last activity: 2026-11-23 — 21-03 complete (abort hook for request threads, child-process replay tests, POOL-03 Docker block at 4 and 1 workers)
+Last activity: 2026-11-24 — 21-05 complete (Amendment 2: mallopt(M_MMAP_THRESHOLD, 128 KiB) at daemon start and in S7, alloc_tune module, save-step counters; no step limit)
 
 Progress: [████░░░░░░] 43%
 
@@ -84,6 +84,7 @@ Progress: [████░░░░░░] 43%
 | Phase 21 P02 | 55 min | 3 tasks | 5 files |
 | Phase 21 P03 | 66 min | 2 tasks | 7 files |
 | Phase 21 P04 | 46 min | 2 tasks | 3 files |
+| Phase 21 P05 | 40 min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -190,6 +191,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21]: 21-03: SLICEFS_TEST_PANIC_CREATE=k (debug builds only) makes the k-th new entry of a mount panic; panic-replay.sh checks it at 4 and 1 workers
 - [Phase 21]: 21-04: S7 cap_checked = flusher form and writers <= DEFAULT_WORKERS_MAX (8); it does not depend on VmHWM
 - [Phase 21]: 21-04: before the step limit, S7 VmHWM is 90-97 MiB at 1 writer, 198-216 at 2, 419-441 at 8 (above CAP_MIB 320 in all 3 runs), 688-730 at 16
+- [Phase 21]: 21-05: mallopt(M_MMAP_THRESHOLD, 128 KiB) first in run_mount on Linux glibc; all allocator calls in alloc_tune.rs; no step limit unless 21-06 misses CAP_MIB 320
 
 ### Pending Todos
 
@@ -213,8 +215,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-24T03:35:39.070Z
-Stopped at: Completed 21-04-PLAN.md
+Last session: 2026-11-24T08:32:32.828Z
+Stopped at: Completed 21-05-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
