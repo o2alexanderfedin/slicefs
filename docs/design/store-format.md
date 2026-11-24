@@ -151,13 +151,13 @@ A mount of a store with an unknown ro_compat flag is read-only:
 - It does no commit at unmount.
 - It prints one line on stdout (M6).
 
-The mount is refused when:
+The mount is refused when (SliceFS does the checks in this order):
 
-- `mount.lock` exists: the last mount did not end cleanly, or a mount runs
-  now (M8). SliceFS does this check first.
-- The write log has records to replay (M7).
 - `--hash` is given (M11).
 - `--auto-snapshot` is given (M12).
+- `mount.lock` exists: the last mount did not end cleanly, or a mount runs
+  now (M8).
+- The write log has records to replay (M7).
 
 The daemon has no EROFS check for each request. With `RO`, the kernel stops
 the write requests. A write that reached the daemon would fail in the
