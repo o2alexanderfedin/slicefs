@@ -198,6 +198,9 @@ for SIG in TERM INT HUP; do
 done
 PRE=()
 
+# POOL-03 (Phase 21): a request panic aborts the daemon; the remount replays the write log.
+bash "$(dirname "$0")/panic-replay.sh" "$B" || F=1
+
 echo "== Phase 06: two snapshots of the same state do not double-count storage"
 $B seed $R/s6 $R/src >/dev/null 2>&1
 mnt $R/s6 $R/m6 && { head -c 2000000 /dev/urandom > $R/m6/data.bin; umnt $R/m6; }

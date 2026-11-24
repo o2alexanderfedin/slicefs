@@ -231,6 +231,32 @@ fn check_mountpoint_not_in_use(mountpoint: &Path) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+/// Debug builds only (POOL-03 live check): with the variable below set to
+/// a number k of 1 or more, the k-th new entry of this mount panics at its
+/// half-done point (linked, its record not appended). Creates, mknods,
+/// symlinks and mkdirs count together. Any other value is ignored.
+#[cfg(debug_assertions)]
+fn set_test_panic_create(fs: &SliceFsFilesystem) {
+    let Ok(v) = std::env::var("SLICEFS_TEST_PANIC_CREATE") else { return };
+    let k = match v.trim().parse::<u64>() {
+        Ok(k) if k >= 1 => k,
+        _ => {
+            eprintln!("[{}] WARNING: SLICEFS_TEST_PANIC_CREATE={v:?} is not a number of 1 or more; ignored", ts());
+            return;
+        }
+    };
+    eprintln!(
+        "[{}] WARNING: test panic set: new entry number {k} panics (creates, mknods, symlinks and mkdirs count together)",
+        ts()
+    );
+    let seen = std::sync::atomic::AtomicU64::new(0);
+    fs.test_set_mkdir_hook(Some(Arc::new(move || {
+        if seen.fetch_add(1, Ordering::SeqCst) + 1 == k {
+            panic!("SLICEFS_TEST_PANIC_CREATE: test panic in new entry number {k}");
+        }
+    })));
+}
+
 // ── run_mount ─────────────────────────────────────────────────────────────────
 
 /// Run the `mount` subcommand.
@@ -470,6 +496,15 @@ pub fn run_mount(
     #[cfg(target_os = "macos")]
     let unmount_watch =
         crate::fuset_watch::spawn_unmount_watcher(mountpoint, mounted_msg, Arc::clone(&unmount_watch_shutdown));
+
+    // POOL-03: a panic on a request thread (the reader or a worker) aborts
+    // the daemon before the unwind: no reply for the half-done request and
+    // no destroy() commit of it; the write log replays at the next mount.
+    crate::pool::install_abort_hook();
+    // Debug builds only: the test panic of the POOL-03 live check. It is set
+    // after the write-log replay, so the entries of the replay do not count.
+    #[cfg(debug_assertions)]
+    set_test_panic_create(&fs);
 
     // The request pool: only for 2 or more workers (1 runs each request on
     // the reader thread). A spawn error is a mount error, and goes through
