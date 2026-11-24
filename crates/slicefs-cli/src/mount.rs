@@ -558,10 +558,32 @@ pub fn run_mount(
     gc_shutdown.store(true, Ordering::SeqCst);
     gc_handle.shutdown();
 
+    print_lock_rows();
+
     // _mount_lock is dropped here, removing mount.lock from the store directory.
     println!("SliceFS unmounted.");
 
     Ok(())
+}
+
+/// A lock-stats build (feature `lock-stats`) prints one `lock_row` line per
+/// lock site that was taken during the mount; a normal build prints nothing.
+fn print_lock_rows() {
+    if !chunk_store::lock_stats::ENABLED {
+        return;
+    }
+    let us = |ns: u64| ns as f64 / 1000.0;
+    for st in chunk_store::lock_stats::snapshot().iter().filter(|s| s.count > 0) {
+        println!(
+            "lock_row site={} count={} wait_p99_us={:.1} wait_max_us={:.1} hold_p99_us={:.1} hold_max_us={:.1}",
+            st.label,
+            st.count,
+            us(st.wait_p99_ns),
+            us(st.wait_max_ns),
+            us(st.hold_p99_ns),
+            us(st.hold_max_ns)
+        );
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

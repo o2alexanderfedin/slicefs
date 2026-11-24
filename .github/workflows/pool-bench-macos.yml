@@ -1,0 +1,59 @@
+name: Pool bench (macOS FSKit)
+
+# Phase 21 [Bench]: 4 clients on 4 different files of 64 MiB at --workers 1
+# and 2 (3 runs each) on the FUSE-T FSKit backend, with write and read MB/s
+# and the daemon maximum RSS. The result is recorded to decide whether the
+# macOS default of 1 worker can be raised later.
+#
+# Run by hand only. A manual dispatch needs this file on the default branch, so
+# the same run also starts on a push to a branch named ci-pool/<anything>. The
+# name is not ci/<anything>: that would also start the long macos-mounts.yml.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["ci-pool/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  pool-bench:
+    name: Pool bench (macOS FSKit, 1 and 2 workers)
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pkg-config and FUSE-T
+        run: |
+          brew install pkg-config
+          brew install --cask macos-fuse-t/cask/fuse-t
+          sw_vers
+          brew list --cask --versions fuse-t
+
+      - name: Enable the FUSE-T FSKit extension
+        run: scripts/macos-mount-test/enable-fskit.sh
+
+      - name: Build
+        run: cargo build --release -p slicefs-cli
+
+      - name: Pool bench
+        shell: bash
+        timeout-minutes: 30
+        env:
+          WORK: ${{ runner.temp }}/pool-bench
+        run: |
+          set -o pipefail
+          mkdir -p "$WORK"
+          scripts/macos-mount-test/pool-bench.sh target/release/slicefs 2>&1 | tee "$WORK/pool-bench.log"
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pool-bench-macos
+          path: |
+            ${{ runner.temp }}/pool-bench/pool-bench.log
+            ${{ runner.temp }}/pool-bench/pb/mount-*.log
+            ${{ runner.temp }}/pool-bench/pb/time-*.err
+          if-no-files-found: ignore
