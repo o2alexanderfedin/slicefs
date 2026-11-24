@@ -43,7 +43,8 @@ was found and not fixed.
    if its flag is in the header too.
 9. **`seed --hash <unknown name> <new dir>`** writes the header of the new
    store, then refuses the hash name (21.1-02 SUMMARY). The header check
-   comes before the hash name check.
+   comes before the hash name check. Fixed by review fix WR-03: the name is
+   read first, so nothing is made.
 10. **The Linux form of `mount::start`** and the FMT-02 section of
     `scripts/docker-linux-test/verify-phases.sh` have run only in the
     Docker method of plan 21.1-03 (tar stream, `cargo build -j 1`). They

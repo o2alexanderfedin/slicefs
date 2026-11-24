@@ -392,11 +392,16 @@ pub fn decide(store: &Path, header: &Header, want: Want) -> std::io::Result<Acce
 /// access is read and write (`header: None`; a mount needs `segments/`, and
 /// `load_store` refuses a store with no committed state).
 pub fn check(store: &Path, want: Want) -> std::io::Result<Opened> {
+    check_with(store, want, DEFAULT_HASHER)
+}
+
+/// [`check`], where a new store gets the header of `hasher` (`--hash`).
+pub fn check_with(store: &Path, want: Want, hasher: &dyn ObjectHasher) -> std::io::Result<Opened> {
     let text = match read(store)? {
         Some(text) => text,
         None if has_data(store)? => return Err(refuse(msg_no_header(store))),
         None if want == Want::Write => {
-            match create(store) {
+            match create_with(store, hasher) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e),
@@ -438,12 +443,17 @@ fn has_data(store: &Path) -> std::io::Result<bool> {
 /// installed first. Tests that build a store with `StoreIo::open` or
 /// `ChunkStore::open` call it first.
 pub fn create(store: &Path) -> std::io::Result<()> {
+    create_with(store, DEFAULT_HASHER)
+}
+
+/// [`create`] with the header [`marker`]`(hasher)`.
+fn create_with(store: &Path, hasher: &dyn ObjectHasher) -> std::io::Result<()> {
     std::fs::create_dir_all(store)?;
     let format = store.join(FORMAT_FILE);
     if format.exists() {
         return Err(already_exists(store));
     }
-    let tmp = write_tmp(store, &marker(DEFAULT_HASHER))?;
+    let tmp = write_tmp(store, &marker(hasher))?;
     let linked = match std::fs::hard_link(&tmp, &format) {
         // A file system with no hard links: the rename of before (it can
         // replace a header that a parallel create wrote at the same time).

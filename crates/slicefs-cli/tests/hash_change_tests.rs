@@ -149,6 +149,26 @@ fn a_new_write_hash_keeps_old_files_and_lookups() {
     close_fs(fs);
 }
 
+/// WR-03: the header step of `seed --hash` (`check_write`) on a new store
+/// gives no hash-change line and writes the chosen hash in the first
+/// header; an unknown name makes no header. On an existing store a change
+/// gives the line.
+#[test]
+fn seed_hash_on_a_new_store_prints_no_change_line() {
+    let dir = TempDir::new().unwrap();
+    let store = dir.path().join("new");
+    assert_eq!(content::check_write(&store, Some(TEST_HASH)).unwrap(), None, "no line for a new store");
+    assert_eq!(marker(&store), format!("{FORMAT}hash {TEST_HASH}\n"));
+    let line = content::check_write(&store, Some("blake3-256")).unwrap();
+    assert_eq!(
+        line.as_deref(),
+        Some("New objects use hash blake3-256 (was test-keyed-blake3); stored objects stay readable.")
+    );
+    let bad = dir.path().join("bad");
+    assert!(content::check_write(&bad, Some("md5")).is_err());
+    assert!(!bad.exists(), "an unknown hash name makes no store");
+}
+
 /// `seed --hash`: a known name is recorded and used; an unknown one is
 /// refused with the known names; no hash line means blake3-256.
 #[test]

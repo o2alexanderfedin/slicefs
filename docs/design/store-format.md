@@ -20,7 +20,8 @@ The code is `crates/slicefs-cli/src/header.rs`.
   A rewrite renames the temp file over `FORMAT`. A crash can leave a temp
   file; SliceFS does not read it.
 - For a new store, the header is written before `packs/` and `segments/`
-  exist. Thus a crash cannot leave data with no header.
+  exist. Thus a crash cannot leave data with no header. With `seed --hash`,
+  the first header has that hash, and SliceFS prints no hash-change line.
 - A rewrite (`--hash` on `mount` or `seed`) changes only the hash line. All
   other lines stay, in their order, also the flag lines and the lines that
   this SliceFS does not know. If there is no hash line, the new hash line

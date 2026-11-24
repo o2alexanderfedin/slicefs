@@ -66,30 +66,46 @@ pub fn parse_hash(s: &str) -> Result<String, String> {
 
 /// Make `name` (if given) the write hash of `store`: new objects use it,
 /// objects of the old hash stay readable (each is verified by its own tag).
-/// Records it in the header (made for a new store) and, if it changes the
-/// hash of an existing store, prints one line. The header is checked first
-/// (`Want::Write`), so a store that this build may not write is never
-/// rewritten. The rewrite changes only the hash line (it is line 2 when
-/// there was none); every other line stays in its order. Call before the
-/// store opens.
+/// Prints the line of [`check_write`] when the hash of an existing store
+/// changes. Call before the store opens.
 pub fn select_hash(store: &Path, name: Option<&str>) -> std::io::Result<()> {
-    let Some(name) = name else { return Ok(()) };
-    let new = hasher_by_name(name).ok_or_else(|| std::io::Error::other(parse_hash(name).unwrap_err()))?;
-    let existed = store.join(FORMAT_FILE).exists();
-    let opened = header::check(store, Want::Write)?;
+    if name.is_none() {
+        return Ok(());
+    }
+    if let Some(line) = check_write(store, name)? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// The header check of a command that writes (`Want::Write`), with the
+/// write hash `name` of `--hash` (`None`: keep the recorded one). A store
+/// that this build may not write is refused, and is never rewritten.
+/// The hash is recorded in the header, and the line to print is returned
+/// when it changes the hash of an existing store. The rewrite changes only
+/// the hash line (it is line 2 when there was none); every other line
+/// stays in its order.
+pub fn check_write(store: &Path, name: Option<&str>) -> std::io::Result<Option<String>> {
+    // The name first, so that an unknown name makes nothing; a new store
+    // gets the new hash in its first header write.
+    let new = match name {
+        Some(n) => Some(hasher_by_name(n).ok_or_else(|| std::io::Error::other(parse_hash(n).unwrap_err()))?),
+        None => None,
+    };
+    let opened = header::check_with(store, Want::Write, new.unwrap_or(DEFAULT_HASHER))?;
+    let Some(new) = new else { return Ok(None) };
     let mut h = opened.header.ok_or_else(|| std::io::Error::other(format!("{}/FORMAT is missing after its write", store.display())))?;
     let current = hasher_of(store, Some(&h))?;
     if current.name() == new.name() {
-        return Ok(());
+        return Ok(None);
     }
-    if existed {
-        println!("New objects use hash {} (was {}); stored objects stay readable.", new.name(), current.name());
-    }
+    let line = format!("New objects use hash {} (was {}); stored objects stay readable.", new.name(), current.name());
     match h.lines.iter_mut().find(|l| matches!(l, Line::Hash(_))) {
         Some(l) => *l = Line::Hash(new.name().to_string()),
         None => h.lines.insert(0, Line::Hash(new.name().to_string())),
     }
-    header::write_header(store, &h)
+    header::write_header(store, &h)?;
+    Ok(Some(line))
 }
 
 /// The temp files of a full GC (`<store>/gc-tmp`; a writable open removes
