@@ -488,7 +488,8 @@ impl PackIo for FileIo {
 
 fn unsupported_if(e: io::Error) -> io::Error {
     match e.raw_os_error() {
-        Some(libc::EOPNOTSUPP) | Some(libc::ENOTSUP) => io::Error::new(io::ErrorKind::Unsupported, e),
+        // A guard, not two patterns: on Linux the two values are equal.
+        Some(c) if c == libc::EOPNOTSUPP || c == libc::ENOTSUP => io::Error::new(io::ErrorKind::Unsupported, e),
         _ => e,
     }
 }
