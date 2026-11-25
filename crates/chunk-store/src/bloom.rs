@@ -100,7 +100,7 @@ impl Bloom {
         if bits_per_key == 0 {
             return Err("a filter with 0 bits per key".into());
         }
-        let words: Vec<u64> = b.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+        let words: Vec<u64> = b.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect();
         let blocks = (b.len() / BLOCK_BYTES) as u64;
         Ok(Bloom { words, blocks, k: probes(bits_per_key) })
     }

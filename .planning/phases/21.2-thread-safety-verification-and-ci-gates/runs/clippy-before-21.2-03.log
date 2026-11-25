@@ -1,0 +1,202 @@
+# stable clippy before the fixes at dea4a89
+# cargo +stable clippy --workspace --all-targets --message-format=short (rustc 1.100.0, macOS x86_64)
+# findings in crates/ and benchmarks/: 93; lint allows without a reason: 37
+warning: unused workspace dependency `anyhow`
+  --> Cargo.toml:33:1
+   |
+33 | anyhow     = "1"
+   | ^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `anyhow`
+warning: unused workspace dependency `bincode`
+  --> Cargo.toml:22:1
+   |
+22 | bincode    = "2"
+   | ^^^^^^^
+   |
+help: consider removing the workspace dependency `bincode`
+warning: unused workspace dependency `criterion`
+  --> Cargo.toml:24:1
+   |
+24 | criterion  = { version = "0.5", features = ["html_reports"] }
+   | ^^^^^^^^^
+   |
+help: consider removing the workspace dependency `criterion`
+warning: unused workspace dependency `redb`
+  --> Cargo.toml:29:1
+   |
+29 | redb       = "3.1"
+   | ^^^^
+   |
+help: consider removing the workspace dependency `redb`
+warning: unused workspace dependency `tokio`
+  --> Cargo.toml:31:1
+   |
+31 | tokio      = { version = "1", features = ["full"] }
+   | ^^^^^
+   |
+help: consider removing the workspace dependency `tokio`
+warning: workspace (manifest) generated 5 warnings
+   Compiling zerocopy v0.8.47
+   Compiling getrandom v0.3.4
+    Checking fnv v1.0.7
+    Checking quick-error v1.2.3
+    Checking bit-vec v0.8.0
+    Checking unarray v0.1.4
+    Checking regex-syntax v0.8.10
+   Compiling libm v0.2.16
+    Checking siphasher v1.0.2
+    Checking wait-timeout v0.2.1
+    Checking slicefs-traits v0.1.0 (<repo>/crates/slicefs-traits)
+    Checking chunk-bench v0.1.0 (<repo>/benchmarks/chunk-bench)
+crates/chunk-store/src/bloom.rs:103:33: warning: using `chunks_exact` with a constant chunk size: help: consider using `as_chunks` instead: `as_chunks::<8>().0.iter()`
+crates/chunk-store/src/file.rs:90:21: warning: using `chunks_exact` with a constant chunk size: help: consider using `as_chunks` instead: `as_chunks::<ENTRY>().0`
+crates/chunk-store/src/index.rs:209:14: warning: using `chunks_exact` with a constant chunk size: help: consider using `as_chunks` instead: `as_chunks::<RUN_ROW>().0.iter()`
+crates/chunk-store/src/index.rs:218:33: warning: using `chunks_exact` with a constant chunk size: help: consider using `as_chunks` instead: `as_chunks::<8>().0.iter()`
+crates/chunk-store/src/run.rs:735:23: warning: using `chunks_exact` with a constant chunk size: help: consider using `as_chunks` instead: `as_chunks::<TAG_ROW>().0`
+crates/chunk-store/src/run.rs:755:35: warning: using `chunks_exact` with a constant chunk size: help: consider using `as_chunks` instead: `as_chunks::<FENCE>().0.iter()`
+crates/chunk-store/src/lib.rs:512:35: warning: very complex type used. Consider factoring parts into `type` definitions
+crates/chunk-store/src/lib.rs:648:14: warning: using `chunks_exact` with a constant chunk size: help: consider using `as_chunks` instead: `as_chunks::<IDX_ENTRY>().0.iter()`
+    Checking chunk-store v0.1.0 (<repo>/crates/chunk-store)
+warning: `chunk-store` (lib) generated 8 warnings (run `cargo clippy --fix --lib -p chunk-store -- ` to apply 7 suggestions)
+crates/metadata/src/store.rs:34:21: warning: digits of hex, binary or octal literal not in groups of equal size: help: consider: `0o0_170_000`
+crates/metadata/src/store.rs:317:22: warning: digits of hex, binary or octal literal not in groups of equal size: help: consider: `0o0_040_000`
+crates/metadata/src/store.rs:842:32: warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+crates/metadata/src/store.rs:1451:32: warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+crates/metadata/src/store.rs:1457:26: warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+crates/metadata/src/inode_map.rs:105:8: warning: manual implementation of `.is_multiple_of()`: help: replace with: `!bytes.len().is_multiple_of(RECORD)`
+crates/metadata/src/store.rs:702:9: warning: this `if` statement can be collapsed
+crates/metadata/src/store.rs:733:13: warning: this `if` statement can be collapsed
+crates/metadata/src/store.rs:784:13: warning: this `if` statement can be collapsed
+crates/metadata/src/store.rs:1688:21: warning: this expression borrows a value the compiler would automatically borrow: help: change this to: `(*io_guard)`
+crates/metadata/src/segment/mod.rs:119:6: warning: very complex type used. Consider factoring parts into `type` definitions
+crates/metadata/src/gc/mod.rs:131:13: warning: this `if` statement can be collapsed
+    Checking index-bench v0.1.0 (<repo>/benchmarks/index-bench)
+warning: `metadata` (lib) generated 12 warnings (run `cargo clippy --fix --lib -p metadata -- ` to apply 9 suggestions)
+    Checking rusty-fork v0.3.1
+    Checking bit-set v0.8.0
+crates/chunk-store/tests/file_tests.rs:69:5: warning: this assertion has a constant value
+warning: `chunk-store` (test "file_tests") generated 1 warning
+crates/chunk-store/tests/index_tests.rs:521:16: warning: very complex type used. Consider factoring parts into `type` definitions
+warning: `chunk-store` (test "index_tests") generated 1 warning
+    Checking rand_core v0.9.5
+    Checking rand_xorshift v0.4.0
+warning: `chunk-store` (lib test) generated 8 warnings (8 duplicates)
+    Checking fuser v0.18.0 (<repo>/vendor/fuser)
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.9.0
+    Checking rand v0.9.2
+    Checking proptest v1.11.0
+    Checking fastbloom v0.14.1
+    Checking cas-local v0.1.0 (<repo>/crates/cas-local)
+vendor/fuser/src/ll/fuse_abi.rs:264:19: warning: struct `fuse_rename_in` is never constructed
+vendor/fuser/src/ll/fuse_abi.rs:539:19: warning: struct `cuse_init_in` is never constructed
+vendor/fuser/src/ll/fuse_abi.rs:548:19: warning: struct `cuse_init_out` is never constructed
+vendor/fuser/src/ll/fuse_abi.rs:593:19: warning: struct `fuse_ioctl_iovec` is never constructed
+vendor/fuser/src/ll/fuse_abi.rs:714:19: warning: struct `fuse_notify_retrieve_out` is never constructed
+vendor/fuser/src/ll/fuse_abi.rs:724:19: warning: struct `fuse_notify_retrieve_in` is never constructed
+warning: `fuser` (lib) generated 6 warnings
+    Checking slicefs-cli v0.1.0 (<repo>/crates/slicefs-cli)
+    Checking metadata v0.1.0 (<repo>/crates/metadata)
+crates/metadata/tests/segment_store_tests.rs:7:1: warning: empty line after doc comment
+warning: `metadata` (test "segment_store_tests") generated 1 warning
+crates/metadata/tests/gc_tests.rs:347:9: warning: length comparison to one: help: using `!is_empty` is clearer and more explicit: `!roots_after.is_empty()`
+warning: `metadata` (test "gc_tests") generated 1 warning (run `cargo clippy --fix --test "gc_tests" -p metadata -- ` to apply 1 suggestion)
+crates/slicefs-cli/src/filesystem.rs:1516:25: warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+crates/slicefs-cli/src/filesystem.rs:1531:25: warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+crates/metadata/src/store.rs:1842:17: warning: casting to the same type is unnecessary (`i64` -> `i64`): help: try: `root.mtime_sec`
+crates/metadata/src/store.rs:1843:17: warning: casting to the same type is unnecessary (`i64` -> `i64`): help: try: `root.ctime_sec`
+crates/metadata/src/store.rs:2407:25: warning: this expression borrows a value the compiler would automatically borrow: help: change this to: `(*io_guard)`
+crates/metadata/src/store.rs:2689:9: warning: used `assert_eq!` with a literal bool
+crates/metadata/src/wal/mod.rs:528:49: warning: very complex type used. Consider factoring parts into `type` definitions
+warning: `metadata` (lib test) generated 17 warnings (12 duplicates) (run `cargo clippy --fix --lib -p metadata --tests -- ` to apply 4 suggestions)
+crates/slicefs-cli/src/backend.rs:105:5: warning: this `if` statement can be collapsed
+crates/slicefs-cli/src/filesystem.rs:1528:21: warning: manual implementation of `.is_multiple_of()`: help: replace with: `n.is_multiple_of(k)`
+crates/slicefs-cli/src/filesystem.rs:1979:18: warning: manually reimplementing `div_ceil`: help: consider using `.div_ceil()`: `meta.size.div_ceil(512)`
+crates/slicefs-cli/src/filesystem.rs:2333:9: warning: this `map_or` can be simplified
+crates/slicefs-cli/src/filesystem.rs:2334:16: warning: this `map_or` can be simplified
+crates/slicefs-cli/src/filesystem.rs:3120:23: warning: this `map_or` can be simplified
+crates/slicefs-cli/src/filesystem.rs:3237:36: warning: this `map_or` can be simplified
+crates/slicefs-cli/src/filesystem.rs:3363:9: warning: this `if` statement can be collapsed
+crates/slicefs-cli/src/filesystem.rs:4085:9: warning: doc list item without indentation
+crates/slicefs-cli/src/filesystem.rs:4086:9: warning: doc list item without indentation
+crates/slicefs-cli/src/filesystem.rs:4087:9: warning: doc list item without indentation
+crates/slicefs-cli/src/filesystem.rs:5096:5: warning: this function has too many arguments (8/7)
+crates/slicefs-cli/src/filesystem.rs:5208:5: warning: this function has too many arguments (8/7)
+crates/slicefs-cli/src/filesystem.rs:5236:9: warning: this `if` statement can be collapsed
+crates/slicefs-cli/src/handlers.rs:419:1: warning: this function has too many arguments (8/7)
+crates/slicefs-cli/src/handlers.rs:492:1: warning: this function has too many arguments (8/7)
+crates/slicefs-cli/src/handlers.rs:637:1: warning: this function has too many arguments (9/7)
+crates/slicefs-cli/src/oplog.rs:339:17: warning: this `if` statement can be collapsed
+crates/slicefs-cli/src/oplog.rs:346:17: warning: this `if` statement can be collapsed
+crates/slicefs-cli/src/online_gc.rs:329:9: warning: this `if` statement can be collapsed
+crates/slicefs-cli/src/mount.rs:61:6: warning: very complex type used. Consider factoring parts into `type` definitions
+crates/slicefs-cli/src/mount.rs:137:6: warning: very complex type used. Consider factoring parts into `type` definitions
+crates/slicefs-cli/src/mount.rs:649:18: warning: redundant closure: help: replace the closure with the function itself: `parse_backend_flag`
+crates/slicefs-cli/src/scrub.rs:109:15: warning: this expression borrows a value the compiler would automatically borrow: help: change this to: `io`
+crates/slicefs-cli/src/scrub.rs:128:29: warning: this `if` statement can be collapsed
+crates/slicefs-cli/src/snapshot.rs:117:70: warning: literal with an empty format string
+crates/slicefs-cli/src/unmount.rs:75:9: warning: this `if` statement can be collapsed
+crates/slicefs-cli/src/unmount.rs:101:13: warning: this `if` statement can be collapsed
+crates/slicefs-cli/src/unmount.rs:164:9: warning: this `if` statement can be collapsed
+crates/slicefs-cli/src/unmount.rs:173:9: warning: this `if` statement can be collapsed
+warning: `slicefs-cli` (lib) generated 32 warnings (run `cargo clippy --fix --lib -p slicefs-cli -- ` to apply 22 suggestions)
+crates/slicefs-cli/tests/wal_strategy_tests.rs:3:1: warning: empty line after doc comment
+crates/slicefs-cli/tests/common/mod.rs:148:61: warning: digits of hex, binary or octal literal not in groups of equal size: help: consider: `0x0100_0000_01b3`
+crates/slicefs-cli/tests/multi_handle_posix.rs:420:72: warning: digits of hex, binary or octal literal not in groups of equal size: help: consider: `0x0100_0000_01b3`
+crates/slicefs-cli/tests/reply_after_locks.rs:85:9: warning: this `if` statement can be collapsed
+crates/slicefs-cli/tests/reply_after_locks.rs:90:9: warning: this `if` statement can be collapsed
+warning: `slicefs-cli` (test "wal_strategy_tests") generated 1 warning
+crates/slicefs-cli/tests/reply_after_locks.rs:105:9: warning: this `if` statement can be collapsed
+crates/slicefs-cli/tests/reply_after_locks.rs:110:9: warning: this `if` statement can be collapsed
+crates/slicefs-cli/tests/reply_after_locks.rs:116:9: warning: this `if` statement can be collapsed
+warning: `slicefs-cli` (test "reply_after_locks") generated 5 warnings (run `cargo clippy --fix --test "reply_after_locks" -p slicefs-cli -- ` to apply 5 suggestions)
+crates/slicefs-cli/tests/crash_recovery_tests.rs:12:1: warning: empty line after doc comment
+crates/slicefs-cli/tests/fsync_tests.rs:7:1: warning: empty line after doc comment
+crates/slicefs-cli/tests/mount_lifecycle_tests.rs:214:57: warning: the borrowed expression implements the required traits: help: change this to: `[0u8; 10]`
+crates/slicefs-cli/tests/mount_lifecycle_tests.rs:399:9: warning: for loop over a single element
+crates/slicefs-cli/tests/gc_cli_tests.rs:7:1: warning: empty line after doc comment
+warning: `slicefs-cli` (test "crash_recovery_tests") generated 1 warning
+warning: `slicefs-cli` (test "mount_lifecycle_tests") generated 2 warnings (run `cargo clippy --fix --test "mount_lifecycle_tests" -p slicefs-cli -- ` to apply 2 suggestions)
+warning: `slicefs-cli` (test "pool_panic_tests") generated 1 warning (1 duplicate)
+warning: `slicefs-cli` (test "rename_ancestor_tests") generated 1 warning (1 duplicate)
+warning: `slicefs-cli` (test "gc_cli_tests") generated 1 warning
+warning: `slicefs-cli` (test "fsync_tests") generated 1 warning
+warning: `slicefs-cli` (test "multi_handle_posix") generated 2 warnings (1 duplicate)
+warning: `slicefs-cli` (test "write_log_replay_tests") generated 1 warning
+crates/slicefs-cli/tests/e2e_filesystem_tests.rs:406:14: warning: the loop variable `i` is used to index `inodes`
+crates/slicefs-cli/tests/e2e_filesystem_tests.rs:422:14: warning: the loop variable `i` is used to index `inodes`
+crates/slicefs-cli/tests/e2e_filesystem_tests.rs:694:5: warning: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`: help: try: `if let Ok(data) = result { assert!(data.is_empty(), "reading non-existent inode must return empty") }`
+crates/slicefs-cli/tests/stress_harness.rs:526:18: warning: the loop variable `b` is used to index `one.model.pending`
+crates/slicefs-cli/tests/coverage_boost_tests.rs:204:32: warning: this can be `std::io::Error::other(_)`
+crates/slicefs-cli/tests/coverage_boost_tests.rs:218:32: warning: this can be `std::io::Error::other(_)`
+crates/slicefs-cli/tests/stress_harness.rs:625:36: warning: manual implementation of `.is_multiple_of()`: help: replace with: `k.is_multiple_of(2)`
+crates/slicefs-cli/tests/stress_harness.rs:726:18: warning: the loop variable `b` is used to index `ver`
+crates/slicefs-cli/tests/stress_harness.rs:1111:21: warning: manual implementation of `.is_multiple_of()`: help: replace with: `blocks.is_multiple_of(STRIPE)`
+warning: `slicefs-cli` (test "e2e_filesystem_tests") generated 3 warnings
+crates/slicefs-cli/tests/lock_free_io.rs:546:18: warning: the loop variable `i` is used to index `plan[t]`
+crates/slicefs-cli/tests/stress_harness.rs:1983:13: warning: length comparison to zero: help: using `!is_empty` is clearer and more explicit: `!commit_h.total.is_empty()`
+crates/slicefs-cli/tests/stress_harness.rs:2129:34: warning: the loop variable `b` is used to index `ver`
+crates/slicefs-cli/tests/stress_harness.rs:2166:25: warning: this `if` statement can be collapsed
+warning: `slicefs-cli` (test "coverage_boost_tests") generated 2 warnings (run `cargo clippy --fix --test "coverage_boost_tests" -p slicefs-cli -- ` to apply 2 suggestions)
+warning: `slicefs-cli` (test "stress_harness") generated 8 warnings (1 duplicate) (run `cargo clippy --fix --test "stress_harness" -p slicefs-cli -- ` to apply 4 suggestions)
+warning: `slicefs-cli` (test "lock_free_io") generated 2 warnings (1 duplicate)
+crates/slicefs-cli/tests/flusher_tests.rs:829:17: warning: manual `Range::contains` implementation: help: use: `(MIB..2 * MIB).contains(&cost)`
+crates/slicefs-cli/tests/flusher_tests.rs:1233:13: warning: manual `Range::contains` implementation: help: use: `(4 * MIB..8 * MIB).contains(&total)`
+warning: `slicefs-cli` (test "flusher_tests") generated 3 warnings (1 duplicate) (run `cargo clippy --fix --test "flusher_tests" -p slicefs-cli -- ` to apply 2 suggestions)
+crates/slicefs-cli/src/cli.rs:311:49: warning: called `.err().expect()` on a `Result` value: help: try: `expect_err`
+crates/slicefs-cli/src/filesystem.rs:5665:17: warning: length comparison to zero: help: using `!is_empty` is clearer and more explicit: `!list.is_empty()`
+crates/slicefs-cli/src/filesystem.rs:6324:57: warning: this can be `std::io::Error::other(_)`
+crates/slicefs-cli/src/filesystem.rs:6333:55: warning: this can be `std::io::Error::other(_)`
+warning: `slicefs-cli` (lib test) generated 36 warnings (32 duplicates) (run `cargo clippy --fix --lib -p slicefs-cli --tests -- ` to apply 4 suggestions)
+warning: unused dependency `sha2-compress`
+  --> crates/slicefs-cli/Cargo.toml:31:1
+   |
+31 | sha2-compress  = { workspace = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `sha2-compress`
+warning: `slicefs-cli` (manifest) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.17s

@@ -518,7 +518,8 @@ fn a_repair_that_stops_after_the_idx_is_done_again_at_the_next_open() {
         f.sync().unwrap();
     };
     let flip = |mem: &MemIo| mem.flip(1, Kind::Pack, small_at(30) + 45);
-    let cases: [(&dyn Fn(&MemIo), Vec<usize>); 2] = [(&cut, (30..120).collect()), (&flip, vec![30])];
+    type Case<'a> = (&'a dyn Fn(&MemIo), Vec<usize>);
+    let cases: [Case<'_>; 2] = [(&cut, (30..120).collect()), (&flip, vec![30])];
     for (damage, lost) in cases {
         let mem = MemIo::new();
         let (o, ids) = hwm_inside_the_active_pack(&mem);

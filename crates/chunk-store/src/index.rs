@@ -206,7 +206,9 @@ impl Manifest {
         let runs_end = n.checked_mul(RUN_ROW).and_then(|s| s.checked_add(at)).filter(|&e| e + COUNT <= body.len());
         let runs_end = runs_end.ok_or_else(|| bad("run count does not fit"))?;
         m.runs = body[at..runs_end]
-            .chunks_exact(RUN_ROW)
+            .as_chunks::<RUN_ROW>()
+            .0
+            .iter()
             .map(|r| RunMeta { num: le_u64(r, 0), len: le_u64(r, 8), entries: le_u64(r, 16) })
             .collect();
         at = runs_end;
@@ -215,7 +217,7 @@ impl Manifest {
         if n.checked_mul(8).and_then(|s| s.checked_add(at)) != Some(body.len()) {
             return Err(bad("obsolete run count does not fit"));
         }
-        m.obsolete = body[at..].chunks_exact(8).map(|c| le_u64(c, 0)).collect();
+        m.obsolete = body[at..].as_chunks::<8>().0.iter().map(|c| le_u64(c, 0)).collect();
         if m.runs.iter().map(|r| r.num).chain(m.obsolete.iter().copied()).any(|n| n >= m.next_run) {
             return Err(bad("a run number is not below the next run number"));
         }

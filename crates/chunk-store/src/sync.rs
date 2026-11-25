@@ -122,12 +122,12 @@ mod imp {
             self.0.write().unwrap_or_else(PoisonError::into_inner)
         }
 
-        #[cfg_attr(not(feature = "lock-stats"), allow(dead_code))]
+        #[cfg_attr(not(feature = "lock-stats"), allow(dead_code, reason = "only the lock-stats code calls it"))]
         pub fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
             ok_or_poisoned(self.0.try_read())
         }
 
-        #[cfg_attr(not(feature = "lock-stats"), allow(dead_code))]
+        #[cfg_attr(not(feature = "lock-stats"), allow(dead_code, reason = "only the lock-stats code calls it"))]
         pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
             ok_or_poisoned(self.0.try_write())
         }
@@ -437,7 +437,7 @@ fn acquire<G>(
 struct Meta {
     rank: Rank,
     key: u64,
-    #[cfg_attr(not(feature = "lock-stats"), allow(dead_code))]
+    #[cfg_attr(not(feature = "lock-stats"), allow(dead_code, reason = "only the lock-stats code reads it"))]
     site: Option<Site>,
 }
 

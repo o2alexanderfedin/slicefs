@@ -507,9 +507,12 @@ fn verify(id: &ObjectId, data: &[u8]) -> Result<bool> {
     Ok(h.id(data) == *id)
 }
 
+/// A decoded record: ID, flags, raw size, stored size, total record bytes.
+type VerifiedRecord = (ObjectId, u8, u32, u32, usize);
+
 /// The record at `buf[0]` if it is valid and its bytes hash to its ID. A
 /// record with a good CRC and an unknown hash tag is an error.
-fn verified_record(buf: &[u8]) -> Result<Option<(ObjectId, u8, u32, u32, usize)>> {
+fn verified_record(buf: &[u8]) -> Result<Option<VerifiedRecord>> {
     let Some((id, flags, raw, stored, total)) = decode_record(buf) else { return Ok(None) };
     let payload = &buf[REC_HEADER..REC_HEADER + stored as usize];
     let ok = if flags & FLAG_ZSTD != 0 {
@@ -645,7 +648,9 @@ fn decode_index(b: &[u8], num: u64) -> Result<Option<Vec<(ObjectId, Loc)>>> {
     }
     Ok(Some(
         body[14..]
-            .chunks_exact(IDX_ENTRY)
+            .as_chunks::<IDX_ENTRY>()
+            .0
+            .iter()
             .map(|e| {
                 let id = ObjectId(e[..ID_LEN].try_into().unwrap());
                 let o = ID_LEN;
@@ -1797,7 +1802,7 @@ impl ChunkStore {
     /// `seen`; only then is it looked up again (with the lock, as the put
     /// loop does). An entry found then is replaced by the new record (it is
     /// the newest, as in `Inner::replay`) and not counted again.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the state of one record write; a struct would only move them")]
     fn publish(
         &self,
         inner: &mut Inner,
@@ -2199,7 +2204,7 @@ impl ChunkStore {
     /// Steps 4 to 6 of a GC over the selected packs `todo` and the unused
     /// packs. `dead_of(num)` gives the dead IDs of pack `num` (a full GC; the
     /// calls come in pack order), or `None`: `keep` decides.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the GC state of one pass; a struct would only move them")]
     fn gc_groups(
         &self,
         snap: &Snapshot,
@@ -2244,7 +2249,7 @@ impl ChunkStore {
     /// over the groups, the packs of the objects put or read during the GC;
     /// such a pack does not change. The touched set records again after the
     /// install of a group that is not the last one.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the GC state of one pass; a struct would only move them")]
     fn gc_group(
         &self,
         snap: &Snapshot,
@@ -2474,7 +2479,7 @@ impl ChunkStore {
     /// Step 4 of `gc_finish` for one group of selected packs: the plans
     /// with their pending runs and copies. Any error ends it (the caller
     /// removes the runs in `pending`).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the GC state of one pass; a struct would only move them")]
     fn gc_prepare(
         &self,
         snap: &Snapshot,

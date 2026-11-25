@@ -620,7 +620,7 @@ struct TagRange {
 /// runs). The run owns its mapping: it is unmapped when the last `Arc` of
 /// the run drops, so a reader keeps valid bytes after a merge or GC removes
 /// the file.
-#[allow(dead_code)] // The pack range: for GC (17-07).
+#[allow(dead_code, reason = "min_pack and max_pack are read only by pack_range")]
 pub(crate) struct Run {
     file: Arc<dyn PackRead>,
     /// The whole file, mapped; `None`: lookups read pages with `read_at`.
@@ -732,7 +732,7 @@ impl Run {
         }
         let mut tags = Vec::with_capacity(tb.len() / TAG_ROW);
         let mut next = 0u64;
-        for row in tb.chunks_exact(TAG_ROW) {
+        for row in tb.as_chunks::<TAG_ROW>().0 {
             let (tag, first, count) = (row[0], le_u64(row, 1), le_u64(row, 9));
             if tags.last().is_some_and(|t: &TagRange| t.tag >= tag) {
                 return Err(bad("tags out of order"));
@@ -752,7 +752,7 @@ impl Run {
         if crc32c::crc32c(&fb) != f.fences.crc {
             return Err(bad("bad fence table CRC"));
         }
-        let fences: Vec<u64> = fb.chunks_exact(FENCE).map(|c| u64::from_be_bytes(c.try_into().unwrap())).collect();
+        let fences: Vec<u64> = fb.as_chunks::<FENCE>().0.iter().map(|c| u64::from_be_bytes(*c)).collect();
         debug_assert_eq!(fences.len(), pages);
         for t in &tags {
             if fences[t.first..t.first + t.count].windows(2).any(|w| w[0] > w[1]) {
@@ -822,7 +822,7 @@ impl Run {
 
     /// The smallest and largest pack of the put entries; `None` if the run
     /// has only tombstones.
-    #[allow(dead_code)] // Not used: a GC must not skip a run by its pack range.
+    #[allow(dead_code, reason = "not used: a GC must not skip a run by its pack range")]
     pub fn pack_range(&self) -> Option<(u64, u64)> {
         (self.min_pack <= self.max_pack).then_some((self.min_pack, self.max_pack))
     }

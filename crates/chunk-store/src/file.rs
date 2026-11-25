@@ -87,7 +87,7 @@ fn decode_node(b: &[u8]) -> Option<Node> {
     let mut entries = Vec::with_capacity(n);
     let mut starts = Vec::with_capacity(n);
     let mut pos = 0u64;
-    for e in b[9..].chunks_exact(ENTRY) {
+    for e in b[9..].as_chunks::<ENTRY>().0 {
         let id = ObjectId(e[..ID_LEN].try_into().unwrap());
         let len = u64::from_le_bytes(e[ID_LEN..].try_into().unwrap());
         starts.push(pos);
@@ -757,7 +757,7 @@ pub fn splice(
 }
 
 #[cfg(test)]
-#[allow(clippy::single_range_in_vec_init)] // one changed range is a list of one
+#[allow(clippy::single_range_in_vec_init, reason = "one changed range is a list of one")]
 mod tests {
     use super::*;
     use crate::mem::MemIo;
