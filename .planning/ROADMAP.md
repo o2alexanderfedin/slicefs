@@ -402,7 +402,7 @@ Plans:
 ### Phase 21.2: Thread-safety verification and CI gates (INSERTED)
 
 **Goal:** Tool-backed evidence of thread safety on every build. Static analysis and formal verification run as CI gates on every push and every PR, and the two Phase 19 races that the multi-worker Linux default made reachable are fixed.
-**Requirements**: TSAFE-01..06 (to be written at discuss)
+**Requirements**: TSAFE-01, TSAFE-02, TSAFE-03, TSAFE-04, TSAFE-05, TSAFE-06
 **Depends on:** Phase 21.1
 **Success criteria:**
 1. A CI workflow runs on every push to any branch and on every PR, and fails the build on any finding: `cargo clippy --workspace --all-targets -D warnings`, Miri on the unit tests that reach `unsafe` in chunk-store and metadata, ThreadSanitizer (pinned nightly, Linux) on the multi-worker tests and a short stress run, loom or shuttle models, Kani proofs, and a `deadlock-detect` stress run. Each job has a time limit.
