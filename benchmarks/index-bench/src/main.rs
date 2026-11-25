@@ -172,7 +172,7 @@ fn max_rss_bytes() -> u64 {
 
 /// Current RSS of this process, in bytes (`task_info` on macOS).
 #[cfg(target_os = "macos")]
-#[allow(deprecated)] // libc points mach_task_self to the mach2 crate; no new crate here
+#[allow(deprecated, reason = "libc points mach_task_self to the mach2 crate; no new crate here")]
 fn current_rss_bytes() -> Option<u64> {
     let mut info: libc::mach_task_basic_info = unsafe { std::mem::zeroed() };
     let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
@@ -204,7 +204,7 @@ fn current_rss_bytes() -> Option<u64> {
 /// `TASK_VM_INFO` flavor. `internal` counts resident anonymous pages (not
 /// the compressed ones); `external` counts resident pages of mapped files.
 #[cfg(target_os = "macos")]
-#[allow(deprecated)] // libc points mach_task_self to the mach2 crate; no new crate here
+#[allow(deprecated, reason = "libc points mach_task_self to the mach2 crate; no new crate here")]
 fn rss_split_bytes() -> Option<(u64, u64)> {
     /// `struct task_vm_info` of `<mach/task_info.h>` up to `phys_footprint`
     /// (revision 1), under `#pragma pack(4)`. libc does not define it.
@@ -261,7 +261,7 @@ fn rss_split_bytes() -> Option<(u64, u64)> {
 
 /// `RssAnon` and `RssFile` of `/proc/self/status` (in kB there). Compiled on
 /// every system, so that a build on macOS checks it too.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(target_os = "macos", allow(dead_code, reason = "used on Linux; built on macOS too so that it is checked"))]
 fn linux_rss_split_bytes() -> Option<(u64, u64)> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     let kb = |key: &str| -> Option<u64> {
@@ -273,7 +273,7 @@ fn linux_rss_split_bytes() -> Option<(u64, u64)> {
 
 /// Resident pages (second field of `/proc/self/statm`) times the page size.
 /// Compiled on every system, so that a build on macOS checks it too.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(target_os = "macos", allow(dead_code, reason = "used on Linux; built on macOS too so that it is checked"))]
 fn linux_rss_bytes() -> Option<u64> {
     let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
     let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
