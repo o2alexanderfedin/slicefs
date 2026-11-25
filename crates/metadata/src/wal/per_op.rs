@@ -641,6 +641,7 @@ mod tests {
     /// The store logs one record per `log_op`; a failed write-out makes
     /// `flush_wal` (fsync) fail until the next commit.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn store_log_op_writes_one_record_and_a_failed_write_out_fails_fsync() {
         use crate::store::DictMetadataStore;
         use crate::store_io::StoreIo;
@@ -669,6 +670,7 @@ mod tests {
     /// record queued after a failed write-out is dropped as lost; the commit
     /// succeeds, fsync works again, and the records after it replay.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn a_commit_after_a_failed_write_with_queued_records_succeeds() {
         use crate::store::DictMetadataStore;
         use crate::store_io::StoreIo;

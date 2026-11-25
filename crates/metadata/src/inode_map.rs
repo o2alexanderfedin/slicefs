@@ -223,6 +223,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_intern_and_load_round_trip() {
         use crate::store_io::StoreIo;
         use tempfile::TempDir;
@@ -256,6 +257,7 @@ mod tests {
 
     proptest! {
         #[test]
+        #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
         fn prop_serialize_round_trip(
             entries in prop::collection::vec((any::<u64>(), (any::<u8>(), any::<[u8; 32]>()).prop_map(|(t, d)| ObjectKey::new(t, d))), 0..20)
         ) {

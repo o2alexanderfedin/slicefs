@@ -518,6 +518,7 @@ mod tests {
     /// (and the periodic timer), and cut/install_root/rotate run at once on
     /// one strategy. A watchdog fails the test if they do not end in 5 s.
     #[test]
+    #[cfg_attr(miri, ignore = "real-time watchdog of 5 s: too slow under the interpreter")]
     fn no_deadlock_between_append_cut_and_sync() {
         for kind in KINDS {
             let dir = tempfile::tempdir().unwrap();
