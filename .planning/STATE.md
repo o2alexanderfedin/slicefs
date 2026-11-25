@@ -7,16 +7,16 @@ current_phase_name: Chunk profiles
 current_plan: Not started
 status: planning
 stopped_at: Phase 21.1 complete, ready to plan Phase 22
-last_updated: "2026-11-25T00:47:42.856Z"
+last_updated: "2026-11-25T02:19:31.765Z"
 last_activity: 2026-11-24
 last_activity_desc: Phase 21.1 complete, transitioned to Phase 22
-state_head: 3bcb467f43a3f1c8a66eb99ce0e1bf808d822c2b
+state_head: d0708f51565d618d9d83c9ff330ec02c0eaed21b
 progress:
-  total_phases: 8
+  total_phases: 9
   completed_phases: 4
   total_plans: 44
   completed_plans: 44
-  percent: 50
+  percent: 44
 ---
 
 # Project State
@@ -37,7 +37,7 @@ Plan: 21.1-01 complete (1 of 4); next: 21.1-02 (the header check at every open p
 Status: Ready to plan
 Last activity: 2026-11-24 — Phase 21.1 complete, transitioned to Phase 22
 
-Progress: [█████░░░░░] 50%
+Progress: [████░░░░░░] 44%
 
 ## Performance Metrics
 
@@ -231,6 +231,7 @@ None.
 ### Roadmap Evolution
 
 - Phase 21.1 inserted after Phase 21: Store header with compat, ro-compat and incompat feature flags, and a written format policy (#154); owner agreed #154 joins v2.2 after Phase 21
+- Phase 21.2 inserted after Phase 21.1: Thread-safety verification and CI gates (user asked for formal verification and static analysis on every build) (URGENT)
 
 ## Deferred Items
 
