@@ -435,4 +435,46 @@ mod loom_tests {
             assert_eq!(st.queue_now, 0);
         });
     }
+
+    /// 1 worker, 1 slot, 3 jobs: in some orders the submitter blocks on
+    /// `not_full` (the full-queue wait of `submit`). Threads: main + 1 worker
+    /// = 2. Bound: none (every order).
+    #[test]
+    fn loom_pool_one_worker_full_queue_all_orders() {
+        let mut b = loom::model::Builder::new();
+        b.preemption_bound = None;
+        b.check(|| {
+            let pool = Pool::with_limits(1, 1, 1 << 20, LONG).unwrap();
+            let n = Arc::new(AtomicUsize::new(0));
+            for _ in 0..3 {
+                let n = Arc::clone(&n);
+                pool.submit(0, Box::new(move || {
+                    n.fetch_add(1, Ordering::SeqCst);
+                }));
+            }
+            let st = pool.drain_and_join(LONG).expect("drain");
+            assert_eq!(st.jobs, 3);
+            assert_eq!(n.load(Ordering::SeqCst), 3);
+            assert_eq!(st.queue_now, 0);
+        });
+    }
+
+    /// 2 workers, 1 job, then the pool is dropped with no drain (the `Drop`
+    /// path: `close_and_wait` and the joins). Threads: main + 2 workers = 3.
+    /// Bound: the `LOOM_MAX_PREEMPTIONS` of model.sh (every order does not
+    /// finish in 60 s). The job runs once, and the drop returns, so no worker
+    /// is left blocked.
+    #[test]
+    fn loom_pool_drop_without_drain_runs_the_job() {
+        loom::model(|| {
+            let n = Arc::new(AtomicUsize::new(0));
+            let pool = Pool::with_limits(2, 2, 1 << 20, LONG).unwrap();
+            let m = Arc::clone(&n);
+            pool.submit(0, Box::new(move || {
+                m.fetch_add(1, Ordering::SeqCst);
+            }));
+            drop(pool);
+            assert_eq!(n.load(Ordering::SeqCst), 1);
+        });
+    }
 }

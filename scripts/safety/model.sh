@@ -9,7 +9,7 @@
 # every order with at most LOOM_MAX_PREEMPTIONS preemptions.
 # Usage: scripts/safety/model.sh
 # Env:   LOOM_MAX_PREEMPTIONS   the preemption bound (default 3)
-#        MODEL_CRATES           the crates with models (default "slicefs-cli")
+#        MODEL_CRATES           the crates with models (default "chunk-store slicefs-cli")
 #        CARGO_TARGET_DIR       the target root (default <repo>/target); the models use <root>/loom
 #        RUST_STABLE            the toolchain (default: the pin in safety.yml; RUST_STABLE=stable locally)
 set -euo pipefail
@@ -25,7 +25,7 @@ echo "MODEL bound=$LOOM_MAX_PREEMPTIONS"
 
 LOG=$(mktemp)
 trap 'rm -f "$LOG"' EXIT
-for crate in ${MODEL_CRATES:-slicefs-cli}; do
+for crate in ${MODEL_CRATES:-chunk-store slicefs-cli}; do
   rc=0
   cargo +"$RUST_STABLE" test --locked --release -p "$crate" --lib -- loom_ </dev/null 2>&1 | tee "$LOG" || rc=$?
   if [ "$rc" -ne 0 ]; then

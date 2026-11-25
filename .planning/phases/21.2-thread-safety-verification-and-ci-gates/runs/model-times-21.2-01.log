@@ -1,0 +1,16 @@
+# loom model times at 787fdfd (+ Task 2 tree), release, stable 1.100.0, macOS; one run each, timeout 300 s
+# host load at start: 15.02 14.09 11.29
+loom_shim_condvar_wakes_a_waiter_all_orders bound=2 secs=1.02 result=ok
+loom_shim_condvar_wakes_a_waiter_all_orders bound=3 secs=0.18 result=ok
+loom_shim_condvar_wakes_a_waiter_all_orders bound=4 secs=0.18 result=ok
+loom_pool_two_workers_two_jobs_drain bound=2 secs=0.77 result=ok
+loom_pool_two_workers_two_jobs_drain bound=3 secs=3.18 result=ok
+loom_pool_two_workers_two_jobs_drain bound=4 secs=34.31 result=ok
+loom_pool_one_worker_full_queue_all_orders bound=2 secs=2.63 result=ok
+loom_pool_one_worker_full_queue_all_orders bound=3 secs=2.64 result=ok
+loom_pool_one_worker_full_queue_all_orders bound=4 secs=2.66 result=ok
+loom_pool_drop_without_drain_runs_the_job bound=2 secs=0.29 result=ok
+loom_pool_drop_without_drain_runs_the_job bound=3 secs=0.94 result=ok
+loom_pool_drop_without_drain_runs_the_job bound=4 secs=4.49 result=ok
+# host load at end: 14.88 14.15 11.48
+# sum at bound 3: 6.94 s (at most 300 s): the CI bound stays 3. Sum at bound 4: 41.64 s. *_all_orders models ignore the bound (every order).

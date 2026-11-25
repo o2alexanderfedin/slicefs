@@ -17,13 +17,152 @@
 //!   that entry.
 //!
 //! The std `Mutex<StoreIo>` and the commit gate stay std types (Phase 19, D-18).
+//!
+//! Under `--cfg loom` (the Phase 21.2 models) the same types wrap the loom
+//! locks, and rank tracking is off: loom runs model threads on one OS thread,
+//! so a thread-local rank stack would mix them.
 
 use std::ops::{Deref, DerefMut};
 use std::time::Duration;
 
 use crate::lock_stats::Site;
 
+#[cfg(not(loom))]
 pub use parking_lot::WaitTimeoutResult;
+
+/// The result of [`Condvar::wait_for`] under `--cfg loom`: loom 0.7.3 waits
+/// never time out, so `timed_out` is always false.
+#[cfg(loom)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WaitTimeoutResult(bool);
+
+#[cfg(loom)]
+impl WaitTimeoutResult {
+    pub fn timed_out(self) -> bool {
+        self.0
+    }
+}
+
+/// The lock types under the shim: `parking_lot`, or with `--cfg loom` small
+/// `parking_lot`-shaped adapters over the loom types, so a loom model runs the
+/// shim code as it is (Phase 21.2).
+#[cfg(not(loom))]
+use parking_lot as imp;
+
+#[cfg(loom)]
+mod imp {
+    use std::ops::{Deref, DerefMut};
+    use std::sync::{PoisonError, TryLockError};
+    use std::time::Duration;
+
+    pub use loom::sync::{RwLockReadGuard, RwLockWriteGuard};
+
+    /// A loom mutex with the `parking_lot` API (no poison).
+    pub struct Mutex<T>(loom::sync::Mutex<T>);
+
+    /// A loom guard; `None` only inside a condvar wait.
+    pub struct MutexGuard<'a, T>(Option<loom::sync::MutexGuard<'a, T>>);
+
+    fn ok_or_poisoned<G>(r: Result<G, TryLockError<G>>) -> Option<G> {
+        match r {
+            Ok(g) => Some(g),
+            Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
+
+    impl<T> Mutex<T> {
+        pub fn new(value: T) -> Self {
+            Mutex(loom::sync::Mutex::new(value))
+        }
+
+        pub fn lock(&self) -> MutexGuard<'_, T> {
+            MutexGuard(Some(self.0.lock().unwrap_or_else(PoisonError::into_inner)))
+        }
+
+        pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+            ok_or_poisoned(self.0.try_lock()).map(|g| MutexGuard(Some(g)))
+        }
+
+        pub fn into_inner(self) -> T {
+            self.0.into_inner().unwrap_or_else(PoisonError::into_inner)
+        }
+
+        pub fn get_mut(&mut self) -> &mut T {
+            self.0.get_mut().unwrap_or_else(PoisonError::into_inner)
+        }
+    }
+
+    impl<T> Deref for MutexGuard<'_, T> {
+        type Target = T;
+        fn deref(&self) -> &T {
+            self.0.as_ref().expect("guard is held")
+        }
+    }
+
+    impl<T> DerefMut for MutexGuard<'_, T> {
+        fn deref_mut(&mut self) -> &mut T {
+            self.0.as_mut().expect("guard is held")
+        }
+    }
+
+    /// A loom read-write lock with the `parking_lot` API (no poison).
+    pub struct RwLock<T>(loom::sync::RwLock<T>);
+
+    impl<T> RwLock<T> {
+        pub fn new(value: T) -> Self {
+            RwLock(loom::sync::RwLock::new(value))
+        }
+
+        pub fn read(&self) -> RwLockReadGuard<'_, T> {
+            self.0.read().unwrap_or_else(PoisonError::into_inner)
+        }
+
+        pub fn write(&self) -> RwLockWriteGuard<'_, T> {
+            self.0.write().unwrap_or_else(PoisonError::into_inner)
+        }
+
+        #[cfg_attr(not(feature = "lock-stats"), allow(dead_code))]
+        pub fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
+            ok_or_poisoned(self.0.try_read())
+        }
+
+        #[cfg_attr(not(feature = "lock-stats"), allow(dead_code))]
+        pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
+            ok_or_poisoned(self.0.try_write())
+        }
+    }
+
+    /// A loom condvar with the `parking_lot` API: the wait takes the guard by
+    /// `&mut`, moves the loom guard out and back.
+    #[derive(Default)]
+    pub struct Condvar(loom::sync::Condvar);
+
+    impl Condvar {
+        pub fn new() -> Self {
+            Condvar(loom::sync::Condvar::new())
+        }
+
+        pub fn wait<T>(&self, guard: &mut MutexGuard<'_, T>) {
+            let g = guard.0.take().expect("guard is held");
+            guard.0 = Some(self.0.wait(g).unwrap_or_else(PoisonError::into_inner));
+        }
+
+        /// loom 0.7.3 never times out: this is `wait`.
+        pub fn wait_for<T>(&self, guard: &mut MutexGuard<'_, T>, _timeout: Duration) -> super::WaitTimeoutResult {
+            self.wait(guard);
+            super::WaitTimeoutResult(false)
+        }
+
+        pub fn notify_one(&self) {
+            self.0.notify_one();
+        }
+
+        pub fn notify_all(&self) {
+            self.0.notify_all();
+        }
+    }
+}
 
 /// Std-shaped primitives for the code that uses std locks on purpose (the
 /// request pool, the commit gate, the flusher atomics). This is the one cfg
@@ -82,7 +221,7 @@ pub enum Rank {
 }
 
 /// The debug-build stack of locks held by this thread.
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(loom)))]
 mod track {
     use super::Rank;
     use std::cell::{Cell, RefCell};
@@ -157,9 +296,9 @@ mod track {
 
 /// One entry of the rank stack, removed when dropped. Empty in a release build.
 struct Entry {
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, not(loom)))]
     rank: Rank,
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, not(loom)))]
     key: u64,
 }
 
@@ -167,19 +306,19 @@ impl Entry {
     /// Check the rules, before a lock is taken.
     #[inline(always)]
     fn check(_rank: Rank, _key: u64) {
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, not(loom)))]
         track::check(_rank, _key);
     }
 
     /// Record a lock that is now held.
     #[inline(always)]
     fn push(_rank: Rank, _key: u64) -> Entry {
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, not(loom)))]
         track::push(_rank, _key);
         Entry {
-            #[cfg(debug_assertions)]
+            #[cfg(all(debug_assertions, not(loom)))]
             rank: _rank,
-            #[cfg(debug_assertions)]
+            #[cfg(all(debug_assertions, not(loom)))]
             key: _key,
         }
     }
@@ -187,11 +326,11 @@ impl Entry {
     /// Take the entry off the stack while the thread waits on a condvar.
     #[inline(always)]
     fn suspend(&self) -> Option<usize> {
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, not(loom)))]
         {
             track::remove(self.rank, self.key)
         }
-        #[cfg(not(debug_assertions))]
+        #[cfg(any(not(debug_assertions), loom))]
         {
             None
         }
@@ -200,7 +339,7 @@ impl Entry {
     /// Put the entry back where it was.
     #[inline(always)]
     fn resume(&self, _at: Option<usize>) {
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, not(loom)))]
         if let Some(at) = _at {
             track::insert(at, self.rank, self.key);
         }
@@ -210,7 +349,7 @@ impl Entry {
 impl Drop for Entry {
     #[inline(always)]
     fn drop(&mut self) {
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, not(loom)))]
         track::remove(self.rank, self.key);
     }
 }
@@ -237,18 +376,18 @@ pub mod rank {
     /// Stripe or Cell lock with no `Gate` entry held panics with `taken without
     /// the commit gate`. A no-op in a release build.
     pub fn require_gate(_on: bool) {
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, not(loom)))]
         super::track::set_need_gate(_on);
     }
 
     /// The ranks and keys this thread holds, oldest first. Empty in a release
     /// build.
     pub fn held() -> Vec<(Rank, u64)> {
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, not(loom)))]
         {
             super::track::held()
         }
-        #[cfg(not(debug_assertions))]
+        #[cfg(any(not(debug_assertions), loom))]
         {
             Vec::new()
         }
@@ -312,14 +451,14 @@ impl Meta {
 
 /// A `parking_lot` mutex with a rank. No poison.
 pub struct Mutex<T> {
-    m: parking_lot::Mutex<T>,
+    m: imp::Mutex<T>,
     meta: Meta,
 }
 
 /// The guard of a [`Mutex`]. Derefs to the value.
 pub struct MutexGuard<'a, T> {
     // Field order is drop order: unlock, then leave the rank stack, then record.
-    g: parking_lot::MutexGuard<'a, T>,
+    g: imp::MutexGuard<'a, T>,
     rank: Entry,
     #[cfg(feature = "lock-stats")]
     _timing: Option<Timing>,
@@ -327,13 +466,13 @@ pub struct MutexGuard<'a, T> {
 
 impl<T> Mutex<T> {
     pub fn new(rank: Rank, value: T) -> Self {
-        Mutex { m: parking_lot::Mutex::new(value), meta: Meta::new(rank, 0) }
+        Mutex { m: imp::Mutex::new(value), meta: Meta::new(rank, 0) }
     }
 
     /// `key` orders locks of the same rank: the stripe index, or the inode
     /// number.
     pub fn new_keyed(rank: Rank, key: u64, value: T) -> Self {
-        Mutex { m: parking_lot::Mutex::new(value), meta: Meta::new(rank, key) }
+        Mutex { m: imp::Mutex::new(value), meta: Meta::new(rank, key) }
     }
 
     /// Record the wait and hold of this lock as `site` (with `lock-stats`).
@@ -398,13 +537,13 @@ impl<T> DerefMut for MutexGuard<'_, T> {
 
 /// A `parking_lot` read-write lock with a rank. No poison.
 pub struct RwLock<T> {
-    l: parking_lot::RwLock<T>,
+    l: imp::RwLock<T>,
     meta: Meta,
 }
 
 /// The read guard of an [`RwLock`].
 pub struct RwLockReadGuard<'a, T> {
-    g: parking_lot::RwLockReadGuard<'a, T>,
+    g: imp::RwLockReadGuard<'a, T>,
     _rank: Entry,
     #[cfg(feature = "lock-stats")]
     _timing: Option<Timing>,
@@ -412,7 +551,7 @@ pub struct RwLockReadGuard<'a, T> {
 
 /// The write guard of an [`RwLock`].
 pub struct RwLockWriteGuard<'a, T> {
-    g: parking_lot::RwLockWriteGuard<'a, T>,
+    g: imp::RwLockWriteGuard<'a, T>,
     _rank: Entry,
     #[cfg(feature = "lock-stats")]
     _timing: Option<Timing>,
@@ -420,11 +559,11 @@ pub struct RwLockWriteGuard<'a, T> {
 
 impl<T> RwLock<T> {
     pub fn new(rank: Rank, value: T) -> Self {
-        RwLock { l: parking_lot::RwLock::new(value), meta: Meta::new(rank, 0) }
+        RwLock { l: imp::RwLock::new(value), meta: Meta::new(rank, 0) }
     }
 
     pub fn new_keyed(rank: Rank, key: u64, value: T) -> Self {
-        RwLock { l: parking_lot::RwLock::new(value), meta: Meta::new(rank, key) }
+        RwLock { l: imp::RwLock::new(value), meta: Meta::new(rank, key) }
     }
 
     /// Record the wait and hold of this lock as `site` (with `lock-stats`).
@@ -487,11 +626,11 @@ impl<T> DerefMut for RwLockWriteGuard<'_, T> {
 /// A `parking_lot` condition variable for a shim [`Mutex`]. The wait takes the
 /// guard by `&mut`; the rank entry is off the stack while the thread waits.
 #[derive(Default)]
-pub struct Condvar(parking_lot::Condvar);
+pub struct Condvar(imp::Condvar);
 
 impl Condvar {
     pub fn new() -> Self {
-        Condvar(parking_lot::Condvar::new())
+        Condvar(imp::Condvar::new())
     }
 
     pub fn wait<T>(&self, guard: &mut MutexGuard<'_, T>) {
@@ -516,7 +655,7 @@ impl Condvar {
     }
 }
 
-#[cfg(all(test, debug_assertions))]
+#[cfg(all(test, debug_assertions, not(loom)))]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -778,5 +917,40 @@ mod tests {
         });
         let msg = *r.unwrap_err().downcast::<String>().unwrap();
         assert!(msg.contains(BAD) && msg.contains("Stripe/4") && msg.contains("Cell/9"), "{msg}");
+    }
+}
+
+/// loom model of the shim backend (Phase 21.2). Run only with `--cfg loom`
+/// (`scripts/safety/model.sh`).
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// One thread sets a flag under a shim `Mutex` and calls `notify_one`; the
+    /// main thread waits with `wait_for` until the flag is set. Threads: main
+    /// + 1 = 2. Bound: none (every order). A lost notify is a loom deadlock:
+    /// loom waits never time out.
+    #[test]
+    fn loom_shim_condvar_wakes_a_waiter_all_orders() {
+        let mut b = loom::model::Builder::new();
+        b.preemption_bound = None;
+        b.check(|| {
+            let pair = Arc::new((Mutex::new(Rank::Short, false), Condvar::new()));
+            let other = Arc::clone(&pair);
+            let t = raw::thread::spawn(move || {
+                let (m, cv) = &*other;
+                *m.lock() = true;
+                cv.notify_one();
+            });
+            let (m, cv) = &*pair;
+            let mut g = m.lock();
+            while !*g {
+                let _ = cv.wait_for(&mut g, Duration::from_secs(3600));
+            }
+            assert!(*g);
+            drop(g);
+            t.join().unwrap();
+        });
     }
 }
