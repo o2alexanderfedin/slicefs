@@ -190,10 +190,10 @@ pub(crate) fn try_force_unmount(mountpoint: &Path) -> bool {
                 cmd.arg(arg);
             }
             cmd.arg(mp.as_ref());
-            if let Ok(status) = cmd.status() {
-                if status.success() {
-                    return true;
-                }
+            if let Ok(status) = cmd.status()
+                && status.success()
+            {
+                return true;
             }
         }
     }

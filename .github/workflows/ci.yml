@@ -15,6 +15,9 @@ jobs:
   linux:
     name: Linux (tests, FUSE smoke, live checks, pjdfstest — in Docker)
     runs-on: ubuntu-latest
+    # The longest of the last 10 successful runs was 9.9 min; 1.5 times that,
+    # rounded up to 5 min, with 30 min as the least limit (Phase 21.2, D-07).
+    timeout-minutes: 30
     # POOL-04: the Linux mounts run with 4 request workers; each step fails
     # without the Workers line of that value.
     env:
@@ -45,6 +48,9 @@ jobs:
   macos:
     name: macOS (cargo test, FUSE-T build)
     runs-on: macos-latest
+    # The longest of the last 10 successful runs was 5.5 min; 1.5 times that,
+    # rounded up to 5 min, with 30 min as the least limit (Phase 21.2, D-07).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

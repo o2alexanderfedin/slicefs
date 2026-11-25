@@ -34,3 +34,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: scripts/safety/model.sh
+
+  clippy:
+    name: clippy-${{ matrix.name }}
+    # clippy with -D warnings on the stable pin, and a written reason on every
+    # lint allow (TSAFE-01). The macOS row checks the FUSE-T and FSKit code;
+    # the Linux row checks the Linux-only code.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+          - name: macos
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # The macOS build finds FUSE-T through .pkgconfig/fuse.pc (.cargo/config.toml).
+      - name: Install pkg-config and FUSE-T
+        if: runner.os == 'macOS'
+        run: |
+          brew install pkg-config
+          brew install --cask macos-fuse-t/cask/fuse-t
+
+      - run: scripts/safety/clippy.sh
