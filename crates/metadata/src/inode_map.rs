@@ -102,7 +102,7 @@ pub fn serialize_inode_map(map: &InodeMap) -> Vec<u8> {
 /// Sets `next_ino` to `max(keys) + 1`, or 2 for an empty map.
 /// Returns `MetaError::Corrupted` if the byte length is not a multiple of `RECORD`.
 pub fn deserialize_inode_map(bytes: &[u8]) -> Result<InodeMap, MetaError> {
-    if bytes.len() % RECORD != 0 {
+    if !bytes.len().is_multiple_of(RECORD) {
         return Err(MetaError::Corrupted(format!(
             "inode map: expected a multiple of {} bytes, got {}",
             RECORD, bytes.len()

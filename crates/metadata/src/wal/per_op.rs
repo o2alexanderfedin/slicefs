@@ -210,7 +210,7 @@ impl WalStrategy for PerOpWal {
         let at = self.loc.lock().clone();
         #[cfg(test)]
         self.park.point("cut_create");
-        #[allow(unused_mut)]
+        #[allow(unused_mut, reason = "only the test fault hook changes next")]
         let mut next = super::open_next_segment(&at)?;
         #[cfg(test)]
         if self.fail_cut_record.swap(false, Ordering::AcqRel) {

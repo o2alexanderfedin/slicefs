@@ -31,7 +31,7 @@ use crate::xattr::{intern_xattrs, load_xattrs, set_xattr_entry, get_xattr_entry,
                    list_xattr_names, remove_xattr_entry};
 
 // S_IFDIR bit mask (POSIX directory type)
-const S_IFMT: u32 = 0o0170_000;
+const S_IFMT: u32 = 0o0_170_000;
 
 /// Byte layout of the root record that `commit` writes: fixed-width fields,
 /// little-endian. Each `*_DATA` field is the key of a serialized map.
@@ -314,7 +314,7 @@ fn check_name(name: &str) -> Result<(), MetaError> {
     }
     Ok(())
 }
-const S_IFDIR: u32 = 0o0040_000;
+const S_IFDIR: u32 = 0o0_040_000;
 
 /// Concrete `MetadataStore`; its nodes are in the chunk store (`StoreIo`).
 ///
@@ -699,10 +699,10 @@ impl DictMetadataStore {
     fn log_wal_entry(&self, entry: &WalEntry) {
         // A clone of the handle: the `wal` slot lock is not held while the
         // log writes or syncs.
-        if let Some(w) = self.wal_handle() {
-            if let Err(e) = w.log_mutation(entry) {
-                self.note_wal_failure(&e);
-            }
+        if let Some(w) = self.wal_handle()
+            && let Err(e) = w.log_mutation(entry)
+        {
+            self.note_wal_failure(&e);
         }
     }
 
@@ -730,11 +730,11 @@ impl DictMetadataStore {
             }
             let digest = self.dir_data.lock().get(&ino).copied()
                 .ok_or(MetaError::NotADirectory(ino))?;
-            if let Some((d, list)) = cold.take() {
-                if d == digest {
-                    live.map.insert(ino, list);
-                    return Ok(live);
-                }
+            if let Some((d, list)) = cold.take()
+                && d == digest
+            {
+                live.map.insert(ino, list);
+                return Ok(live);
             }
             drop(live);
             let list = DirList::load(&mut self.reader(), &digest)?;
@@ -781,11 +781,11 @@ impl DictMetadataStore {
             }
             let digest = self.inode_data.lock().get(&ino).copied()
                 .ok_or(MetaError::NotFound(ino))?;
-            if let Some((d, meta)) = cold.take() {
-                if d == digest {
-                    live.map.insert(ino, meta);
-                    return Ok(live);
-                }
+            if let Some((d, meta)) = cold.take()
+                && d == digest
+            {
+                live.map.insert(ino, meta);
+                return Ok(live);
             }
             drop(live);
             let meta = load_inode(&mut self.reader(), &digest)?;
@@ -839,7 +839,7 @@ impl DictMetadataStore {
         if new > old {
             self.logical_bytes.fetch_add(new - old, Ordering::Relaxed);
         } else if old > new {
-            self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+            self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
                 Some(cur.saturating_sub(old - new))
             }).ok();
         }
@@ -1448,13 +1448,13 @@ impl MetadataStore for DictMetadataStore {
 
         // Decrement logical_bytes by the deleted inode's size.
         if size > 0 {
-            self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+            self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
                 Some(cur.saturating_sub(size))
             }).ok();
         }
 
         // Decrement inode count (saturating to avoid underflow).
-        self.inode_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+        self.inode_count.try_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
             Some(c.saturating_sub(1))
         }).ok();
 
@@ -1685,7 +1685,7 @@ impl DictMetadataStore {
         let mut io_guard = lock_stats::lock(&io, Site::Io);
 
         // Read root record bytes
-        let bytes = (&mut *io_guard).get_node(root)
+        let bytes = (*io_guard).get_node(root)
             .map_err(|e| crate::store_io::node_err("root node", root, e))?;
 
         check_root_len(bytes.len())?;
@@ -1839,8 +1839,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         let store = DictMetadataStore::new(Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap())));
         let root = store.get_inode(1).unwrap();
-        assert!(root.mtime_sec as i64 >= before, "root mtime {} (epoch 0 shows as 1969)", root.mtime_sec);
-        assert!(root.ctime_sec as i64 >= before, "root ctime {}", root.ctime_sec);
+        assert!(root.mtime_sec >= before, "root mtime {} (epoch 0 shows as 1969)", root.mtime_sec);
+        assert!(root.ctime_sec >= before, "root ctime {}", root.ctime_sec);
     }
 
     #[test]
@@ -2404,7 +2404,7 @@ mod tests {
 
         // Verify the content bytes are retrievable from the node store via get_node.
         let mut io_guard = reloaded.io().lock().unwrap();
-        let read_back = (&mut *io_guard).get_node(&content_digest).expect("content missing");
+        let read_back = (*io_guard).get_node(&content_digest).expect("content missing");
         assert_eq!(read_back, content.as_slice());
     }
 
@@ -2686,7 +2686,7 @@ mod tests {
         store.set_snapshots(snaps);
 
         assert_eq!(store.find_snapshot("10").unwrap().version, 10);
-        assert_eq!(store.find_snapshot("twenty").is_none(), true);
+        assert!(store.find_snapshot("twenty").is_none());
         assert_eq!(store.find_snapshot("ten").unwrap().version, 10);
         assert_eq!(store.find_snapshot("thirty").unwrap().version, 30);
         assert!(store.find_snapshot("20").is_some());  // unnamed, find by version

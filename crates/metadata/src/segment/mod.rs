@@ -111,12 +111,13 @@ pub fn load_store_from_segments(
     Ok((last_root, snapshots))
 }
 
+/// The root, the snapshots and the operation records of [`load_store_with_log`].
+type StoreWithLog = (Option<ObjectKey>, Vec<SnapshotEntry>, Vec<Vec<u8>>);
+
 /// Like [`load_store_from_segments`], and also return the operation records
 /// after the last `RootUpdate`, in order (the write log, #20), all in RAM.
 /// For tests and tools; a mount streams them with [`scan_store_with_log`].
-pub fn load_store_with_log(
-    segments_dir: &Path,
-) -> Result<(Option<ObjectKey>, Vec<SnapshotEntry>, Vec<Vec<u8>>), SegmentError> {
+pub fn load_store_with_log(segments_dir: &Path) -> Result<StoreWithLog, SegmentError> {
     let (root, snapshots, log) = scan_store_with_log(segments_dir)?;
     let ops = log.records().collect::<Result<Vec<_>, _>>()?;
     Ok((root, snapshots, ops))

@@ -1,10 +1,10 @@
-/// Integration tests for DictMetadataStore segment persistence + WAL integration.
-///
-/// Covers:
-///   - WAL logging on commits (RootUpdate records appear in segment file)
-///   - load_store_from_segments reconstructs DictMetadataStore correctly
-///   - Lock file lifecycle (acquire creates, drop removes)
-///   - Dirty mount detection (lock file present → DirtyMount error)
+//! Integration tests for DictMetadataStore segment persistence + WAL integration.
+//!
+//! Covers:
+//!   - WAL logging on commits (RootUpdate records appear in segment file)
+//!   - load_store_from_segments reconstructs DictMetadataStore correctly
+//!   - Lock file lifecycle (acquire creates, drop removes)
+//!   - Dirty mount detection (lock file present → DirtyMount error)
 
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;

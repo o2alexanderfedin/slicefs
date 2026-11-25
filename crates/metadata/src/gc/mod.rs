@@ -128,10 +128,10 @@ fn mark(
         }
         let mut failed = None;
         chunk_store::file::for_each_file_object(cs, to_id(&v), |id| {
-            if failed.is_none() {
-                if let Err(e) = add(id) {
-                    failed = Some(e);
-                }
+            if failed.is_none()
+                && let Err(e) = add(id)
+            {
+                failed = Some(e);
             }
         })
         .map_err(|e| MetaError::Corrupted(format!("GC mark: object {v:?}: {e}")))?;
