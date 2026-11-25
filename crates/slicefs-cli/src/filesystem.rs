@@ -1513,7 +1513,7 @@ impl SliceFsFilesystem {
 
     /// True if a test hook fails this rebase step (see `test_fail_steps`).
     fn forced_fail(&self) -> bool {
-        self.fail_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+        self.fail_steps.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
     }
 
     /// Phase C of an unlocked step: true if a test hook drops its result.
@@ -1525,10 +1525,10 @@ impl SliceFsFilesystem {
         }
         let k = self.drop_every.load(Ordering::Relaxed);
         let n = self.steps_seen.fetch_add(1, Ordering::Relaxed) + 1;
-        if k > 0 && n % k == 0 {
+        if k > 0 && n.is_multiple_of(k) {
             return true;
         }
-        self.drop_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+        self.drop_steps.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
     }
 
     /// Run the push hook, if one is set.
@@ -1976,7 +1976,7 @@ pub fn inode_to_file_attr(meta: &InodeMeta) -> FileAttr {
     };
 
     let perm = (meta.mode & 0o7777) as u16;
-    let blocks = (meta.size + 511) / 512;
+    let blocks = meta.size.div_ceil(512);
 
     let mtime = pair_to_system_time(meta.mtime_sec, meta.mtime_nsec);
     let ctime = pair_to_system_time(meta.ctime_sec, meta.ctime_nsec);
@@ -2330,8 +2330,8 @@ impl SliceFsFilesystem {
 
     /// True if the committed file has bytes (so a fresh stream would lose them).
     fn has_content(&self, ino: u64) -> bool {
-        self.meta.get_inode(ino).map_or(false, |m| m.size > 0)
-            && self.meta.get_manifest(ino).map_or(false, |m| !m.is_empty())
+        self.meta.get_inode(ino).is_ok_and(|m| m.size > 0)
+            && self.meta.get_manifest(ino).is_ok_and(|m| !m.is_empty())
     }
 
     /// Switch the stream of the locked cell `g` to an overlay (D-02). Phase
@@ -2403,7 +2403,7 @@ impl SliceFsFilesystem {
     /// `clone` of a stream of `next` bytes, the committed content, or none)
     /// and its length, the root the manifest names now, and the digest of
     /// the stored manifest node of the base.
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, reason = "a private result tuple; an alias would only move the type")]
     fn overlay_base(
         &self,
         ino: u64,
@@ -2718,7 +2718,7 @@ impl SliceFsFilesystem {
     /// installed). Returns the new root (none for size 0), its manifest
     /// digest (the empty manifest for size 0) and the rebase trace line
     /// (the caller prints it with no cell lock held).
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, reason = "a private result tuple; an alias would only move the type")]
     fn step_io(&self, ino: u64, src: &Overlay, plan: &StepPlan) -> Result<(Option<ObjectKey>, ObjectKey, String), i32> {
         let cs = &*self.content;
         let store_err = |e: std::io::Error| {
@@ -2973,7 +2973,7 @@ impl SliceFsFilesystem {
     /// hold that also opens the handle. `O_TRUNC` needs no truncate: the
     /// new inode is empty (a truncate here would wait for a step and do
     /// store I/O with the stripes held, WR-02).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     fn create_logged(
         &self,
         parent_ino: u64,
@@ -3097,7 +3097,7 @@ impl SliceFsFilesystem {
 
     /// The body of `write_logged`; `lsn` gets the LSN of the record, and
     /// `switch` the fields of the debug line of a switch to an overlay.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     fn write_in_cell(
         &self,
         fh: u64,
@@ -3117,7 +3117,7 @@ impl SliceFsFilesystem {
         // An append ignores the request offset (D-12, D-17). Replay does not
         // append: each record carries the offset the write used.
         let append = (h.append || flags & libc::O_APPEND != 0) && !self.replaying.load(Ordering::Relaxed);
-        if !append && offset.checked_add(data.len() as u64).map_or(true, |end| end > MAX_FILE_SIZE) {
+        if !append && offset.checked_add(data.len() as u64).is_none_or(|end| end > MAX_FILE_SIZE) {
             return Err(libc::EFBIG);
         }
         let Some(cell) = self.cells.get(ino) else { return Err(libc::EBADF) };
@@ -3235,7 +3235,7 @@ impl SliceFsFilesystem {
             let s = &mut g.file;
             let WriteMode::Streaming { pending, .. } = &mut s.write_mode else { continue };
             let overlaps_pending = pending.range(..end).next_back()
-                .map_or(false, |(&o, v)| o + v.len() as u64 > offset);
+                .is_some_and(|(&o, v)| o + v.len() as u64 > offset);
             let pending_bytes: usize = pending.values().map(Vec::len).sum();
 
             if fresh && !overlaps_pending && offset > next + REORDER_WINDOW as u64 {
@@ -3360,10 +3360,10 @@ impl SliceFsFilesystem {
         // Then the budget of all open files (#105), with the same bound,
         // unless the throttle let the write in below the budget.
         let n = result?;
-        if admit.pay {
-            if let Err(e) = self.pay_budget(&mut g, added) {
-                after_err(&mut g, "the budget step", e);
-            }
+        if admit.pay
+            && let Err(e) = self.pay_budget(&mut g, added)
+        {
+            after_err(&mut g, "the budget step", e);
         }
         Ok((n, offset))
     }
@@ -4082,6 +4082,7 @@ impl SliceFsFilesystem {
     ///   stream; any other size switches to an overlay (no content read).
     /// - Overlay: only the size and the extents change (no I/O, no allocation
     ///   by size); a resize to 0 goes back to a fresh stream.
+    ///
     /// A size change goes to the open write state of the inode whatever
     /// handle it names (an NFS SETATTR from cp, with the removed NFS
     /// backend, carried no handle).
@@ -4394,7 +4395,7 @@ impl SliceFsFilesystem {
     /// mknod with a device number. Creates regular files, FIFOs, sockets and
     /// character/block device nodes (the kernel implements their I/O; only
     /// the type bits and `rdev` are stored). Returns `(ino, InodeMeta)`.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub fn test_mknod_rdev(
         &self, parent: u64, name: &str, mode: u32, rdev: u32, uid: u32, gid: u32, umask: u32,
     ) -> Result<(u64, InodeMeta), i32> {
@@ -4403,7 +4404,7 @@ impl SliceFsFilesystem {
 
     /// `test_mknod_rdev` at inode `at` (replay) that logs its `Mknod` record
     /// in the parent-stripe hold (D-08).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub(crate) fn mknod_logged(
         &self, parent: u64, name: &str, mode: u32, rdev: u32, uid: u32, gid: u32, umask: u32,
         at: Option<u64>, log: LogOp<'_>,
@@ -4509,7 +4510,7 @@ impl SliceFsFilesystem {
     /// and of the new directory before the directory is linked: a request
     /// that finds the new name (a create in it, a setattr) waits for the new
     /// directory's stripe, so its record comes after the `Mkdir` record.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub(crate) fn mkdir_logged(
         &self,
         parent_ino: u64,
@@ -4750,7 +4751,7 @@ impl SliceFsFilesystem {
 
     /// The body of `rename_logged`, with the stripes held; `freed` gets the
     /// manifest of a replaced inode it reclaimed.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     fn rename_held(
         &self,
         parent_ino: u64,
@@ -4881,7 +4882,7 @@ impl SliceFsFilesystem {
 
     /// `simulate_symlink` at inode `at` (replay) that logs its `Symlink`
     /// record in the parent-stripe hold (D-08). Returns `(ino, InodeMeta)`.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub(crate) fn symlink_logged(
         &self,
         parent_ino: u64,
@@ -5093,6 +5094,7 @@ impl SliceFsFilesystem {
 
     /// Combined setattr: apply mode, uid, gid, mtime, and size changes.
     /// Returns the updated `InodeMeta`.
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub fn test_setattr(
         &self,
         ino: u64,
@@ -5117,7 +5119,7 @@ impl SliceFsFilesystem {
     }
 
     /// setattr with every supported field.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub fn test_setattr_full(
         &self,
         ino: u64,
@@ -5137,7 +5139,7 @@ impl SliceFsFilesystem {
     /// with the writes of the inode; the other fields then log a `Setattr`
     /// without the size in the stripe-and-cell hold of their apply (also
     /// when they are all `None`: that hold sets the ctime).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub(crate) fn setattr_logged(
         &self,
         ino: u64,
@@ -5205,6 +5207,7 @@ impl SliceFsFilesystem {
 
     /// Create a file and return `(ino, fh, InodeMeta)`.
     /// Handles `O_TRUNC` flag atomically.
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub fn test_create_full(
         &self,
         parent: u64,
@@ -5219,7 +5222,7 @@ impl SliceFsFilesystem {
     }
 
     /// `test_create_full` at inode `at` that logs (see `create_logged`).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub(crate) fn create_full_logged(
         &self,
         parent: u64,
@@ -5233,10 +5236,10 @@ impl SliceFsFilesystem {
         log: LogOp<'_>,
     ) -> Result<(u64, u64, InodeMeta), i32> {
         let (ino, fh) = self.create_logged(parent, name, mode, umask, uid, gid, flags, at, log)?;
-        if flags & libc::O_APPEND != 0 {
-            if let Some(h) = self.handles.lock().by_fh.get_mut(&fh) {
-                h.append = true;
-            }
+        if flags & libc::O_APPEND != 0
+            && let Some(h) = self.handles.lock().by_fh.get_mut(&fh)
+        {
+            h.append = true;
         }
         let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
         Ok((ino, fh, meta))
@@ -5662,7 +5665,7 @@ mod tests {
 
         // List
         let list = fs.test_listxattr(ino).unwrap();
-        assert!(list.len() > 0);
+        assert!(!list.is_empty());
         // Should contain "user.key\0"
         let expected = b"user.key\0";
         assert!(list.windows(expected.len()).any(|w| w == expected));
@@ -6321,7 +6324,7 @@ mod tests {
         let _ = meta_error_to_fuse_errno(&MetaError::NotEmpty(0));
         let _ = meta_error_to_fuse_errno(&MetaError::InvalidName("x".into()));
         let _ = meta_error_to_fuse_errno(&MetaError::Corrupted("x".into()));
-        let _ = meta_error_to_fuse_errno(&MetaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "x")));
+        let _ = meta_error_to_fuse_errno(&MetaError::Io(std::io::Error::other("x")));
     }
 
     // ── meta_error_to_errno full coverage ────────────────────────────────────
@@ -6330,7 +6333,7 @@ mod tests {
     fn test_meta_error_to_errno_all_variants() {
         assert_eq!(meta_error_to_errno(&MetaError::NotEmpty(0)), libc::ENOTEMPTY);
         assert_eq!(meta_error_to_errno(&MetaError::InvalidName("x".into())), libc::EINVAL);
-        assert_eq!(meta_error_to_errno(&MetaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "x"))), libc::EIO);
+        assert_eq!(meta_error_to_errno(&MetaError::Io(std::io::Error::other("x"))), libc::EIO);
     }
 
     // ── Buffered mode write tests ────────────────────────────────────────────

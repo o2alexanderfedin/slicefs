@@ -416,6 +416,7 @@ pub fn handle_write_retrying(fs: &SliceFsFilesystem, mut attempt: impl FnMut() -
 }
 
 /// Handle `create`: create a new file named `name` in `parent` and open it.
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
 pub fn handle_create(
     fs: &SliceFsFilesystem,
     parent: u64,
@@ -432,7 +433,7 @@ pub fn handle_create(
 /// `handle_create` at inode `ino` (replay: the logged number; `None`: the
 /// next free one). The `Create` record is appended in the parent-stripe
 /// hold that opens the handle, and written out before the reply (D-08).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
 pub fn handle_create_at(
     fs: &SliceFsFilesystem,
     parent: u64,
@@ -470,7 +471,7 @@ pub fn handle_mkdir(
 
 /// `handle_mkdir` at inode `ino` (replay); logged in the hold of the parent's
 /// and the new directory's stripes.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
 pub fn handle_mkdir_at(
     fs: &SliceFsFilesystem,
     parent: u64,
@@ -489,6 +490,7 @@ pub fn handle_mkdir_at(
 }
 
 /// Handle `mknod`: create a new node (regular file) named `name` in `parent`.
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
 pub fn handle_mknod(
     fs: &SliceFsFilesystem,
     parent: u64,
@@ -503,7 +505,7 @@ pub fn handle_mknod(
 }
 
 /// `handle_mknod` at inode `ino` (replay); logged in the parent-stripe hold.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
 pub fn handle_mknod_at(
     fs: &SliceFsFilesystem,
     parent: u64,
@@ -634,6 +636,7 @@ pub fn handle_rename(
 /// Handle `setattr`: update inode attributes for `ino`.
 ///
 /// `mtime` is `Some((sec, nsec))` if mtime should be updated.
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
 pub fn handle_setattr(
     fs: &SliceFsFilesystem,
     ino: u64,

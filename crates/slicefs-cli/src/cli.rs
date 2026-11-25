@@ -308,7 +308,7 @@ mod tests {
             &["slicefs", "mount", "/mnt", "--store", "/data", "--hash", "md5"][..],
             &["slicefs", "seed", "/data", "/src", "--hash", "md5"][..],
         ] {
-            let err = Cli::try_parse_from(args).err().expect("an unknown hash is refused").to_string();
+            let err = Cli::try_parse_from(args).expect_err("an unknown hash is refused").to_string();
             assert!(err.contains("unknown hash \"md5\"") && err.contains("blake3-256"), "{err}");
         }
     }

@@ -304,7 +304,7 @@ impl Filesystem for MountedFs {
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         use fuser::OpenAccMode;
         let acc = flags.acc_mode();
-        #[allow(unreachable_patterns)]
+        #[allow(unreachable_patterns, reason = "the catch-all stays in case fuser adds an access mode")]
         let acc_str = match acc {
             OpenAccMode::O_RDONLY => "O_RDONLY",
             OpenAccMode::O_WRONLY => "O_WRONLY",
