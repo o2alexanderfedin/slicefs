@@ -410,12 +410,12 @@ Plans:
 3. The two Phase 19 races are fixed, each with a test that failed before the fix and a model or stress test that stays in CI: (a) a size change of a closed file against unlink or setattr; (b) a cross-directory rename with no ancestor check. If either cannot be fixed in this phase, the Linux default is `--workers 1` until it is.
 4. Kani proves small pure code (the header parser, size limits) free of panic and overflow.
 5. Line coverage is measured in CI, also in Linux Docker with the FUSE checks, and the numbers are in the CI log. The `unsafe` blocks that Miri cannot run (FFI in slicefs-cli and vendor/fuser) have a written review.
-**Plans:** 1/11 plans executed
+**Plans:** 2/11 plans executed
 
 Plans:
 **Wave 1** *(tracer)*
 - [x] 21.2-01-PLAN.md — Tracer: `safety.yml` (every push and PR, concurrency, pins) with job `model`; cfg(loom) backend of `chunk_store::sync` and `sync::raw`; loom models of the real worker pool (red on a planted lost wakeup); `--cfg loom` workspace compile; CI checkpoint
-- [ ] 21.2-02-PLAN.md — Race (b): ancestor walk under the rename mutex (EINVAL), failing-first in-process tests, stress test in CI, D-29 repeat rule
+- [x] 21.2-02-PLAN.md — Race (b): ancestor walk under the rename mutex (EINVAL), failing-first in-process tests, stress test in CI, D-29 repeat rule
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 21.2-03-PLAN.md — Clippy clean with `-D warnings` on macOS and Linux (no behavior change), a reason on every lint allow, `clippy.sh`, jobs `clippy-linux`/`clippy-macos`, `ci.yml` time limits
