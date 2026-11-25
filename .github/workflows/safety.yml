@@ -35,6 +35,16 @@ jobs:
       - uses: actions/checkout@v4
       - run: scripts/safety/model.sh
 
+  miri:
+    name: miri
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Miri on the lib tests of chunk-store and metadata that reach unsafe or
+    # the lock shim, on the pinned nightly (TSAFE-01, D-12 to D-14).
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/safety/miri.sh
+
   clippy:
     name: clippy-${{ matrix.name }}
     # clippy with -D warnings on the stable pin, and a written reason on every
