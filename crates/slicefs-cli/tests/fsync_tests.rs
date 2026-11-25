@@ -1,10 +1,10 @@
-/// Integration tests for fsync/fdatasync FUSE callback.
-///
-/// Covers:
-///   - fsync with buffered writes flushes to CAS and updates manifest
-///   - fsync with no buffered writes is a no-op (returns Ok)
-///   - fdatasync (datasync=true) is identical to fsync (same code path)
-///   - fsync followed by simulated crash (drop without destroy) + reload from segments shows data present
+//! Integration tests for fsync/fdatasync FUSE callback.
+//!
+//! Covers:
+//!   - fsync with buffered writes flushes to CAS and updates manifest
+//!   - fsync with no buffered writes is a no-op (returns Ok)
+//!   - fdatasync (datasync=true) is identical to fsync (same code path)
+//!   - fsync followed by simulated crash (drop without destroy) + reload from segments shows data present
 
 use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;

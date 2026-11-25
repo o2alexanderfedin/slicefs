@@ -1,6 +1,6 @@
-/// Tests for --wal-strategy CLI flag parsing.
-///
-/// Verifies that all 4 WAL strategy values are accepted by the mount subcommand.
+//! Tests for --wal-strategy CLI flag parsing.
+//!
+//! Verifies that all 4 WAL strategy values are accepted by the mount subcommand.
 
 use clap::Parser;
 use slicefs_cli::cli::{Cli, Cmd};

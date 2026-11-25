@@ -1,10 +1,10 @@
-/// Integration tests for the `slicefs gc` offline GC command.
-///
-/// Covers:
-/// - `run_gc` on a store with dead entries compacts segments and reports stats
-/// - `run_gc` on a clean store (no dead entries) reports 0 removed
-/// - `run_gc` on a locked store with no running mount fails (no mount takes the request)
-/// - CLI parses `gc` subcommand with store path argument
+//! Integration tests for the `slicefs gc` offline GC command.
+//!
+//! Covers:
+//! - `run_gc` on a store with dead entries compacts segments and reports stats
+//! - `run_gc` on a clean store (no dead entries) reports 0 removed
+//! - `run_gc` on a locked store with no running mount fails (no mount takes the request)
+//! - CLI parses `gc` subcommand with store path argument
 
 use std::path::PathBuf;
 

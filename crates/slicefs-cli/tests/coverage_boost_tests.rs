@@ -45,7 +45,6 @@ use slicefs_traits::metadata::{InodeMeta, MetadataStore, MetaError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 use tempfile::TempDir;
-#[allow(unused_imports)]
 use fuser::FileType;
 
 const S_IFREG: u32 = 0o100_000;
@@ -201,7 +200,7 @@ fn test_meta_error_to_fuse_errno_all_variants() {
     assert_eq!(errno_to_i32(meta_error_to_fuse_errno(&MetaError::InvalidName("x".into()))), libc::EINVAL);
     assert_eq!(errno_to_i32(meta_error_to_fuse_errno(&MetaError::Corrupted("x".into()))), libc::EIO);
     // MetaError::Io wraps std::io::Error
-    let io_err = MetaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "test io error"));
+    let io_err = MetaError::Io(std::io::Error::other("test io error"));
     assert_eq!(errno_to_i32(meta_error_to_fuse_errno(&io_err)), libc::EIO);
 }
 
@@ -215,7 +214,7 @@ fn test_meta_error_to_errno_all_variants() {
     assert_eq!(meta_error_to_errno(&MetaError::InvalidName("x".into())), libc::EINVAL);
     assert_eq!(meta_error_to_errno(&MetaError::Corrupted("x".into())), libc::EIO);
     // MetaError::Io wraps std::io::Error
-    let io_err = MetaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "test io error"));
+    let io_err = MetaError::Io(std::io::Error::other("test io error"));
     assert_eq!(meta_error_to_errno(&io_err), libc::EIO);
 }
 

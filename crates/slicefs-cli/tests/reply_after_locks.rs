@@ -82,16 +82,17 @@ fn callbacks(src: &str) -> Vec<(String, String)> {
         if line == "}" {
             break;
         }
-        if line.starts_with("    ") && !line.starts_with("     ") {
-            if let Some(name) = fn_header_name(line) {
-                out.push((name.to_string(), String::new()));
-            }
+        if line.starts_with("    ")
+            && !line.starts_with("     ")
+            && let Some(name) = fn_header_name(line)
+        {
+            out.push((name.to_string(), String::new()));
         }
-        if let Some((_, body)) = out.last_mut() {
-            if !is_comment(line) {
-                body.push_str(line);
-                body.push('\n');
-            }
+        if let Some((_, body)) = out.last_mut()
+            && !is_comment(line)
+        {
+            body.push_str(line);
+            body.push('\n');
         }
     }
     out
@@ -102,21 +103,22 @@ fn free_fns(src: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
     let mut current: Option<(String, String)> = None;
     for line in src.lines() {
-        if current.is_none() && !line.starts_with(' ') {
-            if let Some(name) = fn_header_name(line) {
-                current = Some((name.to_string(), String::new()));
-            }
+        if current.is_none()
+            && !line.starts_with(' ')
+            && let Some(name) = fn_header_name(line)
+        {
+            current = Some((name.to_string(), String::new()));
         }
-        if let Some((_, body)) = current.as_mut() {
-            if !is_comment(line) {
-                body.push_str(line);
-                body.push('\n');
-            }
+        if let Some((_, body)) = current.as_mut()
+            && !is_comment(line)
+        {
+            body.push_str(line);
+            body.push('\n');
         }
-        if line == "}" {
-            if let Some((name, body)) = current.take() {
-                out.insert(name, body);
-            }
+        if line == "}"
+            && let Some((name, body)) = current.take()
+        {
+            out.insert(name, body);
         }
     }
     out

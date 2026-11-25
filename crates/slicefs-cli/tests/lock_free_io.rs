@@ -543,6 +543,7 @@ fn forced_drops_keep_content_and_the_cap() {
     fs.test_set_rebase_hook(None);
     let mut model = base.clone();
     for (t, &n) in counts.iter().enumerate() {
+        #[allow(clippy::needless_range_loop, reason = "the index is also the block number; it must stay in range")]
         for i in 0..n {
             let b = plan[t][i];
             model[b * BLOCK..(b + 1) * BLOCK].copy_from_slice(&version(t, i));
