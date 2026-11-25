@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v2.2
 milestone_name: Concurrency & Store Evolution
-current_phase: 22
-current_phase_name: Chunk profiles
+current_phase: "21.2"
+current_phase_name: Thread-safety verification and CI gates
 current_plan: Not started
-status: planning
+status: executing
 stopped_at: Phase 21.2 context gathered
-last_updated: "2026-11-25T02:26:10.404Z"
+last_updated: "2026-11-25T04:55:34.147Z"
 last_activity: 2026-11-24
 last_activity_desc: Phase 21.1 complete, transitioned to Phase 22
-state_head: 8699def1029aaf5e80f2a0c6b95f620c3369f794
+state_head: 57bf73180afa3c3c9eda245a5164055f4d016a9f
 progress:
   total_phases: 9
   completed_phases: 4
-  total_plans: 44
+  total_plans: 55
   completed_plans: 44
   percent: 44
 ---
@@ -26,15 +26,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-20)
 
 **Core value:** High-ratio data deduplication that works transparently as a real, daily-driver POSIX filesystem
-**Current focus:** Phase 21 — Worker pool
+**Current focus:** Phase 21.2 — Thread-safety verification and CI gates
 
 ## Current Position
 
 Current Plan: Not started
-Total Plans in Phase: 4
-Phase: 22 — Chunk profiles
+Total Plans in Phase: 11
+Phase: 21.2 (Thread-safety verification and CI gates) — READY TO EXECUTE
 Plan: 21.1-01 complete (1 of 4); next: 21.1-02 (the header check at every open point)
-Status: Ready to plan
+Status: Ready to execute
 Last activity: 2026-11-24 — Phase 21.1 complete, transitioned to Phase 22
 
 Progress: [████░░░░░░] 44%
