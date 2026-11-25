@@ -17,6 +17,10 @@ The code is `crates/slicefs-cli/src/header.rs`.
   syncs the store directory. For a new store, the temp file becomes
   `FORMAT` with a hard link, which never replaces a `FORMAT` that a
   parallel create wrote first; that create then uses the existing header.
+  On a file system with no hard links, the create falls back to a rename
+  of the temp file to `FORMAT` (only when `FORMAT` does not exist just
+  before). That rename can replace a `FORMAT` that a parallel create wrote
+  at the same moment.
   A rewrite renames the temp file over `FORMAT`. A crash can leave a temp
   file; SliceFS does not read it.
 - For a new store, the header is written before `packs/` and `segments/`
@@ -157,7 +161,11 @@ A mount of a store with an unknown ro_compat flag is read-only:
 - It does no write-log replay, and it starts no flusher, no online GC, no
   segment GC and no commit timer.
 - It does no commit at unmount.
-- It prints one line on stdout (M6).
+- It prints M6 on stdout. In place of the chunk store line of a
+  read-write mount, it prints `Chunk store: read-only.` (it runs no GC and
+  does no hole punch probe). The `Workers`, `Allocator`, `Compression of
+  new data` and `SliceFS mounted at` lines are as for every mount. There
+  is no `Replayed` line, because there is no replay.
 
 The mount is refused when (SliceFS does the checks in this order):
 
@@ -186,8 +194,12 @@ A read-only mount makes no `mount.lock`, so the commands that look for
 - The lock is a `flock` on the store directory (not on `FORMAT`: a header
   rewrite replaces the `FORMAT` file, and a lock on the old file then
   protects nothing).
-- A read-only mount takes it shared, with no wait, before it reads the
-  store, and holds it until the mount ends.
+- A read-only mount takes it shared, with no wait, and holds it until the
+  mount ends. The order is: the header check reads `FORMAT`, then the
+  `--hash` and `--auto-snapshot` checks (M11, M12), then the store lock
+  (M13), then the `mount.lock` check (M8), the write-log check (M7) and the
+  read-only open of the chunk store and the index. Thus the lock comes
+  after the read of `FORMAT`, and before every other read of the store.
 - The commands that need no live mount (`gc` with no `mount.lock`,
   `snapshot create`, `snapshot switch`) take it exclusive, with no wait,
   after their `mount.lock` check, and hold it while they run. If it is held,
