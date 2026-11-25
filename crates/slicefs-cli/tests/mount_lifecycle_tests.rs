@@ -25,6 +25,7 @@ use tempfile::TempDir;
 
 /// Write a valid seeded store in segment format with a single file.
 fn write_seeded_store_segments(store_dir: &TempDir) {
+    slicefs_cli::header::create(store_dir.path()).unwrap();
     let segs_dir = store_dir.path().join("segments");
     std::fs::create_dir_all(&segs_dir).unwrap();
 
@@ -182,6 +183,7 @@ fn test_load_store_truncated_segment_skipped() {
 #[test]
 fn test_load_store_only_empty_segments_fails() {
     let store_dir = TempDir::new().unwrap();
+    slicefs_cli::header::create(store_dir.path()).unwrap();
     let segs_dir = store_dir.path().join("segments");
     std::fs::create_dir_all(&segs_dir).unwrap();
 
@@ -480,6 +482,7 @@ fn test_non_mounted_path_passes_check() {
 #[test]
 fn test_load_store_with_multiple_valid_segments() {
     let store_dir = TempDir::new().unwrap();
+    slicefs_cli::header::create(store_dir.path()).unwrap();
     let segs_dir = store_dir.path().join("segments");
     std::fs::create_dir_all(&segs_dir).unwrap();
 

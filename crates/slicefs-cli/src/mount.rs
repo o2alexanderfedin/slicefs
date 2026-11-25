@@ -33,6 +33,7 @@ use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
 use metadata::wal::{WalConfig, create_wal};
 use crate::filesystem::{DirtyConfig, SliceFsFilesystem};
+use crate::header;
 use crate::util::ts;
 
 // ── Store loading ─────────────────────────────────────────────────────────────
@@ -69,6 +70,12 @@ pub fn load_store(
             "store not found at {}: no segments/ directory",
             store_path.display()
         ).into());
+    }
+
+    // The store header, before the lock. The read-only mode is
+    // `load_store_read_only`, chosen by `start`: refuse it here.
+    if let header::Access::ReadOnly(flag) = header::check(store_path, header::Want::Mount)?.access {
+        return Err(header::msg_ro_write(store_path, &flag).into());
     }
 
     // Step 2: Acquire mount lock.
@@ -116,6 +123,46 @@ pub fn load_store(
     meta.set_wal(wal);
 
     Ok((meta, io, mount_lock))
+}
+
+/// Load a store for the read-only daemon mode (a store with the unknown
+/// ro_compat flag `flag`): the root and the snapshots from the segments,
+/// a read-only chunk store and index, no write hash change, no write log,
+/// no `mount.lock`. Nothing on disk changes. Refuses a store that needs a
+/// writer first: `mount.lock` exists (a crash, or a mount runs now), or the
+/// write log has records to replay.
+pub fn load_store_read_only(
+    store_path: &Path,
+    flag: &header::Flag,
+) -> Result<(DictMetadataStore, Arc<Mutex<StoreIo>>), Box<dyn std::error::Error>> {
+    if store_path.join("mount.lock").exists() {
+        return Err(header::msg_lock_present(store_path, flag).into());
+    }
+    if store_path.join("dictionary.bin").exists() {
+        return Err(format!(
+            "legacy store format detected at {}. Re-seed required: slicefs seed <store> <source>",
+            store_path.display()
+        ).into());
+    } else if !store_path.join("segments").is_dir() {
+        return Err(format!(
+            "store not found at {}: no segments/ directory",
+            store_path.display()
+        ).into());
+    }
+    let segs_dir = store_path.join("segments");
+    let (last_root, snapshots, log) = metadata::segment::scan_store_with_log(&segs_dir)
+        .map_err(|e| format!("failed to load segments: {}", e))?;
+    if !log.is_empty() {
+        return Err(header::msg_log_pending(store_path, log.len(), flag).into());
+    }
+    let root = last_root.ok_or_else(|| {
+        format!("no committed state found in segments at {}", segs_dir.display())
+    })?;
+    let io = Arc::new(Mutex::new(crate::content::store_io_read_only(store_path)?));
+    let mut meta = DictMetadataStore::load_from_root(io.clone(), &root)
+        .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;
+    meta.set_snapshots(snapshots);
+    Ok((meta, io))
 }
 
 /// Determine the next segment ID by scanning existing segment files.
@@ -257,13 +304,279 @@ fn set_test_panic_create(fs: &SliceFsFilesystem) {
     })));
 }
 
+// ── start / stop ──────────────────────────────────────────────────────────────
+
+/// The setup values of a mount: the `mount` flags that [`start`] uses.
+/// `Default` gives zero and off values (not the defaults of the command
+/// line): a test sets the fields it needs and takes the rest.
+#[derive(Debug, Clone, Default)]
+pub struct StartArgs {
+    /// Add the `noatime` FUSE option.
+    pub noatime: bool,
+    /// Add the `allow_other` FUSE option (multi-user access).
+    pub allow_other: bool,
+    /// `--wal-strategy` (`None`: per-op).
+    pub wal_strategy: Option<String>,
+    /// `--snapshot`: mount this snapshot (by version number or name) read-only.
+    pub snapshot_ref: Option<String>,
+    /// `--auto-snapshot`: make a snapshot at a clean unmount.
+    pub auto_snapshot: bool,
+    /// The interval of the commit timer in seconds (0: no commit timer).
+    pub commit_interval_secs: u64,
+    /// The interval of the online GC in seconds.
+    pub gc_interval_secs: u64,
+    /// The zstd level of new data (0: no compression).
+    pub zstd_level: i32,
+    /// `--hash`: a new write hash (`None` keeps the recorded one).
+    pub hash: Option<String>,
+    /// The dirty-data values (checked by the caller before any side effect).
+    pub dirty: DirtyConfig,
+}
+
+/// A mount after its setup: the file system, its FUSE configuration, and
+/// the threads and the lock that [`Started::stop`] ends.
+pub struct Started {
+    /// The file system to give to the FUSE session.
+    pub fs: Arc<SliceFsFilesystem>,
+    /// The FUSE configuration (mount options and ACL).
+    pub config: Config,
+    /// The open decision of the store header.
+    pub access: header::Access,
+    /// The clone of `fs` that stops the flusher (`None`: no flusher started).
+    flusher_fs: Option<Arc<SliceFsFilesystem>>,
+    /// The online GC thread (`None`: not started) and its stop flag.
+    online_gc: Option<std::thread::JoinHandle<()>>,
+    online_gc_shutdown: Arc<AtomicBool>,
+    /// The segment GC thread (`None`: not started).
+    segment_gc: Option<metadata::gc::background::GcHandle>,
+    /// The commit timer thread (`None`: not started) and its stop flag.
+    commit_timer: Option<std::thread::JoinHandle<()>>,
+    commit_shutdown: Arc<AtomicBool>,
+    /// `mount.lock` (`None`: no lock taken). Dropped last.
+    lock: Option<MountLock>,
+    /// The shared store lock of a read-only mount (`None`: not taken).
+    /// Dropped last.
+    store_lock: Option<header::StoreLock>,
+}
+
+/// The setup of a mount, from the store load to the commit timer: load the
+/// store, make the file system, replay the write log, and start the
+/// flusher, the online GC, the segment GC and the commit timer. Nothing
+/// here is process-wide (no signal handler, no panic hook), so a test can
+/// run it in the test process, then [`Started::stop`].
+///
+/// `backend` is the FUSE-T backend (macOS) for a normal mount; a snapshot
+/// mount does not use it.
+pub fn start(
+    store_path: &Path,
+    args: &StartArgs,
+    #[cfg(target_os = "macos")] backend: Option<&crate::backend::FuseTBackend>,
+    #[cfg(not(target_os = "macos"))] backend: Option<()>,
+) -> Result<Started, Box<dyn std::error::Error>> {
+    // The store header first, before anything writes to the store.
+    let access = header::check(store_path, header::Want::Mount)?.access;
+    // A read-only mount writes nothing: refuse the options that write.
+    if let header::Access::ReadOnly(flag) = &access {
+        if args.hash.is_some() {
+            return Err(header::msg_ro_hash(store_path, flag).into());
+        }
+        if args.auto_snapshot {
+            return Err(header::msg_ro_auto_snapshot(store_path, flag).into());
+        }
+    }
+    let snapshot_ref = args.snapshot_ref.as_deref();
+    let wal_config = parse_wal_config(args.wal_strategy.as_deref());
+
+    // Read and write: today's load (lock, write hash, writable store, write
+    // log). Read-only: no mount.lock, no write log, a read-only store; the
+    // shared store lock first, so a SliceFS that can write the store sees
+    // the mount (no file is written for it).
+    let (meta, io, mount_lock, store_lock) = match &access {
+        header::Access::ReadWrite => {
+            let (meta, io, lock) = load_store(store_path, wal_config, args.hash.as_deref())?;
+            (meta, io, Some(lock), None)
+        }
+        header::Access::ReadOnly(flag) => {
+            let store_lock = header::lock_read_mount(store_path)?;
+            let (meta, io) = load_store_read_only(store_path, flag)?;
+            println!("{}", header::msg_mount_read_only(store_path, flag));
+            (meta, io, None, Some(store_lock))
+        }
+    };
+    // Replay, flusher and online GC: only a writable mount of the current
+    // root. The segment GC and the commit timer: not in the read-only mode
+    // (a snapshot mount of a normal store keeps them, as before).
+    let writable = access.is_read_write() && snapshot_ref.is_none();
+
+    // If mounting a snapshot: resolve it and load from snapshot root (read-only).
+    let (final_meta, final_io, config) = if let Some(snap_ref) = snapshot_ref {
+        let snap = meta.find_snapshot(snap_ref).ok_or_else(|| -> Box<dyn std::error::Error> {
+            format!("snapshot not found: {}", snap_ref).into()
+        })?;
+        println!("Mounting snapshot {} (read-only)", snap.version);
+        let snap_io: Arc<Mutex<StoreIo>> = io.clone();
+        let snap_meta = DictMetadataStore::load_from_root(snap_io.clone(), &snap.root)
+            .map_err(|e| -> Box<dyn std::error::Error> { format!("failed to load snapshot root: {}", e).into() })?;
+        let mut cfg = build_mount_options(args.noatime, args.allow_other, None);
+        cfg.mount_options.push(MountOption::RO);
+        (snap_meta, snap_io, cfg)
+    } else {
+        let mut cfg = build_mount_options(args.noatime, args.allow_other, backend);
+        if !access.is_read_write() {
+            cfg.mount_options.push(MountOption::RO);
+        }
+        (meta, io, cfg)
+    };
+
+    let mut fs = SliceFsFilesystem::new(
+        final_meta,
+        final_io,
+        Some(store_path.to_path_buf()),
+    );
+    fs.set_auto_snapshot(args.auto_snapshot);
+    fs.set_read_only(!access.is_read_write());
+    // A read-only mount runs no GC, and its store does no punch probe.
+    if !access.is_read_write() {
+        println!("Chunk store: read-only.");
+    } else if fs.content().punches_holes() {
+        println!("Chunk store: GC frees space with hole punching and compaction.");
+    } else {
+        println!("Chunk store: this file system cannot punch holes; GC frees space by compaction only.");
+    }
+    fs.content().set_zstd_level(args.zstd_level);
+    if args.zstd_level > 0 {
+        println!("Compression of new data: zstd level {}.", args.zstd_level);
+    } else {
+        println!("Compression of new data: none.");
+    }
+
+    fs.set_dirty_config(&args.dirty);
+
+    // Replay the write log (#20): requests after the last root, made durable
+    // by fsync before a crash. Then commit, which cuts the log. Not on a
+    // snapshot mount (read-only; the log stays for the next normal mount).
+    if writable {
+        let stats = crate::oplog::replay_log(&fs, &store_path.join("segments"))
+            .map_err(|e| format!("write log replay failed: {}", e))?;
+        if stats.applied + stats.skipped > 0 {
+            slicefs_traits::metadata::MetadataStore::commit(fs.meta().as_ref())
+                .map_err(|e| format!("commit after replay failed: {}", e))?;
+            fs.meta().flush_wal().map_err(|e| format!("sync after replay failed: {}", e))?;
+            println!(
+                "Replayed {} request(s) from the write log ({} skipped).",
+                stats.applied, stats.skipped
+            );
+        }
+    }
+    let fs = Arc::new(fs);
+
+    // The dirty-data flusher (Phase 20). Not on a snapshot mount (read-only).
+    // The clone is for the stop after mount() returns.
+    let flusher_fs = writable.then(|| {
+        fs.start_flusher();
+        Arc::clone(&fs)
+    });
+
+    // GC of the stored objects while mounted (#25). Not on a snapshot mount:
+    // its metadata is the snapshot, not the current root.
+    let online_gc_shutdown = Arc::new(AtomicBool::new(false));
+    let online_gc = writable.then(|| {
+        crate::online_gc::spawn_online_gc(
+            Arc::downgrade(&fs),
+            store_path.to_path_buf(),
+            Duration::from_secs(args.gc_interval_secs),
+            Arc::clone(&online_gc_shutdown),
+        )
+    });
+
+    // Spawn background GC thread.
+    // The GC thread holds a Weak<DictMetadataStore> so it exits automatically when
+    // the filesystem is dropped. We also use an explicit shutdown flag to stop it
+    // gracefully before the MountLock drops.
+    let weak_meta = Arc::downgrade(fs.meta());
+    let segments_dir = store_path.join("segments");
+    let gc_shutdown = Arc::new(AtomicBool::new(false));
+    let segment_gc = access.is_read_write().then(|| {
+        spawn_background_gc(weak_meta, segments_dir, Duration::from_secs(60), 1000, Arc::clone(&gc_shutdown))
+    });
+
+    // Commit metadata periodically, so a crash does not lose everything since mount (#18).
+    let commit_shutdown = Arc::new(AtomicBool::new(false));
+    let commit_timer = (access.is_read_write() && args.commit_interval_secs > 0).then(|| {
+        crate::commit_timer::spawn_commit_timer(
+            Arc::downgrade(&fs),
+            fs.commit_gate(),
+            Duration::from_secs(args.commit_interval_secs),
+            Arc::clone(&commit_shutdown),
+        )
+    });
+
+    Ok(Started {
+        fs,
+        config,
+        access,
+        flusher_fs,
+        online_gc,
+        online_gc_shutdown,
+        segment_gc,
+        commit_timer,
+        commit_shutdown,
+        lock: mount_lock,
+        store_lock,
+    })
+}
+
+impl Started {
+    /// Stop what [`start`] started, in this order: the flusher, the online
+    /// GC, the commit timer, the segment GC; then drop the file system and,
+    /// last, the mount lock (its drop removes `mount.lock`). Run it after
+    /// the FUSE session ended (`destroy` ran), also when the mount failed.
+    pub fn stop(self) {
+        let Started {
+            fs,
+            config: _,
+            access: _,
+            flusher_fs,
+            online_gc,
+            online_gc_shutdown,
+            segment_gc,
+            commit_timer,
+            commit_shutdown,
+            lock,
+            store_lock,
+        } = self;
+        // After a clean unmount destroy() stopped the flusher already; a
+        // second stop does nothing.
+        if let Some(fs) = flusher_fs {
+            fs.stop_flusher();
+        }
+        // Stop the GC thread before mount.lock is released.
+        online_gc_shutdown.store(true, Ordering::SeqCst);
+        if let Some(h) = online_gc {
+            let _ = h.join();
+        }
+        commit_shutdown.store(true, Ordering::SeqCst);
+        if let Some(h) = commit_timer {
+            let _ = h.join();
+        }
+        if let Some(gc) = segment_gc {
+            gc.shutdown();
+        }
+        drop(fs);
+        // mount.lock and the store lock go last.
+        drop(lock);
+        drop(store_lock);
+    }
+}
+
 // ── run_mount ─────────────────────────────────────────────────────────────────
 
 /// Run the `mount` subcommand.
 ///
 /// Loads the store, constructs the FUSE filesystem, and starts a blocking
 /// `fuser::mount` session. Blocks until the session ends (SIGTERM, Ctrl+C,
-/// or `slicefs unmount`).
+/// or `slicefs unmount`). The steps: pre-flight, [`start`], the signal
+/// handlers and the panic hook, `fuser::mount`, [`Started::stop`].
 ///
 /// `_cache_size` is accepted but unused (there is no read cache).
 /// `allow_other` passes the `allow_other` FUSE mount option (multi-user access).
@@ -322,8 +635,8 @@ pub fn run_mount(
     // Pre-flight: reject if mountpoint is already in use.
     check_mountpoint_not_in_use(mountpoint)?;
 
-    // Pre-flight: refuse a store of an older format (metadata in vt0/).
-    crate::content::check_format(store_path)?;
+    // Pre-flight: the store header (an early refusal, before the backend choice).
+    header::check(store_path, header::Want::Mount)?;
 
     // ── macOS: Backend selection ──────────────────────────────────────────────
     //
@@ -347,127 +660,22 @@ pub fn run_mount(
         let _ = (backend, force);
     }
 
-    let wal_config = parse_wal_config(wal_strategy);
-
-    let (meta, io, _mount_lock) = load_store(store_path, wal_config, hash)?;
-
-    // If mounting a snapshot: resolve it and load from snapshot root (read-only).
+    let args = StartArgs {
+        noatime,
+        allow_other,
+        wal_strategy: wal_strategy.map(str::to_string),
+        snapshot_ref: snapshot_ref.map(str::to_string),
+        auto_snapshot,
+        commit_interval_secs,
+        gc_interval_secs,
+        zstd_level,
+        hash: hash.map(str::to_string),
+        dirty,
+    };
     #[cfg(target_os = "macos")]
-    let (final_meta, final_io, config) = if let Some(snap_ref) = snapshot_ref {
-        let snap = meta.find_snapshot(snap_ref).ok_or_else(|| -> Box<dyn std::error::Error> {
-            format!("snapshot not found: {}", snap_ref).into()
-        })?;
-        println!("Mounting snapshot {} (read-only)", snap.version);
-        let snap_io: Arc<Mutex<StoreIo>> = io.clone();
-        let snap_meta = DictMetadataStore::load_from_root(snap_io.clone(), &snap.root)
-            .map_err(|e| -> Box<dyn std::error::Error> { format!("failed to load snapshot root: {}", e).into() })?;
-        let mut cfg = build_mount_options(noatime, allow_other, None);
-        cfg.mount_options.push(MountOption::RO);
-        (snap_meta, snap_io, cfg)
-    } else {
-        let cfg = build_mount_options(noatime, allow_other, Some(&selected_backend));
-        (meta, io, cfg)
-    };
-
+    let started = start(store_path, &args, Some(&selected_backend))?;
     #[cfg(not(target_os = "macos"))]
-    let (final_meta, final_io, config) = if let Some(snap_ref) = snapshot_ref {
-        let snap = meta.find_snapshot(snap_ref).ok_or_else(|| -> Box<dyn std::error::Error> {
-            format!("snapshot not found: {}", snap_ref).into()
-        })?;
-        println!("Mounting snapshot {} (read-only)", snap.version);
-        let snap_io: Arc<Mutex<StoreIo>> = io.clone();
-        let snap_meta = DictMetadataStore::load_from_root(snap_io.clone(), &snap.root)
-            .map_err(|e| -> Box<dyn std::error::Error> { format!("failed to load snapshot root: {}", e).into() })?;
-        let mut cfg = build_mount_options(noatime, allow_other, None);
-        cfg.mount_options.push(MountOption::RO);
-        (snap_meta, snap_io, cfg)
-    } else {
-        let cfg = build_mount_options(noatime, allow_other, None);
-        (meta, io, cfg)
-    };
-
-    let mut fs = SliceFsFilesystem::new(
-        final_meta,
-        final_io,
-        Some(store_path.to_path_buf()),
-    );
-    fs.set_auto_snapshot(auto_snapshot);
-    if fs.content().punches_holes() {
-        println!("Chunk store: GC frees space with hole punching and compaction.");
-    } else {
-        println!("Chunk store: this file system cannot punch holes; GC frees space by compaction only.");
-    }
-    fs.content().set_zstd_level(zstd_level);
-    if zstd_level > 0 {
-        println!("Compression of new data: zstd level {zstd_level}.");
-    } else {
-        println!("Compression of new data: none.");
-    }
-
-    fs.set_dirty_config(&dirty);
-
-    // Replay the write log (#20): requests after the last root, made durable
-    // by fsync before a crash. Then commit, which cuts the log. Not on a
-    // snapshot mount (read-only; the log stays for the next normal mount).
-    if snapshot_ref.is_none() {
-        let stats = crate::oplog::replay_log(&fs, &store_path.join("segments"))
-            .map_err(|e| format!("write log replay failed: {}", e))?;
-        if stats.applied + stats.skipped > 0 {
-            slicefs_traits::metadata::MetadataStore::commit(fs.meta().as_ref())
-                .map_err(|e| format!("commit after replay failed: {}", e))?;
-            fs.meta().flush_wal().map_err(|e| format!("sync after replay failed: {}", e))?;
-            println!(
-                "Replayed {} request(s) from the write log ({} skipped).",
-                stats.applied, stats.skipped
-            );
-        }
-    }
-    let fs = Arc::new(fs);
-
-    // The dirty-data flusher (Phase 20). Not on a snapshot mount (read-only).
-    // The clone is for the stop after mount() returns.
-    let flusher_fs = snapshot_ref.is_none().then(|| {
-        fs.start_flusher();
-        Arc::clone(&fs)
-    });
-
-    // GC of the stored objects while mounted (#25). Not on a snapshot mount:
-    // its metadata is the snapshot, not the current root.
-    let online_gc_shutdown = Arc::new(AtomicBool::new(false));
-    let online_gc_handle = snapshot_ref.is_none().then(|| {
-        crate::online_gc::spawn_online_gc(
-            Arc::downgrade(&fs),
-            store_path.to_path_buf(),
-            Duration::from_secs(gc_interval_secs),
-            Arc::clone(&online_gc_shutdown),
-        )
-    });
-
-    // Spawn background GC thread.
-    // The GC thread holds a Weak<DictMetadataStore> so it exits automatically when
-    // the filesystem is dropped. We also use an explicit shutdown flag to stop it
-    // gracefully before the MountLock drops.
-    let weak_meta = Arc::downgrade(fs.meta());
-    let segments_dir = store_path.join("segments");
-    let gc_shutdown = Arc::new(AtomicBool::new(false));
-    let gc_handle = spawn_background_gc(
-        weak_meta,
-        segments_dir,
-        Duration::from_secs(60),
-        1000,
-        Arc::clone(&gc_shutdown),
-    );
-
-    // Commit metadata periodically, so a crash does not lose everything since mount (#18).
-    let commit_shutdown = Arc::new(AtomicBool::new(false));
-    let commit_handle = (commit_interval_secs > 0).then(|| {
-        crate::commit_timer::spawn_commit_timer(
-            Arc::downgrade(&fs),
-            fs.commit_gate(),
-            Duration::from_secs(commit_interval_secs),
-            Arc::clone(&commit_shutdown),
-        )
-    });
+    let started = start(store_path, &args, None)?;
 
     // ── Mount + startup log ────────────────────────────────────────────────────
 
@@ -510,14 +718,18 @@ pub fn run_mount(
     // Debug builds only: the test panic of the POOL-03 live check. It is set
     // after the write-log replay, so the entries of the replay do not count.
     #[cfg(debug_assertions)]
-    set_test_panic_create(&fs);
+    set_test_panic_create(&started.fs);
 
     // The request pool: only for 2 or more workers (1 runs each request on
     // the reader thread). A spawn error is a mount error, and goes through
     // the stop steps below.
     #[allow(unused_mut)]
     let mut mounted = match (n_workers >= 2).then(|| crate::pool::Pool::new(n_workers)).transpose() {
-        Ok(pool) => mount(crate::fuse_callbacks::MountedFs::new(fs, pool), mountpoint, &config),
+        Ok(pool) => mount(
+            crate::fuse_callbacks::MountedFs::new(Arc::clone(&started.fs), pool),
+            mountpoint,
+            &started.config,
+        ),
         Err(e) => Err(std::io::Error::other(format!("cannot start {n_workers} request workers: {e}"))),
     };
 
@@ -536,31 +748,14 @@ pub fn run_mount(
         }
     }
 
-    // Stop the flusher, also when mount failed (after a clean unmount
-    // destroy() stopped it already; a second stop does nothing). The clone
-    // is dropped at once, so it does not keep the file system alive.
-    if let Some(fs) = flusher_fs {
-        fs.stop_flusher();
-    }
-
-    // Stop the GC thread before mount.lock is released, also when mount failed.
-    online_gc_shutdown.store(true, Ordering::SeqCst);
-    if let Some(h) = online_gc_handle {
-        let _ = h.join();
-    }
+    // mount has returned: the FUSE session ended (destroy() ran after a
+    // clean unmount). Stop the threads and release mount.lock, also when
+    // mount failed.
+    started.stop();
     mounted?;
-
-    // mount has returned — FUSE session ended, destroy() already called.
-    commit_shutdown.store(true, Ordering::SeqCst);
-    if let Some(h) = commit_handle {
-        let _ = h.join();
-    }
-    gc_shutdown.store(true, Ordering::SeqCst);
-    gc_handle.shutdown();
 
     print_lock_rows();
 
-    // _mount_lock is dropped here, removing mount.lock from the store directory.
     println!("SliceFS unmounted.");
 
     Ok(())
@@ -602,6 +797,7 @@ mod tests {
 
     /// Write a valid seeded store in segment format (new format only).
     fn write_seeded_store_segments(store_dir: &TempDir) {
+        crate::header::create(store_dir.path()).unwrap();
         use metadata::wal::create_wal;
         let segs_dir = store_dir.path().join("segments");
         std::fs::create_dir_all(&segs_dir).unwrap();
@@ -967,5 +1163,287 @@ mod tests {
             matches!(opt, MountOption::CUSTOM(_))
         });
         assert!(!has_custom, "No CUSTOM options on macOS — FUSE-T rejects them");
+    }
+
+    // ── Read-only mount of a ro_compat store (tracer) ─────────────────────────
+
+    use crate::handlers::{self, DataResult, EmptyResult, EntryResult, OpenResult, ReaddirResult};
+    use std::collections::BTreeMap;
+
+    /// The test-only ro_compat flag line.
+    const RO_FLAG_LINE: &str = "ro_compat test-ro-feature r-test\n";
+
+    /// The store tree: each directory as `<rel>/`, each file as its relative
+    /// name with `"<len> <blake3 hex>"`. Files are read in 64 KiB pieces.
+    fn tree(root: &Path) -> BTreeMap<String, String> {
+        use std::io::Read;
+        let mut out = BTreeMap::new();
+        let mut todo = vec![root.to_path_buf()];
+        let mut buf = vec![0u8; 64 << 10];
+        while let Some(d) = todo.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                let rel = p.strip_prefix(root).unwrap().display().to_string();
+                let m = std::fs::symlink_metadata(&p).unwrap();
+                if m.is_dir() {
+                    out.insert(format!("{rel}/"), String::new());
+                    todo.push(p);
+                    continue;
+                }
+                let mut f = std::fs::File::open(&p).unwrap();
+                let mut h = blake3::Hasher::new();
+                loop {
+                    let n = f.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    h.update(&buf[..n]);
+                }
+                out.insert(rel, format!("{} {}", m.len(), h.finalize().to_hex()));
+            }
+        }
+        out
+    }
+
+    /// One line per change from `a` to `b`: `+ <name>`, `- <name>` or `~ <name>`.
+    fn diff(a: &BTreeMap<String, String>, b: &BTreeMap<String, String>) -> String {
+        let mut out = String::new();
+        for (k, v) in b {
+            match a.get(k) {
+                None => out.push_str(&format!("+ {k}\n")),
+                Some(old) if old != v => out.push_str(&format!("~ {k}\n")),
+                Some(_) => {}
+            }
+        }
+        for k in a.keys().filter(|k| !b.contains_key(*k)) {
+            out.push_str(&format!("- {k}\n"));
+        }
+        out
+    }
+
+    /// The source files of the fixture: two small files, one in a subdirectory.
+    fn source_files() -> Vec<(String, Vec<u8>)> {
+        vec![
+            ("a.txt".to_string(), (0..3000u32).map(|i| (i % 251) as u8).collect()),
+            ("sub/b.bin".to_string(), (0..5000u32).map(|i| (i * 7 % 253) as u8).collect()),
+        ]
+    }
+
+    /// A small seeded store at `<dir>/store`. With `flag`, its header gets
+    /// the test-only ro_compat flag line. Then `gc-tmp/bait` (one byte), as
+    /// bait for the cleanup of a writable open.
+    fn ro_fixture(flag: bool) -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        for (name, data) in source_files() {
+            let p = src.join(&name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, data).unwrap();
+        }
+        let store = dir.path().join("store");
+        crate::seed::run_seed(&store, &src, None).unwrap();
+        if flag {
+            append_line(&store, RO_FLAG_LINE);
+        }
+        std::fs::create_dir_all(store.join("gc-tmp")).unwrap();
+        std::fs::write(store.join("gc-tmp").join("bait"), b"x").unwrap();
+        dir
+    }
+
+    /// Append `line` to the header of `store`.
+    fn append_line(store: &Path, line: &str) {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(store.join(header::FORMAT_FILE)).unwrap();
+        f.write_all(line.as_bytes()).unwrap();
+    }
+
+    /// The start values of these tests: the commit timer and the online GC
+    /// with a short interval, so a mount that starts them does so.
+    fn ro_args() -> StartArgs {
+        StartArgs { commit_interval_secs: 1, gc_interval_secs: 1, ..Default::default() }
+    }
+
+    /// The test-only flag as the access of a ro_compat store.
+    fn ro_access() -> header::Access {
+        header::Access::ReadOnly(header::Flag {
+            class: header::Class::RoCompat,
+            name: "test-ro-feature".to_string(),
+            release: "r-test".to_string(),
+        })
+    }
+
+    /// Read one file through the handlers: lookup, open (read-only), read to
+    /// the end, release.
+    fn read_file(fs: &SliceFsFilesystem, parent: u64, name: &str) -> Vec<u8> {
+        let EntryResult::Ok(ino, _) = handlers::handle_lookup(fs, parent, name) else { panic!("lookup {name}") };
+        let OpenResult::Ok(fh, _) = handlers::handle_open(fs, ino, libc::O_RDONLY) else { panic!("open {name}") };
+        let mut data = Vec::new();
+        loop {
+            let DataResult::Ok(piece) = handlers::handle_read(fs, ino, data.len() as u64, 64 << 10) else {
+                panic!("read {name}")
+            };
+            if piece.is_empty() {
+                break;
+            }
+            data.extend_from_slice(&piece);
+        }
+        assert!(matches!(handlers::handle_release(fs, ino, fh), EmptyResult::Ok), "release {name}");
+        data
+    }
+
+    /// Read every file below directory `ino` through the handlers (readdir
+    /// of each directory).
+    fn read_all(fs: &SliceFsFilesystem, ino: u64, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
+        let ReaddirResult::Ok(entries) = handlers::handle_readdir(fs, ino, 0) else { panic!("readdir {prefix}") };
+        for (child, kind, name) in entries {
+            if name == "." || name == ".." {
+                continue;
+            }
+            let rel = format!("{prefix}{name}");
+            if kind == fuser::FileType::Directory {
+                read_all(fs, child, &format!("{rel}/"), out);
+            } else {
+                out.push((rel, read_file(fs, ino, &name)));
+            }
+        }
+    }
+
+    /// FMT-02 tracer: a store with an unknown ro_compat flag goes through
+    /// the real mount setup, reads of every file, `destroy` and `stop`, and
+    /// its tree does not change (names, sizes, content hashes). The tree is
+    /// taken after the setup and reads too, so a write that `stop` undoes
+    /// (`mount.lock`) is seen.
+    #[test]
+    fn ro_compat_mount_writes_nothing() {
+        let dir = ro_fixture(true);
+        let store = dir.path().join("store");
+        let t0 = tree(&store);
+        let s = start(&store, &ro_args(), None).expect("start");
+        assert_eq!(s.access, ro_access(), "the access is read-only, by the test flag");
+        assert!(s.config.mount_options.contains(&MountOption::RO), "the mount options have RO");
+        // Record now, assert after the tree checks.
+        let threads = [s.flusher_fs.is_some(), s.online_gc.is_some(), s.segment_gc.is_some(), s.commit_timer.is_some()];
+        let lock = s.lock.is_some();
+        let mut got = Vec::new();
+        read_all(&s.fs, 1, "", &mut got);
+        got.sort();
+        assert!(got == source_files(), "the files read through the handlers equal the source");
+        let t1 = tree(&store);
+        assert!(t1 == t0, "the setup and the reads changed the store tree:\n{}", diff(&t0, &t1));
+        fuser::Filesystem::destroy(&mut crate::fuse_callbacks::MountedFs::new(Arc::clone(&s.fs), None));
+        s.stop();
+        let t2 = tree(&store);
+        assert!(t2 == t0, "destroy and stop changed the store tree:\n{}", diff(&t0, &t2));
+        assert_eq!(threads, [false; 4], "no thread started (flusher, online GC, segment GC, commit timer)");
+        assert!(!lock, "no mount lock held");
+    }
+
+    /// WR-02: a read-only mount holds a shared lock on the store directory
+    /// while it runs. A SliceFS that knows the flag (here: the header with
+    /// no flag line) sees it: offline gc, snapshot create and snapshot
+    /// switch refuse, and stats shows the store as mounted. After `stop`, gc
+    /// runs.
+    #[test]
+    fn offline_commands_see_a_ro_compat_mount() {
+        let dir = ro_fixture(true);
+        let store = dir.path().join("store");
+        let s = start(&store, &ro_args(), None).expect("start");
+        std::fs::write(store.join(header::FORMAT_FILE), header::marker(chunk_store::DEFAULT_HASHER)).unwrap();
+        let s2 = |r: Result<(), Box<dyn std::error::Error>>| r.map_err(|e| e.to_string());
+        let results = [
+            ("gc", crate::gc::gc_report(&store, false).map(drop).map_err(|e| e.to_string())),
+            ("snapshot create", s2(crate::snapshot::run_snapshot_create(&store, None))),
+            ("snapshot switch", s2(crate::snapshot::run_snapshot_switch(&store, "1"))),
+        ];
+        for (name, r) in results {
+            let err = r.err().unwrap_or_else(|| panic!("{name} is refused while a read-only mount runs"));
+            assert!(err.contains("is in use"), "{name}: {err}");
+        }
+        assert!(crate::stats::store_stats(&store).unwrap().mounted, "stats shows the read-only mount");
+        fuser::Filesystem::destroy(&mut crate::fuse_callbacks::MountedFs::new(Arc::clone(&s.fs), None));
+        s.stop();
+        assert!(!crate::stats::store_stats(&store).unwrap().mounted, "not mounted after stop");
+        crate::gc::gc_report(&store, false).expect("gc runs after the unmount");
+        // A read-only mount is refused while such a command runs.
+        append_line(&store, RO_FLAG_LINE);
+        let held = header::lock_offline(&store).unwrap();
+        let err = start(&store, &ro_args(), None).err().expect("the mount is refused").to_string();
+        assert!(err.contains("is in use"), "{err}");
+        drop(held);
+    }
+
+    /// Control of the tracer: the same steps on a normal store change its
+    /// tree, so the tree compare sees the writes of a mount.
+    #[test]
+    fn a_normal_mount_changes_the_tree() {
+        let dir = ro_fixture(false);
+        let store = dir.path().join("store");
+        let t0 = tree(&store);
+        let s = start(&store, &ro_args(), None).expect("start");
+        assert_eq!(s.access, header::Access::ReadWrite);
+        assert_eq!(read_file(&s.fs, 1, "a.txt"), source_files()[0].1);
+        fuser::Filesystem::destroy(&mut crate::fuse_callbacks::MountedFs::new(Arc::clone(&s.fs), None));
+        s.stop();
+        let t2 = tree(&store);
+        assert!(t2 != t0, "a normal mount changes the store tree");
+    }
+
+    /// [Mount lock]: a ro_compat mount refuses a store with `mount.lock` (a
+    /// crash, or a mount that runs now), and writes nothing.
+    #[test]
+    fn ro_compat_refuses_a_mount_lock() {
+        let dir = ro_fixture(true);
+        let store = dir.path().join("store");
+        std::fs::write(store.join("mount.lock"), b"").unwrap();
+        let t0 = tree(&store);
+        let err = start(&store, &ro_args(), None).err().expect("the mount is refused").to_string();
+        for part in ["mount.lock", "test-ro-feature", "r-test"] {
+            assert!(err.contains(part), "the message has {part:?}: {err}");
+        }
+        let t1 = tree(&store);
+        assert!(t1 == t0, "the refusal changed the store tree:\n{}", diff(&t0, &t1));
+    }
+
+    /// [Ro-compat]: a ro_compat mount refuses a store whose write log has
+    /// records to replay (a crash, with `mount.lock` removed), and writes
+    /// nothing.
+    #[test]
+    fn ro_compat_refuses_a_pending_write_log() {
+        let dir = ro_fixture(false);
+        let store = dir.path().join("store");
+        {
+            let (meta, io, lock) = load_store(&store, WalConfig::PerOp, None).unwrap();
+            let fs = SliceFsFilesystem::new(meta, io, Some(store.clone()));
+            assert!(matches!(handlers::handle_mkdir(&fs, 1, "d", 0o755, 0, 0, 0), EntryResult::Ok(..)), "mkdir");
+            fs.meta().flush_wal().unwrap();
+            std::mem::forget(fs); // a crash: no commit, no destroy
+            drop(lock); // as `slicefs unmount --store` removes it
+        }
+        append_line(&store, RO_FLAG_LINE);
+        let n = metadata::segment::scan_store_with_log(&store.join("segments")).unwrap().2.len();
+        assert!(n >= 1, "the write log has the mkdir record");
+        let t0 = tree(&store);
+        let err = start(&store, &ro_args(), None).err().expect("the mount is refused").to_string();
+        for part in ["write log", &format!("{n} request(s)"), "test-ro-feature", "r-test"] {
+            assert!(err.contains(part), "the message has {part:?}: {err}");
+        }
+        let t1 = tree(&store);
+        assert!(t1 == t0, "the refusal changed the store tree:\n{}", diff(&t0, &t1));
+    }
+
+    /// An empty write log after the last root (a clean unmount) does not
+    /// refuse a ro_compat mount.
+    #[test]
+    fn a_ro_compat_mount_with_an_empty_log_is_not_refused() {
+        let dir = ro_fixture(false);
+        let store = dir.path().join("store");
+        let s = start(&store, &ro_args(), None).expect("a normal start");
+        fuser::Filesystem::destroy(&mut crate::fuse_callbacks::MountedFs::new(Arc::clone(&s.fs), None));
+        s.stop();
+        append_line(&store, RO_FLAG_LINE);
+        let s = start(&store, &ro_args(), None).expect("an empty log is not refused");
+        assert_eq!(s.access, ro_access());
+        fuser::Filesystem::destroy(&mut crate::fuse_callbacks::MountedFs::new(Arc::clone(&s.fs), None));
+        s.stop();
     }
 }

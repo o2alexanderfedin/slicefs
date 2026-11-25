@@ -34,8 +34,12 @@ const S_IFDIR: u32 = 0o040_000;
 /// `hash` is `--hash`: the write hash of the new objects (`None`: the
 /// store's recorded hash, blake3-256 for a new store).
 pub fn run_seed(store_path: &Path, source_dir: &Path, hash: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    std::fs::create_dir_all(store_path)?;
-    content::select_hash(store_path, hash)?;
+    // The store header first: a new store gets it durably before `packs/`
+    // and `segments/` exist (with the hash of `--hash`); a store that this
+    // build may not write is refused.
+    if let Some(line) = content::check_write(store_path, hash)? {
+        println!("{line}");
+    }
 
     let io = Arc::new(Mutex::new(content::store_io(store_path)?));
     let meta_store = DictMetadataStore::new(io.clone());

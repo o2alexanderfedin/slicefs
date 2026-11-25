@@ -6,17 +6,17 @@ current_phase: 22
 current_phase_name: Chunk profiles
 current_plan: Not started
 status: planning
-stopped_at: Phase 21 complete, ready to plan Phase 22
-last_updated: "2026-11-24T17:12:09.840Z"
+stopped_at: Phase 21.1 complete, ready to plan Phase 22
+last_updated: "2026-11-25T00:47:42.856Z"
 last_activity: 2026-11-24
-last_activity_desc: Phase 21 complete, transitioned to Phase 22
-state_head: 78c7f7e342e244d479104cf0699a4821495d325b
+last_activity_desc: Phase 21.1 complete, transitioned to Phase 22
+state_head: 3bcb467f43a3f1c8a66eb99ce0e1bf808d822c2b
 progress:
-  total_phases: 7
+  total_phases: 8
   completed_phases: 4
-  total_plans: 40
-  completed_plans: 40
-  percent: 57
+  total_plans: 44
+  completed_plans: 44
+  percent: 50
 ---
 
 # Project State
@@ -31,13 +31,13 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 ## Current Position
 
 Current Plan: Not started
-Total Plans in Phase: 9
+Total Plans in Phase: 4
 Phase: 22 — Chunk profiles
-Plan: 21-09 complete (9 of 9); next: review and verification of Phase 21 (the orchestrator runs phase complete)
+Plan: 21.1-01 complete (1 of 4); next: 21.1-02 (the header check at every open point)
 Status: Ready to plan
-Last activity: 2026-11-24 — Phase 21 complete, transitioned to Phase 22
+Last activity: 2026-11-24 — Phase 21.1 complete, transitioned to Phase 22
 
-Progress: [██████░░░░] 57%
+Progress: [█████░░░░░] 50%
 
 ## Performance Metrics
 
@@ -89,6 +89,10 @@ Progress: [██████░░░░] 57%
 | Phase 21 P07 | 75 min | 3 tasks | 10 files |
 | Phase 21 P08 | 50 min | 3 tasks | 12 files |
 | Phase 21 P09 | 60 min | 2 tasks | 8 files |
+| Phase 21.1 P01 | 74min | 3 tasks | 7 files |
+| Phase 21.1 P02 | 57min | 3 tasks | 16 files |
+| Phase 21.1 P03 | 50min | 3 tasks | 7 files |
+| Phase 21.1 P04 | 45min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -201,6 +205,14 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21]: 21-08: POOL-05 bench verdict=PASS on the read phase (ratio_read_4_1=2.69; write 1.26), mem_bar=pass (178 MiB at 8 workers), mem16_max_mib=223; the metadata phase runs in its own mount so lock-stats rows cover it alone
 - [Phase 21]: 21-09: POOL-01..05 Complete on evidence (POOL-04 on ci-evidence for 7853542; POOL-05 on verdict=PASS, mem_bar=pass, R1=pass); [Step limit] closed by the 21-05 mmap threshold, no step limit
 - [Phase 21]: 21-09: no follow-up issue for POOL-05; write plateau (1.26x), S7 R2/R3 at 16 writers and no gain at 16 workers are owner reports in deferred-items.md
+- [Phase 21.1]: 21.1-01: header::read checks the 64 KiB bound before UTF-8; a header that is not UTF-8 has its own text (msg_not_text), to document next to M10
+- [Phase 21.1]: 21.1-01: Started::stop drops the file system before mount.lock; on a failed mount it also stops the commit timer and the segment GC
+- [Phase 21.1]: 21.1-01: --hash and --auto-snapshot are ignored (nothing written) on a ro_compat mount until plan 21.1-02 adds M11 and M12
+- [Phase 21.1]: 21.1-02: header::check is the first statement of every command that writes; a store with data and no header is refused (M1) for every Want
+- [Phase 21.1]: 21.1-02: write commands on a path with no store write FORMAT before they fail (gc, snapshot create/switch); a later small fix can refuse a path with no segments/ first
+- [Phase 21.1]: stats shows format (null with no header), flags by class (name, release, known) and access, in text and JSON
+- [Phase 21.1]: gc, snapshot create and snapshot switch refuse a path with no segments/ before the header check (content::require_store); seed and mount still make new stores
+- [Phase 21.1]: store-format.md leaves out the unverified ext4 journal-replay claim (RESEARCH A1); deferred list item
 
 ### Pending Todos
 
@@ -216,6 +228,10 @@ None.
 - LOCK-01 open: store lock held across an fsync (ChunkStore::sync second phase) and record pwrites under the store and WAL writer locks stall 20-36 ms behind a concurrent fsync on macOS (19-11 lock rows; deferred-items.md). Decided (G1, G2); plans 19-12 (store) and 19-13 (WAL), measured in 19-16.
 - LOCK-05 open: finalize and the write path fall back to a rebase step or flush with the cell locked after a dropped or concurrent step (19-06/07), so a reader can wait for a writer's I/O under contention (19-11 SUMMARY Finding 5; deferred-items.md). Decided (G3); plans 19-14 (step token, write and read paths) and 19-15 (finalize, setattr, forced-drop evidence).
 
+### Roadmap Evolution
+
+- Phase 21.1 inserted after Phase 21: Store header with compat, ro-compat and incompat feature flags, and a written format policy (#154); owner agreed #154 joins v2.2 after Phase 21
+
 ## Deferred Items
 
 | Category | Item | Status | Deferred At | Milestone |
@@ -224,8 +240,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-24T16:49:44.957Z
-Stopped at: Phase 21 complete, ready to plan Phase 22
+Last session: 2026-11-24T22:17:53.780Z
+Stopped at: Phase 21.1 complete, ready to plan Phase 22
 Resume file: None
 
 ## Operator Next Steps

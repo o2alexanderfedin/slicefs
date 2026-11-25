@@ -121,6 +121,52 @@ pub struct StoreStats {
     pub snapshots: Vec<SnapshotStats>,
     /// Whether the store was mounted at scan time.
     pub mounted: bool,
+    /// The store format number of the header; `None` (JSON `null`) for an
+    /// empty store with no header yet.
+    pub format: Option<u32>,
+    /// The feature flags of the header, by class.
+    pub flags: FlagSets,
+    /// `read-write`, or `read-only` (an unknown ro_compat flag) for this SliceFS.
+    pub access: &'static str,
+}
+
+/// The feature flags of the store header, by class.
+#[derive(Debug, Default, Serialize)]
+pub struct FlagSets {
+    pub compat: Vec<FlagOut>,
+    pub ro_compat: Vec<FlagOut>,
+    pub incompat: Vec<FlagOut>,
+}
+
+/// One feature flag of the store header.
+#[derive(Debug, Default, Serialize)]
+pub struct FlagOut {
+    pub name: String,
+    /// The lowest SliceFS release that knows the flag.
+    pub release: String,
+    /// Whether this SliceFS knows the flag.
+    pub known: bool,
+}
+
+/// The format number, the flags and the access of an open decision.
+fn header_fields(opened: &crate::header::Opened) -> (Option<u32>, FlagSets, &'static str) {
+    use crate::header::Class;
+    let mut flags = FlagSets::default();
+    let Some(h) = &opened.header else { return (None, flags, "read-write") };
+    for f in h.flags() {
+        let out = FlagOut {
+            name: f.name.clone(),
+            release: f.release.clone(),
+            known: crate::header::KNOWN_FLAGS.contains(&f.name.as_str()),
+        };
+        match f.class {
+            Class::Compat => flags.compat.push(out),
+            Class::RoCompat => flags.ro_compat.push(out),
+            Class::Incompat => flags.incompat.push(out),
+        }
+    }
+    let access = if opened.access.is_read_write() { "read-write" } else { "read-only" };
+    (Some(h.format), flags, access)
 }
 
 /// Recursively sum file sizes under `dir`: `(apparent bytes, allocated bytes)`.
@@ -155,11 +201,28 @@ fn ratio(num: u64, den: u64) -> f64 {
 /// Returns an error if segment files cannot be read.
 pub fn run_stats(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     // Check if store is currently mounted — stats work on mounted stores too.
-    let lock_path = store_path.join("mount.lock");
-    let mounted = lock_path.exists();
-    if mounted && !json {
+    if store_path.join("mount.lock").exists() && !json {
         eprintln!("Note: store appears to be mounted; stats reflect closed segments only.");
     }
+    let stats = store_stats(store_path)?;
+    if json {
+        let output = serde_json::to_string_pretty(&stats)
+            .map_err(|e| format!("JSON serialization error: {}", e))?;
+        println!("{}", output);
+    } else {
+        print!("{}", human_stats(&stats));
+    }
+    Ok(())
+}
+
+/// The statistics of the store at `store_path` (read only: writes nothing).
+///
+/// # Errors
+///
+/// Returns an error if segment files cannot be read.
+pub fn store_stats(store_path: &Path) -> Result<StoreStats, Box<dyn std::error::Error>> {
+    // A read-only mount makes no mount.lock; it holds the store lock.
+    let mounted = store_path.join("mount.lock").exists() || crate::header::store_lock_held(store_path);
 
     // Reject legacy format.
     if store_path.join("dictionary.bin").exists() {
@@ -174,7 +237,8 @@ pub fn run_stats(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
         ).into());
     }
 
-    crate::content::check_format(store_path)?;
+    let opened = crate::header::check(store_path, crate::header::Want::Read)?;
+    let (format, flags, access) = header_fields(&opened);
     let segs_dir = store_path.join("segments");
 
     // Load store from segment replay.
@@ -220,17 +284,11 @@ pub fn run_stats(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
         refcount_distribution: content.dist,
         snapshots: snap_stats,
         mounted,
+        format,
+        flags,
+        access,
     };
-
-    if json {
-        let output = serde_json::to_string_pretty(&stats)
-            .map_err(|e| format!("JSON serialization error: {}", e))?;
-        println!("{}", output);
-    } else {
-        print_human_stats(&stats);
-    }
-
-    Ok(())
+    Ok(stats)
 }
 
 /// Build per-snapshot statistics.
@@ -248,32 +306,53 @@ fn build_snapshot_stats(snapshots: &[SnapshotEntry]) -> Vec<SnapshotStats> {
         .collect()
 }
 
-/// Print stats in human-readable tabular format.
-fn print_human_stats(stats: &StoreStats) {
-    println!("SliceFS Store Statistics");
-    println!("========================");
-    println!("Logical bytes    : {}", format_bytes(stats.logical_bytes));
-    println!("Unique content   : {} (each distinct file content once)", format_bytes(stats.unique_content_bytes));
-    println!("CAS bytes        : {} (packs/, apparent size)", format_bytes(stats.physical_bytes));
-    println!("CAS on disk      : {} (packs/, allocated blocks)", format_bytes(stats.physical_disk_bytes));
-    println!("Host disk used   : {} (whole store, allocated blocks)", format_bytes(stats.host_disk_bytes));
-    println!("File dedup ratio : {:.2}x (logical / unique content; whole-file duplicates)", stats.file_dedup_ratio);
-    println!("Overall ratio    : {:.2}x (logical / CAS bytes; block dedup and format cost included)", stats.overall_ratio);
+/// The stats in human-readable tabular format, one line each.
+fn human_stats(stats: &StoreStats) -> String {
+    use std::fmt::Write;
+    let mut o = String::new();
+    let _ = writeln!(o, "SliceFS Store Statistics");
+    let _ = writeln!(o, "========================");
+    let _ = writeln!(o, "Logical bytes    : {}", format_bytes(stats.logical_bytes));
+    let _ = writeln!(o, "Unique content   : {} (each distinct file content once)", format_bytes(stats.unique_content_bytes));
+    let _ = writeln!(o, "CAS bytes        : {} (packs/, apparent size)", format_bytes(stats.physical_bytes));
+    let _ = writeln!(o, "CAS on disk      : {} (packs/, allocated blocks)", format_bytes(stats.physical_disk_bytes));
+    let _ = writeln!(o, "Host disk used   : {} (whole store, allocated blocks)", format_bytes(stats.host_disk_bytes));
+    let _ = writeln!(o, "File dedup ratio : {:.2}x (logical / unique content; whole-file duplicates)", stats.file_dedup_ratio);
+    let _ = writeln!(o, "Overall ratio    : {:.2}x (logical / CAS bytes; block dedup and format cost included)", stats.overall_ratio);
     let d = &stats.refcount_distribution;
-    println!("Content sharing  : {} unique, {} shared by 2, {} shared by 3+", d.unique, d.shared_2x, d.shared_3plus);
-    println!("Snapshot count   : {}", stats.snapshot_count);
-    println!("Mounted          : {}", if stats.mounted { "yes" } else { "no" });
+    let _ = writeln!(o, "Content sharing  : {} unique, {} shared by 2, {} shared by 3+", d.unique, d.shared_2x, d.shared_3plus);
+    let _ = writeln!(o, "Snapshot count   : {}", stats.snapshot_count);
+    let _ = writeln!(o, "Mounted          : {}", if stats.mounted { "yes" } else { "no" });
+    match stats.format {
+        Some(n) => { let _ = writeln!(o, "Store format     : {n}"); }
+        None => { let _ = writeln!(o, "Store format     : none (no store header yet)"); }
+    }
+    let f = &stats.flags;
+    let all = [("compat", &f.compat), ("ro_compat", &f.ro_compat), ("incompat", &f.incompat)];
+    let mut label = "Feature flags    : ";
+    for (class, list) in all {
+        for flag in list.iter() {
+            let here = if flag.known { "known here" } else { "unknown here" };
+            let _ = writeln!(o, "{label}{class} {} (needs SliceFS {}; {here})", flag.name, flag.release);
+            label = "                   ";
+        }
+    }
+    if f.compat.is_empty() && f.ro_compat.is_empty() && f.incompat.is_empty() {
+        let _ = writeln!(o, "Feature flags    : none");
+    }
+    let _ = writeln!(o, "Access           : {}", stats.access);
 
     if !stats.snapshots.is_empty() {
-        println!();
-        println!("Snapshots");
-        println!("---------");
+        o.push('\n');
+        let _ = writeln!(o, "Snapshots");
+        let _ = writeln!(o, "---------");
         for snap in &stats.snapshots {
             let name = snap.name.as_deref().unwrap_or("<unnamed>");
-            println!("  v{}: {} (created {})",
+            let _ = writeln!(o, "  v{}: {} (created {})",
                 snap.version, name, snap.created_at);
         }
     }
+    o
 }
 
 /// Format a byte count as human-readable string with appropriate units.
@@ -316,6 +395,7 @@ mod tests {
 
     /// Write a valid seeded store in segment format.
     fn write_segment_store(dir: &TempDir) {
+        crate::header::create(dir.path()).unwrap();
         use metadata::wal::create_wal;
         let segs_dir = dir.path().join("segments");
         std::fs::create_dir_all(&segs_dir).unwrap();
@@ -531,12 +611,84 @@ mod tests {
             refcount_distribution: RefcountDist { unique: 10, shared_2x: 5, shared_3plus: 2 },
             snapshots: vec![],
             mounted: false,
+            format: Some(7),
+            flags: FlagSets::default(),
+            access: "read-write",
         };
         let json = serde_json::to_string(&stats).expect("StoreStats should serialize to JSON");
+        assert!(json.contains("\"format\":7"), "JSON should contain format: {json}");
         assert!(json.contains("logical_bytes"), "JSON should contain logical_bytes");
         assert!(json.contains("physical_bytes"), "JSON should contain physical_bytes");
         assert!(json.contains("file_dedup_ratio"), "JSON should contain file_dedup_ratio");
         assert!(json.contains("snapshot_count"), "JSON should contain snapshot_count");
+    }
+
+    // ── store header ─────────────────────────────────────────────────────────
+
+    /// A store seeded from one small file, with `lines` appended to FORMAT.
+    fn seeded_with(lines: &str) -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.txt"), b"hello").unwrap();
+        let store = dir.path().join("store");
+        crate::seed::run_seed(&store, &src, None).unwrap();
+        let mut f = std::fs::OpenOptions::new().append(true).open(store.join("FORMAT")).unwrap();
+        std::io::Write::write_all(&mut f, lines.as_bytes()).unwrap();
+        dir
+    }
+
+    #[test]
+    fn stats_shows_the_header() {
+        let dir = seeded_with("compat test-compat-feature r-test\nro_compat test-ro-feature r-test\n");
+        let stats = store_stats(&dir.path().join("store")).unwrap();
+        assert_eq!(stats.format, Some(7));
+        assert_eq!((stats.flags.compat.len(), stats.flags.ro_compat.len(), stats.flags.incompat.len()), (1, 1, 0));
+        assert_eq!(stats.access, "read-only");
+        let text = human_stats(&stats);
+        for line in [
+            "Store format     : 7",
+            "Feature flags    : compat test-compat-feature (needs SliceFS r-test; unknown here)",
+            "                   ro_compat test-ro-feature (needs SliceFS r-test; unknown here)",
+            "Access           : read-only",
+        ] {
+            assert!(text.lines().any(|l| l == line), "no line {line:?} in:\n{text}");
+        }
+        let v = serde_json::to_value(&stats).unwrap();
+        assert_eq!(v["format"], 7);
+        assert_eq!(v["flags"]["compat"][0]["name"], "test-compat-feature");
+        assert_eq!(v["flags"]["ro_compat"][0]["name"], "test-ro-feature");
+        assert_eq!(v["flags"]["ro_compat"][0]["release"], "r-test");
+        assert_eq!(v["flags"]["ro_compat"][0]["known"], false);
+        assert_eq!(v["flags"]["incompat"], serde_json::json!([]));
+        assert_eq!(v["access"], "read-only");
+    }
+
+    #[test]
+    fn stats_of_a_normal_store_shows_no_flags() {
+        let dir = seeded_with("");
+        let stats = store_stats(&dir.path().join("store")).unwrap();
+        let text = human_stats(&stats);
+        for line in ["Store format     : 7", "Feature flags    : none", "Access           : read-write"] {
+            assert!(text.lines().any(|l| l == line), "no line {line:?} in:\n{text}");
+        }
+        let v = serde_json::to_value(&stats).unwrap();
+        for class in ["compat", "ro_compat", "incompat"] {
+            assert_eq!(v["flags"][class], serde_json::json!([]), "{class}");
+        }
+        assert_eq!(v["access"], "read-write");
+    }
+
+    #[test]
+    fn stats_of_an_empty_store_shows_format_none() {
+        let store = make_empty_store();
+        let stats = store_stats(store.path()).unwrap();
+        assert_eq!(stats.format, None);
+        let text = human_stats(&stats);
+        assert!(text.lines().any(|l| l == "Store format     : none (no store header yet)"), "{text}");
+        let v = serde_json::to_value(&stats).unwrap();
+        assert!(v.get("format").is_some_and(|f| f.is_null()), "format is null: {v}");
+        assert!(!store.path().join("FORMAT").exists(), "a read writes no header");
     }
 
     // ── segment store json output ────────────────────────────────────────────

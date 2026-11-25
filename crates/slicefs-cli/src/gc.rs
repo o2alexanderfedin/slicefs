@@ -88,6 +88,10 @@ pub fn run_gc_mode(store_path: &Path, full: bool) -> Result<(), Box<dyn std::err
 
 /// Run the GC and return its report (the lines that `slicefs gc` prints).
 pub fn gc_report(store_path: &Path, full: bool) -> Result<String, Box<dyn std::error::Error>> {
+    // An existing store only, then the store header, before anything writes
+    // (also a GC request).
+    crate::content::require_store(store_path)?;
+    crate::header::check(store_path, crate::header::Want::Write)?;
     // Step 1: A mounted store runs the GC itself: ask the mount and wait.
     if store_path.join("mount.lock").exists() {
         let outcome = crate::online_gc::request_gc_mode(store_path, full)?;
@@ -95,7 +99,10 @@ pub fn gc_report(store_path: &Path, full: bool) -> Result<String, Box<dyn std::e
         return if outcome.starts_with("ok") { Ok(report) } else { Err(report.into()) };
     }
 
-    crate::content::check_format(store_path)?;
+    // An offline GC: refused while a read-only mount runs (it holds the
+    // store lock shared and makes no mount.lock). Held to the end.
+    let _store_lock = crate::header::lock_offline(store_path)?;
+
     let before = store_usage(store_path);
     let segs_dir = store_path.join("segments");
 

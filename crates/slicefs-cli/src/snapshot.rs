@@ -8,7 +8,8 @@
 //! slicefs snapshot switch <store> <version_or_name>
 //! ```
 //!
-//! All snapshot commands require the store to be **unmounted** (no `mount.lock`).
+//! `create` and `switch` require the store to be **unmounted**: no `mount.lock`,
+//! and no read-only mount (it holds the store lock, see `header::lock_offline`).
 
 use std::path::Path;
 
@@ -40,6 +41,10 @@ pub fn run_snapshot_create(
     store_path: &Path,
     name: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // An existing store only, then the store header, before anything writes.
+    crate::content::require_store(store_path)?;
+    crate::header::check(store_path, crate::header::Want::Write)?;
+
     // Refuse to run on a mounted store.
     let lock_path = store_path.join("mount.lock");
     if lock_path.exists() {
@@ -49,6 +54,8 @@ pub fn run_snapshot_create(
         )
         .into());
     }
+    // A read-only mount makes no mount.lock: it holds the store lock.
+    let _store_lock = crate::header::lock_offline(store_path)?;
 
     let segs_dir = store_path.join("segments");
 
@@ -94,6 +101,7 @@ pub fn run_snapshot_create(
 
 /// List all snapshots in the store.
 pub fn run_snapshot_list(store_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    crate::header::check(store_path, crate::header::Want::Read)?;
     let segs_dir = store_path.join("segments");
 
     // Load snapshot list from segment replay (no need to reconstruct full store).
@@ -137,6 +145,10 @@ pub fn run_snapshot_switch(
     store_path: &Path,
     version_or_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // An existing store only, then the store header, before anything writes.
+    crate::content::require_store(store_path)?;
+    crate::header::check(store_path, crate::header::Want::Write)?;
+
     // Refuse to run on a mounted store.
     let lock_path = store_path.join("mount.lock");
     if lock_path.exists() {
@@ -146,6 +158,8 @@ pub fn run_snapshot_switch(
         )
         .into());
     }
+    // A read-only mount makes no mount.lock: it holds the store lock.
+    let _store_lock = crate::header::lock_offline(store_path)?;
 
     let segs_dir = store_path.join("segments");
 
@@ -262,6 +276,7 @@ mod tests {
 
     /// Create a valid segment-format store with a committed file.
     fn make_seeded_store(store_dir: &TempDir) {
+        crate::header::create(store_dir.path()).unwrap();
         use metadata::store_io::StoreIo;
         use metadata::wal::create_wal;
         use std::sync::{Arc, Mutex};

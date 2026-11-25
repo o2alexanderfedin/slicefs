@@ -151,9 +151,9 @@ snapshots are 33-byte keys in the `RootUpdate` and `Snapshot` records.
 
 The metadata and the file content share one `ChunkStore` instance: a commit
 syncs the active pack once, then logs the root. A directory entry key is
-BLAKE3-256 of the name (no object is stored for it). The store format is 6;
-a store of format 5 (224-bit object IDs) or 4 (metadata in `vt0/`) is
-refused.
+BLAKE3-256 of the name (no object is stored for it). The store format
+number and the store header are in `docs/design/store-format.md` (format 7;
+a store of an older format is refused).
 
 ## Object IDs and the hash
 
@@ -170,8 +170,9 @@ ObjectId = tag (1 byte) | digest (32 bytes)
   build knows a fixed list of them (`hasher_by_name`, `hasher_by_tag`).
 - Write hash: the store makes the IDs of new objects with one hasher,
   injected at open (`Options::hasher`, default BLAKE3-256), as the zstd
-  level is. The store records it in its format marker, as a second line
-  `hash blake3-256` (a marker without that line means blake3-256).
+  level is. The store records it in its store header (`FORMAT`, see
+  `docs/design/store-format.md`), as a line `hash blake3-256` (a header
+  without that line means blake3-256).
   `slicefs mount --hash <name>` and `slicefs seed --hash <name>` change it:
   the new name is recorded and new objects use it. Without `--hash`, the
   recorded hash stays. An unknown name is refused with the list of the

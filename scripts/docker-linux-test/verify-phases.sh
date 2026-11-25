@@ -40,6 +40,37 @@ if mnt $R/s3 $R/m3 --snapshot base; then
   umnt $R/m3; ok unmount
 fi
 
+echo "== FMT-02 (Phase 21.1): an unknown ro_compat flag mounts read-only; an unknown incompat flag is refused"
+snap(){ # snap <dir>: every path, then the sha256 of every file, in sorted order
+  (cd "$1" && find . -print0 | LC_ALL=C sort -z | tr '\0' '\n' && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum); }
+$B seed $R/sf $R/src >/dev/null 2>&1 && echo "ro_compat test-ro-feature r-test" >> $R/sf/FORMAT
+snap $R/sf > $R/sf.before
+rm -rf $R/sfc; cp -a $R/sf $R/sfc
+if ! snap $R/sfc | cmp -s - $R/sf.before; then bad tree-check-sees-a-change "(a plain copy differs)"
+else : > $R/sfc/control; if snap $R/sfc | cmp -s - $R/sf.before; then bad tree-check-sees-a-change "(an added file is not seen)"; else ok tree-check-sees-a-change; fi; fi
+rm -rf $R/sfc
+if timeout -s KILL 20 $B stats $R/sf >$R/fst.out 2>&1 && grep -q 'ro_compat test-ro-feature' $R/fst.out && grep -qE '^Access +: read-only$' $R/fst.out
+then ok ro-stats; else bad ro-stats "($(head -c 300 $R/fst.out))"; fi
+if timeout -s KILL 20 $B gc $R/sf >$R/fgc.out 2>&1; then bad ro-gc-refused "(gc ran)"
+elif grep -q test-ro-feature $R/fgc.out; then ok ro-gc-refused; else bad ro-gc-refused "($(head -c 300 $R/fgc.out))"; fi
+if mnt $R/sf $R/mf; then
+  if [ -e $R/sf/mount.lock ]; then bad ro-no-lock "(mount.lock exists)"; else ok ro-no-lock; fi
+  step ro-cat 10 bash -c "[ \"\$(cat $R/mf/hello.txt)\" = 'Hello SliceFS' ] && diff -r $R/src $R/mf"
+  if timeout 10 touch $R/mf/test 2>$R/err; then bad ro-touch-erofs "(write succeeded)";
+  elif grep -q "Read-only file system" $R/err; then ok ro-touch-erofs; else bad ro-touch-erofs "($(cat $R/err))"; fi
+  if grep -qE 'Mounting read-only: .*test-ro-feature.*r-test' $R/mount.log; then ok ro-line; else bad ro-line "($(tail -3 $R/mount.log | tr '\n' ' '))"; fi
+  umnt $R/mf
+fi
+snap $R/sf > $R/sf.after
+if cmp -s $R/sf.before $R/sf.after; then ok ro-store-unchanged
+else bad ro-store-unchanged "($(diff $R/sf.before $R/sf.after | grep '^[<>]' | head -5 | tr '\n' ' '))"; fi
+$B seed $R/si $R/src >/dev/null 2>&1 && echo "incompat test-new-feature r-test" >> $R/si/FORMAT
+mkdir -p $R/mi
+timeout -s KILL 20 $B mount --store $R/si $R/mi </dev/null >$R/fmi.out 2>&1; e=$?
+if mountpoint -q $R/mi; then fusermount -u $R/mi 2>/dev/null; bad incompat-refused "(it mounted)"
+elif [ $e -ne 0 ] && grep -q test-new-feature $R/fmi.out && grep -q r-test $R/fmi.out; then ok incompat-refused
+else bad incompat-refused "(exit $e: $(head -c 300 $R/fmi.out))"; fi
+
 echo "== Phase 04: end-to-end write session, survives remount"
 $B seed $R/s4 $R/src >/dev/null 2>&1
 if mnt $R/s4 $R/m4; then

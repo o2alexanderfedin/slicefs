@@ -84,7 +84,7 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
         ).into());
     }
 
-    crate::content::check_format(store_path)?;
+    crate::header::check(store_path, crate::header::Want::Read)?;
     let segs_dir = store_path.join("segments");
 
     // Load last committed root + all snapshot roots from segment replay.
@@ -235,6 +235,7 @@ mod tests {
 
     /// Write a valid seeded store in segment format.
     fn write_segment_store(dir: &TempDir) {
+        crate::header::create(dir.path()).unwrap();
         use metadata::wal::create_wal;
         let segs_dir = dir.path().join("segments");
         std::fs::create_dir_all(&segs_dir).unwrap();
