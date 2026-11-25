@@ -801,6 +801,7 @@ mod tests {
     /// A chunk added or removed at the start changes only a few nodes, not
     /// every node after it (about 200,000 chunks: a 1.6 GB file).
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn a_shift_at_the_start_changes_few_nodes() {
         let s = ChunkStore::open_with(Arc::new(MemIo::new()), Options::default()).unwrap();
         let base = fake(200_000);
@@ -824,6 +825,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn nodes_stay_within_the_size_limits() {
         let s = ChunkStore::open_with(Arc::new(MemIo::new()), Options::default()).unwrap();
         let root = build(&s, &fake(100_000));
@@ -941,6 +943,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn a_splice_gives_the_same_key_as_a_full_write() {
         let s = fast_store();
         let mut rng = Rng(0x5eed_1234_abcd_0001);
@@ -1025,6 +1028,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn a_splice_across_many_leaves_gives_the_same_key() {
         let s = fast_store();
         let mut rng = Rng(0x5eed_1234_abcd_0002);
@@ -1068,6 +1072,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn a_splice_over_zeros_and_repeating_data_gives_the_same_key() {
         let s = fast_store();
         let mut rng = Rng(0x5eed_1234_abcd_0003);
@@ -1114,6 +1119,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn a_small_splice_reuses_old_nodes() {
         let s = fast_store();
         let mut rng = Rng(0x5eed_1234_abcd_0004);
@@ -1194,6 +1200,7 @@ mod tests {
     /// 2 * CHUNK_MAX past each change (that read three times the re-chunked
     /// bytes, and a mount reads and verifies each of them from the store).
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn scattered_small_edits_read_little_more_than_they_rechunk() {
         let s = fast_store();
         let mut rng = Rng(0x5eed_1234_abcd_0005);
@@ -1227,6 +1234,7 @@ mod tests {
     /// read steps past a change grow, so such a run reads big pieces (each
     /// read is re-chunked again with the bytes kept from the last one).
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn a_long_rechunk_run_reads_big_pieces() {
         let s = fast_store();
         let mut rng = Rng(0x5eed_1234_abcd_0006);

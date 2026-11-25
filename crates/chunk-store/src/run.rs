@@ -1154,6 +1154,7 @@ mod tests {
     // open_run, on each I/O strategy: FileIo maps the run, and a hit reads
     // its page in place (no `read_at`); the others read one page per hit.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support a file-backed mmap")]
     fn a_run_round_trips_through_each_io() {
         let dir = tempfile::tempdir().unwrap();
         let files = FileIo::new(dir.path().join("packs"));
@@ -1247,6 +1248,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn runs_of_each_size_round_trip() {
         for n in [0u64, 1, 70, 71, 120, 121, 10_000] {
             let entries: Vec<(ObjectId, Entry)> = (0..n).map(|i| (key(0x1e, i), put(i))).collect();
@@ -1281,6 +1283,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn keys_with_the_prefix_of_a_page_fence_are_found() {
         // Keys 60..360 share one 8-byte prefix: more than a page, so a page
         // boundary falls inside them, and a page starts with that prefix.
@@ -1600,6 +1603,7 @@ mod tests {
     /// differ only in digest byte 0: each one is found with its own place,
     /// and IDs near them are misses.
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn ids_that_share_most_of_their_bytes_are_kept_apart() {
         let last = ID_LEN - 1; // the last digest byte in `ObjectId.0`
         let mut entries = Vec::new();
@@ -1674,6 +1678,7 @@ mod tests {
     /// Bytes for each entry of a run with real places: about 42 bytes
     /// (58 with the fixed fields of run version 1).
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn a_run_of_real_places_needs_about_42_bytes_for_each_entry() {
         let n = 200_000u64;
         let mut x = 0x2545_F491_4F6C_DD1Du64;
@@ -1753,6 +1758,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn a_run_with_a_filter_answers_misses_without_a_page_read() {
         let entries = hashed_entries(5000);
         let io = MemIo::new();
