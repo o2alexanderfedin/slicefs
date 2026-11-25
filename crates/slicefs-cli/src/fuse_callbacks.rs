@@ -1002,7 +1002,7 @@ impl Filesystem for MountedFs {
         let (ino, fh, owner, typ) = (ino.0, _fh.0, _lock_owner.0, _typ);
         let fs = Arc::clone(&self.fs);
         self.run(0, move || {
-            let type_str = match typ { x if x == libc::F_RDLCK as i32 => "F_RDLCK", x if x == libc::F_WRLCK as i32 => "F_WRLCK", x if x == libc::F_UNLCK as i32 => "F_UNLCK", _ => "UNKNOWN" };
+            let type_str = match typ { x if x == crate::handlers::LOCK_RD => "F_RDLCK", x if x == crate::handlers::LOCK_WR => "F_WRLCK", x if x == crate::handlers::LOCK_UN => "F_UNLCK", _ => "UNKNOWN" };
             fuse_trace!("[{}][FUSE] getlk: ENTRY ino={}, fh={}, lock_owner={}, start={}, end={}, type={}({}), pid={}", ts(), ino, fh, owner, start, end, type_str, typ, pid);
             match serve(&fs, || handle_getlk(start, end, pid)) {
                 LockResult::Ok(s, e, typ, p) => {
@@ -1035,7 +1035,7 @@ impl Filesystem for MountedFs {
         let (ino, fh, owner, typ) = (ino.0, _fh.0, _lock_owner.0, _typ);
         let fs = Arc::clone(&self.fs);
         self.run(0, move || {
-            let type_str = match typ { x if x == libc::F_RDLCK as i32 => "F_RDLCK", x if x == libc::F_WRLCK as i32 => "F_WRLCK", x if x == libc::F_UNLCK as i32 => "F_UNLCK", _ => "UNKNOWN" };
+            let type_str = match typ { x if x == crate::handlers::LOCK_RD => "F_RDLCK", x if x == crate::handlers::LOCK_WR => "F_WRLCK", x if x == crate::handlers::LOCK_UN => "F_UNLCK", _ => "UNKNOWN" };
             fuse_trace!("[{}][FUSE] setlk: ENTRY ino={}, fh={}, lock_owner={}, start={}, end={}, type={}({}), pid={}, sleep={}", ts(), ino, fh, owner, _start, _end, type_str, typ, _pid, _sleep);
             serve(&fs, || ());
             fuse_trace!("[{}][FUSE] setlk: EXIT ino={}, fh={} -> ok (no-op, no lock table)", ts(), ino, fh);
