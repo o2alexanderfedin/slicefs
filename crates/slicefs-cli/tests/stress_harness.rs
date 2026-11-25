@@ -24,7 +24,7 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Barrier, Mutex, RwLock};
+use std::sync::{mpsc, Arc, Barrier, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hdrhistogram::Histogram;
@@ -380,7 +380,7 @@ fn new_fs(store: &Path, config: WalConfig) -> SliceFsFilesystem {
 struct Ctx {
     fs: SliceFsFilesystem,
     _dir: TempDir,
-    gate: Arc<RwLock<()>>,
+    gate: Arc<chunk_store::sync::raw::RwLock<()>>,
     serial: Mutex<()>,
     cfg: Config,
     one: Option<OneFile>,

@@ -9,12 +9,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chunk_store::lock_stats::Site;
 use chunk_store::pack_io::SyncWait;
-use chunk_store::sync::{self, Rank};
+use chunk_store::sync::{self, raw, Rank};
 use crate::util::ts;
 
 use slicefs_traits::key::ObjectKey;
@@ -1034,10 +1034,10 @@ pub(crate) enum FlushStep {
 
 /// Counts one waiter for the exclusive commit gate while it lives
 /// (`SliceFsFilesystem::exclusive_wait`).
-pub(crate) struct ExclusiveWait<'a>(&'a AtomicUsize);
+pub(crate) struct ExclusiveWait<'a>(&'a raw::atomic::AtomicUsize);
 
 impl<'a> ExclusiveWait<'a> {
-    fn enter(n: &'a AtomicUsize) -> Self {
+    fn enter(n: &'a raw::atomic::AtomicUsize) -> Self {
         n.fetch_add(1, Ordering::Relaxed);
         ExclusiveWait(n)
     }
@@ -1133,7 +1133,7 @@ pub struct SliceFsFilesystem {
     /// ro_compat flag: `destroy` writes nothing (see `test_destroy`).
     read_only: bool,
     /// Shared by FUSE callbacks, exclusive for a timed commit (see `commit_gate()`).
-    commit_gate: Arc<RwLock<()>>,
+    commit_gate: Arc<raw::RwLock<()>>,
     /// True while the write log is replayed: requests are not logged again.
     replaying: std::sync::atomic::AtomicBool,
     /// Dirty limit of one overlay (`DIRTY_LIMIT`; tests set it lower).
@@ -1196,7 +1196,7 @@ pub struct SliceFsFilesystem {
     shut_down: AtomicBool,
     /// Threads that wait for the exclusive commit gate now (a test hook;
     /// see `ExclusiveWait`).
-    gate_xwaiters: AtomicUsize,
+    gate_xwaiters: raw::atomic::AtomicUsize,
     /// The flusher thread of a mount (`start_flusher`); `stop_flusher`
     /// takes it and joins it. `Rank::Short`.
     flusher_thread: sync::Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -1234,7 +1234,7 @@ impl SliceFsFilesystem {
             store_path,
             auto_snapshot: false,
             read_only: false,
-            commit_gate: Arc::new(RwLock::new(())),
+            commit_gate: Arc::new(raw::RwLock::new(())),
             replaying: std::sync::atomic::AtomicBool::new(false),
             dirty_limit: AtomicUsize::new(DIRTY_LIMIT),
             dirty_budget: AtomicUsize::new(DIRTY_BUDGET),
@@ -1257,7 +1257,7 @@ impl SliceFsFilesystem {
             store_busy_retries: AtomicU64::new(0),
             flush_ctl: Arc::new(FlushCtl::new()),
             shut_down: AtomicBool::new(false),
-            gate_xwaiters: AtomicUsize::new(0),
+            gate_xwaiters: raw::atomic::AtomicUsize::new(0),
             flusher_thread: sync::Mutex::new(Rank::Short, None),
         }
     }
@@ -1887,7 +1887,7 @@ impl SliceFsFilesystem {
         self.flush_cell(g, FlushIo::Locked).map(|_| ())
     }
 
-    pub fn commit_gate(&self) -> Arc<RwLock<()>> {
+    pub fn commit_gate(&self) -> Arc<raw::RwLock<()>> {
         Arc::clone(&self.commit_gate)
     }
 
@@ -1897,19 +1897,13 @@ impl SliceFsFilesystem {
     /// instead of waiting behind a queued commit. Every request and the
     /// harness take the gate through this, never `commit_gate().read()`.
     pub fn gate_shared(&self) -> GateGuard<'_> {
-        let rank = sync::rank::enter(Rank::Gate);
-        let hold = GateHold::Shared { _g: self.commit_gate.read().unwrap_or_else(|e| e.into_inner()) };
-        GateGuard { _hold: hold, _rank: rank }
+        hold_shared(&self.commit_gate)
     }
 
     /// Hold the commit gate exclusively (a commit, the start of a GC), with
     /// its `Rank::Gate` entry (see `gate_shared`).
     pub fn gate_exclusive(&self) -> GateGuard<'_> {
-        let rank = sync::rank::enter(Rank::Gate);
-        let waiting = self.exclusive_wait();
-        let hold = GateHold::Exclusive { _g: self.commit_gate.write().unwrap_or_else(|e| e.into_inner()) };
-        drop(waiting);
-        GateGuard { _hold: hold, _rank: rank }
+        hold_exclusive(&self.commit_gate, &self.gate_xwaiters)
     }
 
     /// Access the metadata store (used by the mount command after unmount).
@@ -1933,11 +1927,33 @@ impl SliceFsFilesystem {
     }
 }
 
-/// The std commit gate held, shared or exclusive (each guard is kept only
-/// for its drop).
+/// Hold `gate` shared with its `Rank::Gate` entry (the body of
+/// `SliceFsFilesystem::gate_shared`). The entry goes on first. A free
+/// function, so the commit gate model (`loom_tests`) runs it on a gate of
+/// its own.
+pub(crate) fn hold_shared(gate: &raw::RwLock<()>) -> GateGuard<'_> {
+    let rank = sync::rank::enter(Rank::Gate);
+    let hold = GateHold::Shared { _g: gate.read().unwrap_or_else(|e| e.into_inner()) };
+    GateGuard { _hold: hold, _rank: rank }
+}
+
+/// Hold `gate` exclusively with its `Rank::Gate` entry, counted in
+/// `xwaiters` while it waits (the body of
+/// `SliceFsFilesystem::gate_exclusive`; see `hold_shared`).
+pub(crate) fn hold_exclusive<'a>(gate: &'a raw::RwLock<()>, xwaiters: &'a raw::atomic::AtomicUsize) -> GateGuard<'a> {
+    let rank = sync::rank::enter(Rank::Gate);
+    let waiting = ExclusiveWait::enter(xwaiters);
+    let hold = GateHold::Exclusive { _g: gate.write().unwrap_or_else(|e| e.into_inner()) };
+    drop(waiting);
+    GateGuard { _hold: hold, _rank: rank }
+}
+
+/// The commit gate held, shared or exclusive (each guard is kept only for
+/// its drop). The gate is a std `RwLock`; under `--cfg loom` it is the loom
+/// one (`sync::raw`).
 enum GateHold<'a> {
-    Shared { _g: std::sync::RwLockReadGuard<'a, ()> },
-    Exclusive { _g: std::sync::RwLockWriteGuard<'a, ()> },
+    Shared { _g: raw::RwLockReadGuard<'a, ()> },
+    Exclusive { _g: raw::RwLockWriteGuard<'a, ()> },
 }
 
 /// A hold of the commit gate and its rank-1 entry (D-16, D-18: the gate
@@ -7143,5 +7159,83 @@ mod tests {
         } else {
             assert_eq!(live, T, "the fields record is last, so its mtime must be the live one");
         }
+    }
+}
+
+/// Models of the lock protocol on the real code (Phase 21.2, TSAFE-02):
+/// the commit gate (M3) and the shared dirty budget (M2). Run them with
+/// `scripts/safety/model.sh`. Threads are counted with the model main thread.
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use super::*;
+    use crate::locks::{stripe, NamespaceLocks};
+    use raw::atomic::AtomicUsize as ModelUsize;
+
+    /// M3, the commit gate: shared request holds against the exclusive
+    /// commit, with the real `hold_shared`/`hold_exclusive`, the real
+    /// `NamespaceLocks` and two shim cell locks. Threads: 4 (main, 2
+    /// requests and 1 committer). Bound: the `LOOM_MAX_PREEMPTIONS` of
+    /// model.sh (default 3).
+    ///
+    /// Each request holds the gate shared, then the stripes of two inodes
+    /// (given in opposite order by the two requests; `NamespaceLocks::lock`
+    /// sorts them), then its cell, and counts `started` and then `finished`.
+    /// The committer holds the gate exclusively, then locks each cell once,
+    /// one at a time. Invariants: no deadlock in any order (gate, stripes
+    /// ascending, cell), and `started == finished` while the committer
+    /// holds the gate (no request is mid-flight).
+    ///
+    /// What loom cannot see: loom's `RwLock` lets a new reader in whenever
+    /// no writer holds it (it is reader-preferring), and loom reports
+    /// deadlocks and failed asserts, not starvation. So the deadlock of
+    /// `.planning/research/STACK.md` (a queued exclusive commit blocks new
+    /// shared holds while a shared holder waits for the budget) is not shown
+    /// here. It is covered by the debug panic of `throttle_write` under any
+    /// ranked lock (the gate too), by the `Rank::Gate` same-thread rule (test
+    /// `gate_after_a_lock_panics`), by the S5 gate spike and by the stress
+    /// harness. `Mutex<StoreIo>` is not modeled: it is a std lock of rank 6
+    /// (a leaf), with no condvar, held only for short store calls; the
+    /// models replace the store with closures, and TSan and the stress run
+    /// cover it. `commit_timer::commit` takes the gate with its own inline
+    /// code, not through `hold_exclusive`, so this model covers the steps of
+    /// `hold_exclusive` only.
+    #[test]
+    fn loom_gate_commit_excludes_requests() {
+        loom::model(|| {
+            let (a, b) = (1u64, 2u64);
+            assert_ne!(stripe(a), stripe(b), "the two inodes need two stripes");
+            let gate = Arc::new(raw::RwLock::new(()));
+            let xwaiters = Arc::new(ModelUsize::new(0));
+            let ns = Arc::new(NamespaceLocks::new());
+            let cells = Arc::new([sync::Mutex::new_keyed(Rank::Cell, a, ()), sync::Mutex::new_keyed(Rank::Cell, b, ())]);
+            let started = Arc::new(ModelUsize::new(0));
+            let finished = Arc::new(ModelUsize::new(0));
+            let mut threads = Vec::new();
+            for (cell, inos) in [(0usize, [a, b]), (1, [b, a])] {
+                let (gate, ns, cells) = (Arc::clone(&gate), Arc::clone(&ns), Arc::clone(&cells));
+                let (started, finished) = (Arc::clone(&started), Arc::clone(&finished));
+                threads.push(raw::thread::spawn(move || {
+                    let _gate = hold_shared(&gate);
+                    let _ns = ns.lock(&inos);
+                    let _cell = cells[cell].lock();
+                    started.fetch_add(1, Ordering::SeqCst);
+                    finished.fetch_add(1, Ordering::SeqCst);
+                }));
+            }
+            threads.push(raw::thread::spawn(move || {
+                let _gate = hold_exclusive(&gate, &xwaiters);
+                assert_eq!(
+                    started.load(Ordering::SeqCst),
+                    finished.load(Ordering::SeqCst),
+                    "a request is mid-flight while the commit holds the gate"
+                );
+                for c in cells.iter() {
+                    drop(c.lock());
+                }
+            }));
+            for t in threads {
+                t.join().unwrap();
+            }
+        });
     }
 }

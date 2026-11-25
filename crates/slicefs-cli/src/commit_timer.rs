@@ -16,9 +16,11 @@
 //! for the cut.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+use chunk_store::sync::raw::RwLock;
 
 use crate::filesystem::SliceFsFilesystem;
 use slicefs_traits::metadata::MetaError;
