@@ -4,18 +4,18 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: "21.2"
 current_phase_name: Thread-safety verification and CI gates
-current_plan: 3
+current_plan: 4
 status: executing
-stopped_at: Completed 21.2-02-PLAN.md
-last_updated: "2026-11-25T10:17:24.096Z"
+stopped_at: Completed 21.2-03-PLAN.md
+last_updated: "2026-11-25T16:06:21.034Z"
 last_activity: 2026-11-25
 last_activity_desc: Phase 21.1 complete, transitioned to Phase 22
-state_head: 964b6b36a3fc84f5809c245afbccea6da215ae4f
+state_head: 57510b949be7e58c7c5f199af33a83eb061633dd
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 55
-  completed_plans: 46
+  completed_plans: 47
   percent: 44
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 3
+Current Plan: 4
 Total Plans in Phase: 11
 Phase: 21.2 (Thread-safety verification and CI gates) — EXECUTING
 Plan: 21.2-01 and 21.2-02 complete (2 of 11); next: 21.2-03
@@ -95,6 +95,7 @@ Progress: [████░░░░░░] 44%
 | Phase 21.1 P04 | 45min | 2 tasks | 6 files |
 | Phase 21.2 P01 | 11h (gates on a loaded host) | 3 tasks | 13 files |
 | Phase 21.2 P02 | about 2 h | 2 tasks | 5 files |
+| Phase 21.2 P03 | about 6 h | 3 tasks | 48 files |
 
 ## Accumulated Context
 
@@ -218,6 +219,10 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21.2]: 21.2-01: loom 0.7.3 models through one cfg point (chunk_store::sync + sync::raw); CI bound LOOM_MAX_PREEMPTIONS=3 (bound-3 sum 6.94 s, bound-4 sum 41.64 s)
 - [Phase 21.2]: 21.2-01: pool_panic_tests child tests flaky on a loaded Mac (slow binary start); local gate skips 3 of them, CI on Linux and macOS must pass them
 - [Phase 21.2]: 21.2-02: race (b) fixed - check_not_ancestor walks .. under the rename mutex, EINVAL; ELOOP guard 1<<20; D-29 not needed (20 of 20 runs pass)
+- [Phase 21.2]: 21.2-03: lint allow reasons use the reason = argument on one line; clippy.sh checks it
+- [Phase 21.2]: 21.2-03: too_many_arguments, index loops with a meaningful index, and one-row case tables get an allow with a reason, not a refactor
+- [Phase 21.2]: 21.2-03: ci.yml jobs linux and macos get timeout-minutes 30 (10-run maximum times 1.5 is below the 30 min floor)
+- [Phase 21.2]: 21.2-03: Linux clippy evidence is CI Safety run 45649551248; local Docker had under 1 GiB free
 
 ### Pending Todos
 
@@ -246,8 +251,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-25T10:17:23.501Z
-Stopped at: Completed 21.2-02-PLAN.md
+Last session: 2026-11-25T16:06:20.392Z
+Stopped at: Completed 21.2-03-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
