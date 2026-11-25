@@ -346,6 +346,20 @@ fn add_to(counter: &'static std::thread::LocalKey<std::cell::Cell<u64>>, n: u64)
 /// A function the tests run inside a rebase (see `test_set_rebase_hook`).
 pub type RebaseHook = Arc<dyn Fn() + Send + Sync>;
 
+/// A point where a test can park a request (see `test_set_pause_hook`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pause {
+    /// A size change of a closed file has claimed the inode: its transient
+    /// cell is locked and in the cell map, the stripe is released.
+    SizeClaimed,
+    /// A setattr of other fields (or another `with_inode_locked` call)
+    /// holds the stripe and has read the cell map, before it locks a cell.
+    FieldsStriped,
+}
+
+/// A function the tests run at a `Pause` point (see `test_set_pause_hook`).
+pub type PauseHook = Arc<dyn Fn(Pause) + Send + Sync>;
+
 /// Write mode for an open file handle.
 ///
 /// Streaming mode is the default for sequential writes (O(log N) memory).
@@ -1153,6 +1167,9 @@ pub struct SliceFsFilesystem {
     /// manifest node is read, with no stripe held (for tests: a parked
     /// unlink).
     reclaim_hook: sync::Mutex<Option<RebaseHook>>,
+    /// Run at each `Pause` point (for tests: a request parked at a known
+    /// step of a race).
+    pause_hook: sync::Mutex<Option<PauseHook>>,
     /// Write requests so far (write, create, setattr): the online GC gives
     /// way to writes by it (`gc_pacing`).
     write_activity: Arc<AtomicU64>,
@@ -1229,6 +1246,7 @@ impl SliceFsFilesystem {
             push_hook: sync::Mutex::new(Rank::Short, None),
             mkdir_hook: sync::Mutex::new(Rank::Short, None),
             reclaim_hook: sync::Mutex::new(Rank::Short, None),
+            pause_hook: sync::Mutex::new(Rank::Short, None),
             write_activity: Arc::new(AtomicU64::new(0)),
             drop_steps: AtomicUsize::new(0),
             drop_every: AtomicUsize::new(0),
@@ -1387,6 +1405,20 @@ impl SliceFsFilesystem {
     /// inode, before its manifest node is read (`None`: no hook).
     pub fn test_set_reclaim_hook(&self, hook: Option<RebaseHook>) {
         *self.reclaim_hook.lock() = hook;
+    }
+
+    /// Test hook: run `hook` at each `Pause` point, with the locks that the
+    /// point names held (`None`: no hook).
+    pub fn test_set_pause_hook(&self, hook: Option<PauseHook>) {
+        *self.pause_hook.lock() = hook;
+    }
+
+    /// Run the pause hook at `at`, with no hook lock held during the call.
+    fn pause(&self, at: Pause) {
+        let hook = self.pause_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook(at);
+        }
     }
 
     /// Test hook: drop the results of the next `n` unlocked steps (stream
@@ -2060,6 +2092,13 @@ impl SliceFsFilesystem {
         t.by_fh.insert(fh, Handle { ino, write, append });
         *t.open_count.entry(ino).or_insert(0) += 1;
         fh
+    }
+
+    /// Count `ino` as open with no handle (the count half of `open_handle`):
+    /// an unlink then keeps the inode as an orphan until `uncount`, as for
+    /// an open handle. The caller holds `stripe(ino)` (IN-01 order).
+    fn pin_inode(&self, ino: u64) {
+        *self.handles.lock().open_count.entry(ino).or_insert(0) += 1;
     }
 
     /// Remove `fh` from the handle table (its inode stays counted as open
@@ -2902,6 +2941,7 @@ impl SliceFsFilesystem {
     fn with_inode_locked<R>(&self, ino: u64, f: impl FnOnce(Option<&mut OpenFileState>) -> R) -> R {
         let _ns = self.ns.lock(&[ino]);
         let cell = self.cells.get(ino);
+        self.pause(Pause::FieldsStriped);
         let mut g = cell.as_deref().map(|c| self.lock_cell(c)).filter(|g| !g.retired);
         f(g.as_mut().map(|g| &mut g.file))
     }
@@ -4092,6 +4132,15 @@ impl SliceFsFilesystem {
 
     /// `test_setattr_size` that logs a size-only `Setattr` in the cell hold
     /// of the change (the open cell or the transient cell).
+    ///
+    /// A closed file (case B) is first claimed under `stripe(ino)`: the
+    /// inode exists (else ENOENT), its transient cell is locked and in the
+    /// cell map, and the inode is pinned like an open handle (`pin_inode`).
+    /// The splice and the install then run under the cell with the stripe
+    /// released; the pin makes an unlink meanwhile keep an orphan, which
+    /// `uncount` reclaims after the change (race (a), window 1). The install
+    /// stays in the cell hold, so an open or a second size change cannot
+    /// enter between the splice and the install (research variant of D-27).
     fn setattr_size_logged(&self, ino: u64, new_size: u64, log: LogOp<'_>) -> Result<(), i32> {
         if new_size > MAX_FILE_SIZE {
             return Err(libc::EFBIG);
@@ -4099,16 +4148,17 @@ impl SliceFsFilesystem {
         let size_op = || crate::oplog::Op::Setattr {
             ino, mode: None, uid: None, gid: None, size: Some(new_size), atime: None, mtime: None,
         };
-        // A create (or mknod) that has linked `ino` holds its stripe until
-        // its record is appended (`new_entry`): wait for that, so this
-        // change's record comes after it (WR-03, D-08), and release the
-        // stripe at once. The change itself holds no stripe; the caller
-        // holds none either (stripes rank before cells).
-        drop(self.ns.lock(&[ino]));
         loop {
+            // Each pass takes `stripe(ino)` first. A create (or mknod) that
+            // has linked `ino` holds it until its record is appended
+            // (`new_entry`): so this change's record comes after it (WR-03,
+            // D-08). The caller holds no stripe (stripes rank before cells).
+            let ns = self.ns.lock(&[ino]);
             // Case A: the inode has an open write state (also one that its
-            // last release is still storing).
+            // last release is still storing). The stripe is released before
+            // the cell lock: the change can wait for steps.
             if let Some(cell) = self.cells.get(ino) {
+                drop(ns);
                 let mut g = self.lock_cell(&cell);
                 if g.retired {
                     continue;
@@ -4124,26 +4174,44 @@ impl SliceFsFilesystem {
                     Err(e) => return Err(e),
                 }
             }
-            // Case B: no open write state. A transient cell, locked before
-            // it goes into the map, orders this change against an open or
-            // another size change of the inode: its lock is held across the
-            // splice. This is the one I/O under a cell lock on a request
-            // path, accepted (RESEARCH Pattern 1): the file is closed, so
-            // no writer and no reader waits for it (a read does not lock a
-            // transient cell; it reads the committed manifest, which this
-            // change replaces in one install). Only an open or a second
-            // size change of the inode waits (19-07 order).
+            // Case B: no open write state. The claim, under the stripe: the
+            // inode exists; a transient cell, locked before it goes into the
+            // map (stripe 3 before cell 4), orders this change against an
+            // open or another size change of the inode, and a setattr of
+            // other fields either ran before the claim or finds the cell and
+            // waits for it (window 2: its inode write and its record both
+            // come after this change's); the pin keeps an unlinked inode as
+            // an orphan (window 1). The cell lock is held across the splice
+            // with the stripe released. This is the one I/O under a cell
+            // lock on a request path, accepted (RESEARCH Pattern 1): the
+            // file is closed, so no writer and no reader waits for it (a
+            // read does not lock a transient cell; it reads the committed
+            // manifest, which this change replaces in one install). Only an
+            // open, a second size change or a fields setattr of the inode
+            // waits (19-07 order).
+            if self.meta.get_inode(ino).is_err() {
+                return Err(libc::ENOENT);
+            }
             let cell = Arc::new(FileCell::transient(ino));
             let mut g = self.lock_cell(&cell);
             if !self.cells.insert_new(&cell) {
+                drop(g);
+                drop(ns);
                 continue;
             }
+            self.pin_inode(ino);
+            drop(ns);
+            self.pause(Pause::SizeClaimed);
+            // No return between the pin and `uncount`.
             let r = self.setattr_size_closed(ino, new_size);
             if r.is_ok() {
                 log(size_op());
             }
             g.retired = true;
             self.cells.remove(&cell);
+            // The cell first: `uncount` takes the stripe (rank 3).
+            drop(g);
+            self.uncount(ino);
             return r;
         }
     }
@@ -4153,18 +4221,19 @@ impl SliceFsFilesystem {
     /// zero-extended. NotFound from get_manifest means the inode exists but
     /// has no content yet (brand-new file created by create() before any
     /// write/release). Treat as empty content. The rebase hook runs after
-    /// the splice, before the install (for tests).
+    /// the splice, before the install (for tests). The old root is released
+    /// once, after the new manifest is set (no release on an error path).
     fn setattr_size_closed(&self, ino: u64, new_size: u64) -> Result<(), i32> {
         let old_manifest = match self.meta.get_manifest(ino) {
             Ok(m) => m,
             Err(MetaError::NotFound(_)) => vec![],
             Err(_) => return Err(libc::EIO),
         };
-
-        // Decrement old refcount
-        if !old_manifest.is_empty() {
-            self.meta.decrement_refcount(&old_manifest[0]);
-        }
+        let release_old = || {
+            if let Some(old) = old_manifest.first() {
+                self.meta.decrement_refcount(old);
+            }
+        };
 
         // Splice the old content to the new size: only the chunks near the
         // old end (a cut, or the last chunk of an extend) are cut again; the
@@ -4172,6 +4241,7 @@ impl SliceFsFilesystem {
         // zero chunks without a hash. Same key as a full write.
         if new_size == 0 {
             self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
+            release_old();
         } else {
             let cs = &*self.content;
             let store_err = |e: std::io::Error| {
@@ -4194,7 +4264,9 @@ impl SliceFsFilesystem {
                 hook();
             }
             self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
+            // The new root first: it can be the old one.
             self.meta.increment_refcount(&new_digest);
+            release_old();
         }
 
         // Update inode
@@ -6991,5 +7063,85 @@ mod tests {
         assert!(!fs.test_is_streaming(fh2));
         fs.test_release(ino2, fh2).unwrap();
         assert!(fs.test_read(ino2, 0, 1 << 20).unwrap() == old[..n], "streamed bytes cut at n");
+    }
+
+    /// Race (a), window 2 (Phase 19 item 19-10): a setattr of other fields
+    /// that reads the cell map in the window between the stripe step and
+    /// the transient-cell insert of a closed-file size change must not
+    /// write the inode in another order than its record. The size change is
+    /// parked at `Pause::SizeClaimed`, the fields call at
+    /// `Pause::FieldsStriped`; the log closure of the size change is the
+    /// third pause (after its inode write, before its record).
+    #[test]
+    fn a_fields_setattr_in_the_claim_window_keeps_the_record_order() {
+        use std::sync::mpsc::channel;
+        const T: (i64, u32) = (1_000_000_000, 0);
+        const WAIT: Duration = Duration::from_secs(10);
+        let (fs, _dir) = fresh_fs();
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        fs.test_write(fh, 0, &seeded(1, 64 << 10)).unwrap();
+        fs.test_release(ino, fh).unwrap();
+
+        let (tx, rx) = channel::<&'static str>();
+        let (go_s, go_s_rx) = channel::<()>();
+        let (go_f, go_f_rx) = channel::<()>();
+        let (go_2, go_2_rx) = channel::<()>();
+        let (go_s_rx, go_f_rx) = (Mutex::new(go_s_rx), Mutex::new(go_f_rx));
+        let (s_seen, f_seen) = (AtomicBool::new(false), AtomicBool::new(false));
+        let hook_tx = Mutex::new(tx.clone());
+        fs.test_set_pause_hook(Some(Arc::new(move |at| {
+            let (seen, msg, go) = match at {
+                Pause::SizeClaimed => (&s_seen, "s-claimed", &go_s_rx),
+                Pause::FieldsStriped => (&f_seen, "f-armed", &go_f_rx),
+            };
+            if !seen.swap(true, Ordering::SeqCst) {
+                hook_tx.lock().unwrap().send(msg).unwrap();
+                let _ = go.lock().unwrap().recv_timeout(WAIT);
+            }
+        })));
+        let next = |want: &str| assert_eq!(rx.recv_timeout(WAIT), Ok(want), "waiting for {want}");
+
+        let records = Mutex::new(Vec::new());
+        std::thread::scope(|sc| {
+            let (fs, records) = (&fs, &records);
+            let tx_s = tx.clone();
+            let s = sc.spawn(move || {
+                fs.setattr_size_logged(ino, 1024, &mut |op| {
+                    tx_s.send("s-at-log").unwrap();
+                    let _ = go_2_rx.recv_timeout(WAIT);
+                    records.lock().unwrap().push(op);
+                })
+            });
+            next("s-claimed");
+            let tx_f = tx.clone();
+            let f = sc.spawn(move || {
+                fs.setattr_logged(ino, None, None, None, None, None, None, Some(T), &mut |op| {
+                    records.lock().unwrap().push(op);
+                    tx_f.send("f-done").unwrap();
+                })
+            });
+            next("f-armed");
+            go_s.send(()).unwrap();
+            next("s-at-log");
+            go_f.send(()).unwrap();
+            // Before the fix the fields call ends here; after it, it waits
+            // for the transient cell (the wait times out, which is fine).
+            let _ = rx.recv_timeout(Duration::from_secs(1));
+            go_2.send(()).unwrap();
+            assert_eq!(s.join().unwrap(), Ok(()));
+            assert!(f.join().unwrap().is_ok());
+        });
+        fs.test_set_pause_hook(None);
+
+        let records = records.into_inner().unwrap();
+        assert_eq!(records.len(), 2, "one size record and one fields record: {records:?}");
+        let last_is_size = matches!(records[1], crate::oplog::Op::Setattr { size: Some(_), .. });
+        let m = fs.meta.get_inode(ino).unwrap();
+        let live = (m.mtime_sec, m.mtime_nsec);
+        if last_is_size {
+            assert_ne!(live, T, "the size record is last, but the fields write was last: replay gives another mtime");
+        } else {
+            assert_eq!(live, T, "the fields record is last, so its mtime must be the live one");
+        }
     }
 }
