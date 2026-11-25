@@ -1,0 +1,94 @@
+# red run at 8e4e999: tests of race (b) before the fix (not committed)
+# run 1 of 3 (full output); runs 2 and 3 below gave the same result
+   Compiling slicefs-cli v0.1.0 (<repo>/crates/slicefs-cli)
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 6 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.19s
+     Running tests/rename_ancestor_tests.rs (target/debug/deps/rename_ancestor_tests-38dc9ed14579505d)
+
+running 6 tests
+test the_root_is_its_own_parent ... ok
+test moves_that_make_no_cycle_still_work ... ok
+test a_directory_cannot_move_into_its_own_subtree ... FAILED
+test a_directory_cannot_move_into_itself ... FAILED
+test a_deep_move_into_the_subtree_is_refused ... FAILED
+test a_refused_rename_writes_no_record ... FAILED
+
+failures:
+
+---- a_directory_cannot_move_into_its_own_subtree stdout ----
+
+thread 'a_directory_cannot_move_into_its_own_subtree' (134861256) panicked at crates/slicefs-cli/tests/rename_ancestor_tests.rs:66:5:
+assertion `left == right` failed
+  left: Ok(())
+ right: Err(22)
+
+---- a_directory_cannot_move_into_itself stdout ----
+
+thread 'a_directory_cannot_move_into_itself' (134861257) panicked at crates/slicefs-cli/tests/rename_ancestor_tests.rs:81:5:
+assertion `left == right` failed
+  left: Ok(())
+ right: Err(22)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- a_deep_move_into_the_subtree_is_refused stdout ----
+
+thread 'a_deep_move_into_the_subtree_is_refused' (134861255) panicked at crates/slicefs-cli/tests/rename_ancestor_tests.rs:96:5:
+assertion `left == right` failed
+  left: Ok(())
+ right: Err(22)
+
+---- a_refused_rename_writes_no_record stdout ----
+
+thread 'a_refused_rename_writes_no_record' (134861258) panicked at crates/slicefs-cli/tests/rename_ancestor_tests.rs:144:5:
+Ok
+
+
+failures:
+    a_deep_move_into_the_subtree_is_refused
+    a_directory_cannot_move_into_its_own_subtree
+    a_directory_cannot_move_into_itself
+    a_refused_rename_writes_no_record
+
+test result: FAILED. 2 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+error: test failed, to rerun pass `-p slicefs-cli --test rename_ancestor_tests`
+# run 2: test result: FAILED. 2 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+# run 3: test result: FAILED. 2 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s

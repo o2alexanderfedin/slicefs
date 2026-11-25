@@ -278,6 +278,11 @@ pub const STORE_BUSY_RETRY_MAX: Duration = Duration::from_secs(60);
 /// (D-02 "retries later").
 const REBASE_TRIES: usize = 2;
 
+/// Most `..` steps of the ancestor walk of a cross-directory rename
+/// (`check_not_ancestor`). A guard against a damaged store with a `..`
+/// cycle, not a depth limit of real trees.
+const MAX_ANCESTOR_STEPS: u32 = 1 << 20;
+
 /// Forced drops in a row (a test hook) after which a finalize stops
 /// consulting the drop hook for the rest of that finalize, so a test
 /// release ends too. With no write handle nothing else drops a finalize
@@ -4715,6 +4720,34 @@ impl SliceFsFilesystem {
         r
     }
 
+    /// Refuse to move the directory `dir` into `target_parent` when `dir` is
+    /// `target_parent` or one of its ancestors: that move would detach `dir`
+    /// and its subtree from the tree as a cycle (race (b) of Phase 19).
+    ///
+    /// The walk reads `..` from `target_parent` up to the root (the root is
+    /// its own parent) and returns `EINVAL` when it meets `dir`. The caller
+    /// holds the rename mutex, which is enough: every other cross-directory
+    /// move waits for it, a rename in one directory changes no `..`, and
+    /// `rmdir` removes only an empty directory, while each directory above
+    /// `target_parent` has a child on the walk and the stripe of
+    /// `target_parent` is held. After `MAX_ANCESTOR_STEPS` steps (only on a
+    /// damaged store with a `..` cycle) it returns `ELOOP`. It changes
+    /// nothing, so a refused rename writes no record.
+    fn check_not_ancestor(&self, dir: u64, target_parent: u64) -> Result<(), i32> {
+        let mut cur = target_parent;
+        for _ in 0..MAX_ANCESTOR_STEPS {
+            if cur == dir {
+                return Err(libc::EINVAL);
+            }
+            let up = self.meta.lookup(cur, "..").map_err(|e| meta_error_to_errno(&e))?;
+            if up == cur {
+                return Ok(());
+            }
+            cur = up;
+        }
+        Err(libc::ELOOP)
+    }
+
     /// The body of `rename_logged`, with the stripes held; `freed` gets the
     /// manifest of a replaced inode it reclaimed.
     #[allow(clippy::too_many_arguments)]
@@ -4750,6 +4783,12 @@ impl SliceFsFilesystem {
         let src_ino = src.map_err(|e| meta_error_to_errno(&e))?;
         let src_is_dir = self.meta.get_inode(src_ino).map_err(|e| meta_error_to_errno(&e))?
             .mode & S_IFMT == S_IFDIR;
+
+        // A directory must not move into itself or its own subtree; the
+        // rename mutex is held here (race (b), D-28).
+        if src_is_dir && parent_ino != newparent_ino {
+            self.check_not_ancestor(src_ino, newparent_ino)?;
+        }
 
         // RENAME_NOREPLACE: fail if target already exists
         let target_ino = match dst {
