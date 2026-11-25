@@ -11,13 +11,16 @@
 //! Window 2 (the fields setattr in the claim window) needs the log closures of
 //! private functions: it is the in-crate test
 //! `a_fields_setattr_in_the_claim_window_keeps_the_record_order`.
+//!
+//! `stress_size_changes_and_unlinks_of_closed_files` is the short stress test
+//! of window 1 that stays in the default suite (D-21, D-26).
 
 mod common;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
 use common::{dump, new_fs_with, reload_and_replay};
@@ -158,4 +161,45 @@ fn an_unlink_inside_the_splice_replays_to_the_live_state() {
     let fs = reload_and_replay(dir.path());
     assert_eq!(dump(&fs), live, "replay gives the live state");
     assert!(fs.test_read(g, 0, LEN as u32 + 1).unwrap() == data, "g reads back after replay");
+}
+
+/// Seed of the stress test (printed in its assert messages).
+const STRESS_SEED: u64 = 0x21_0204;
+
+/// Short stress test that stays in the default suite (D-21, D-26): size
+/// changes of a closed file against one unlink of it. Each round has a file
+/// `f<k>` and a file `g<k>` with the same content (one shared root); thread X
+/// changes the size of `f<k>` 20 times, thread Y unlinks it once.
+#[test]
+fn stress_size_changes_and_unlinks_of_closed_files() {
+    let (fs, _dir) = fresh_fs();
+    let mut x = STRESS_SEED;
+    for k in 0..8u64 {
+        let (fname, gname) = (format!("f{k}"), format!("g{k}"));
+        let data = seeded(STRESS_SEED ^ k, LEN);
+        let f = closed_file(&fs, &fname, &data);
+        let g = closed_file(&fs, &gname, &data);
+        let root = fs.meta().get_manifest(g).unwrap()[0];
+        let sizes: Vec<u64> = (0..20).map(|_| { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x % (2 * LEN as u64) }).collect();
+        let barrier = Barrier::new(2);
+        std::thread::scope(|sc| {
+            let xs = sc.spawn(|| {
+                barrier.wait();
+                sizes.iter().map(|&s| fs.test_setattr_size(f, None, s)).collect::<Vec<_>>()
+            });
+            barrier.wait();
+            fs.simulate_unlink(1, &fname).unwrap();
+            for (i, r) in xs.join().unwrap().into_iter().enumerate() {
+                assert!(matches!(r, Ok(()) | Err(libc::ENOENT)), "seed {STRESS_SEED:#x} round {k} change {i}: {r:?}");
+            }
+        });
+        let at = format!("seed {STRESS_SEED:#x} round {k}");
+        assert_eq!(fs.test_orphan_count(), 0, "{at}: no orphan is left");
+        assert!(fs.meta().get_manifest(f).is_err(), "{at}: no manifest of the deleted inode");
+        assert!(fs.meta().get_inode(f).is_err(), "{at}: the deleted inode is gone");
+        assert_eq!(fs.meta().get_manifest(g).unwrap(), vec![root], "{at}: g keeps its manifest");
+        assert!(fs.test_read(g, 0, LEN as u32 + 1).unwrap() == data, "{at}: g reads back");
+        // Stats evidence only (#165): g still counts its root.
+        assert!(fs.meta().get_refcount(&root) >= 1, "{at}: refcount stats of the shared root");
+    }
 }

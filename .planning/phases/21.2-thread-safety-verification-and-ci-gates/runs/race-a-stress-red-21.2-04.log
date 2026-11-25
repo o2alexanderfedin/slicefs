@@ -1,0 +1,82 @@
+# mutation run at f7fa253: no pin_inode and no uncount in the claim (planted, not committed); the rest of the fix stays
+# cargo test -p slicefs-cli --test race_closed_size_tests -- stress_, 5 runs, timeout 300 each; compiler warnings removed; result: 5 of 5 runs failed (EIO from a size change)
+# run 1 of 5
+...
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running tests/race_closed_size_tests.rs (target/debug/deps/race_closed_size_tests-794a240322b03979)
+running 1 test
+test stress_size_changes_and_unlinks_of_closed_files ... FAILED
+failures:
+---- stress_size_changes_and_unlinks_of_closed_files stdout ----
+thread 'stress_size_changes_and_unlinks_of_closed_files' (135751868) panicked at crates/slicefs-cli/tests/race_closed_size_tests.rs:193:17:
+seed 0x210204 round 0 change 0: Err(5)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+failures:
+    stress_size_changes_and_unlinks_of_closed_files
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s
+error: test failed, to rerun pass `-p slicefs-cli --test race_closed_size_tests`
+run=1 exit=101
+# run 2 of 5
+...
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running tests/race_closed_size_tests.rs (target/debug/deps/race_closed_size_tests-794a240322b03979)
+running 1 test
+test stress_size_changes_and_unlinks_of_closed_files ... FAILED
+failures:
+---- stress_size_changes_and_unlinks_of_closed_files stdout ----
+thread 'stress_size_changes_and_unlinks_of_closed_files' (135752147) panicked at crates/slicefs-cli/tests/race_closed_size_tests.rs:193:17:
+seed 0x210204 round 1 change 0: Err(5)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+failures:
+    stress_size_changes_and_unlinks_of_closed_files
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s
+error: test failed, to rerun pass `-p slicefs-cli --test race_closed_size_tests`
+run=2 exit=101
+# run 3 of 5
+...
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running tests/race_closed_size_tests.rs (target/debug/deps/race_closed_size_tests-794a240322b03979)
+running 1 test
+test stress_size_changes_and_unlinks_of_closed_files ... FAILED
+failures:
+---- stress_size_changes_and_unlinks_of_closed_files stdout ----
+thread 'stress_size_changes_and_unlinks_of_closed_files' (135752373) panicked at crates/slicefs-cli/tests/race_closed_size_tests.rs:193:17:
+seed 0x210204 round 0 change 0: Err(5)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+failures:
+    stress_size_changes_and_unlinks_of_closed_files
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s
+error: test failed, to rerun pass `-p slicefs-cli --test race_closed_size_tests`
+run=3 exit=101
+# run 4 of 5
+...
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running tests/race_closed_size_tests.rs (target/debug/deps/race_closed_size_tests-794a240322b03979)
+running 1 test
+test stress_size_changes_and_unlinks_of_closed_files ... FAILED
+failures:
+---- stress_size_changes_and_unlinks_of_closed_files stdout ----
+thread 'stress_size_changes_and_unlinks_of_closed_files' (135752669) panicked at crates/slicefs-cli/tests/race_closed_size_tests.rs:193:17:
+seed 0x210204 round 3 change 0: Err(5)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+failures:
+    stress_size_changes_and_unlinks_of_closed_files
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.02s
+error: test failed, to rerun pass `-p slicefs-cli --test race_closed_size_tests`
+run=4 exit=101
+# run 5 of 5
+...
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running tests/race_closed_size_tests.rs (target/debug/deps/race_closed_size_tests-794a240322b03979)
+running 1 test
+test stress_size_changes_and_unlinks_of_closed_files ... FAILED
+failures:
+---- stress_size_changes_and_unlinks_of_closed_files stdout ----
+thread 'stress_size_changes_and_unlinks_of_closed_files' (135752889) panicked at crates/slicefs-cli/tests/race_closed_size_tests.rs:193:17:
+seed 0x210204 round 0 change 0: Err(5)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+failures:
+    stress_size_changes_and_unlinks_of_closed_files
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s
+error: test failed, to rerun pass `-p slicefs-cli --test race_closed_size_tests`
+run=5 exit=101
