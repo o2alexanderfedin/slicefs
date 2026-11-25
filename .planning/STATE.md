@@ -4,18 +4,18 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: "21.2"
 current_phase_name: Thread-safety verification and CI gates
-current_plan: 4
+current_plan: 5
 status: executing
-stopped_at: Completed 21.2-03-PLAN.md
-last_updated: "2026-11-25T16:06:21.034Z"
+stopped_at: Completed 21.2-04-PLAN.md
+last_updated: "2026-11-25T18:50:50.212Z"
 last_activity: 2026-11-25
 last_activity_desc: Phase 21.1 complete, transitioned to Phase 22
-state_head: 57510b949be7e58c7c5f199af33a83eb061633dd
+state_head: c13f01b87e3d1e3f3a6319e97e14607e305d6b10
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 55
-  completed_plans: 47
+  completed_plans: 48
   percent: 44
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 4
+Current Plan: 5
 Total Plans in Phase: 11
 Phase: 21.2 (Thread-safety verification and CI gates) — EXECUTING
 Plan: 21.2-01 and 21.2-02 complete (2 of 11); next: 21.2-03
@@ -96,6 +96,7 @@ Progress: [████░░░░░░] 44%
 | Phase 21.2 P01 | 11h (gates on a loaded host) | 3 tasks | 13 files |
 | Phase 21.2 P02 | about 2 h | 2 tasks | 5 files |
 | Phase 21.2 P03 | about 6 h | 3 tasks | 48 files |
+| Phase 21.2 P04 | about 3 h | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -223,6 +224,8 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21.2]: 21.2-03: too_many_arguments, index loops with a meaningful index, and one-row case tables get an allow with a reason, not a refactor
 - [Phase 21.2]: 21.2-03: ci.yml jobs linux and macos get timeout-minutes 30 (10-run maximum times 1.5 is below the 30 min floor)
 - [Phase 21.2]: 21.2-03: Linux clippy evidence is CI Safety run 45649551248; local Docker had under 1 GiB free
+- [Phase 21.2]: 21.2-04: race (a) fixed with the research variant of D-27 (claim under the stripe plus an open-count pin, install stays in the cell hold); D-29: 40 of 40 runs pass, no --workers 1 change
+- [Phase 21.2]: 21.2-04: T-21.2-09 is medium: GC is reachability and the refcount table only feeds stats and scrub, so a double release gives wrong stats, not lost content
 
 ### Pending Todos
 
@@ -251,8 +254,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-25T16:06:20.392Z
-Stopped at: Completed 21.2-03-PLAN.md
+Last session: 2026-11-25T18:50:49.557Z
+Stopped at: Completed 21.2-04-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
