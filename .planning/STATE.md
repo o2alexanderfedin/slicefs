@@ -2,15 +2,15 @@
 gsd_state_version: "1.0"
 milestone: v2.2
 milestone_name: Concurrency & Store Evolution
-current_phase: "21.1"
-current_phase_name: "Store header and format policy (#154)"
-current_plan: 4
-status: verifying
-stopped_at: Completed 21.1-04-PLAN.md
-last_updated: "2026-11-24T22:17:54.295Z"
+current_phase: 22
+current_phase_name: Chunk profiles
+current_plan: Not started
+status: planning
+stopped_at: Phase 21.1 complete, ready to plan Phase 22
+last_updated: "2026-11-25T00:47:42.856Z"
 last_activity: 2026-11-24
-last_activity_desc: 21.1-01 complete (store header core, read-only daemon mode, tracer)
-state_head: 40d39f5eb3ebfb22900a9ea8da1559a48897c932
+last_activity_desc: Phase 21.1 complete, transitioned to Phase 22
+state_head: 3bcb467f43a3f1c8a66eb99ce0e1bf808d822c2b
 progress:
   total_phases: 8
   completed_phases: 4
@@ -30,12 +30,12 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 4
+Current Plan: Not started
 Total Plans in Phase: 4
-Phase: 21.1 — Store header and format policy (#154)
+Phase: 22 — Chunk profiles
 Plan: 21.1-01 complete (1 of 4); next: 21.1-02 (the header check at every open point)
-Status: Phase complete — ready for verification
-Last activity: 2026-11-24 — 21.1-01 complete: store header core, read-only daemon mode, tracer
+Status: Ready to plan
+Last activity: 2026-11-24 — Phase 21.1 complete, transitioned to Phase 22
 
 Progress: [█████░░░░░] 50%
 
@@ -241,7 +241,7 @@ None.
 ## Session Continuity
 
 Last session: 2026-11-24T22:17:53.780Z
-Stopped at: Completed 21.1-04-PLAN.md
+Stopped at: Phase 21.1 complete, ready to plan Phase 22
 Resume file: None
 
 ## Operator Next Steps
