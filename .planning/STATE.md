@@ -6,16 +6,16 @@ current_phase: "21.2"
 current_phase_name: Thread-safety verification and CI gates
 current_plan: Not started
 status: executing
-stopped_at: Phase 21.2 context gathered
-last_updated: "2026-11-25T04:55:34.147Z"
-last_activity: 2026-11-24
+stopped_at: Completed 21.2-01-PLAN.md
+last_updated: "2026-11-25T08:18:57.650Z"
+last_activity: 2026-11-25
 last_activity_desc: Phase 21.1 complete, transitioned to Phase 22
-state_head: 57bf73180afa3c3c9eda245a5164055f4d016a9f
+state_head: 98f316cb54a1523f1fb279108e73989902f91180
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 55
-  completed_plans: 44
+  completed_plans: 45
   percent: 44
 ---
 
@@ -30,12 +30,12 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: Not started
+Current Plan: 2
 Total Plans in Phase: 11
-Phase: 21.2 (Thread-safety verification and CI gates) — READY TO EXECUTE
-Plan: 21.1-01 complete (1 of 4); next: 21.1-02 (the header check at every open point)
-Status: Ready to execute
-Last activity: 2026-11-24 — Phase 21.1 complete, transitioned to Phase 22
+Phase: 21.2 (Thread-safety verification and CI gates) — EXECUTING
+Plan: 21.2-01 complete (1 of 11); next: 21.2-02
+Status: In progress
+Last activity: 2026-11-25 — 21.2-01 complete: Safety workflow, job model green on CI (loom, bound 3)
 
 Progress: [████░░░░░░] 44%
 
@@ -93,6 +93,7 @@ Progress: [████░░░░░░] 44%
 | Phase 21.1 P02 | 57min | 3 tasks | 16 files |
 | Phase 21.1 P03 | 50min | 3 tasks | 7 files |
 | Phase 21.1 P04 | 45min | 2 tasks | 6 files |
+| Phase 21.2 P01 | 11h (gates on a loaded host) | 3 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -213,6 +214,8 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21.1]: stats shows format (null with no header), flags by class (name, release, known) and access, in text and JSON
 - [Phase 21.1]: gc, snapshot create and snapshot switch refuse a path with no segments/ before the header check (content::require_store); seed and mount still make new stores
 - [Phase 21.1]: store-format.md leaves out the unverified ext4 journal-replay claim (RESEARCH A1); deferred list item
+- [Phase 21.2]: 21.2-01: loom 0.7.3 models through one cfg point (chunk_store::sync + sync::raw); CI bound LOOM_MAX_PREEMPTIONS=3 (bound-3 sum 6.94 s, bound-4 sum 41.64 s)
+- [Phase 21.2]: 21.2-01: pool_panic_tests child tests flaky on a loaded Mac (slow binary start); local gate skips 3 of them, CI on Linux and macOS must pass them
 
 ### Pending Todos
 
@@ -241,9 +244,9 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-25T02:26:09.898Z
-Stopped at: Phase 21.2 context gathered
-Resume file: .planning/phases/21.2-thread-safety-verification-and-ci-gates/21.2-CONTEXT.md
+Last session: 2026-11-25T08:18:57.138Z
+Stopped at: Completed 21.2-01-PLAN.md
+Resume file: None
 
 ## Operator Next Steps
 
