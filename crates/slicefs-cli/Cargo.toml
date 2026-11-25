@@ -31,6 +31,14 @@ serde_json     = { workspace = true }
 sha2-compress  = { workspace = true }
 parking_lot    = { workspace = true }
 
+# Models of the lock protocol: built only with `--cfg loom`, never in a normal build.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[lints.rust]
+# The model (`loom`) and proof (`kani`) cfgs.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(kani)'] }
+
 [dev-dependencies]
 # Registers a second hasher (`chunk_store::hash::TestKeyedBlake3`) for tests
 # of a change of the write hash.

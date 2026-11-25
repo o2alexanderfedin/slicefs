@@ -25,6 +25,34 @@ use crate::lock_stats::Site;
 
 pub use parking_lot::WaitTimeoutResult;
 
+/// Std-shaped primitives for the code that uses std locks on purpose (the
+/// request pool, the commit gate, the flusher atomics). This is the one cfg
+/// point of the models (Phase 21.2): with `--cfg loom` the same names are the
+/// loom types, so a loom model runs the real code.
+///
+/// `Arc` and `Weak` are not here: callers keep `std::sync::Arc` and `Weak`.
+/// loom 0.7.3 has no `Weak`, and the flusher and the commit timer use it. A
+/// std `Arc` around loom locks is sound for the models: they check the lock
+/// and condvar protocol, not the reference count.
+pub mod raw {
+    #[cfg(not(loom))]
+    pub use std::sync::{
+        atomic, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    };
+    #[cfg(not(loom))]
+    pub use std::thread;
+
+    #[cfg(loom)]
+    pub use loom::sync::{
+        atomic, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    };
+    #[cfg(loom)]
+    pub use loom::thread;
+    /// loom's locks return the std `LockResult`.
+    #[cfg(loom)]
+    pub use std::sync::PoisonError;
+}
+
 /// Where a lock sits in the one global lock order. A thread takes locks in
 /// ascending rank. Rules, checked in debug builds:
 ///

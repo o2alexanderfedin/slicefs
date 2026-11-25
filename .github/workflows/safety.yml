@@ -1,0 +1,36 @@
+name: Safety
+
+# The thread-safety and memory-safety gates (Phase 21.2, TSAFE-01). They run
+# on every push to any branch and on every pull request. Each job runs one
+# script of scripts/safety/, so a developer runs the same command locally.
+# The tool pins are only in the `env:` block below (scripts/safety/toolchains.sh
+# reads them from here). The job names are the check names for branch
+# protection (an owner step). Jobs have no `needs:`: they run in parallel,
+# each with its own time limit.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RUST_STABLE: "1.100.0"
+  NIGHTLY: nightly-2026-02-11
+  KANI_VERSION: "0.68.0"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  model:
+    name: model
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # loom models of the real worker pool and lock shim (TSAFE-02).
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/safety/model.sh
