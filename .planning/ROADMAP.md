@@ -410,7 +410,7 @@ Plans:
 3. The two Phase 19 races are fixed, each with a test that failed before the fix and a model or stress test that stays in CI: (a) a size change of a closed file against unlink or setattr; (b) a cross-directory rename with no ancestor check. If either cannot be fixed in this phase, the Linux default is `--workers 1` until it is.
 4. Kani proves small pure code (the header parser, size limits) free of panic and overflow.
 5. Line coverage is measured in CI, also in Linux Docker with the FUSE checks, and the numbers are in the CI log. The `unsafe` blocks that Miri cannot run (FFI in slicefs-cli and vendor/fuser) have a written review.
-**Plans:** 4/11 plans executed
+**Plans:** 5/11 plans executed
 
 Plans:
 **Wave 1** *(tracer)*
@@ -422,7 +422,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [x] 21.2-04-PLAN.md — Race (a): closed-file size change claims under the stripe with an open-count pin (research variant of D-27), window 1 and 2 tests red first, stress test, D-29 repeat rule
-- [ ] 21.2-05-PLAN.md — Miri: Linux probe of every lib test, ignore attributes with reasons, anon-mapping test of `RunMap`, `miri.sh`, job `miri`
+- [x] 21.2-05-PLAN.md — Miri: Linux probe of every lib test, ignore attributes with reasons, anon-mapping test of `RunMap`, `miri.sh`, job `miri`
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 21.2-06-PLAN.md — loom models of the commit gate and the shared dirty budget on the real code (gate through `sync::raw`, `throttle_wait` and `request_stop` seams), red on planted faults, timings
