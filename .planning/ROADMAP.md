@@ -426,7 +426,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [x] 21.2-06-PLAN.md — loom models of the commit gate and the shared dirty budget on the real code (gate through `sync::raw`, `throttle_wait` and `request_stop` seams), red on planted faults, timings
-- [x] 21.2-07-PLAN.md — ThreadSanitizer (named set with the race tests and a 10 s stress run) and deadlock-detect stress scripts and jobs; first Linux CI run read by the orchestrator (local work done; CI read pending)
+- [x] 21.2-07-PLAN.md — ThreadSanitizer (named set with the race tests and a 10 s stress run) and deadlock-detect stress scripts and jobs; first Linux CI run read by the orchestrator (CI run 45733741913 green: tsan 208 s, deadlock 111 s)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 21.2-08-PLAN.md — Kani: byte-level core of the header parser, `write_end`, `hard_cap_of`, `dirty_move`, `workers_for_cpus`, `stripe`; nine harnesses, `kani.sh`

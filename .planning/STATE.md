@@ -4,13 +4,13 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: "21.2"
 current_phase_name: Thread-safety verification and CI gates
-current_plan: 7
+current_plan: 8
 status: executing
-stopped_at: "21.2-07 at CI checkpoint (Task 3): local work committed, first tsan/deadlock CI run pending"
-last_updated: "2026-11-26T01:06:03.316Z"
+stopped_at: Completed 21.2-07-PLAN.md
+last_updated: "2026-11-26T01:31:02.711Z"
 last_activity: 2026-11-25
 last_activity_desc: Phase 21.1 complete, transitioned to Phase 22
-state_head: b4d1a22d80fbbcc9a9b83f240012ce327579f0d9
+state_head: 96f361d71fee3e15cc95c7e977f19454c7e13873
 progress:
   total_phases: 9
   completed_phases: 4
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 7
+Current Plan: 8
 Total Plans in Phase: 11
 Phase: 21.2 (Thread-safety verification and CI gates) — EXECUTING
 Plan: 21.2-01 and 21.2-02 complete (2 of 11); next: 21.2-03
@@ -233,6 +233,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21.2]: 21.2-05: every lib test Miri cannot run has cfg_attr(miri, ignore = reason) from the Linux probe (chunk-store 52, metadata 109); no target-only form was needed
 - [Phase 21.2]: 21.2-06: loom CI bound stays 3; all 7 models run in 7 s; the gate and FlushCtl protocol atomics go through sync::raw
 - [Phase 21.2]: 21.2-07: lock_tail_tests stays under TSan with put_and_read_pass_a_held_keep_cap_wait skipped (5 s real-time step limit in a debug TSan build; passes under TSan in release, no report)
+- [Phase 21.2]: 21.2-07: first CI run 45733741913 green (tsan 208 s, deadlock 111 s, 0 TSan reports); every TSan entry kept, no set change
 
 ### Pending Todos
 
@@ -261,9 +262,9 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-26T01:06:02.698Z
-Stopped at: 21.2-07 at CI checkpoint (Task 3): local work committed, first tsan/deadlock CI run pending
-Resume file: .planning/phases/21.2-thread-safety-verification-and-ci-gates/21.2-07-PLAN.md
+Last session: 2026-11-26T01:31:02.078Z
+Stopped at: Completed 21.2-07-PLAN.md
+Resume file: None
 
 ## Operator Next Steps
 
