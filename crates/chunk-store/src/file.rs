@@ -108,7 +108,8 @@ fn load_node(store: &ChunkStore, id: &ObjectId) -> Result<Node> {
 /// the content written so far without ending the stream.
 #[derive(Clone, Default)]
 pub struct FileWriter {
-    /// Bytes not yet cut into chunks (less than 2 * CHUNK_MAX after a write).
+    /// Bytes not yet cut into chunks (less than 2 x the max chunk size of
+    /// the store profile after a write).
     buf: Vec<u8>,
     /// `levels[k]`: entries of the level-k node being filled.
     levels: Vec<Vec<Entry>>,
@@ -133,7 +134,7 @@ impl FileWriter {
     pub fn write(&mut self, store: &ChunkStore, data: &[u8]) -> Result<()> {
         self.buf.extend_from_slice(data);
         self.len += data.len() as u64;
-        if self.buf.len() >= 2 * CHUNK_MAX as usize {
+        if self.buf.len() >= 2 * store.profile().max() as usize {
             self.cut(store, false)?;
         }
         Ok(())
@@ -153,7 +154,7 @@ impl FileWriter {
     /// Store the chunks of `buf`. Without `all`, the last chunk stays in
     /// `buf`: more bytes can move its end.
     fn cut(&mut self, store: &ChunkStore, all: bool) -> Result<()> {
-        let ranges = chunk_ranges(&self.buf);
+        let ranges = store.profile().ranges(&self.buf);
         let keep = if all { ranges.len() } else { ranges.len().saturating_sub(1) };
         let mut used = 0;
         for r in &ranges[..keep] {

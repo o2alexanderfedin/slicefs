@@ -1,0 +1,19 @@
+# 22-01 red runs (before the code)
+
+## Task 1: cargo test -p slicefs-cli --test chunk_profile_tests (compile errors)
+error[E0432]: unresolved import `chunk_store::ChunkProfile`
+error[E0432]: unresolved imports `slicefs_cli::header::CHUNK_PROFILE_FLAG`, `slicefs_cli::header::CHUNK_PROFILE_RELEASE`
+error[E0425]: cannot find function `check_write_with` in module `content`
+error[E0425]: cannot find function `marker_with` in module `header`
+error[E0425]: cannot find function `check_write_with` in module `content`
+error[E0425]: cannot find function `check_write_with` in module `content`
+error[E0425]: cannot find function `check_write_with` in module `content`
+error[E0425]: cannot find function `check_write_with` in module `content`
+error[E0425]: cannot find function `check_write_with` in module `content`
+error[E0425]: cannot find function `check_write_with` in module `content`
+error[E0599]: no method named `profile` found for struct `Arc<ChunkStore>` in the current scope
+error[E0282]: type annotations needed
+error[E0282]: type annotations needed
+error[E0282]: type annotations needed
+error[E0599]: no method named `profile` found for struct `Arc<ChunkStore>` in the current scope
+error: could not compile `slicefs-cli` (test "chunk_profile_tests") due to 15 previous errors; 1 warning emitted
