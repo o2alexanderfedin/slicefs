@@ -8,10 +8,15 @@
 //!
 //! `--full` runs a full GC: an exact mark in sorted temp files and no
 //! holes, so every dead object goes (see `ChunkStore::gc_finish_full`).
-//! In both modes the mark walk sorts its keys in temp files
-//! (`<store>/gc-tmp`), so its RAM does not grow with the file or snapshot
-//! count (#207). Both modes print the disk usage of the store before and
-//! after.
+//! In both modes the mark walk sorts its keys in a 4 MiB buffer and, when
+//! they do not fit, in temp files (`<store>/gc-tmp`), so the RAM of the walk
+//! does not grow with the file or snapshot count (#207). The normal GC also
+//! holds its mark, a Bloom filter of about 1.25 bytes per stored object; the
+//! full GC holds none (its exact mark is in temp files). Disk: about 33
+//! bytes per key per root, up to twice that at the last merge (and for
+//! `--full` the exact mark, about 33 bytes per object, up to twice that); a
+//! GC without that much free space does not start. Both modes print the
+//! disk usage of the store before and after.
 //!
 //! The command:
 //! 1. If the store is mounted (`mount.lock` present), asks the mount to run

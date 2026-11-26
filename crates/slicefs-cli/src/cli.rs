@@ -173,9 +173,16 @@ pub enum Cmd {
         store: PathBuf,
         /// Full GC: an exact mark (sorted temp files in the store) and no
         /// holes, so every dead object goes. Slower than the normal GC,
-        /// which can keep a few dead objects. In both modes the RAM of the
-        /// mark does not grow with the file or snapshot count; the temp
-        /// files take about 33 bytes per key per root.
+        /// which can keep a few dead objects. RAM: in both modes the walk
+        /// of the mark is bounded (it sorts its keys in a 4 MiB buffer and
+        /// temp files); the normal GC also holds a Bloom filter of about
+        /// 1.25 bytes per stored object. Disk: no temp file while the keys
+        /// fit in the buffer; else about 33 bytes per key per root (about 3
+        /// keys per file), up to twice that at the last merge, and with
+        /// --full also the exact mark (about 33 bytes per object, up to
+        /// twice that). A GC that has not that much free space (plus a
+        /// reserve of 1 %, at least 64 MiB) does not start, and deletes
+        /// nothing.
         #[arg(long)]
         full: bool,
     },

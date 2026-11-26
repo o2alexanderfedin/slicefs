@@ -345,8 +345,11 @@ the next `slicefs gc` or rehash run.
   frees the old objects. The report shows the store disk usage before and
   after.
 - The GC of step 7 uses the mark of every GC (see "The mark walk" below):
-  its RAM does not grow with the file or root count. Its temp files take
-  about 33 bytes per key per root (about 3 keys per file).
+  the RAM of its walk does not grow with the file or root count. Its temp
+  files take about 33 bytes per key per root (about 3 keys per file), up
+  to twice that at the last merge, plus the exact mark (about 33 bytes per
+  object, up to twice that). The rewrite's own temp files (`rehash-tmp`)
+  are removed before this GC.
 - Time: a rehash to SHA-256 on a CPU without SHA instructions runs at about
   250 MB/s per core for the hash, plus zstd. A large store can take hours.
   The progress lines show where the run is.
@@ -1550,15 +1553,34 @@ full GC below) in `<store>/gc-tmp`, and reads the sorted keys without
 duplicates back one at a time. For each key it adds the objects of that
 value to the mark. A snapshot of the same tree gives the same keys again,
 but they go to disk, not to RAM. The map and manifest nodes are read in
-1 MiB windows of whole entries, never whole. RAM: one sort buffer
-(4 MiB), the merge buffers (32 x 64 KiB), and two read windows. Disk:
-about 33 bytes per key per root (a tiny file is 3 keys: inode node,
-manifest list, content), removed at the end, also after an error or a
-stop. An online GC, `slicefs gc`, `gc --full` and the GC of
-`slicefs rehash` share this walk. The RAM that stays (measured in
-`docs/research/gc-memory.md`): the per-pack `.idx` decode (bounded by the
-pack limit) and the Bloom filters of the index runs and of the mark
-(about 1.25 to 2.5 bytes per object, by design).
+1 MiB windows of whole entries, never whole. RAM of the walk: one sort
+buffer (4 MiB), the merge buffers (32 x 64 KiB), and two read windows.
+Disk: none while the keys fit in the sort buffer (about 127,000 keys: the
+sort stays in RAM and makes no file). Above that, about 33 bytes per key
+per root (a tiny file is 3 keys: inode node, manifest list, content). The
+peak is at the last merge, where its inputs and its output exist at the
+same time: up to twice that. The files are removed at the end, also
+after an error or a stop. An online GC, `slicefs gc`, `gc --full` and the
+GC of `slicefs rehash` share this walk. The RAM that stays (measured in
+`docs/research/gc-memory.md`): the mark of a normal GC, a Bloom filter of
+about 1.25 bytes per stored object (`ChunkStore::live_filter`; it grows
+with the object count, so with the file count); the per-pack `.idx`
+decode (bounded by the pack limit); and the Bloom filters of the index
+runs (about 2.5 bytes per object).
+
+Before the walk, the mark checks the free space of the file system of
+`gc-tmp` (`ChunkStore::gc_temp_space_check`) against an estimate: the
+keys of each root from the sizes of its maps (no map is read), at 33
+bytes, twice, and for a full GC the exact mark (33 bytes per object,
+twice). If that does not fit with a reserve left for the writes of the
+store (`chunk_store::gc_tmp_reserve`: 1 % of the file system, at least
+64 MiB), the GC does not start: an I/O error of kind `StorageFull`,
+nothing deleted. The estimate can be low (a file with many extents), so
+each write of a run or a merge output checks again and stops the mark
+before the disk is full. The online GC logs the error and backs off as
+for any failed GC. A stop (unmount) is asked before each root, every
+4096 keys of a walk, in the merge passes (before each merge and every
+16384 records) and before each value of the read-back.
 
 The mark (#113) is a Bloom filter of the live IDs, not a set of them:
 10 bits (1.25 bytes) for each object of the store

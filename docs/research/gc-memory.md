@@ -241,7 +241,12 @@ the heap peak):
    up to about 150 MB with tiny objects.
 2. **The Bloom filters of the index runs** (`run.rs:769`): 0.9 MB at 100k
    files, 15 MB at 1M files (about 2.5 bytes per object). By design.
-3. **The sweep of a GC that frees much** (rehash, step 6): the plans of
+3. **The mark of a normal GC**: a Bloom filter of about 1.25 bytes per
+   stored object (`ChunkStore::live_filter`), so it grows with the file
+   count: about 6 objects per tiny file give about 7.5 bytes per file,
+   75 MB at 10M files. By design (#113); `gc --full` has no filter (its
+   exact mark is in temp files).
+4. **The sweep of a GC that frees much** (rehash, step 6): the plans of
    one group of up to 32 packs (`gc_prepare`, 151 MB, the same at both
    sizes) and the dead sets of the group (36 MB), and the copy of the
    memtable (`Index::snapshot`, 6 to 20 MB, bounded by the memtable
@@ -259,12 +264,37 @@ The RSS stays above the heap: the file pages of the mapped index runs
 heap, for example 172 MiB anon for 96 MB heap in `gc` at 1M files). The
 RSS went down by 12 to 60 % from before.
 
-Disk: the sort of the keys takes about 33 bytes per key per root in
-`<store>/gc-tmp` (about 100 bytes per tiny file per root), removed at the
-end. The wall time of `gc --full` at 1M files and 1 snapshot is 73 s.
+Disk: while the keys fit in the 4 MiB sort buffer (about 127,000 keys,
+about 40,000 tiny files with one root), the sort stays in RAM and makes
+no file. Above that, the sort of the keys takes about 33 bytes per key
+per root in `<store>/gc-tmp` (about 100 bytes per tiny file per root).
+The peak is at the last merge, where its inputs and its output exist at
+the same time: up to twice that. `gc --full` adds its exact mark, about
+33 bytes per object, up to twice that at its last merge. The files are
+removed at the end, also after an error or a stop. The wall time of
+`gc --full` at 1M files and 1 snapshot is 73 s.
 
-Costs of the change for every GC (also the online GC of a mount): the
-temp disk space above must be free before the GC frees anything, so a GC
-on a full disk can fail (then it deletes nothing). A stop request is not
-checked during the merge of the sorted keys (sequential disk I/O, a few
-seconds per GB).
+Costs of the change for every GC that needs temp files (also the online
+GC of a mount): that temp disk space must be free before the GC frees
+anything. Before the walk, the mark checks the free space against an
+estimate (the keys from the map sizes of each root) and keeps a reserve
+for the writes of the store (1 % of the file system, at least 64 MiB);
+each write of a temp file checks again. A GC that does not fit does not
+start or stops, and deletes nothing; the online GC logs it and backs off.
+So a GC on a nearly full disk with a large store cannot free space; free
+some by other means. A stop request is checked in the merge passes too
+(before each merge and every 16,384 records), so an unmount does not wait
+for the sort.
+
+### Not done
+
+- `.idx` decode in windows (item 3 of the sketch): not done (see above),
+  so #207 is only partly done; keep it open or split this part out.
+- A `ChunkStore` opened with `open_with` and the default options has no
+  `gc_tmp_dir`, so every GC on it (now also a normal GC) fails; no caller
+  in the tree does this.
+- A writable open removes all of `gc-tmp`; on a file system without
+  `flock`, an offline command can remove the temp files of a running GC
+  of a mount, which then fails (safely, nothing deleted).
+- `slicefs scrub` still keeps all content keys of all roots in RAM
+  (`collect_content_keys`), O(files x roots); a follow-up issue is needed.
