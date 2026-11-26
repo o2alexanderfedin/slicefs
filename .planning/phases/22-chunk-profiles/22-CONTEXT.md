@@ -6,7 +6,7 @@
 <domain>
 ## Phase Boundary
 
-A store has one FastCDC profile (min/avg/max), fixed when the store is made (`seed`, or the first `mount` of a new store), and a benchmark shows what four larger profiles cost and gain against 4/8/32 KiB. The default stays 4/8/32 KiB (#67, PROF-01, PROF-02, PROF-03).
+A store has one FastCDC profile (min/avg/max), fixed when the store is made by `seed` (`mount` only checks it, see "Settled during planning"), and a benchmark shows what four larger profiles cost and gain against 4/8/32 KiB. The default stays 4/8/32 KiB (#67, PROF-01, PROF-02, PROF-03).
 
 In scope:
 - A chunk profile type in `chunk-store`, carried by the store (`Options` -> `ChunkStore`); every use of the chunk constants reads the profile of the store.
