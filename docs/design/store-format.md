@@ -29,11 +29,14 @@ The code is `crates/slicefs-cli/src/header.rs`.
   With `seed --chunk-profile MIN/AVG/MAX` (sizes in KiB) and a profile that
   is not 4/8/32 KiB, the first header also has the `chunks` line and the
   flag line `ro_compat chunk-profile <release>`. The default profile writes
-  neither line.
+  neither line. With `seed --hash sha256`, the first header has the flag
+  line `incompat hash-sha256 <release>` right after the hash line.
 - A rewrite (`--hash` on `mount` or `seed`) changes only the hash line. All
   other lines stay, in their order, also the `chunks` line, the flag lines
   and the lines that this SliceFS does not know. If there is no hash line, the new hash line
-  becomes line 2.
+  becomes line 2. A rewrite to `sha256` also adds the flag line
+  `incompat hash-sha256 <release>` at the end, in the same header write,
+  when the header does not have it.
 
 The header of a new store (format 7, no flags):
 
@@ -51,6 +54,16 @@ slicefs-store 7 (store header with feature flags)
 hash blake3-256
 chunks 16384 65536 262144
 ro_compat chunk-profile <release>
+```
+
+The header of a new store with the write hash SHA-256
+(`seed --hash sha256`; the release word is the value of
+`HASH_SHA256_RELEASE`, now `v2.2`):
+
+```
+slicefs-store 7 (store header with feature flags)
+hash sha256
+incompat hash-sha256 v2.2
 ```
 
 A header with one flag of each class (the names are examples, and
@@ -100,7 +113,11 @@ Parse order:
    hash lines, a bad chunks line or two chunks lines stop the parse (M9).
    These errors occur also when a flag is unknown. Then a chunks line with
    no `chunk-profile` flag, a `chunk-profile` flag with no chunks line, or
-   a `chunk-profile` flag that is not ro_compat stops the parse (M9).
+   a `chunk-profile` flag that is not ro_compat stops the parse (M9). A
+   `hash sha256` line with no `hash-sha256` flag, or a `hash-sha256` flag
+   that is not incompat, also stops the parse (M9). A `hash-sha256` flag
+   with no `hash sha256` line is valid: the store can still hold SHA-256
+   objects after the write hash went back.
 3. Find the unknown flags: the flags whose name is not in `KNOWN_FLAGS`.
    The strongest unknown flag decides:
    - an unknown incompat flag: refuse (M5);
@@ -151,14 +168,17 @@ The SliceFS classes use the same meanings. The differences:
 
 ## Flag list
 
-Store format 7 has one flag: `KNOWN_FLAGS` is `chunk-profile`.
+Store format 7 has two flags: `KNOWN_FLAGS` is `chunk-profile` and
+`hash-sha256`.
 
 | Name | Class | Release | What it means |
 |------|-------|---------|---------------|
 | chunk-profile | ro_compat | `CHUNK_PROFILE_RELEASE` | The store has a FastCDC chunk profile that is not 4/8/32 KiB, in its `chunks` line. An older SliceFS can read the store: a reader takes each chunk length from the manifest entries, and its zero shortcut matches only zero chunks of its own max length (it reads all other chunks). It must not write the store: it would cut new data with 4/8/32 KiB, so a store would have two profiles, and a spliced file would not have the key of a new write of the same bytes. |
+| hash-sha256 | incompat | `HASH_SHA256_RELEASE` | The store has, or had, objects with SHA-256 IDs (tag 0x12). An older SliceFS cannot verify or read these objects, so it must not open the store. SliceFS writes the flag before the first SHA-256 object: in the first header of `seed --hash sha256`, in the same header write as the hash line of `mount --hash sha256`, and alone before `rehash --to sha256` writes an object. The flag stays when the write hash goes back to `blake3-256`, because SHA-256 objects can still be live. Removing it after a GC that proves no SHA-256 object is left is deferred. |
 
-The release word is the constant `CHUNK_PROFILE_RELEASE` in `header.rs`. It
-is a placeholder (now `v2.2`) until the release is named.
+The release words are the constants `CHUNK_PROFILE_RELEASE` and
+`HASH_SHA256_RELEASE` in `header.rs`. They are placeholders (now `v2.2`)
+until the release is named.
 
 Rule to add a flag:
 
@@ -303,6 +323,8 @@ The values in the texts:
   - `chunks line with no chunk-profile flag`
   - `chunk-profile flag with no chunks line`
   - `the feature chunk-profile must be ro_compat`
+  - `hash sha256 with no hash-sha256 flag`
+  - `the feature hash-sha256 must be incompat`
   - `unknown setting`
 - `{what}` in M2 is one of:
   - `metadata in vt0/` (format 0 to 4)

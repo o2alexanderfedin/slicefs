@@ -373,12 +373,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
-name = "fixed-array"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "241668ff6e39e5c9621490e8fb507e11146e2f5530eae227f2512f08ae6f540b"
-
-[[package]]
 name = "fixedbitset"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1071,16 +1065,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sha2-compress"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ccc72b8dea22489033d4fdefbc608742ebcdc7c45f8b3af3f9d299bd30c48ede"
-dependencies = [
- "fixed-array",
- "uints",
-]
-
-[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1116,7 +1100,6 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
- "sha2-compress",
  "slicefs-traits",
  "tempfile",
  "thiserror",
@@ -1291,15 +1274,6 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
-
-[[package]]
-name = "uints"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a3d5339752658d8ad7308e896f51826ac70ed35d7c86132d673fb837885418e"
-dependencies = [
- "fixed-array",
-]
 
 [[package]]
 name = "unarray"
