@@ -86,7 +86,7 @@ brew install macos-fuse-t/cask/fuse-t
 
 The build finds FUSE-T through the bundled `.pkgconfig/fuse.pc` shim (set in `.cargo/config.toml`); no extra environment is needed.
 
-SliceFS builds against a patched copy of `fuser` in `vendor/fuser` (see `vendor/fuser/PATCHES.md`). Stock `fuser` 0.17/0.18 cannot mount on FUSE-T 1.2.x, and with older FUSE-T, `cp` into the mount hangs.
+SliceFS builds against a patched copy of `fuser` in `vendor/fuser` (see `vendor/fuser/PATCHES.md`). Stock `fuser` 0.17 to 0.19 cannot mount on FUSE-T 1.2.x, and with older FUSE-T, `cp` into the mount hangs.
 
 **Linux** — install libfuse:
 

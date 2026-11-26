@@ -68,11 +68,12 @@ impl<'a> Notification<'a> {
     pub(crate) fn new_inval_entry(
         parent: INodeNo,
         name: &'a OsStr,
+        flags: u32,
     ) -> Result<Self, TryFromIntError> {
         let r = abi::fuse_notify_inval_entry_out {
             parent: parent.0,
             namelen: name.len().try_into()?,
-            padding: 0,
+            flags,
         };
         Ok(Self::from_struct_with_name(&r, name.as_bytes()))
     }
@@ -114,6 +115,12 @@ impl<'a> Notification<'a> {
         Ok(Self::from_struct_with_name(&r, name.as_bytes()))
     }
 
+    /// The notification carries no payload at all: the kernel's handler takes only the
+    /// connection, ignoring the size and the rest of the message
+    pub(crate) fn new_inc_epoch() -> Self {
+        Self::Bare(NotificationBuf::new())
+    }
+
     pub(crate) fn new_poll(kh: PollHandle) -> Self {
         let r = abi::fuse_notify_poll_wakeup_out { kh: kh.0 };
         Self::from_struct(&r)
@@ -141,7 +148,7 @@ mod test {
 
     #[test]
     fn inval_entry() {
-        let n = Notification::new_inval_entry(INodeNo(0x42), OsStr::new("abc"))
+        let n = Notification::new_inval_entry(INodeNo(0x42), OsStr::new("abc"), 0)
             .unwrap()
             .with_iovec(
                 abi::fuse_notify_code::FUSE_NOTIFY_INVAL_ENTRY,
@@ -152,6 +159,25 @@ mod test {
             0x24, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x61, 0x62, 0x63, 0x00,
+        ];
+        assert_eq!(n, expected);
+    }
+
+    /// The same notification as `inval_entry`, but with FUSE_EXPIRE_ONLY in the flags word.
+    #[test]
+    fn expire_entry() {
+        let n =
+            Notification::new_inval_entry(INodeNo(0x42), OsStr::new("abc"), abi::FUSE_EXPIRE_ONLY)
+                .unwrap()
+                .with_iovec(
+                    abi::fuse_notify_code::FUSE_NOTIFY_INVAL_ENTRY,
+                    ioslice_to_vec,
+                )
+                .unwrap();
+        let expected = vec![
+            0x24, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00, 0x61, 0x62, 0x63, 0x00,
         ];
         assert_eq!(n, expected);
     }
@@ -187,16 +213,36 @@ mod test {
         assert_eq!(n, expected);
     }
 
+    /// `fuse_notify_delete_out` is eight bytes longer than the entry-invalidating layout,
+    /// carrying the child inode between the parent and the name length.
     #[test]
     fn delete() {
-        let n = Notification::new_inval_entry(INodeNo(0x42), OsStr::new("abc"))
+        let n = Notification::new_delete(INodeNo(0x42), INodeNo(0x43), OsStr::new("abc"))
             .unwrap()
             .with_iovec(abi::fuse_notify_code::FUSE_NOTIFY_DELETE, ioslice_to_vec)
             .unwrap();
         let expected = vec![
-            0x24, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x61, 0x62, 0x63, 0x00,
+            // len 44, code 6, unique 0
+            0x2c, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, // parent
+            0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // child
+            0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // namelen, padding
+            0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // "abc", NUL
+            0x61, 0x62, 0x63, 0x00,
+        ];
+        assert_eq!(n, expected);
+    }
+
+    /// Nothing but a header: 16 bytes of length and code, and no payload for the kernel to
+    /// read past it.
+    #[test]
+    fn inc_epoch() {
+        let n = Notification::new_inc_epoch()
+            .with_iovec(abi::fuse_notify_code::FUSE_NOTIFY_INC_EPOCH, ioslice_to_vec)
+            .unwrap();
+        let expected = vec![
+            0x10, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
         ];
         assert_eq!(n, expected);
     }

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileHandle, Filesystem, FopenFlags,
-    Generation, INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr,
+    Generation, INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags, Owner, RenameFlags, ReplyAttr,
     ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen,
     ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
@@ -103,6 +103,27 @@ fn serve<T>(fs: &SliceFsFilesystem, f: impl FnOnce() -> T) -> T {
         chunk_store::sync::rank::held()
     );
     r
+}
+
+/// The rename flags in the encoding of `handle_rename` and the write log:
+/// 1 = do not replace the target, 2 = exchange (refused there). fuser 0.19
+/// passes the `renamex_np` flags on macOS (`RENAME_EXCL`, `RENAME_SWAP`)
+/// and the `renameat2` flags on Linux, and a filesystem must answer
+/// `EINVAL` to a flag it does not support.
+fn rename_flags(flags: RenameFlags) -> Result<u32, Errno> {
+    #[cfg(target_os = "macos")]
+    let known = [(RenameFlags::RENAME_EXCL, 1), (RenameFlags::RENAME_SWAP, 2)];
+    #[cfg(target_os = "linux")]
+    let known = [(RenameFlags::RENAME_NOREPLACE, 1), (RenameFlags::RENAME_EXCHANGE, 2)];
+    let mut rest = flags;
+    let mut out = 0;
+    for (flag, bit) in known {
+        if rest.contains(flag) {
+            rest.remove(flag);
+            out |= bit;
+        }
+    }
+    if rest.is_empty() { Ok(out) } else { Err(Errno::EINVAL) }
 }
 
 /// The fields of one WRITE request that its job needs, copied from the
@@ -301,7 +322,7 @@ impl Filesystem for MountedFs {
         });
     }
 
-    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, _kill_suid_gid: bool, reply: ReplyOpen) {
         use fuser::OpenAccMode;
         let acc = flags.acc_mode();
         #[allow(unreachable_patterns, reason = "the catch-all stays in case fuser adds an access mode")]
@@ -645,15 +666,17 @@ impl Filesystem for MountedFs {
 
     fn create(
         &self,
-        req: &Request,
+        _req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
         umask: u32,
         flags: i32,
+        _kill_suid_gid: bool,
+        owner: Owner,
         reply: ReplyCreate,
     ) {
-        let (uid, gid) = (req.uid(), req.gid());
+        let Owner { uid, gid } = owner;
         let parent = parent.0;
         let name = name.to_os_string();
         let fs = Arc::clone(&self.fs);
@@ -681,14 +704,15 @@ impl Filesystem for MountedFs {
 
     fn mkdir(
         &self,
-        req: &Request,
+        _req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
         umask: u32,
+        owner: Owner,
         reply: ReplyEntry,
     ) {
-        let (uid, gid) = (req.uid(), req.gid());
+        let Owner { uid, gid } = owner;
         let parent = parent.0;
         let name = name.to_os_string();
         let fs = Arc::clone(&self.fs);
@@ -716,15 +740,16 @@ impl Filesystem for MountedFs {
 
     fn mknod(
         &self,
-        req: &Request,
+        _req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
         umask: u32,
         rdev: u32,
+        owner: Owner,
         reply: ReplyEntry,
     ) {
-        let (uid, gid) = (req.uid(), req.gid());
+        let Owner { uid, gid } = owner;
         let parent = parent.0;
         let name = name.to_os_string();
         let fs = Arc::clone(&self.fs);
@@ -749,13 +774,14 @@ impl Filesystem for MountedFs {
 
     fn symlink(
         &self,
-        req: &Request,
+        _req: &Request,
         parent: INodeNo,
         link_name: &OsStr,
         target: &std::path::Path,
+        owner: Owner,
         reply: ReplyEntry,
     ) {
-        let (uid, gid) = (req.uid(), req.gid());
+        let Owner { uid, gid } = owner;
         let parent = parent.0;
         let link_name = link_name.to_os_string();
         let target = target.to_path_buf();
@@ -900,9 +926,14 @@ impl Filesystem for MountedFs {
         newparent: INodeNo,
         newname: &OsStr,
         flags: RenameFlags,
+        _owner: Option<Owner>,
         reply: ReplyEmpty,
     ) {
-        let (parent, newparent, flags) = (parent.0, newparent.0, flags.bits());
+        let flags = match rename_flags(flags) {
+            Ok(flags) => flags,
+            Err(errno) => return reply.error(errno),
+        };
+        let (parent, newparent) = (parent.0, newparent.0);
         let (name, newname) = (name.to_os_string(), newname.to_os_string());
         let fs = Arc::clone(&self.fs);
         self.run(0, move || {
@@ -950,6 +981,7 @@ impl Filesystem for MountedFs {
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
         _flags: Option<BsdFileFlags>,
+        _kill_suid_gid: bool,
         reply: ReplyAttr,
     ) {
         let ino = ino.0;
@@ -1087,6 +1119,20 @@ mod tests {
         let mut meta = DictMetadataStore::new(io.clone());
         meta.set_wal(wal);
         Arc::new(SliceFsFilesystem::new(meta, io, Some(dir.path().to_path_buf())))
+    }
+
+    #[test]
+    fn rename_flags_map_to_the_log_encoding() {
+        assert_eq!(rename_flags(RenameFlags::empty()), Ok(0));
+        #[cfg(target_os = "macos")]
+        let (no_replace, exchange) = (RenameFlags::RENAME_EXCL, RenameFlags::RENAME_SWAP);
+        #[cfg(target_os = "linux")]
+        let (no_replace, exchange) = (RenameFlags::RENAME_NOREPLACE, RenameFlags::RENAME_EXCHANGE);
+        assert_eq!(rename_flags(no_replace), Ok(1));
+        assert_eq!(rename_flags(exchange), Ok(2));
+        // A flag SliceFS does not know (RENAME_WHITEOUT on Linux, an unknown bit on macOS).
+        assert_eq!(rename_flags(RenameFlags::from_bits_retain(1 << 30)), Err(Errno::EINVAL));
+        assert_eq!(rename_flags(no_replace | RenameFlags::from_bits_retain(1 << 30)), Err(Errno::EINVAL));
     }
 
     #[test]

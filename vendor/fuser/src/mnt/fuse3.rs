@@ -17,16 +17,8 @@ use crate::mnt::fuse3_sys::fuse_session_fd;
 use crate::mnt::fuse3_sys::fuse_session_mount;
 use crate::mnt::fuse3_sys::fuse_session_new;
 use crate::mnt::fuse3_sys::fuse_session_unmount;
+use crate::mnt::libfuse_call;
 use crate::mnt::with_fuse_args;
-
-/// Ensures that an os error is never 0/Success
-fn ensure_last_os_error() -> io::Error {
-    let err = io::Error::last_os_error();
-    match err.raw_os_error() {
-        Some(0) => io::Error::new(io::ErrorKind::Other, "Unspecified Error"),
-        _ => err,
-    }
-}
 
 #[derive(Debug)]
 pub(crate) struct MountImpl {
@@ -43,35 +35,40 @@ impl MountImpl {
         with_fuse_args(options, acl, |args| {
             let ops = fuse_lowlevel_ops::default();
 
-            let fuse_session = unsafe {
-                fuse_session_new(
-                    args,
-                    &ops as *const _,
-                    size_of::<fuse_lowlevel_ops>(),
-                    ptr::null_mut(),
-                )
-            };
-            if fuse_session.is_null() {
-                return Err(io::Error::last_os_error());
-            }
+            let fuse_session = libfuse_call(
+                "fuse_session_new",
+                || unsafe {
+                    fuse_session_new(
+                        args,
+                        &ops as *const _,
+                        size_of::<fuse_lowlevel_ops>(),
+                        ptr::null_mut(),
+                    )
+                },
+                |session| !session.is_null(),
+            )?;
+            // Construct the guard before the fallible setup steps, so an early
+            // return destroys the session via Drop instead of leaking it
             let mount = MountImpl {
                 fuse_session,
-                mountpoint: mnt.clone(),
+                mountpoint: mnt,
             };
-            let result = unsafe { fuse_session_mount(mount.fuse_session, mnt.as_ptr()) };
-            if result != 0 {
-                return Err(ensure_last_os_error());
-            }
-            let fd = unsafe { fuse_session_fd(mount.fuse_session) };
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
+            libfuse_call(
+                "fuse_session_mount",
+                || unsafe { fuse_session_mount(mount.fuse_session, mount.mountpoint.as_ptr()) },
+                |result| *result == 0,
+            )?;
+            let fd = libfuse_call(
+                "fuse_session_fd",
+                || unsafe { fuse_session_fd(mount.fuse_session) },
+                |fd| *fd >= 0,
+            )?;
             let fd = unsafe { BorrowedFd::borrow_raw(fd) };
             // We dup the fd here as the existing fd is owned by the fuse_session, and we
             // don't want it being closed out from under us:
             let fd = fd.try_clone_to_owned()?;
             let file = File::from(fd);
-            Ok((Arc::new(DevFuse(file)), mount))
+            Ok((Arc::new(DevFuse::new(file)), mount))
         })
     }
 
@@ -81,9 +78,12 @@ impl MountImpl {
             // library go through the setuid-root "fusermount -u" to unmount.
             if err == nix::errno::Errno::EPERM {
                 #[cfg(target_os = "linux")]
-                unsafe {
-                    fuse_session_unmount(self.fuse_session);
-                    fuse_session_destroy(self.fuse_session);
+                {
+                    unsafe {
+                        fuse_session_unmount(self.fuse_session);
+                        fuse_session_destroy(self.fuse_session);
+                    }
+                    self.fuse_session = ptr::null_mut();
                     return Ok(());
                 }
             }
@@ -92,4 +92,20 @@ impl MountImpl {
         Ok(())
     }
 }
+
+impl Drop for MountImpl {
+    fn drop(&mut self) {
+        // Free the session on every teardown path (it may already be gone if
+        // umount_impl went through fuse_session_unmount). This only releases the
+        // session's resources; any unmounting has been done by umount_impl, or was
+        // deliberately skipped because the filesystem is no longer mounted
+        if !self.fuse_session.is_null() {
+            unsafe {
+                fuse_session_destroy(self.fuse_session);
+            }
+            self.fuse_session = ptr::null_mut();
+        }
+    }
+}
+
 unsafe impl Send for MountImpl {}

@@ -28,7 +28,6 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use log::debug;
-use log::error;
 use nix::fcntl::FcntlArg;
 use nix::fcntl::FdFlag;
 use nix::fcntl::OFlag;
@@ -40,10 +39,10 @@ use nix::sys::socket::recvmsg;
 
 use crate::SessionACL;
 use crate::dev_fuse::DevFuse;
-use crate::mnt::is_mounted;
 use crate::mnt::mount_options::MountOption;
 use crate::mnt::mount_options::MountOptionGroup;
 use crate::mnt::mount_options::option_group;
+use crate::mnt::mount_options::option_to_escaped_string;
 use crate::mnt::mount_options::option_to_flag;
 use crate::mnt::mount_options::option_to_string;
 
@@ -56,7 +55,6 @@ const MOUNT_FUSEFS_BIN: &str = "mount_fusefs";
 pub(crate) struct MountImpl {
     mountpoint: CString,
     auto_unmount_socket: Option<UnixStream>,
-    fuse_device: Arc<DevFuse>,
 }
 impl MountImpl {
     pub(crate) fn new(
@@ -64,36 +62,36 @@ impl MountImpl {
         options: &[MountOption],
         acl: SessionACL,
     ) -> io::Result<(Arc<DevFuse>, MountImpl)> {
-        let mountpoint = mountpoint.canonicalize()?;
+        let mountpoint = mountpoint
+            .canonicalize()
+            .map_err(|err| crate::mnt::context(format_args!("{}", mountpoint.display()), err))?;
         let (file, sock) = fuse_mount_pure(mountpoint.as_os_str(), options, acl)?;
         let file = Arc::new(file);
         Ok((
-            file.clone(),
+            file,
             MountImpl {
                 mountpoint: CString::new(mountpoint.as_os_str().as_bytes())?,
                 auto_unmount_socket: sock,
-                fuse_device: file,
             },
         ))
     }
 
     pub(crate) fn umount_impl(&mut self) -> io::Result<()> {
-        if !is_mounted(&self.fuse_device) {
-            // If the filesystem has already been unmounted, avoid unmounting it again.
-            // Unmounting it a second time could cause a race with a newly mounted filesystem
-            // living at the same mountpoint
-            return Ok(());
-        }
-        if let Some(sock) = mem::take(&mut self.auto_unmount_socket) {
-            drop(sock);
-            // fusermount in auto-unmount mode, no more work to do.
-            return Ok(());
-        }
+        // The auto_unmount watcher only reacts once this process lets go of the mount, so
+        // leaving the unmount to it keeps the mountpoint occupied for the rest of the
+        // process's life. Unmount here, as libfuse does, and close the socket afterwards
+        // so the watcher exits without a mount left to clean up (issue #407)
+        let result = self.umount_now();
+        drop(mem::take(&mut self.auto_unmount_socket));
+        result
+    }
+
+    fn umount_now(&self) -> io::Result<()> {
         if let Err(err) = crate::mnt::libc_umount(&self.mountpoint) {
             if err == nix::errno::Errno::EPERM {
                 // Linux always returns EPERM for non-root users.  We have to let the
                 // library go through the setuid-root "fusermount -u" to unmount.
-                fuse_unmount_pure(&self.mountpoint);
+                fuse_unmount_pure(&self.mountpoint)?;
                 return Ok(());
             } else {
                 return Err(err.into());
@@ -129,44 +127,27 @@ fn fuse_mount_pure(
     fuse_mount_fusermount(mountpoint, options, acl)
 }
 
-fn fuse_unmount_pure(mountpoint: &CStr) {
-    #[cfg(target_os = "linux")]
-    {
-        if nix::mount::umount2(mountpoint, nix::mount::MntFlags::MNT_DETACH).is_ok() {
-            return;
-        }
-    }
+/// Only reached once `libc_umount()` has failed with EPERM, i.e. unprivileged, so
+/// there is no point in retrying the same unmount syscall with different flags
+fn fuse_unmount_pure(mountpoint: &CStr) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         if nix::mount::unmount(mountpoint, nix::mount::MntFlags::MNT_FORCE).is_ok() {
-            return;
+            return Ok(());
         }
     }
-
-    let mut builder = Command::new(detect_fusermount_bin());
-    builder.stdout(Stdio::piped()).stderr(Stdio::piped());
-    builder
-        .arg("-u")
-        .arg("-q")
-        .arg("-z")
-        .arg("--")
-        .arg(OsStr::new(&mountpoint.to_string_lossy().into_owned()));
-
-    if let Ok(output) = builder.output() {
-        debug!("fusermount: {}", String::from_utf8_lossy(&output.stdout));
-        debug!("fusermount: {}", String::from_utf8_lossy(&output.stderr));
-    }
+    crate::mnt::fusermount_unmount(&detect_fusermount_bin()?, mountpoint)
 }
 
-fn detect_fusermount_bin() -> String {
+fn detect_fusermount_bin() -> io::Result<String> {
     if let Some(fusermount) = env::var_os("FUSERMOUNT_PATH") {
-        return fusermount
+        return Ok(fusermount
             .to_str()
             .expect("FUSERMOUNT_PATH is not UTF-8")
-            .to_owned();
+            .to_owned());
     }
 
-    for name in [
+    let candidates = [
         FUSERMOUNT3_BIN.to_string(),
         FUSERMOUNT_BIN.to_string(),
         MOUNT_FUSEFS_BIN.to_string(),
@@ -175,15 +156,20 @@ fn detect_fusermount_bin() -> String {
         format!("/sbin/{MOUNT_FUSEFS_BIN}"),
         format!("/bin/{FUSERMOUNT3_BIN}"),
         format!("/bin/{FUSERMOUNT_BIN}"),
-    ]
-    .iter()
-    {
+    ];
+    for name in candidates.iter() {
         if Command::new(name).arg("-h").output().is_ok() {
-            return name.to_string();
+            return Ok(name.to_string());
         }
     }
-    // Default to fusermount3
-    FUSERMOUNT3_BIN.to_string()
+    // None of these could be started, so naming a single guessed default would be misleading
+    Err(Error::new(
+        ErrorKind::NotFound,
+        format!(
+            "no FUSE mount helper found, tried {} (set FUSERMOUNT_PATH to override)",
+            candidates.join(", ")
+        ),
+    ))
 }
 
 fn receive_fusermount_message(socket: &UnixStream) -> Result<DevFuse, Error> {
@@ -221,7 +207,7 @@ fn receive_fusermount_message(socket: &UnixStream) -> Result<DevFuse, Error> {
                     if fd < 0 {
                         return Err(ErrorKind::InvalidData.into());
                     }
-                    return Ok(DevFuse(unsafe { File::from_raw_fd(fd) }));
+                    return Ok(DevFuse::new(unsafe { File::from_raw_fd(fd) }));
                 }
             }
             other => {
@@ -262,7 +248,7 @@ fn fuse_mount_fusermount(
     options: &[MountOption],
     acl: SessionACL,
 ) -> Result<(DevFuse, Option<UnixStream>), Error> {
-    let fusermount_bin = detect_fusermount_bin();
+    let fusermount_bin = detect_fusermount_bin()?;
 
     if fusermount_bin.ends_with(MOUNT_FUSEFS_BIN) {
         return fuse_mount_mount_fusefs(&fusermount_bin, mountpoint, options, acl);
@@ -272,7 +258,7 @@ fn fuse_mount_fusermount(
 
     let mut builder = Command::new(&fusermount_bin);
     builder.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut options_strs: Vec<String> = options.iter().map(option_to_string).collect();
+    let mut options_strs: Vec<String> = options.iter().map(option_to_escaped_string).collect();
     options_strs.extend(acl.to_mount_option().map(|s| s.to_owned()));
     if !options_strs.is_empty() {
         builder.arg("-o");
@@ -287,7 +273,9 @@ fn fuse_mount_fusermount(
         clear_cloexec_in_pre_exec(&mut builder, child_socket.as_fd());
     }
 
-    let fusermount_child = builder.spawn()?;
+    let fusermount_child = builder
+        .spawn()
+        .map_err(|err| crate::mnt::context(format_args!("spawning {fusermount_bin}"), err))?;
 
     drop(child_socket); // close socket in parent
 
@@ -357,6 +345,8 @@ fn fuse_mount_mount_fusefs(
 
     let mut builder = Command::new(fusermount_bin);
     builder.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Unlike fusermount, mount_fusefs decodes no escapes. That is why the platforms
+    // using it reject comma and backslash in option values outright
     let mut options_strs: Vec<String> = options.iter().map(option_to_string).collect();
     options_strs.extend(acl.to_mount_option().map(|s| s.to_owned()));
     if !options_strs.is_empty() {
@@ -368,7 +358,9 @@ fn fuse_mount_mount_fusefs(
 
     unsafe { clear_cloexec_in_pre_exec(&mut builder, fuse_device.as_fd()) };
 
-    let output = builder.output()?;
+    let output = builder
+        .output()
+        .map_err(|err| crate::mnt::context(format_args!("running {fusermount_bin}"), err))?;
     if !output.status.success() {
         return Err(io::Error::new(
             ErrorKind::Other,
@@ -388,20 +380,16 @@ fn fuse_mount_sys(
 ) -> Result<Option<DevFuse>, Error> {
     use std::os::unix::fs::PermissionsExt;
 
-    let mountpoint_mode = File::open(mountpoint)?.metadata()?.permissions().mode();
+    let mountpoint_mode = File::open(mountpoint)
+        .map_err(|err| crate::mnt::context(Path::new(mountpoint).display(), err))?
+        .metadata()?
+        .permissions()
+        .mode();
 
     // Auto unmount requests must be sent to fusermount binary
     assert!(!options.contains(&MountOption::AutoUnmount));
 
-    let file = match DevFuse::open() {
-        Ok(dev_fuse) => dev_fuse,
-        Err(error) => {
-            if error.kind() == ErrorKind::NotFound {
-                error!("{} not found. Try 'modprobe fuse'", DevFuse::PATH);
-            }
-            return Err(error);
-        }
-    };
+    let file = DevFuse::open()?;
     assert!(
         file.as_raw_fd() > 2,
         "Conflict with stdin/stdout/stderr. fd={}",
