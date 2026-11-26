@@ -59,9 +59,9 @@ requirements: [PROLLY-02, PROLLY-03]
 actuals:
   tokens: 68000    # chars/4 over the realized diff (data included); about 14,300 for the script and the three docs alone
   tasks: 3
-  commits: 4       # git rev-list --count 7bbe75e..1d821aa (this SUMMARY commit not counted)
+  commits: 6       # git rev-list --count 7bbe75e..dafab53 (the first SUMMARY commit 401d409 included; this SUMMARY update not counted)
 plan_head_before: 7bbe75e
-plan_head_after: 1d821aa
+plan_head_after: dafab53
 ---
 
 # Phase 24 Plan 05: Prolly benchmark run and decision Summary
@@ -76,6 +76,8 @@ The prolly benchmark ran on the Boost trees 1_84_0 and 1_85_0 (3 runs, in proces
 | 2 | e16962c | feat(24-05): full prolly benchmark on Boost 1_84_0 and 1_85_0 (macOS) |
 | 2 (extra) | ff56872 | feat(24-05): prolly benchmark on Boost in Linux Docker |
 | 3 | 1d821aa | docs(24-05): prolly decision report, design section and the #19 text |
+| - | 401d409 | docs(24-05): plan summary |
+| 3 (fix) | dafab53 | docs(24-05): fix commit counts, memory wording and owner suggestions |
 
 ## Gates
 
@@ -126,7 +128,8 @@ The prolly benchmark ran on the Boost trees 1_84_0 and 1_85_0 (3 runs, in proces
 2. **[Discretion] Reading of the rubric.** On macOS the wall time minus the CPU time of a small commit is about 20 ms (one `F_FULLFSYNC`) and sometimes about 40 ms, in every mode. The report says this and lets CPU time, serialized bytes and the scale rows carry the decision. With this reading, scatter K = 100 (prolly 45.7 against flat 30.3 ms wall, but 5.8 against 9.3 CPU ms) counts as "better". The Linux run (sync about 2 ms) has prolly faster in wall time in all six rows for K up to 100. The word would be `later` in every reading that does not make one sync-noise row a `drop`.
 3. **[Discretion] Extra columns.** The estimate table also has the CPU estimate (whole - flat + prolly) next to the wall estimate. The peak memory table has `ru_maxrss` after the last commit. The plan named the other columns.
 4. **[Discretion] Scratch folder.** The launch message gave a fixed private scratch folder, so the plan's `mktemp -d` was not used. Every output went through the sed for the repo, home and scratch paths (and the host name).
-5. **[Process] GSD state steps not done.** The launch message did not permit changes to `STATE.md` and `ROADMAP.md`. The plan-commit ledger file was not written; the base `7bbe75e` is known from the start step.
+5. **[Review] Text fixes after the first SUMMARY commit (dafab53).** A review found small text errors that the greps do not cover: the disk growth covers the 80 small commits and the version step (not 81 or 82 commits); two memory causes and the 40 ms sync group were stated as facts and are now "not measured" (Linux has the same 49,012 objects at 21.6 MiB); the Linux section named a host load that was not read during that run; the `inode_map`/`inode_data` step also changes the root record; the design doc and the #19 text now give a suggestion for each owner question. The `--check` runs and the Task 3 greps were run again (REPORT-OK for both stems). A grep of `git log -p 7bbe75e..HEAD` for home paths, host and user names and banned words finds only the git author lines (the configured identity of the repo), not file content.
+6. **[Process] GSD state steps not done.** The launch message did not permit changes to `STATE.md` and `ROADMAP.md`. The plan-commit ledger file was not written; the base `7bbe75e` is known from the start step.
 
 ## Known Stubs
 
@@ -147,4 +150,4 @@ Q-1 to Q-3 stay open. They are one-way doors, and this plan does not decide them
 ## Self-Check: PASSED
 
 - All 22 created files exist (`git diff --name-only 7bbe75e..1d821aa`).
-- Commits 50965cb, e16962c, ff56872 and 1d821aa are on `exec/24-05`.
+- Commits 50965cb, e16962c, ff56872, 1d821aa, 401d409 and dafab53 are on `exec/24-05`.
