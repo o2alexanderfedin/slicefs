@@ -60,17 +60,38 @@
 //! a fixed-width child ID and count, so its level cuts only on the last
 //! keys of the children and their lengths.
 //!
+//! # Apply
+//!
+//! `apply(store, cfg, root, batch)` applies one batch (one commit): puts
+//! and deletes in strictly ascending key order. It returns the new root
+//! and `ApplyStats`. Each level is rewritten from the leaves up through
+//! the same `LevelWriter` and `Splitter` as the bulk builder. A rewrite
+//! starts at the first touched node with a fresh splitter (a node start is
+//! always a cut) and stops at the first new cut that falls on an old node
+//! end before a node with no edits (resync); every other node keeps its
+//! ID. The replaced and the new nodes become the edits of the level above.
+//! New top levels come from the bulk builder, and the root is collapsed
+//! through internal nodes with one child, so the root of a set does not
+//! depend on the order of the edits: it equals the `build` root.
+//! A shrink of the height may write up to depth nodes that the collapse
+//! then skips; they stay unreferenced in the store. The batch is checked
+//! (order, key and entry sizes) before any read or write.
+//!
 //! # Memory
 //!
 //! Build keeps one node in progress per level, and the cursor, `get` and
 //! `walk` hold one path of nodes: O(depth x node_max) bytes, never
-//! O(entries). There is no node cache.
+//! O(entries). Apply holds one path of nodes per level pass, one old node,
+//! one writer buffer and the sorted edits of the next level: O(changes x
+//! depth) plus the batch. There is no node cache (D-17).
 //!
 //! # Concurrency
 //!
-//! The design is a single writer per map. Nodes are immutable
-//! content-addressed objects, so readers of an existing root are safe at
-//! any time, and no type of this crate holds shared mutable state.
+//! The design is a single writer per map: one `apply` per root at a time.
+//! Nodes are immutable content-addressed objects and no node is changed in
+//! place, so readers of an existing root (also an old root during an
+//! `apply`) are safe at any time, and no type of this crate holds shared
+//! mutable state.
 //!
 //! # Floats
 //!
@@ -80,6 +101,7 @@
 //! would become part of a frozen store format is owner question Q-3 of
 //! Phase 24 (a one-way door, not decided here).
 
+mod apply;
 mod node;
 mod rule;
 mod tree;
@@ -87,6 +109,7 @@ mod tree;
 #[cfg(test)]
 mod tests;
 
+pub use apply::{apply, ApplyStats, Edit};
 pub use rule::{boundary_hash, cut_probability, Splitter};
 pub use tree::{build, empty_root, get, iter, walk, BuildStats, Builder, Cursor, NodeInfo};
 
