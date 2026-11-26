@@ -22,6 +22,9 @@ use crate::{
 /// One batch record: op u8 (1 put, 0 delete), ino u64 LE, key.
 const BATCH_REC: usize = 1 + MAP_ENTRY;
 
+/// Base records per read of the hash-cost loop (about 41 KB).
+const HASH_PIECE_ENTRIES: usize = 1024;
+
 /// The entries of one `u64 -> key` map node, in order, read in `PIECE`
 /// reads: it holds at most one piece and one partial record.
 struct MapStream<'s> {
@@ -268,22 +271,26 @@ fn for_each_base(dir: &Path, mut f: impl FnMut(u64, &[u8; KEY_LEN]) -> Res<()>) 
     }
 }
 
-/// The records of one batch file: (put, ino, key), sorted by ino.
-fn read_batch(dir: &Path, seq: u64) -> Res<Vec<(bool, u64, [u8; KEY_LEN])>> {
-    let b = fs::read(batch_path(dir, seq))?;
-    if b.len() % BATCH_REC != 0 {
-        return run_fail(format!("batch {seq}: {} bytes is not whole records", b.len()));
+/// Streams the records of one batch file (sorted by ino) to `f` as (put,
+/// ino, key); returns the record count. No copy of the file is held.
+fn for_each_batch(dir: &Path, seq: u64, mut f: impl FnMut(bool, u64, &[u8; KEY_LEN])) -> Res<u64> {
+    let path = batch_path(dir, seq);
+    let len = fs::metadata(&path)?.len();
+    if len % BATCH_REC as u64 != 0 {
+        return run_fail(format!("batch {seq}: {len} bytes is not whole records"));
     }
-    let mut out = Vec::with_capacity(b.len() / BATCH_REC);
-    for r in b.as_chunks::<BATCH_REC>().0 {
-        let put = match r[0] {
+    let mut r = BufReader::new(fs::File::open(&path)?);
+    let mut rec = [0u8; BATCH_REC];
+    for _ in 0..len / BATCH_REC as u64 {
+        r.read_exact(&mut rec)?;
+        let put = match rec[0] {
             1 => true,
             0 => false,
             op => return run_fail(format!("batch {seq}: bad op {op}")),
         };
-        out.push((put, u64::from_le_bytes(r[1..9].try_into().expect("8 bytes")), r[9..].try_into().expect("33 bytes")));
+        f(put, u64::from_le_bytes(rec[1..9].try_into().expect("8 bytes")), rec[9..].try_into().expect("33 bytes"));
     }
-    Ok(out)
+    Ok(len / BATCH_REC as u64)
 }
 
 /// Prints the `check` line; a mismatch with `batches.txt` is a failure.
@@ -386,15 +393,14 @@ pub(crate) fn flat(argv: &[String]) -> Res<()> {
     print_disk("flat", "start", &store)?;
 
     for bl in &plan.batches {
-        let recs = read_batch(&dir, bl.seq)?;
-        for (put, ino, key) in &recs {
-            if *put {
-                map.insert(*ino, *key);
+        let changed = for_each_batch(&dir, bl.seq, |put, ino, key| {
+            if put {
+                map.insert(ino, *key);
             } else {
-                map.remove(ino);
+                map.remove(&ino);
             }
-        }
-        timed("flat", &cs, &bl.pattern, bl.k, bl.seq, recs.len() as u64, || {
+        })?;
+        timed("flat", &cs, &bl.pattern, bl.k, bl.seq, changed, || {
             let ser = intern_flat(&cs, &map)?;
             cs.sync()?;
             Ok(((), ser, None))
@@ -431,13 +437,14 @@ pub(crate) fn prolly(argv: &[String]) -> Res<()> {
     let cs = ChunkStore::open(&store, Options::default())?;
 
     // The cost of the boundary hash, once over all base keys (D-12). The
-    // keys are read in pieces and only the hash loop of each piece is
-    // timed, so the file reads are not in the number.
+    // keys are read in small pieces (so the peak RSS of this process stays
+    // the prototype's own) and only the hash loop of each piece is timed,
+    // so the file reads are not in the number.
     let base_n = fs::metadata(dir.join("base.bin"))?.len() / MAP_ENTRY as u64;
     let mut hash_ns = 0u128;
     let mut acc = 0u32;
-    let mut r = BufReader::new(fs::File::open(dir.join("base.bin"))?);
-    let mut piece = vec![0u8; (PIECE / MAP_ENTRY) * MAP_ENTRY];
+    let mut r = fs::File::open(dir.join("base.bin"))?;
+    let mut piece = vec![0u8; HASH_PIECE_ENTRIES * MAP_ENTRY];
     loop {
         let mut n = 0;
         while n < piece.len() {
@@ -469,17 +476,15 @@ pub(crate) fn prolly(argv: &[String]) -> Res<()> {
     print_disk("prolly", "start", &store)?;
 
     for bl in &plan.batches {
-        let recs = read_batch(&dir, bl.seq)?;
-        let edits: Vec<Edit> = recs
-            .iter()
-            .map(|(put, ino, key)| {
-                if *put {
-                    Edit::Put { key: pkey(*ino).to_vec(), value: key.to_vec() }
-                } else {
-                    Edit::Delete { key: pkey(*ino).to_vec() }
-                }
-            })
-            .collect();
+        // One batch in RAM (D-02), read straight into edits.
+        let mut edits: Vec<Edit> = Vec::new();
+        for_each_batch(&dir, bl.seq, |put, ino, key| {
+            edits.push(if put {
+                Edit::Put { key: pkey(ino).to_vec(), value: key.to_vec() }
+            } else {
+                Edit::Delete { key: pkey(ino).to_vec() }
+            });
+        })?;
         root = timed("prolly", &cs, &bl.pattern, bl.k, bl.seq, edits.len() as u64, || {
             let (r, st) = prolly::apply(&cs, cfg, &root, &edits)?;
             cs.sync()?;
