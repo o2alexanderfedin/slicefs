@@ -2,7 +2,10 @@
 
 This is the fuser source tree at tag `v0.19.0` (upstream commit `893dfeb`), with the patches
 below. SliceFS uses it through `[patch.crates-io]` in the workspace `Cargo.toml`.
-Drop this copy when upstream ships the fixes.
+Drop this copy only when a fuser release has all three fixes AND the FUSE-T smoke workflow
+(`.github/workflows/fuse-t-smoke.yml`: a real FUSE-T mount with a 1 GiB copy, renames and a
+remount) passes on that release. Unit tests are not enough: PR #789 as it is passes them and
+still breaks `mv` on FUSE-T (patch 2).
 
 All three patches are for FUSE-T on macOS. They were found with FUSE-T 1.2.x; see the
 upstream issue https://github.com/cberner/fuser/issues/761.
@@ -22,14 +25,23 @@ with macOS layouts.
 
 ## 2. Parse the `fuse_rename_in` layout that the peer sends on macOS
 
-Upstream PR: https://github.com/cberner/fuser/pull/789 (open), same commit as patch 1.
-File: `src/ll/request.rs` (`FUSE_RENAME` parsing, unit tests).
+Upstream PR: https://github.com/cberner/fuser/pull/789 (open), same commit as patch 1, with a local
+change (below) that the PR does not have.
+Files: `src/ll/request.rs` (`FUSE_RENAME` parsing, unit tests), `src/ll/argument.rs`
+(`ArgumentIterator::peek`).
 
 fuser always parsed `fuse_rename_in` on macOS with macFUSE's extended layout, which carries
 the `renamex_np` flags. macFUSE sends that layout only when FUSE_RENAME_SWAP was negotiated.
 FUSE-T sends the plain 8-byte layout, so the names were read from the wrong offset and `mv`
-failed. fuser now parses the extension only when FUSE_RENAME_SWAP was negotiated, as macFUSE's
-own libfuse does.
+failed.
+
+PR #789 parses the extension only when FUSE_RENAME_SWAP was negotiated. That is not enough for
+FUSE-T 1.2.9: it sets bits 25 and 26 in its INIT flags, which fuser reads on macOS as
+FUSE_RENAME_SWAP and FUSE_RENAME_EXCL (and always requests), but it still sends the plain
+layout. A real mount showed it: `mv` failed with ENOSYS or EINVAL. So the local change chooses
+the layout by content, as the 0.18 patch did: the two names never contain NUL, so the plain
+layout leaves exactly two NULs after `newdir`, while the extended layout adds at least four
+zero bytes of padding. Test: `rename_plain_layout_with_rename_swap_negotiated`.
 
 ## 3. Read and write whole messages on a stream socket
 

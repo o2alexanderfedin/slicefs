@@ -1,7 +1,10 @@
 #!/bin/bash
 # Large copy on FSKit (#20, WLOG-02): copy a 1 GiB random file into a SliceFS
 # mount, sample the daemon RSS each second, compare; unmount, remount, compare
-# again. Fails if a cmp fails or the peak RSS is above the limit.
+# again. Between the two, rename it in place, move it to another directory and
+# rename a small file over another one (FUSE-T sends its own `fuse_rename_in`
+# layout; see vendor/fuser/PATCHES.md). Fails if a cmp or a rename fails, or
+# if the peak RSS is above the limit.
 #
 # usage: large-copy.sh [backend]          (default backend: fskit)
 # env:   SLICEFS      slicefs binary (default: target/release/slicefs)
@@ -73,7 +76,9 @@ unmount_fs() {
   waitexit
 }
 
-CMP1=FAIL; CMP2=FAIL; FAILS=0
+CMP1=FAIL; CMP2=FAIL; REN=FAIL; FAILS=0
+# The file after the renames below.
+F=d/moved.bin
 echo 0 > "$W/peak.kib"
 if mount_fs; then
   # RSS sampler (KiB, each second); ends when the daemon ends.
@@ -85,13 +90,20 @@ if mount_fs; then
   S=$!
   mounted && run copy cp "$W/big.bin" "$W/mnt/big.bin" \
     && mounted && run cmp-after-copy cmp "$W/big.bin" "$W/mnt/big.bin" && CMP1=ok
+  mounted && run rename mv "$W/mnt/big.bin" "$W/mnt/renamed.bin" \
+    && run mkdir mkdir "$W/mnt/d" \
+    && run rename-cross-dir mv "$W/mnt/renamed.bin" "$W/mnt/$F" \
+    && echo a > "$W/mnt/a" && echo b > "$W/mnt/b" \
+    && run rename-replace mv -f "$W/mnt/a" "$W/mnt/b" \
+    && [ "$(cat "$W/mnt/b")" = a ] && [ ! -e "$W/mnt/a" ] && REN=ok
   unmount_fs || FAILS=$((FAILS+1))
   # The sampler ends with the daemon; limit the wait all the same.
   for i in $(seq 1 10); do kill -0 $S 2>/dev/null || break; sleep 1; done
   kill $S 2>/dev/null; wait $S 2>/dev/null; S=
 
   if mount_fs; then
-    mounted && run cmp-after-remount cmp "$W/big.bin" "$W/mnt/big.bin" && CMP2=ok
+    mounted && run cmp-after-remount cmp "$W/big.bin" "$W/mnt/$F" \
+      && [ "$(cat "$W/mnt/b")" = a ] && CMP2=ok
     unmount_fs || FAILS=$((FAILS+1))
   fi
 fi
@@ -100,13 +112,15 @@ MP=
 PEAK=$(( $(cat "$W/peak.kib") / 1024 ))
 [ "$CMP1" = ok ] || FAILS=$((FAILS+1))
 [ "$CMP2" = ok ] || FAILS=$((FAILS+1))
+[ "$REN" = ok ] || FAILS=$((FAILS+1))
 RSS_OK=ok
 if [ "$PEAK" -le 0 ] || [ "$PEAK" -gt "$LIMIT" ]; then RSS_OK=FAIL; FAILS=$((FAILS+1)); fi
 echo "large-copy file size: $(stat -f %z "$W/big.bin") bytes"
 echo "large-copy peak RSS: $PEAK MiB (limit $LIMIT MiB: $RSS_OK)"
 echo "large-copy cmp after copy: $CMP1"
 echo "large-copy cmp after remount: $CMP2"
+echo "large-copy renames: $REN"
 echo "large-copy commit: $(git rev-parse --short HEAD 2>/dev/null)"
-rm -f "$W/big.bin" "$W/mnt/big.bin" 2>/dev/null
+rm -f "$W/big.bin" 2>/dev/null
 if [ $FAILS -eq 0 ]; then echo "RESULT large-copy: PASS"; else echo "RESULT large-copy: FAIL ($FAILS)"; fi
 [ $FAILS -eq 0 ]

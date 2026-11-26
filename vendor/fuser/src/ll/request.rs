@@ -1824,11 +1824,13 @@ mod op {
             fuse_opcode::FUSE_RENAME => Operation::Rename(Rename {
                 header,
                 arg: data.fetch()?,
-                // macFUSE adds the renamex_np flags only when it offers FUSE_RENAME_SWAP, which
-                // fuser always requests: as in its libfuse, the layout follows that capability.
-                // FUSE-T, which does not offer it, sends the plain layout
+                // macFUSE adds the renamex_np flags (and 4 bytes of padding) only when it offers
+                // FUSE_RENAME_SWAP. FUSE-T sets that bit in its INIT flags too, but sends the
+                // plain layout, so the capability cannot choose the layout. The two names never
+                // contain NUL: the plain layout leaves exactly two NULs after `newdir`, and the
+                // extended one adds at least four zero bytes of padding
                 #[cfg(target_os = "macos")]
-                flags: if negotiated.contains(InitFlags::FUSE_RENAME_SWAP) {
+                flags: if data.peek().iter().filter(|b| **b == 0).count() > 2 {
                     let ext: &fuse_rename_in_macos_ext = data.fetch()?;
                     ext.flags
                 } else {
@@ -2575,7 +2577,7 @@ mod tests {
     }
 
     /// The plain layout: Linux, and macOS FUSE implementations that do not offer
-    /// FUSE_RENAME_SWAP, such as FUSE-T
+    /// FUSE_RENAME_SWAP
     #[test]
     fn rename() {
         let req = AnyRequest::try_from(&RENAME_REQUEST[..]).unwrap();
@@ -2587,6 +2589,23 @@ mod tests {
                 assert_eq!(x.dest().dir, INodeNo(0x99aa_bbcc_ddee_ff00));
                 assert_eq!(x.dest().name, Path::new("new.txt"));
                 #[cfg(target_os = "macos")]
+                assert_eq!(x.flags(), crate::RenameFlags::empty());
+            }
+            _ => panic!("Unexpected request operation"),
+        }
+    }
+
+    /// FUSE-T sets the FUSE_RENAME_SWAP bit at INIT but still sends the plain layout
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn rename_plain_layout_with_rename_swap_negotiated() {
+        let mut req = AnyRequest::try_from(&RENAME_REQUEST[..]).unwrap();
+        req.set_negotiated(InitFlags::FUSE_RENAME_SWAP | InitFlags::FUSE_RENAME_EXCL);
+        match req.operation().unwrap() {
+            Operation::Rename(x) => {
+                assert_eq!(x.src().name, Path::new("old.txt"));
+                assert_eq!(x.dest().dir, INodeNo(0x99aa_bbcc_ddee_ff00));
+                assert_eq!(x.dest().name, Path::new("new.txt"));
                 assert_eq!(x.flags(), crate::RenameFlags::empty());
             }
             _ => panic!("Unexpected request operation"),
