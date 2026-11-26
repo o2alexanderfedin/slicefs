@@ -170,7 +170,7 @@ impl StreamSocket {
             match write(remaining) {
                 Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
                 Ok(n) => io::IoSlice::advance_slices(&mut remaining, n),
-                Err(Errno::EINTR) => {}
+                Err(Errno::EINTR | Errno::EAGAIN) => {}
                 Err(err) => return Err(err.into()),
             }
         }
@@ -186,7 +186,7 @@ fn read_exact(fd: impl AsFd, buf: &mut [u8]) -> nix::Result<bool> {
             Ok(0) if done == 0 => return Ok(false),
             Ok(0) => return Err(Errno::EIO),
             Ok(n) => done += n,
-            Err(Errno::EINTR) => {}
+            Err(Errno::EINTR | Errno::EAGAIN) => {}
             Err(err) => return Err(err),
         }
     }

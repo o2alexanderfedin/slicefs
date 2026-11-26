@@ -33,7 +33,8 @@ own libfuse does.
 
 ## 3. Read and write whole messages on a stream socket
 
-Not yet sent upstream.
+Not yet sent upstream. Fork branch with all three patches on `v0.19.0`:
+https://github.com/o2alexanderfedin/fuser/tree/slicefs-0.19
 Files: `src/channel.rs` (`StreamSocket`, unit tests), `src/dev_fuse.rs` (`DevFuse` keeps the
 detected socket state; `DevFuse::new`), and the places that build a `DevFuse`
 (`src/session.rs`, `src/notify.rs` test, `src/mnt/fuse2.rs`, `src/mnt/fuse3.rs`,
@@ -47,6 +48,6 @@ never answered, and `cp` into the mount hung.
 When the fd is a stream socket (checked once with `getsockopt(SO_TYPE) == SOCK_STREAM`),
 `receive()` reads the 40-byte header, then exactly the rest of the request, and maps EOF
 before a request to `ENODEV` (clean exit on unmount). `send()` loops until the whole reply
-is written. Reads and writes each take their own lock, so concurrent readers or senders
+is written. Both loops retry on `EINTR` and `EAGAIN`, as the 0.18 patch did. Reads and writes each take their own lock, so concurrent readers or senders
 cannot interleave bytes. Devices and seqpacket sockets are unchanged. This mirrors
 `lib/fuse_kern_chan.c` in FUSE-T's libfuse.
