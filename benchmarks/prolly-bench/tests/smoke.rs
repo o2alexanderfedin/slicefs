@@ -45,17 +45,38 @@ fn num(line: &str, name: &str) -> u64 {
 fn smoke_end_to_end() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let t = tmp.path();
-    let (tree, store) = (t.join("tree"), t.join("store"));
+    let (tree, tree2, store) = (t.join("tree"), t.join("tree2"), t.join("store"));
     let (roots, batches, pstore) = (t.join("roots.txt"), t.join("batches"), t.join("prolly"));
 
     ok(&["gen", "tree", "--dir", p(&tree), "--files", "200", "--seed", "1"]);
+    // The next version: the same 200 files, every 10th changed, 20 new.
+    ok(&["gen", "tree", "--dir", p(&tree2), "--files", "220", "--seed", "1", "--change-every", "10"]);
     let out = ok(&["seed", "--tree", p(&tree), "--store", p(&store)]);
     assert_eq!(lines(&out, "seed").len(), 1, "{out}");
 
     let out = ok(&[
-        "whole", "--store", p(&store), "--roots", p(&roots), "--ks", "1", "--commits", "1", "--patterns", "scatter",
+        "whole",
+        "--store",
+        p(&store),
+        "--roots",
+        p(&roots),
+        "--ks",
+        "1 4",
+        "--commits",
+        "1",
+        "--patterns",
+        "scatter cluster",
+        "--next-tree",
+        p(&tree2),
     ]);
-    assert_eq!(lines(&out, "commit").iter().filter(|l| l.contains(" mode=whole ")).count(), 2, "{out}");
+    // Setup, 2 patterns x 2 K x 1 commit, version.
+    let commits: Vec<&str> = lines(&out, "commit").into_iter().filter(|l| l.contains(" mode=whole ")).collect();
+    assert_eq!(commits.len(), 6, "{out}");
+    assert!(commits.iter().map(|l| num(l, "edits_delete")).sum::<u64>() >= 1, "{out}");
+    let version = lines(&out, "version");
+    assert_eq!(version.len(), 1, "{out}");
+    assert!(num(version[0], "files_changed") >= 1, "{out}");
+    assert_eq!(num(version[0], "files_created"), 20, "{out}");
 
     let out = ok(&["batches", "--store", p(&store), "--roots", p(&roots), "--out", p(&batches)]);
     let b1 = lines(&out, "batch").into_iter().find(|l| l.contains(" seq=1 ")).expect("a batch seq=1 line");

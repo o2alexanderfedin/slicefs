@@ -1,23 +1,31 @@
 //! The `whole` mode: the real `DictMetadataStore` on a copy of a seeded
-//! store. It runs a seeded edit script of small commits and times
-//! `begin_commit` and `finish_commit` apart (public API only, D-22).
+//! store. It runs a seeded edit script of small commits, then optionally
+//! one version commit, and times `begin_commit` and `finish_commit` apart
+//! (public API only, D-22).
 
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::Write;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use chunk_store::ChunkStore;
 use metadata::store::DictMetadataStore;
+use slicefs_cli::content::put_reader;
+use slicefs_traits::key::ObjectKey;
 use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 
 use crate::{
     hex, map_len, ms, print_disk, root_record, run_fail, rusage, segment_root, serialized_bytes, stats_delta,
-    usage, usage_fields, Args, Res, Rng, S_IFDIR, S_IFMT, S_IFREG,
+    usage, usage_fields, Args, Fail, Res, Rng, CONTENT_BYTES, S_IFDIR, S_IFMT, S_IFREG,
 };
 
 /// Most draws of one scatter pick before the bench gives up.
 const MAX_DRAWS: u32 = 10_000;
+
+/// The directory under the root that holds the created files.
+const BENCH_DIR: &str = "bench";
 
 /// The state of one `whole` run.
 struct Whole {
@@ -27,6 +35,24 @@ struct Whole {
     /// Inode numbers below this exist or existed.
     next_ino: u64,
     roots: fs::File,
+    /// The ino of the `bench` directory.
+    bench: u64,
+    /// The created files (name, ino), oldest first; a delete takes the oldest.
+    created: VecDeque<(String, u64)>,
+    /// Files created so far (for the names).
+    creates: u64,
+    /// The last cluster pick of this commit.
+    cluster_at: Option<u64>,
+}
+
+/// The counts of the version step.
+#[derive(Default)]
+struct Version {
+    files_changed: u64,
+    files_created: u64,
+    files_deleted: u64,
+    dirs_created: u64,
+    dirs_deleted: u64,
 }
 
 pub(crate) fn run(argv: &[String]) -> Res<()> {
@@ -41,6 +67,12 @@ pub(crate) fn run(argv: &[String]) -> Res<()> {
     if let Some(p) = patterns.iter().find(|p| !matches!(p.as_str(), "scatter" | "cluster")) {
         return usage(format!("--patterns: unknown pattern {p}"));
     }
+    let next_tree = a.opt("next-tree").map(Path::new);
+    if let Some(t) = next_tree {
+        if !t.is_dir() {
+            return usage("--next-tree: not a directory");
+        }
+    }
 
     let root = segment_root(&store)?;
     let io = slicefs_cli::content::store_io(&store)?;
@@ -52,7 +84,7 @@ pub(crate) fn run(argv: &[String]) -> Res<()> {
     let entries = {
         let mut r = chunk_store::file::FileReader::open(&cs, metadata::store_io::to_id(&rr.inode_data()))?;
         let b = r.read(&cs, 0, 8)?;
-        u64::from_le_bytes(b.as_slice().try_into().map_err(|_| crate::Fail::Run("short inode_data node".into()))?)
+        u64::from_le_bytes(b.as_slice().try_into().map_err(|_| Fail::Run("short inode_data node".into()))?)
     };
     let mut map_bytes = 0;
     for k in &rr.maps {
@@ -66,32 +98,52 @@ pub(crate) fn run(argv: &[String]) -> Res<()> {
     );
     print_disk("whole", "start", &store)?;
 
-    let roots = fs::File::create(&roots_path)?;
-    let mut w = Whole { meta, cs, rng: Rng::new(seed), next_ino: rr.next_ino, roots };
-
     // Setup commit (seq 0): the directory of the created files.
-    let dir_meta = InodeMeta::new_directory(0, 0, 0, S_IFDIR | 0o755);
-    w.meta.create_directory(1, "bench", &dir_meta)?;
-    w.next_ino = w.next_ino.max(w.meta.lookup(1, "bench")? + 1);
+    let roots = fs::File::create(&roots_path)?;
+    let bench = meta.create_directory(1, BENCH_DIR, &InodeMeta::new_directory(0, 0, 0, S_IFDIR | 0o755))?;
+    let mut w = Whole {
+        meta,
+        cs,
+        rng: Rng::new(seed),
+        next_ino: rr.next_ino.max(bench + 1),
+        roots,
+        bench,
+        created: VecDeque::new(),
+        creates: 0,
+        cluster_at: None,
+    };
     w.commit("setup", 0, 0, [0; 4])?;
 
+    // The small commits. Edit i of commit seq has kind (i + seq) mod 4, so
+    // K = 1 rotates the kinds over the commits and a larger K splits them
+    // about equally.
     let mut seq = 1;
     for pattern in &patterns {
+        let cluster = pattern == "cluster";
         for &k in &ks {
             for _ in 0..commits {
+                w.cluster_at = None;
                 let mut kinds = [0u64; 4];
-                for _ in 0..k {
-                    let ino = w.pick_scatter()?;
-                    w.meta.modify_inode(ino, |m| {
-                        m.mtime_sec += 1;
-                        m.ctime_sec += 1;
-                    })?;
-                    kinds[0] += 1;
+                for i in 0..k {
+                    let done = w.edit(((i + seq) % 4) as usize, cluster)?;
+                    kinds[done] += 1;
                 }
                 w.commit(pattern, k, seq, kinds)?;
                 seq += 1;
             }
         }
+    }
+
+    // The version step: one commit that syncs the store tree to the next
+    // tree (`run_seed_with` cannot add a version to a store).
+    if let Some(next) = next_tree {
+        let mut v = Version::default();
+        w.sync_dir(1, next, &mut v)?;
+        println!(
+            "version files_changed={} files_created={} files_deleted={} dirs_created={} dirs_deleted={}",
+            v.files_changed, v.files_created, v.files_deleted, v.dirs_created, v.dirs_deleted
+        );
+        w.commit("version", 0, seq, [0; 4])?;
     }
 
     w.roots.sync_all()?;
@@ -101,6 +153,83 @@ pub(crate) fn run(argv: &[String]) -> Res<()> {
 }
 
 impl Whole {
+    /// Runs one edit of `kind` (0 metadata change, 1 content change, 2
+    /// create, 3 delete) and returns the kind that ran: a delete with no
+    /// created file left is a create.
+    fn edit(&mut self, kind: usize, cluster: bool) -> Res<usize> {
+        match kind {
+            0 => {
+                let ino = self.pick(cluster)?;
+                self.meta.modify_inode(ino, |m| {
+                    m.mtime_sec += 1;
+                    m.ctime_sec += 1;
+                })?;
+                Ok(0)
+            }
+            1 => {
+                let ino = self.pick(cluster)?;
+                let (key, size) = self.new_content()?;
+                self.meta.set_manifest(ino, &[key])?;
+                self.meta.modify_inode(ino, |m| {
+                    m.size = size;
+                    m.mtime_sec += 1;
+                })?;
+                Ok(1)
+            }
+            3 if !self.created.is_empty() => {
+                let (name, ino) = self.created.pop_front().expect("not empty");
+                self.meta.unlink(self.bench, &name)?;
+                self.meta.delete_inode(ino)?;
+                Ok(3)
+            }
+            _ => {
+                let (key, size) = self.new_content()?;
+                let mut m = InodeMeta::new_file(0, 0, 0, S_IFREG | 0o644);
+                m.size = size;
+                let ino = self.meta.create_inode(&m)?;
+                let name = format!("c{:08}", self.creates);
+                self.creates += 1;
+                self.meta.link(self.bench, &name, ino)?;
+                self.meta.set_manifest(ino, &[key])?;
+                self.created.push_back((name, ino));
+                self.next_ino = self.next_ino.max(ino + 1);
+                Ok(2)
+            }
+        }
+    }
+
+    /// `CONTENT_BYTES` new bytes from the RNG, streamed into the store.
+    fn new_content(&mut self) -> Res<(ObjectKey, u64)> {
+        let mut buf = vec![0u8; CONTENT_BYTES];
+        self.rng.fill(&mut buf);
+        Ok(put_reader(&self.cs, &mut buf.as_slice())?)
+    }
+
+    /// The file of the next metadata or content change. `scatter`: a
+    /// random file per pick. `cluster`: a random start per commit, then the
+    /// next files in ino order (wrapping from `next_ino` to 2).
+    fn pick(&mut self, cluster: bool) -> Res<u64> {
+        let ino = match (cluster, self.cluster_at) {
+            (false, _) | (true, None) => self.pick_scatter()?,
+            (true, Some(last)) => {
+                let mut ino = last;
+                let mut found = None;
+                for _ in 0..self.next_ino - 2 {
+                    ino = if ino + 1 >= self.next_ino { 2 } else { ino + 1 };
+                    if self.is_file(ino) {
+                        found = Some(ino);
+                        break;
+                    }
+                }
+                found.ok_or_else(|| Fail::Run("no regular file for a cluster pick".into()))?
+            }
+        };
+        if cluster {
+            self.cluster_at = Some(ino);
+        }
+        Ok(ino)
+    }
+
     /// A random existing regular file.
     fn pick_scatter(&mut self) -> Res<u64> {
         if self.next_ino <= 2 {
@@ -148,4 +277,118 @@ impl Whole {
         writeln!(self.roots, "{seq} {pattern} {k} {}", hex(&root.0))?;
         Ok(())
     }
+
+    /// Syncs the store directory `dir` to the tree directory `path`, as one
+    /// version step. The content key, not the mtime, decides "changed",
+    /// because release tars may stamp other mtimes; unchanged content then
+    /// dedups to 0 new bytes. Tree names are walked sorted, regular files
+    /// and directories only (as seed does). Memory: one listing per level
+    /// and streamed file content, never a whole file (D-02).
+    fn sync_dir(&mut self, dir: u64, path: &Path, v: &mut Version) -> Res<()> {
+        // The store side by name: the listing order is not the name order,
+        // and it holds `.` and `..`.
+        let mut store_side: BTreeMap<String, u64> = BTreeMap::new();
+        for e in self.meta.list_directory(dir)? {
+            if !is_dot(&e.name) && !(dir == 1 && e.name == BENCH_DIR) {
+                store_side.insert(e.name, e.ino);
+            }
+        }
+        let mut names = Vec::new();
+        for e in fs::read_dir(path)? {
+            names.push(e?.file_name());
+        }
+        names.sort();
+        for os_name in names {
+            let p = path.join(&os_name);
+            let name = os_name.to_string_lossy().into_owned();
+            let md = fs::metadata(&p)?;
+            if !md.is_file() && !md.is_dir() {
+                continue;
+            }
+            let old = store_side.remove(&name);
+            let old_is_dir = match old {
+                Some(ino) => Some(self.meta.get_inode(ino)?.mode & S_IFMT == S_IFDIR),
+                None => None,
+            };
+            match (old, old_is_dir, md.is_dir()) {
+                (Some(ino), Some(false), false) => {
+                    let (key, size) = put_reader(&self.cs, &mut fs::File::open(&p)?)?;
+                    if self.meta.get_manifest(ino)? != vec![key] {
+                        self.meta.set_manifest(ino, &[key])?;
+                        let src = file_inode_meta(&md, size);
+                        let mut m = self.meta.get_inode(ino)?;
+                        m.size = src.size;
+                        m.mtime_sec = src.mtime_sec;
+                        m.mtime_nsec = src.mtime_nsec;
+                        m.mode = src.mode;
+                        self.meta.update_inode(&m)?;
+                        v.files_changed += 1;
+                    }
+                }
+                (Some(ino), Some(true), true) => self.sync_dir(ino, &p, v)?,
+                (old, _, is_dir) => {
+                    // New, or a file on one side and a directory on the
+                    // other: remove, then create.
+                    if let Some(ino) = old {
+                        self.remove(dir, &name, ino, v)?;
+                    }
+                    if is_dir {
+                        let ino = self.meta.create_directory(dir, &name, &dir_inode_meta(&md))?;
+                        v.dirs_created += 1;
+                        self.sync_dir(ino, &p, v)?;
+                    } else {
+                        let (key, size) = put_reader(&self.cs, &mut fs::File::open(&p)?)?;
+                        let ino = self.meta.create_inode(&file_inode_meta(&md, size))?;
+                        self.meta.link(dir, &name, ino)?;
+                        self.meta.set_manifest(ino, &[key])?;
+                        v.files_created += 1;
+                    }
+                }
+            }
+        }
+        for (name, ino) in store_side {
+            self.remove(dir, &name, ino, v)?;
+        }
+        Ok(())
+    }
+
+    /// Removes the entry `name` (inode `ino`) of `dir`; a directory loses
+    /// its children first.
+    fn remove(&mut self, dir: u64, name: &str, ino: u64, v: &mut Version) -> Res<()> {
+        if self.meta.get_inode(ino)?.mode & S_IFMT == S_IFDIR {
+            for e in self.meta.list_directory(ino)?.into_iter().filter(|e| !is_dot(&e.name)) {
+                self.remove(ino, &e.name, e.ino, v)?;
+            }
+            v.dirs_deleted += 1;
+        } else {
+            v.files_deleted += 1;
+        }
+        self.meta.unlink(dir, name)?;
+        self.meta.delete_inode(ino)?;
+        Ok(())
+    }
+}
+
+/// `.` or `..`: listed by the store, never synced or removed.
+fn is_dot(name: &str) -> bool {
+    name == "." || name == ".."
+}
+
+/// The `InodeMeta` of a regular file: a copy of `file_inode_meta` of
+/// `crates/slicefs-cli/src/seed.rs` (private there).
+fn file_inode_meta(md: &fs::Metadata, size: u64) -> InodeMeta {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let mode = S_IFREG | (md.permissions().mode() & 0o7777);
+    let mut m = InodeMeta::new_file(0, md.uid(), md.gid(), mode);
+    m.size = size;
+    m.mtime_sec = md.mtime();
+    m.mtime_nsec = md.mtime_nsec() as u32;
+    m
+}
+
+/// The `InodeMeta` of a directory: a copy of `dir_inode_meta` of seed.rs.
+fn dir_inode_meta(md: &fs::Metadata) -> InodeMeta {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let mode = S_IFDIR | (md.permissions().mode() & 0o7777);
+    InodeMeta::new_directory(0, md.uid(), md.gid(), mode)
 }
