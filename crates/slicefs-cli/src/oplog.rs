@@ -336,17 +336,17 @@ pub fn replay_stream<B: AsRef<[u8]>>(
                 }
             }
             Op::Flush { ino } => {
-                if let Some(&fh) = handles.get(ino) {
-                    if !matches!(handlers::handle_flush(fs, *ino, fh), handlers::EmptyResult::Ok) {
-                        return Err(bad("flush"));
-                    }
+                if let Some(&fh) = handles.get(ino)
+                    && !matches!(handlers::handle_flush(fs, *ino, fh), handlers::EmptyResult::Ok)
+                {
+                    return Err(bad("flush"));
                 }
             }
             Op::Release { ino } => {
-                if let Some(fh) = handles.remove(ino) {
-                    if !matches!(handlers::handle_release(fs, *ino, fh), handlers::EmptyResult::Ok) {
-                        return Err(bad("release"));
-                    }
+                if let Some(fh) = handles.remove(ino)
+                    && !matches!(handlers::handle_release(fs, *ino, fh), handlers::EmptyResult::Ok)
+                {
+                    return Err(bad("release"));
                 }
             }
             Op::Truncate { ino } => {

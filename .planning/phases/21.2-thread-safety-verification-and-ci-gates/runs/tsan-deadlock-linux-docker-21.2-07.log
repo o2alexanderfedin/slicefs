@@ -1,0 +1,52 @@
+# Linux pre-run in Docker (slicefs-fusetest, CARGO_BUILD_JOBS=2, vm.mmap_rnd_bits=28, 32 vCPU), plan 21.2-07; not the CI runner
+# run 1: tree before commit 9044533, the script without the keep_cap skip; tsan.sh then deadlock.sh
+MemAvailable:   14694084 kB
+TSAN host=x86_64-unknown-linux-gnu options=halt_on_error=0 second_deadlock_stack=1
+TSAN build secs=195 exit=0
+TSAN target=pool_tests result=ok reports=0 secs=1 passed=9 exit=0
+TSAN target=reply_after_locks result=ok reports=0 secs=0 passed=2 exit=0
+TSAN target=multi_handle_posix result=ok reports=0 secs=2 passed=13 exit=0
+TSAN target=lock_free_io result=ok reports=0 secs=9 passed=33 exit=0
+TSAN target=flusher_tests result=ok reports=0 secs=25 passed=26 exit=0
+TSAN target=dirty_budget_tests result=ok reports=0 secs=51 passed=1 exit=0
+TSAN target=race_closed_size_tests result=ok reports=0 secs=2 passed=3 exit=0
+TSAN target=rename_ancestor_tests result=ok reports=0 secs=0 passed=7 exit=0
+TSAN target=chunk-store:race_tests:: result=ok reports=0 secs=4 passed=14 exit=0
+test lock_tail_tests::put_and_read_pass_a_held_keep_cap_wait ... FAILED
+---- lock_tail_tests::put_and_read_pass_a_held_keep_cap_wait stdout ----
+thread 'lock_tail_tests::put_and_read_pass_a_held_keep_cap_wait' (13756) panicked at crates/chunk-store/src/lock_tail_tests.rs:41:9:
+timed out: A waits for the background sync at KEEP_CAP
+    lock_tail_tests::put_and_read_pass_a_held_keep_cap_wait
+test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 116 filtered out; finished in 8.10s
+TSAN target=chunk-store:lock_tail_tests:: result=fail reports=0 secs=9 passed=0 exit=101
+TSAN target=metadata:wal::per_op:: result=ok reports=0 secs=1 passed=13 exit=0
+TSAN target=long_run result=ok reports=0 secs=21 passed=1 exit=0
+TSAN FAILED: see the TSAN target lines above
+tsan-exit=1
+MemAvailable:   14683064 kB
+DEADLOCK STRESS_SECS=20 STRESS_THREADS=8 STRESS_SERIALIZE=0 STRESS_MODE=both STRESS_FILE_MIB=16 STRESS_SEED=2102
+DEADLOCK build secs=75 exit=0
+DEADLOCK long_run=ok max_inflight=8 secs=41
+DEADLOCK serialize_off_target=ok secs=5
+DEADLOCK ok
+deadlock-exit=0
+exit=0 total_secs=443
+# run 2: git archive of b4d1a22 (the committed scripts); tsan.sh only
+MemAvailable:   14682900 kB
+TSAN host=x86_64-unknown-linux-gnu options=halt_on_error=0 second_deadlock_stack=1
+TSAN build secs=30 exit=0
+TSAN target=pool_tests result=ok reports=0 secs=1 passed=9 exit=0
+TSAN target=reply_after_locks result=ok reports=0 secs=0 passed=2 exit=0
+TSAN target=multi_handle_posix result=ok reports=0 secs=3 passed=13 exit=0
+TSAN target=lock_free_io result=ok reports=0 secs=10 passed=33 exit=0
+TSAN target=flusher_tests result=ok reports=0 secs=24 passed=26 exit=0
+TSAN target=dirty_budget_tests result=ok reports=0 secs=48 passed=1 exit=0
+TSAN target=race_closed_size_tests result=ok reports=0 secs=1 passed=3 exit=0
+TSAN target=rename_ancestor_tests result=ok reports=0 secs=0 passed=7 exit=0
+TSAN target=chunk-store:race_tests:: result=ok reports=0 secs=4 passed=14 exit=0
+TSAN target=chunk-store:lock_tail_tests:: result=ok reports=0 secs=1 passed=11 exit=0
+TSAN target=metadata:wal::per_op:: result=ok reports=0 secs=0 passed=13 exit=0
+TSAN target=long_run result=ok reports=0 secs=21 passed=1 exit=0
+TSAN ok
+tsan-exit=0
+exit=0 total_secs=145

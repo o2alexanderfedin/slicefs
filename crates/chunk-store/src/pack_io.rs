@@ -273,6 +273,26 @@ impl RunMap {
     }
 }
 
+#[cfg(test)]
+impl RunMap {
+    /// A private anonymous mapping that holds a copy of `bytes`, so Miri can
+    /// run `bytes` and `Drop` (it has no file mmap and no `madvise`).
+    fn anon_for_test(bytes: &[u8]) -> RunMap {
+        let len = bytes.len();
+        assert!(len > 0, "mmap of 0 bytes fails");
+        // SAFETY: a new private anonymous mapping of `len` bytes; the result
+        // is checked before use.
+        let p = unsafe {
+            libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANON, -1, 0)
+        };
+        assert!(p != libc::MAP_FAILED, "anonymous mmap failed: {}", io::Error::last_os_error());
+        // SAFETY: the mapping is new, writable and `len` bytes long, so the
+        // copy fits; nothing else holds the pointer.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, len) };
+        RunMap { ptr: p as *const u8, len }
+    }
+}
+
 impl Drop for RunMap {
     fn drop(&mut self) {
         if self.len != 0 {
@@ -488,7 +508,8 @@ impl PackIo for FileIo {
 
 fn unsupported_if(e: io::Error) -> io::Error {
     match e.raw_os_error() {
-        Some(libc::EOPNOTSUPP) | Some(libc::ENOTSUP) => io::Error::new(io::ErrorKind::Unsupported, e),
+        // A guard, not two patterns: on Linux the two values are equal.
+        Some(c) if c == libc::EOPNOTSUPP || c == libc::ENOTSUP => io::Error::new(io::ErrorKind::Unsupported, e),
         _ => e,
     }
 }
@@ -551,4 +572,29 @@ fn write_durable(path: &Path, data: &[u8], sync: bool) -> io::Result<()> {
         sync_dir(path.parent().unwrap())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunMap;
+
+    /// The only `RunMap` unsafe Miri can run (D-14): the view
+    /// (`from_raw_parts`), the `Sync` and `Send` impls and the `munmap` of
+    /// `Drop`, on an anonymous mapping (Miri has no file mmap).
+    #[test]
+    fn a_run_map_reads_back_moves_across_threads_and_unmaps() {
+        let map = RunMap::anon_for_test(&[1, 2, 3, 4, 5]);
+        assert_eq!(map.bytes(), &[1, 2, 3, 4, 5]);
+        assert_eq!(map.len(), 5);
+        // Shared by reference with another thread (Sync).
+        std::thread::scope(|s| {
+            s.spawn(|| assert_eq!(map.bytes(), &[1, 2, 3, 4, 5]));
+        });
+        // Moved into another thread, read and dropped there (Send, munmap).
+        let t = std::thread::spawn(move || {
+            assert_eq!(map.bytes()[4], 5);
+            drop(map);
+        });
+        t.join().unwrap();
+    }
 }

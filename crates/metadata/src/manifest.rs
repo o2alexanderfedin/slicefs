@@ -65,6 +65,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_empty_manifest_round_trip() {
         let (_dir, mut io) = make_io();
         let key = {
@@ -76,6 +77,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_single_block_round_trip() {
         let (_dir, mut io) = make_io();
         let block: ObjectKey = ObjectKey::example(1);
@@ -88,6 +90,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_multiple_blocks_round_trip() {
         let (_dir, mut io) = make_io();
         let b1: ObjectKey = ObjectKey::example(0x01);
@@ -104,6 +107,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_ordering_preserved() {
         let (_dir, mut io) = make_io();
         let blocks: Vec<ObjectKey> = (0..10).map(|i| ObjectKey::example(i as u32)).collect();
@@ -116,6 +120,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_two_different_manifests_produce_different_keys() {
         let (_dir, mut io) = make_io();
         let (k1, k2) = {
@@ -128,6 +133,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_empty_and_nonempty_keys_differ() {
         let (_dir, mut io) = make_io();
         let (k_empty, k_one) = {

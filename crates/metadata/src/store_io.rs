@@ -243,6 +243,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn a_node_reads_back_and_equal_bytes_share_a_key() {
         let dir = TempDir::new().unwrap();
         let mut io = StoreIo::open(dir.path()).unwrap();
@@ -255,6 +256,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn a_missing_node_says_missing() {
         use chunk_store::ObjectHasher;
         let dir = TempDir::new().unwrap();
@@ -266,6 +268,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn sync_written_syncs_only_after_puts() {
         let dir = TempDir::new().unwrap();
         let mut io = StoreIo::open(dir.path()).unwrap();

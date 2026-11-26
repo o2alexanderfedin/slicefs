@@ -326,11 +326,11 @@ pub fn request_gc_mode(store: &Path, full: bool) -> Result<String, String> {
         std::thread::sleep(Duration::from_millis(100));
     }
     loop {
-        if let Ok(text) = std::fs::read_to_string(&result) {
-            if !text.is_empty() {
-                let _ = std::fs::remove_file(&result);
-                return Ok(text.trim().to_string());
-            }
+        if let Ok(text) = std::fs::read_to_string(&result)
+            && !text.is_empty()
+        {
+            let _ = std::fs::remove_file(&result);
+            return Ok(text.trim().to_string());
         }
         if !running.exists() && !result.exists() && !store.join("mount.lock").exists() {
             return Err("the mount ended before the GC finished".into());

@@ -826,7 +826,7 @@ fn throttle_setup(store: &std::path::Path) -> (SliceFsFilesystem, Vec<Model>) {
     let files: Vec<Model> = (1..=4).map(|f| dirty_file(&fs, f, 4 * MIB, 35)).collect();
     for m in &files {
         let cost = fs.test_dirty_cost(m.ino);
-        assert!(cost >= MIB && cost < 2 * MIB, "file {} has about 1.1 MiB dirty: {cost}", m.file);
+        assert!((MIB..2 * MIB).contains(&cost), "file {} has about 1.1 MiB dirty: {cost}", m.file);
     }
     fs.test_pause_flusher(true);
     fs.test_set_flush_pass(20);
@@ -1230,7 +1230,7 @@ fn the_flusher_steps_the_quiet_file_first() {
     assert!(q_cost >= 3 * MIB / 2 && h_cost >= 3 * MIB, "Q has 1.5 MiB and H 3 MiB dirty: {q_cost} {h_cost}");
     fs.test_set_dirty_budget(8 * MIB);
     let total = fs.test_dirty_total();
-    assert!(total >= 4 * MIB && total < 8 * MIB, "the total is at or above half the budget and below it: {total}");
+    assert!((4 * MIB..8 * MIB).contains(&total), "the total is at or above half the budget and below it: {total}");
     let st = flusher::flush_pass(&fs);
     assert_eq!(fs.test_dirty_cost(h.ino), h_cost, "H's cost is the same: {st:?}");
     assert_eq!(fs.test_dirty_cost(q.ino), 0, "Q's cost is 0: {st:?}");

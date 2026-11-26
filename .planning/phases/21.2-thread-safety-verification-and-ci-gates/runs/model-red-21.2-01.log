@@ -1,0 +1,167 @@
+# red run at b4c3a4d: Exit::drop without done.notify_all (planted, not committed)
+TOOLCHAINS stable=stable nightly=nightly-2026-02-11 kani=0.68.0
+MODEL bound=3
+warning: unused workspace dependency `anyhow`
+  --> Cargo.toml:33:1
+   |
+33 | anyhow     = "1"
+   | ^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `anyhow`
+warning: unused workspace dependency `bincode`
+  --> Cargo.toml:22:1
+   |
+22 | bincode    = "2"
+   | ^^^^^^^
+   |
+help: consider removing the workspace dependency `bincode`
+warning: unused workspace dependency `criterion`
+  --> Cargo.toml:24:1
+   |
+24 | criterion  = { version = "0.5", features = ["html_reports"] }
+   | ^^^^^^^^^
+   |
+help: consider removing the workspace dependency `criterion`
+warning: unused workspace dependency `redb`
+  --> Cargo.toml:29:1
+   |
+29 | redb       = "3.1"
+   | ^^^^
+   |
+help: consider removing the workspace dependency `redb`
+warning: unused workspace dependency `tokio`
+  --> Cargo.toml:31:1
+   |
+31 | tokio      = { version = "1", features = ["full"] }
+   | ^^^^^
+   |
+help: consider removing the workspace dependency `tokio`
+warning: workspace (manifest) generated 5 warnings
+   Compiling slicefs-cli v0.1.0 (<repo>/crates/slicefs-cli)
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 6 warnings
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates/metadata/src/store.rs:842:32
+    |
+842 |             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+    |                                ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+842 -             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+842 +             self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+    |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/metadata/src/store.rs:1451:32
+     |
+1451 |             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+     |                                ^^^^^^^^^^^^
+     |
+help: replace the use of the deprecated method
+     |
+1451 -             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+1451 +             self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+     |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/metadata/src/store.rs:1457:26
+     |
+1457 |         self.inode_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+     |                          ^^^^^^^^^^^^
+     |
+help: replace the use of the deprecated method
+     |
+1457 -         self.inode_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+1457 +         self.inode_count.try_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+     |
+
+warning: `metadata` (lib) generated 3 warnings (run `cargo fix --lib -p metadata` to apply 3 suggestions)
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/slicefs-cli/src/filesystem.rs:1511:25
+     |
+1511 |         self.fail_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+     |                         ^^^^^^^^^^^^
+     |
+     = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+     |
+1511 -         self.fail_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+1511 +         self.fail_steps.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+     |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/slicefs-cli/src/filesystem.rs:1526:25
+     |
+1526 |         self.drop_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+     |                         ^^^^^^^^^^^^
+     |
+help: replace the use of the deprecated method
+     |
+1526 -         self.drop_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+1526 +         self.drop_steps.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+     |
+
+warning: `slicefs-cli` (lib test) generated 2 warnings (run `cargo fix --lib -p slicefs-cli --tests` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 10.23s
+     Running unittests src/lib.rs (target/loom/release/build/slicefs-cli/6f10f32bb8d077d1/out/slicefs_cli-6f10f32bb8d077d1)
+
+running 1 test
+test pool::loom_tests::loom_pool_two_workers_two_jobs_drain ... FAILED
+
+failures:
+
+---- pool::loom_tests::loom_pool_two_workers_two_jobs_drain stdout ----
+
+thread 'pool::loom_tests::loom_pool_two_workers_two_jobs_drain' (134083347) panicked at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/loom-0.7.3/src/rt/execution.rs:215:13:
+deadlock; threads = [(Id(0), Blocked(Location(None))), (Id(1), Terminated), (Id(2), Terminated)]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    pool::loom_tests::loom_pool_two_workers_two_jobs_drain
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 380 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p slicefs-cli --lib`
+MODEL FAILED crate=slicefs-cli: cargo exit 101
+# model.sh exit: 1

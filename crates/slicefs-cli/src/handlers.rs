@@ -365,6 +365,15 @@ pub fn handle_write_admitted(
     }
 }
 
+// The POSIX lock types as i32. libc gives them as c_short on macOS and as
+// c_int on Linux, so the cast is needed on one platform only.
+#[allow(clippy::unnecessary_cast, reason = "c_short on macOS, already i32 on Linux")]
+pub(crate) const LOCK_RD: i32 = libc::F_RDLCK as i32;
+#[allow(clippy::unnecessary_cast, reason = "c_short on macOS, already i32 on Linux")]
+pub(crate) const LOCK_WR: i32 = libc::F_WRLCK as i32;
+#[allow(clippy::unnecessary_cast, reason = "c_short on macOS, already i32 on Linux")]
+pub(crate) const LOCK_UN: i32 = libc::F_UNLCK as i32;
+
 /// The first pause between two attempts of a write that met a busy store.
 const BUSY_PAUSE_MIN: Duration = Duration::from_millis(50);
 /// The longest pause between two attempts (the pause doubles for each one).
@@ -416,6 +425,7 @@ pub fn handle_write_retrying(fs: &SliceFsFilesystem, mut attempt: impl FnMut() -
 }
 
 /// Handle `create`: create a new file named `name` in `parent` and open it.
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
 pub fn handle_create(
     fs: &SliceFsFilesystem,
     parent: u64,
@@ -432,7 +442,7 @@ pub fn handle_create(
 /// `handle_create` at inode `ino` (replay: the logged number; `None`: the
 /// next free one). The `Create` record is appended in the parent-stripe
 /// hold that opens the handle, and written out before the reply (D-08).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
 pub fn handle_create_at(
     fs: &SliceFsFilesystem,
     parent: u64,
@@ -470,7 +480,7 @@ pub fn handle_mkdir(
 
 /// `handle_mkdir` at inode `ino` (replay); logged in the hold of the parent's
 /// and the new directory's stripes.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
 pub fn handle_mkdir_at(
     fs: &SliceFsFilesystem,
     parent: u64,
@@ -489,6 +499,7 @@ pub fn handle_mkdir_at(
 }
 
 /// Handle `mknod`: create a new node (regular file) named `name` in `parent`.
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
 pub fn handle_mknod(
     fs: &SliceFsFilesystem,
     parent: u64,
@@ -503,7 +514,7 @@ pub fn handle_mknod(
 }
 
 /// `handle_mknod` at inode `ino` (replay); logged in the parent-stripe hold.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
 pub fn handle_mknod_at(
     fs: &SliceFsFilesystem,
     parent: u64,
@@ -634,6 +645,7 @@ pub fn handle_rename(
 /// Handle `setattr`: update inode attributes for `ino`.
 ///
 /// `mtime` is `Some((sec, nsec))` if mtime should be updated.
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
 pub fn handle_setattr(
     fs: &SliceFsFilesystem,
     ino: u64,
@@ -663,7 +675,7 @@ pub fn handle_getlk(
     end: u64,
     pid: u32,
 ) -> LockResult {
-    LockResult::Ok(start, end, libc::F_UNLCK as i32, pid)
+    LockResult::Ok(start, end, LOCK_UN, pid)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1332,7 +1344,7 @@ mod tests {
             LockResult::Ok(start, end, typ, pid) => {
                 assert_eq!(start, 0);
                 assert_eq!(end, 100);
-                assert_eq!(typ, libc::F_UNLCK as i32);
+                assert_eq!(typ, LOCK_UN);
                 assert_eq!(pid, 42);
             }
         }

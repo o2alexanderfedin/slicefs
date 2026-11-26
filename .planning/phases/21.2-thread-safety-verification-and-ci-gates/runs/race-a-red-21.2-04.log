@@ -1,0 +1,138 @@
+# red run at ee5dbe6: race (a) window tests before the fix (not committed; the pause hook and the three tests on top of ee5dbe6)
+# 1 of 2: cargo test -p slicefs-cli --test race_closed_size_tests (timeout 900)
+   Compiling slicefs-cli v0.1.0 (<repo>/crates/slicefs-cli)
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 6 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.39s
+     Running tests/race_closed_size_tests.rs (target/debug/deps/race_closed_size_tests-794a240322b03979)
+
+running 2 tests
+test an_unlink_inside_the_splice_keeps_the_shared_content ... FAILED
+test an_unlink_inside_the_splice_replays_to_the_live_state ... FAILED
+
+failures:
+
+---- an_unlink_inside_the_splice_keeps_the_shared_content stdout ----
+
+thread 'an_unlink_inside_the_splice_keeps_the_shared_content' (135634381) panicked at crates/slicefs-cli/tests/race_closed_size_tests.rs:106:5:
+assertion `left == right` failed: the size change of a file unlinked in its splice
+  left: Err(5)
+ right: Ok(())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- an_unlink_inside_the_splice_replays_to_the_live_state stdout ----
+
+thread 'an_unlink_inside_the_splice_replays_to_the_live_state' (135634382) panicked at crates/slicefs-cli/tests/race_closed_size_tests.rs:150:5:
+setattr result Error(5)
+
+
+failures:
+    an_unlink_inside_the_splice_keeps_the_shared_content
+    an_unlink_inside_the_splice_replays_to_the_live_state
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+error: test failed, to rerun pass `-p slicefs-cli --test race_closed_size_tests`
+exit=101
+# 2 of 2: cargo test -p slicefs-cli --lib -- a_fields_setattr_in_the_claim_window (timeout 900)
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 6 warnings
+   Compiling slicefs-cli v0.1.0 (<repo>/crates/slicefs-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.57s
+     Running unittests src/lib.rs (target/debug/deps/slicefs_cli-0647206a6073dff9)
+
+running 1 test
+test filesystem::tests::a_fields_setattr_in_the_claim_window_keeps_the_record_order ... FAILED
+
+failures:
+
+---- filesystem::tests::a_fields_setattr_in_the_claim_window_keeps_the_record_order stdout ----
+
+thread 'filesystem::tests::a_fields_setattr_in_the_claim_window_keeps_the_record_order' (135635905) panicked at crates/slicefs-cli/src/filesystem.rs:7104:13:
+assertion `left != right` failed: the size record is last, but the fields write was last: replay gives another mtime
+  left: (1000000000, 0)
+ right: (1000000000, 0)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    filesystem::tests::a_fields_setattr_in_the_claim_window_keeps_the_record_order
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 381 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p slicefs-cli --lib`
+exit=101

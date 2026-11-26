@@ -1,0 +1,39 @@
+# report-only, COVERAGE_FLOOR=0 (saved profiles of the run in coverage-docker-21.2-10.log)
+Linux a219ffb3c0ee 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+2.20 1.86 1.19 1/843 20
+MemAvailable:   14690444 kB
+coverage: cargo-llvm-cov 0.9.2 rustc 1.100.0 (0ef1bc386 2026-11-09)
+
+    Finished report saved to /tmp/cov-tests.json
+COVERAGE tests workspace=91.27 cas-local=96.29 chunk-store=95.38 metadata=96.11 slicefs-cli=86.13 slicefs-traits=85.53 fuse_callbacks=9.60
+TOTAL                                    37140              3717    89.99%        3479               316    90.92%       24379              2129    91.27%           0                 0         -
+COVERAGE floor=0 result=ok
+build-exit=0
+# report-only, COVERAGE_FLOOR=100
+Linux 8b25d80fa3ac 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+2.20 1.86 1.19 1/847 20
+MemAvailable:   14483876 kB
+coverage: cargo-llvm-cov 0.9.2 rustc 1.100.0 (0ef1bc386 2026-11-09)
+
+    Finished report saved to /tmp/cov-tests.json
+COVERAGE tests workspace=91.27 cas-local=96.29 chunk-store=95.38 metadata=96.11 slicefs-cli=86.13 slicefs-traits=85.53 fuse_callbacks=9.60
+TOTAL                                    37140              3717    89.99%        3479               316    90.92%       24379              2129    91.27%           0                 0         -
+COVERAGE floor=100 result=below
+build-exit=1
+# report-only, COVERAGE_FLOOR=90.27 from scripts/safety/coverage-floor.txt (Task 3; saved profiles of the last full tar-stream run, 4 CPUs, tests 91.26)
+Linux 7c332c993094 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+0.00 0.04 0.46 1/822 20
+MemAvailable:   14634412 kB
+coverage: cargo-llvm-cov 0.9.2 rustc 1.100.0 (0ef1bc386 2026-11-09)
+
+    Finished report saved to /tmp/cov-tests.json
+COVERAGE tests workspace=91.26 cas-local=96.29 chunk-store=95.34 metadata=96.09 slicefs-cli=86.15 slicefs-traits=85.53 fuse_callbacks=9.60
+TOTAL                                    37140              3720    89.98%        3479               316    90.92%       24379              2131    91.26%           0                 0         -
+COVERAGE floor=90.27 result=ok
+build-exit=0

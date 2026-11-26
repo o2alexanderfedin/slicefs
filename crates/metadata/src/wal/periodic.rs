@@ -112,6 +112,7 @@ mod tests {
     use std::time::Instant;
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn ram_stays_at_most_the_cap_with_no_fsync() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.seg");

@@ -211,7 +211,7 @@ fn test_load_store_from_segments_skips_empty_files() {
     std::fs::create_dir_all(&segs_dir).unwrap();
 
     std::fs::write(segs_dir.join("segment-000001.seg"), b"").unwrap();
-    std::fs::write(segs_dir.join("segment-000002.seg"), &[0u8; 10]).unwrap();
+    std::fs::write(segs_dir.join("segment-000002.seg"), [0u8; 10]).unwrap();
 
     let result = load_store_from_segments(&segs_dir);
     assert!(result.is_ok(), "should not error on empty/truncated segments");
@@ -396,6 +396,7 @@ mod backend_tests {
 
     #[test]
     fn test_backend_passed_as_custom_mount_option() {
+        #[allow(clippy::single_element_loop, reason = "a table of cases that has one row now")]
         for (backend, expected) in [
             (FuseTBackend::Fskit, &["backend=fskit"][..]),
         ] {

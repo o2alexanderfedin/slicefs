@@ -106,7 +106,7 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
 
     // Step 1: Verify each root node can be read; say why not (#65).
     for root in &all_roots {
-        match (&mut io).get_node(root) {
+        match io.get_node(root) {
             Ok(_bytes) => roots_verified += 1,
             Err(e) => {
                 let hex = root.to_hex();
@@ -125,10 +125,10 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
                     Ok(objs) => {
                         for id in objs {
                             // Verified with the hasher of the object's own tag.
-                            if seen.insert(id) {
-                                if let Err(e) = cs.read(&id) {
-                                    errors.push(format!("content object {}: {e}", &id.to_hex()[..18]));
-                                }
+                            if seen.insert(id)
+                                && let Err(e) = cs.read(&id)
+                            {
+                                errors.push(format!("content object {}: {e}", &id.to_hex()[..18]));
                             }
                         }
                     }

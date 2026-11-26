@@ -100,7 +100,7 @@ impl Bloom {
         if bits_per_key == 0 {
             return Err("a filter with 0 bits per key".into());
         }
-        let words: Vec<u64> = b.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+        let words: Vec<u64> = b.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect();
         let blocks = (b.len() / BLOCK_BYTES) as u64;
         Ok(Bloom { words, blocks, k: probes(bits_per_key) })
     }
@@ -127,12 +127,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn no_false_negatives() {
         let f = filled(100_000, 10);
         assert!((0..100_000).all(|i| f.may_contain(&digest(1, i))));
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn the_false_positive_rate_is_about_one_percent() {
         let f = filled(100_000, 10);
         let fp = (0..100_000).filter(|&i| f.may_contain(&digest(2, i))).count();
@@ -150,6 +152,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn bytes_round_trip() {
         let f = filled(10_000, 10);
         let back = Bloom::from_bytes(&f.to_bytes(), 10).unwrap();

@@ -102,13 +102,13 @@ pub(crate) fn check_macos_version_26_or_later() -> bool {
         .arg("-productVersion")
         .output()
         .ok();
-    if let Some(out) = output {
-        if out.status.success() {
-            let version_str = String::from_utf8_lossy(&out.stdout);
-            let major_str = version_str.trim().split('.').next().unwrap_or("0");
-            if let Ok(major) = major_str.parse::<u32>() {
-                return major >= 26;
-            }
+    if let Some(out) = output
+        && out.status.success()
+    {
+        let version_str = String::from_utf8_lossy(&out.stdout);
+        let major_str = version_str.trim().split('.').next().unwrap_or("0");
+        if let Ok(major) = major_str.parse::<u32>() {
+            return major >= 26;
         }
     }
     false

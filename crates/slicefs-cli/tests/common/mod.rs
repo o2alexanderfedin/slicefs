@@ -2,7 +2,7 @@
 //! file system with a write log, what a mount after a crash does (the last
 //! root, then the replay of the log), and a dump of the tree to compare the
 //! two. Each binary uses a subset.
-#![allow(dead_code)]
+#![allow(dead_code, reason = "each test binary uses only some of the helpers")]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -145,7 +145,7 @@ fn content_hash(fs: &SliceFsFilesystem, ino: u64, size: u64) -> u64 {
 }
 
 fn blake_from(h: u64, data: &[u8]) -> u64 {
-    data.iter().fold(h, |h, &b| (h ^ b as u64).wrapping_mul(0x1_0000_0001_b3))
+    data.iter().fold(h, |h, &b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
 }
 
 /// The keys where two dumps differ, with both values (at most `n`).

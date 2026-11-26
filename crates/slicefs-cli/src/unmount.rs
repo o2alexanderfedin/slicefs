@@ -72,10 +72,10 @@ pub(crate) fn try_soft_unmount(mountpoint: &Path) -> bool {
             cmd.arg(arg);
         }
         cmd.arg(mp.as_ref());
-        if let Ok(status) = cmd.status() {
-            if status.success() {
-                return true;
-            }
+        if let Ok(status) = cmd.status()
+            && status.success()
+        {
+            return true;
         }
     }
     false
@@ -98,12 +98,12 @@ pub(crate) fn kill_processes_at_mountpoint(mountpoint: &Path) {
         for line in stdout.lines().skip(1) {
             // lsof output: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
             let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() >= 2 {
-                if let Ok(pid) = fields[1].parse::<i32>() {
-                    // SAFETY: kill is a safe POSIX syscall when given a valid pid.
-                    unsafe {
-                        libc::kill(pid, libc::SIGTERM);
-                    }
+            if fields.len() >= 2
+                && let Ok(pid) = fields[1].parse::<i32>()
+            {
+                // SAFETY: kill is a safe POSIX syscall when given a valid pid.
+                unsafe {
+                    libc::kill(pid, libc::SIGTERM);
                 }
             }
         }
@@ -164,16 +164,15 @@ pub(crate) fn try_force_unmount(mountpoint: &Path) -> bool {
         if let Ok(status) = Command::new("diskutil")
             .args(["unmount", "force", mp.as_ref()])
             .status()
+            && status.success()
         {
-            if status.success() {
-                return true;
-            }
+            return true;
         }
         // Fallback: umount -f.
-        if let Ok(status) = Command::new("umount").args(["-f", mp.as_ref()]).status() {
-            if status.success() {
-                return true;
-            }
+        if let Ok(status) = Command::new("umount").args(["-f", mp.as_ref()]).status()
+            && status.success()
+        {
+            return true;
         }
     }
 
@@ -191,10 +190,10 @@ pub(crate) fn try_force_unmount(mountpoint: &Path) -> bool {
                 cmd.arg(arg);
             }
             cmd.arg(mp.as_ref());
-            if let Ok(status) = cmd.status() {
-                if status.success() {
-                    return true;
-                }
+            if let Ok(status) = cmd.status()
+                && status.success()
+            {
+                return true;
             }
         }
     }

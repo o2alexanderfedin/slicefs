@@ -102,7 +102,7 @@ pub fn serialize_inode_map(map: &InodeMap) -> Vec<u8> {
 /// Sets `next_ino` to `max(keys) + 1`, or 2 for an empty map.
 /// Returns `MetaError::Corrupted` if the byte length is not a multiple of `RECORD`.
 pub fn deserialize_inode_map(bytes: &[u8]) -> Result<InodeMap, MetaError> {
-    if bytes.len() % RECORD != 0 {
+    if !bytes.len().is_multiple_of(RECORD) {
         return Err(MetaError::Corrupted(format!(
             "inode map: expected a multiple of {} bytes, got {}",
             RECORD, bytes.len()
@@ -223,6 +223,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_intern_and_load_round_trip() {
         use crate::store_io::StoreIo;
         use tempfile::TempDir;
@@ -256,6 +257,7 @@ mod tests {
 
     proptest! {
         #[test]
+        #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
         fn prop_serialize_round_trip(
             entries in prop::collection::vec((any::<u64>(), (any::<u8>(), any::<[u8; 32]>()).prop_map(|(t, d)| ObjectKey::new(t, d))), 0..20)
         ) {

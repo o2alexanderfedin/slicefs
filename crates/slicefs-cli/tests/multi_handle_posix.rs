@@ -417,7 +417,7 @@ fn check_records(fs: &SliceFsFilesystem, ino: u64, k: u64, n: u64) -> u64 {
             assert!(seen[bit / 64] & (1 << (bit % 64)) == 0, "record ({t}, {i}) twice");
             seen[bit / 64] |= 1 << (bit % 64);
         }
-        fp = piece.iter().fold(fp, |h, &b| (h ^ b as u64).wrapping_mul(0x1_0000_0001_b3));
+        fp = piece.iter().fold(fp, |h, &b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
         off += piece.len() as u64;
     }
     fp

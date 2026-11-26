@@ -38,6 +38,9 @@ use crate::util::ts;
 
 // ── Store loading ─────────────────────────────────────────────────────────────
 
+/// The store of a writable mount: the metadata, its node store and the mount lock.
+type LoadedStore = (DictMetadataStore, Arc<Mutex<StoreIo>>, MountLock);
+
 /// Load a seeded store from disk, returning `(DictMetadataStore, Arc<Mutex<StoreIo>>, MountLock)`.
 ///
 /// The returned `MountLock` must be kept alive for the duration of the mount;
@@ -58,7 +61,7 @@ pub fn load_store(
     store_path: &Path,
     wal_config: WalConfig,
     hash: Option<&str>,
-) -> Result<(DictMetadataStore, Arc<Mutex<StoreIo>>, MountLock), Box<dyn std::error::Error>> {
+) -> Result<LoadedStore, Box<dyn std::error::Error>> {
     // Step 1: Reject legacy format — migration path removed.
     if store_path.join("dictionary.bin").exists() {
         return Err(format!(
@@ -125,6 +128,9 @@ pub fn load_store(
     Ok((meta, io, mount_lock))
 }
 
+/// The store of a read-only mount: the metadata and its node store.
+type ReadOnlyStore = (DictMetadataStore, Arc<Mutex<StoreIo>>);
+
 /// Load a store for the read-only daemon mode (a store with the unknown
 /// ro_compat flag `flag`): the root and the snapshots from the segments,
 /// a read-only chunk store and index, no write hash change, no write log,
@@ -134,7 +140,7 @@ pub fn load_store(
 pub fn load_store_read_only(
     store_path: &Path,
     flag: &header::Flag,
-) -> Result<(DictMetadataStore, Arc<Mutex<StoreIo>>), Box<dyn std::error::Error>> {
+) -> Result<ReadOnlyStore, Box<dyn std::error::Error>> {
     if store_path.join("mount.lock").exists() {
         return Err(header::msg_lock_present(store_path, flag).into());
     }
@@ -588,7 +594,7 @@ impl Started {
 /// effect and set before the write-log replay.
 /// `workers` is the number of request worker threads (`None`: the default
 /// of `pool::default_workers`); with 1 there is no pool.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "the mount options of the command line; a struct would only move them")]
 pub fn run_mount(
     store_path: &Path,
     mountpoint: &Path,
@@ -646,7 +652,7 @@ pub fn run_mount(
     let (selected_backend, fuse_t_version) = {
         use crate::backend::{parse_backend_flag, select_backend_auto};
         let requested: Option<crate::backend::FuseTBackend> = backend
-            .map(|s| parse_backend_flag(s))
+            .map(parse_backend_flag)
             .transpose()
             .map_err(|e: String| -> Box<dyn std::error::Error> { e.into() })?;
         select_backend_auto(requested, force)
@@ -723,7 +729,7 @@ pub fn run_mount(
     // The request pool: only for 2 or more workers (1 runs each request on
     // the reader thread). A spawn error is a mount error, and goes through
     // the stop steps below.
-    #[allow(unused_mut)]
+    #[allow(unused_mut, reason = "only the macOS code changes mounted")]
     let mut mounted = match (n_workers >= 2).then(|| crate::pool::Pool::new(n_workers)).transpose() {
         Ok(pool) => mount(
             crate::fuse_callbacks::MountedFs::new(Arc::clone(&started.fs), pool),

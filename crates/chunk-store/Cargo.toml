@@ -16,6 +16,14 @@ parking_lot.workspace = true
 # Lock timing recorder, only with the `lock-stats` feature (see `lock_stats`).
 hdrhistogram = { version = "7.6", default-features = false, optional = true }
 
+# Models of the lock protocol: built only with `--cfg loom`, never in a normal build.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[lints.rust]
+# The model (`loom`) and proof (`kani`) cfgs.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(kani)'] }
+
 [features]
 # A second, test-only hasher (`hash::TestKeyedBlake3`) in the registry, for
 # tests of hash changes in the crates that use the store.

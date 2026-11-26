@@ -1,0 +1,12 @@
+# Model times of plan 21.2-06 (release, --cfg loom, stable toolchain, one run each, macOS, load average 5 to 7).
+# Format: <test> bound=<LOOM_MAX_PREEMPTIONS> secs=<the libtest 'finished in' time> result=<ok|timeout|fail>; timeout 300 s each.
+loom_gate_commit_excludes_requests bound=2 secs=0.03 result=ok
+loom_gate_commit_excludes_requests bound=3 secs=0.17 result=ok
+loom_gate_commit_excludes_requests bound=4 secs=0.53 result=ok
+loom_throttle_writer_leaves_after_a_pass_frees bound=2 secs=0.01 result=ok
+loom_throttle_writer_leaves_after_a_pass_frees bound=3 secs=0.05 result=ok
+loom_throttle_writer_leaves_after_a_pass_frees bound=4 secs=0.12 result=ok
+loom_throttle_stop_wakes_two_writers bound=2 secs=0.23 result=ok
+loom_throttle_stop_wakes_two_writers bound=3 secs=5.38 result=ok
+loom_throttle_stop_wakes_two_writers bound=4 secs=59.94 result=ok
+scripts/safety/model.sh bound=3 secs=7 result=ok (all 7 models, warm build; the libtest time of slicefs-cli is 7.19 s, of chunk-store 0.00 s)

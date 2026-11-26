@@ -1,0 +1,129 @@
+name: Safety
+
+# The thread-safety and memory-safety gates (Phase 21.2, TSAFE-01). They are
+# the release gate: release.yml calls this workflow and creates the v* tag
+# only when every job passes. A manual run (Actions > Safety > Run workflow)
+# checks any branch earlier. A v* tag pushed by hand, not by release.yml,
+# also runs it, but then the tag exists already. Each job runs one
+# script of scripts/safety/, so a developer runs the same command locally.
+# The tool pins are only in the `env:` block below (scripts/safety/toolchains.sh
+# reads them from here). The job names are the check names for branch
+# protection (an owner step). Jobs have no `needs:`: they run in parallel,
+# each with its own time limit. Limit rule (Phase 21.2, D-03): twice the
+# longest green runner time of the job, rounded up to 5 minutes, at least 10.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RUST_STABLE: "1.100.0"
+  NIGHTLY: nightly-2026-02-11
+  KANI_VERSION: "0.68.0"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  model:
+    name: model
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # loom models of the real worker pool and lock shim (TSAFE-02).
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/safety/model.sh
+
+  miri:
+    name: miri
+    runs-on: ubuntu-latest
+    # Above the start value 30: the longest green run took 17.6 min (D-03).
+    timeout-minutes: 40
+    # Miri on the lib tests of chunk-store and metadata that reach unsafe or
+    # the lock shim, on the pinned nightly (TSAFE-01, D-12 to D-14).
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/safety/miri.sh
+
+  tsan:
+    name: tsan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # ThreadSanitizer on the multi-worker and race tests and a 10 s stress
+    # run, on the pinned nightly with -Zbuild-std (TSAFE-01, TSAFE-03, D-15 to D-17).
+    steps:
+      - uses: actions/checkout@v4
+      # Ubuntu kernels with vm.mmap_rnd_bits=32 make TSan abort with
+      # "unexpected memory mapping" (RESEARCH Pitfall 8).
+      - name: TSan memory layout
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - run: scripts/safety/tsan.sh
+
+  deadlock:
+    name: deadlock
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The in-process stress harness with the parking_lot deadlock detector,
+    # 8 workers, in release (TSAFE-01, D-30).
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/safety/deadlock.sh
+
+  kani:
+    name: kani
+    runs-on: ubuntu-latest
+    # No runner time yet: twice the local time (about 1 min), at least the
+    # start value 30 (D-03). kani.sh installs the pinned KANI_VERSION.
+    timeout-minutes: 30
+    # Kani proofs of the header core and the size arithmetic (TSAFE-04, D-23).
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/safety/kani.sh
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Line coverage in the Linux Docker harness (TSAFE-05, D-31, D-32): the
+    # instrumented workspace tests, then the instrumented daemon through the
+    # FUSE smoke. The log prints `COVERAGE tests ...` (workspace and per crate)
+    # and `COVERAGE merged ...` (with the FUSE smoke, information only). The
+    # gate is the tests-only workspace number against
+    # scripts/safety/coverage-floor.txt; with no floor the job fails.
+    # The toolchain is the one of the Docker image (rust:1.100.0-bookworm, the same version as RUST_STABLE).
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/safety/coverage.sh
+
+  clippy:
+    name: clippy-${{ matrix.name }}
+    # clippy with -D warnings on the stable pin, and a written reason on every
+    # lint allow (TSAFE-01). The macOS row checks the FUSE-T and FSKit code;
+    # the Linux row checks the Linux-only code.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+          - name: macos
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # The macOS build finds FUSE-T through .pkgconfig/fuse.pc (.cargo/config.toml).
+      - name: Install pkg-config and FUSE-T
+        if: runner.os == 'macOS'
+        run: |
+          brew install pkg-config
+          brew install --cask macos-fuse-t/cask/fuse-t
+
+      - run: scripts/safety/clippy.sh

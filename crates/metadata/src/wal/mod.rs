@@ -138,7 +138,7 @@ pub trait WalStrategy: Send + Sync {
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Parker {
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, reason = "a test hook field; an alias would only move the type")]
     armed: std::sync::Mutex<Option<(&'static str, std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
 }
 
@@ -518,6 +518,7 @@ mod tests {
     /// (and the periodic timer), and cut/install_root/rotate run at once on
     /// one strategy. A watchdog fails the test if they do not end in 5 s.
     #[test]
+    #[cfg_attr(miri, ignore = "real-time watchdog of 5 s: too slow under the interpreter")]
     fn no_deadlock_between_append_cut_and_sync() {
         for kind in KINDS {
             let dir = tempfile::tempdir().unwrap();
@@ -525,7 +526,8 @@ mod tests {
             let stop = Arc::new(AtomicBool::new(false));
             let (done, finished) = mpsc::channel::<&'static str>();
             let mut threads = Vec::new();
-            let spawn = |name: &'static str, f: Box<dyn Fn(&dyn WalStrategy, u32) + Send>| {
+            type Job = Box<dyn Fn(&dyn WalStrategy, u32) + Send>;
+            let spawn = |name: &'static str, f: Job| {
                 let (wal, stop, done) = (Arc::clone(&wal), Arc::clone(&stop), done.clone());
                 std::thread::spawn(move || {
                     let mut n = 0;

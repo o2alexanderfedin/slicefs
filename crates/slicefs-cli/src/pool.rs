@@ -12,10 +12,12 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::thread::JoinHandle;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use chunk_store::sync::raw::atomic::{AtomicU64, AtomicUsize, Ordering};
+use chunk_store::sync::raw::thread::JoinHandle;
+use chunk_store::sync::raw::{Condvar, Mutex, MutexGuard, PoisonError};
 
 /// The most workers by default on Linux (owner answer, 2026-11-23).
 /// CAP_MIB was measured with 4 writers, and each busy worker adds memory.
@@ -208,7 +210,7 @@ impl Pool {
         let mut pool = Pool { shared, workers: Vec::with_capacity(n), submit_wait };
         for k in 0..n {
             let shared = Arc::clone(&pool.shared);
-            let h = std::thread::Builder::new()
+            let h = chunk_store::sync::raw::thread::Builder::new()
                 .name(format!("slicefs-worker-{k}"))
                 .spawn(move || worker_loop(&shared, k))?;
             pool.workers.push(h);
@@ -397,5 +399,95 @@ mod tests {
     fn default_workers_is_in_range() {
         let n = default_workers();
         assert!((1..=DEFAULT_WORKERS_MAX).contains(&n), "default {n}");
+    }
+}
+
+/// loom models of the real pool (Phase 21.2, TSAFE-02). Run only with
+/// `--cfg loom` (`scripts/safety/model.sh`). loom waits never time out, so a
+/// lost wakeup that the 1 s `WAIT_SLICE` hides in production is a deadlock
+/// report here. loom cannot see real time: the submit and drain limits are
+/// long, and their abort paths are not modeled.
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use super::*;
+    use chunk_store::sync::raw::atomic::AtomicUsize;
+
+    const LONG: Duration = Duration::from_secs(3600);
+
+    /// 2 workers, 2 slots, 2 jobs, then the drain. Threads: the model main
+    /// thread (submitter and closer) + 2 workers = 3. Bound: the
+    /// `LOOM_MAX_PREEMPTIONS` of model.sh (default 3). Every job runs once,
+    /// the drain returns `Ok`, and the queue is empty at the end.
+    #[test]
+    fn loom_pool_two_workers_two_jobs_drain() {
+        loom::model(|| {
+            let pool = Pool::with_limits(2, 2, 1 << 20, LONG).unwrap();
+            let n = Arc::new(AtomicUsize::new(0));
+            for _ in 0..2 {
+                let n = Arc::clone(&n);
+                pool.submit(0, Box::new(move || {
+                    n.fetch_add(1, Ordering::SeqCst);
+                }));
+            }
+            let st = pool.drain_and_join(LONG).expect("drain");
+            assert_eq!(st.jobs, 2);
+            assert_eq!(n.load(Ordering::SeqCst), 2);
+            assert_eq!(st.queue_now, 0);
+        });
+    }
+
+    /// 1 worker, 1 slot, 3 jobs: in some orders the submitter blocks on
+    /// `not_full` (the full-queue wait of `submit`). Threads: main + 1 worker
+    /// = 2. Bound: none (every order).
+    #[test]
+    fn loom_pool_one_worker_full_queue_all_orders() {
+        let mut b = loom::model::Builder::new();
+        b.preemption_bound = None;
+        b.check(|| {
+            let pool = Pool::with_limits(1, 1, 1 << 20, LONG).unwrap();
+            let n = Arc::new(AtomicUsize::new(0));
+            for _ in 0..3 {
+                let n = Arc::clone(&n);
+                pool.submit(0, Box::new(move || {
+                    n.fetch_add(1, Ordering::SeqCst);
+                }));
+            }
+            let st = pool.drain_and_join(LONG).expect("drain");
+            assert_eq!(st.jobs, 3);
+            assert_eq!(n.load(Ordering::SeqCst), 3);
+            assert_eq!(st.queue_now, 0);
+        });
+    }
+
+    /// 2 workers, 1 job, then the pool is dropped with no drain (the `Drop`
+    /// path: `close_and_wait` and the joins). Threads: main + 2 workers = 3.
+    /// Bound: the `LOOM_MAX_PREEMPTIONS` of model.sh (every order does not
+    /// finish in 60 s). The job runs once, and the drop returns, so no worker
+    /// is left blocked.
+    #[test]
+    fn loom_pool_drop_without_drain_runs_the_job() {
+        loom::model(|| {
+            let n = Arc::new(AtomicUsize::new(0));
+            let pool = Pool::with_limits(2, 2, 1 << 20, LONG).unwrap();
+            let m = Arc::clone(&n);
+            pool.submit(0, Box::new(move || {
+                m.fetch_add(1, Ordering::SeqCst);
+            }));
+            drop(pool);
+            assert_eq!(n.load(Ordering::SeqCst), 1);
+        });
+    }
+}
+
+// Kani proof (TSAFE-04). Run with scripts/safety/kani.sh.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    // Bound: none (any usize CPU count).
+    #[kani::proof]
+    fn workers_for_cpus_in_range() {
+        let n = workers_for_cpus(kani::any());
+        assert!((1..=DEFAULT_WORKERS_MAX).contains(&n));
     }
 }

@@ -6,17 +6,17 @@ current_phase: 22
 current_phase_name: Chunk profiles
 current_plan: Not started
 status: planning
-stopped_at: Phase 21.1 complete, ready to plan Phase 22
-last_updated: "2026-11-25T00:47:42.856Z"
-last_activity: 2026-11-24
-last_activity_desc: Phase 21.1 complete, transitioned to Phase 22
-state_head: 3bcb467f43a3f1c8a66eb99ce0e1bf808d822c2b
+stopped_at: Phase 21.2 complete, ready to plan Phase 22
+last_updated: "2026-11-26T05:22:16.631Z"
+last_activity: 2026-11-25
+last_activity_desc: Phase 21.2 complete, transitioned to Phase 22
+state_head: d522c321b92e1ca6cd43d2dff3a0ba318a2f6893
 progress:
-  total_phases: 8
+  total_phases: 9
   completed_phases: 4
-  total_plans: 44
-  completed_plans: 44
-  percent: 50
+  total_plans: 55
+  completed_plans: 55
+  percent: 44
 ---
 
 # Project State
@@ -26,18 +26,18 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-20)
 
 **Core value:** High-ratio data deduplication that works transparently as a real, daily-driver POSIX filesystem
-**Current focus:** Phase 21 — Worker pool
+**Current focus:** Phase 21.2 — Thread-safety verification and CI gates
 
 ## Current Position
 
 Current Plan: Not started
-Total Plans in Phase: 4
+Total Plans in Phase: 11
 Phase: 22 — Chunk profiles
-Plan: 21.1-01 complete (1 of 4); next: 21.1-02 (the header check at every open point)
+Plan: 21.2-01 to 21.2-11 complete (11 of 11); next: /gsd-verify-work 21.2
 Status: Ready to plan
-Last activity: 2026-11-24 — Phase 21.1 complete, transitioned to Phase 22
+Last activity: 2026-11-25 — Phase 21.2 complete, transitioned to Phase 22
 
-Progress: [█████░░░░░] 50%
+Progress: [████░░░░░░] 44%
 
 ## Performance Metrics
 
@@ -93,6 +93,16 @@ Progress: [█████░░░░░] 50%
 | Phase 21.1 P02 | 57min | 3 tasks | 16 files |
 | Phase 21.1 P03 | 50min | 3 tasks | 7 files |
 | Phase 21.1 P04 | 45min | 2 tasks | 6 files |
+| Phase 21.2 P01 | 11h (gates on a loaded host) | 3 tasks | 13 files |
+| Phase 21.2 P02 | about 2 h | 2 tasks | 5 files |
+| Phase 21.2 P03 | about 6 h | 3 tasks | 48 files |
+| Phase 21.2 P04 | about 3 h | 2 tasks | 5 files |
+| Phase 21.2 P05 | 3h35m | 3 tasks | 28 files |
+| Phase 21.2 P06 | about 2 h | 2 tasks | 6 files |
+| Phase 21.2 P07 | 25 min | 2 tasks | 6 files |
+| Phase 21.2 P09 | about 50 min | 2 tasks | 3 files |
+| Phase 21.2 P08 | about 2 h | 2 tasks | 7 files |
+| Phase 21.2 P10 | about 40 min | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -213,6 +223,23 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21.1]: stats shows format (null with no header), flags by class (name, release, known) and access, in text and JSON
 - [Phase 21.1]: gc, snapshot create and snapshot switch refuse a path with no segments/ before the header check (content::require_store); seed and mount still make new stores
 - [Phase 21.1]: store-format.md leaves out the unverified ext4 journal-replay claim (RESEARCH A1); deferred list item
+- [Phase 21.2]: 21.2-01: loom 0.7.3 models through one cfg point (chunk_store::sync + sync::raw); CI bound LOOM_MAX_PREEMPTIONS=3 (bound-3 sum 6.94 s, bound-4 sum 41.64 s)
+- [Phase 21.2]: 21.2-01: pool_panic_tests child tests flaky on a loaded Mac (slow binary start); local gate skips 3 of them, CI on Linux and macOS must pass them
+- [Phase 21.2]: 21.2-02: race (b) fixed - check_not_ancestor walks .. under the rename mutex, EINVAL; ELOOP guard 1<<20; D-29 not needed (20 of 20 runs pass)
+- [Phase 21.2]: 21.2-03: lint allow reasons use the reason = argument on one line; clippy.sh checks it
+- [Phase 21.2]: 21.2-03: too_many_arguments, index loops with a meaningful index, and one-row case tables get an allow with a reason, not a refactor
+- [Phase 21.2]: 21.2-03: ci.yml jobs linux and macos get timeout-minutes 30 (10-run maximum times 1.5 is below the 30 min floor)
+- [Phase 21.2]: 21.2-03: Linux clippy evidence is CI Safety run 45649551248; local Docker had under 1 GiB free
+- [Phase 21.2]: 21.2-04: race (a) fixed with the research variant of D-27 (claim under the stripe plus an open-count pin, install stays in the cell hold); D-29: 40 of 40 runs pass, no --workers 1 change
+- [Phase 21.2]: 21.2-04: T-21.2-09 is medium: GC is reachability and the refcount table only feeds stats and scrub, so a double release gives wrong stats, not lost content
+- [Phase 21.2]: 21.2-05 D-13: Miri runs a named module list (chunk-store pack_io, sync, lock_tail_tests, run, index; metadata wal, inode, xattr): the full --lib run took 1449 s on Linux, over 1200 s; the list takes 982 s
+- [Phase 21.2]: 21.2-05: every lib test Miri cannot run has cfg_attr(miri, ignore = reason) from the Linux probe (chunk-store 52, metadata 109); no target-only form was needed
+- [Phase 21.2]: 21.2-06: loom CI bound stays 3; all 7 models run in 7 s; the gate and FlushCtl protocol atomics go through sync::raw
+- [Phase 21.2]: 21.2-07: lock_tail_tests stays under TSan with put_and_read_pass_a_held_keep_cap_wait skipped (5 s real-time step limit in a debug TSan build; passes under TSan in release, no report)
+- [Phase 21.2]: 21.2-07: first CI run 45733741913 green (tsan 208 s, deadlock 111 s, 0 TSan reports); every TSan entry kept, no set change
+- [Phase 21.2]: 21.2-09: unsafe review in docs/design/unsafe-review.md (30 files, 128 tokens); no memory-safety bug; unsafe-count.sh in clippy.sh; pid > 1 guard and errno save are follow-ups (D-33)
+- [Phase 21.2]: 21.2-08: Kani 0.68.0 proves 9 harnesses (header byte core, workers_for_cpus, stripe, write_end, hard_cap_of, dirty_move) in about 37 s of solving; parse itself stays covered by unit tests; kani.sh uses terse output and checks the harness count
+- [Phase 21.2]: 21.2-10: coverage in Linux Docker with cargo-llvm-cov 0.9.2; gate on the tests-only workspace number (first CI run 45750602854: 91.27 %; local 91.25 to 91.27 %), merged with the FUSE smoke printed (CI 93.08 %, fuse_callbacks 9.60 -> 51.40 %); floor 90.27 in scripts/safety/coverage-floor.txt; job 3 min 4 s
 
 ### Pending Todos
 
@@ -231,6 +258,7 @@ None.
 ### Roadmap Evolution
 
 - Phase 21.1 inserted after Phase 21: Store header with compat, ro-compat and incompat feature flags, and a written format policy (#154); owner agreed #154 joins v2.2 after Phase 21
+- Phase 21.2 inserted after Phase 21.1: Thread-safety verification and CI gates (user asked for formal verification and static analysis on every build) (URGENT)
 
 ## Deferred Items
 
@@ -240,8 +268,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-24T22:17:53.780Z
-Stopped at: Phase 21.1 complete, ready to plan Phase 22
+Last session: 2026-11-26T01:31:02.078Z
+Stopped at: Phase 21.2 complete, ready to plan Phase 22
 Resume file: None
 
 ## Operator Next Steps

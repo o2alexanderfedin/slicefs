@@ -21,7 +21,7 @@ This file is a delta. It records only what v2.2 adds, changes or refuses. The ex
 | Rehash (#62) | No crate. |
 | fuser | Stay on vendored 0.18.0. No `n_threads`. Do not rebase onto 0.19.0 inside v2.2. |
 | Benchmarks | No `criterion`. Keep the bin + `getrusage` + fio pattern. Add `hdrhistogram` to one new stress bench only. |
-| Concurrency tests | `shuttle` (dev-only) for the gate/budget/flusher protocol. `parking_lot` `deadlock_detection` in stress builds. No `loom`. |
+| Concurrency tests | `shuttle` (dev-only) for the gate/budget/flusher protocol. `parking_lot` `deadlock_detection` in stress builds. No `loom`. Superseded for the Phase 21.2 models: a spike chose loom with a preemption bound on small models of the real code (21.2-RESEARCH Decision 1); shuttle stays a fallback. |
 
 ## Recommended Stack
 
@@ -70,7 +70,7 @@ Add it at first use, not before, and only for read-mostly immutable snapshots:
 | `imbl` 7.0.2 | 2026-09-09, Rust 1.85 | **Contingent** | Only for #21 option B (per-inode `ArcSwap<ExtentMap>`). Provides `OrdMap` with `range()` and structural sharing, `Send + Sync` when the items are. Do not add before S4 shows contention. Option A (`BTreeMap` under a per-inode `RwLock`) comes first, and the extent map stays behind a small interface so the change is local. |
 | `rpds` 1.2.1 | 2026-05-15, Rust 1.85 | **Alternative to imbl** | `RedBlackTreeMap` with `_sync` variants. Choose it only if `imbl` fails a range-query benchmark. |
 | `scc` 3.9.1, `papaya` 0.2.5, `left-right` 0.11.8 | active | **No** | Lock-free maps and double-buffered maps solve problems that sharded `RwLock` tables do not have at FUSE rates, and they hide locks from the rank checker. |
-| `loom` 0.7.3 | 2026-11-08 | **No** | Exhaustive search. It targets the atomics memory model, and the README says it can miss executions and treats `SeqCst` as `AcqRel` (doc page). Its state space does not scale to a gate + budget + flusher + N workers protocol. Use shuttle. |
+| `loom` 0.7.3 | 2026-11-08 | **No** | Exhaustive search. It targets the atomics memory model, and the README says it can miss executions and treats `SeqCst` as `AcqRel` (doc page). Its state space does not scale to a gate + budget + flusher + N workers protocol. Use shuttle. Superseded for the Phase 21.2 models: a spike chose loom with a preemption bound on small models of the real code (21.2-RESEARCH Decision 1); shuttle stays a fallback. |
 | `indicatif` and similar | n/a | **No** | `rehash` reports progress with `tracing` lines and the existing `--json` output (`serde_json` is already a dependency). |
 
 ## Supporting Libraries

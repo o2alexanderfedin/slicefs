@@ -87,7 +87,9 @@ pub fn spawn_flusher(fs: Weak<SliceFsFilesystem>) -> JoinHandle<()> {
 /// Wait for the pass interval, a kick or a stop (the first wait comes
 /// before the first pass), then run `pass`, until `stop_flusher` or until
 /// `pass` returns false. A paused flusher (a test hook) makes no pass.
-fn flusher_loop(ctl: &FlushCtl, mut pass: impl FnMut() -> bool) {
+/// `pub(crate)`: the dirty budget model (`filesystem::loom_tests`) runs it
+/// with a pass closure on a flush control block of its own.
+pub(crate) fn flusher_loop(ctl: &FlushCtl, mut pass: impl FnMut() -> bool) {
     chunk_store::sync::rank::require_gate(true);
     ctl.started_ms.store(ctl.now_ms(), Ordering::Relaxed);
     ctl.running.store(true, Ordering::Release);

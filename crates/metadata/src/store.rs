@@ -31,7 +31,7 @@ use crate::xattr::{intern_xattrs, load_xattrs, set_xattr_entry, get_xattr_entry,
                    list_xattr_names, remove_xattr_entry};
 
 // S_IFDIR bit mask (POSIX directory type)
-const S_IFMT: u32 = 0o0170_000;
+const S_IFMT: u32 = 0o0_170_000;
 
 /// Byte layout of the root record that `commit` writes: fixed-width fields,
 /// little-endian. Each `*_DATA` field is the key of a serialized map.
@@ -314,7 +314,7 @@ fn check_name(name: &str) -> Result<(), MetaError> {
     }
     Ok(())
 }
-const S_IFDIR: u32 = 0o0040_000;
+const S_IFDIR: u32 = 0o0_040_000;
 
 /// Concrete `MetadataStore`; its nodes are in the chunk store (`StoreIo`).
 ///
@@ -699,10 +699,10 @@ impl DictMetadataStore {
     fn log_wal_entry(&self, entry: &WalEntry) {
         // A clone of the handle: the `wal` slot lock is not held while the
         // log writes or syncs.
-        if let Some(w) = self.wal_handle() {
-            if let Err(e) = w.log_mutation(entry) {
-                self.note_wal_failure(&e);
-            }
+        if let Some(w) = self.wal_handle()
+            && let Err(e) = w.log_mutation(entry)
+        {
+            self.note_wal_failure(&e);
         }
     }
 
@@ -730,11 +730,11 @@ impl DictMetadataStore {
             }
             let digest = self.dir_data.lock().get(&ino).copied()
                 .ok_or(MetaError::NotADirectory(ino))?;
-            if let Some((d, list)) = cold.take() {
-                if d == digest {
-                    live.map.insert(ino, list);
-                    return Ok(live);
-                }
+            if let Some((d, list)) = cold.take()
+                && d == digest
+            {
+                live.map.insert(ino, list);
+                return Ok(live);
             }
             drop(live);
             let list = DirList::load(&mut self.reader(), &digest)?;
@@ -781,11 +781,11 @@ impl DictMetadataStore {
             }
             let digest = self.inode_data.lock().get(&ino).copied()
                 .ok_or(MetaError::NotFound(ino))?;
-            if let Some((d, meta)) = cold.take() {
-                if d == digest {
-                    live.map.insert(ino, meta);
-                    return Ok(live);
-                }
+            if let Some((d, meta)) = cold.take()
+                && d == digest
+            {
+                live.map.insert(ino, meta);
+                return Ok(live);
             }
             drop(live);
             let meta = load_inode(&mut self.reader(), &digest)?;
@@ -839,7 +839,7 @@ impl DictMetadataStore {
         if new > old {
             self.logical_bytes.fetch_add(new - old, Ordering::Relaxed);
         } else if old > new {
-            self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+            self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
                 Some(cur.saturating_sub(old - new))
             }).ok();
         }
@@ -1448,13 +1448,13 @@ impl MetadataStore for DictMetadataStore {
 
         // Decrement logical_bytes by the deleted inode's size.
         if size > 0 {
-            self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+            self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
                 Some(cur.saturating_sub(size))
             }).ok();
         }
 
         // Decrement inode count (saturating to avoid underflow).
-        self.inode_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+        self.inode_count.try_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
             Some(c.saturating_sub(1))
         }).ok();
 
@@ -1685,7 +1685,7 @@ impl DictMetadataStore {
         let mut io_guard = lock_stats::lock(&io, Site::Io);
 
         // Read root record bytes
-        let bytes = (&mut *io_guard).get_node(root)
+        let bytes = (*io_guard).get_node(root)
             .map_err(|e| crate::store_io::node_err("root node", root, e))?;
 
         check_root_len(bytes.len())?;
@@ -1816,6 +1816,7 @@ mod map_decode_tests {
     // A map node with an entry count whose size overflows is corrupt
     // metadata: an error, never a panic or a wrapped length.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn a_map_with_an_overflowing_count_is_corrupt() {
         let dir = tempfile::TempDir::new().unwrap();
         let mut io = StoreIo::open(dir.path()).unwrap();
@@ -1833,17 +1834,19 @@ mod map_decode_tests {
 mod tests {
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn new_store_root_dir_has_current_times() {
         let dir = tempfile::TempDir::new().unwrap();
         let before = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         let store = DictMetadataStore::new(Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap())));
         let root = store.get_inode(1).unwrap();
-        assert!(root.mtime_sec as i64 >= before, "root mtime {} (epoch 0 shows as 1969)", root.mtime_sec);
-        assert!(root.ctime_sec as i64 >= before, "root ctime {}", root.ctime_sec);
+        assert!(root.mtime_sec >= before, "root mtime {} (epoch 0 shows as 1969)", root.mtime_sec);
+        assert!(root.ctime_sec >= before, "root ctime {}", root.ctime_sec);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn cached_dirs_and_inodes_survive_eviction_commit_and_reload() {
         let tmp = tempfile::tempdir().unwrap();
         let io = Arc::new(Mutex::new(StoreIo::open(tmp.path()).unwrap()));
@@ -1909,6 +1912,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_delete_inode_drops_manifest_xattrs_and_dir_entries() {
         // Leftover per-inode map entries keep deleted content reachable for GC.
         let (_d, store) = make_store();
@@ -1926,6 +1930,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_names_longer_than_name_max_are_rejected() {
         let (_d, store) = make_store();
         let ok = "a".repeat(255);
@@ -1939,6 +1944,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_new_has_root_dir() {
         let (_dir, store) = make_store();
         assert_eq!(store.root_ino(), 1);
@@ -1949,6 +1955,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_inode_crud() {
         let (_dir, store) = make_store();
 
@@ -1977,6 +1984,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_create_directory_shows_in_parent() {
         let (_dir, store) = make_store();
         let dir_meta = new_dir_meta();
@@ -1996,6 +2004,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_lookup_and_link() {
         let (_dir, store) = make_store();
 
@@ -2011,6 +2020,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_unlink_removes_entry() {
         let (_dir, store) = make_store();
 
@@ -2024,6 +2034,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_manifest_round_trip() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -2035,12 +2046,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_root_ino_is_one() {
         let (_dir, store) = make_store();
         assert_eq!(store.root_ino(), 1);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_commit_returns_nonzero_digest() {
         let (_dir, store) = make_store();
         let digest = store.commit().unwrap();
@@ -2048,6 +2061,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_delete_nonexistent_returns_not_found() {
         let (_dir, store) = make_store();
         let result = store.delete_inode(9999);
@@ -2055,6 +2069,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_create_dir_under_nonexistent_parent_returns_not_found() {
         let (_dir, store) = make_store();
         let result = store.create_directory(9999, "sub", &new_dir_meta());
@@ -2063,6 +2078,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_create_dir_under_file_returns_not_a_directory() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -2075,6 +2091,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_set_get() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -2084,6 +2101,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_list() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -2099,6 +2117,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_remove() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -2109,6 +2128,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_overwrite() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -2119,6 +2139,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_on_directory() {
         let (_dir, store) = make_store();
         // Set xattr on the root directory inode (ino=1)
@@ -2128,6 +2149,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_large_value() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -2139,6 +2161,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_list_empty() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -2147,6 +2170,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_get_not_found() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -2155,6 +2179,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_remove_not_found() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -2163,6 +2188,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_update_nonexistent_returns_not_found() {
         let (_dir, store) = make_store();
         let mut meta = new_file_meta();
@@ -2172,6 +2198,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_inode_numbers_are_monotonic() {
         let (_dir, store) = make_store();
         let ino1 = store.create_inode(&new_file_meta()).unwrap();
@@ -2182,6 +2209,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_link_duplicate_name_rejected() {
         let (_dir, store) = make_store();
         let ino = store.create_inode(&new_file_meta()).unwrap();
@@ -2191,6 +2219,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_list_directory_non_dir_returns_error() {
         let (_dir, store) = make_store();
         // Inode 9999 doesn't exist as a directory
@@ -2201,6 +2230,7 @@ mod tests {
     // ── persistence round-trip tests (Task 2) ─────────────────────────────────
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_commit_and_reload() {
         let (_dir, store) = make_store();
 
@@ -2247,6 +2277,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_inode_stability_across_reload() {
         let (_dir, store) = make_store();
 
@@ -2276,6 +2307,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_directory_stable_across_reload() {
         let (_dir, store) = make_store();
         let sub1 = store.create_directory(1, "alpha", &new_dir_meta()).unwrap();
@@ -2292,6 +2324,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_manifest_stable_across_reload() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -2307,6 +2340,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_stable_across_reload() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -2322,6 +2356,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_filestorage_persistence_round_trip() {
         // This test proves POSIX-10: inode numbers are stable across a full
         // commit + load_from_root cycle backed by file storage.
@@ -2354,6 +2389,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_empty_store_commit_reload() {
         let (_dir, store) = make_store();
         let root = store.commit().unwrap();
@@ -2375,6 +2411,7 @@ mod tests {
     /// This proves the seed command's design is sound: file content and metadata
     /// can share the same Io backend, and nothing is lost on a round-trip.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_io_accessor_content_survives_reload() {
         let (_dir, store) = make_store();
 
@@ -2404,13 +2441,14 @@ mod tests {
 
         // Verify the content bytes are retrievable from the node store via get_node.
         let mut io_guard = reloaded.io().lock().unwrap();
-        let read_back = (&mut *io_guard).get_node(&content_digest).expect("content missing");
+        let read_back = (*io_guard).get_node(&content_digest).expect("content missing");
         assert_eq!(read_back, content.as_slice());
     }
 
     // ── Snapshot method tests ──────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_create_snapshot_returns_entry() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2427,6 +2465,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_create_snapshot_auto_increments_version() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2444,6 +2483,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_list_snapshots_sorted_by_version() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2465,6 +2505,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_find_snapshot_by_version_string() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2483,6 +2524,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_find_snapshot_by_name() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2499,6 +2541,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_find_snapshot_returns_none_for_unknown() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2514,6 +2557,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_snapshot_roots_includes_all_roots() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2532,6 +2576,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_snapshot_roots_no_snapshots_returns_current_root() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2548,6 +2593,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_snapshots_survive_segment_replay() {
         use crate::wal::{WalConfig, create_wal};
         use crate::segment::load_store_from_segments;
@@ -2573,6 +2619,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_set_snapshots_loads_snapshot_list() {
         use crate::snapshot::SnapshotEntry;
         let (_dir, store) = make_store();
@@ -2603,6 +2650,7 @@ mod tests {
 
     /// FIX-03: find_snapshot by version string uses O(1) lookup.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_hashmap_find_by_version_o1() {
         let (_dir, mut store) = make_store();
         store.set_snapshots(vec![
@@ -2619,6 +2667,7 @@ mod tests {
 
     /// FIX-04: find_snapshot by name uses O(1) lookup.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_hashmap_find_by_name_o1() {
         let (_dir, mut store) = make_store();
         store.set_snapshots(vec![
@@ -2634,6 +2683,7 @@ mod tests {
 
     /// Scale test: 10,000 snapshots — find_snapshot must complete in under 1ms.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_hashmap_10k_snapshots_under_1ms() {
         let snaps: Vec<_> = (1u64..=10_000)
             .map(|v| make_snapshot(v, None))
@@ -2655,6 +2705,7 @@ mod tests {
 
     /// create_snapshot adds to both indexes.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_create_snapshot_adds_to_both_indexes() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2676,6 +2727,7 @@ mod tests {
 
     /// set_snapshots populates both by_version and by_name indexes correctly.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_set_snapshots_populates_both_indexes() {
         let snaps = vec![
             make_snapshot(10, Some("ten")),
@@ -2686,7 +2738,7 @@ mod tests {
         store.set_snapshots(snaps);
 
         assert_eq!(store.find_snapshot("10").unwrap().version, 10);
-        assert_eq!(store.find_snapshot("twenty").is_none(), true);
+        assert!(store.find_snapshot("twenty").is_none());
         assert_eq!(store.find_snapshot("ten").unwrap().version, 10);
         assert_eq!(store.find_snapshot("thirty").unwrap().version, 30);
         assert!(store.find_snapshot("20").is_some());  // unnamed, find by version
@@ -2695,6 +2747,7 @@ mod tests {
 
     /// list_snapshots returns sorted by version (existing behavior preserved).
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_hashmap_list_snapshots_sorted() {
         let snaps = vec![
             make_snapshot(3, None),
@@ -2714,6 +2767,7 @@ mod tests {
     // ── Saturating refcount tests (FIX-01) ────────────────────────────────────
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_refcount_saturates() {
         let (_dir, store) = make_store();
         let digest: ObjectKey = ObjectKey::example(0xDE);
@@ -2736,6 +2790,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_refcount_decrement_saturated() {
         let (_dir, store) = make_store();
         let digest: ObjectKey = ObjectKey::example(0xAB);
@@ -2753,6 +2808,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_saturated_refcount_count() {
         let (_dir, store) = make_store();
         let d1: ObjectKey = ObjectKey::example(0x01);
@@ -2777,6 +2833,7 @@ mod tests {
     // ── inode_count AtomicU64 tests (FIX-02 store layer) ─────────────────────
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_inode_count_empty() {
         let (_dir, store) = make_store();
         // Fresh store has root inode (ino=1) — count should be 1
@@ -2785,6 +2842,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_inode_count_tracks_lifecycle() {
         let (_dir, store) = make_store();
         // Create 3 inodes (inos 2, 3, 4) — total = 1 root + 3 = 4
@@ -2802,6 +2860,7 @@ mod tests {
 
     // D-05: four threads that each add 1 to nlinks 500 times lose no change.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn atomic_modify_inode_loses_no_change() {
         let (_d, store) = make_store();
         let ino = store.create_inode(&new_file_meta()).unwrap();
@@ -2819,6 +2878,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn missing_inode_modify_inode_is_not_found_and_creates_nothing() {
         let (_d, store) = make_store();
         assert!(matches!(store.modify_inode(99, |m| m.size = 5), Err(MetaError::NotFound(99))));
@@ -2827,6 +2887,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn size_change_in_modify_inode_moves_logical_bytes() {
         let (_d, store) = make_store();
         let ino = store.create_inode(&new_file_meta()).unwrap();
@@ -2839,6 +2900,7 @@ mod tests {
 
     // D-08 (store side): a create with a given number.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn create_inode_at_takes_the_number_and_raises_the_allocator() {
         let (_d, store) = make_store();
         assert_eq!(store.create_inode_at(7, &new_file_meta()).unwrap(), 7);
@@ -2854,6 +2916,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn create_directory_at_adds_the_entry_or_nothing() {
         let (_d, store) = make_store();
         let root_links = store.get_inode(1).unwrap().nlinks;
@@ -2889,6 +2952,7 @@ mod tests {
     // read is held. Thread B changes a cached inode, creates one, and looks
     // up a name in another (cached) directory: none of it waits for A.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
     fn cold_dir_load_does_not_block_other_inodes() {
         use chunk_store::mem::{Hold, MemIo};
         use std::sync::mpsc;
@@ -2934,6 +2998,7 @@ mod tests {
     // before the flush installs its digest. The late install must not bring
     // X back. The hook point runs on this thread: no timing.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn flush_install_does_not_resurrect_a_deleted_inode() {
         let (_d, store) = make_store();
         let x = store.create_inode(&new_file_meta()).unwrap();
@@ -2950,6 +3015,7 @@ mod tests {
     // flush took it. Before the flush installs, the commit installs its
     // older digest. The older digest must not end up as the current one.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn late_older_install_does_not_overwrite_a_newer_change() {
         let (_d, store) = make_store();
         let x = store.create_inode(&new_file_meta()).unwrap();
@@ -2972,6 +3038,7 @@ mod tests {
     // Thread B changes another inode and stores another manifest: no
     // `StoreIo` lock (or other lock) makes it wait for A.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
     fn manifest_read_does_not_block_inode_changes() {
         use chunk_store::mem::{Hold, MemIo};
         use std::sync::mpsc;
@@ -3012,6 +3079,7 @@ mod tests {
     // T-19-10: a node put error on the hot path is returned by the next
     // commit; and a commit syncs every node that the hot path put.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
     fn hot_path_put_error_fails_the_next_commit_and_puts_are_synced() {
         use chunk_store::mem::MemIo;
         let mem = MemIo::new();
@@ -3034,6 +3102,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_inode_count_after_reload() {
         let (_dir, store) = make_store();
         // Create 2 inodes

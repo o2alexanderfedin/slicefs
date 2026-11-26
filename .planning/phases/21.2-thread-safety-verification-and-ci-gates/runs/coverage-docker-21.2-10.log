@@ -1,0 +1,2378 @@
+Linux c72b45c055ad 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+1.28 1.50 0.91 1/845 20
+MemAvailable:   14702780 kB
+coverage: cargo-llvm-cov 0.9.2 rustc 1.100.0 (0ef1bc386 2026-11-09)
+warning: unused workspace dependency `anyhow`
+  --> Cargo.toml:33:1
+   |
+33 | anyhow     = "1"
+   | ^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `anyhow`
+warning: unused workspace dependency `bincode`
+  --> Cargo.toml:22:1
+   |
+22 | bincode    = "2"
+   | ^^^^^^^
+   |
+help: consider removing the workspace dependency `bincode`
+warning: unused workspace dependency `criterion`
+  --> Cargo.toml:24:1
+   |
+24 | criterion  = { version = "0.5", features = ["html_reports"] }
+   | ^^^^^^^^^
+   |
+help: consider removing the workspace dependency `criterion`
+warning: unused workspace dependency `redb`
+  --> Cargo.toml:29:1
+   |
+29 | redb       = "3.1"
+   | ^^^^
+   |
+help: consider removing the workspace dependency `redb`
+warning: unused workspace dependency `tokio`
+  --> Cargo.toml:31:1
+   |
+31 | tokio      = { version = "1", features = ["full"] }
+   | ^^^^^
+   |
+help: consider removing the workspace dependency `tokio`
+warning: workspace (manifest) generated 5 warnings
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling libc v0.2.191
+   Compiling syn v2.0.117
+   Compiling cfg-if v1.0.4
+   Compiling jobserver v0.1.34
+   Compiling shlex v1.3.0
+   Compiling find-msvc-tools v0.1.9
+   Compiling cc v1.2.58
+   Compiling pkg-config v0.3.32
+   Compiling thiserror v2.0.18
+   Compiling thiserror-impl v2.0.18
+   Compiling once_cell v1.21.4
+   Compiling blake3 v1.8.3
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling bitflags v2.11.0
+   Compiling cpufeatures v0.2.17
+   Compiling arrayref v0.3.9
+   Compiling arrayvec v0.7.6
+   Compiling constant_time_eq v0.4.2
+   Compiling parking_lot_core v0.9.12
+   Compiling semver v1.0.27
+   Compiling rustc_version v0.4.1
+   Compiling smallvec v1.15.1
+   Compiling scopeguard v1.2.0
+   Compiling zstd-safe v7.2.4
+   Compiling lock_api v0.4.14
+   Compiling crc32c v0.6.9
+   Compiling getrandom v0.4.2
+   Compiling rustix v1.1.4
+   Compiling parking_lot v0.12.5
+   Compiling tracing-core v0.1.36
+   Compiling tracing-attributes v0.1.31
+   Compiling pin-project-lite v0.2.17
+   Compiling fastcdc v3.2.1
+   Compiling linux-raw-sys v0.12.1
+   Compiling tracing v0.1.44
+   Compiling fastrand v2.3.0
+   Compiling tempfile v3.27.0
+   Compiling autocfg v1.5.0
+   Compiling zerocopy v0.8.47
+   Compiling zerocopy-derive v0.8.47
+   Compiling slicefs-traits v0.1.0 (/w/crates/slicefs-traits)
+   Compiling num-traits v0.2.19
+   Compiling equivalent v1.0.2
+   Compiling hashbrown v0.16.1
+   Compiling winnow v1.0.0
+   Compiling toml_parser v1.1.0+spec-1.1.0
+   Compiling zstd v0.13.3
+   Compiling indexmap v2.13.0
+   Compiling chunk-store v0.1.0 (/w/crates/chunk-store)
+   Compiling toml_datetime v1.1.0+spec-1.1.0
+   Compiling toml_edit v0.25.8+spec-1.1.0
+   Compiling memoffset v0.9.1
+   Compiling utf8parse v0.2.2
+   Compiling cfg_aliases v0.2.1
+   Compiling serde_core v1.0.228
+   Compiling rustversion v1.0.22
+   Compiling nix v0.31.3
+   Compiling metadata v0.1.0 (/w/crates/metadata)
+   Compiling anstyle-parse v1.0.0
+   Compiling proc-macro-crate v3.5.0
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstyle v1.0.14
+   Compiling anstyle-query v1.1.5
+   Compiling zmij v1.0.21
+   Compiling colorchoice v1.0.5
+   Compiling ref-cast v1.0.25
+   Compiling anstream v1.0.0
+   Compiling num_enum_derive v0.7.6
+   Compiling fuser v0.18.0 (/w/vendor/fuser)
+   Compiling ref-cast-impl v1.0.25
+   Compiling serde v1.0.228
+   Compiling heck v0.5.0
+   Compiling fixed-array v0.4.1
+   Compiling serde_json v1.0.149
+   Compiling clap_lex v1.1.0
+   Compiling strsim v0.11.1
+   Compiling memchr v2.8.0
+   Compiling clap_builder v4.6.0
+   Compiling uints v0.11.2
+   Compiling clap_derive v4.6.0
+   Compiling num_enum v0.7.6
+   Compiling serde_derive v1.0.228
+   Compiling page_size v0.6.0
+   Compiling log v0.4.29
+   Compiling itoa v1.0.18
+   Compiling slicefs-cli v0.1.0 (/w/crates/slicefs-cli)
+   Compiling clap v4.6.0
+   Compiling sha2-compress v0.7.2
+   Compiling byteorder v1.5.0
+   Compiling hdrhistogram v7.6.0
+   Compiling getrandom v0.3.4
+   Compiling rand_core v0.9.5
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling rand v0.9.2
+   Compiling wait-timeout v0.2.1
+warning: `fuser` (lib) generated 6 warnings
+   Compiling fnv v1.0.7
+   Compiling quick-error v1.2.3
+   Compiling bit-vec v0.8.0
+   Compiling bit-set v0.8.0
+   Compiling rusty-fork v0.3.1
+   Compiling rand_xorshift v0.4.0
+   Compiling unarray v0.1.4
+   Compiling regex-syntax v0.8.10
+   Compiling proptest v1.11.0
+   Compiling libm v0.2.16
+   Compiling siphasher v1.0.2
+   Compiling fastbloom v0.14.1
+   Compiling cas-local v0.1.0 (/w/crates/cas-local)
+   Compiling index-bench v0.1.0 (/w/benchmarks/index-bench)
+   Compiling chunk-bench v0.1.0 (/w/benchmarks/chunk-bench)
+warning: unused dependency `sha2-compress`
+  --> crates/slicefs-cli/Cargo.toml:31:1
+   |
+31 | sha2-compress  = { workspace = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `sha2-compress`
+warning: `slicefs-cli` (manifest) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 12s
+     Running unittests src/lib.rs (/target/cov/debug/build/cas-local/d53d6afeedd1d79f/out/cas_local-d53d6afeedd1d79f)
+
+running 52 tests
+test blake3_hasher::tests::different_inputs_produce_different_hashes ... ok
+test blake3_hasher::tests::empty_input_does_not_panic ... ok
+test blake3_hasher::tests::hash_output_is_32_bytes ... ok
+test blake3_hasher::tests::deterministic_same_input_same_hash ... ok
+test blake3_hasher::tests::algorithm_id_is_blake3 ... ok
+test blake3_hasher::tests::swap_test_trait_object_dispatch ... ok
+test fixed_chunker::tests::chunk_offsets_are_monotonically_increasing_and_contiguous ... ok
+test fixed_chunker::tests::chunks_into_equal_size_pieces ... ok
+test fixed_chunker::tests::empty_input_returns_empty_vec ... ok
+test disk_block_store::tests::leading_zero_byte_hash_no_truncation ... ok
+test disk_block_store::tests::block_stored_under_two_byte_sharded_path ... ok
+test fixed_chunker::tests::concatenating_chunks_reproduces_original_input ... ok
+test disk_block_store::tests::get_with_verify_on_read_detects_corruption ... ok
+test fixed_chunker::tests::last_chunk_is_smaller_if_not_evenly_divisible ... ok
+test fixed_chunker::tests::strategy_id_is_fixed_4096 ... ok
+test disk_block_store::tests::put_and_get_round_trip ... ok
+test disk_block_store::tests::delete_removes_block ... ok
+test disk_block_store::tests::exists_returns_true_after_put ... ok
+test disk_block_store::tests::delete_nonexistent_is_idempotent ... ok
+test disk_block_store::tests::get_absent_returns_not_found ... ok
+test disk_block_store::tests::put_with_mismatched_hash_returns_integrity_failure ... ok
+test mem_block_store::tests::delete_nonexistent_is_idempotent ... ok
+test fixed_chunker::tests::swap_test_trait_object_dispatch ... ok
+test disk_block_store::tests::subdirectory_created_on_first_write ... ok
+test disk_block_store::tests::put_same_hash_twice_is_idempotent ... ok
+test disk_block_store::tests::get_without_verify_on_read_returns_corrupted_data ... ok
+test mem_block_store::tests::delete_removes_block_subsequent_get_returns_not_found ... ok
+test mem_block_store::tests::put_same_hash_twice_is_idempotent ... ok
+test mem_block_store::tests::get_nonexistent_hash_returns_not_found ... ok
+test mem_block_store::tests::exists_true_after_put_false_before ... ok
+test mem_block_store::tests::hash_collision_detected_same_hash_different_data ... ok
+test mem_block_store::tests::put_then_get_returns_same_data ... ok
+test mem_block_store::tests::read_time_integrity_verification_passes_for_correct_data ... ok
+test mem_block_store::tests::concurrent_put_get_from_multiple_threads_does_not_panic ... ok
+test mem_block_store::tests::verify_on_read_false_skips_integrity_check ... ok
+test mem_dedup_index::tests::bloom_check_returns_true_for_inserted_hash ... ok
+test mem_dedup_index::tests::bloom_check_still_true_after_remove ... ok
+test mem_dedup_index::tests::insert_then_lookup_returns_present ... ok
+test mem_dedup_index::tests::lookup_unknown_hash_returns_definitely_absent ... ok
+test mem_dedup_index::tests::remove_then_lookup_returns_absent_not_definitely_absent ... ok
+test mem_dedup_index::tests::bloom_check_returns_false_for_never_inserted ... ok
+test mem_dedup_index::tests::dedup_flow_inserted_hash_detected_as_duplicate ... ok
+test mem_dedup_index::tests::dedup_flow_remove_and_reinsert_works ... ok
+test mem_block_store::tests::write_time_integrity_check_catches_hash_data_mismatch ... ok
+test mem_dedup_index::tests::serialization_round_trip ... ok
+test mem_dedup_index::tests::concurrent_insert_lookup_does_not_panic ... ok
+test mem_dedup_index::tests::bloom_false_positive_two_tier_design_demonstration ... ok
+test mem_block_store::tests::prop_hash_put_get_round_trip ... ok
+test mem_dedup_index::tests::prop_all_inserted_hashes_are_found ... ok
+test disk_block_store::tests::prop_round_trip ... ok
+test fixed_chunker::tests::prop_chunk_round_trip ... ok
+test fixed_chunker::tests::prop_offsets_contiguous ... ok
+
+test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+     Running unittests src/main.rs (/target/cov/debug/build/chunk-bench/8b935d046391ff0b/out/chunk_bench-8b935d046391ff0b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/target/cov/debug/build/chunk-store/b9a126f58dccf877/out/chunk_store-b9a126f58dccf877)
+
+running 128 tests
+test bloom::tests::the_size_is_ten_bits_per_key_in_whole_blocks ... ok
+test hash::tests::an_older_pack_format_is_refused ... ok
+test file::tests::a_malformed_tree_is_an_error_not_a_panic ... ok
+test file::tests::a_read_of_a_level_255_child_is_an_error_not_a_panic ... ok
+test extsort::tests::an_absorbed_sorter_joins_and_a_cursor_seeks ... ok
+test file::tests::zero_runs_cut_at_chunk_max ... ok
+test file::tests::a_splice_of_a_malformed_tree_is_an_error_not_a_panic ... ok
+test hash::tests::an_unknown_hash_tag_is_an_error ... ok
+test hash::tests::lookup_by_name_and_tag ... ok
+test index::tests::a_failed_flush_keeps_the_memtable_and_the_old_manifest ... ok
+test index::tests::a_manifest_round_trips_and_damage_is_refused ... ok
+test index::tests::a_read_error_ends_get_and_iter_all_with_the_error ... ok
+test index::tests::the_newest_entry_wins_in_get_and_iter_all ... ok
+test index::tests::the_idle_window_rewrites_a_run_only_for_enough_new_data ... ok
+test index_tests::an_index_with_an_overflowing_count_is_refused ... ok
+test locality::tests::a_fill_with_entries_of_another_pack_is_dropped ... ok
+test locality::tests::a_floor_during_a_fill_drops_it_and_empties_the_cache ... ok
+test locality::tests::a_gc_during_a_fill_drops_it_and_the_cached_pack ... ok
+test index_tests::the_resync_scan_treats_an_unknown_tag_by_position ... ok
+test index::tests::the_obsolete_runs_of_the_manifest_are_removed_at_open ... ok
+test index::tests::a_stopped_merge_leaves_no_output ... ok
+test locality::tests::a_refused_untrusted_or_low_pack_is_never_filled ... ok
+test locality::tests::a_streak_of_hits_fills_the_pack ... ok
+test lock_stats::tests::all_lists_every_site_in_discriminant_order ... ok
+test hash::tests::a_new_write_hash_keeps_old_objects_readable ... ok
+test lock_tail_tests::a_record_in_flight_is_invisible_and_below_no_hwm ... ok
+test lock_tail_tests::put_and_read_pass_a_held_index_flush_sync ... ok
+test hash::tests::gc_keeps_live_objects_of_both_hashes ... ok
+test lock_tail_tests::put_and_read_pass_a_held_pack_create ... ok
+test locality_tests::a_rewrite_in_the_active_pack_tries_no_fill ... ok
+test bloom::tests::bytes_round_trip ... ok
+test lock_tail_tests::put_and_read_pass_a_held_phase_two_sync ... ok
+test lock_tail_tests::put_and_read_pass_a_held_run_write ... ok
+test extsort::tests::tiny_chunks_and_fan_in_take_several_merge_passes ... ok
+test lock_tail_tests::put_passes_a_held_pack_open ... ok
+test lock_tail_tests::put_passes_a_held_trust_floor_write ... ok
+test lock_tail_tests::retrying_put_and_read_pass_a_held_phase_two_sync ... ok
+test lock_tail_tests::put_and_read_pass_a_held_seal_join ... ok
+test mark::tests::an_exact_touched_set_never_spills ... ok
+test mark::tests::a_spilled_touched_set_has_no_false_negatives ... ok
+test pack_io::tests::a_run_map_reads_back_moves_across_threads_and_unmaps ... ok
+test race_tests::a_flush_during_a_merge_keeps_the_new_runs ... ok
+test race_tests::a_gc_during_a_merge_stays_newer_than_the_merged_run ... ok
+test mark::tests::a_live_filter_has_no_false_negatives ... ok
+test race_tests::a_put_hit_that_gc_removed_before_the_lock_writes_again ... ok
+test race_tests::a_put_hit_without_a_gc_writes_nothing ... ok
+test locality_tests::a_put_whose_trust_floor_fails_writes_nothing ... ok
+test locality_tests::an_unreadable_trust_floor_is_written_again_at_the_next_failed_lookup ... ok
+test locality_tests::packs_of_an_earlier_process_are_cached_from_their_exact_idx ... ok
+test race_tests::a_listed_but_missing_run_requests_a_rebuild ... ok
+test race_tests::a_read_whose_loc_gc_moved_returns_the_bytes_from_the_new_pack ... ok
+test locality_tests::a_failed_lookup_ends_the_trust_in_the_packs_so_far ... ok
+test locality_tests::a_cache_hit_that_gc_removed_before_the_lock_writes_again ... ok
+test locality_tests::a_cache_hit_during_a_gc_keeps_the_object ... ok
+test locality_tests::a_gc_drops_the_cached_pack_of_a_removed_object ... ok
+test retry::tests::a_handle_sync_drops_the_copies_made_before_it ... ok
+test locality_tests::the_trust_floor_of_a_failed_lookup_outlives_a_crash ... ok
+test retry::tests::a_write_that_overlaps_a_failed_sync_is_written_again ... ok
+test retry::tests::a_handle_sync_repairs_a_short_error ... ok
+test locality_tests::a_pack_that_a_gc_changed_is_never_filled_from_its_stale_idx ... ok
+test run::tests::a_damaged_tombstone_never_reads_as_a_miss_or_a_put ... ok
+test run::tests::a_damaged_footer_or_table_is_refused ... ok
+test bloom::tests::the_false_positive_rate_is_about_one_percent ... ok
+test run::tests::a_damaged_page_gives_no_false_miss_and_the_verified_reads_are_corrupt ... ok
+test lock_tail_tests::gc_begin_waits_for_a_record_write_with_no_lock ... ok
+test run::tests::a_run_without_a_filter_round_trips ... ok
+test locality::tests::the_ram_stays_within_the_bounds ... ok
+test run::tests::each_tag_starts_a_new_page ... ok
+test run::tests::an_id_that_differs_only_in_the_shared_bytes_is_a_miss ... ok
+test lock_tail_tests::put_and_read_pass_a_held_record_write ... ok
+test run::tests::place_fields_of_each_width_round_trip ... ok
+test race_tests::a_read_error_in_the_per_pack_pass_changes_nothing ... ok
+test run::tests::the_writer_refuses_keys_out_of_order ... ok
+test race_tests::a_read_error_in_the_totals_pass_changes_nothing ... ok
+test run::tests::tombstones_are_in_the_filter ... ok
+test sync::tests::cell_then_stripe_panics - should panic ... ok
+test bloom::tests::no_false_negatives ... ok
+test run::tests::tombstones_round_trip_and_are_counted ... ok
+test sync::tests::exclusive_gate_holder_locks_cells_one_at_a_time ... ok
+test sync::tests::gate_after_a_lock_panics - should panic ... ok
+test sync::tests::gate_marker_then_cell_passes ... ok
+test sync::tests::guards_drop_out_of_order ... ok
+test run::tests::the_interpolation_search_finds_what_a_binary_search_finds ... ok
+test sync::tests::condvar_wait_takes_entry_off_the_stack ... ok
+test sync::tests::condvar_notify_wakes_waiter ... ok
+test sync::tests::mutex_counts_across_threads ... ok
+test sync::tests::rwlock_read_write ... ok
+test sync::tests::same_rank_short_and_store_nest ... ok
+test sync::tests::rank_names_in_message_are_checked ... ok
+test sync::tests::rename_then_rename_panics - should panic ... ok
+test sync::tests::same_stripe_twice_panics - should panic ... ok
+test sync::tests::short_then_store_passes ... ok
+test sync::tests::store_then_short_panics - should panic ... ok
+test run::tests::a_run_with_a_filter_answers_misses_without_a_page_read ... ok
+test sync::tests::strict_gate_with_gate_passes_and_short_needs_none ... ok
+test sync::tests::stripe_ascending_passes ... ok
+test sync::tests::strict_gate_cell_without_gate_panics - should panic ... ok
+test sync::tests::stripe_descending_panics - should panic ... ok
+test sync::tests::two_cells_panic_even_in_key_order - should panic ... ok
+test sync::tests::strict_gate_stripe_without_gate_panics - should panic ... ok
+test sync::tests::try_lock_busy_leaves_no_entry ... ok
+test run::tests::keys_with_the_prefix_of_a_page_fence_are_found ... ok
+test run::tests::ids_that_share_most_of_their_bytes_are_kept_apart ... ok
+test file::tests::nodes_stay_within_the_size_limits ... ok
+test race_tests::the_store_lock_is_free_during_the_gc_passes ... ok
+test run::tests::runs_of_each_size_round_trip ... ok
+test race_tests::a_read_error_in_a_later_group_leaves_the_earlier_groups_done ... ok
+test locality_tests::a_failed_clear_ends_the_gc_before_any_change ... ok
+test race_tests::a_read_error_after_pending_runs_changes_nothing ... ok
+test race_tests::an_object_put_in_an_early_group_keeps_its_pack_in_a_later_group ... ok
+test race_tests::an_object_put_in_a_later_group_keeps_its_pack ... ok
+test locality_tests::a_gc_that_cannot_change_its_packs_leaves_no_exact_idx_of_them ... ok
+test file::tests::a_long_rechunk_run_reads_big_pieces ... ok
+test locality_tests::hits_in_random_order_never_fill ... ok
+test locality_tests::a_failed_install_after_the_copies_leaves_the_source_pack_untrusted ... ok
+test race_tests::a_transient_read_error_in_a_gc_pass_changes_nothing ... ok
+test mark::tests::another_salt_gives_other_false_positives ... ok
+test file::tests::a_shift_at_the_start_changes_few_nodes ... ok
+test run::tests::a_run_round_trips_through_each_io ... ok
+test locality_tests::a_rewrite_in_pack_order_hits_the_cache_with_the_places_of_the_index ... ok
+test run::tests::a_run_of_real_places_needs_about_42_bytes_for_each_entry ... ok
+test lock_tail_tests::put_and_read_pass_a_held_keep_cap_wait ... ok
+test file::tests::a_splice_over_zeros_and_repeating_data_gives_the_same_key ... ok
+test locality_tests::a_crash_at_each_step_of_a_gc_never_leaves_a_stale_exact_idx ... ok
+test file::tests::a_splice_gives_the_same_key_as_a_full_write ... ok
+test file::tests::scattered_small_edits_read_little_more_than_they_rechunk ... ok
+test file::tests::a_small_splice_reuses_old_nodes ... ok
+test file::tests::a_splice_across_many_leaves_gives_the_same_key ... ok
+
+test result: ok. 128 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.13s
+
+     Running tests/file_tests.rs (/target/cov/debug/build/chunk-store/1849281fc3549ee9/out/file_tests-1849281fc3549ee9)
+
+running 10 tests
+test an_empty_file_has_a_key_and_reads_nothing ... ok
+test a_missing_object_is_an_error_not_wrong_data ... ok
+test zeros_are_stored_once ... ok
+test a_clone_of_a_writer_finishes_the_content_so_far ... ok
+test zero_chunks_need_no_read_of_the_store ... ok
+test zero_chunks_read_back_without_the_store ... ok
+test the_same_content_twice_adds_nothing ... ok
+test reads_return_the_written_bytes_at_any_offset ... ok
+test the_key_does_not_depend_on_the_write_sizes ... ok
+test a_large_file_uses_a_manifest_tree ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.37s
+
+     Running tests/gc_fault_tests.rs (/target/cov/debug/build/chunk-store/58a47cdc9549c92e/out/gc_fault_tests-58a47cdc9549c92e)
+
+running 7 tests
+test on_runs::a_damaged_page_in_the_gc_passes_requests_a_rebuild ... ok
+test on_runs::a_failed_install_changes_no_pack ... ok
+test on_runs::a_failed_pack_removal_after_the_install ... ok
+test a_gc_that_fails_on_a_sync_loses_nothing ... ok
+test a_gc_that_fails_on_a_read_loses_nothing ... ok
+test a_crash_in_the_middle_of_gc_finish_loses_nothing ... ok
+test a_gc_that_fails_in_the_middle_of_compaction_loses_nothing ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+     Running tests/gc_full_memory_tests.rs (/target/cov/debug/build/chunk-store/a500c1c461feefd1/out/gc_full_memory_tests-a500c1c461feefd1)
+
+running 1 test
+test full_gc_ram_does_not_grow_with_the_object_count ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.17s
+
+     Running tests/gc_full_tests.rs (/target/cov/debug/build/chunk-store/8e4481db5f54f534/out/gc_full_tests-8e4481db5f54f534)
+
+running 7 tests
+test a_full_gc_without_a_temp_dir_fails_before_it_changes_anything ... ok
+test a_writable_open_removes_the_temp_files_of_a_crash ... ok
+test objects_put_or_read_during_a_full_gc_survive ... ok
+test tiny_sort_chunks_force_several_merge_passes ... ok
+test a_full_gc_compacts_punched_packs_with_no_dead_entry_left ... ok
+test a_full_gc_frees_what_a_filter_gc_and_punching_left ... ok
+test a_full_gc_that_fails_loses_nothing_and_leaves_no_temp_files ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/gc_mark_tests.rs (/target/cov/debug/build/chunk-store/86cd6ad8ebaae46e/out/gc_mark_tests-86cd6ad8ebaae46e)
+
+running 6 tests
+test an_empty_filter_removes_everything ... ok
+test objects_read_before_gc_finish_survive_when_the_touched_set_spills_to_a_filter ... ok
+test a_filter_mark_keeps_every_live_object_and_removes_most_dead_ones ... ok
+test a_false_positive_of_one_gc_is_removed_by_a_later_gc_with_another_salt ... ok
+test a_saturated_filter_keeps_every_live_object ... ok
+test a_filter_mark_removes_a_subset_of_what_an_exact_mark_removes ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.65s
+
+     Running tests/gc_tests.rs (/target/cov/debug/build/chunk-store/0f81db80aa0ba37e/out/gc_tests-0f81db80aa0ba37e)
+
+running 13 tests
+test on_runs::a_merge_after_gc_drops_the_tombstones_and_removed_objects_stay_missing ... ok
+test on_runs::a_merge_between_gc_begin_and_gc_finish ... ok
+test on_runs::the_put_dedup_check_of_a_removed_object_writes_it ... ok
+test on_runs::removed_objects_stay_missing_for_each_kind_of_pack ... ok
+test an_object_put_during_the_gc_is_kept_even_if_the_mark_missed_it ... ok
+test on_runs::a_gc_with_an_empty_memtable_moves_the_hwm_past_the_changed_packs ... ok
+test on_runs::many_packs_gc_with_a_small_memtable ... ok
+test on_runs::a_gc_over_many_packs_keeps_a_bounded_number_of_handles_open ... ok
+test a_gc_that_keeps_everything_changes_nothing ... ok
+test a_gc_with_nothing_live_deletes_every_pack ... ok
+test live_objects_stay_readable_and_mostly_dead_packs_are_compacted ... ok
+test compaction_into_an_empty_active_pack_from_open_keeps_every_live_object ... ok
+test the_sweep_calls_the_pacer_between_pack_groups ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s
+
+     Running tests/index_crash_tests.rs (/target/cov/debug/build/chunk-store/1325362547a1a9a0/out/index_crash_tests-1325362547a1a9a0)
+
+running 16 tests
+test a_crash_after_the_run_file_before_the_manifest ... ok
+test a_failed_run_sync ... ok
+test a_failed_active_pack_sync_before_a_flush ... ok
+test a_crash_after_the_manifest ... ok
+test a_power_loss_with_unsynced_puts_after_a_flush ... ok
+test a_crash_after_the_merge_manifest_before_the_inputs_are_removed ... ok
+test gc_copies_are_not_counted_twice_after_a_failed_tombstone_flush ... ok
+test a_crash_after_the_merge_output_before_the_manifest ... ok
+test a_damaged_page_found_by_the_merge_thread_leads_to_a_rebuild ... ok
+test a_failed_merge_on_the_thread_is_tried_again_after_the_next_flush ... ok
+test a_crash_during_the_replay_of_a_rebuild ... ok
+test a_read_error_during_a_merge_keeps_the_store_working ... ok
+test background_merges_keep_the_run_count_small ... ok
+test a_drop_during_background_merges_returns ... ok
+test the_idle_merge_waits_for_the_idle_delay ... ok
+test the_idle_merge_leaves_at_most_two_runs_with_the_same_answers ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+     Running tests/index_tests.rs (/target/cov/debug/build/chunk-store/e8de3db347e22532/out/index_tests-e8de3db347e22532)
+
+running 38 tests
+test a_damaged_newer_page_never_shows_an_older_entry ... ok
+test a_damaged_tombstone_never_shows_the_older_entry ... ok
+test a_flush_inside_the_active_pack_is_replayed_from_its_offset ... ok
+test a_damaged_record_below_the_hwm_costs_only_itself ... ok
+test an_active_pack_cut_below_the_hwm_is_rebuilt_from_the_packs ... ok
+test a_repair_that_stops_after_the_idx_is_done_again_at_the_next_open ... ok
+test a_merge_with_nothing_left_writes_no_run ... ok
+test a_read_only_store_refuses_a_merge ... ok
+test a_read_only_open_writes_nothing ... ok
+test a_read_only_open_keeps_an_orphan_run ... ok
+test stats_are_the_same_after_a_reopen ... ok
+test a_gc_that_cannot_read_the_index_changes_nothing ... ok
+test a_read_error_at_open_is_not_damage ... ok
+test a_damaged_page_found_by_a_merge_leads_to_a_rebuild ... ok
+test an_orphan_run_is_removed_at_a_writable_open ... ok
+test a_damaged_manifest_is_rebuilt_from_the_packs ... ok
+test a_damaged_run_page_gives_no_wrong_data ... ok
+test a_rebuild_request_rebuilds_the_index_at_the_next_writable_open ... ok
+test a_manifest_of_another_version_is_rebuilt_from_the_packs ... ok
+test a_damaged_run_footer_is_rebuilt ... ok
+test a_manifest_that_names_a_missing_run_is_rebuilt ... ok
+test a_gc_removal_is_a_durable_tombstone ... ok
+test a_read_only_store_keeps_reading_after_a_merge_removed_its_runs ... ok
+test a_tombstone_hides_a_put_in_an_older_run_after_a_crash ... ok
+test a_store_without_a_manifest_is_indexed_at_its_first_writable_open ... ok
+test merge_index_all_drops_the_tombstones ... ok
+test a_merge_of_newer_runs_keeps_the_tombstones ... ok
+test a_damaged_run_entry_place_is_never_read_and_asks_for_a_rebuild ... ok
+test merges_keep_the_run_count_small ... ok
+test objects_are_found_through_runs_after_a_reopen ... ok
+test a_cold_open_reads_no_entry_page ... ok
+test the_index_ram_is_about_two_bytes_per_object ... ok
+test hits_read_one_page_and_misses_read_almost_none ... ok
+test the_same_flow_works_through_retrying_io ... ok
+test lookups_never_miss_a_stored_object_during_background_merges ... ok
+test a_hit_on_files_reads_the_run_page_in_place ... ok
+test lookups_outside_the_lock_never_miss_a_stored_object ... ok
+test a_failed_compaction_is_counted_once_after_a_reopen ... ok
+
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
+
+     Running tests/io_tests.rs (/target/cov/debug/build/chunk-store/90b707102348ddd5/out/io_tests-90b707102348ddd5)
+
+running 10 tests
+test a_read_error_gives_no_data_not_wrong_data ... ok
+test after_a_failed_sync_no_later_sync_reports_success ... ok
+test a_damaged_record_at_the_tail_is_cut_and_the_rest_stays ... ok
+test a_full_disk_fails_the_put_and_the_store_works_again_after ... ok
+test a_crash_keeps_every_synced_object_and_no_wrong_data ... ok
+test a_gc_that_fails_before_its_copies_are_durable_loses_nothing ... ok
+test objects_synced_without_close_survive_reopen ... ok
+test objects_survive_close_and_reopen ... ok
+test reads_from_many_packs_keep_few_files_open ... ok
+test gc_keeps_the_live_set_and_frees_the_rest ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running tests/mapped_run_tests.rs (/target/cov/debug/build/chunk-store/3cd6d4447704c152/out/mapped_run_tests-3cd6d4447704c152)
+
+running 3 tests
+test the_guard_sees_a_write_to_a_mapped_run ... ok
+test a_run_file_cut_before_the_open_is_rebuilt_not_mapped_past_its_end ... ok
+test lookups_on_files_stay_right_while_merges_and_gc_replace_the_runs ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s
+
+     Running tests/punch_tests.rs (/target/cov/debug/build/chunk-store/ce7a7400f2a08c48/out/punch_tests-ce7a7400f2a08c48)
+
+running 8 tests
+test without_hole_support_gc_keeps_dead_records_and_compacts_later ... ok
+test a_failed_index_write_before_the_punch_punches_nothing ... ok
+test a_failed_punch_loses_no_live_object ... ok
+test a_crash_after_the_punch_loses_no_live_object ... ok
+test a_mostly_live_pack_is_punched_and_the_live_objects_stay ... ok
+test punch_twice_is_safe ... ok
+test a_dead_object_put_again_after_the_punch_is_stored_again ... ok
+test a_punched_pack_without_its_index_is_resynced_not_cut ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+
+     Running tests/retry_tests.rs (/target/cov/debug/build/chunk-store/15371986c9fbd6a2/out/retry_tests-15371986c9fbd6a2)
+
+running 17 tests
+test a_cut_before_the_retry_is_kept ... ok
+test a_plain_retry_of_a_failed_sync_loses_the_data ... ok
+test a_lasting_sync_error_still_stops_the_store ... ok
+test a_failed_handle_sync_fails_the_store ... ok
+test a_single_sync_error_is_repaired_and_the_data_is_durable ... ok
+test a_short_error_of_an_index_write_is_retried ... ok
+test a_short_sync_error_is_repaired_and_the_data_is_durable ... ok
+test a_put_that_fills_a_pack_does_not_wait_for_its_seal ... ok
+test puts_go_on_while_a_store_sync_waits_for_the_disk ... ok
+test puts_go_on_while_a_store_sync_waits_for_a_seal ... ok
+test the_copy_of_unsynced_writes_stays_below_the_keep_limit ... ok
+test writes_after_the_start_of_a_background_sync_are_kept_until_synced ... ok
+test a_write_does_not_wait_for_a_slow_background_sync ... ok
+test a_failed_background_sync_is_written_again_and_nothing_is_lost ... ok
+test sync_waits_for_the_background_sync_and_the_rest ... ok
+test a_write_waits_for_the_sync_at_the_cap ... ok
+test a_put_that_waits_too_long_for_a_sync_gives_a_busy_error_and_the_store_goes_on ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.23s
+
+     Running tests/store_tests.rs (/target/cov/debug/build/chunk-store/bfb41a770545a4fc/out/store_tests-bfb41a770545a4fc)
+
+running 11 tests
+test put_then_get_returns_the_bytes ... ok
+test compressible_data_is_compressed_and_random_data_is_not ... ok
+test the_same_bytes_are_stored_once ... ok
+test a_flipped_byte_in_a_record_is_detected ... ok
+test the_compression_level_can_change_and_old_objects_stay_readable ... ok
+test objects_survive_a_reopen_after_sync ... ok
+test a_torn_tail_of_the_active_pack_is_cut_and_the_rest_kept ... ok
+test a_corrupt_index_is_ignored_and_rebuilt ... ok
+test a_sealed_pack_without_its_index_is_scanned_and_indexed ... ok
+test chunks_cover_the_input_and_have_the_configured_sizes ... ok
+test one_inserted_byte_changes_only_the_chunks_near_it ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running unittests src/main.rs (/target/cov/debug/build/index-bench/db3e4f623b2c99b0/out/index_bench-db3e4f623b2c99b0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli_tests.rs (/target/cov/debug/build/index-bench/745277d05ba42513/out/cli_tests-745277d05ba42513)
+
+running 18 tests
+test lookup_refuses_a_dir_without_the_marker ... ok
+test bad_arguments_exit_with_code_2 ... ok
+test create_refuses_a_non_empty_dir ... ok
+test recover_refuses_a_dir_without_the_marker ... ok
+test open_refuses_a_dir_without_the_marker ... ok
+test recover_refuses_a_store_with_saved_files_left ... ok
+test recover_on_a_one_pack_store_takes_the_active_pack_path ... ok
+test lookup_finds_hits_not_misses_and_does_not_change_the_store ... ok
+test lookup_only_times_one_phase_and_counts_its_faults ... ok
+test open_reports_rss_per_object ... ok
+test drop_caches_fails_clearly_or_measures_cold ... ok
+test create_counts_the_whole_store ... ok
+test open_prints_the_index_keys ... ok
+test recover_counts_only_the_scanned_packs ... ok
+test recover_on_a_multi_pack_store_restores_every_idx ... ok
+test gc_reports_the_lock_hold ... ok
+test settle_merges_the_runs_of_an_idle_store ... ok
+test run_creates_and_opens_a_small_store ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.44s
+
+     Running unittests src/lib.rs (/target/cov/debug/build/metadata/a501862fc796fc37/out/metadata-a501862fc796fc37)
+
+running 166 tests
+test inode::tests::test_extension_round_trip_72_bytes ... ok
+test inode::tests::test_deserialize_rejects_wrong_length ... ok
+test inode::tests::test_new_directory_nlinks ... ok
+test inode::tests::test_new_file_nlinks ... ok
+test inode::tests::test_rdev_zero_keeps_56_byte_format ... ok
+test inode::tests::test_round_trip_max_values ... ok
+test inode::tests::test_round_trip_zero_ino ... ok
+test inode::tests::test_round_trip ... ok
+test inode::tests::test_serialize_size_is_56 ... ok
+test inode_map::tests::test_deserialize_rejects_bad_length ... ok
+test inode_map::tests::test_insert_and_get ... ok
+test inode_map::tests::test_new_starts_at_two ... ok
+test inode_map::tests::test_next_ino_after_deserialize_is_max_plus_one ... ok
+test inode_map::tests::test_remove ... ok
+test inode_map::tests::test_serialize_single_entry ... ok
+test snapshot::tests::test_snapshot_entry_no_name ... ok
+test inode_map::tests::test_serialize_empty_round_trip ... ok
+test inode_map::tests::test_serialize_multiple_entries ... ok
+test inode::tests::prop_round_trip ... ok
+test snapshot::tests::test_snapshot_entry_fields ... ok
+test snapshot::tests::test_snapshot_record_name_len_zero_for_none ... ok
+test segment::order_tests::segments_sort_by_id_past_six_digits ... ok
+test snapshot::tests::test_snapshot_record_round_trip_no_name ... ok
+test snapshot::tests::test_snapshot_record_parse_returns_none_on_short_payload ... ok
+test snapshot::tests::test_snapshot_record_round_trip_with_name ... ok
+test directory::tests::test_remove_dot_rejected ... ok
+test store::tests::hot_path_put_error_fails_the_next_commit_and_puts_are_synced ... ok
+test store::tests::cold_dir_load_does_not_block_other_inodes ... ok
+test store::tests::manifest_read_does_not_block_inode_changes ... ok
+test manifest::tests::test_empty_manifest_round_trip ... ok
+test directory::tests::test_multiple_entries_round_trip ... ok
+test directory::tests::test_lookup_finds_entry ... ok
+test directory::tests::dir_list_interns_same_digest_as_per_change_path ... ok
+test manifest::tests::test_single_block_round_trip ... ok
+test directory::tests::test_remove_dir_entry_gone_from_list ... ok
+test directory::tests::test_add_dot_rejected ... ok
+test directory::tests::test_add_dir_entry_duplicate_rejected ... ok
+test directory::tests::test_remove_dotdot_rejected ... ok
+test directory::tests::test_create_dir_entries_dot_points_to_self ... ok
+test manifest::tests::test_empty_and_nonempty_keys_differ ... ok
+test directory::tests::test_lookup_not_found ... ok
+test store::tests::test_create_dir_under_file_returns_not_a_directory ... ok
+test directory::tests::test_remove_nonexistent_returns_not_found ... ok
+test directory::tests::test_add_dir_entry_appears_in_list ... ok
+test directory::tests::test_original_entry_list_unchanged_after_add ... ok
+test directory::tests::test_create_dir_entries_has_dot_and_dotdot ... ok
+test manifest::tests::test_two_different_manifests_produce_different_keys ... ok
+test inode::tests::test_intern_and_load_roundtrip ... ok
+test manifest::tests::test_ordering_preserved ... ok
+test inode_map::tests::test_intern_and_load_round_trip ... ok
+test manifest::tests::test_multiple_blocks_round_trip ... ok
+test store::map_decode_tests::a_map_with_an_overflowing_count_is_corrupt ... ok
+test segment::writer::sync_tests::sync_skips_disk_flush_when_nothing_was_written ... ok
+test store::tests::create_directory_at_adds_the_entry_or_nothing ... ok
+test store::tests::test_create_dir_under_nonexistent_parent_returns_not_found ... ok
+test store::tests::missing_inode_modify_inode_is_not_found_and_creates_nothing ... ok
+test store::tests::atomic_modify_inode_loses_no_change ... ok
+test store::tests::test_create_directory_shows_in_parent ... ok
+test store::tests::new_store_root_dir_has_current_times ... ok
+test store::tests::test_delete_inode_drops_manifest_xattrs_and_dir_entries ... ok
+test inode_map::tests::prop_serialize_round_trip ... ok
+test store::tests::size_change_in_modify_inode_moves_logical_bytes ... ok
+test store::tests::flush_install_does_not_resurrect_a_deleted_inode ... ok
+test store::tests::create_inode_at_takes_the_number_and_raises_the_allocator ... ok
+test store::tests::test_inode_count_empty ... ok
+test store::tests::test_delete_nonexistent_returns_not_found ... ok
+test store::tests::test_hashmap_find_by_version_o1 ... ok
+test store::tests::test_empty_store_commit_reload ... ok
+test store::tests::test_hashmap_find_by_name_o1 ... ok
+test store::tests::late_older_install_does_not_overwrite_a_newer_change ... ok
+test store::tests::test_commit_returns_nonzero_digest ... ok
+test store::tests::test_inode_count_tracks_lifecycle ... ok
+test store::tests::test_hashmap_list_snapshots_sorted ... ok
+test store::tests::test_inode_crud ... ok
+test store::tests::test_inode_numbers_are_monotonic ... ok
+test store::tests::test_directory_stable_across_reload ... ok
+test store::tests::test_commit_and_reload ... ok
+test store::tests::test_hashmap_10k_snapshots_under_1ms ... ok
+test store::tests::test_link_duplicate_name_rejected ... ok
+test store::tests::test_list_directory_non_dir_returns_error ... ok
+test store::tests::test_saturated_refcount_count ... ok
+test store::tests::test_filestorage_persistence_round_trip ... ok
+test store::tests::test_lookup_and_link ... ok
+test store::tests::test_manifest_round_trip ... ok
+test store::tests::test_names_longer_than_name_max_are_rejected ... ok
+test store::tests::cached_dirs_and_inodes_survive_eviction_commit_and_reload ... ok
+test store::tests::test_set_snapshots_loads_snapshot_list ... ok
+test store::tests::test_inode_count_after_reload ... ok
+test store::tests::test_new_has_root_dir ... ok
+test store::tests::test_io_accessor_content_survives_reload ... ok
+test store::tests::test_refcount_decrement_saturated ... ok
+test store::tests::test_set_snapshots_populates_both_indexes ... ok
+test store::tests::test_inode_stability_across_reload ... ok
+test store::tests::test_unlink_removes_entry ... ok
+test store::tests::test_xattr_on_directory ... ok
+test store::tests::test_refcount_saturates ... ok
+test store::tests::test_xattr_overwrite ... ok
+test store::tests::test_manifest_stable_across_reload ... ok
+test store::tests::test_root_ino_is_one ... ok
+test store::tests::test_update_nonexistent_returns_not_found ... ok
+test store::tests::test_xattr_get_not_found ... ok
+test store::tests::test_xattr_list ... ok
+test store_io::tests::a_node_reads_back_and_equal_bytes_share_a_key ... ok
+test store::tests::test_xattr_list_empty ... ok
+test store::tests::test_xattr_large_value ... ok
+test store::tests::test_xattr_remove ... ok
+test store::tests::test_xattr_set_get ... ok
+test wal::per_op::tests::op_record_reaches_the_file_without_a_sync ... ok
+test store::tests::test_xattr_remove_not_found ... ok
+test wal::per_op::tests::append_returns_while_the_writer_is_held ... ok
+test store::tests::test_create_snapshot_returns_entry ... ok
+test store::tests::test_create_snapshot_adds_to_both_indexes ... ok
+test store::tests::test_find_snapshot_returns_none_for_unknown ... ok
+test wal::per_op::tests::cut_opens_the_new_segment_before_the_writer ... ok
+test store_io::tests::a_missing_node_says_missing ... ok
+test wal::flush_on_fsync::tests::ram_stays_at_most_the_cap_with_no_fsync ... ok
+test wal::per_op::tests::append_and_write_out_pass_a_parked_fsync ... ok
+test wal::buffered::tests::buffered_cut_opens_the_new_segment_before_the_writer ... ok
+test wal::per_op::tests::write_out_twice_writes_each_record_once ... ok
+test store::tests::test_find_snapshot_by_name ... ok
+test wal::per_op::tests::records_reach_the_segment_in_lsn_order ... ok
+test store::tests::test_create_snapshot_auto_increments_version ... ok
+test xattr::tests::test_binary_value_round_trip ... ok
+test wal::flush_on_fsync::tests::append_holds_records_until_a_write_out_past_the_cap ... ok
+test store::tests::test_xattr_stable_across_reload ... ok
+test store_io::tests::sync_written_syncs_only_after_puts ... ok
+test xattr::tests::test_empty_round_trip ... ok
+test xattr::tests::test_empty_value ... ok
+test xattr::tests::test_get_xattr_entry_found ... ok
+test xattr::tests::test_get_xattr_entry_not_found ... ok
+test xattr::tests::test_large_value_round_trip ... ok
+test xattr::tests::test_list_xattr_names ... ok
+test xattr::tests::test_list_xattr_names_empty ... ok
+test xattr::tests::test_multiple_attrs_round_trip ... ok
+test xattr::tests::test_remove_xattr_entry_not_found_returns_false ... ok
+test xattr::tests::test_remove_xattr_entry_removes ... ok
+test xattr::tests::test_set_xattr_entry_insert ... ok
+test wal::periodic::tests::ram_stays_at_most_the_cap_with_no_fsync ... ok
+test xattr::tests::test_set_xattr_entry_replace ... ok
+test xattr::tests::test_single_attr_round_trip ... ok
+test wal::per_op::tests::a_failed_record_write_fails_until_a_cut ... ok
+test xattr::tests::test_intern_load_empty ... ok
+test xattr::tests::test_multiple_attrs_coexist_independently ... ok
+test xattr::tests::test_intern_load_multiple_attrs ... ok
+test store::tests::test_snapshots_survive_segment_replay ... ok
+test xattr::tests::test_intern_load_single_attr ... ok
+test xattr::tests::test_intern_load_large_value ... ok
+test wal::flush_on_fsync::tests::failed_cap_write_out_fails_fsync_until_rotate ... ok
+test store::tests::test_snapshot_roots_no_snapshots_returns_current_root ... ok
+test wal::buffered::tests::buffered_write_out_passes_a_parked_record_write ... ok
+test wal::per_op::tests::a_failed_cut_record_write_fails_until_the_next_cut ... ok
+test store::tests::test_find_snapshot_by_version_string ... ok
+test wal::per_op::tests::settle_syncs_the_old_segments_with_the_behind_lock_released ... ok
+test wal::tests::cut_keeps_unwritten_appends_in_lsn_order ... ok
+test wal::per_op::tests::a_commit_after_a_failed_write_with_queued_records_succeeds ... ok
+test wal::tests::rotate_after_unwritten_appends_starts_with_the_seed_only ... ok
+test wal::flush_on_fsync::tests::a_buffered_commit_after_a_failed_write_with_queued_records_succeeds ... ok
+test wal::flush_on_fsync::tests::a_failed_write_out_fails_fsync_until_a_commit_and_the_commit_works ... ok
+test wal::per_op::tests::store_log_op_writes_one_record_and_a_failed_write_out_fails_fsync ... ok
+test store::tests::test_snapshot_roots_includes_all_roots ... ok
+test store::tests::test_list_snapshots_sorted_by_version ... ok
+test wal::periodic::tests::failed_timer_sync_fails_fsync_until_rotate ... ok
+test wal::per_op::tests::the_writer_lock_is_free_during_a_record_write ... ok
+test wal::per_op::tests::flush_and_sync_waits_for_a_parked_record_write ... ok
+test wal::periodic::tests::timer_syncs_and_drop_stops_it ... ok
+test wal::tests::no_deadlock_between_append_cut_and_sync ... ok
+
+test result: ok. 166 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.32s
+
+     Running tests/commit_bench.rs (/target/cov/debug/build/metadata/8750498503d25dfc/out/commit_bench-8750498503d25dfc)
+
+running 1 test
+test commit_time_vs_file_count ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/create_bench.rs (/target/cov/debug/build/metadata/1427ab0633813a59/out/create_bench-1427ab0633813a59)
+
+running 1 test
+test create_cost ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gc_tests.rs (/target/cov/debug/build/metadata/a5a8970993ce6f6d/out/gc_tests-a5a8970993ce6f6d)
+
+running 10 tests
+test background_gc_tests::test_background_gc_handle_shutdown ... ok
+test live_objects_fails_on_a_missing_root ... ok
+test test_compact_segment_empty_produces_empty_output ... ok
+test test_compact_segment_crash_safety_atomic_rename ... ok
+test test_compact_segment_retains_all_entries ... ok
+test test_snapshot_roots_includes_all_anchors ... ok
+test test_gc_preserves_snapshot_blocks ... ok
+test background_gc_tests::test_background_gc_shutdown_does_not_wait_for_interval ... ok
+test background_gc_tests::test_background_gc_exits_on_store_drop ... ok
+test background_gc_tests::test_background_gc_runs_cycle ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/node_crash_tests.rs (/target/cov/debug/build/metadata/e039880a0dc5788d/out/node_crash_tests-e039880a0dc5788d)
+
+running 4 tests
+test a_node_read_error_keeps_its_kind ... ok
+test a_failed_node_sync_fails_the_commit ... ok
+test a_committed_root_loads_after_a_crash ... ok
+test a_small_change_stores_little_at_the_next_commit ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.48s
+
+     Running tests/refcount_tests.rs (/target/cov/debug/build/metadata/568399d217690a6e/out/refcount_tests-568399d217690a6e)
+
+running 5 tests
+test test_decrement_refcount ... ok
+test test_two_inodes_sharing_same_content_digest_have_refcount_two ... ok
+test test_increment_refcount_from_zero ... ok
+test test_get_refcount_unknown_returns_zero ... ok
+test test_refcounts_survive_commit_load_round_trip ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/segment_frame_tests.rs (/target/cov/debug/build/metadata/3a9be136ecafdfde/out/segment_frame_tests-3a9be136ecafdfde)
+
+running 4 tests
+test a_repeated_record_is_out_of_sequence ... ok
+test records_read_back_in_order ... ok
+test a_changed_byte_stops_the_read_at_that_record ... ok
+test a_record_cut_in_the_middle_is_ignored ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/segment_store_tests.rs (/target/cov/debug/build/metadata/61b08abbea962c5c/out/segment_store_tests-61b08abbea962c5c)
+
+running 4 tests
+test test_dirty_mount_detected_when_lock_exists ... ok
+test test_mount_lock_created_and_removed ... ok
+test test_load_store_from_segments_returns_root ... ok
+test test_wal_logs_root_update_on_commit ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/segment_tests.rs (/target/cov/debug/build/metadata/47bb62ce030f39ee/out/segment_tests-47bb62ce030f39ee)
+
+running 6 tests
+test test_unknown_record_type_skipped ... ok
+test test_truncated_record_is_skipped ... ok
+test test_empty_segment_returns_zero_entries ... ok
+test test_segment_header_magic_and_version ... ok
+test test_round_trip_root_update_entries ... ok
+test test_round_trip_root_update ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/wal_tests.rs (/target/cov/debug/build/metadata/eee79b7352b8999e/out/wal_tests-eee79b7352b8999e)
+
+running 9 tests
+test test_no_wal_flush_and_sync ... ok
+test test_no_wal_log_mutation ... ok
+test test_flush_on_fsync_wal_buffers_entries ... ok
+test test_no_wal_shutdown ... ok
+test test_flush_on_fsync_wal_flush_writes_entries ... ok
+test test_per_op_wal_log_mutation_snapshot ... ok
+test test_per_op_wal_flush_and_sync ... ok
+test test_per_op_wal_log_mutation_root_update ... ok
+test test_periodic_wal_shutdown_flushes_entries ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/write_log_tests.rs (/target/cov/debug/build/metadata/7f39344ddf56b3fb/out/write_log_tests-7f39344ddf56b3fb)
+
+running 9 tests
+test a_commit_cuts_the_log ... ok
+test a_torn_record_at_the_scan_ends_both_passes ... ok
+test an_op_after_an_unknown_last_record_is_not_read ... ok
+test a_record_cut_after_the_scan_is_an_error ... ok
+test records_added_after_the_scan_are_not_read ... ok
+test the_log_continues_into_later_segments ... ok
+test a_commit_makes_its_objects_durable_before_the_root ... ok
+test records_after_the_last_root_come_back_in_order ... ok
+test each_commit_rotates_the_log_to_one_segment_and_keeps_snapshots ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running unittests src/lib.rs (/target/cov/debug/build/slicefs-cli/69f7c1e362439898/out/slicefs_cli-69f7c1e362439898)
+
+running 380 tests
+test backend::tests::test_as_mount_option_fskit ... ok
+test backend::tests::test_detect_version_found ... ok
+test backend::tests::test_detect_version_no_dylib_returns_none ... ok
+test backend::tests::test_detect_version_ignores_partial_match ... ok
+test backend::tests::test_detect_version_multi_digit ... ok
+test backend::tests::test_detect_version_nonexistent_dir_returns_none ... ok
+test backend::tests::test_detect_version_unrelated_files_ignored ... ok
+test backend::tests::test_parse_backend_fskit ... ok
+test backend::tests::test_parse_backend_invalid ... ok
+test backend::tests::test_detect_version_with_multiple_dylibs_returns_first_found ... ok
+test backend::tests::test_parse_backend_smb_and_nfs_are_removed ... ok
+test backend::tests::test_detect_version_zero_components ... ok
+test backend::tests::test_select_backend_needs_fuse_t_1_2 ... ok
+test backend::tests::test_select_backend_default_is_fskit ... ok
+test backend::tests::test_select_backend_without_fskit_is_an_error_with_a_hint ... ok
+test cli::tests::dirty_size_defaults_are_the_constants ... ok
+test cli::tests::test_json_flag_after_subcommand ... ok
+test cli::tests::test_mount_extra_options ... ok
+test cli::tests::test_json_flag_global ... ok
+test cli::tests::test_mount_basic ... ok
+test cli::tests::test_mount_with_auto_snapshot_flag ... ok
+test cli::tests::test_hash_flag ... ok
+test cli::tests::test_mount_with_snapshot_flag ... ok
+test cli::tests::a_small_budget_alone_gives_a_limit_of_the_budget ... ok
+test cli::tests::test_scrub_subcommand ... ok
+test cli::tests::test_no_json_flag_default ... ok
+test cli::tests::dirty_size_options_parse ... ok
+test cli::tests::test_seed ... ok
+test cli::tests::test_snapshot_create_with_name ... ok
+test cli::tests::test_snapshot_create_no_name ... ok
+test cli::tests::test_snapshot_list ... ok
+test cli::tests::test_stats_subcommand ... ok
+test cli::tests::test_snapshot_switch_by_name ... ok
+test cli::tests::test_snapshot_switch_by_version ... ok
+test cli::tests::test_unmount ... ok
+test content::tests::compression_specs_parse_to_zstd_levels ... ok
+test cli::tests::dirty_time_options_parse ... ok
+test content::tests::dirty_bytes_parse_with_binary_suffixes ... ok
+test cli::tests::workers_zero_is_refused ... ok
+test filesystem::tests::dirty_move_keeps_the_sum ... ok
+test cli::tests::workers_absent_is_none ... ok
+test cli::tests::workers_above_eight_is_accepted ... ok
+test content::tests::dirty_bytes_refuse_bad_values ... ok
+test content::tests::digest_and_id_convert_both_ways ... ok
+test cli::tests::test_unmount_with_store ... ok
+test cli::tests::workers_flag_parses ... ok
+test filesystem::tests::test_create_full_with_o_trunc ... ok
+test filesystem::tests::test_create_applies_umask ... ok
+test content::tests::a_new_store_gets_the_header_and_data_with_no_header_is_refused ... ok
+test filesystem::tests::test_inode_to_file_attr_blocks_calculation ... ok
+test filesystem::tests::test_inode_to_file_attr_directory ... ok
+test filesystem::tests::test_flush_basic ... ok
+test filesystem::tests::test_flush_noop_for_unknown_fh ... ok
+test filesystem::tests::test_inode_to_file_attr_negative_mtime ... ok
+test filesystem::tests::test_inode_to_file_attr_symlink ... ok
+test filesystem::tests::test_inode_to_file_attr_regular_file ... ok
+test filesystem::tests::test_create_duplicate_name_fails ... ok
+test filesystem::tests::test_create_allocates_unique_inos ... ok
+test filesystem::tests::test_getattr_nonexistent_returns_not_found ... ok
+test filesystem::tests::test_auto_snapshot_setter ... ok
+test filesystem::tests::test_create_full_duplicate_fails ... ok
+test filesystem::tests::test_getattr_root_is_directory ... ok
+test filesystem::tests::test_getattr_root_returns_directory ... ok
+test filesystem::tests::test_fsync_buffered_mode ... ok
+test filesystem::tests::test_meta_error_to_errno ... ok
+test filesystem::tests::test_meta_error_to_errno_all_variants ... ok
+test filesystem::tests::test_meta_error_to_fuse_errno_all_variants ... ok
+test filesystem::tests::test_getattr_created_file ... ok
+test filesystem::tests::test_fsync_empty_file_is_noop ... ok
+test filesystem::tests::test_fsync_noop_for_readonly_handle ... ok
+test filesystem::tests::test_fsync_commits_data ... ok
+test filesystem::tests::test_create_full_basic ... ok
+test filesystem::tests::test_getxattr_nonexistent_attr ... ok
+test filesystem::tests::test_io_accessor ... ok
+test filesystem::tests::test_link_directory_fails ... ok
+test filesystem::tests::test_fsync_then_write_then_release ... ok
+test filesystem::tests::test_link_full_basic ... ok
+test filesystem::tests::test_meta_accessor ... ok
+test filesystem::tests::test_link_creates_hard_link ... ok
+test filesystem::tests::test_lookup_dot_returns_self ... ok
+test filesystem::tests::test_listxattr_empty ... ok
+test filesystem::tests::test_lookup_created_file ... ok
+test filesystem::tests::test_lookup_nonexistent_returns_notfound ... ok
+test filesystem::tests::test_mkdir_creates_directory ... ok
+test filesystem::tests::a_switch_that_moves_pending_writes_over_the_limit_rebases_at_once ... ok
+test filesystem::tests::test_lookup_nonexistent_returns_enoent ... ok
+test filesystem::tests::test_mkdir_full_basic ... ok
+test filesystem::tests::test_open_wronly ... ok
+test filesystem::tests::test_open_rdwr ... ok
+test filesystem::tests::test_mkdir_duplicate_fails ... ok
+test filesystem::tests::test_read_returns_correct_bytes ... ok
+test filesystem::tests::test_mknod_creates_file_without_fh ... ok
+test filesystem::tests::test_open_rdonly ... ok
+test filesystem::tests::test_mknod_char_device_succeeds ... ok
+test filesystem::tests::test_read_empty_file ... ok
+test filesystem::tests::test_mknod_full_basic ... ok
+test filesystem::tests::test_destroy_with_auto_snapshot ... ok
+test filesystem::tests::test_read_during_write_buffered ... ok
+test filesystem::tests::test_read_during_write_streaming ... ok
+test filesystem::tests::test_readdir_root_contains_dot_entries ... ok
+test filesystem::tests::test_read_beyond_eof_returns_empty ... ok
+test filesystem::tests::test_open_with_trunc ... ok
+test filesystem::tests::test_readdir_root_has_dot_dotdot ... ok
+test filesystem::tests::test_readlink_empty_manifest ... ok
+test filesystem::tests::test_read_sees_new_content_after_rewrite ... ok
+test filesystem::tests::test_destroy_basic ... ok
+test filesystem::tests::test_read_with_offset ... ok
+test filesystem::tests::test_readdir_shows_correct_file_types ... ok
+test filesystem::tests::test_readdir_after_create ... ok
+test filesystem::tests::test_read_with_offset_and_size ... ok
+test filesystem::tests::test_readdir_nonexistent_dir ... ok
+test filesystem::tests::test_rename_across_directories ... ok
+test filesystem::tests::test_release_empty_file_no_existing_content ... ok
+test filesystem::tests::test_release_full_readonly_handle ... ok
+test filesystem::tests::test_release_after_fsync_skips_redundant_commit ... ok
+test filesystem::tests::test_readdir_with_offset_skips_entries ... ok
+test filesystem::tests::test_release_full_write_handle ... ok
+test filesystem::tests::test_rename_overwrite_target_with_hardlinks ... ok
+test filesystem::tests::a_streaming_shrink_to_a_nonzero_size_switches_to_an_overlay ... ok
+test filesystem::tests::test_rename_exchange_returns_enosys ... ok
+test filesystem::tests::test_release_nonexistent_fh_is_ok ... ok
+test filesystem::tests::test_rename_overwrite_target ... ok
+test filesystem::tests::test_setattr_mode ... ok
+test filesystem::tests::test_rename_basic ... ok
+test filesystem::tests::test_setattr_combined_mode_uid_gid_mtime ... ok
+test filesystem::tests::test_rename_noreplace_fails_if_exists ... ok
+test filesystem::tests::test_setattr_nonexistent_inode ... ok
+test filesystem::tests::test_setattr_size_beyond_max_returns_efbig ... ok
+test filesystem::tests::test_rmdir_empty_directory ... ok
+test filesystem::tests::test_setattr_mtime_specific ... ok
+test filesystem::tests::test_rmdir_non_directory_fails ... ok
+test filesystem::tests::test_setattr_mtime ... ok
+test filesystem::tests::test_setattr_size_extend_closed_file ... ok
+test filesystem::tests::test_rmdir_nonempty_fails ... ok
+test filesystem::tests::test_setattr_size_truncate_closed_file ... ok
+test filesystem::tests::test_setattr_mode_preserves_type_bits ... ok
+test filesystem::tests::test_setattr_size_buffered_extend ... ok
+test filesystem::tests::test_setattr_size_buffered_truncate_to_zero ... ok
+test commit_timer::tests::no_timed_commit_after_shutdown ... ok
+test filesystem::tests::test_setattr_size_truncate_to_zero_closed_file ... ok
+test filesystem::tests::test_setattr_size_with_open_fh_streaming ... ok
+test filesystem::tests::test_setattr_size_buffered_truncate ... ok
+test filesystem::tests::test_symlink_readlink_roundtrip ... ok
+test filesystem::tests::test_setattr_size_no_manifest ... ok
+test filesystem::tests::test_setattr_size_zero_with_open_fh_streaming ... ok
+test filesystem::tests::write_end_gives_the_end_or_none ... ok
+test filesystem::tests::test_setattr_with_size_change ... ok
+test filesystem::tests::test_setattr_uid_gid ... ok
+test filesystem::tests::test_statfs_no_store_path ... ok
+test filesystem::tests::test_setattr_uid_gid_separate ... ok
+test gc_pacing::tests::a_stop_ends_the_wait ... ok
+test filesystem::tests::test_statfs_invalid_path_cstring ... ok
+test gc_pacing::tests::the_free_ratio_of_a_real_path_is_a_ratio_and_an_error_is_plenty ... ok
+test filesystem::tests::test_statfs_files_not_hardcoded ... ok
+test filesystem::tests::test_write_buffered_mode_extend ... ok
+test gc_pacing::tests::the_mode_follows_the_free_ratio ... ok
+test gc_pacing::tests::with_medium_space_it_sleeps_briefly_by_the_write_rate ... ok
+test gc_pacing::tests::with_low_space_it_never_waits ... ok
+test filesystem::tests::test_unlink_directory_fails ... ok
+test filesystem::tests::test_statfs_with_store_path ... ok
+test gc_pacing::tests::with_plenty_of_space_it_waits_while_writes_come_and_stops_at_the_cap ... ok
+test gc_pacing::tests::with_plenty_of_space_it_waits_until_the_writes_stop ... ok
+test filesystem::tests::test_unlink_with_hard_links_decrements_nlinks ... ok
+test filesystem::tests::test_symlink_full_basic ... ok
+test filesystem::tests::test_unlink_file ... ok
+test filesystem::tests::test_symlink_is_link_type ... ok
+test handlers::tests::test_handle_getlk_preserves_range_and_pid ... ok
+test handlers::tests::test_handle_getlk_returns_f_unlck ... ok
+test filesystem::tests::test_write_bad_fh_returns_ebadf ... ok
+test filesystem::tests::test_write_beyond_max_returns_efbig ... ok
+test filesystem::tests::test_write_read_roundtrip ... ok
+test filesystem::tests::test_write_nonsequential_triggers_buffered_fallback ... ok
+test filesystem::tests::test_write_buffered_mode_pwrite ... ok
+test filesystem::tests::test_xattr_set_get_list_remove ... ok
+test filesystem::tests::test_write_sequential_multiple ... ok
+test handlers::tests::test_handle_create_duplicate_returns_error ... ok
+test fuse_callbacks::tests::run_without_a_pool_runs_on_the_caller ... ok
+test handlers::tests::test_handle_getattr_nonexistent_error ... ok
+test fuse_callbacks::tests::serve_panics_when_a_lock_is_held_at_the_reply ... ok
+test handlers::tests::test_handle_fsync_no_handle_ok ... ok
+test handlers::tests::test_handle_flush_written_data_ok ... ok
+test handlers::tests::test_handle_getattr_created_file ... ok
+test handlers::tests::test_handle_flush_no_handle_ok ... ok
+test handlers::tests::test_handle_create_ok ... ok
+test handlers::tests::test_handle_getattr_root_ok ... ok
+test flusher::tests::a_spawned_flusher_stops_and_joins ... ok
+test handlers::tests::test_handle_link_ok ... ok
+test handlers::tests::test_handle_getxattr_missing_returns_error ... ok
+test handlers::tests::test_handle_fsync_written_data_ok ... ok
+test handlers::tests::test_handle_getxattr_size_query ... ok
+test handlers::tests::test_handle_getxattr_set_and_get_data ... ok
+test handlers::tests::test_handle_listxattr_with_attrs ... ok
+test handlers::tests::test_handle_link_to_nonexistent_inode_returns_error ... ok
+test handlers::tests::test_handle_listxattr_empty ... ok
+test handlers::tests::test_handle_listxattr_size_query ... ok
+test handlers::tests::test_handle_readdir_nonexistent_returns_error ... ok
+test handlers::tests::test_handle_mknod_duplicate_returns_error ... ok
+test handlers::tests::test_handle_open_readonly_ok ... ok
+test handlers::tests::test_handle_lookup_missing_returns_error ... ok
+test handlers::tests::test_handle_readdir_offset_skips_entries ... ok
+test filesystem::tests::two_write_handles_on_an_overlay_keep_every_write ... ok
+test handlers::tests::test_handle_read_empty_file ... ok
+test handlers::tests::test_handle_read_written_content ... ok
+test handlers::tests::test_handle_mkdir_duplicate_returns_error ... ok
+test handlers::tests::test_handle_open_wronly_is_write ... ok
+test handlers::tests::test_handle_mkdir_ok ... ok
+test handlers::tests::test_handle_mknod_regular_file_ok ... ok
+test commit_timer::tests::the_timer_does_not_commit_after_shutdown ... ok
+test handlers::tests::test_handle_readdir_root_contains_dots ... ok
+test handlers::tests::test_handle_readlink_ok ... ok
+test filesystem::tests::set_dirty_config_stores_the_budget_and_limit ... ok
+test handlers::tests::test_handle_lookup_created_file ... ok
+test handlers::tests::test_handle_lookup_dot_ok ... ok
+test handlers::tests::test_handle_release_no_handle_ok ... ok
+test handlers::tests::test_handle_rmdir_empty_dir_ok ... ok
+test header::tests::a_flag_is_listed_once ... ok
+test header::tests::a_flag_line_has_three_words ... ok
+test handlers::tests::test_handle_removexattr_ok ... ok
+test handlers::tests::test_handle_readlink_on_regular_file_returns_error ... ok
+test header::tests::an_unknown_line_needs_an_unknown_flag ... ok
+test handlers::tests::test_handle_rename_missing_source_returns_error ... ok
+test handlers::tests::test_handle_rename_ok ... ok
+test handlers::tests::test_handle_removexattr_missing_returns_enodata ... ok
+test header::tests::flag_names_and_releases_follow_the_grammar ... ok
+test header::tests::one_hash_line_at_most ... ok
+test header::tests::older_and_newer_formats_are_refused ... ok
+test handlers::tests::test_handle_release_ok ... ok
+test header::tests::the_byte_core_keeps_the_header_rules ... ok
+test header::tests::the_number_is_parsed_not_the_line ... ok
+test header::tests::unknown_compat_is_read_write ... ok
+test header::tests::unknown_incompat_is_refused_by_the_decision ... ok
+test header::tests::unknown_ro_compat_is_read_only ... ok
+test locks::tests::two_inodes_in_one_stripe_lock_once ... ok
+test handlers::tests::test_handle_statfs_returns_ok ... ok
+test locks::tests::unsorted_inodes_lock_in_ascending_stripe_order ... ok
+test handlers::tests::test_handle_rmdir_missing_returns_error ... ok
+test handlers::tests::test_handle_setattr_mode_ok ... ok
+test handlers::tests::test_handle_setxattr_overwrites_existing_value ... ok
+test locks::tests::stripe_is_in_range_and_spreads ... ok
+test handlers::tests::test_handle_setxattr_ok ... ok
+test handlers::tests::test_handle_statfs_files_equals_inode_count ... ok
+test mount::tests::dirty_config_check_refuses_a_limit_above_the_budget ... ok
+test mount::tests::test_build_mount_options_allow_other ... ok
+test mount::tests::test_build_mount_options_always_has_fsname ... ok
+test mount::tests::test_build_mount_options_no_allow_other ... ok
+test mount::tests::test_build_mount_options_noatime_and_allow_other ... ok
+test mount::tests::test_build_mount_options_with_noatime ... ok
+test mount::tests::test_build_mount_options_without_noatime ... ok
+test handlers::tests::test_handle_setattr_nonexistent_returns_error ... ok
+test handlers::tests::test_handle_rmdir_nonempty_returns_enotempty ... ok
+test handlers::tests::test_handle_setattr_uid_gid ... ok
+test handlers::tests::test_handle_write_ok ... ok
+test handlers::tests::test_handle_unlink_missing_returns_error ... ok
+test mount::tests::test_load_store_rejects_legacy_format ... ok
+test handlers::tests::test_handle_unlink_ok ... ok
+test handlers::tests::test_handle_symlink_ok ... ok
+test handlers::tests::test_handle_write_passes_efbig_through ... ok
+test mount::tests::test_next_segment_id_nonexistent_dir_returns_1 ... ok
+test handlers::tests::test_handle_symlink_duplicate_returns_error ... ok
+test handlers::tests::test_handle_write_invalid_fh_returns_error ... ok
+test mount::tests::test_parse_wal_config_defaults_to_per_op ... ok
+test mount::tests::test_parse_wal_config_flush_on_fsync ... ok
+test header::tests::a_large_header_is_refused ... ok
+test mount::tests::test_parse_wal_config_no_wal ... ok
+test mount::tests::test_parse_wal_config_periodic ... ok
+test mount::tests::test_parse_wal_config_unknown_defaults_to_per_op ... ok
+test mount::tests::test_next_segment_id_empty_dir_returns_1 ... ok
+test mount::tests::test_load_store_rejects_missing_store ... ok
+test mount::tests::run_mount_refuses_a_dirty_limit_above_the_budget_first ... ok
+test mount::tests::test_next_segment_id_ignores_non_segment_files ... ok
+test online_gc::tests::an_unchanged_tree_gets_one_more_gc_then_none ... ok
+test online_gc::tests::failed_gcs_back_off_up_to_a_cap_and_a_success_resets ... ok
+test online_gc::tests::low_space_makes_a_gc_due_without_the_interval_or_the_duty_gap ... ok
+test mount::tests::test_next_segment_id_with_multiple_segments ... ok
+test online_gc::tests::with_low_space_a_gc_that_freed_little_makes_the_next_wait_the_duty_gap ... ok
+test oplog::tests::the_clock_freeze_nests_and_ends ... ok
+test oplog::tests::every_op_round_trips_through_the_encoding ... ok
+test overlay::tests::a_far_write_and_a_huge_extend_allocate_nothing_by_offset ... ok
+test mount::tests::test_next_segment_id_with_single_segment ... ok
+test mount::tests::test_next_segment_id_only_malformed_files_returns_1 ... ok
+test overlay::tests::every_change_moves_gen_and_a_copy_does_not ... ok
+test overlay::tests::cost_after_predicts_the_cost_of_a_write ... ok
+test overlay::tests::a_read_asks_the_base_only_for_the_gaps_between_extents ... ok
+test overlay::tests::touching_writes_merge_and_cost_counts_each_extent ... ok
+test pool::tests::workers_for_cpus_halves_and_clamps ... ok
+test pool::tests::default_workers_is_in_range ... ok
+test filesystem::tests::test_sequential_chunked_read_of_large_file ... ok
+test scrub::tests::test_scrub_empty_store_json_is_clean ... ok
+test scrub::tests::test_scrub_empty_segments_dir_is_clean ... ok
+test scrub::tests::test_scrub_empty_store_is_clean ... ok
+test header::tests::data_and_no_header_is_refused ... ok
+test content::tests::put_reader_key_equals_put_all_key ... ok
+test scrub::tests::test_scrub_report_saturated_blocks_field_exists ... ok
+test scrub::tests::test_scrub_report_serializes_to_json ... ok
+test scrub::tests::test_scrub_missing_store_returns_error ... ok
+test scrub::tests::test_scrub_legacy_store_returns_error ... ok
+test header::tests::compat_flags_and_unknown_lines_are_kept_on_rewrite ... ok
+test flusher::tests::a_spawned_flusher_ends_when_the_fs_is_dropped ... ok
+test header::tests::a_new_store_gets_a_header ... ok
+test mount::tests::test_load_store_finds_seeded_file ... ok
+test mount::tests::ro_compat_mount_writes_nothing ... ok
+test mount::tests::ro_compat_refuses_a_pending_write_log ... ok
+test scrub::tests::test_scrub_mounted_store_emits_warning_but_continues ... ok
+test mount::tests::test_load_store_from_segment_format ... ok
+test mount::tests::ro_compat_refuses_a_mount_lock ... ok
+test snapshot::tests::test_format_unix_timestamp_epoch ... ok
+test snapshot::tests::test_format_unix_timestamp_known_date ... ok
+test snapshot::tests::test_format_unix_timestamp_zero_returns_unknown ... ok
+test mount::tests::test_load_store_dirty_mount_recovery ... ok
+test mount::tests::test_load_store_returns_correct_inode_1 ... ok
+test seed::tests::test_seed_empty_directory ... ok
+test scrub::tests::test_scrub_segment_store_json_output ... ok
+test seed::tests::test_seed_creates_segment_with_root ... ok
+test fuse_callbacks::tests::destroy_drains_before_shutdown ... ok
+test scrub::tests::test_scrub_mounted_store_json_mode_warning ... ok
+test scrub::tests::test_scrub_saturated_blocks_zero_for_clean_store ... ok
+test scrub::tests::test_scrub_segment_store_is_clean ... ok
+test stats::tests::stats_of_an_empty_store_shows_format_none ... ok
+test seed::tests::test_seed_preserves_file_size ... ok
+test snapshot::tests::test_snapshot_create_refuses_mounted_store ... ok
+test stats::tests::test_build_snapshot_stats_empty ... ok
+test seed::tests::test_seed_nested_directories ... ok
+test stats::tests::test_build_snapshot_stats_preserves_fields ... ok
+test stats::tests::test_build_snapshot_stats_unnamed ... ok
+test stats::tests::test_format_bytes_1023_bytes ... ok
+test stats::tests::test_format_bytes_exact_1_byte ... ok
+test stats::tests::test_format_bytes_gib ... ok
+test stats::tests::test_format_bytes_kib ... ok
+test stats::tests::test_format_bytes_mib ... ok
+test stats::tests::test_format_bytes_small ... ok
+test stats::tests::test_format_bytes_zero ... ok
+test stats::tests::test_stats_empty_store_json_output ... ok
+test stats::tests::test_stats_empty_store_produces_zero_stats ... ok
+test stats::tests::test_stats_missing_store_returns_error ... ok
+test stats::tests::test_stats_legacy_store_returns_error ... ok
+test stats::tests::test_content_stats_groups_files_by_content ... ok
+test seed::tests::test_seed_single_file_content_round_trip ... ok
+test snapshot::tests::test_snapshot_list_empty ... ok
+test stats::tests::test_store_stats_serializes_to_json ... ok
+test unmount::tests::only_the_server_of_the_mount_point_is_selected ... ok
+test stats::tests::stats_shows_the_header ... ok
+test stats::tests::stats_of_a_normal_store_shows_no_flags ... ok
+test unmount::tests::test_mount_lock_cleanup_no_store ... ok
+test unmount::tests::test_mount_lock_cleanup_nonexistent_lock ... ok
+test filesystem::tests::an_overlay_rebases_when_it_crosses_the_dirty_limit ... ok
+test unmount::tests::test_mount_lock_cleanup_on_success ... ok
+test filesystem::tests::a_commit_relogs_an_overlay_in_pieces_of_at_most_1_mib ... ok
+fusermount: bad mount point /nonexistent/path/that/cannot/be/a/mountpoint: No such file or directory
+fusermount: bad mount point /nonexistent/path/that/cannot/be/mounted: No such file or directory
+fusermount: bad mount point /nonexistent/not_a_mountpoint: No such file or directory
+test unmount::tests::test_kill_processes_at_mountpoint_nonexistent_path_does_not_panic ... ok
+test unmount::tests::test_kill_processes_at_mountpoint_temp_dir_does_not_panic ... ok
+umount: /nonexistent/not_a_mountpoint: no mount point specified.
+umount: /nonexistent/path/that/cannot/be/a/mountpoint: no mount point specified.
+umount: /nonexistent/path/that/cannot/be/mounted: no mount point specified.
+fusermount: bad mount point /nonexistent/path/not_mounted: No such file or directory
+test snapshot::tests::test_snapshot_create_succeeds_on_unmounted_store ... ok
+umount: /nonexistent/path/not_mounted: no mount point specified.
+test unmount::tests::test_try_force_unmount_nonexistent_path_returns_false ... ok
+test snapshot::tests::test_snapshot_create_with_name_succeeds ... ok
+test snapshot::tests::test_snapshot_list_after_create ... ok
+test mount::tests::offline_commands_see_a_ro_compat_mount ... ok
+test scrub::tests::test_scrub_verifies_objects_of_both_hashes ... ok
+test snapshot::tests::test_snapshot_switch_refuses_mounted_store ... ok
+test stats::tests::test_stats_mounted_store_succeeds ... ok
+test stats::tests::test_stats_segment_store_succeeds ... ok
+test snapshot::tests::test_snapshot_switch_unknown_ref_fails ... ok
+test stats::tests::test_stats_mounted_store_json_succeeds ... ok
+test stats::tests::test_stats_segment_store_json_output ... ok
+test snapshot::tests::test_snapshot_switch_by_name ... ok
+test snapshot::tests::test_snapshot_switch_by_version ... ok
+test seed::tests::test_seed_file_larger_than_read_buffer ... ok
+test header::tests::two_parallel_creates_of_a_new_store_agree ... ok
+test overlay::tests::a_growing_extent_does_not_double_its_capacity ... ok
+test mount::tests::a_normal_mount_changes_the_tree ... ok
+test mount::tests::a_ro_compat_mount_with_an_empty_log_is_not_refused ... ok
+test overlay::tests::overlay_reads_match_a_vec_model ... ok
+test filesystem::tests::a_fields_setattr_in_the_claim_window_keeps_the_record_order ... ok
+test commit_timer::tests::timer_commits_changes_and_waits_for_the_gate ... ok
+fusermount: bad mount point /nonexistent/not_a_mountpoint: No such file or directory
+fusermount: bad mount point /nonexistent/path/that/cannot/be/mounted: No such file or directory
+fusermount: bad mount point /nonexistent/path/that/cannot/be/a/mountpoint: No such file or directory
+umount: /nonexistent/not_a_mountpoint: no mount point specified.
+test unmount::tests::test_run_unmount_with_nonexistent_store_cleans_nothing ... ok
+umount: /nonexistent/path/that/cannot/be/mounted: no mount point specified.umount: 
+/nonexistent/path/that/cannot/be/a/mountpoint: no mount point specified.
+test unmount::tests::test_run_unmount_nonexistent_path_returns_error ... ok
+test unmount::tests::test_run_unmount_returns_error_message_with_path ... ok
+test commit_timer::tests::a_timed_commit_holds_the_gate_for_a_small_part_of_the_commit ... ok
+test overlay::tests::take_frees_what_is_asked_and_keeps_every_byte ... ok
+test overlay::tests::a_copy_then_discard_at_one_gen_equals_take ... ok
+test online_gc::tests::a_request_without_a_mount_times_out_and_is_removed ... ok
+test online_gc::tests::an_old_heartbeat_does_not_keep_the_request_waiting ... ok
+test online_gc::tests::a_request_waits_while_a_gc_runs_and_is_taken_after_it ... ok
+
+test result: ok. 380 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.23s
+
+     Running unittests src/main.rs (/target/cov/debug/build/slicefs-cli/3760bc4ceb744bcb/out/slicefs-3760bc4ceb744bcb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/alloc_tune_tests.rs (/target/cov/debug/build/slicefs-cli/a094e22eeed7c7d7/out/alloc_tune_tests-a094e22eeed7c7d7)
+
+running 2 tests
+test stats_show_a_live_heap ... ok
+test tune_at_start_fixes_the_mmap_threshold ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/coverage_boost_tests.rs (/target/cov/debug/build/slicefs-cli/58af6073ec2a0db8/out/coverage_boost_tests-58af6073ec2a0db8)
+
+running 107 tests
+test test_inode_to_file_attr_blocks_exact ... ok
+test test_inode_to_file_attr_blocks_roundup ... ok
+test test_inode_to_file_attr_negative_mtime ... ok
+test test_inode_to_file_attr_unknown_type_is_regular ... ok
+test test_meta_error_to_fuse_errno_all_variants ... ok
+test test_inode_to_file_attr_symlink_kind ... ok
+test test_meta_error_to_errno_all_variants ... ok
+test test_create_duplicate_name_returns_error ... ok
+test test_fsync_empty_file_returns_ok_without_manifest ... ok
+test test_entry_changes_update_parent_times ... ok
+test test_closed_file_extend_and_shrink ... ok
+test test_new_inodes_get_current_times ... ok
+test test_dir_size_exercised_via_compute_statfs ... ok
+test test_create_inside_socket_returns_enotdir ... ok
+test test_fsync_closed_fh_is_noop ... ok
+test test_getattr_reports_size_of_open_write_handle ... ok
+test test_fsync_with_pending_data_is_complete ... ok
+test test_fsync_twice_with_same_content_skips_refcount_increment ... ok
+test test_link_updates_ctime ... ok
+test test_move_dir_between_parents_updates_links_and_dotdot ... ok
+test test_fsync_buffered_mode_flushes_to_cas ... ok
+test test_mknod_fifo_creates_named_pipe ... ok
+test test_link_nonexistent_source_returns_error ... ok
+test test_mknod_block_device_keeps_rdev ... ok
+test test_extend_without_fh_during_streaming_write_stays_streaming ... ok
+test test_overwrite_start_of_existing_file_keeps_tail ... ok
+test test_extend_without_fh_goes_to_the_writing_handle ... ok
+test test_mkdir_sets_uid_gid ... ok
+test test_ftruncate_on_fresh_handle_keeps_existing_bytes ... ok
+test test_mkdir_applies_umask ... ok
+test test_mknod_socket_creates_socket ... ok
+test test_mknod_char_device_kind ... ok
+test test_mknod_duplicate_name_returns_error ... ok
+test test_read_and_release_with_pending_gap ... ok
+test test_read_empty_file_returns_empty ... ok
+test test_read_offset_beyond_eof_returns_empty ... ok
+test test_read_file_with_no_manifest_returns_empty ... ok
+test test_overlap_with_pending_keeps_newest_bytes ... ok
+test test_o_trunc_then_write_past_start_gives_hole ... ok
+test test_release_after_fsync_skips_redundant_commit ... ok
+test test_destroy_reclaims_orphans ... ok
+test test_read_partial_at_end_of_file ... ok
+test test_read_from_uncommitted_buffered_write ... ok
+test test_set_auto_snapshot_mutates_field ... ok
+test test_read_zero_size_returns_empty ... ok
+test test_read_from_uncommitted_streaming_write ... ok
+test test_rmdir_on_regular_file_returns_enotdir ... ok
+test test_setattr_mode_nonexistent_inode_returns_error ... ok
+test test_readlink_nonexistent_inode_returns_error ... ok
+test test_release_never_opened_fh_returns_ok ... ok
+test test_rename_between_hard_links_of_same_inode_is_noop ... ok
+test test_rmdir_socket_returns_enotdir ... ok
+test test_readlink_empty_manifest_returns_empty_string ... ok
+test test_setattr_size_extend_on_open_streaming_handle ... ok
+test test_setattr_neither_uid_nor_gid_is_noop ... ok
+test test_readdir_reports_special_file_types ... ok
+test test_rename_dir_onto_empty_dir_replaces_it ... ok
+test test_rename_over_multiply_linked_target_updates_its_ctime ... ok
+test test_rename_over_open_file_keeps_target_until_release ... ok
+test test_time_conversion_handles_pre_epoch ... ok
+test test_rename_file_onto_dir_and_dir_onto_file ... ok
+test test_rename_over_socket_frees_it ... ok
+test test_release_already_closed_returns_ok ... ok
+test test_rename_noreplace_no_target_succeeds ... ok
+test test_rename_dir_onto_non_empty_dir_returns_enotempty ... ok
+test test_setattr_gid_only ... ok
+test test_rename_updates_ctime_of_moved_inode ... ok
+test test_rename_overwrite_directory_target ... ok
+test test_setattr_size_and_mtime_together_keeps_explicit_mtime ... ok
+test test_rmdir_nonexistent_returns_enoent ... ok
+test test_repeated_fsync_without_writes_keeps_content ... ok
+test test_setattr_size_extend_on_open_buffered_handle ... ok
+test test_setattr_size_zero_buffered_with_prior_committed_root ... ok
+test test_setattr_times_stores_atime_and_mtime ... ok
+test test_statfs_with_store_path_has_nonzero_bsize ... ok
+test test_unlink_socket_succeeds ... ok
+test test_setattr_size_nonzero_on_empty_streaming_handle ... ok
+test test_setattr_size_nonzero_on_open_buffered_handle ... ok
+test test_setattr_size_streaming_resize_with_prior_committed_root ... ok
+test test_setattr_size_nonzero_on_open_streaming_handle ... ok
+test test_setattr_size_zero_on_open_streaming_handle ... ok
+test test_write_nonsequential_after_write_loads_from_streaming_state ... ok
+test test_statfs_after_creating_files_inode_count_increases ... ok
+test test_setattr_size_zero_on_closed_file_clears_manifest ... ok
+test test_statfs_no_store_path_returns_zero_blocks ... ok
+test test_setattr_size_zero_on_open_buffered_handle ... ok
+test test_symlink_duplicate_name_returns_error ... ok
+test test_truncate_to_zero_then_extend_gives_zeros ... ok
+test test_statfs_with_store_path_and_written_data ... ok
+test test_unlink_open_file_keeps_inode_until_release ... ok
+test test_statfs_files_equals_inode_count ... ok
+test test_write_fallback_loads_from_manifest_when_streaming_empty ... ok
+test test_setattr_uid_only ... ok
+test test_write_buffered_beyond_end_extends ... ok
+test test_unlink_read_only_open_file_keeps_inode_until_release ... ok
+test test_xattr_get_nonexistent_returns_error ... ok
+test test_write_past_extended_size_extends_further ... ok
+test test_unlink_nonexistent_returns_enoent ... ok
+test test_write_buffered_mode_extends_buffer ... ok
+test test_xattr_set_get_list_remove ... ok
+test test_shuffled_writes_inside_window_stay_streaming ... ok
+test test_write_nonsequential_from_empty_streaming_falls_back_to_buffered ... ok
+test test_write_invalid_fh_returns_ebadf ... ok
+test test_xattr_multiple_attributes ... ok
+test test_write_fallback_with_prior_committed_root_decrements_refcount ... ok
+test test_truncate_updates_mtime_and_ctime ... ok
+test test_xattr_list_empty_returns_empty_vec ... ok
+
+test result: ok. 107 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/crash_recovery_tests.rs (/target/cov/debug/build/slicefs-cli/20e6a802ceb8fd4b/out/crash_recovery_tests-20e6a802ceb8fd4b)
+
+running 6 tests
+test test_sc1_crash_during_write_filesystem_consistent ... ok
+test test_sc5_wal_replay_on_dirty_mount ... ok
+test test_sc2_fsync_guarantees_durability ... ok
+test test_sc4_multiple_fsync_cycles_all_survive ... ok
+test test_bonus_append_across_fsync_cycles ... ok
+test test_sc3_orphaned_blocks_reclaimed_by_gc ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/dir_link_tests.rs (/target/cov/debug/build/slicefs-cli/bda50c1f294bb54b/out/dir_link_tests-bda50c1f294bb54b)
+
+running 31 tests
+test test_link_creates_second_directory_entry ... ok
+test create_in_a_removed_directory_fails ... ok
+test test_link_accessible_from_both_paths ... ok
+test test_rmdir_nonempty_returns_enotempty ... ok
+test test_rename_across_directories ... ok
+test open_of_a_removed_inode_fails ... ok
+test test_mkdir_creates_entry_in_parent ... ok
+test test_link_to_directory_returns_eperm ... ok
+test test_link_increments_nlinks ... ok
+test test_symlink_target_in_parent_directory ... ok
+test test_mkdir_creates_directory_with_dot_entries ... ok
+test test_rename_noreplace_returns_eexist_if_target_exists ... ok
+test test_rename_overwrites_existing_target ... ok
+test test_mkdir_increments_parent_nlinks ... ok
+test test_symlink_inode_size_equals_target_length ... ok
+test test_rename_nonexistent_source_returns_enoent ... ok
+test test_unlink_with_nlinks_2_keeps_inode ... ok
+test test_rename_within_same_directory ... ok
+test test_symlink_stores_target_as_cas_content ... ok
+test test_rmdir_empty_directory_succeeds ... ok
+test test_rmdir_decrements_parent_nlinks ... ok
+test test_symlink_readlink_returns_target ... ok
+test test_unlink_with_nlinks_1_deletes_inode_and_decrements_refcount ... ok
+test test_unlink_directory_returns_eisdir ... ok
+test test_symlink_creates_slnk_inode ... ok
+test test_unlink_removes_entry_and_decrements_nlinks ... ok
+test test_rename_exchange_returns_enosys ... ok
+test two_inodes_in_one_stripe_are_locked_once ... ok
+test set_xattr_and_unlink_leave_no_xattr_behind ... ok
+test unlink_and_last_close_never_leak_an_orphan ... ok
+test namespace_ops_in_parallel_keep_the_tree_consistent ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s
+
+     Running tests/dirty_budget_tests.rs (/target/cov/debug/build/slicefs-cli/5d9abdea259dd741/out/dirty_budget_tests-5d9abdea259dd741)
+
+running 1 test
+test many_open_files_stay_within_one_dirty_budget ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.01s
+
+     Running tests/e2e_filesystem_tests.rs (/target/cov/debug/build/slicefs-cli/8b998ea0148462b1/out/e2e_filesystem_tests-8b998ea0148462b1)
+
+running 78 tests
+test test_concurrent_create_and_read_interleaved ... ok
+test test_concurrent_5_files_open_simultaneously ... ok
+test test_create_full_returns_inode_meta ... ok
+test test_create_full_with_o_trunc ... ok
+test test_edge_rapid_create_delete_cycles ... ok
+test test_dedup_overwrite_one_copy_does_not_affect_others ... ok
+test test_edge_filename_255_chars ... ok
+test test_error_create_duplicate_file_fails ... ok
+test test_edge_read_partial_middle_of_file ... ok
+test test_edge_filename_starting_with_dash ... ok
+test test_dedup_5_copies_delete_3_verify_refcount_2 ... ok
+test test_edge_write_at_offset_beyond_size_creates_zero_gap ... ok
+test test_edge_all_byte_values_in_file ... ok
+test test_error_create_file_in_nonexistent_parent ... ok
+test test_edge_deep_nesting_25_levels ... ok
+test test_edge_filename_with_dots_only ... ok
+test test_error_rmdir_on_file_returns_enotdir ... ok
+test test_error_unlink_from_nonexistent_parent ... ok
+test test_error_mkdir_duplicate_name_fails ... ok
+test test_error_double_release_same_fh_is_ok ... ok
+test test_error_mkdir_in_nonexistent_parent ... ok
+test test_error_lookup_nonexistent_in_root ... ok
+test test_error_write_to_unknown_fh ... ok
+test test_error_setattr_mode_on_nonexistent ... ok
+test test_lifecycle_create_write_small_close_reopen_read ... ok
+test test_error_read_nonexistent_inode ... ok
+test test_getattr_after_chmod ... ok
+test test_fsync_then_write_different_data_then_release ... ok
+test test_flush_multiple_times_before_release ... ok
+test test_getattr_root_directory ... ok
+test test_hardlink_5_links_unlink_all_but_one ... ok
+test test_lifecycle_open_o_trunc_overwrites ... ok
+test test_hardlink_across_directories ... ok
+test test_posix_mkdir_directory_mode_preserved ... ok
+test test_lifecycle_open_o_rdwr ... ok
+test test_lifecycle_create_write_large_100kb_close_read ... ok
+test test_lookup_in_subdirectory ... ok
+test test_lifecycle_multiple_sequential_overwrites_verify_final ... ok
+test test_readdir_with_offset ... ok
+test test_link_full_returns_meta ... ok
+test test_posix_rename_noreplace_existing_target_fails ... ok
+test test_edge_500_entries_in_one_directory ... ok
+test test_mkdir_full_returns_meta ... ok
+test test_open_wronly_creates_write_handle ... ok
+test test_lifecycle_write_fsync_write_more_release ... ok
+test test_open_rdonly_then_release_full_is_noop ... ok
+test test_setattr_combined ... ok
+test test_mknod_full_returns_meta ... ok
+test test_posix_unlink_decrements_nlinks_to_zero_removes_inode ... ok
+test test_posix_create_preserves_mode_with_umask ... ok
+test test_posix_mtime_updated_after_write ... ok
+test test_posix_timestamps_set_on_create ... ok
+test test_posix_rename_overwrite_existing_file ... ok
+test test_crash_recovery_metadata_survives ... ok
+test test_readdir_includes_dot_and_dotdot ... ok
+test test_readdir_mixes_files_dirs_and_symlinks ... ok
+test test_destroy_commits_and_returns_true ... ok
+test test_rename_directory_across_parents ... ok
+test test_symlink_to_nonexistent_target ... ok
+test test_symlink_unlink_removes_symlink ... ok
+test test_setattr_with_size_change ... ok
+test test_crash_recovery_directory_structure_survives ... ok
+test test_symlink_full_returns_meta ... ok
+test test_write_overlapping_chunks ... ok
+test test_xattr_empty_value ... ok
+test test_xattr_overwrite_multiple_times ... ok
+test test_symlink_with_spaces_in_target ... ok
+test test_statfs_inode_count_tracks_creates_and_deletes ... ok
+test test_lifecycle_1mb_file_roundtrip ... ok
+test test_write_single_byte_at_a_time ... ok
+test test_xattr_on_directory ... ok
+test test_xattr_remove_nonexistent_returns_error ... ok
+test test_destroy_with_auto_snapshot ... ok
+test test_seed_empty_directory ... ok
+test test_seed_with_symlink ... ok
+test test_snapshot_unnamed ... ok
+test test_snapshot_preserves_directory_structure ... ok
+test test_snapshot_multiple_preserves_each_point_in_time ... ok
+
+test result: ok. 78 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/flusher_tests.rs (/target/cov/debug/build/slicefs-cli/e5710893bbc1a199/out/flusher_tests-e5710893bbc1a199)
+
+running 26 tests
+test a_throttle_with_a_lock_held_panics ... ok
+test a_stop_with_a_lock_held_panics ... ok
+test a_queued_commit_is_seen ... ok
+test a_write_past_half_the_budget_kicks_the_flusher ... ok
+test stop_wakes_throttled_writers ... ok
+test a_throttled_writer_does_not_wait_when_the_flusher_cannot_free ... ok
+test a_hot_file_above_half_the_budget_does_not_kick_after_an_empty_pass ... ok
+test a_writer_over_the_budget_waits_for_the_flusher ... ok
+test a_throttled_writer_writes_after_the_limit ... ok
+test shutdown_with_a_parked_flusher_step_and_a_queued_commit_ends ... ok
+test a_flusher_panic_wakes_throttled_writers ... ok
+test the_flusher_lowers_the_total ... ok
+test a_pass_ends_when_no_step_frees ... ok
+test a_configured_idle_time_is_used ... ok
+test an_idle_file_is_flushed ... ok
+test an_expired_file_is_flushed ... ok
+test a_quiet_file_over_its_limit_is_flushed ... ok
+test the_flusher_skips_a_cell_with_a_step_in_flight ... ok
+test a_write_does_not_wait_for_a_cell_in_its_back_off ... ok
+test a_hot_file_is_left_to_its_own_writer ... ok
+test a_failed_step_backs_off ... ok
+test all_writers_throttled_while_a_commit_waits_flusher_in_a_step ... ok
+test all_writers_throttled_while_a_commit_waits_flusher_paused ... ok
+test at_the_budget_a_hot_file_is_stepped ... ok
+test the_flusher_steps_the_quiet_file_first ... ok
+test dirty_total_stays_bounded_with_parallel_writers ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.41s
+
+     Running tests/fsync_tests.rs (/target/cov/debug/build/slicefs-cli/584a12ef67dd565d/out/fsync_tests-584a12ef67dd565d)
+
+running 7 tests
+test test_fsync_no_buffer_is_noop ... ok
+test test_fdatasync_identical_to_fsync ... ok
+test test_fsync_flushes_buffer_to_cas ... ok
+test fsync_time_on_buffered_handle_does_not_grow_with_file_size ... ok
+test test_fsync_crash_durability ... ok
+test destroy_keeps_data_of_a_handle_that_is_still_open ... ok
+test commit_and_fsync_do_not_rebase_an_open_overlay ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/gc_cli_tests.rs (/target/cov/debug/build/slicefs-cli/f9669f07f6276502/out/gc_cli_tests-f9669f07f6276502)
+
+running 5 tests
+test test_cli_parses_gc_subcommand ... ok
+test test_run_gc_clean_store_reports_zero_removed ... ok
+test test_run_gc_with_dead_entries_compacts ... ok
+test test_gc_report_has_the_store_size_before_and_after ... ok
+test test_run_gc_locked_store_refuses ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.03s
+
+     Running tests/gc_online_tests.rs (/target/cov/debug/build/slicefs-cli/6e80b4e2396ffb4b/out/gc_online_tests-6e80b4e2396ffb4b)
+
+running 16 tests
+test the_nodes_of_deleted_files_are_freed ... ok
+test a_write_that_dedups_against_garbage_during_gc_keeps_its_objects ... ok
+test a_write_that_dedups_against_garbage_during_a_full_gc_keeps_its_objects ... ok
+test online_gc_frees_garbage_and_keeps_live_files ... ok
+test a_full_online_gc_frees_all_garbage_and_keeps_live_files ... ok
+test uncommitted_files_survive_online_gc ... ok
+test a_stop_request_ends_the_gc_without_more_deletes ... ok
+test an_open_streaming_handle_keeps_its_partial_tree ... ok
+test a_paced_gc_with_endless_writes_finishes_after_the_yield_caps ... ok
+test low_space_starts_a_gc_without_the_interval ... ok
+test an_open_overlay_keeps_its_base_through_online_gc ... ok
+test a_full_gc_request_runs_on_the_gc_thread ... ok
+test gc_start_waits_for_a_rebase_in_a_callback ... ok
+test reads_during_rewrite_and_gc_never_fail ... ok
+test online_gc_inside_a_rebase_step_keeps_every_chunk ... ok
+test online_gc_during_a_rebase_keeps_every_chunk ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.71s
+
+     Running tests/gc_sweep_tests.rs (/target/cov/debug/build/slicefs-cli/111394bfbc5faae9/out/gc_sweep_tests-111394bfbc5faae9)
+
+running 2 tests
+test gc_after_deleting_every_file_leaves_an_almost_empty_store ... ok
+test gc_frees_deleted_files_and_keeps_live_and_snapshot_data ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/hash_change_tests.rs (/target/cov/debug/build/slicefs-cli/38c3be4e358b1f10/out/hash_change_tests-38c3be4e358b1f10)
+
+running 3 tests
+test seed_hash_on_a_new_store_prints_no_change_line ... ok
+test seed_hash_is_recorded_and_unknown_names_are_refused ... ok
+test a_new_write_hash_keeps_old_files_and_lookups ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/integration_tests.rs (/target/cov/debug/build/slicefs-cli/585edf42af800157/out/integration_tests-585edf42af800157)
+
+running 55 tests
+test test_edge_empty_file ... ok
+test test_edge_deep_nesting_10_levels ... ok
+test test_dedup_refcount_is_correct ... ok
+test test_dedup_different_content_different_digest ... ok
+test test_chmod_roundtrip ... ok
+test test_edge_all_zeros_file ... ok
+test test_chown_roundtrip ... ok
+test test_dedup_identical_content_shares_digest ... ok
+test test_edge_read_at_various_offsets ... ok
+test test_edge_file_names_with_special_chars ... ok
+test test_cross_handle_read_on_open_write ... ok
+test test_mkdir_create_files_readdir_verify ... ok
+test test_edge_file_names_with_spaces ... ok
+test test_hardlink_unlink_one_other_still_works ... ok
+test test_edge_single_byte_file ... ok
+test test_lookup_returns_correct_inode_metadata ... ok
+test test_full_workflow_project_directory ... ok
+test test_edge_zero_size_read ... ok
+test test_getattr_returns_correct_size_after_write ... ok
+test test_edge_unicode_file_names ... ok
+test test_flush_then_release_preserves_content ... ok
+test test_hardlink_nlink_count ... ok
+test test_lookup_nonexistent_returns_error ... ok
+test test_hardlink_both_names_exist ... ok
+test test_edge_write_read_large_file_128kb ... ok
+test test_multiple_overwrites_in_sequence ... ok
+test test_rename_file_across_directories ... ok
+test test_hardlink_write_through_one_read_through_other ... ok
+test test_rename_file_within_directory ... ok
+test test_mtime_roundtrip ... ok
+test test_interleaved_writes_to_multiple_files ... ok
+test test_nested_mkdir_and_deep_file_access ... ok
+test test_open_read_only_does_not_create_write_handle ... ok
+test test_rename_directory_with_contents ... ok
+test test_rmdir_empty_then_verify_gone ... ok
+test test_overwrite_with_shorter_content ... ok
+test test_edge_many_files_in_one_directory ... ok
+test test_rmdir_nonempty_returns_enotempty ... ok
+test test_overwrite_with_longer_content ... ok
+test test_read_while_another_file_is_being_written ... ok
+test test_crash_recovery_fsynced_data_survives ... ok
+test test_crash_recovery_committed_data_survives ... ok
+test test_symlink_long_target ... ok
+test test_symlink_create_readlink_verify ... ok
+test test_truncate_to_zero_and_rewrite ... ok
+test test_symlink_relative_target ... ok
+test test_xattr_binary_values ... ok
+test test_xattr_full_lifecycle ... ok
+test test_truncate_to_shorter_then_longer ... ok
+test test_write_read_overwrite_read_roundtrip ... ok
+test test_snapshot_preserves_state_after_modifications ... ok
+test test_seed_preserves_directory_structure ... ok
+test test_seed_then_mount_and_modify ... ok
+test test_seed_roundtrip_various_file_types ... ok
+test test_snapshot_list_and_find ... ok
+
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/lock_free_io.rs (/target/cov/debug/build/slicefs-cli/74d9d029611d784d/out/lock_free_io-74d9d029611d784d)
+
+running 33 tests
+test a_read_of_pending_writes_runs_no_stream_step ... ok
+test a_parked_fsync_does_not_install_over_a_truncate ... ok
+test a_size_change_of_an_open_stream_runs_its_steps_unlocked ... ok
+test an_unlink_releases_the_content_with_no_stripe_held ... ok
+test a_forced_drop_of_a_push_retries_unlocked ... ok
+test a_panic_in_a_step_clears_the_step_token ... ok
+test sixteen_dropped_stream_steps_give_eio ... ok
+test fsyncs_publish_in_order ... ok
+test a_read_does_not_wait_for_a_closed_file_truncate ... ok
+test the_last_release_of_a_stream_flushes_unlocked ... ok
+test reader_does_not_wait_for_streaming_push ... ok
+test a_closed_file_truncate_runs_in_a_transient_cell ... ok
+test a_second_stream_write_waits_for_the_push_without_the_cell ... ok
+test a_failed_step_after_the_apply_does_not_fail_the_write ... ok
+test a_dropped_step_below_the_cap_retries_later ... ok
+test a_dropped_step_is_retried_unlocked ... ok
+test reader_does_not_wait_for_rebase_io ... ok
+test a_second_writer_skips_its_step_while_one_is_in_flight ... ok
+test writer_does_not_wait_for_rebase_io ... ok
+test a_writer_that_opens_during_the_finalize_keeps_the_cell ... ok
+test a_failed_last_release_keeps_the_unstored_bytes ... ok
+test many_files_no_cross_file_wait ... ok
+test the_last_release_finalizes_in_steps ... ok
+test the_last_release_retries_dropped_steps_unlocked ... ok
+test finalize_ends_under_forced_drops ... ok
+test an_o_trunc_open_waits_for_a_finalize_step ... ok
+test a_size_change_waits_for_a_finalize_step_without_the_cell ... ok
+test dirty_cost_stays_under_the_hard_cap ... ok
+test a_switch_above_the_cap_steps_at_most_the_final_step ... ok
+test forced_drops_keep_content_and_the_cap ... ok
+test overwriters_do_not_starve_a_writer_at_the_cap ... ok
+test a_writer_waits_for_a_step_while_it_makes_progress ... ok
+test a_writer_at_the_hard_cap_waits_without_the_cell ... ok
+
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.73s
+
+     Running tests/lock_stats_report.rs (/target/cov/debug/build/slicefs-cli/18b162bf01c383e7/out/lock_stats_report-18b162bf01c383e7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lock_wait_rows.rs (/target/cov/debug/build/slicefs-cli/d8b934059f330aa2/out/lock_wait_rows-d8b934059f330aa2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/memory_bound_tests.rs (/target/cov/debug/build/slicefs-cli/7925940d5ecdbb68/out/memory_bound_tests-7925940d5ecdbb68)
+
+running 1 test
+test an_open_file_uses_memory_bounded_by_the_dirty_limit_not_the_file_size ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.55s
+
+     Running tests/mount_lifecycle_tests.rs (/target/cov/debug/build/slicefs-cli/e1f73d6d156258bd/out/mount_lifecycle_tests-e1f73d6d156258bd)
+
+running 34 tests
+test test_load_store_legacy_dictionary_bin_error ... ok
+test test_mount_options_allow_other_sets_acl_all ... ok
+test test_mount_options_both_noatime_and_allow_other ... ok
+test test_mount_options_default_permissions_always_present ... ok
+test test_mount_options_fsname_slicefs_always_present ... ok
+test test_mount_options_no_allow_other_sets_acl_owner ... ok
+test test_mount_options_no_custom_options ... ok
+test test_load_store_missing_segments_dir_error ... ok
+test test_mount_options_no_direct_io ... ok
+test test_load_store_from_segments_skips_empty_files ... ok
+test test_mount_options_noatime_false ... ok
+test test_mount_options_noatime_true ... ok
+test test_parse_wal_config_flush_on_fsync ... ok
+test test_parse_wal_config_no_wal ... ok
+test test_parse_wal_config_none_returns_per_op ... ok
+test test_parse_wal_config_per_op_explicit ... ok
+test test_mountpoint_auto_creation_already_exists ... ok
+test test_mountpoint_auto_creation_nested ... ok
+test test_parse_wal_config_periodic ... ok
+test test_parse_wal_config_unknown_falls_back_to_per_op ... ok
+test test_load_store_only_empty_segments_fails ... ok
+test test_load_store_dirty_mount_stale_lock_recovery ... ok
+test test_load_store_dictionary_bin_takes_precedence ... ok
+test test_load_store_with_no_wal ... ok
+test test_load_store_valid_seeded_succeeds ... ok
+test test_load_store_creates_mount_lock ... ok
+test test_mount_lock_dropped_on_scope_exit ... ok
+test test_load_store_empty_segment_file_skipped ... ok
+test test_load_store_truncated_segment_skipped ... ok
+test test_load_store_ignores_non_segment_files ... ok
+test test_load_store_with_periodic_wal ... ok
+test test_load_store_with_flush_on_fsync_wal ... ok
+test test_non_mounted_path_passes_check ... ok
+test test_load_store_with_multiple_valid_segments ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/multi_handle_posix.rs (/target/cov/debug/build/slicefs-cli/bafa72420ccf9b80/out/multi_handle_posix-bafa72420ccf9b80)
+
+running 13 tests
+test open_count_tracks_handles_and_orphans ... ok
+test a_write_request_with_o_append_appends ... ok
+test append_starts_at_the_committed_size_and_stops_at_the_max ... ok
+test append_handle_ignores_the_request_offset ... ok
+test a_read_only_release_logs_no_release_record ... ok
+test visibility_across_handles ... ok
+test open_after_last_release_gets_a_new_cell ... ok
+test visibility_across_ro_rw_append_handles ... ok
+test last_release_finalizes_once ... ok
+test two_readers_of_one_file_do_not_share_a_reader_wait ... ok
+test fsync_through_any_write_handle_commits ... ok
+test appends_never_overlap ... ok
+test all_or_none_reads ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s
+
+     Running tests/no_take_out.rs (/target/cov/debug/build/slicefs-cli/960d4d51899a73cb/out/no_take_out-960d4d51899a73cb)
+
+running 4 tests
+test header_parser_finds_names ... ok
+test the_flusher_takes_no_cell_out ... ok
+test the_budget_step_is_own_file_only ... ok
+test only_four_functions_remove_a_cell ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/pool_panic_tests.rs (/target/cov/debug/build/slicefs-cli/e9ce50d9b0171e58/out/pool_panic_tests-e9ce50d9b0171e58)
+
+running 5 tests
+test panic_child ... ignored
+test a_panic_on_another_thread_does_not_abort ... ok
+test a_worker_panic_aborts_and_the_remount_replays ... ok
+test a_reader_thread_panic_aborts_and_the_remount_replays ... ok
+test a_full_queue_that_stays_full_aborts ... ok
+
+test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running tests/pool_tests.rs (/target/cov/debug/build/slicefs-cli/75d46fe248898633/out/pool_tests-75d46fe248898633)
+
+running 9 tests
+test a_submit_with_a_lock_held_panics ... ok
+test jobs_run_on_named_workers ... ok
+test stats_count_the_queue_and_the_jobs_per_worker ... ok
+test jobs_run_in_parallel ... ok
+test an_oversize_job_passes_when_the_queue_is_empty ... ok
+test drain_runs_every_queued_job ... ok
+test drain_limit_reports_a_stuck_worker ... ok
+test submit_blocks_at_the_slot_bound ... ok
+test submit_blocks_at_the_byte_bound ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/posix_compliance_tests.rs (/target/cov/debug/build/slicefs-cli/6ec43d367a2eb498/out/posix_compliance_tests-6ec43d367a2eb498)
+
+running 40 tests
+test test_dedup_identical_content_same_digest ... ok
+test test_dedup_refcount_incremented_for_identical_content ... ok
+test test_file_create_empty_has_size_zero ... ok
+test test_chown_changes_uid_gid ... ok
+test test_dir_mkdir_has_dot_entries ... ok
+test test_link_to_directory_returns_eperm ... ok
+test test_chmod_changes_mode_bits ... ok
+test test_dedup_refcount_decremented_on_overwrite ... ok
+test test_dir_rmdir_empty_succeeds ... ok
+test test_dedup_logical_bytes_counts_both_files ... ok
+test test_dedup_different_content_different_digest ... ok
+test test_dir_mkdir_increments_parent_nlinks ... ok
+test test_dir_rmdir_on_file_returns_enotdir ... ok
+test test_file_delete_removes_from_directory ... ok
+test test_dir_rmdir_decrements_parent_nlinks ... ok
+test test_dir_nested_mkdir ... ok
+test test_symlink_and_file_are_distinct_inodes ... ok
+test test_dir_rmdir_nonempty_returns_enotempty ... ok
+test test_link_nlinks_equals_two ... ok
+test test_file_write_at_offset_zero_pads ... ok
+test test_file_overwrite_content ... ok
+test test_file_create_in_subdirectory ... ok
+test test_link_cross_directory ... ok
+test test_rename_overwrites_existing_target ... ok
+test test_rename_editor_pattern ... ok
+test test_link_unlink_one_keeps_inode ... ok
+test test_rename_across_directories ... ok
+test test_rename_within_same_directory ... ok
+test test_link_unlink_last_deletes_inode ... ok
+test test_file_create_write_read ... ok
+test test_rename_directory ... ok
+test test_setattr_mtime_explicit ... ok
+test test_truncate_to_shorter_length ... ok
+test test_symlink_long_target_path ... ok
+test test_mtime_updates_on_write ... ok
+test test_symlink_size_equals_target_length ... ok
+test test_truncate_to_zero ... ok
+test test_symlink_readlink_returns_target ... ok
+test test_symlink_dangling_allowed ... ok
+test test_truncate_zero_extend ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/race_closed_size_tests.rs (/target/cov/debug/build/slicefs-cli/6be0820fd6c2da5c/out/race_closed_size_tests-6be0820fd6c2da5c)
+
+running 3 tests
+test an_unlink_inside_the_splice_keeps_the_shared_content ... ok
+test an_unlink_inside_the_splice_replays_to_the_live_state ... ok
+test stress_size_changes_and_unlinks_of_closed_files ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/rebase_step_tests.rs (/target/cov/debug/build/slicefs-cli/b70a327e37b7baf1/out/rebase_step_tests-b70a327e37b7baf1)
+
+running 4 tests
+test a_switch_above_the_limit_comes_down_in_bounded_steps ... ok
+test the_budget_turns_a_stream_with_pending_writes_into_steps ... ok
+test scattered_writes_past_the_limit_each_pay_a_bounded_step ... ok
+test a_growing_extent_past_the_limit_is_rebased_in_parts ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.05s
+
+     Running tests/rename_ancestor_tests.rs (/target/cov/debug/build/slicefs-cli/31291c7bf7e5e674/out/rename_ancestor_tests-31291c7bf7e5e674)
+
+running 7 tests
+test a_directory_cannot_move_into_its_own_subtree ... ok
+test a_directory_cannot_move_into_itself ... ok
+test a_deep_move_into_the_subtree_is_refused ... ok
+test moves_that_make_no_cycle_still_work ... ok
+test the_root_is_its_own_parent ... ok
+test a_refused_rename_writes_no_record ... ok
+test stress_cross_directory_directory_renames_keep_one_tree ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/replay_memory_tests.rs (/target/cov/debug/build/slicefs-cli/4993a29bf39e654a/out/replay_memory_tests-4993a29bf39e654a)
+
+running 1 test
+test replay_memory_is_bounded_by_a_record_not_by_the_log ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.82s
+
+     Running tests/reply_after_locks.rs (/target/cov/debug/build/slicefs-cli/60a5e517147030bb/out/reply_after_locks-60a5e517147030bb)
+
+running 2 tests
+test every_request_callback_uses_serve ... ok
+test the_gate_is_taken_only_in_serve_and_init ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/signal_tests.rs (/target/cov/debug/build/slicefs-cli/ab60ee7e7bca6b7c/out/signal_tests-ab60ee7e7bca6b7c)
+
+running 1 test
+test a_signal_calls_the_stop_callback_and_ignored_signals_stay_ignored ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/small_file_bench.rs (/target/cov/debug/build/slicefs-cli/ec5b5554ea1e2f62/out/small_file_bench-ec5b5554ea1e2f62)
+
+running 4 tests
+test mid_file_read_cost ... ignored
+test small_file_cost ... ignored
+test sparse_2gib_write_cost ... ignored
+test zero_gap_memory ... ignored
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/statfs_tests.rs (/target/cov/debug/build/slicefs-cli/fc8c34da868beec0/out/statfs_tests-fc8c34da868beec0)
+
+running 12 tests
+test test_distinct_files_have_low_dedup_ratio ... ok
+test test_statfs_blocks_from_host ... ok
+test test_logical_bytes_increases_after_write ... ok
+test test_dedup_ratio_with_identical_files ... ok
+test test_logical_bytes_empty_store ... ok
+test test_statfs_after_write_reports_logical_bytes ... ok
+test test_statfs_empty_filesystem ... ok
+test test_physical_bytes_nonzero_after_write ... ok
+test test_logical_bytes_decremented_on_delete ... ok
+test test_statfs_fallback_no_store_path ... ok
+test test_logical_bytes_equals_sum_of_inode_sizes ... ok
+test test_statfs_files_reflects_inode_count ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/store_busy_tests.rs (/target/cov/debug/build/slicefs-cli/f95302bb0168ebae/out/store_busy_tests-f95302bb0168ebae)
+
+running 4 tests
+test a_store_that_stays_busy_ends_the_write_with_eio_at_the_limit ... ok
+test a_flusher_step_that_meets_a_busy_store_is_not_an_error_and_goes_again ... ok
+test an_append_that_meets_a_busy_store_is_in_the_file_once ... ok
+test a_write_waits_for_a_busy_store_and_succeeds ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.59s
+
+     Running tests/store_header_tests.rs (/target/cov/debug/build/slicefs-cli/9b514eff944c54d1/out/store_header_tests-9b514eff944c54d1)
+
+running 9 tests
+test a_write_command_on_no_store_makes_nothing ... ok
+test an_empty_store_read_writes_nothing ... ok
+test ro_compat_flag_allows_read_commands ... ok
+test ro_compat_flag_refuses_write_commands ... ok
+test data_and_no_header_is_refused_at_every_open_point ... ok
+test a_format_6_store_is_refused ... ok
+test seed_writes_the_header_first ... ok
+test ro_compat_mount_refuses_hash_and_auto_snapshot ... ok
+test incompat_flag_is_refused_at_every_open_point ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/streaming_tests.rs (/target/cov/debug/build/slicefs-cli/50ff72262cacd379/out/streaming_tests-50ff72262cacd379)
+
+running 25 tests
+test test_fallback_materializes_streaming_content ... ok
+test test_out_of_order_writes ... ok
+test test_pwrite_new_file_gap_zero_pads ... ok
+test test_fsync_refcount_no_leak ... ok
+test test_mixed_seq_then_nonseq ... ok
+test test_overlapping_writes ... ok
+test test_empty_file_release ... ok
+test test_read_in_buffered_mode ... ok
+test test_sequential_stays_streaming ... ok
+test test_truncate_to_zero_on_open_handle ... ok
+test test_fsync_in_buffered_mode ... ok
+test test_nonseq_fallback_on_gap ... ok
+test test_truncate_after_fsync_decrements_refcount ... ok
+test test_read_during_write_uncommitted ... ok
+test test_cas_committed_guard_fsync_then_release ... ok
+test test_fsync_midstream_then_continue ... ok
+test test_streaming_write_fsync_then_more_writes ... ok
+test test_truncate_in_buffered_mode ... ok
+test test_write_after_fsync_produces_correct_final ... ok
+test test_truncate_midstream_nonzero ... ok
+test test_truncate_extend_beyond ... ok
+test pending_writes_with_gaps_settle_without_buffered_mode ... ok
+test test_sequential_large_write ... ok
+test sparse_write_far_past_end_stays_streaming ... ok
+test two_interleaved_read_streams_do_not_restart_each_other ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.20s
+
+     Running tests/stress_harness.rs (/target/cov/debug/build/slicefs-cli/57102ddfad4cb20b/out/stress_harness-57102ddfad4cb20b)
+
+running 11 tests
+test long_run ... ignored, long run by hand: STRESS_THREADS STRESS_SECS STRESS_FILE_MIB STRESS_SEED STRESS_SERIALIZE STRESS_MODE STRESS_DROP_EVERY STRESS_DIRTY_LIMIT_KIB; use --release
+test s3_store_lock ... ignored, spike S3, by hand: S3_THREADS S3_FILE_MIB S3_SERIALIZE; use --release; run once without and once with --features lock-stats
+test s5_gate_fairness ... ignored, spike S5, by hand: S5_FILES S5_SECS S5_HOLD_MS; use --release
+test s6_small_fsync ... ignored, spike S6 in process (macOS numbers, no mount), by hand: S6_FILES; use --release
+test s7_budget_baseline ... ignored, spike S7 baseline: S7_THREADS S7_FILE_MIB S7_WRITE_MIB S7_COMMIT_SECS S7_SERIALIZE S7_FLUSHER S7_STORE_WAIT_MS; use --release
+test strict_gate_catches_a_request_without_the_gate - should panic ... ok
+test short_many_files ... ok
+test model_detects_planted_bug ... ok
+test short_one_file ... ok
+test crash_replay_matches_apply ... ok
+test serialize_off_target ... ok
+
+test result: ok. 6 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 5.96s
+
+     Running tests/v3_store_tests.rs (/target/cov/debug/build/slicefs-cli/709a426e0d6bda10/out/v3_store_tests-709a426e0d6bda10)
+
+running 3 tests
+test test_write_raw_no_compression ... ok
+test test_read_returns_raw_bytes ... ok
+test test_raw_content_dedup ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/wal_durability_tests.rs (/target/cov/debug/build/slicefs-cli/c7293d5e63ea9bc1/out/wal_durability_tests-c7293d5e63ea9bc1)
+
+running 2 tests
+test fsync_of_a_directory_syncs_the_write_log ... ok
+test a_failed_log_append_fails_fsync_until_the_next_commit ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/wal_strategy_tests.rs (/target/cov/debug/build/slicefs-cli/871fb332784f83c9/out/wal_strategy_tests-871fb332784f83c9)
+
+running 5 tests
+test test_wal_strategy_default_is_per_op ... ok
+test test_wal_strategy_flush_on_fsync ... ok
+test test_wal_strategy_periodic ... ok
+test test_wal_strategy_no_wal ... ok
+test test_wal_strategy_per_op ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/write_log_replay_tests.rs (/target/cov/debug/build/slicefs-cli/732c58028221c755/out/write_log_replay_tests-732c58028221c755)
+
+running 36 tests
+test a_failed_write_appends_no_record ... ok
+test a_failed_namespace_op_appends_no_record ... ok
+test a_failed_create_or_mkdir_does_not_break_replay ... ok
+test a_file_created_with_o_append_replays_its_overwrites ... ok
+test a_utimens_during_the_close_io_is_kept ... ok
+test an_explicit_mtime_after_a_write_is_kept_at_close_and_replay ... ok
+test reverse_order_creates_replay ... ok
+test a_torn_segment_before_a_cut_ends_the_log_there ... ok
+test stat_of_an_open_file_shows_the_time_of_the_last_write ... ok
+test an_o_trunc_open_beside_a_write_handle_replays ... ok
+test a_setattr_of_an_open_orphan_replays ... ok
+test a_file_still_open_at_the_crash_keeps_its_fsynced_bytes ... ok
+test directories_renames_links_and_unlinks_replay ... ok
+test two_write_handles_on_one_file_share_their_writes ... ok
+test attributes_xattrs_truncate_and_overwrite_replay ... ok
+test fsynced_buffered_bytes_survive_a_commit_and_a_crash ... ok
+test an_xattr_change_of_an_open_orphan_replays ... ok
+test a_commit_keeps_the_times_of_a_buffered_file ... ok
+test a_rename_with_no_sync_after_it_is_lost_with_a_buffered_log ... ok
+test the_log_of_a_mount_after_a_torn_cut_replays ... ok
+test a_rename_survives_a_crash_after_fsync_of_the_directory ... ok
+test two_write_handles_release_replays ... ok
+test a_torn_last_record_does_not_stop_the_mount ... ok
+test files_written_and_fsynced_survive_a_crash ... ok
+test a_create_in_a_new_directory_waits_for_its_mkdir_record ... ok
+test a_commit_with_open_files_is_a_clean_cut ... ok
+test parallel_namespace_ops_replay ... ok
+test parallel_overlapping_writes_replay_to_the_same_content ... ok
+test a_commit_keeps_out_of_order_bytes_pending_and_the_handle_streaming ... ok
+test a_size_change_of_a_new_file_comes_after_its_create_record ... ok
+test an_overlay_with_more_than_64_mib_of_relog_replays ... ok
+test a_commit_relogs_only_the_bytes_changed_since_the_last_rebase ... ok
+test cross_file_budget_steps_with_commits_replay_after_a_crash ... ok
+test an_overlay_replays_after_a_crash_with_each_log_mode ... ok
+test rebase_steps_with_commits_between_them_replay_after_a_crash ... ok
+test a_crash_between_the_cut_and_the_root_replays ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.37s
+
+     Running tests/write_path_tests.rs (/target/cov/debug/build/slicefs-cli/3356e14e98ea2fd9/out/write_path_tests-3356e14e98ea2fd9)
+
+running 24 tests
+test test_create_returns_valid_attr ... ok
+test test_flush_write_read_roundtrip ... ok
+test test_empty_file_create_release_has_empty_manifest ... ok
+test test_mknod_regular_file_then_open_write_release ... ok
+test test_setattr_truncate_larger_zero_extends_closed_file ... ok
+test test_mknod_unknown_type_returns_einval ... ok
+test test_create_produces_inode_in_parent_dir ... ok
+test test_setattr_truncate_open_file_handle_truncates_buffer ... ok
+test test_setattr_mtime_updates_timestamp ... ok
+test test_release_increments_refcount ... ok
+test test_release_updates_inode_size_and_mtime ... ok
+test test_mknod_zero_type_bits_creates_regular_file ... ok
+test test_setattr_mode_changes_permission_bits ... ok
+test test_release_flushes_to_cas_content_readable ... ok
+test test_setattr_truncate_smaller_on_closed_file ... ok
+test test_two_identical_files_share_content_digest ... ok
+test test_setattr_size_zero_on_new_file_without_manifest ... ok
+test test_write_with_gap_zero_pads ... ok
+test test_write_sequential_produces_correct_buffer ... ok
+test test_setattr_uid_gid_changes_ownership ... ok
+test an_extend_without_a_handle_rechunks_little ... ok
+test a_sparse_extend_on_an_open_overlay_rebases_without_hashing_the_zeros ... ok
+test a_rebase_rechunks_only_near_the_change ... ok
+test a_small_change_adds_only_the_changed_chunks ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.62s
+
+     Running unittests src/lib.rs (/target/cov/debug/build/slicefs-traits/b58fc8e725934076/out/slicefs_traits-b58fc8e725934076)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cas_local
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests chunk_store
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests metadata
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests slicefs_cli
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests slicefs_traits
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    Finished report saved to /tmp/cov-tests.json
+COVERAGE tests workspace=91.27 cas-local=96.29 chunk-store=95.38 metadata=96.11 slicefs-cli=86.13 slicefs-traits=85.53 fuse_callbacks=9.60
+COVERAGE floor=unset
+warning: unused workspace dependency `anyhow`
+  --> Cargo.toml:33:1
+   |
+33 | anyhow     = "1"
+   | ^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `anyhow`
+warning: unused workspace dependency `bincode`
+  --> Cargo.toml:22:1
+   |
+22 | bincode    = "2"
+   | ^^^^^^^
+   |
+help: consider removing the workspace dependency `bincode`
+warning: unused workspace dependency `criterion`
+  --> Cargo.toml:24:1
+   |
+24 | criterion  = { version = "0.5", features = ["html_reports"] }
+   | ^^^^^^^^^
+   |
+help: consider removing the workspace dependency `criterion`
+warning: unused workspace dependency `redb`
+  --> Cargo.toml:29:1
+   |
+29 | redb       = "3.1"
+   | ^^^^
+   |
+help: consider removing the workspace dependency `redb`
+warning: unused workspace dependency `tokio`
+  --> Cargo.toml:31:1
+   |
+31 | tokio      = { version = "1", features = ["full"] }
+   | ^^^^^
+   |
+help: consider removing the workspace dependency `tokio`
+warning: workspace (manifest) generated 5 warnings
+   Compiling zerocopy v0.8.47
+   Compiling bitflags v2.11.0
+   Compiling chunk-store v0.1.0 (/w/crates/chunk-store)
+   Compiling nix v0.31.3
+   Compiling metadata v0.1.0 (/w/crates/metadata)
+   Compiling fuser v0.18.0 (/w/vendor/fuser)
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling slicefs-cli v0.1.0 (/w/crates/slicefs-cli)
+warning: `fuser` (lib) generated 6 warnings
+warning: unused dependency `sha2-compress`
+  --> crates/slicefs-cli/Cargo.toml:31:1
+   |
+31 | sha2-compress  = { workspace = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `sha2-compress`
+warning: `slicefs-cli` (manifest) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.72s
+  read: ok
+  echo-write: ok
+  cp-3MB: ok
+  cp-again: ok
+  readback: ok
+  mkdir-mv: ok
+  chmod: ok
+  truncate: ok
+  xattr: ok
+  rm: ok
+  unmount: ok
+  daemon-exit: ok
+  workers-line: Workers: 8 (default)
+  pool-line: pool: workers=8 jobs=163 max_weight=131072 max_queue_wait_ms=0 queue_max=2 jobs_per_worker=20,19,21,18,20,19,20,26
+  allocator-line: Allocator: mmap threshold 131072 bytes (fixed)
+  steps-line: steps: save_steps=1 steps_per_s=0.77 freed_per_step=0 freed_bytes=0
+CAS bytes        : 2.91 MiB (3046416 bytes) (packs/, apparent size)
+CAS on disk      : 2.91 MiB (3051520 bytes) (packs/, allocated blocks)
+File dedup ratio : 1.00x (logical / unique content; whole-file duplicates)
+coverage: smoke profiles=4
+
+    Finished report saved to /tmp/cov-merged.json
+COVERAGE merged workspace=93.08 fuse_callbacks=51.52
+build-exit=3

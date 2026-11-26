@@ -114,7 +114,7 @@ pub fn run_snapshot_list(store_path: &Path) -> Result<(), Box<dyn std::error::Er
     }
 
     // Print table header.
-    println!("{:<8} {:<20} {:<22} {}", "Version", "Name", "Created", "Root");
+    println!("{:<8} {:<20} {:<22} Root", "Version", "Name", "Created");
     println!("{}", "-".repeat(80));
 
     for snap in &snapshots {

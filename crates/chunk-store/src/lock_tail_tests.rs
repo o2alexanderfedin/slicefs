@@ -128,6 +128,7 @@ fn put_and_read_pass_a_held_pack_create() {
 // reach KEEP_CAP: the next put of A waits for that sync. B's small put (it
 // stays below the cap) and B's read must not wait for it.
 #[test]
+#[cfg_attr(miri, ignore = "real-time limit of 5 s: too slow under the interpreter")]
 fn put_and_read_pass_a_held_keep_cap_wait() {
     use crate::retry::{RetryingIo, KEEP_CAP};
     const MIB: usize = 1 << 20;

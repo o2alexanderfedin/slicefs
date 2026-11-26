@@ -199,6 +199,7 @@ mod tests {
     // ── CAS-backed intern/load tests ──────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_intern_load_empty() {
         let (_dir, mut io) = make_io();
         let xattrs: Vec<(String, Vec<u8>)> = vec![];
@@ -208,6 +209,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_intern_load_single_attr() {
         let (_dir, mut io) = make_io();
         let xattrs = vec![("user.test".to_string(), b"testvalue".to_vec())];
@@ -217,6 +219,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_intern_load_large_value() {
         // A value larger than an inline value
         let (_dir, mut io) = make_io();
@@ -228,6 +231,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_intern_load_multiple_attrs() {
         let (_dir, mut io) = make_io();
         let xattrs = vec![
@@ -310,6 +314,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_multiple_attrs_coexist_independently() {
         let (_dir, mut io) = make_io();
         let xattrs1 = vec![("user.x".to_string(), b"foo".to_vec())];

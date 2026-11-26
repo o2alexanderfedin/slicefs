@@ -155,6 +155,7 @@ mod tests {
     /// Reopened with another write hash, the store reads and verifies the
     /// old objects, and new objects carry the new tag.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot run the zstd C code (ZSTD_createCCtx)")]
     fn a_new_write_hash_keeps_old_objects_readable() {
         let mem = MemIo::new();
         let a = data(1, 100_000);
@@ -198,6 +199,7 @@ mod tests {
 
     /// GC keeps the live objects of both hashes and frees the dead ones.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot run the zstd C code (ZSTD_createCCtx)")]
     fn gc_keeps_live_objects_of_both_hashes() {
         let mem = MemIo::new();
         let s = open(&mem, &Blake3_256);

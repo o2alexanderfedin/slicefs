@@ -1,0 +1,38 @@
+# First CI run of the Safety jobs tsan and deadlock, plan 21.2-07: run 45733741913, head 96f361d, branch feature/phase-21.2-thread-safety
+# job conclusion started completed duration
+model success 2026-11-26T01:09:02Z 2026-11-26T01:10:35Z 93s
+deadlock success 2026-11-26T01:09:01Z 2026-11-26T01:10:52Z 111s
+clippy-macos success 2026-11-26T01:09:01Z 2026-11-26T01:09:56Z 55s
+miri success 2026-11-26T01:09:02Z 2026-11-26T01:25:16Z 974s
+clippy-linux success 2026-11-26T01:09:02Z 2026-11-26T01:09:46Z 44s
+tsan success 2026-11-26T01:09:02Z 2026-11-26T01:12:30Z 208s
+# TSan report lines (the ThreadSanitizer WARNING header) in the whole run log: 0
+# job tsan and job deadlock lines (step output; GitHub timestamp removed)
+DEADLOCK STRESS_SECS=20 STRESS_THREADS=8 STRESS_SERIALIZE=0 STRESS_MODE=both STRESS_FILE_MIB=16 STRESS_SEED=2102
+DEADLOCK build secs=52 exit=0
+deadlock: max_inflight=8
+deadlock: max_inflight=8
+DEADLOCK long_run=ok max_inflight=8 secs=41
+deadlock: max_inflight=4
+deadlock: max_inflight=4
+deadlock: max_inflight=4
+DEADLOCK serialize_off_target=ok secs=5
+DEADLOCK ok
+tsan: vm.mmap_rnd_bits = 28
+TSAN host=x86_64-unknown-linux-gnu options=halt_on_error=0 second_deadlock_stack=1
+TSAN build secs=104 exit=0
+TSAN target=pool_tests result=ok reports=0 secs=0 passed=9 exit=0
+TSAN target=reply_after_locks result=ok reports=0 secs=0 passed=2 exit=0
+TSAN target=multi_handle_posix result=ok reports=0 secs=2 passed=13 exit=0
+TSAN target=lock_free_io result=ok reports=0 secs=9 passed=33 exit=0
+TSAN target=flusher_tests result=ok reports=0 secs=26 passed=26 exit=0
+TSAN target=dirty_budget_tests result=ok reports=0 secs=30 passed=1 exit=0
+TSAN target=race_closed_size_tests result=ok reports=0 secs=1 passed=3 exit=0
+TSAN target=rename_ancestor_tests result=ok reports=0 secs=0 passed=7 exit=0
+TSAN target=chunk-store:race_tests:: result=ok reports=0 secs=3 passed=14 exit=0
+TSAN target=chunk-store:lock_tail_tests:: result=ok reports=0 secs=0 passed=11 exit=0
+TSAN target=metadata:wal::per_op:: result=ok reports=0 secs=1 passed=13 exit=0
+tsan: max_inflight=4
+tsan: max_inflight=4
+TSAN target=long_run result=ok reports=0 secs=21 passed=1 exit=0
+TSAN ok

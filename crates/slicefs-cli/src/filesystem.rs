@@ -9,12 +9,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chunk_store::lock_stats::Site;
 use chunk_store::pack_io::SyncWait;
-use chunk_store::sync::{self, Rank};
+use chunk_store::sync::{self, raw, Rank};
 use crate::util::ts;
 
 use slicefs_traits::key::ObjectKey;
@@ -42,6 +42,13 @@ const S_IFBLK: u32 = 0o060_000;
 /// allocates memory by file size or offset (an out-of-order write goes to an
 /// overlay, see `crate::overlay`).
 pub const MAX_FILE_SIZE: u64 = 1 << 40;
+
+/// The end of a write of `len` bytes at `offset`: `Some(end)` when
+/// `offset + len` fits in u64 and is at most [`MAX_FILE_SIZE`], else `None`
+/// (EFBIG). Kani proves it exact on all inputs (`mod proofs`).
+pub(crate) fn write_end(offset: u64, len: usize) -> Option<u64> {
+    offset.checked_add(len as u64).filter(|&end| end <= MAX_FILE_SIZE)
+}
 
 /// Most bytes of out-of-order writes a streaming handle holds while it waits
 /// for a gap to close. Beyond it the handle switches to an overlay.
@@ -278,6 +285,11 @@ pub const STORE_BUSY_RETRY_MAX: Duration = Duration::from_secs(60);
 /// (D-02 "retries later").
 const REBASE_TRIES: usize = 2;
 
+/// Most `..` steps of the ancestor walk of a cross-directory rename
+/// (`check_not_ancestor`). A guard against a damaged store with a `..`
+/// cycle, not a depth limit of real trees.
+const MAX_ANCESTOR_STEPS: u32 = 1 << 20;
+
 /// Forced drops in a row (a test hook) after which a finalize stops
 /// consulting the drop hook for the rest of that finalize, so a test
 /// release ends too. With no write handle nothing else drops a finalize
@@ -340,6 +352,20 @@ fn add_to(counter: &'static std::thread::LocalKey<std::cell::Cell<u64>>, n: u64)
 
 /// A function the tests run inside a rebase (see `test_set_rebase_hook`).
 pub type RebaseHook = Arc<dyn Fn() + Send + Sync>;
+
+/// A point where a test can park a request (see `test_set_pause_hook`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pause {
+    /// A size change of a closed file has claimed the inode: its transient
+    /// cell is locked and in the cell map, the stripe is released.
+    SizeClaimed,
+    /// A setattr of other fields (or another `with_inode_locked` call)
+    /// holds the stripe and has read the cell map, before it locks a cell.
+    FieldsStriped,
+}
+
+/// A function the tests run at a `Pause` point (see `test_set_pause_hook`).
+pub type PauseHook = Arc<dyn Fn(Pause) + Send + Sync>;
 
 /// Write mode for an open file handle.
 ///
@@ -682,12 +708,40 @@ impl CellGuard<'_> {
         } else if cost == 0 {
             self.cell.dirty_since.store(0, Ordering::Relaxed);
         }
-        if cost >= old {
-            self.total.fetch_add(cost - old, Ordering::Relaxed);
-        } else {
-            self.total.fetch_sub(old - cost, Ordering::Relaxed);
+        match dirty_move(old, cost) {
+            DirtyMove::Add(d) => {
+                self.total.fetch_add(d, Ordering::Relaxed);
+            }
+            DirtyMove::Sub(d) => {
+                self.total.fetch_sub(d, Ordering::Relaxed);
+            }
         }
     }
+}
+
+/// The change of the shared dirty total when the cost of one cell goes
+/// from `old` to `cost`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirtyMove {
+    Add(usize),
+    Sub(usize),
+}
+
+/// The move of the shared total for a cell cost `old` -> `cost` (no wrap:
+/// the difference of the two). Kani proves that the total stays the sum of
+/// the costs (`mod proofs`).
+fn dirty_move(old: usize, cost: usize) -> DirtyMove {
+    if cost >= old {
+        DirtyMove::Add(cost - old)
+    } else {
+        DirtyMove::Sub(old - cost)
+    }
+}
+
+/// The hard cap of a dirty `limit` (see `hard_cap`), saturating, so at
+/// least `limit` (Kani proof in `mod proofs`).
+fn hard_cap_of(limit: usize) -> usize {
+    limit.saturating_add(limit / crate::overlay::GROW_DIV).saturating_add(2 * REBASE_STEP)
 }
 
 impl Deref for CellGuard<'_> {
@@ -811,11 +865,11 @@ pub(crate) struct FlushCtl {
     pub(crate) freed: sync::Condvar,
     /// True while a flusher loop runs. With no flusher, a writer over the
     /// budget does not wait (it pays at once).
-    pub(crate) running: AtomicBool,
+    pub(crate) running: raw::atomic::AtomicBool,
     /// The wait limit of a throttled writer, in ms (`THROTTLE_WAIT`).
-    pub(crate) throttle_wait_ms: AtomicU64,
+    pub(crate) throttle_wait_ms: raw::atomic::AtomicU64,
     /// The pass interval of the flusher, in ms (`FLUSH_PASS`).
-    pub(crate) pass_ms: AtomicU64,
+    pub(crate) pass_ms: raw::atomic::AtomicU64,
     /// The idle time of a file, in ms (`DIRTY_IDLE`).
     pub(crate) idle_ms: AtomicU64,
     /// The maximum age of dirty data, in ms (`DIRTY_EXPIRE`).
@@ -836,9 +890,9 @@ pub(crate) struct FlushCtl {
     /// half the budget leaves it false, so the first write that finds the
     /// total at half kicks. The next pass sets it again: a timed pass, or
     /// a pass kicked at the budget.
-    pub(crate) empty_pass: AtomicBool,
+    pub(crate) empty_pass: raw::atomic::AtomicBool,
     /// Writers in a throttle wait now.
-    pub(crate) throttled_now: AtomicUsize,
+    pub(crate) throttled_now: raw::atomic::AtomicUsize,
     pub(crate) passes: AtomicU64,
     pub(crate) steps: AtomicU64,
     pub(crate) published: AtomicU64,
@@ -865,15 +919,15 @@ impl FlushCtl {
             flags: sync::Mutex::new(Rank::Short, FlushFlags::default()),
             wake: sync::Condvar::new(),
             freed: sync::Condvar::new(),
-            running: AtomicBool::new(false),
-            throttle_wait_ms: AtomicU64::new(THROTTLE_WAIT.as_millis() as u64),
-            pass_ms: AtomicU64::new(FLUSH_PASS.as_millis() as u64),
+            running: raw::atomic::AtomicBool::new(false),
+            throttle_wait_ms: raw::atomic::AtomicU64::new(THROTTLE_WAIT.as_millis() as u64),
+            pass_ms: raw::atomic::AtomicU64::new(FLUSH_PASS.as_millis() as u64),
             idle_ms: AtomicU64::new(DIRTY_IDLE.as_millis() as u64),
             expire_ms: AtomicU64::new(DIRTY_EXPIRE.as_millis() as u64),
             hot_ms: AtomicU64::new(HOT_WINDOW.as_millis() as u64),
             clock_offset_ms: AtomicU64::new(0),
-            empty_pass: AtomicBool::new(false),
-            throttled_now: AtomicUsize::new(0),
+            empty_pass: raw::atomic::AtomicBool::new(false),
+            throttled_now: raw::atomic::AtomicUsize::new(0),
             passes: AtomicU64::new(0),
             steps: AtomicU64::new(0),
             published: AtomicU64::new(0),
@@ -904,6 +958,16 @@ impl FlushCtl {
     /// the new total or waits already and gets the notify.
     pub(crate) fn notify_freed(&self) {
         drop(self.flags.lock());
+        self.freed.notify_all();
+    }
+
+    /// Ask the flusher loop to end and wake every throttled writer (the
+    /// stop step of `SliceFsFilesystem::stop_flusher`; the M2 model calls
+    /// it). The stop is set under the flags lock: a writer checks it under
+    /// that lock, so it sees it or waits already and gets the notify.
+    pub(crate) fn request_stop(&self) {
+        self.flags.lock().stop = true;
+        self.wake.notify_all();
         self.freed.notify_all();
     }
 }
@@ -1015,10 +1079,10 @@ pub(crate) enum FlushStep {
 
 /// Counts one waiter for the exclusive commit gate while it lives
 /// (`SliceFsFilesystem::exclusive_wait`).
-pub(crate) struct ExclusiveWait<'a>(&'a AtomicUsize);
+pub(crate) struct ExclusiveWait<'a>(&'a raw::atomic::AtomicUsize);
 
 impl<'a> ExclusiveWait<'a> {
-    fn enter(n: &'a AtomicUsize) -> Self {
+    fn enter(n: &'a raw::atomic::AtomicUsize) -> Self {
         n.fetch_add(1, Ordering::Relaxed);
         ExclusiveWait(n)
     }
@@ -1031,10 +1095,10 @@ impl Drop for ExclusiveWait<'_> {
 }
 
 /// Lowers `FlushCtl::throttled_now` when dropped (every exit of a wait).
-struct ThrottledNow<'a>(&'a AtomicUsize);
+struct ThrottledNow<'a>(&'a raw::atomic::AtomicUsize);
 
 impl<'a> ThrottledNow<'a> {
-    fn enter(n: &'a AtomicUsize) -> Self {
+    fn enter(n: &'a raw::atomic::AtomicUsize) -> Self {
         n.fetch_add(1, Ordering::Relaxed);
         ThrottledNow(n)
     }
@@ -1114,7 +1178,7 @@ pub struct SliceFsFilesystem {
     /// ro_compat flag: `destroy` writes nothing (see `test_destroy`).
     read_only: bool,
     /// Shared by FUSE callbacks, exclusive for a timed commit (see `commit_gate()`).
-    commit_gate: Arc<RwLock<()>>,
+    commit_gate: Arc<raw::RwLock<()>>,
     /// True while the write log is replayed: requests are not logged again.
     replaying: std::sync::atomic::AtomicBool,
     /// Dirty limit of one overlay (`DIRTY_LIMIT`; tests set it lower).
@@ -1148,6 +1212,9 @@ pub struct SliceFsFilesystem {
     /// manifest node is read, with no stripe held (for tests: a parked
     /// unlink).
     reclaim_hook: sync::Mutex<Option<RebaseHook>>,
+    /// Run at each `Pause` point (for tests: a request parked at a known
+    /// step of a race).
+    pause_hook: sync::Mutex<Option<PauseHook>>,
     /// Write requests so far (write, create, setattr): the online GC gives
     /// way to writes by it (`gc_pacing`).
     write_activity: Arc<AtomicU64>,
@@ -1174,7 +1241,7 @@ pub struct SliceFsFilesystem {
     shut_down: AtomicBool,
     /// Threads that wait for the exclusive commit gate now (a test hook;
     /// see `ExclusiveWait`).
-    gate_xwaiters: AtomicUsize,
+    gate_xwaiters: raw::atomic::AtomicUsize,
     /// The flusher thread of a mount (`start_flusher`); `stop_flusher`
     /// takes it and joins it. `Rank::Short`.
     flusher_thread: sync::Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -1212,7 +1279,7 @@ impl SliceFsFilesystem {
             store_path,
             auto_snapshot: false,
             read_only: false,
-            commit_gate: Arc::new(RwLock::new(())),
+            commit_gate: Arc::new(raw::RwLock::new(())),
             replaying: std::sync::atomic::AtomicBool::new(false),
             dirty_limit: AtomicUsize::new(DIRTY_LIMIT),
             dirty_budget: AtomicUsize::new(DIRTY_BUDGET),
@@ -1224,6 +1291,7 @@ impl SliceFsFilesystem {
             push_hook: sync::Mutex::new(Rank::Short, None),
             mkdir_hook: sync::Mutex::new(Rank::Short, None),
             reclaim_hook: sync::Mutex::new(Rank::Short, None),
+            pause_hook: sync::Mutex::new(Rank::Short, None),
             write_activity: Arc::new(AtomicU64::new(0)),
             drop_steps: AtomicUsize::new(0),
             drop_every: AtomicUsize::new(0),
@@ -1234,7 +1302,7 @@ impl SliceFsFilesystem {
             store_busy_retries: AtomicU64::new(0),
             flush_ctl: Arc::new(FlushCtl::new()),
             shut_down: AtomicBool::new(false),
-            gate_xwaiters: AtomicUsize::new(0),
+            gate_xwaiters: raw::atomic::AtomicUsize::new(0),
             flusher_thread: sync::Mutex::new(Rank::Short, None),
         }
     }
@@ -1384,6 +1452,20 @@ impl SliceFsFilesystem {
         *self.reclaim_hook.lock() = hook;
     }
 
+    /// Test hook: run `hook` at each `Pause` point, with the locks that the
+    /// point names held (`None`: no hook).
+    pub fn test_set_pause_hook(&self, hook: Option<PauseHook>) {
+        *self.pause_hook.lock() = hook;
+    }
+
+    /// Run the pause hook at `at`, with no hook lock held during the call.
+    fn pause(&self, at: Pause) {
+        let hook = self.pause_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook(at);
+        }
+    }
+
     /// Test hook: drop the results of the next `n` unlocked steps (stream
     /// steps, overlay switches, rebase steps) as if the file had changed in
     /// their I/O phase. Flushes are not dropped.
@@ -1508,7 +1590,7 @@ impl SliceFsFilesystem {
 
     /// True if a test hook fails this rebase step (see `test_fail_steps`).
     fn forced_fail(&self) -> bool {
-        self.fail_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+        self.fail_steps.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
     }
 
     /// Phase C of an unlocked step: true if a test hook drops its result.
@@ -1520,10 +1602,10 @@ impl SliceFsFilesystem {
         }
         let k = self.drop_every.load(Ordering::Relaxed);
         let n = self.steps_seen.fetch_add(1, Ordering::Relaxed) + 1;
-        if k > 0 && n % k == 0 {
+        if k > 0 && n.is_multiple_of(k) {
             return true;
         }
-        self.drop_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+        self.drop_steps.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
     }
 
     /// Run the push hook, if one is set.
@@ -1850,7 +1932,7 @@ impl SliceFsFilesystem {
         self.flush_cell(g, FlushIo::Locked).map(|_| ())
     }
 
-    pub fn commit_gate(&self) -> Arc<RwLock<()>> {
+    pub fn commit_gate(&self) -> Arc<raw::RwLock<()>> {
         Arc::clone(&self.commit_gate)
     }
 
@@ -1860,19 +1942,13 @@ impl SliceFsFilesystem {
     /// instead of waiting behind a queued commit. Every request and the
     /// harness take the gate through this, never `commit_gate().read()`.
     pub fn gate_shared(&self) -> GateGuard<'_> {
-        let rank = sync::rank::enter(Rank::Gate);
-        let hold = GateHold::Shared { _g: self.commit_gate.read().unwrap_or_else(|e| e.into_inner()) };
-        GateGuard { _hold: hold, _rank: rank }
+        hold_shared(&self.commit_gate)
     }
 
     /// Hold the commit gate exclusively (a commit, the start of a GC), with
     /// its `Rank::Gate` entry (see `gate_shared`).
     pub fn gate_exclusive(&self) -> GateGuard<'_> {
-        let rank = sync::rank::enter(Rank::Gate);
-        let waiting = self.exclusive_wait();
-        let hold = GateHold::Exclusive { _g: self.commit_gate.write().unwrap_or_else(|e| e.into_inner()) };
-        drop(waiting);
-        GateGuard { _hold: hold, _rank: rank }
+        hold_exclusive(&self.commit_gate, &self.gate_xwaiters)
     }
 
     /// Access the metadata store (used by the mount command after unmount).
@@ -1896,11 +1972,78 @@ impl SliceFsFilesystem {
     }
 }
 
-/// The std commit gate held, shared or exclusive (each guard is kept only
-/// for its drop).
+/// The wait of a writer over the budget (the wait part of
+/// `SliceFsFilesystem::throttle_write`, with `now` for its `dirty_now`):
+/// it counts the wait, kicks the flusher under the flags lock, and waits
+/// on `freed` in slices of `THROTTLE_SLICE` until the total from `now` is
+/// below the budget (returns false: no pay), the flusher stopped or ended,
+/// a pass that began in the wait could not free memory, or the wait limit
+/// passed (returns true: the writer pays). A free function, so the dirty
+/// budget model (`loom_tests`) runs it with a model total.
+pub(crate) fn throttle_wait(ctl: &FlushCtl, now: impl Fn() -> (usize, usize)) -> bool {
+    ctl.throttled.fetch_add(1, Ordering::Relaxed);
+    let _now = ThrottledNow::enter(&ctl.throttled_now);
+    let start = Instant::now();
+    let deadline = start + Duration::from_millis(ctl.throttle_wait_ms.load(Ordering::Relaxed));
+    let mut flags = ctl.flags.lock();
+    // Only a pass with a higher number began after this point.
+    let seen = flags.pass_begun;
+    flags.kicked = true;
+    ctl.wake.notify_all();
+    let pay = loop {
+        // Under the flags lock: the flusher lowers the total before it
+        // takes this lock to notify, so no wakeup is lost.
+        let (total, budget) = now();
+        if total < budget {
+            break false;
+        }
+        if flags.stop || !ctl.running.load(Ordering::Acquire) {
+            ctl.stop_exits.fetch_add(1, Ordering::Relaxed);
+            break true;
+        }
+        if flags.pass_done > seen && flags.pass_stuck {
+            ctl.no_room_exits.fetch_add(1, Ordering::Relaxed);
+            break true;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            ctl.timeouts.fetch_add(1, Ordering::Relaxed);
+            break true;
+        }
+        ctl.freed.wait_for(&mut flags, left.min(THROTTLE_SLICE));
+    };
+    drop(flags);
+    ctl.max_wait_ms.fetch_max(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+    pay
+}
+
+/// Hold `gate` shared with its `Rank::Gate` entry (the body of
+/// `SliceFsFilesystem::gate_shared`). The entry goes on first. A free
+/// function, so the commit gate model (`loom_tests`) runs it on a gate of
+/// its own.
+pub(crate) fn hold_shared(gate: &raw::RwLock<()>) -> GateGuard<'_> {
+    let rank = sync::rank::enter(Rank::Gate);
+    let hold = GateHold::Shared { _g: gate.read().unwrap_or_else(|e| e.into_inner()) };
+    GateGuard { _hold: hold, _rank: rank }
+}
+
+/// Hold `gate` exclusively with its `Rank::Gate` entry, counted in
+/// `xwaiters` while it waits (the body of
+/// `SliceFsFilesystem::gate_exclusive`; see `hold_shared`).
+pub(crate) fn hold_exclusive<'a>(gate: &'a raw::RwLock<()>, xwaiters: &'a raw::atomic::AtomicUsize) -> GateGuard<'a> {
+    let rank = sync::rank::enter(Rank::Gate);
+    let waiting = ExclusiveWait::enter(xwaiters);
+    let hold = GateHold::Exclusive { _g: gate.write().unwrap_or_else(|e| e.into_inner()) };
+    drop(waiting);
+    GateGuard { _hold: hold, _rank: rank }
+}
+
+/// The commit gate held, shared or exclusive (each guard is kept only for
+/// its drop). The gate is a std `RwLock`; under `--cfg loom` it is the loom
+/// one (`sync::raw`).
 enum GateHold<'a> {
-    Shared { _g: std::sync::RwLockReadGuard<'a, ()> },
-    Exclusive { _g: std::sync::RwLockWriteGuard<'a, ()> },
+    Shared { _g: raw::RwLockReadGuard<'a, ()> },
+    Exclusive { _g: raw::RwLockWriteGuard<'a, ()> },
 }
 
 /// A hold of the commit gate and its rank-1 entry (D-16, D-18: the gate
@@ -1971,7 +2114,7 @@ pub fn inode_to_file_attr(meta: &InodeMeta) -> FileAttr {
     };
 
     let perm = (meta.mode & 0o7777) as u16;
-    let blocks = (meta.size + 511) / 512;
+    let blocks = meta.size.div_ceil(512);
 
     let mtime = pair_to_system_time(meta.mtime_sec, meta.mtime_nsec);
     let ctime = pair_to_system_time(meta.ctime_sec, meta.ctime_nsec);
@@ -2055,6 +2198,13 @@ impl SliceFsFilesystem {
         t.by_fh.insert(fh, Handle { ino, write, append });
         *t.open_count.entry(ino).or_insert(0) += 1;
         fh
+    }
+
+    /// Count `ino` as open with no handle (the count half of `open_handle`):
+    /// an unlink then keeps the inode as an orphan until `uncount`, as for
+    /// an open handle. The caller holds `stripe(ino)` (IN-01 order).
+    fn pin_inode(&self, ino: u64) {
+        *self.handles.lock().open_count.entry(ino).or_insert(0) += 1;
     }
 
     /// Remove `fh` from the handle table (its inode stays counted as open
@@ -2325,8 +2475,8 @@ impl SliceFsFilesystem {
 
     /// True if the committed file has bytes (so a fresh stream would lose them).
     fn has_content(&self, ino: u64) -> bool {
-        self.meta.get_inode(ino).map_or(false, |m| m.size > 0)
-            && self.meta.get_manifest(ino).map_or(false, |m| !m.is_empty())
+        self.meta.get_inode(ino).is_ok_and(|m| m.size > 0)
+            && self.meta.get_manifest(ino).is_ok_and(|m| !m.is_empty())
     }
 
     /// Switch the stream of the locked cell `g` to an overlay (D-02). Phase
@@ -2398,7 +2548,7 @@ impl SliceFsFilesystem {
     /// `clone` of a stream of `next` bytes, the committed content, or none)
     /// and its length, the root the manifest names now, and the digest of
     /// the stored manifest node of the base.
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, reason = "a private result tuple; an alias would only move the type")]
     fn overlay_base(
         &self,
         ino: u64,
@@ -2588,8 +2738,7 @@ impl SliceFsFilesystem {
     /// it), and two rebase steps (Claude's discretion). The write path
     /// gates its apply on it (`write_in_cell`).
     fn hard_cap(&self) -> usize {
-        let limit = self.dirty_limit.load(Ordering::Relaxed);
-        limit.saturating_add(limit / crate::overlay::GROW_DIV).saturating_add(2 * REBASE_STEP)
+        hard_cap_of(self.dirty_limit.load(Ordering::Relaxed))
     }
 
     /// A rebase step of the writer's own locked cell `g` (D-02, D-13), with
@@ -2713,7 +2862,7 @@ impl SliceFsFilesystem {
     /// installed). Returns the new root (none for size 0), its manifest
     /// digest (the empty manifest for size 0) and the rebase trace line
     /// (the caller prints it with no cell lock held).
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, reason = "a private result tuple; an alias would only move the type")]
     fn step_io(&self, ino: u64, src: &Overlay, plan: &StepPlan) -> Result<(Option<ObjectKey>, ObjectKey, String), i32> {
         let cs = &*self.content;
         let store_err = |e: std::io::Error| {
@@ -2897,6 +3046,7 @@ impl SliceFsFilesystem {
     fn with_inode_locked<R>(&self, ino: u64, f: impl FnOnce(Option<&mut OpenFileState>) -> R) -> R {
         let _ns = self.ns.lock(&[ino]);
         let cell = self.cells.get(ino);
+        self.pause(Pause::FieldsStriped);
         let mut g = cell.as_deref().map(|c| self.lock_cell(c)).filter(|g| !g.retired);
         f(g.as_mut().map(|g| &mut g.file))
     }
@@ -2968,7 +3118,7 @@ impl SliceFsFilesystem {
     /// hold that also opens the handle. `O_TRUNC` needs no truncate: the
     /// new inode is empty (a truncate here would wait for a step and do
     /// store I/O with the stripes held, WR-02).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     fn create_logged(
         &self,
         parent_ino: u64,
@@ -3092,7 +3242,7 @@ impl SliceFsFilesystem {
 
     /// The body of `write_logged`; `lsn` gets the LSN of the record, and
     /// `switch` the fields of the debug line of a switch to an overlay.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     fn write_in_cell(
         &self,
         fh: u64,
@@ -3112,7 +3262,7 @@ impl SliceFsFilesystem {
         // An append ignores the request offset (D-12, D-17). Replay does not
         // append: each record carries the offset the write used.
         let append = (h.append || flags & libc::O_APPEND != 0) && !self.replaying.load(Ordering::Relaxed);
-        if !append && offset.checked_add(data.len() as u64).map_or(true, |end| end > MAX_FILE_SIZE) {
+        if !append && write_end(offset, data.len()).is_none() {
             return Err(libc::EFBIG);
         }
         let Some(cell) = self.cells.get(ino) else { return Err(libc::EBADF) };
@@ -3177,10 +3327,7 @@ impl SliceFsFilesystem {
                     }
                     size
                 };
-                end = match offset.checked_add(data.len() as u64) {
-                    Some(e) if e <= MAX_FILE_SIZE => e,
-                    _ => return Err(libc::EFBIG),
-                };
+                end = write_end(offset, data.len()).ok_or(libc::EFBIG)?;
             }
             cost_before = dirty_cost(&g.file);
             if let WriteMode::Overlay(ov) = &g.file.write_mode {
@@ -3230,7 +3377,7 @@ impl SliceFsFilesystem {
             let s = &mut g.file;
             let WriteMode::Streaming { pending, .. } = &mut s.write_mode else { continue };
             let overlaps_pending = pending.range(..end).next_back()
-                .map_or(false, |(&o, v)| o + v.len() as u64 > offset);
+                .is_some_and(|(&o, v)| o + v.len() as u64 > offset);
             let pending_bytes: usize = pending.values().map(Vec::len).sum();
 
             if fresh && !overlaps_pending && offset > next + REORDER_WINDOW as u64 {
@@ -3355,10 +3502,10 @@ impl SliceFsFilesystem {
         // Then the budget of all open files (#105), with the same bound,
         // unless the throttle let the write in below the budget.
         let n = result?;
-        if admit.pay {
-            if let Err(e) = self.pay_budget(&mut g, added) {
-                after_err(&mut g, "the budget step", e);
-            }
+        if admit.pay
+            && let Err(e) = self.pay_budget(&mut g, added)
+        {
+            after_err(&mut g, "the budget step", e);
         }
         Ok((n, offset))
     }
@@ -3436,40 +3583,7 @@ impl SliceFsFilesystem {
         if !ctl.running.load(Ordering::Acquire) {
             return Admit { pay: true };
         }
-        ctl.throttled.fetch_add(1, Ordering::Relaxed);
-        let _now = ThrottledNow::enter(&ctl.throttled_now);
-        let start = Instant::now();
-        let deadline = start + Duration::from_millis(ctl.throttle_wait_ms.load(Ordering::Relaxed));
-        let mut flags = ctl.flags.lock();
-        // Only a pass with a higher number began after this point.
-        let seen = flags.pass_begun;
-        flags.kicked = true;
-        ctl.wake.notify_all();
-        let pay = loop {
-            // Under the flags lock: the flusher lowers the total before it
-            // takes this lock to notify, so no wakeup is lost.
-            let (total, budget) = self.dirty_now();
-            if total < budget {
-                break false;
-            }
-            if flags.stop || !ctl.running.load(Ordering::Acquire) {
-                ctl.stop_exits.fetch_add(1, Ordering::Relaxed);
-                break true;
-            }
-            if flags.pass_done > seen && flags.pass_stuck {
-                ctl.no_room_exits.fetch_add(1, Ordering::Relaxed);
-                break true;
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                ctl.timeouts.fetch_add(1, Ordering::Relaxed);
-                break true;
-            }
-            ctl.freed.wait_for(&mut flags, left.min(THROTTLE_SLICE));
-        };
-        drop(flags);
-        ctl.max_wait_ms.fetch_max(start.elapsed().as_millis() as u64, Ordering::Relaxed);
-        Admit { pay }
+        Admit { pay: throttle_wait(ctl, || self.dirty_now()) }
     }
 
     /// Wake the flusher for a pass now (the background threshold, half the
@@ -3512,12 +3626,7 @@ impl SliceFsFilesystem {
             "stop_flusher with a lock held: {:?}",
             sync::rank::held()
         );
-        let ctl = &*self.flush_ctl;
-        // The stop is set under the flags lock: a writer checks it under
-        // that lock, so it sees it or waits already and gets the notify.
-        ctl.flags.lock().stop = true;
-        ctl.wake.notify_all();
-        ctl.freed.notify_all();
+        self.flush_ctl.request_stop();
         // Take the handle, then join with no lock held.
         let Some(h) = self.flusher_thread.lock().take() else { return };
         if h.thread().id() == std::thread::current().id() {
@@ -4077,6 +4186,7 @@ impl SliceFsFilesystem {
     ///   stream; any other size switches to an overlay (no content read).
     /// - Overlay: only the size and the extents change (no I/O, no allocation
     ///   by size); a resize to 0 goes back to a fresh stream.
+    ///
     /// A size change goes to the open write state of the inode whatever
     /// handle it names (an NFS SETATTR from cp, with the removed NFS
     /// backend, carried no handle).
@@ -4086,6 +4196,15 @@ impl SliceFsFilesystem {
 
     /// `test_setattr_size` that logs a size-only `Setattr` in the cell hold
     /// of the change (the open cell or the transient cell).
+    ///
+    /// A closed file (case B) is first claimed under `stripe(ino)`: the
+    /// inode exists (else ENOENT), its transient cell is locked and in the
+    /// cell map, and the inode is pinned like an open handle (`pin_inode`).
+    /// The splice and the install then run under the cell with the stripe
+    /// released; the pin makes an unlink meanwhile keep an orphan, which
+    /// `uncount` reclaims after the change (race (a), window 1). The install
+    /// stays in the cell hold, so an open or a second size change cannot
+    /// enter between the splice and the install (research variant of D-27).
     fn setattr_size_logged(&self, ino: u64, new_size: u64, log: LogOp<'_>) -> Result<(), i32> {
         if new_size > MAX_FILE_SIZE {
             return Err(libc::EFBIG);
@@ -4093,16 +4212,17 @@ impl SliceFsFilesystem {
         let size_op = || crate::oplog::Op::Setattr {
             ino, mode: None, uid: None, gid: None, size: Some(new_size), atime: None, mtime: None,
         };
-        // A create (or mknod) that has linked `ino` holds its stripe until
-        // its record is appended (`new_entry`): wait for that, so this
-        // change's record comes after it (WR-03, D-08), and release the
-        // stripe at once. The change itself holds no stripe; the caller
-        // holds none either (stripes rank before cells).
-        drop(self.ns.lock(&[ino]));
         loop {
+            // Each pass takes `stripe(ino)` first. A create (or mknod) that
+            // has linked `ino` holds it until its record is appended
+            // (`new_entry`): so this change's record comes after it (WR-03,
+            // D-08). The caller holds no stripe (stripes rank before cells).
+            let ns = self.ns.lock(&[ino]);
             // Case A: the inode has an open write state (also one that its
-            // last release is still storing).
+            // last release is still storing). The stripe is released before
+            // the cell lock: the change can wait for steps.
             if let Some(cell) = self.cells.get(ino) {
+                drop(ns);
                 let mut g = self.lock_cell(&cell);
                 if g.retired {
                     continue;
@@ -4118,26 +4238,44 @@ impl SliceFsFilesystem {
                     Err(e) => return Err(e),
                 }
             }
-            // Case B: no open write state. A transient cell, locked before
-            // it goes into the map, orders this change against an open or
-            // another size change of the inode: its lock is held across the
-            // splice. This is the one I/O under a cell lock on a request
-            // path, accepted (RESEARCH Pattern 1): the file is closed, so
-            // no writer and no reader waits for it (a read does not lock a
-            // transient cell; it reads the committed manifest, which this
-            // change replaces in one install). Only an open or a second
-            // size change of the inode waits (19-07 order).
+            // Case B: no open write state. The claim, under the stripe: the
+            // inode exists; a transient cell, locked before it goes into the
+            // map (stripe 3 before cell 4), orders this change against an
+            // open or another size change of the inode, and a setattr of
+            // other fields either ran before the claim or finds the cell and
+            // waits for it (window 2: its inode write and its record both
+            // come after this change's); the pin keeps an unlinked inode as
+            // an orphan (window 1). The cell lock is held across the splice
+            // with the stripe released. This is the one I/O under a cell
+            // lock on a request path, accepted (RESEARCH Pattern 1): the
+            // file is closed, so no writer and no reader waits for it (a
+            // read does not lock a transient cell; it reads the committed
+            // manifest, which this change replaces in one install). Only an
+            // open, a second size change or a fields setattr of the inode
+            // waits (19-07 order).
+            if self.meta.get_inode(ino).is_err() {
+                return Err(libc::ENOENT);
+            }
             let cell = Arc::new(FileCell::transient(ino));
             let mut g = self.lock_cell(&cell);
             if !self.cells.insert_new(&cell) {
+                drop(g);
+                drop(ns);
                 continue;
             }
+            self.pin_inode(ino);
+            drop(ns);
+            self.pause(Pause::SizeClaimed);
+            // No return between the pin and `uncount`.
             let r = self.setattr_size_closed(ino, new_size);
             if r.is_ok() {
                 log(size_op());
             }
             g.retired = true;
             self.cells.remove(&cell);
+            // The cell first: `uncount` takes the stripe (rank 3).
+            drop(g);
+            self.uncount(ino);
             return r;
         }
     }
@@ -4147,18 +4285,19 @@ impl SliceFsFilesystem {
     /// zero-extended. NotFound from get_manifest means the inode exists but
     /// has no content yet (brand-new file created by create() before any
     /// write/release). Treat as empty content. The rebase hook runs after
-    /// the splice, before the install (for tests).
+    /// the splice, before the install (for tests). The old root is released
+    /// once, after the new manifest is set (no release on an error path).
     fn setattr_size_closed(&self, ino: u64, new_size: u64) -> Result<(), i32> {
         let old_manifest = match self.meta.get_manifest(ino) {
             Ok(m) => m,
             Err(MetaError::NotFound(_)) => vec![],
             Err(_) => return Err(libc::EIO),
         };
-
-        // Decrement old refcount
-        if !old_manifest.is_empty() {
-            self.meta.decrement_refcount(&old_manifest[0]);
-        }
+        let release_old = || {
+            if let Some(old) = old_manifest.first() {
+                self.meta.decrement_refcount(old);
+            }
+        };
 
         // Splice the old content to the new size: only the chunks near the
         // old end (a cut, or the last chunk of an extend) are cut again; the
@@ -4166,6 +4305,7 @@ impl SliceFsFilesystem {
         // zero chunks without a hash. Same key as a full write.
         if new_size == 0 {
             self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
+            release_old();
         } else {
             let cs = &*self.content;
             let store_err = |e: std::io::Error| {
@@ -4188,7 +4328,9 @@ impl SliceFsFilesystem {
                 hook();
             }
             self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
+            // The new root first: it can be the old one.
             self.meta.increment_refcount(&new_digest);
+            release_old();
         }
 
         // Update inode
@@ -4389,7 +4531,7 @@ impl SliceFsFilesystem {
     /// mknod with a device number. Creates regular files, FIFOs, sockets and
     /// character/block device nodes (the kernel implements their I/O; only
     /// the type bits and `rdev` are stored). Returns `(ino, InodeMeta)`.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub fn test_mknod_rdev(
         &self, parent: u64, name: &str, mode: u32, rdev: u32, uid: u32, gid: u32, umask: u32,
     ) -> Result<(u64, InodeMeta), i32> {
@@ -4398,7 +4540,7 @@ impl SliceFsFilesystem {
 
     /// `test_mknod_rdev` at inode `at` (replay) that logs its `Mknod` record
     /// in the parent-stripe hold (D-08).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub(crate) fn mknod_logged(
         &self, parent: u64, name: &str, mode: u32, rdev: u32, uid: u32, gid: u32, umask: u32,
         at: Option<u64>, log: LogOp<'_>,
@@ -4504,7 +4646,7 @@ impl SliceFsFilesystem {
     /// and of the new directory before the directory is linked: a request
     /// that finds the new name (a create in it, a setattr) waits for the new
     /// directory's stripe, so its record comes after the `Mkdir` record.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub(crate) fn mkdir_logged(
         &self,
         parent_ino: u64,
@@ -4715,9 +4857,37 @@ impl SliceFsFilesystem {
         r
     }
 
+    /// Refuse to move the directory `dir` into `target_parent` when `dir` is
+    /// `target_parent` or one of its ancestors: that move would detach `dir`
+    /// and its subtree from the tree as a cycle (race (b) of Phase 19).
+    ///
+    /// The walk reads `..` from `target_parent` up to the root (the root is
+    /// its own parent) and returns `EINVAL` when it meets `dir`. The caller
+    /// holds the rename mutex, which is enough: every other cross-directory
+    /// move waits for it, a rename in one directory changes no `..`, and
+    /// `rmdir` removes only an empty directory, while each directory above
+    /// `target_parent` has a child on the walk and the stripe of
+    /// `target_parent` is held. After `MAX_ANCESTOR_STEPS` steps (only on a
+    /// damaged store with a `..` cycle) it returns `ELOOP`. It changes
+    /// nothing, so a refused rename writes no record.
+    fn check_not_ancestor(&self, dir: u64, target_parent: u64) -> Result<(), i32> {
+        let mut cur = target_parent;
+        for _ in 0..MAX_ANCESTOR_STEPS {
+            if cur == dir {
+                return Err(libc::EINVAL);
+            }
+            let up = self.meta.lookup(cur, "..").map_err(|e| meta_error_to_errno(&e))?;
+            if up == cur {
+                return Ok(());
+            }
+            cur = up;
+        }
+        Err(libc::ELOOP)
+    }
+
     /// The body of `rename_logged`, with the stripes held; `freed` gets the
     /// manifest of a replaced inode it reclaimed.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     fn rename_held(
         &self,
         parent_ino: u64,
@@ -4750,6 +4920,12 @@ impl SliceFsFilesystem {
         let src_ino = src.map_err(|e| meta_error_to_errno(&e))?;
         let src_is_dir = self.meta.get_inode(src_ino).map_err(|e| meta_error_to_errno(&e))?
             .mode & S_IFMT == S_IFDIR;
+
+        // A directory must not move into itself or its own subtree; the
+        // rename mutex is held here (race (b), D-28).
+        if src_is_dir && parent_ino != newparent_ino {
+            self.check_not_ancestor(src_ino, newparent_ino)?;
+        }
 
         // RENAME_NOREPLACE: fail if target already exists
         let target_ino = match dst {
@@ -4842,7 +5018,7 @@ impl SliceFsFilesystem {
 
     /// `simulate_symlink` at inode `at` (replay) that logs its `Symlink`
     /// record in the parent-stripe hold (D-08). Returns `(ino, InodeMeta)`.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub(crate) fn symlink_logged(
         &self,
         parent_ino: u64,
@@ -5054,6 +5230,7 @@ impl SliceFsFilesystem {
 
     /// Combined setattr: apply mode, uid, gid, mtime, and size changes.
     /// Returns the updated `InodeMeta`.
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub fn test_setattr(
         &self,
         ino: u64,
@@ -5078,7 +5255,7 @@ impl SliceFsFilesystem {
     }
 
     /// setattr with every supported field.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub fn test_setattr_full(
         &self,
         ino: u64,
@@ -5098,7 +5275,7 @@ impl SliceFsFilesystem {
     /// with the writes of the inode; the other fields then log a `Setattr`
     /// without the size in the stripe-and-cell hold of their apply (also
     /// when they are all `None`: that hold sets the ctime).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub(crate) fn setattr_logged(
         &self,
         ino: u64,
@@ -5166,6 +5343,7 @@ impl SliceFsFilesystem {
 
     /// Create a file and return `(ino, fh, InodeMeta)`.
     /// Handles `O_TRUNC` flag atomically.
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub fn test_create_full(
         &self,
         parent: u64,
@@ -5180,7 +5358,7 @@ impl SliceFsFilesystem {
     }
 
     /// `test_create_full` at inode `at` that logs (see `create_logged`).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub(crate) fn create_full_logged(
         &self,
         parent: u64,
@@ -5194,10 +5372,10 @@ impl SliceFsFilesystem {
         log: LogOp<'_>,
     ) -> Result<(u64, u64, InodeMeta), i32> {
         let (ino, fh) = self.create_logged(parent, name, mode, umask, uid, gid, flags, at, log)?;
-        if flags & libc::O_APPEND != 0 {
-            if let Some(h) = self.handles.lock().by_fh.get_mut(&fh) {
-                h.append = true;
-            }
+        if flags & libc::O_APPEND != 0
+            && let Some(h) = self.handles.lock().by_fh.get_mut(&fh)
+        {
+            h.append = true;
         }
         let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
         Ok((ino, fh, meta))
@@ -5623,7 +5801,7 @@ mod tests {
 
         // List
         let list = fs.test_listxattr(ino).unwrap();
-        assert!(list.len() > 0);
+        assert!(!list.is_empty());
         // Should contain "user.key\0"
         let expected = b"user.key\0";
         assert!(list.windows(expected.len()).any(|w| w == expected));
@@ -6282,7 +6460,7 @@ mod tests {
         let _ = meta_error_to_fuse_errno(&MetaError::NotEmpty(0));
         let _ = meta_error_to_fuse_errno(&MetaError::InvalidName("x".into()));
         let _ = meta_error_to_fuse_errno(&MetaError::Corrupted("x".into()));
-        let _ = meta_error_to_fuse_errno(&MetaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "x")));
+        let _ = meta_error_to_fuse_errno(&MetaError::Io(std::io::Error::other("x")));
     }
 
     // ── meta_error_to_errno full coverage ────────────────────────────────────
@@ -6291,7 +6469,7 @@ mod tests {
     fn test_meta_error_to_errno_all_variants() {
         assert_eq!(meta_error_to_errno(&MetaError::NotEmpty(0)), libc::ENOTEMPTY);
         assert_eq!(meta_error_to_errno(&MetaError::InvalidName("x".into())), libc::EINVAL);
-        assert_eq!(meta_error_to_errno(&MetaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "x"))), libc::EIO);
+        assert_eq!(meta_error_to_errno(&MetaError::Io(std::io::Error::other("x"))), libc::EIO);
     }
 
     // ── Buffered mode write tests ────────────────────────────────────────────
@@ -6949,5 +7127,319 @@ mod tests {
         assert!(!fs.test_is_streaming(fh2));
         fs.test_release(ino2, fh2).unwrap();
         assert!(fs.test_read(ino2, 0, 1 << 20).unwrap() == old[..n], "streamed bytes cut at n");
+    }
+
+    /// Race (a), window 2 (Phase 19 item 19-10): a setattr of other fields
+    /// that reads the cell map in the window between the stripe step and
+    /// the transient-cell insert of a closed-file size change must not
+    /// write the inode in another order than its record. The size change is
+    /// parked at `Pause::SizeClaimed`, the fields call at
+    /// `Pause::FieldsStriped`; the log closure of the size change is the
+    /// third pause (after its inode write, before its record).
+    #[test]
+    fn a_fields_setattr_in_the_claim_window_keeps_the_record_order() {
+        use std::sync::mpsc::channel;
+        const T: (i64, u32) = (1_000_000_000, 0);
+        const WAIT: Duration = Duration::from_secs(10);
+        let (fs, _dir) = fresh_fs();
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        fs.test_write(fh, 0, &seeded(1, 64 << 10)).unwrap();
+        fs.test_release(ino, fh).unwrap();
+
+        let (tx, rx) = channel::<&'static str>();
+        let (go_s, go_s_rx) = channel::<()>();
+        let (go_f, go_f_rx) = channel::<()>();
+        let (go_2, go_2_rx) = channel::<()>();
+        let (go_s_rx, go_f_rx) = (Mutex::new(go_s_rx), Mutex::new(go_f_rx));
+        let (s_seen, f_seen) = (AtomicBool::new(false), AtomicBool::new(false));
+        let hook_tx = Mutex::new(tx.clone());
+        fs.test_set_pause_hook(Some(Arc::new(move |at| {
+            let (seen, msg, go) = match at {
+                Pause::SizeClaimed => (&s_seen, "s-claimed", &go_s_rx),
+                Pause::FieldsStriped => (&f_seen, "f-armed", &go_f_rx),
+            };
+            if !seen.swap(true, Ordering::SeqCst) {
+                hook_tx.lock().unwrap().send(msg).unwrap();
+                let _ = go.lock().unwrap().recv_timeout(WAIT);
+            }
+        })));
+        let next = |want: &str| assert_eq!(rx.recv_timeout(WAIT), Ok(want), "waiting for {want}");
+
+        let records = Mutex::new(Vec::new());
+        std::thread::scope(|sc| {
+            let (fs, records) = (&fs, &records);
+            let tx_s = tx.clone();
+            let s = sc.spawn(move || {
+                fs.setattr_size_logged(ino, 1024, &mut |op| {
+                    tx_s.send("s-at-log").unwrap();
+                    let _ = go_2_rx.recv_timeout(WAIT);
+                    records.lock().unwrap().push(op);
+                })
+            });
+            next("s-claimed");
+            let tx_f = tx.clone();
+            let f = sc.spawn(move || {
+                fs.setattr_logged(ino, None, None, None, None, None, None, Some(T), &mut |op| {
+                    records.lock().unwrap().push(op);
+                    tx_f.send("f-done").unwrap();
+                })
+            });
+            next("f-armed");
+            go_s.send(()).unwrap();
+            next("s-at-log");
+            go_f.send(()).unwrap();
+            // Before the fix the fields call ends here; after it, it waits
+            // for the transient cell (the wait times out, which is fine).
+            let _ = rx.recv_timeout(Duration::from_secs(1));
+            go_2.send(()).unwrap();
+            assert_eq!(s.join().unwrap(), Ok(()));
+            assert!(f.join().unwrap().is_ok());
+        });
+        fs.test_set_pause_hook(None);
+
+        let records = records.into_inner().unwrap();
+        assert_eq!(records.len(), 2, "one size record and one fields record: {records:?}");
+        let last_is_size = matches!(records[1], crate::oplog::Op::Setattr { size: Some(_), .. });
+        let m = fs.meta.get_inode(ino).unwrap();
+        let live = (m.mtime_sec, m.mtime_nsec);
+        if last_is_size {
+            assert_ne!(live, T, "the size record is last, but the fields write was last: replay gives another mtime");
+        } else {
+            assert_eq!(live, T, "the fields record is last, so its mtime must be the live one");
+        }
+    }
+
+    #[test]
+    fn write_end_gives_the_end_or_none() {
+        assert_eq!(write_end(0, 0), Some(0));
+        assert_eq!(write_end(MAX_FILE_SIZE - 1, 1), Some(MAX_FILE_SIZE));
+        assert_eq!(write_end(MAX_FILE_SIZE, 1), None);
+        assert_eq!(write_end(u64::MAX, 1), None);
+    }
+
+    #[test]
+    fn dirty_move_keeps_the_sum() {
+        // Costs (5, 3), total 8; the first cell goes to 2, the second to 10.
+        let apply = |total: usize, m: DirtyMove| match m {
+            DirtyMove::Add(d) => total + d,
+            DirtyMove::Sub(d) => total - d,
+        };
+        let total = apply(8, dirty_move(5, 2));
+        assert_eq!(apply(total, dirty_move(3, 10)), 12);
+    }
+}
+
+/// Models of the lock protocol on the real code (Phase 21.2, TSAFE-02):
+/// the commit gate (M3) and the shared dirty budget (M2). Run them with
+/// `scripts/safety/model.sh`. Threads are counted with the model main thread.
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use super::*;
+    use crate::locks::{stripe, NamespaceLocks};
+    use raw::atomic::AtomicUsize as ModelUsize;
+
+    /// M3, the commit gate: shared request holds against the exclusive
+    /// commit, with the real `hold_shared`/`hold_exclusive`, the real
+    /// `NamespaceLocks` and two shim cell locks. Threads: 4 (main, 2
+    /// requests and 1 committer). Bound: the `LOOM_MAX_PREEMPTIONS` of
+    /// model.sh (default 3).
+    ///
+    /// Each request holds the gate shared, then the stripes of two inodes
+    /// (given in opposite order by the two requests; `NamespaceLocks::lock`
+    /// sorts them), then its cell, and counts `started` and then `finished`.
+    /// The committer holds the gate exclusively, then locks each cell once,
+    /// one at a time. Invariants: no deadlock in any order (gate, stripes
+    /// ascending, cell), and `started == finished` while the committer
+    /// holds the gate (no request is mid-flight).
+    ///
+    /// What loom cannot see: loom's `RwLock` lets a new reader in whenever
+    /// no writer holds it (it is reader-preferring), and loom reports
+    /// deadlocks and failed asserts, not starvation. So the deadlock of
+    /// `.planning/research/STACK.md` (a queued exclusive commit blocks new
+    /// shared holds while a shared holder waits for the budget) is not shown
+    /// here. It is covered by the debug panic of `throttle_write` under any
+    /// ranked lock (the gate too), by the `Rank::Gate` same-thread rule (test
+    /// `gate_after_a_lock_panics`), by the S5 gate spike and by the stress
+    /// harness. `Mutex<StoreIo>` is not modeled: it is a std lock of rank 6
+    /// (a leaf), with no condvar, held only for short store calls; the
+    /// models replace the store with closures, and TSan and the stress run
+    /// cover it. `commit_timer::commit` takes the gate with its own inline
+    /// code, not through `hold_exclusive`, so this model covers the steps of
+    /// `hold_exclusive` only.
+    #[test]
+    fn loom_gate_commit_excludes_requests() {
+        loom::model(|| {
+            let (a, b) = (1u64, 2u64);
+            assert_ne!(stripe(a), stripe(b), "the two inodes need two stripes");
+            let gate = Arc::new(raw::RwLock::new(()));
+            let xwaiters = Arc::new(ModelUsize::new(0));
+            let ns = Arc::new(NamespaceLocks::new());
+            let cells = Arc::new([sync::Mutex::new_keyed(Rank::Cell, a, ()), sync::Mutex::new_keyed(Rank::Cell, b, ())]);
+            let started = Arc::new(ModelUsize::new(0));
+            let finished = Arc::new(ModelUsize::new(0));
+            let mut threads = Vec::new();
+            for (cell, inos) in [(0usize, [a, b]), (1, [b, a])] {
+                let (gate, ns, cells) = (Arc::clone(&gate), Arc::clone(&ns), Arc::clone(&cells));
+                let (started, finished) = (Arc::clone(&started), Arc::clone(&finished));
+                threads.push(raw::thread::spawn(move || {
+                    let _gate = hold_shared(&gate);
+                    let _ns = ns.lock(&inos);
+                    let _cell = cells[cell].lock();
+                    started.fetch_add(1, Ordering::SeqCst);
+                    finished.fetch_add(1, Ordering::SeqCst);
+                }));
+            }
+            threads.push(raw::thread::spawn(move || {
+                let _gate = hold_exclusive(&gate, &xwaiters);
+                assert_eq!(
+                    started.load(Ordering::SeqCst),
+                    finished.load(Ordering::SeqCst),
+                    "a request is mid-flight while the commit holds the gate"
+                );
+                for c in cells.iter() {
+                    drop(c.lock());
+                }
+            }));
+            for t in threads {
+                t.join().unwrap();
+            }
+        });
+    }
+
+    /// The budget of the M2 models (the total starts at or above it).
+    const BUDGET: usize = 100;
+
+    /// A real flush control block for the M2 models, as `throttle_write`
+    /// finds it before the wait: the flusher is marked as running (the
+    /// writer enters the wait only after it saw `running`) and kicked (a
+    /// write at or above the budget kicks the flusher before its wait,
+    /// `kick_flusher`). Real time is not modeled: the wait limit and the
+    /// pass interval are one hour, so no wait ends by time, and under loom
+    /// `wait_for` never times out anyway. So a lost wakeup shows as a
+    /// deadlock report, not as a slow pass (RESEARCH Pitfall 4).
+    fn model_ctl() -> Arc<FlushCtl> {
+        let ctl = FlushCtl::new();
+        ctl.throttle_wait_ms.store(3_600_000, Ordering::Relaxed);
+        ctl.pass_ms.store(3_600_000, Ordering::Relaxed);
+        ctl.running.store(true, Ordering::Release);
+        ctl.flags.lock().kicked = true;
+        Arc::new(ctl)
+    }
+
+    /// M2, the shared dirty budget: one writer over the budget in the real
+    /// `throttle_wait`, against the real `flusher::flusher_loop` with a pass
+    /// that, like a flusher step, lowers a model total below the budget
+    /// when it finds it at or above the budget and then calls the real
+    /// `FlushCtl::notify_freed` (a pass that finds nothing to free does not
+    /// notify). Threads: 3 (main, writer, flusher). Bound: the
+    /// `LOOM_MAX_PREEMPTIONS` of model.sh (default 3). Invariants: the
+    /// writer leaves the wait with no pay (it never waits while the total
+    /// is below the budget, and the notify of the pass is not lost: "the
+    /// flusher lowers the total before it takes this lock to notify"), then
+    /// `request_stop` ends the flusher; no deadlock in any order.
+    #[test]
+    fn loom_throttle_writer_leaves_after_a_pass_frees() {
+        loom::model(|| {
+            let ctl = model_ctl();
+            let total = Arc::new(ModelUsize::new(BUDGET));
+            let flusher = {
+                let (ctl, total) = (Arc::clone(&ctl), Arc::clone(&total));
+                raw::thread::spawn(move || {
+                    crate::flusher::flusher_loop(&ctl, || {
+                        if total.load(Ordering::Relaxed) >= BUDGET {
+                            total.store(0, Ordering::Relaxed);
+                            ctl.notify_freed();
+                        }
+                        true
+                    })
+                })
+            };
+            let writer = {
+                let (ctl, total) = (Arc::clone(&ctl), Arc::clone(&total));
+                raw::thread::spawn(move || throttle_wait(&ctl, || (total.load(Ordering::Relaxed), BUDGET)))
+            };
+            assert!(!writer.join().unwrap(), "the writer pays although the pass freed");
+            ctl.request_stop();
+            flusher.join().unwrap();
+            assert_eq!(ctl.stop_exits.load(Ordering::Relaxed), 0);
+        });
+    }
+
+    /// M2, the stop: two writers over the budget in the real
+    /// `throttle_wait`, the real `flusher_loop` with a pass that frees
+    /// nothing, and the real `FlushCtl::request_stop` (the stop step of
+    /// `stop_flusher`) on the main thread. Threads: 4 (main, 2 writers,
+    /// flusher). Bound: the `LOOM_MAX_PREEMPTIONS` of model.sh (default 3).
+    /// Invariants: the stop wakes both writers (or they see it, or see the
+    /// flusher gone, when they enter), each pays, `stop_exits` is 2, and the
+    /// flusher ends; no deadlock in any order.
+    #[test]
+    fn loom_throttle_stop_wakes_two_writers() {
+        loom::model(|| {
+            let ctl = model_ctl();
+            let flusher = {
+                let ctl = Arc::clone(&ctl);
+                raw::thread::spawn(move || crate::flusher::flusher_loop(&ctl, || true))
+            };
+            let writers: Vec<_> = (0..2)
+                .map(|_| {
+                    let ctl = Arc::clone(&ctl);
+                    raw::thread::spawn(move || throttle_wait(&ctl, || (BUDGET, BUDGET)))
+                })
+                .collect();
+            ctl.request_stop();
+            for w in writers {
+                assert!(w.join().unwrap(), "a writer does not pay after the stop");
+            }
+            assert_eq!(ctl.stop_exits.load(Ordering::Relaxed), 2);
+            flusher.join().unwrap();
+        });
+    }
+}
+
+// Kani proofs of the size and limit arithmetic (TSAFE-04). Each harness
+// writes its bound. Run with scripts/safety/kani.sh.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    // Bound: none (any u64 offset, any usize length).
+    #[kani::proof]
+    fn write_end_is_exact_and_bounded() {
+        let offset: u64 = kani::any();
+        let len: usize = kani::any();
+        let sum = u128::from(offset) + len as u128;
+        match write_end(offset, len) {
+            Some(e) => assert!(u128::from(e) == sum && e <= MAX_FILE_SIZE),
+            None => assert!(sum > u128::from(MAX_FILE_SIZE)),
+        }
+    }
+
+    // Bound: none (any usize limit).
+    #[kani::proof]
+    fn hard_cap_is_at_least_the_limit() {
+        let limit: usize = kani::any();
+        assert!(hard_cap_of(limit) >= limit);
+    }
+
+    // Bound: two cells; each old and new cost at most usize::MAX / 4, so the
+    // sums fit. The two moves are applied in either order.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn dirty_total_stays_the_sum_of_costs() {
+        let (a0, a1, b0, b1): (usize, usize, usize, usize) = (kani::any(), kani::any(), kani::any(), kani::any());
+        for c in [a0, a1, b0, b1] {
+            kani::assume(c <= usize::MAX / 4);
+        }
+        let moves = if kani::any() { [(a0, a1), (b0, b1)] } else { [(b0, b1), (a0, a1)] };
+        let mut total = a0 + b0;
+        for (old, cost) in moves {
+            let next = match dirty_move(old, cost) {
+                DirtyMove::Add(d) => total.checked_add(d),
+                DirtyMove::Sub(d) => total.checked_sub(d),
+            };
+            total = next.expect("the shared total does not wrap");
+        }
+        assert_eq!(total, a1 + b1);
     }
 }

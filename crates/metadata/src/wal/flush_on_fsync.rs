@@ -60,6 +60,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn ram_stays_at_most_the_cap_with_no_fsync() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.seg");
@@ -70,6 +71,7 @@ mod tests {
     /// LOCK-04: append only holds the record in RAM; write_out writes the
     /// held records when they pass the cap, and not before.
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn append_holds_records_until_a_write_out_past_the_cap() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.seg");
@@ -121,6 +123,7 @@ mod tests {
     // fail until its root is logged and work after it, and the log after the
     // root must replay.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn a_failed_write_out_fails_fsync_until_a_commit_and_the_commit_works() {
         use crate::store::DictMetadataStore;
         use crate::store_io::StoreIo;
@@ -150,6 +153,7 @@ mod tests {
     /// the commit is dropped as lost and not waited for; the commit
     /// succeeds, fsync works again, and the records after it replay.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn a_buffered_commit_after_a_failed_write_with_queued_records_succeeds() {
         use crate::store::DictMetadataStore;
         use crate::store_io::StoreIo;

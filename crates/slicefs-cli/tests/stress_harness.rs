@@ -24,7 +24,7 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Barrier, Mutex, RwLock};
+use std::sync::{mpsc, Arc, Barrier, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hdrhistogram::Histogram;
@@ -380,7 +380,7 @@ fn new_fs(store: &Path, config: WalConfig) -> SliceFsFilesystem {
 struct Ctx {
     fs: SliceFsFilesystem,
     _dir: TempDir,
-    gate: Arc<RwLock<()>>,
+    gate: Arc<chunk_store::sync::raw::RwLock<()>>,
     serial: Mutex<()>,
     cfg: Config,
     one: Option<OneFile>,
@@ -523,6 +523,7 @@ impl Ctx {
     fn write_blocks(&self, hs: &mut Hists, fh: u64, first: usize, n: usize, out: &mut Vec<Mismatch>) {
         let one = self.one.as_ref().expect("one-file context");
         let mut buf = Vec::with_capacity(n * BLOCK);
+        #[allow(clippy::needless_range_loop, reason = "the index is also the block number; it must stay in range")]
         for b in first..first + n {
             // Only the owner writes this block: pending is the last version.
             let v = one.model.pending[b].load(Ordering::SeqCst) + 1;
@@ -622,7 +623,7 @@ impl Ctx {
                     self.read_blocks(hs, one.ino, b, 1, &mut out);
                 } else if r < 64 && k < MAX_APPENDS {
                     let rec = append_record(self.cfg.seed, t as u64, k);
-                    let wrong = if k % 2 == 0 { 0 } else { 999_999 + k };
+                    let wrong = if k.is_multiple_of(2) { 0 } else { 999_999 + k };
                     match self.gated(hs, Kind::Append, || h::handle_write(&self.fs, ap, wrong, &rec)) {
                         WriteResult::Ok(n) if n as usize == RECORD => {
                             k += 1;
@@ -723,6 +724,7 @@ impl Ctx {
         let start = rng.below(MAX_BLOCKS - n + 1);
         let mut ver = ent.ver;
         let mut buf = Vec::with_capacity(n * BLOCK);
+        #[allow(clippy::needless_range_loop, reason = "the index is also the block number; it must stay in range")]
         for b in start..start + n {
             ver[b] += 1;
             buf.extend_from_slice(&block_bytes(self.cfg.seed, ent.ino, b as u64, ver[b]));
@@ -1108,7 +1110,7 @@ fn run(cfg: Config) -> Outcome {
                 CreateResult::Error(e) => panic!("seed={} create errno {e}", cfg.seed),
             };
             let blocks = (cfg.file_bytes as usize) / BLOCK;
-            assert!(blocks % STRIPE == 0, "file size must be a multiple of a stripe");
+            assert!(blocks.is_multiple_of(STRIPE), "file size must be a multiple of a stripe");
             let appends = (0..cfg.threads).map(|_| AtomicU64::new(0)).collect();
             (Some(OneFile { model: FileModel::new(blocks), ino, appends }), None)
         }
@@ -1980,7 +1982,7 @@ fn s5_gate_fairness() {
     commit_errs.extend(op_errs);
     print_first("S5", seed, &commit_errs);
     assert!(commit_errs.is_empty(), "seed={seed}: S5 had {} errors", commit_errs.len());
-    assert!(commit_h.total.len() > 0, "seed={seed}: no commit ran in {secs} s");
+    assert!(!commit_h.total.is_empty(), "seed={seed}: no commit ran in {secs} s");
 }
 
 // ---- S6 in process (macOS numbers, no mount) ------------------------------------
@@ -2126,6 +2128,7 @@ fn s7_budget_baseline() {
                     // One write of `n` blocks from block `first`: bump the versions, fill, write.
                     let put = |first: usize, n: usize, hs: &mut Hists, out: &mut Vec<Mismatch>, buf: &mut Vec<u8>, ver: &mut Vec<u32>| {
                         buf.clear();
+                        #[allow(clippy::needless_range_loop, reason = "the index is also the block number; it must stay in range")]
                         for b in first..first + n {
                             ver[b] += 1;
                             buf.extend_from_slice(&block_bytes(seed, fid, b as u64, ver[b]));
@@ -2163,10 +2166,10 @@ fn s7_budget_baseline() {
                         for _ in 0..MIB_BLOCKS {
                             put(rng.below(blocks), 1, &mut hs, &mut out, &mut buf, &mut ver);
                         }
-                        if round % 32 == 31 {
-                            if let EmptyResult::Error(e) = ctx.gated(&mut hs, Kind::Fsync, || h::handle_fsync(&ctx.fs, ino, fh)) {
-                                out.push(errno_mismatch("fsync", e));
-                            }
+                        if round % 32 == 31
+                            && let EmptyResult::Error(e) = ctx.gated(&mut hs, Kind::Fsync, || h::handle_fsync(&ctx.fs, ino, fh))
+                        {
+                            out.push(errno_mismatch("fsync", e));
                         }
                     }
                     (hs.ops[Kind::Write as usize].max(), out, ver)

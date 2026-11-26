@@ -368,6 +368,7 @@ mod tests {
     /// while it is parked, another thread takes the writer lock and appends.
     /// The segment holds every record in LSN order.
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn buffered_write_out_passes_a_parked_record_write() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("segment-000001.seg");

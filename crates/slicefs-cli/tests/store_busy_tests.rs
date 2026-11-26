@@ -76,8 +76,11 @@ fn piece(i: usize) -> Vec<u8> {
         .collect()
 }
 
+/// The file type bits of a regular file (libc gives `mode_t`: u16 on macOS, u32 on Linux).
+const S_IFREG: u32 = 0o100_000;
+
 fn create(fs: &SliceFsFilesystem, name: &str, flags: i32) -> (u64, u64) {
-    match h::handle_create(fs, 1, name, u32::from(libc::S_IFREG) | 0o644, 0o022, 501, 20, libc::O_RDWR | flags) {
+    match h::handle_create(fs, 1, name, S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR | flags) {
         CreateResult::Ok(ino, fh, _) => (ino, fh),
         CreateResult::Error(e) => panic!("create {name}: errno {e}"),
     }
