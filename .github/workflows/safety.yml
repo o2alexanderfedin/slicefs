@@ -1,8 +1,10 @@
 name: Safety
 
-# The thread-safety and memory-safety gates (Phase 21.2, TSAFE-01). They run
-# only when a release tag (v*) is pushed, or by hand (Actions > Safety > Run
-# workflow, on any branch: run it before you tag). Each job runs one
+# The thread-safety and memory-safety gates (Phase 21.2, TSAFE-01). They are
+# the release gate: release.yml calls this workflow and creates the v* tag
+# only when every job passes. A manual run (Actions > Safety > Run workflow)
+# checks any branch earlier. A v* tag pushed by hand, not by release.yml,
+# also runs it, but then the tag exists already. Each job runs one
 # script of scripts/safety/, so a developer runs the same command locally.
 # The tool pins are only in the `env:` block below (scripts/safety/toolchains.sh
 # reads them from here). The job names are the check names for branch
@@ -12,6 +14,7 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
