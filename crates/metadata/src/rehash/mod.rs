@@ -24,18 +24,28 @@
 //!   sorted by their new keys with the external sorter of the chunk store,
 //!   and rows that get one new key are merged.
 //!
+//! A value whose own key and every object of its tree already have the
+//! target tag is kept as it is: its nodes are read to check the tags, its
+//! chunks are not read. The old-to-new map ([`KeyMap`], on disk in the map
+//! directory) maps (node kind, old key) to the new key, so a value that
+//! many inodes, roots or snapshots share is done once. A miss only costs a
+//! rewrite with the same result.
+//!
 //! RAM does not grow with the object count: per value one read window, one
 //! reader and one writer (one path of nested values at a time: root record,
-//! map, manifest list, content); a fixed map cache; the fixed buffers of
-//! the sorter. No value and no map is read into RAM whole (only the root
-//! record, which has a fixed size).
+//! map, manifest list, content); the map cache of
+//! `map::CACHE_SLOTS * map::SLOT` bytes (about 1.1 MB); the fixed buffers
+//! of the sorter (a 4 MiB sort chunk, 32 merge inputs of 64 KiB). No value
+//! and no map is read into RAM whole (only the root record, which has a
+//! fixed size). Disk: the map file (about 134 bytes per distinct key at
+//! half load) and the sorted refcount rows of one root at a time.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chunk_store::extsort::{self, SortCfg, Sorter, TmpDir};
-use chunk_store::file::{FileReader, FileWriter};
+use chunk_store::file::{for_each_file_object, FileReader, FileWriter};
 use chunk_store::{ChunkStore, ObjectHasher};
 use slicefs_traits::key::{ObjectKey, KEY_BYTES};
 
@@ -43,6 +53,9 @@ use crate::inode_map::RECORD;
 use crate::snapshot::SnapshotEntry;
 use crate::store::{root_rec, MAP_ENTRY};
 use crate::store_io::{to_id, to_key};
+
+pub mod map;
+pub use map::{KeyMap, Kind};
 
 /// Bytes read from a value at a time.
 pub const WINDOW: usize = 1 << 20;
@@ -123,50 +136,6 @@ pub enum RehashError {
     Stopped(u64),
 }
 
-/// The node kind of a map entry: one old key can be both a file content
-/// and a node, and each has its own translation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum Kind {
-    Value = 1,
-    ManifestList = 2,
-    ValueMap = 3,
-    ManifestMap = 4,
-    InodeMap = 5,
-    Refcounts = 6,
-    Root = 7,
-}
-
-/// A fixed-size map from (kind, old key) to new key in RAM (a stand-in).
-struct StandIn {
-    slots: Vec<Option<(Kind, ObjectKey, ObjectKey)>>,
-}
-
-const STAND_IN_SLOTS: usize = 1 << 12;
-
-impl StandIn {
-    fn new() -> Self {
-        StandIn { slots: vec![None; STAND_IN_SLOTS] }
-    }
-
-    fn at(kind: Kind, old: &ObjectKey) -> usize {
-        let h = u64::from_le_bytes(old.digest()[..8].try_into().unwrap()) ^ (kind as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        h as usize & (STAND_IN_SLOTS - 1)
-    }
-
-    fn get(&mut self, kind: Kind, old: &ObjectKey) -> std::io::Result<Option<ObjectKey>> {
-        Ok(match self.slots[Self::at(kind, old)] {
-            Some((k, o, n)) if k == kind && o == *old => Some(n),
-            _ => None,
-        })
-    }
-
-    fn insert(&mut self, kind: Kind, old: &ObjectKey, new: &ObjectKey) -> std::io::Result<()> {
-        self.slots[Self::at(kind, old)] = Some((kind, *old, *new));
-        Ok(())
-    }
-}
-
 /// A refcount sort row: new key, count (big-endian), row index
 /// (big-endian). The index keeps two equal rows apart: the sorter removes
 /// identical rows.
@@ -222,9 +191,10 @@ impl Blob {
 
 struct Walker<'c, 'a> {
     cs: &'c ChunkStore,
+    target: &'static dyn ObjectHasher,
     /// `None` in a dry-run.
     map_dir: Option<PathBuf>,
-    map: StandIn,
+    map: KeyMap,
     stats: Stats,
     progress: Option<&'a mut dyn FnMut(&Stats)>,
     every: Duration,
@@ -244,6 +214,18 @@ impl Walker<'_, '_> {
             p(&self.stats);
             self.last = Instant::now();
         }
+    }
+
+    /// Do `old` and every object of its tree have the target tag? Reads
+    /// the nodes of the tree (verified), no chunk.
+    fn all_target(&self, old: ObjectKey) -> chunk_store::Result<bool> {
+        let tag = self.target.tag();
+        if old.tag() != tag {
+            return Ok(false);
+        }
+        let mut all = true;
+        for_each_file_object(self.cs, to_id(&old), |id| all &= id.tag() == tag)?;
+        Ok(all)
     }
 
     fn hit(&mut self, kind: Kind, old: &ObjectKey) -> Result<Option<ObjectKey>, RehashError> {
@@ -284,6 +266,12 @@ impl Walker<'_, '_> {
         }
         let cs = self.cs;
         let err = |source| RehashError::Read { what, key: old, source };
+        if self.all_target(old).map_err(err)? {
+            self.stats.values_kept += 1;
+            self.map.insert(Kind::Value, &old, &old)?;
+            self.tick(false);
+            return Ok(old);
+        }
         let mut r = FileReader::open(cs, to_id(&old)).map_err(err)?;
         let len = r.len();
         let mut w = (!self.dry()).then(FileWriter::new);
@@ -554,11 +542,16 @@ pub fn rehash_roots(cs: &ChunkStore, roots: &RootSet, opts: RehashOptions<'_>) -
         }
         Mode::DryRun => None,
     };
+    let map = match &map_dir {
+        Some(dir) => KeyMap::on_disk(dir)?,
+        None => KeyMap::cache_only(),
+    };
     let before = cs.stats();
     let mut w = Walker {
         cs,
+        target: opts.target,
         map_dir,
-        map: StandIn::new(),
+        map,
         stats: Stats { roots_total: 1 + roots.snapshots.len() as u64, ..Stats::default() },
         progress: opts.progress,
         every: opts.progress_every,
@@ -803,5 +796,96 @@ mod tests {
         assert_eq!(m.get_refcount(&stale), 0);
         let k = m.get_manifest(m.lookup(m.root_ino(), "f").unwrap()).unwrap()[0];
         assert_eq!(m.get_refcount(&k), 1);
+    }
+
+    /// A snapshot `v1` of a store (root R1) and a current root R2 with one
+    /// more file. The same bytes each call.
+    fn build_two(mem: &MemIo) -> (ObjectKey, ObjectKey) {
+        let r1 = build(mem);
+        let cs = open(mem, BLAKE3);
+        let m = load(&cs, &r1);
+        add_file(&m, &cs, m.root_ino(), "late", &noise(4, 50_000));
+        (r1, m.commit().unwrap())
+    }
+
+    fn snap(version: u64, root: ObjectKey) -> SnapshotEntry {
+        SnapshotEntry { version, name: Some(format!("v{version}")), root, created_at: 1_700_000_000 + version }
+    }
+
+    /// A run on a new store from `build_two`.
+    fn run_two(pick: impl Fn(ObjectKey, ObjectKey) -> RootSet) -> (RootSet, Stats) {
+        let mem = MemIo::new();
+        let (r1, r2) = build_two(&mem);
+        let cs = open(&mem, KEYED);
+        let dir = tempfile::tempdir().unwrap();
+        rehash_roots(&cs, &pick(r1, r2), rewrite(KEYED, dir.path())).unwrap()
+    }
+
+    #[test]
+    fn shared_values_are_rewritten_once() {
+        let (new, both) = run_two(|r1, r2| RootSet { current: r2, snapshots: vec![snap(1, r1)] });
+        let (_, s1) = run_two(|r1, _| one(r1));
+        let (_, s2) = run_two(|_, r2| one(r2));
+        assert!(both.map_hits > 0);
+        assert!(both.values_rewritten < s1.values_rewritten + s2.values_rewritten, "{both:?} {s1:?} {s2:?}");
+        let s = &new.snapshots[0];
+        assert_eq!((s.version, s.name.as_deref(), s.created_at), (1, Some("v1"), 1_700_000_001));
+        assert_ne!(s.root, new.current);
+
+        let (same, st) = run_two(|_, r2| RootSet { current: r2, snapshots: vec![snap(1, r2)] });
+        assert_eq!(same.snapshots[0].root, same.current);
+        assert_eq!(st.values_rewritten, s2.values_rewritten);
+    }
+
+    #[test]
+    fn a_target_tag_value_is_kept() {
+        let mem = MemIo::new();
+        let (old_file, root1) = {
+            let cs = open(&mem, BLAKE3);
+            let m = DictMetadataStore::new(io(&cs));
+            let (ino, _) = add_file(&m, &cs, m.root_ino(), "old", &noise(5, 40_000));
+            (ino, m.commit().unwrap())
+        };
+        let (new_file, k_new, root2) = {
+            let cs = open(&mem, KEYED);
+            let m = load(&cs, &root1);
+            let (ino, k) = add_file(&m, &cs, m.root_ino(), "new", &noise(6, 40_000));
+            (ino, k, m.commit().unwrap())
+        };
+        let cs = open(&mem, KEYED);
+        let dir = tempfile::tempdir().unwrap();
+        let (new, stats) = rehash_roots(&cs, &one(root2), rewrite(KEYED, dir.path())).unwrap();
+        assert!(stats.values_kept >= 1, "{stats:?}");
+        let m = load(&cs, &new.current);
+        assert_eq!(m.get_manifest(new_file).unwrap(), vec![k_new], "kept as is");
+        assert_eq!(m.get_manifest(old_file).unwrap()[0].tag(), KEYED.tag());
+        assert_one_tag(&cs, &new.current, KEYED.tag());
+    }
+
+    #[test]
+    fn a_file_byte_equal_to_a_node_gets_both_translations() {
+        let mem = MemIo::new();
+        let y_bytes = noise(7, 30_000);
+        let (x, y, ky, root) = {
+            let cs = open(&mem, BLAKE3);
+            let m = DictMetadataStore::new(io(&cs));
+            let r = m.root_ino();
+            let (y, ky) = add_file(&m, &cs, r, "y", &y_bytes);
+            // X holds the 33 bytes of Y's content key: the bytes of Y's
+            // manifest list node, so both have one old key.
+            let (x, kx) = add_file(&m, &cs, r, "x", &ky.0);
+            let root = m.commit().unwrap();
+            let mut nr = NodeReader(Arc::clone(&cs));
+            assert!(referenced_roots(&mut nr, &root).unwrap().contains(&kx), "X's content key is a node key");
+            (x, y, ky, root)
+        };
+        let cs = open(&mem, KEYED);
+        let dir = tempfile::tempdir().unwrap();
+        let (new, _) = rehash_roots(&cs, &one(root), rewrite(KEYED, dir.path())).unwrap();
+        let m = load(&cs, &new.current);
+        let read = |ino| get_value(&cs, &m.get_manifest(ino).unwrap()[0]).unwrap();
+        assert_eq!(read(x), ky.0.to_vec(), "X keeps its old bytes");
+        assert_eq!(read(y), y_bytes);
+        assert_one_tag(&cs, &new.current, KEYED.tag());
     }
 }

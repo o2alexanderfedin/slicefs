@@ -22,3 +22,61 @@ assertion `left == right` failed: the counts of both old keys
  right: 2
 test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 166 filtered out; finished in 0.26s
 error: test failed, to rerun pass `-p metadata --lib`
+
+## Task 2: engine tests before the kept rule (Task 1 stand-in map); cargo test -p metadata --lib -- rehash::tests
+test rehash::tests::two_old_keys_of_one_content_merge_their_counts ... ok
+test rehash::tests::a_stale_refcount_is_dropped_and_counted ... ok
+test rehash::tests::a_file_byte_equal_to_a_node_gets_both_translations ... ok
+test rehash::tests::a_target_tag_value_is_kept ... FAILED
+test rehash::tests::a_root_rehashes_to_the_same_tree ... ok
+test rehash::tests::shared_values_are_rewritten_once ... ok
+thread 'rehash::tests::a_target_tag_value_is_kept' (139729743) panicked at crates/metadata/src/rehash/mod.rs:865:9:
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 166 filtered out; finished in 0.51s
+error: test failed, to rerun pass `-p metadata --lib`
+
+## Task 2 guard mutation: the stand-in map ignores the node kind (kind-blind slot); cargo test -p metadata --lib -- rehash::tests
+test rehash::tests::a_stale_refcount_is_dropped_and_counted ... ok
+test rehash::tests::two_old_keys_of_one_content_merge_their_counts ... ok
+test rehash::tests::a_file_byte_equal_to_a_node_gets_both_translations ... FAILED
+test rehash::tests::a_target_tag_value_is_kept ... FAILED
+test rehash::tests::a_root_rehashes_to_the_same_tree ... ok
+test rehash::tests::shared_values_are_rewritten_once ... ok
+thread 'rehash::tests::a_file_byte_equal_to_a_node_gets_both_translations' (139731288) panicked at crates/metadata/src/rehash/mod.rs:894:9:
+assertion `left == right` failed: X keeps its old bytes
+  left: [240, 248, 95, 154, 209, 209, 66, 129, 60, 56, 194, 41, 62, 215, 65, 62, 109, 175, 220, 61, 172, 93, 117, 57, 48, 140, 156, 65, 212, 13, 35, 231, 237]
+ right: [30, 139, 114, 77, 14, 45, 187, 181, 195, 119, 204, 183, 22, 8, 166, 142, 61, 57, 252, 111, 251, 238, 123, 26, 126, 93, 66, 137, 191, 201, 214, 72, 11]
+thread 'rehash::tests::a_target_tag_value_is_kept' (139731291) panicked at crates/metadata/src/rehash/mod.rs:865:9:
+test result: FAILED. 4 passed; 2 failed; 0 ignored; 0 measured; 166 filtered out; finished in 0.50s
+error: test failed, to rerun pass `-p metadata --lib`
+
+## Task 2: map tests before KeyMap (compile errors, counted); cargo test -p metadata --lib -- rehash::map
+error[E0425]: cannot find value `MAP_FILE` in this scope
+error[E0425]: cannot find value `SLOT` in this scope
+error[E0433]: failed to resolve: use of undeclared type `Kind`
+error[E0433]: failed to resolve: use of undeclared type `Kind`
+error[E0433]: failed to resolve: use of undeclared type `Kind`
+error[E0433]: failed to resolve: use of undeclared type `Kind`
+error[E0433]: failed to resolve: use of undeclared type `Kind`
+error[E0433]: failed to resolve: use of undeclared type `Kind`
+error[E0433]: failed to resolve: use of undeclared type `Kind`
+error[E0433]: failed to resolve: use of undeclared type `Kind`
+error[E0433]: failed to resolve: use of undeclared type `Kind`
+error[E0433]: failed to resolve: use of undeclared type `Kind`
+error[E0425]: cannot find value `SLOT` in this scope
+error[E0433]: failed to resolve: use of undeclared type `Kind`
+error[E0433]: failed to resolve: use of undeclared type `Kind`
+error[E0433]: failed to resolve: use of undeclared type `Kind`
+error[E0433]: failed to resolve: use of undeclared type `Kind`
+error[E0425]: cannot find value `CACHE_SLOTS` in this scope
+error[E0433]: failed to resolve: use of undeclared type `KeyMap`
+error[E0433]: failed to resolve: use of undeclared type `KeyMap`
+error[E0433]: failed to resolve: use of undeclared type `KeyMap`
+error[E0433]: failed to resolve: use of undeclared type `KeyMap`
+error[E0433]: failed to resolve: use of undeclared type `KeyMap`
+error: could not compile `metadata` (lib test) due to 23 previous errors; 1 warning emitted
+   1 error: could not compile `metadata` (lib test) due to 23 previous errors; 1 warning emitted
+   1 error[E0425]: cannot find value `CACHE_SLOTS` in this scope
+   1 error[E0425]: cannot find value `MAP_FILE` in this scope
+   2 error[E0425]: cannot find value `SLOT` in this scope
+   5 error[E0433]: failed to resolve: use of undeclared type `KeyMap`
+  14 error[E0433]: failed to resolve: use of undeclared type `Kind`
