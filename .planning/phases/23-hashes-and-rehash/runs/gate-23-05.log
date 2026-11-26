@@ -6,14 +6,25 @@ passed=1663 failed=0 ignored=13 result_lines=81
 CLIPPY os=Darwin toolchain=stable result=ok
 UNSAFE files=31 tokens=132 result=ok
 
-## Clippy and unsafe count (final tree)
+## Final tree (commit 100e686): local gate and clippy
+The test change of 100e686 (stop_after_values set in RehashArgs in
+crash_inside_the_rewrite_then_rerun) came after the runs below. The gate
+and clippy ran again on it:
+GATE_EXIT=0
+passed=1668 failed=0 ignored=13 result_lines=81
 CLIPPY os=Darwin toolchain=stable result=ok
 UNSAFE files=31 tokens=132 result=ok
 
-## Build (final tree)
-cargo build --workspace --locked: exit 0
+## Clippy and unsafe count (tree of f808f3d)
+CLIPPY os=Darwin toolchain=stable result=ok
+UNSAFE files=31 tokens=132 result=ok
 
-## Kani (full run, final tree)
+## Build (tree of f808f3d)
+cargo build --workspace --locked: exit 0
+(100e686 changes only a tests/ file; this build builds no tests)
+
+## Kani (full run, tree of f808f3d)
+(100e686 changes only a tests/ file; Kani proves the --lib harnesses)
 TOOLCHAINS stable=stable nightly=nightly-2026-02-11 kani=0.68.0
 KANI version=0.68.0 (Kani uses its own bundled nightly, not NIGHTLY=nightly-2026-02-11)
 KANI harness=filesystem::proofs::dirty_total_stays_the_sum_of_costs result=SUCCESSFUL secs=15.19
@@ -27,7 +38,7 @@ KANI harness=locks::proofs::stripe_in_range result=SUCCESSFUL secs=0.07
 KANI harness=pool::proofs::workers_for_cpus_in_range result=SUCCESSFUL secs=0.54
 KANI ok harnesses=9
 
-## Local gate on the final tree (Task 2 tests and Task 3 docs)
+## Local gate on the tree of f808f3d (Task 2 tests and Task 3 docs)
 command: timeout 3600 cargo test --workspace -- --skip a_panic_on_another_thread_does_not_abort --skip a_reader_thread_panic_aborts_and_the_remount_replays --skip a_worker_panic_aborts_and_the_remount_replays --skip a_full_queue_that_stays_full_aborts
 GATE_EXIT=0
 passed=1668 failed=0 ignored=13 result_lines=81

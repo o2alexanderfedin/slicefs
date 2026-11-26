@@ -40,11 +40,11 @@ estimate:
   tokens: 160000
   tasks: 3
 actuals:
-  tokens: 14900    # chars/4 of git diff c8795f4..f808f3d (59674 chars)
+  tokens: 18000    # chars/4 of git diff c8795f4..100e686 (72019 chars, SUMMARY ee88434 included)
   tasks: 3
-  commits: 3
+  commits: 5       # git rev-list --count c8795f4..100e686 (3 task commits, the first SUMMARY, one test fix)
 plan_head_before: c8795f4
-plan_head_after: f808f3d
+plan_head_after: 100e686
 ---
 
 # Phase 23 Plan 05: Rehash end to end and docs Summary
@@ -60,6 +60,9 @@ BASE = `c8795f4`, the merge of plans 01-04 on `feature/phase-23-hashes-rehash`. 
 | 1 | 1fe2a42 | test(23-05): HASH-06 round trips, three-hash store, fresh-write keys for two profiles |
 | 2 | 5a4dbb9 | test(23-05): crash after each step and inside the rewrite, torn switch, damaged object |
 | 3 | f808f3d | docs(23-05): rehash and SHA-256 in the design docs and README; phase gate |
+| - | ee88434 | docs(23-05): complete the rehash end-to-end and docs plan |
+| 2 (fix) | 100e686 | test(23-05): the inside-the-rewrite crash test sets stop_after_values in RehashArgs |
+| - | (this commit) | docs(23-05): gate and SUMMARY after the test fix |
 
 ## Tests (`crates/slicefs-cli/tests/rehash_tests.rs`: 23 tests, about 26 s)
 
@@ -76,7 +79,7 @@ BASE = `c8795f4`, the merge of plans 01-04 on `feature/phase-23-hashes-rehash`. 
   - `round_trip_large_profile_keys_equal_fresh_writes`: `ChunkProfile::new(16384, 65536, 262144)`.
 - **Crash:**
   - `crash_after_each_step_then_rerun`: all 7 `Step` values, `Step::Checked` to `Step::GcDone`. `Checked` to `Synced` give the old roots and `Switched` to `GcDone` give the new roots. The test also checks the header (flag, hash line) at each step.
-  - `crash_inside_the_rewrite_then_rerun` uses `stop_after_values: Some(3)`.
+  - `crash_inside_the_rewrite_then_rerun` runs with `RehashArgs { stop_after_values: Some(3), .. }`.
   - `crash_with_a_stale_seg_tmp_then_rerun`.
   - `crash_with_old_segments_left_after_the_switch`.
   - After each case, a rerun with no hook gives the final state: tag 0x12, the same store, `hash sha256` and the flag, no `rehash-tmp`, no `.seg.tmp`.
@@ -108,17 +111,25 @@ Every test passed at once, because plan 23-04 built the command, so each test is
 
 - Local gate (4 standard skips), exit 0:
   - Task 1 tree: 1663 passed, 0 failed, 13 ignored.
-  - Final tree: 1668 passed, 0 failed, 13 ignored, 81 result lines.
-- `RUST_STABLE=stable scripts/safety/clippy.sh` passed at each commit: `CLIPPY os=Darwin toolchain=stable result=ok` and `UNSAFE files=31 tokens=132 result=ok`. `docs/design/unsafe-review.md` did not change (`diff_exit=0`).
-- `cargo build --workspace --locked` exits 0.
-- `scripts/safety/kani.sh` (full run): `KANI ok harnesses=9`.
+  - Tree of f808f3d: 1668 passed, 0 failed, 13 ignored, 81 result lines.
+  - Final tree (100e686): 1668 passed, 0 failed, 13 ignored, 81 result lines.
+- `RUST_STABLE=stable scripts/safety/clippy.sh` passed at each code commit, also at 100e686: `CLIPPY os=Darwin toolchain=stable result=ok` and `UNSAFE files=31 tokens=132 result=ok`. `docs/design/unsafe-review.md` did not change (`diff_exit=0`).
+- `cargo build --workspace --locked` exits 0 (tree of f808f3d).
+- `scripts/safety/kani.sh` (full run, tree of f808f3d): `KANI ok harnesses=9`. 100e686 changes only a `tests/` file, which neither the build nor the Kani `--lib` harnesses use, so they were not run again.
+- The code greps of Tasks 1 and 2 give these counts:
+  - `fn round_trip_`: 4;
+  - `fn assert_fresh_write_keys`: 1;
+  - `ChunkProfile::new(16384, 65536, 262144)`: 1;
+  - `Step::GcDone`: 2; `Step::Switched`: 3;
+  - `stop_after_values.*Some(` on a code line: 1;
+  - the whole `rehash_tests` file: 23 passed.
 - The doc greps give these counts:
   - `## Rehash`: 1;
   - `is future work`: 0;
   - `gc, seed, rehash, snapshot create or snapshot switch` in store-format.md: 3;
   - `rehash-tmp`: 3 in chunk-store.md and 1 in store-format.md;
   - `slicefs rehash` in README: 1.
-- No home path, user name or license word is in the logs or in the added doc lines.
+- The plan's path and word grep prints 0 for both run logs. The same grep, with the user name added, prints 0 for the added doc lines and for this file.
 - Not run here: the hand check of the hardware SHA-256 path. It needs a CPU with SHA extensions: `cargo test --release -p chunk-store --lib -- --ignored sha256_speed --nocapture` (over 1,000 MB/s means a hardware path).
 
 ## Deviations from Plan
@@ -131,8 +142,9 @@ Every test passed at once, because plan 23-04 built the command, so each test is
    The plan's run order (to blake3-256, then to sha256) is kept.
 3. **Guard mutations differ from the plan's examples.** Some of the plan's examples cannot turn a test red here: the loader rule in Task 1, the manifest list, and sync after the switch. Other mutations took their place. The red log gives each one and why.
 4. **`assert_opens` does no commit.** It does not call `open_fs`/`close_fs`, because a commit writes a new root under the header hash and removes the old segments that the test put back. In its place it uses the read-only dumps of each root, plus `content::open(..).close()`: that is the writable open of a mount, and it removes `rehash-tmp`.
-5. **One local gate for Task 2 and Task 3.** The full gate ran on the final tree: the Task 2 tests plus the Task 3 docs, which were already in the tree. Task 3 changed only docs and the gate log after that, so this run is the phase gate. Clippy, the `--locked` build and Kani also ran on the final tree.
-6. **Process.**
+5. **Gates for Task 2 and Task 3.** The full gate ran once on the Task 2 tests plus the Task 3 docs, which were already in the tree, before the Task 2 commit. Task 3 changed only docs and the gate log after that. Clippy, the `--locked` build and Kani ran on the tree of f808f3d.
+6. **[Rule 1 - Bug, test only] The plan grep `stop_after_values.*Some(` gave 0.** The first form passed the value to a helper as a parameter, so no code line had both words. 100e686 sets `stop_after_values: Some(3)` in a `RehashArgs` literal in the test, and `stopped_run` takes only `stop_after`. The line count did not change. G5 was run again on the new form (red), and the full gate and clippy ran again (green) before the commit.
+7. **Process.**
    - The plan commit ledger file was not written. `plan_head_before` is BASE, and `commits` comes from `git rev-list --count c8795f4..f808f3d`.
    - STATE.md, ROADMAP.md and REQUIREMENTS.md were not touched, as the orchestrator said.
 
@@ -157,4 +169,5 @@ None. The plan adds tests and docs only.
 ## Self-Check: PASSED
 
 - Files: `crates/slicefs-cli/tests/rehash_tests.rs`, `runs/red-23-05.log`, `runs/gate-23-05.log`, `docs/design/chunk-store.md` (with `## Rehash (#62)`), `docs/design/store-format.md` and `README.md` exist.
-- Commits 1fe2a42, 5a4dbb9 and f808f3d are ancestors of HEAD on `exec/23-05`. `git rev-list --count c8795f4..f808f3d` is 3.
+- Commits 1fe2a42, 5a4dbb9, f808f3d, ee88434 and 100e686 are ancestors of HEAD on `exec/23-05`. `git rev-list --count c8795f4..100e686` is 5.
+- `git diff --stat c8795f4 100e686 -- crates/*/src` is empty: no source change.
