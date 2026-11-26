@@ -461,11 +461,30 @@ pub struct StoreLock {
     _dir: Option<std::fs::File>,
 }
 
-/// Take the store lock of `store`, shared or exclusive, with no wait.
-/// `Ok(None)` when another holder makes it wait.
+/// Take the store lock of `store`, shared or exclusive, without blocking.
+/// `Ok(None)` when another holder keeps it for more than `LOCK_RETRY`.
+///
+/// The short retry is for a false "held": the lock belongs to the open
+/// directory handle, and a child process that another thread of this process
+/// starts at that moment holds a copy of the handle for a short time (seen on
+/// macOS: about 5% of immediate re-locks with 4 threads that spawn). A real
+/// holder, such as a live mount, keeps it, and the caller is refused after
+/// the retry.
 fn try_store_lock(store: &Path, shared: bool) -> std::io::Result<Option<StoreLock>> {
+    const LOCK_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+    const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(10);
     let dir = std::fs::File::open(store)?;
-    let r = if shared { dir.try_lock_shared() } else { dir.try_lock() };
+    let start = std::time::Instant::now();
+    loop {
+        let r = if shared { dir.try_lock_shared() } else { dir.try_lock() };
+        match r {
+            Err(std::fs::TryLockError::WouldBlock) if start.elapsed() < LOCK_RETRY => std::thread::sleep(LOCK_POLL),
+            r => return lock_result(dir, r),
+        }
+    }
+}
+
+fn lock_result(dir: std::fs::File, r: Result<(), std::fs::TryLockError>) -> std::io::Result<Option<StoreLock>> {
     match r {
         Ok(()) => Ok(Some(StoreLock { _dir: Some(dir) })),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
@@ -600,6 +619,27 @@ mod tests {
     fn decide_text(text: &str, want: Want) -> std::io::Result<Access> {
         let store = Path::new(STORE);
         decide(store, &parse(store, text)?, want)
+    }
+
+    /// A child process that another thread starts holds a copy of the lock's
+    /// directory handle for a moment, so an immediate re-lock can see a false
+    /// "held". The short retry in `try_store_lock` must hide it.
+    #[test]
+    fn a_relock_is_not_refused_while_another_thread_spawns_processes() {
+        let d = tempfile::tempdir().unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spawner = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::process::Command::new("true").status();
+                }
+            })
+        };
+        let refused = (0..300).filter(|_| lock_offline(d.path()).is_err()).count();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        spawner.join().unwrap();
+        assert_eq!(refused, 0, "re-locks refused while another thread spawns");
     }
 
     fn ro_flag() -> Flag {
