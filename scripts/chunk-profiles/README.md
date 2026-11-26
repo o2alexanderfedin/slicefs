@@ -27,8 +27,12 @@ The profiles are 4/8/32, 8/16/64, 8/32/128, 16/64/256 and 32/128/512 KiB
 |---|---|
 | `trees` | Every Boost tree `DIR/x/boost_<v>/` of `BOOST_VERS` (default 1_84_0 then 1_85_0), into one store, so the store dedups across versions |
 | `tar` | The Boost tar of the last version, `DIR/boost_<v>.tar` |
-| `rand` | One random file `DIR/in-rand-<RAND_BYTES>/random.bin`, made once (not in the default `INPUTS`) |
-| `sparse` | One file `DIR/in-sparse-<SPARSE_BYTES>/sparse.bin` of zeros with 64 KiB of random bytes at every 16 MiB, made once (not in the default `INPUTS`) |
+| `rand` | One random file `WORK/inputs/in-rand-<RAND_BYTES>/random.bin`, made once per `WORK` (not in the default `INPUTS`) |
+| `sparse` | One file `WORK/inputs/in-sparse-<SPARSE_BYTES>/sparse.bin` of zeros with 64 KiB of random bytes at every 16 MiB, made once per `WORK` (not in the default `INPUTS`) |
+
+The script writes nothing in the data dir (it can be read-only), and it
+refuses a data dir that does not exist. Only the smoke mode makes its data
+dir, `WORK/smoke-data`.
 
 Get the Boost data with the mount-test script:
 
@@ -61,7 +65,7 @@ in the container (a `-v DIR:/data:ro` volume, then `bench.sh /data`).
 
 | Env | Default | What |
 |---|---|---|
-| `WORK` | a new temp dir | The store (in `WORK/store.XXXXXX`, a new dir that the script makes; the store is removed after each step, the dir at exit), step logs, `results.csv`, `edits.csv`, `machine.txt` |
+| `WORK` | a new temp dir | The store (in `WORK/store.XXXXXX`, a new dir that the script makes; the store is removed after each step, the dir at exit), step logs, the generated `rand` and `sparse` inputs (`WORK/inputs`), `results.csv`, `edits.csv`, `machine.txt` |
 | `BIN` | build it | The `chunk_profile_bench` binary. When unset, the script runs `cargo build --release -p chunk-store --example chunk_profile_bench` |
 | `PROFILES` | the five profiles | Profiles `MIN/AVG/MAX` in KiB |
 | `INPUTS` | `trees tar` | Inputs, in this order (also `rand`, `sparse`) |

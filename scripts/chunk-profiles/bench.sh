@@ -23,8 +23,8 @@
 #        SMOKE=1       small synthetic inputs in $WORK/smoke-data, short probe
 # inputs: trees  = every DATA/x/boost_<v>/ of BOOST_VERS, into one store (see fetch-boost.sh);
 #         tar    = DATA/boost_<last v>.tar;
-#         rand   = DATA/in-rand-RAND_BYTES/random.bin, made once;
-#         sparse = DATA/in-sparse-SPARSE_BYTES/sparse.bin, made once.
+#         rand   = WORK/inputs/in-rand-RAND_BYTES/random.bin, made once per WORK;
+#         sparse = WORK/inputs/in-sparse-SPARSE_BYTES/sparse.bin, made once per WORK.
 # stdout: CSV only; progress goes to stderr. Rows also go to $WORK/results.csv:
 #         one row per run, input and profile, then one row with run=median per
 #         input and profile (median_low per column). Edit rows go to
@@ -74,7 +74,11 @@ EDIT_BYTES=${EDIT_BYTES:-67108864}; EDIT_SIZE=${EDIT_SIZE:-4096}
 for v in "$RAND_BYTES" "$SPARSE_BYTES" "$SEQ_BYTES" "$READS" "$EDIT_BYTES" "$EDIT_SIZE"; do
   [[ "$v" =~ ^[1-9][0-9]*$ ]] || { echo "not a positive number: $v" >&2; exit 2; }
 done
-mkdir -p "$D"; D=$(cd "$D" && pwd)
+# Only the smoke data dir is made; a mistyped data dir is refused, not made.
+if [ "$SMOKE" = 1 ]; then mkdir -p "$D"; else [ -d "$D" ] || { echo "no data dir: $D" >&2; exit 2; }; fi
+D=$(cd "$D" && pwd)
+# The generated rand and sparse inputs go under WORK, never in the data dir.
+GEN=$WORK/inputs
 LAST_V=${BOOST_VERS##* }
 
 if [ "$SMOKE" = 1 ]; then
@@ -97,11 +101,11 @@ src_for() {
       [ -f "$D/boost_$LAST_V.tar" ] || nodata "$D/boost_$LAST_V.tar"
       echo "$D/boost_$LAST_V.tar" ;;
     rand)
-      f=$D/in-rand-$RAND_BYTES/random.bin
+      f=$GEN/in-rand-$RAND_BYTES/random.bin
       [ -f "$f" ] || { echo "making random.bin ($RAND_BYTES bytes)" >&2; "$BIN" gen file --path "$f.tmp" --bytes "$RAND_BYTES" --seed 3 >&2; mv "$f.tmp" "$f"; }
       echo "$f" ;;
     sparse)
-      f=$D/in-sparse-$SPARSE_BYTES/sparse.bin
+      f=$GEN/in-sparse-$SPARSE_BYTES/sparse.bin
       [ -f "$f" ] || { echo "making sparse.bin ($SPARSE_BYTES bytes)" >&2; "$BIN" gen file --path "$f.tmp" --bytes "$SPARSE_BYTES" --seed 4 --sparse >&2; mv "$f.tmp" "$f"; }
       echo "$f" ;;
     *) echo "unknown input: $1" >&2; exit 2 ;;
