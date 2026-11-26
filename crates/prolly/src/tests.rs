@@ -309,3 +309,101 @@ fn unsorted_input_is_an_error() {
     assert!(matches!(b.push(b"a", b""), Err(Error::Unsorted)));
     assert!(matches!(build(&s, Config::SMALL, [(b"b", b""), (b"a", b"")]), Err(Error::Unsorted)));
 }
+
+// ---- apply (plan 24-02) ----
+
+type Model = std::collections::BTreeMap<Vec<u8>, Vec<u8>>;
+
+fn put(k: &[u8], v: &[u8]) -> Edit {
+    Edit::Put { key: k.to_vec(), value: v.to_vec() }
+}
+
+fn edit_model(m: &mut Model, batch: &[Edit]) {
+    for e in batch {
+        match e {
+            Edit::Put { key, value } => m.insert(key.clone(), value.clone()),
+            Edit::Delete { key } => m.remove(key),
+        };
+    }
+}
+
+/// Applies `batch` to `root` (the tree of `m`), updates `m`, and checks
+/// that the new root is the bulk root of the new set.
+fn apply_checked(
+    s: &ChunkStore,
+    cfg: Config,
+    root: &chunk_store::ObjectId,
+    m: &mut Model,
+    batch: &[Edit],
+) -> (chunk_store::ObjectId, ApplyStats) {
+    let (r, st) = apply(s, cfg, root, batch).unwrap();
+    edit_model(m, batch);
+    let (bulk, _) = build(s, cfg, m.iter()).unwrap();
+    assert_eq!(r, bulk, "apply root is not the bulk root ({} entries, {} edits)", m.len(), batch.len());
+    (r, st)
+}
+
+#[test]
+fn apply_one_put_then_get() {
+    let s = mem_store();
+    let es = u64_entries(3_000, 3);
+    let (root, _) = build(&s, Config::DEFAULT, es.clone()).unwrap();
+    let mut m: Model = es.iter().cloned().collect();
+    let (old_k, new_k) = (es[1_500].0.clone(), 4u64.to_be_bytes().to_vec());
+    let batch = [put(&new_k, b"new"), put(&old_k, &[7; 33])];
+    let (r, _) = apply_checked(&s, Config::DEFAULT, &root, &mut m, &batch);
+    assert_eq!(get(&s, &r, &old_k).unwrap(), Some(vec![7; 33]));
+    assert_eq!(get(&s, &r, &new_k).unwrap(), Some(b"new".to_vec()));
+    assert_eq!(get(&s, &r, &es[10].0).unwrap(), Some(es[10].1.clone()));
+    assert_eq!(entries_of(&s, &r), m.into_iter().collect::<Vec<_>>());
+}
+
+#[test]
+fn one_change_writes_one_path() {
+    for (cfg, n) in [(Config::DEFAULT, 20_000), (Config::SMALL, 5_000)] {
+        let s = mem_store();
+        let es = u64_entries(n, 3);
+        let (root, bst) = build(&s, cfg, es.clone()).unwrap();
+        let before = s.stats().objects;
+        let (r, st) = apply(&s, cfg, &root, &[put(&es[n / 2].0, &[0xab; 33])]).unwrap();
+        assert_ne!(r, root);
+        assert_eq!(s.stats().objects - before, bst.depth as u64, "{cfg:?}");
+        assert_eq!(st.nodes_written, bst.depth as u64, "{cfg:?}: {st:?}");
+    }
+}
+
+#[test]
+fn apply_inserts_equal_bulk() {
+    let cfg = Config::SMALL;
+    let s = mem_store();
+    let es = u64_entries(2_000, 3);
+    let (root, _) = build(&s, cfg, es.clone()).unwrap();
+    let base: Model = es.iter().cloned().collect();
+    let k = |x: u64| x.to_be_bytes().to_vec();
+    let mut seed = 77u64;
+    let mut random: Vec<u64> = (0..300).map(|_| xorshift(&mut seed) % 7_000).collect();
+    random.sort_unstable();
+    random.dedup();
+    let batches: Vec<Vec<Edit>> = vec![
+        vec![put(&k(0), b"first"), put(&k(1), b"")],
+        vec![put(&k(3 + 3 * 2_000), b"last"), put(&k(u64::MAX), &[1; 40])],
+        vec![put(&k(3 * 1_000 + 4), b"middle")],
+        random.iter().map(|&x| put(&k(x), &x.to_le_bytes())).collect(),
+    ];
+    for b in &batches {
+        let mut m = base.clone();
+        apply_checked(&s, cfg, &root, &mut m, b);
+    }
+    // A small tree grows several levels in one batch.
+    let small = u64_entries(50, 401);
+    let (r50, st50) = build(&s, cfg, small.clone()).unwrap();
+    let mut m: Model = small.into_iter().collect();
+    let grow: Vec<Edit> = u64_entries(20_000, 1)
+        .into_iter()
+        .filter(|(k, _)| !m.contains_key(k))
+        .map(|(key, value)| Edit::Put { key, value })
+        .collect();
+    let (r, _) = apply_checked(&s, cfg, &r50, &mut m, &grow);
+    let depth = nodes(&s, &r).iter().map(|n| n.level).max().unwrap_or(0) + 1;
+    assert!(depth >= st50.depth + 2, "depth {depth} from {}", st50.depth);
+}

@@ -80,6 +80,7 @@
 //! would become part of a frozen store format is owner question Q-3 of
 //! Phase 24 (a one-way door, not decided here).
 
+mod apply;
 mod node;
 mod rule;
 mod tree;
@@ -87,6 +88,7 @@ mod tree;
 #[cfg(test)]
 mod tests;
 
+pub use apply::{apply, ApplyStats, Edit};
 pub use rule::{boundary_hash, cut_probability, Splitter};
 pub use tree::{build, empty_root, get, iter, walk, BuildStats, Builder, Cursor, NodeInfo};
 
