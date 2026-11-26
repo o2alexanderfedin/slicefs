@@ -71,7 +71,9 @@ pub fn segment_file_count(dir: &Path) -> std::io::Result<usize> {
 /// durable (synced) before this call.
 pub fn write_switch_segment(dir: &Path, root: ObjectKey, snapshots: &[SnapshotEntry]) -> Result<u64, SegmentError> {
     remove_switch_tmps(dir)?;
-    let id = max_segment_id(dir)? + 1;
+    // The ids come from file names: a name of id u64::MAX must not wrap the
+    // switch to the lowest id.
+    let id = max_segment_id(dir)?.checked_add(1).ok_or_else(|| SegmentError::from(std::io::Error::other("segment id overflow")))?;
     let tmp = dir.join(format!("segment-{id:06}{SWITCH_TMP_SUFFIX}"));
     let fin = dir.join(format!("segment-{id:06}.seg"));
     let write = || -> Result<(), SegmentError> {
@@ -251,6 +253,17 @@ mod tests {
         std::fs::write(seg(d.path(), 9), b"").unwrap();
         assert_eq!(write_switch_segment(d.path(), k(10), &new_snaps(&old)).unwrap(), 10);
         assert_eq!(names(d.path()), ["segment-000010.seg"]);
+    }
+
+    #[test]
+    fn a_switch_after_the_largest_id_is_an_error() {
+        let d = tempfile::TempDir::new().unwrap();
+        let old = old_store(d.path());
+        std::fs::write(d.path().join(format!("segment-{}.seg", u64::MAX)), b"").unwrap();
+        let before = names(d.path());
+        let e = write_switch_segment(d.path(), k(10), &new_snaps(&old)).unwrap_err();
+        assert!(e.to_string().contains("segment id overflow"), "{e}");
+        assert_eq!(names(d.path()), before, "nothing is written or removed");
     }
 
     #[test]
