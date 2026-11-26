@@ -26,7 +26,7 @@
     {
       "number": "22",
       "name": "Chunk profiles",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "23",
@@ -41,8 +41,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step",
-    "reason": "Phase 7 of 9 · 44% · executing"
+    "label": "Advance to the next step (plan phase 23)",
+    "reason": "Phase 8 of 9 — needs a plan"
   },
-  "updated_at": "2026-11-26T06:32:57.948Z"
+  "updated_at": "2026-11-26T11:53:33.270Z"
 }

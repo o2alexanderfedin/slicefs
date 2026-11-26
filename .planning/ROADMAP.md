@@ -190,7 +190,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
 - [x] **Phase 21: Worker pool** (#22) - N worker threads by mount option, drain before `destroy()`, abort on panic, 4 workers pass pjdfstest (completed 2026-11-24)
 - [x] **Phase 21.1: Store header and format policy (#154)** (INSERTED) - one store header with format number and compat/ro-compat/incompat flags, format policy doc (completed 2026-11-24)
 - [x] **Phase 21.2: Thread-safety verification and CI gates** (INSERTED) - clippy, Miri, ThreadSanitizer, loom/shuttle models, Kani, deadlock-detect stress and Linux coverage as CI gates (release gate, manual run); fix the two Phase 19 races (completed 2026-11-25)
-- [ ] **Phase 22: Chunk profiles** (#67) - FastCDC min/avg/max fixed per store at `seed`, benchmark of five profiles, default unchanged (parallel track)
+- [x] **Phase 22: Chunk profiles** (#67) - FastCDC min/avg/max fixed per store at `seed`, benchmark of five profiles, default unchanged (parallel track) (completed 2026-11-26)
 - [ ] **Phase 23: Hashes and rehash** (#62) - SHA-256 write hash and an offline, crash-safe `slicefs rehash` (parallel track)
 - [ ] **Phase 24: Prolly evaluation** (#19) - one-map prototype, benchmark on Boost trees, written decision (parallel track)
 
@@ -446,18 +446,18 @@ Plans:
   2. Two stores with different profiles work in one process: a file written under each profile reads back byte for byte, including files with zero runs and a spliced edit, and a golden cut-point test fails if a cut point moves
   3. One reproducible script reports, for 4/8/32, 8/16/64, 8/32/128, 16/64/256 and 32/128/512 KiB: physical bytes after dedup and zstd, object count, index RAM, cold-open time, ingest throughput, read latency and rewrite bytes after small edits; it runs outside the test suite
   4. The report recommends a default, and a store seeded without a profile setting is still 4/8/32 KiB after v2.2
-**Plans**: 4 plans
+**Plans**: 4/4 plans complete
 
 Plans:
 **Wave 1**
-- [ ] 22-01-PLAN.md — Tracer: profile type on the store, FORMAT `chunks` line + `ro_compat chunk-profile` flag, `file.rs` reads the store profile, per-store zero chunk, golden cut points, two stores in one process
+- [x] 22-01-PLAN.md — Tracer: profile type on the store, FORMAT `chunks` line + `ro_compat chunk-profile` flag, `file.rs` reads the store profile, per-store zero chunk, golden cut points, two stores in one process
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 22-02-PLAN.md — Header pairing rules, `--chunk-profile` on `seed` and `mount` (mount only checks), refusals, `stats` line and JSON field, two profiles through the file-system layer
-- [ ] 22-03-PLAN.md — Benchmark: chunk-store example and `scripts/chunk-profiles/bench.sh` with README and smoke mode, by hand only
+- [x] 22-02-PLAN.md — Header pairing rules, `--chunk-profile` on `seed` and `mount` (mount only checks), refusals, `stats` line and JSON field, two profiles through the file-system layer
+- [x] 22-03-PLAN.md — Benchmark: chunk-store example and `scripts/chunk-profiles/bench.sh` with README and smoke mode, by hand only
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 22-04-PLAN.md — Phase gate, design docs, benchmark run on Boost (time-limited), report `docs/research/chunk-profiles.md` with a recommended default
+- [x] 22-04-PLAN.md — Phase gate, design docs, benchmark run on Boost (time-limited), report `docs/research/chunk-profiles.md` with a recommended default
 
 ### Phase 23: Hashes and rehash
 
@@ -500,6 +500,6 @@ Plans:
 | 19. Fine-grained locks | 16/16 | Complete    | 2026-11-22 |
 | 20. Dirty budget and rebase flusher | 8/8 | Complete    | 2026-11-23 |
 | 21. Worker pool | 9/9 | Complete    | 2026-11-24 |
-| 22. Chunk profiles | 0/4 | Planned | - |
+| 22. Chunk profiles | 4/4 | Complete    | 2026-11-26 |
 | 23. Hashes and rehash | 0/0 | Not started | - |
 | 24. Prolly evaluation | 0/0 | Not started | - |
