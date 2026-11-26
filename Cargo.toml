@@ -5,6 +5,7 @@ members = [
     "crates/metadata",
     "crates/slicefs-cli",
     "crates/chunk-store",
+    "crates/prolly",
     "benchmarks/chunk-bench",
     "benchmarks/index-bench",
 ]
