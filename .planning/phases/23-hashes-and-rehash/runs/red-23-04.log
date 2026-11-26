@@ -37,3 +37,29 @@ test refuse_with_a_mount_lock_file ... FAILED          (M4: "rehash is refused, 
 test refuse_while_the_store_lock_is_held_shared ... FAILED      (M3: "rehash is refused, but it ran")
 test refuse_with_write_log_records_after_the_last_root ... FAILED (M5: "rehash is refused, but it ran")
 test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 2 filtered out
+
+## Task 3: cargo test -p slicefs-cli --test rehash_tests (six tests written, Task 1 report and progress lines)
+test dry_run_refuses_like_a_real_run ... ok    (guard, see below)
+test a_store_with_only_target_objects_gets_the_header_line ... FAILED
+test dry_run_changes_nothing_and_reports_an_estimate ... FAILED
+test progress_lines_come_at_each_step ... FAILED
+test report_has_the_counts_and_bytes_freed ... FAILED
+test a_second_run_finds_nothing_to_rewrite ... FAILED
+test result: FAILED. 9 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out
+  dry_run_changes_nothing_and_reports_an_estimate: no "Objects of another hash: " line in:
+    Rehash to sha256 (dry run, nothing written): 159 objects of another hash.
+  progress_lines_come_at_each_step: no "rehash: switch" line in [checks passed, flag written, rewrite: root 0 of 2 ...]
+  report_has_the_counts_and_bytes_freed: no "Read:" line in: Rehash to sha256: done. / Bytes freed: 941921.
+  a_second_run_finds_nothing_to_rewrite and a_store_with_only_target_objects_gets_the_header_line:
+    no "Every live object already has hash sha256" line.
+
+After the code, a_store_with_only_target_objects_gets_the_header_line still failed on its first form,
+which asserted "Rewritten: 0 values": the report said "Rewritten: 8 values; new objects: 0 (0 bytes stored)."
+The engine always translates the key-carrying nodes and counts them as rewritten; they give the same keys.
+The test now asserts "new objects: 0 (0 bytes stored)", "Every live object already has hash sha256",
+no new segment file and the header line. Then 14 passed.
+
+Guard mutation for dry_run_refuses_like_a_real_run: the mount.lock and write-log checks skipped for
+the dry-run (if !args.dry_run && ...), then undone:
+test dry_run_refuses_like_a_real_run ... FAILED
+  rehash is refused, but it ran: Rehash to sha256 (dry run, nothing written): 1 roots (0 snapshots).

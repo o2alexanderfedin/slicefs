@@ -164,25 +164,31 @@ pub fn rehash_report_with(args: &RehashArgs<'_>, progress: &mut dyn FnMut(&str))
         progress: Some(&mut on_stats),
         stop_after_values: args.stop_after_values,
     };
-    let (new, _stats) = rehash_roots(&cs, &old, opts)
+    let (new, stats) = rehash_roots(&cs, &old, opts)
         .map_err(|e| format!("rehash stopped before the switch: {e}. Nothing was switched; the store still uses its old root."))?;
     hook(args, Step::Rewritten)?;
     cs.sync()?;
+    progress("rehash: synced");
     hook(args, Step::Synced)?;
 
     // Step 4: the switch, when a root changed.
     let changed = new != old;
     if changed {
         write_switch_segment(&segs, new.current, &new.snapshots)?;
+        progress("rehash: switch");
+    } else {
+        progress("rehash: no switch needed");
     }
     hook(args, Step::Switched)?;
 
     // Step 5: the header hash line (the flag is already there).
     content::check_write(store, Some(target.name()))?;
+    progress("rehash: header");
     hook(args, Step::HeaderWritten)?;
 
     // Step 6: always a full GC, so a run after a crash between the switch
     // and the GC frees the old objects.
+    progress("rehash: gc");
     let roots: Vec<_> = std::iter::once(new.current).chain(new.snapshots.iter().map(|s| s.root)).collect();
     let freed = gc::gc_on_open_store(&cs, &roots, true)?;
     hook(args, Step::GcDone)?;
@@ -192,12 +198,23 @@ pub fn rehash_report_with(args: &RehashArgs<'_>, progress: &mut dyn FnMut(&str))
     drop(cs);
     content::remove_rehash_tmp(store)?;
     let after = gc::store_usage(store);
-    Ok(format!(
-        "Rehash to {}: done.\nBytes freed: {}.\n{}",
-        target.name(),
-        freed.removed_bytes,
-        gc::usage_line(before, after)
-    ))
+    let name = target.name();
+    let mut lines = vec![
+        format!("Rehash to {name}: {} roots ({} snapshots).", stats.roots_total, new.snapshots.len()),
+        format!("Read: {} values, {} bytes; each object read was verified.", stats.values_read, stats.bytes_read),
+        format!(
+            "Rewritten: {} values; new objects: {} ({} bytes stored).",
+            stats.values_rewritten, stats.objects_written, stats.stored_bytes_written
+        ),
+        format!("Kept as is: {} values. Stale refcount rows dropped: {}.", stats.values_kept, stats.stale_refcounts),
+    ];
+    if !changed {
+        lines.push(format!("Every live object already has hash {name}; no root changed."));
+    }
+    lines.push(format!("GC (full): {}", gc::stats_line(&freed)));
+    lines.push(format!("Bytes freed: {}.", freed.removed_bytes));
+    lines.push(gc::usage_line(before, after));
+    Ok(lines.join("\n"))
 }
 
 /// The dry-run: read and verify the live tree, count what a real run
@@ -218,11 +235,20 @@ fn dry_run(
         stop_after_values: None,
     };
     let (_, stats) = rehash_roots(&cs, old, opts)?;
-    Ok(format!(
-        "Rehash to {} (dry run, nothing written): {} objects of another hash.",
-        target.name(),
-        stats.other_tag_objects
-    ))
+    Ok([
+        format!(
+            "Rehash to {} (dry run, nothing written): {} roots ({} snapshots).",
+            target.name(),
+            stats.roots_total,
+            old.snapshots.len()
+        ),
+        format!("Read and verified: {} values, {} bytes.", stats.values_read, stats.bytes_read),
+        format!(
+            "Objects of another hash: {}, about {} bytes. This is an estimate of what a real run rewrites and of what its GC frees.",
+            stats.other_tag_objects, stats.other_tag_bytes
+        ),
+    ]
+    .join("\n"))
 }
 
 /// `slicefs rehash`: progress lines on stderr, the report on stdout.

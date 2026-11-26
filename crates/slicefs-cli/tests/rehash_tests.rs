@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use chunk_store::file::file_objects;
 use metadata::segment::{load_store_from_segments, scan_store_with_log};
@@ -308,4 +309,110 @@ fn refuse_a_path_with_no_store() {
     }
     assert!(!missing.exists(), "no directory is made");
     assert_eq!(std::fs::read_dir(&empty).unwrap().count(), 0, "nothing is made");
+}
+
+/// Names of the segment files.
+fn segment_names(store: &Path) -> BTreeSet<String> {
+    std::fs::read_dir(store.join("segments")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect()
+}
+
+/// D-22: the dry-run writes no file and reports an estimate.
+#[test]
+fn dry_run_changes_nothing_and_reports_an_estimate() {
+    let dir = seeded_with_snapshot();
+    let store = dir.path().join("store");
+    let files = tree(&store);
+    let report = rehash(&store, "sha256", true);
+    assert_eq!(tree(&store), files, "the dry-run changes no file");
+    assert!(!store.join(REHASH_TMP_DIR).exists());
+    assert!(!marker(&store).contains(HASH_SHA256_FLAG), "no flag");
+    assert!(report.starts_with("Rehash to sha256 (dry run, nothing written)"), "{report}");
+    assert!(number_after(&report, "Objects of another hash: ") > 0, "{report}");
+    assert!(report.contains("estimate"), "{report}");
+}
+
+/// D-22: the dry-run makes the checks of a real run and refuses with the
+/// same text.
+#[test]
+fn dry_run_refuses_like_a_real_run() {
+    let dir = seeded_small();
+    let store = dir.path().join("store");
+    let lock = header::lock_offline(&store).unwrap();
+    assert_eq!(refused(&store, "sha256", true), refused(&store, "sha256", false));
+    drop(lock);
+
+    std::fs::write(store.join("mount.lock"), b"").unwrap();
+    assert_eq!(refused(&store, "sha256", true), refused(&store, "sha256", false));
+    std::fs::remove_file(store.join("mount.lock")).unwrap();
+
+    let dir = store_with_log_records();
+    let store = dir.path().join("store");
+    let real = refused(&store, "sha256", false);
+    assert!(real.contains("write-log records"), "{real}");
+    assert_eq!(refused(&store, "sha256", true), real);
+}
+
+/// D-21: the report of a real run.
+#[test]
+fn report_has_the_counts_and_bytes_freed() {
+    let dir = seeded_with_snapshot();
+    let store = dir.path().join("store");
+    let report = rehash(&store, "sha256", false);
+    for prefix in ["Rehash to sha256:", "Read:", "Rewritten:", "Kept as is:", "GC (full):", "Bytes freed:", "store disk usage: before"] {
+        assert!(report.lines().any(|l| l.starts_with(prefix)), "no {prefix:?} line in:\n{report}");
+    }
+    assert!(number_after(&report, "Bytes freed: ") > 0, "{report}");
+}
+
+/// D-21: a progress line at each step, in order.
+#[test]
+fn progress_lines_come_at_each_step() {
+    let dir = seeded_with_snapshot();
+    let store = dir.path().join("store");
+    let mut lines = Vec::new();
+    let args = RehashArgs { progress_every: Duration::ZERO, ..RehashArgs::new(&store, "sha256", false) };
+    rehash_report_with(&args, &mut |l| lines.push(l.to_string())).unwrap();
+    let at = |part: &str| lines.iter().position(|l| l.contains(part)).unwrap_or_else(|| panic!("no {part:?} line in {lines:#?}"));
+    for root in 1..=2 {
+        at(&format!("rewrite: root {root} of 2"));
+    }
+    let order = [at("checks passed"), at("rewrite: "), at("rehash: switch"), at("rehash: gc")];
+    assert!(order.is_sorted(), "{order:?} {lines:#?}");
+}
+
+/// R-08: a second run finds every object with the target hash, writes no
+/// segment, still runs the GC and keeps the header line.
+#[test]
+fn a_second_run_finds_nothing_to_rewrite() {
+    let dir = seeded_with_snapshot();
+    let store = dir.path().join("store");
+    rehash(&store, "sha256", false);
+    let names = segment_names(&store);
+    let report = rehash(&store, "sha256", false);
+    assert!(report.contains("Every live object already has hash sha256"), "{report}");
+    assert!(report.contains("GC (full):"), "{report}");
+    assert_eq!(segment_names(&store), names, "no new segment");
+    assert!(marker(&store).contains("hash sha256\n"));
+}
+
+/// D-23: a store whose objects all have the target tag, with another hash
+/// line, only gets the header line.
+#[test]
+fn a_store_with_only_target_objects_gets_the_header_line() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("a.bin"), data(9, 50 << 10)).unwrap();
+    let store = dir.path().join("store");
+    run_seed(&store, &src, Some("sha256")).unwrap();
+    content::select_hash(&store, Some("blake3-256")).unwrap();
+    assert!(marker(&store).contains("hash blake3-256\n"));
+    let names = segment_names(&store);
+    let report = rehash(&store, "sha256", false);
+    // The key-carrying nodes are always translated (and counted as
+    // rewritten), but they give the same keys: no new object, no new root.
+    assert!(report.contains("; new objects: 0 (0 bytes stored)."), "{report}");
+    assert!(report.contains("Every live object already has hash sha256"), "{report}");
+    assert_eq!(segment_names(&store), names, "no new segment");
+    assert!(marker(&store).contains("hash sha256\n"));
 }

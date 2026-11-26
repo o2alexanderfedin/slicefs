@@ -1,0 +1,22 @@
+# gate-23-04 (paths: <repo>)
+BASE=1aa0c71 (git merge-base HEAD feature/phase-23-hashes-rehash), branch exec/23-04, not pushed
+
+## Local gate, Task 3 tree (all code of the plan)
+timeout 3600 cargo test --workspace -- --skip a_panic_on_another_thread_does_not_abort --skip a_reader_thread_panic_aborts_and_the_remount_replays --skip a_worker_panic_aborts_and_the_remount_replays --skip a_full_queue_that_stays_full_aborts
+GATE_EXIT=0
+test result lines: 81; passed 1659; failed 0; ignored 13
+Earlier gates: Task 1 tree GATE_EXIT=0 (1645 passed, 0 failed); Task 2 tree GATE_EXIT=0 (1653 passed, 0 failed)
+
+## rehash_tests (cargo test -p slicefs-cli --test rehash_tests)
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+cli::tests::rehash*: 2 passed; store_header_tests: 9 passed
+
+## Safety (RUST_STABLE=stable scripts/safety/clippy.sh), at each of the three task commits
+CLIPPY os=Darwin toolchain=stable result=ok
+UNSAFE files=31 tokens=132 result=ok
+
+## Greps
+rehash.rs code lines with gc_report|GarbageCollector|run_gc_mode|store_io( : 0
+pub const REHASH_TMP_DIR in content.rs: 1
+Cmd::Rehash in main.rs: 1
+"gc, seed, rehash, snapshot create or snapshot switch" in header.rs: 3
