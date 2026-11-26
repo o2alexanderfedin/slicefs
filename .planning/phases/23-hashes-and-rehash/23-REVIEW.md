@@ -117,6 +117,21 @@ If the dry-run must not write anywhere, then the report must say that a value sh
 **Issue:** `stop_after` returns an error. The process continues, and `ChunkStore` is dropped in the normal way (`Drop` does not sync, but the written pack bytes stay in the OS page cache). So the step tests show a process crash only. The one test with a power-loss model (`new_objects_survive_a_crash_after_sync`, `MemIo::crash`) runs after `cs.sync()`. No test removes the unsynced pack writes of a rewrite. Then it is not proved that the old root still loads and that a rerun completes, with the torn new data in the packs.
 **Fix:** Add an engine test. Run `rehash_roots` in `Mode::Rewrite` without `cs.sync()`, then call `mem.crash()` and open again. Check that the old root gives the same tree. Run `rehash_roots` again and check that the new root is equal to that of a clean run.
 
+## Fixes
+
+Branch `exec/23-fix` (from `b7b25f8`). One commit per finding.
+
+| Finding | Status | Commit | What changed |
+|---------|--------|--------|--------------|
+| WR-01 | fixed | `93867c5` | Step 1 calls `content::write_hasher`, so an unknown header `hash` name is refused before any write, the same as the dry-run. Test `refuse_an_unknown_header_hash`: the store tree does not change, and the dry-run gives the same text. |
+| WR-02 | fixed | `40b9894` | `Mode::DryRun { map_dir }` uses the same on-disk map as a real run. RAM is the fixed map cache. Decision: the CLI puts the map in a new `tempfile` directory in the system temp dir (`TMPDIR`), outside the store, and removes it at the end, also on an error. The dry-run still writes nothing in the store. The map takes about 134 bytes per distinct key in the temp dir. `tempfile` is now a normal dependency of `slicefs-cli`. Test `dry_run_counts_equal_the_real_run` (300 small files, one content in four files, two snapshots): the dry-run reads the same values and bytes as the real run. With the old cache-only map it failed (919 against 915 values). |
+| IN-01 | fixed | `d2c943f` | An error in steps 3 to 7 that is not a test-hook stop removes `rehash-tmp` and any `segment-*.seg.tmp` (best effort; the run returns its own error). The hook stops have a separate error type, so the crash tests still keep their files. Before the switch, the message says that the new objects of the run stay until the next `slicefs gc` or rehash run. For an error in the switch, the message says to run rehash again, because the rename may or may not be done. `write_switch_segment` removes its temp file when a step before the rename fails. The damaged-object test checks the message and that `rehash-tmp` is gone. |
+| IN-02 | fixed | `bfc98a7` | When no root changes but more than one `segment-*.seg` file is there, the run writes the switch segment with the same roots, which removes the older segments. The write log is empty at that point, so the roots and the snapshot list are all that the segments hold. `crash_with_old_segments_left_after_the_switch` now checks that one segment stays. Without the fix it found 3. |
+| IN-03 | fixed | `ecc2f7c` | `checked_add` for the switch segment id. On overflow the switch fails with "segment id overflow" before it writes or removes a file. Unit test `a_switch_after_the_largest_id_is_an_error`. |
+| IN-04 | skipped | — | A power-loss test before the sync needs a crash-aware storage layer. That is outside this fix pass. The finding stays open as noted. |
+
+Gate on the tree of the last code commit: the full suite of `23-VALIDATION.md` (4 skips) exited 0 (1671 passed, 0 failed, 13 ignored). `RUST_STABLE=stable scripts/safety/clippy.sh` gave `CLIPPY os=Darwin toolchain=stable result=ok` and `UNSAFE files=31 tokens=132 result=ok`. Both gates ran in the agent worktree on `exec/23-fix`.
+
 ---
 
 _Reviewed: 2026-11-26T16:24:12Z_
