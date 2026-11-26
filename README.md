@@ -10,7 +10,7 @@ SliceFS splits files into variable-sized content-addressed blocks, stores each u
 - **Snapshots**: point-in-time create / list / switch.
 - **Compression**: zstd per object (dedup works on the original bytes, before compression). `slicefs mount --compression zstd[:LEVEL]|none` sets it for the new data of a mount. 8 Boost releases (1.80 to 1.87, as tars) in one store: 6,222 MiB of data in 891 MiB (6.99x).
 - **Hash agility**: an object ID names its hash (a tag byte, then a 32-byte digest). `slicefs mount --hash NAME` (or `seed --hash`) changes the hash of new objects and records it in the store; objects of the old hash stay readable and verifiable.
-- **Chunk profile**: `slicefs seed --chunk-profile 16/64/256 ./my-store DIR` fixes the FastCDC min/avg/max (KiB) of a new store; the default is 4/8/32. A `seed` or `mount` with another profile is refused (`docs/research/chunk-profiles.md`).
+- **Chunk profile**: `slicefs seed --chunk-profile 16/64/256 ./my-store DIR` fixes the FastCDC min/avg/max (KiB, powers of two, max at most 1024) of a new store; the default is 4/8/32. A `seed` or `mount` with another profile is refused (`docs/research/chunk-profiles.md`).
 
 ## Why SliceFS (compared with dedup in other file systems)
 

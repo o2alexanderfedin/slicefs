@@ -36,12 +36,27 @@ fn the_five_profiles_and_the_limits_are_accepted() {
         assert!(ChunkProfile::new(a * KIB, b * KIB, c * KIB).is_ok(), "{a}/{b}/{c} KiB");
     }
     assert!(ChunkProfile::new(64, 256, 1024).is_ok());
-    assert!(ChunkProfile::new(MIB, 4 * MIB, 16 * MIB).is_ok());
+    assert!(ChunkProfile::new(256 * KIB, 512 * KIB, MIB).is_ok());
     assert_eq!(ChunkProfile::DEFAULT.to_string(), "4/8/32 KiB");
     assert_eq!(kib(16, 64, 256).to_string(), "16/64/256 KiB");
     assert_eq!(ChunkProfile::new(64, 256, 1024).unwrap().to_string(), "64/256/1024 B");
     let x = xorshift(300 << 10, 0x2267_c0de_5eed_0002);
     assert_eq!(chunk_ranges(&x), ChunkProfile::DEFAULT.ranges(&x));
+}
+
+/// The max is at most 1 MiB (`ChunkProfile::MAX_LIMIT`): a stream holds up
+/// to 2 x max bytes outside `--dirty-budget`, so the limit bounds that at
+/// about 2 MiB per streaming file. 64/256/1024 KiB is accepted; the same
+/// shape at 128/512/2048 KiB is refused only for the limit, and the
+/// message names it.
+#[test]
+fn the_max_is_at_most_1_mib() {
+    assert_eq!(ChunkProfile::MAX_LIMIT, MIB);
+    assert!(ChunkProfile::new(64 * KIB, 256 * KIB, 1024 * KIB).is_ok());
+    for (a, b, c) in [(128 * KIB, 512 * KIB, 2048 * KIB), (MIB, 4 * MIB, 16 * MIB)] {
+        let e = ChunkProfile::new(a, b, c).unwrap_err();
+        assert!(e.contains("1024 KiB") && e.contains("1 MiB"), "{a}/{b}/{c}: {e}");
+    }
 }
 
 #[test]

@@ -404,7 +404,7 @@ pub(crate) mod tests {
     fn parse_chunk_profile_takes_whole_kib() {
         assert_eq!(parse_chunk_profile("16/64/256"), Ok(ChunkProfile::new(16384, 65536, 262144).unwrap()));
         assert_eq!(parse_chunk_profile("4/8/32"), Ok(ChunkProfile::DEFAULT));
-        for v in ["8/32/128", "32/128/512"] {
+        for v in ["8/32/128", "32/128/512", "64/256/1024"] {
             assert!(parse_chunk_profile(v).is_ok(), "{v}");
         }
     }
@@ -424,6 +424,7 @@ pub(crate) mod tests {
             "0/8/32",
             "1/2/32768",
             "4194304/8388608/16777216",
+            "128/512/2048",
         ] {
             assert!(parse_chunk_profile(v).is_err(), "{v:?} is refused");
         }

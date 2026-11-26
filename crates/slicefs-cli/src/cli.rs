@@ -96,9 +96,9 @@ pub enum Cmd {
         #[arg(long, value_name = "NAME", value_parser = crate::content::parse_hash)]
         hash: Option<String>,
         /// Refuse the mount when the store has another chunk profile
-        /// (MIN/AVG/MAX in KiB, for example 16/64/256). Default: the profile
-        /// that the store records. A mount does not make a store, so it
-        /// never sets the profile: `slicefs seed` does.
+        /// (MIN/AVG/MAX in KiB, MAX at most 1024, for example 16/64/256).
+        /// Default: the profile that the store records. A mount does not
+        /// make a store, so it never sets the profile: `slicefs seed` does.
         #[arg(long, value_name = "MIN/AVG/MAX", value_parser = crate::content::parse_chunk_profile)]
         chunk_profile: Option<ChunkProfile>,
         /// Most dirty file data (data that is not stored yet) of all open
@@ -157,9 +157,9 @@ pub enum Cmd {
         #[arg(long, value_name = "NAME", value_parser = crate::content::parse_hash)]
         hash: Option<String>,
         /// The FastCDC chunk sizes of a new store: MIN/AVG/MAX in KiB,
-        /// powers of two (for example 16/64/256). Default 4/8/32. The
-        /// profile is fixed when the store is made, so a store with another
-        /// profile is refused.
+        /// powers of two, MAX at most 1024 (for example 16/64/256). Default
+        /// 4/8/32. The profile is fixed when the store is made, so a store
+        /// with another profile is refused.
         #[arg(long, value_name = "MIN/AVG/MAX", value_parser = crate::content::parse_chunk_profile)]
         chunk_profile: Option<ChunkProfile>,
     },

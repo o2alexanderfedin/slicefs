@@ -73,7 +73,7 @@ Lines are split into words at each space.
 | First line | `slicefs-store <number> [free text]` | `<number>` is decimal digits. The free text is optional and SliceFS does not read it. |
 | Flag line | `<class> <name> <release>` | Exactly three words. `<class>` is `compat`, `ro_compat` or `incompat`. |
 | Hash line | `hash <name>` | Exactly two words. At most one hash line. No hash line means `blake3-256`. |
-| Chunks line | `chunks <min> <avg> <max>` | The FastCDC chunk profile of the store. Exactly four words. The sizes are in bytes, as decimal digits. They are powers of two with min < avg < max, inside the limits of fastcdc v2020 (min 64 B to 1 MiB, avg 256 B to 4 MiB, max 1 KiB to 16 MiB), and FastCDC must cut a run of zeros at max. At most one chunks line. It always comes with the ro_compat flag `chunk-profile`, and the flag always comes with the line. No chunks line means 4/8/32 KiB. |
+| Chunks line | `chunks <min> <avg> <max>` | The FastCDC chunk profile of the store. Exactly four words. The sizes are in bytes, as decimal digits. They are powers of two with min < avg < max, max at most 1 MiB (1048576, the SliceFS limit), at least the fastcdc v2020 minimums (min 64 B, avg 256 B, max 1 KiB), and FastCDC must cut a run of zeros at max. At most one chunks line. It always comes with the ro_compat flag `chunk-profile`, and the flag always comes with the line. No chunks line means 4/8/32 KiB. |
 | Other line | any other text | An unknown setting (see the parse order). |
 
 - `<name>`: 1 to 64 characters; lowercase letters `a-z`, digits `0-9` and

@@ -134,13 +134,19 @@ impl ChunkProfile {
     /// 4/8/32 KiB ([`CHUNK_MIN`], [`CHUNK_AVG`], [`CHUNK_MAX`]).
     pub const DEFAULT: ChunkProfile = ChunkProfile { min: CHUNK_MIN, avg: CHUNK_AVG, max: CHUNK_MAX };
 
+    /// The largest max chunk size (bytes): 1 MiB. A streaming file keeps up
+    /// to 2 x max bytes in its `FileWriter` outside the dirty budget of a
+    /// mount, so this limit bounds that at about 2 MiB per stream.
+    pub const MAX_LIMIT: u32 = 1 << 20;
+
     /// The profile `min`/`avg`/`max` (bytes). Refused: a size that is not a
-    /// power of two, sizes not in the order min < avg < max, a size outside
-    /// the fastcdc v2020 limits (min 64 B to 1 MiB, avg 256 B to 4 MiB, max
-    /// 1 KiB to 16 MiB), and a profile that does not cut a run of zeros
-    /// into chunks of `max` bytes (the zero chunk of the readers and of
-    /// `splice` needs it). The checks run in this order, so FastCDC never
-    /// gets values that make it panic.
+    /// power of two, sizes not in the order min < avg < max, a max above
+    /// [`ChunkProfile::MAX_LIMIT`] (1 MiB; so min is at most 256 KiB and
+    /// avg at most 512 KiB), a size below the fastcdc v2020 minimums (min
+    /// 64 B, avg 256 B, max 1 KiB), and a profile that does not cut a run
+    /// of zeros into chunks of `max` bytes (the zero chunk of the readers
+    /// and of `splice` needs it). The checks run in this order, so FastCDC
+    /// never gets values that make it panic.
     pub fn new(min: u32, avg: u32, max: u32) -> std::result::Result<ChunkProfile, String> {
         use fastcdc::v2020::{AVERAGE_MAX, AVERAGE_MIN, MAXIMUM_MAX, MAXIMUM_MIN, MINIMUM_MAX, MINIMUM_MIN};
         let sizes = format!("{min}/{avg}/{max} bytes");
@@ -150,12 +156,15 @@ impl ChunkProfile {
         if !(min < avg && avg < max) {
             return Err(format!("chunk profile {sizes}: the sizes must be min < avg < max"));
         }
+        if max > Self::MAX_LIMIT {
+            return Err(format!("chunk profile {sizes}: the max is above the limit of 1024 KiB (1 MiB)"));
+        }
         if !(MINIMUM_MIN..=MINIMUM_MAX).contains(&min)
             || !(AVERAGE_MIN..=AVERAGE_MAX).contains(&avg)
             || !(MAXIMUM_MIN..=MAXIMUM_MAX).contains(&max)
         {
             return Err(format!(
-                "chunk profile {sizes}: outside the limits (min 64 B to 1 MiB, avg 256 B to 4 MiB, max 1 KiB to 16 MiB)"
+                "chunk profile {sizes}: below the fastcdc limits (min at least 64 B, avg at least 256 B, max at least 1 KiB)"
             ));
         }
         let p = ChunkProfile { min, avg, max };

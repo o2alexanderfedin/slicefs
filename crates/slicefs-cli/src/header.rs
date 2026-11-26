@@ -956,6 +956,7 @@ mod tests {
             "chunks 65536 16384 262144",
             "chunks 32 256 1024",
             "chunks 4096 8192 33554432",
+            "chunks 131072 524288 2097152",
             "chunks 16384 65536 99999999999",
         ] {
             let err = parse(Path::new(STORE), &format!("{FORMAT}{HASH}{line}\n{ro}")).expect_err(line).to_string();
