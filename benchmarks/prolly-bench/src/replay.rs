@@ -144,7 +144,9 @@ pub(crate) fn batches(argv: &[String]) -> Res<()> {
     let roots = read_roots(&a.path("roots")?)?;
     let out = a.path("out")?;
     fs::create_dir_all(&out)?;
-    let cs = ChunkStore::open(&store, Options::default())?;
+    // Read only: the store of whole was measured, so this step must not
+    // recover, merge or write it.
+    let cs = ChunkStore::open(&store, Options { read_only: true, ..Options::default() })?;
     let maps: Vec<ObjectKey> =
         roots.iter().map(|r| root_record(&cs, &r.root).map(|rr| rr.inode_data())).collect::<Res<_>>()?;
     let mut txt = BufWriter::new(fs::File::create(out.join("batches.txt"))?);
