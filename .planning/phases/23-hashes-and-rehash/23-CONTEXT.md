@@ -164,3 +164,18 @@ Out of scope: an online rehash job (offline only, owner decision); re-chunking t
 
 *Phase: 23-hashes-and-rehash*
 *Context gathered: 2026-11-26*
+
+## Settled after research (2026-11-26, reversible)
+
+Research (23-RESEARCH.md) refined these defaults; the planner follows them:
+- R-01 (D-17): the write-log check uses `scan_store_with_log` and refuses when the log is not empty (`log.is_empty()`); `require_store` runs before the lock. Rehash also refuses when a `mount.lock` file is present (as `snapshot create`).
+- R-02 (D-16): the map is an on-disk open-addressing hash table in `<store>/rehash-tmp/` (fixed slots: old key + new key, tag 0 = empty), with a fixed RAM cache. It is not under `gc-tmp`. `content::open` (writable) and rehash start and end remove `rehash-tmp`.
+- R-03 (D-13): only the key-carrying values are decoded (manifest lists, the flat maps, the root record); inode, directory and xattr values are byte copies rewritten through `FileWriter`. Refcount rows are translated to new keys and re-sorted with `extsort` (bounded RAM); a stale key whose object is missing is dropped and counted.
+- R-04 (D-12): no chunk-boundary reuse path; values are streamed `FileReader` -> `FileWriter`.
+- R-05 (D-15): `get` also verifies but hides the cause; use `read`.
+- R-06 (D-19): option (a). One switch segment (`RootUpdate` + one `SnapshotRecord` per snapshot) written as `segment-N.seg.tmp`, synced, renamed, dir synced; then older segments are removed. Both loaders keep the last record per snapshot version.
+- R-07 (D-20): a new GC entry runs on the already open `ChunkStore` with the new roots (`gc_begin_full`, `live_objects_exact`, `gc_finish_full`), no second lock, no segment copy. Bytes freed from `GcStats.removed_bytes`. The existing GC mark RAM (one key per metadata node and file) is the accepted bound of the GC step, stated in the docs.
+- R-08 (D-23 replaced): a real run always runs the full GC, also when nothing was rewritten, so a rerun after a crash between switch and GC finishes the job.
+- R-09 (D-10): `sha2` 0.11.x with `default-features = false`; drop the unused `sha2-compress` dependency.
+- R-10: the rehash engine lives in the `metadata` crate (`crates/metadata/src/rehash/`); the CLI command in `crates/slicefs-cli/src/rehash.rs`.
+- R-11: memory-bound checks are structural (cache size constant while entries grow), not a counting allocator (that would add `unsafe`).
