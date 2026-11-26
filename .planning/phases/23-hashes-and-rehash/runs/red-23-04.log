@@ -1,0 +1,14 @@
+# red-23-04: red runs before the code (paths: <repo>)
+
+## Task 1: cargo test -p slicefs-cli --test rehash_tests (tests written, no rehash.rs, no REHASH_TMP_DIR)
+error[E0432]: unresolved import `slicefs_cli::content::REHASH_TMP_DIR`
+  --> crates/slicefs-cli/tests/rehash_tests.rs:17:55
+error[E0432]: unresolved import `slicefs_cli::rehash`
+  --> crates/slicefs-cli/tests/rehash_tests.rs:20:18
+error: could not compile `slicefs-cli` (test "rehash_tests") due to 2 previous errors
+
+## Task 1: first run with the code (a test helper bug, not a code bug)
+test a_blake3_store_rehashes_to_sha256 ... FAILED
+panicked at crates/slicefs-cli/tests/rehash_tests.rs:166:5: left: 0, right: 1 (snapshots before the rehash)
+cause: the test helper open_fs did not give the loaded snapshots to the metadata store, so its commit wrote a root
+segment with no snapshot record. Fix: open_fs calls set_snapshots, as a mount does. Then 2 passed.
