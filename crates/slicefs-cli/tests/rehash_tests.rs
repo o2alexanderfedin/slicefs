@@ -313,6 +313,20 @@ fn refuse_an_unknown_target() {
     assert_refused_and_unchanged(&store, &["unknown hash \"md5\""], || run_rehash(&store, "md5", false).unwrap_err().to_string());
 }
 
+/// WR-01: a header write hash that this build does not know is refused in
+/// the checks, before any write; the dry-run refuses with the same text.
+#[test]
+fn refuse_an_unknown_header_hash() {
+    let dir = seeded_small();
+    let store = dir.path().join("store");
+    let m = marker(&store);
+    assert!(m.contains("hash blake3-256\n"), "{m}");
+    std::fs::write(store.join(FORMAT_FILE), m.replace("hash blake3-256\n", "hash foo\n")).unwrap();
+    let parts = ["\"foo\"", "does not know"];
+    assert_refused_and_unchanged(&store, &parts, || refused(&store, "sha256", false));
+    assert_eq!(refused(&store, "sha256", true), refused(&store, "sha256", false));
+}
+
 /// A missing path and an empty directory are no store; nothing is made.
 #[test]
 fn refuse_a_path_with_no_store() {

@@ -128,6 +128,9 @@ pub fn rehash_report_with(args: &RehashArgs<'_>, progress: &mut dyn FnMut(&str))
     if let Some(h) = header::check(store, Want::Read)?.header {
         header::decide(store, &h, Want::Write)?;
     }
+    // A recorded write hash that this build does not know: refused here,
+    // before any write (a later step reads it too).
+    content::write_hasher(store)?;
     if store.join("mount.lock").exists() {
         return Err(msg_stale_mount_lock(store).into());
     }
