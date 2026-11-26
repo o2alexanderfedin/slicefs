@@ -393,7 +393,11 @@ pub(crate) fn flat(argv: &[String]) -> Res<()> {
         cs.sync()?;
         Ok(((), ser, None))
     })?;
+    // The disk sizes are taken after a close, which writes the pack index,
+    // as for whole (D-23: index included); the store is opened again.
+    cs.close()?;
     print_disk("flat", "start", &store)?;
+    let cs = ChunkStore::open(&store, Options::default())?;
 
     for bl in &plan.batches {
         let changed = for_each_batch(&dir, bl.seq, |put, ino, key| {
@@ -415,8 +419,8 @@ pub(crate) fn flat(argv: &[String]) -> Res<()> {
         d.add(*ino, key);
     }
     check("flat", &plan, &d)?;
-    print_disk("flat", "end", &store)?;
     cs.close()?;
+    print_disk("flat", "end", &store)?;
     Ok(())
 }
 
@@ -476,7 +480,10 @@ pub(crate) fn prolly(argv: &[String]) -> Res<()> {
         cs.sync()?;
         Ok((root, st.bytes_written, Some((0, st.nodes_written))))
     })?;
+    // As in flat: the sizes after a close (pack index included), then open again.
+    cs.close()?;
     print_disk("prolly", "start", &store)?;
+    let cs = ChunkStore::open(&store, Options::default())?;
 
     for bl in &plan.batches {
         // One batch in RAM (D-02), read straight into edits.
@@ -502,9 +509,9 @@ pub(crate) fn prolly(argv: &[String]) -> Res<()> {
         d.add(ino, &v);
     }
     check("prolly", &plan, &d)?;
-    print_disk("prolly", "end", &store)?;
     print_tree(&cs, &root)?;
     cs.close()?;
+    print_disk("prolly", "end", &store)?;
     Ok(())
 }
 

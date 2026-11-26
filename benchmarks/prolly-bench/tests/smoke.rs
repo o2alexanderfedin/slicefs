@@ -100,12 +100,19 @@ fn smoke_end_to_end() {
     assert_eq!(lines(&out, "hash").len(), 1, "{out}");
     assert_eq!(lines(&out, "tree").len(), 1, "{out}");
     let prolly_commits = lines(&out, "commit").len();
+    // The sizes are taken after a close, so each counts a pack and its index.
+    let disk = lines(&out, "disk");
+    assert_eq!(disk.len(), 2, "{out}");
+    assert!(disk.iter().all(|l| num(l, "files") >= 2), "{out}");
 
     let out = ok(&["flat", "--batches", p(&batches), "--store", p(&t.join("flat"))]);
     let check = lines(&out, "check");
     assert_eq!(check.len(), 1, "{out}");
     assert!(check[0].contains("mode=flat") && check[0].ends_with(" ok=1"), "{out}");
     assert_eq!(lines(&out, "commit").len(), prolly_commits, "{out}");
+    let disk = lines(&out, "disk");
+    assert_eq!(disk.len(), 2, "{out}");
+    assert!(disk.iter().all(|l| num(l, "files") >= 2), "{out}");
 
     for mode in ["flat", "prolly"] {
         let store = t.join(format!("scale-{mode}"));

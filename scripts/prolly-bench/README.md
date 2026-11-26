@@ -257,7 +257,7 @@ One row per commit and mode (the line `commit` of `whole`, `flat` and
 |---|---|---|
 | `mode` | | `whole`, `flat` or `prolly` |
 | `run` | | 1 to RUNS, or `median` |
-| `phase` | | `start` (`whole`: the seeded store before the setup commit; `flat`, `prolly`: after the first intern or build) or `end` (after the last commit) |
+| `phase` | | `start` (`whole`: the seeded store before the setup commit; `flat`, `prolly`: after the first intern or build and a close of the store) or `end` (after the last commit and a close of the store). A close seals the active pack and writes its index, so every size includes the pack index |
 | `apparent_bytes` | bytes | Sum of the file sizes of the store dir |
 | `alloc_bytes` | bytes | Allocated blocks of those files x 512 |
 | `files` | files | Files in the store dir |
