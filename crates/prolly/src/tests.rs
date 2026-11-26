@@ -404,6 +404,146 @@ fn apply_inserts_equal_bulk() {
         .map(|(key, value)| Edit::Put { key, value })
         .collect();
     let (r, _) = apply_checked(&s, cfg, &r50, &mut m, &grow);
-    let depth = nodes(&s, &r).iter().map(|n| n.level).max().unwrap_or(0) + 1;
-    assert!(depth >= st50.depth + 2, "depth {depth} from {}", st50.depth);
+    assert!(depth_of(&s, &r) >= st50.depth + 2, "depth {} from {}", depth_of(&s, &r), st50.depth);
+}
+
+fn depth_of(s: &ChunkStore, root: &chunk_store::ObjectId) -> u8 {
+    nodes(s, root).iter().map(|n| n.level).max().unwrap_or(0) + 1
+}
+
+fn del(k: &[u8]) -> Edit {
+    Edit::Delete { key: k.to_vec() }
+}
+
+fn dels<'a>(keys: impl IntoIterator<Item = &'a Vec<u8>>) -> Vec<Edit> {
+    keys.into_iter().map(|k| del(k)).collect()
+}
+
+fn puts(es: &[(Vec<u8>, Vec<u8>)]) -> Vec<Edit> {
+    es.iter().map(|(k, v)| put(k, v)).collect()
+}
+
+#[test]
+fn canonical_root() {
+    let cfg = Config::SMALL;
+    let s = mem_store();
+    let es = u64_entries(2_000, 3);
+    let (root, bst) = build(&s, cfg, es.clone()).unwrap();
+    let empty = empty_root(&s).unwrap();
+    // (a) no keys; (b) one key; (c) two keys.
+    for keep in [0usize, 1, 2] {
+        let mut m: Model = es.iter().cloned().collect();
+        let (r, _) = apply_checked(&s, cfg, &root, &mut m, &dels(es[keep..].iter().map(|(k, _)| k)));
+        assert_eq!(m.len(), keep);
+        if keep == 0 {
+            assert_eq!(r, empty);
+        }
+    }
+    // (d) a whole range of leaves goes, and the height goes down.
+    let mut m: Model = es.iter().cloned().collect();
+    apply_checked(&s, cfg, &root, &mut m, &dels(es[500..1_500].iter().map(|(k, _)| k)));
+    let mut m: Model = es.iter().cloned().collect();
+    let (r, _) = apply_checked(&s, cfg, &root, &mut m, &dels(es[30..].iter().map(|(k, _)| k)));
+    assert!(depth_of(&s, &r) < bst.depth, "depth {} from {}", depth_of(&s, &r), bst.depth);
+    // (e) a delete of an absent key from the empty map writes nothing.
+    let before = s.stats();
+    assert_eq!(apply(&s, cfg, &empty, &[del(b"x")]).unwrap().0, empty);
+    assert_eq!(s.stats(), before);
+}
+
+#[test]
+fn order_independence() {
+    let cfg = Config::SMALL;
+    let es = u64_entries(3_000, 3);
+    let n = es.len();
+    let mut roots = Vec::new();
+    // (1) bulk.
+    roots.push(build(&mem_store(), cfg, es.clone()).unwrap().0);
+    // (2) one put per batch, in a shuffled order.
+    let s = mem_store();
+    let mut order: Vec<usize> = (0..n).collect();
+    let mut seed = 2_024u64;
+    for i in (1..n).rev() {
+        order.swap(i, (xorshift(&mut seed) % (i as u64 + 1)) as usize);
+    }
+    let mut r = empty_root(&s).unwrap();
+    for i in order {
+        r = apply(&s, cfg, &r, &puts(&es[i..=i])).unwrap().0;
+    }
+    roots.push(r);
+    // (3) 7 batches in key order; (4) 13 batches in reverse key order.
+    for (parts, reverse) in [(7, false), (13, true)] {
+        let s = mem_store();
+        let mut ranges: Vec<_> = (0..parts).map(|p| p * n / parts..(p + 1) * n / parts).collect();
+        if reverse {
+            ranges.reverse();
+        }
+        let mut r = empty_root(&s).unwrap();
+        for range in ranges {
+            r = apply(&s, cfg, &r, &puts(&es[range])).unwrap().0;
+        }
+        roots.push(r);
+    }
+    // (5) a superset, then the extra keys deleted in 3 batches.
+    let s = mem_store();
+    let extra: Vec<Vec<u8>> = (0..1_000u64).map(|i| (i * 9 + 4).to_be_bytes().to_vec()).collect();
+    let mut sup: Model = es.iter().cloned().collect();
+    sup.extend(extra.iter().map(|k| (k.clone(), b"extra".to_vec())));
+    let (mut r, _) = build(&s, cfg, sup.iter()).unwrap();
+    for part in extra.chunks(334) {
+        r = apply(&s, cfg, &r, &dels(part)).unwrap().0;
+    }
+    roots.push(r);
+    assert!(roots.iter().all(|r| *r == roots[0]), "{:?}", roots.iter().map(|r| r.to_hex()).collect::<Vec<_>>());
+}
+
+#[test]
+fn same_batch_twice_writes_nothing() {
+    let cfg = Config::DEFAULT;
+    let s = mem_store();
+    let es = u64_entries(3_000, 3);
+    let (root, _) = build(&s, cfg, es.clone()).unwrap();
+    // 50 mixed edits: puts of new and old keys, deletes of old and absent keys.
+    let mut b: Vec<Edit> = (0..50u64)
+        .map(|i| {
+            let k = (i * 179 + 3 + i % 3).to_be_bytes().to_vec();
+            if i % 2 == 0 {
+                put(&k, &i.to_le_bytes())
+            } else {
+                del(&k)
+            }
+        })
+        .collect();
+    b.sort_by(|x, y| x.key().cmp(y.key()));
+    let (r1, _) = apply(&s, cfg, &root, &b).unwrap();
+    assert_ne!(r1, root);
+    let before = s.stats();
+    let (r2, _) = apply(&s, cfg, &r1, &b).unwrap();
+    assert_eq!(r1, r2);
+    let after = s.stats();
+    assert_eq!((after.objects, after.raw_bytes), (before.objects, before.raw_bytes));
+    // A put of the current value changes nothing.
+    let (r3, st) = apply(&s, cfg, &root, &puts(&es[700..701])).unwrap();
+    assert_eq!(r3, root);
+    assert_eq!(s.stats(), after);
+    assert!(st.nodes_read > 0, "{st:?}");
+}
+
+#[test]
+fn apply_rejects_unsorted_batch() {
+    let cfg = Config::SMALL;
+    let s = mem_store();
+    let (root, _) = build(&s, cfg, u64_entries(500, 3)).unwrap();
+    // A root that is not in the store: an error from a read would be
+    // `Error::Store`, so these errors come before any read.
+    let missing = chunk_store::ObjectId([0x1e; chunk_store::ID_LEN]);
+    let before = s.stats();
+    for r in [root, missing] {
+        assert!(matches!(apply(&s, cfg, &r, &[put(b"b", b""), put(b"a", b"")]), Err(Error::Unsorted)));
+        assert!(matches!(apply(&s, cfg, &r, &[put(b"a", b""), del(b"a")]), Err(Error::Unsorted)));
+        assert!(matches!(apply(&s, cfg, &r, &[put(b"a", &[0; 300])]), Err(Error::EntryTooLarge { len: 305, max: 256 })));
+        assert!(matches!(apply(&s, cfg, &r, &[del(&[b'k'; 129])]), Err(Error::KeyTooLarge { len: 129, max: 128 })));
+        assert_eq!(apply(&s, cfg, &r, &[]).unwrap(), (r, ApplyStats::default()));
+    }
+    assert_eq!(s.stats(), before);
 }
