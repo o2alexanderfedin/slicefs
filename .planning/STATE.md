@@ -6,8 +6,8 @@ current_phase: "21.2"
 current_phase_name: Thread-safety verification and CI gates
 current_plan: 8
 status: executing
-stopped_at: Completed 21.2-07-PLAN.md
-last_updated: "2026-11-26T01:31:02.711Z"
+stopped_at: Completed 21.2-09-PLAN.md
+last_updated: "2026-11-26T01:50:00.000Z"
 last_activity: 2026-11-25
 last_activity_desc: Phase 21.1 complete, transitioned to Phase 22
 state_head: 96f361d71fee3e15cc95c7e977f19454c7e13873
@@ -15,7 +15,7 @@ progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 55
-  completed_plans: 51
+  completed_plans: 52
   percent: 44
 ---
 
@@ -100,6 +100,7 @@ Progress: [████░░░░░░] 44%
 | Phase 21.2 P05 | 3h35m | 3 tasks | 28 files |
 | Phase 21.2 P06 | about 2 h | 2 tasks | 6 files |
 | Phase 21.2 P07 | 25 min | 2 tasks | 6 files |
+| Phase 21.2 P09 | about 50 min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -234,6 +235,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21.2]: 21.2-06: loom CI bound stays 3; all 7 models run in 7 s; the gate and FlushCtl protocol atomics go through sync::raw
 - [Phase 21.2]: 21.2-07: lock_tail_tests stays under TSan with put_and_read_pass_a_held_keep_cap_wait skipped (5 s real-time step limit in a debug TSan build; passes under TSan in release, no report)
 - [Phase 21.2]: 21.2-07: first CI run 45733741913 green (tsan 208 s, deadlock 111 s, 0 TSan reports); every TSan entry kept, no set change
+- [Phase 21.2]: 21.2-09: unsafe review in docs/design/unsafe-review.md (30 files, 128 tokens); no memory-safety bug; unsafe-count.sh in clippy.sh; pid > 1 guard and errno save are follow-ups (D-33)
 
 ### Pending Todos
 
@@ -263,7 +265,7 @@ None.
 ## Session Continuity
 
 Last session: 2026-11-26T01:31:02.078Z
-Stopped at: Completed 21.2-07-PLAN.md
+Stopped at: Completed 21.2-09-PLAN.md
 Resume file: None
 
 ## Operator Next Steps

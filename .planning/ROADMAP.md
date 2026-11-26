@@ -430,7 +430,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 21.2-08-PLAN.md — Kani: byte-level core of the header parser, `write_end`, `hard_cap_of`, `dirty_move`, `workers_for_cpus`, `stripe`; nine harnesses, `kani.sh`
-- [ ] 21.2-09-PLAN.md — `docs/design/unsafe-review.md` for every crate and `unsafe-count.sh` in the clippy jobs
+- [x] 21.2-09-PLAN.md — `docs/design/unsafe-review.md` for every crate and `unsafe-count.sh` in the clippy jobs
 - [ ] 21.2-10-PLAN.md — Coverage in Linux Docker (tests and FUSE smoke), job `coverage`, floor from the first Linux CI number minus 1 point
 
 **Wave 6** *(blocked on Wave 5 completion)*
