@@ -45,19 +45,21 @@ A missing tree or tar stops the script (exit 2) with this command.
 ## Run
 
 ```sh
-scripts/chunk-profiles/bench.sh DIR > results.csv
-WORK=WORKDIR RUNS=5 PROFILES="4/8/32 16/64/256" scripts/chunk-profiles/bench.sh DIR
-SMOKE=1 RUNS=1 scripts/chunk-profiles/bench.sh
+timeout 5400 scripts/chunk-profiles/bench.sh DIR > results.csv
+WORK=WORKDIR RUNS=5 PROFILES="4/8/32 16/64/256" timeout 5400 scripts/chunk-profiles/bench.sh DIR
+SMOKE=1 RUNS=1 timeout 600 scripts/chunk-profiles/bench.sh
 ```
 
-On Linux the same lines work. The smoke in Linux Docker (no FUSE) is
+The script has no time limit of its own on a step, so give it one with
+`timeout`. On Linux the same lines work. The smoke in Linux Docker (no FUSE) is
 
 ```sh
-scripts/docker-linux-test/run.sh chunk-profiles-smoke
+timeout 2400 scripts/docker-linux-test/run.sh chunk-profiles-smoke
 ```
 
-It builds the example in release in the container and runs `bench.sh` with
-`SMOKE=1 RUNS=1 PROFILES="4/8/32 16/64/256"`. Smoke run in Linux Docker
+It builds the example in release in the container (time limit 1200 s) and
+runs `bench.sh` with `SMOKE=1 RUNS=1 PROFILES="4/8/32 16/64/256"` (time limit
+600 s). Smoke run in Linux Docker
 (plan 22-03): rows and edits as on macOS (8 CSV rows, 18 edit rows, the same
 object counts and stored bytes). The image has no GNU `time`, so
 `open_peak_rss_bytes` is `NA` there. A full run in Docker needs the data dir

@@ -76,10 +76,10 @@ case "${1:-all}" in
     docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry \
       -e CARGO_TARGET_DIR=/target slicefs-fusetest bash -c '
         rustc -V
-        cargo build -q --release --locked -j 1 -p chunk-store --example chunk_profile_bench || exit 1
+        timeout 1200 cargo build -q --release --locked -j 1 -p chunk-store --example chunk_profile_bench || exit 1
         echo "# load before: $(cat /proc/loadavg)"
         SMOKE=1 RUNS=1 PROFILES="4/8/32 16/64/256" WORK=/tmp/cp BIN=/target/release/examples/chunk_profile_bench \
-          bash /src/scripts/chunk-profiles/bench.sh || exit 1
+          timeout 600 bash /src/scripts/chunk-profiles/bench.sh || exit 1
         echo "# load after: $(cat /proc/loadavg)"
         echo "# edits.csv rows: $(($(wc -l < /tmp/cp/edits.csv) - 1))"
         cat /tmp/cp/machine.txt' ;;
