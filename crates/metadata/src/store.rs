@@ -1601,17 +1601,17 @@ pub(crate) enum Ref {
     Content,
 }
 
-/// Call `f` with each key that the root record `root` refers to, in the
-/// order of [`referenced`], without a list of them (the GC mark, #207). A
-/// key can come more than once.
+/// Call `f` with each key that the root record `root` refers to, without a
+/// list of them (the GC mark, #207). A key can come more than once. The
+/// map and manifest nodes are read in windows of [`WALK_WINDOW`] bytes of
+/// whole entries, never whole: RAM does not grow with the entry count.
 pub(crate) fn for_each_referenced(
     io: &mut impl crate::store_io::NodeRead,
     root: &ObjectKey,
     f: &mut dyn FnMut(Ref, ObjectKey) -> Result<(), MetaError>,
 ) -> Result<(), MetaError> {
-    let bytes = (io).get_node(root)
-        .map_err(|e| crate::store_io::node_err("root node", root, e))?;
-    check_root_len(bytes.len())?;
+    let cs = io.chunk_store();
+    let bytes = read_root(cs, root)?;
     let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
     let (inodes, dirs, manifests, xattrs) = (
         at(root_rec::INODE_DATA), at(root_rec::DIR_DATA),
@@ -1621,17 +1621,97 @@ pub(crate) fn for_each_referenced(
         f(Ref::Node, k)?;
     }
     for map in [inodes, dirs, xattrs] {
-        for k in load_u64_digest_map(io, &map)?.into_values() {
-            f(Ref::Node, k)?;
-        }
+        for_each_map_value(cs, &map, &mut |k| f(Ref::Node, k))?;
     }
-    for manifest in load_u64_digest_map(io, &manifests)?.into_values() {
+    for_each_map_value(cs, &manifests, &mut |manifest| {
         f(Ref::Node, manifest)?;
-        for k in load_manifest(io, &manifest)? {
-            f(Ref::Content, k)?;
+        for_each_manifest_key(cs, &manifest, &mut |k| f(Ref::Content, k))
+    })
+}
+
+/// Bytes of a map or manifest node that [`for_each_referenced`] reads at a
+/// time (rounded down to whole entries). Tiny in tests, so that a small
+/// node takes many windows.
+const WALK_WINDOW: usize = if cfg!(test) { 100 } else { 1 << 20 };
+
+/// The bytes of the root record `root`; its size is checked before the read.
+fn read_root(cs: &ChunkStore, root: &ObjectKey) -> Result<Vec<u8>, MetaError> {
+    let err = |e| crate::store_io::node_err("root node", root, e);
+    let mut r = chunk_store::file::FileReader::open(cs, crate::store_io::to_id(root)).map_err(err)?;
+    check_root_len(usize::try_from(r.len()).unwrap_or(usize::MAX))?;
+    let bytes = r.read(cs, 0, root_rec::SIZE).map_err(err)?;
+    check_root_len(bytes.len())?;
+    Ok(bytes)
+}
+
+/// Call `f` with each `rec`-byte record of the node `r` (key `key`) from
+/// `off` to its end, read in windows of whole records. The caller checks
+/// that the length fits.
+fn for_each_window(
+    cs: &ChunkStore,
+    r: &mut chunk_store::file::FileReader,
+    what: &str,
+    mut off: u64,
+    rec: usize,
+    f: &mut dyn FnMut(&[u8]) -> Result<(), MetaError>,
+) -> Result<(), MetaError> {
+    let key = crate::store_io::to_key(r.key());
+    let per = WALK_WINDOW.max(rec) / rec * rec;
+    let end = r.len();
+    while off < end {
+        let n = (per as u64).min(end - off) as usize;
+        let buf = r.read(cs, off, n).map_err(|e| crate::store_io::node_err(what, &key, e))?;
+        if buf.len() != n {
+            return Err(MetaError::Corrupted(format!("{what} {key:?}: short read at {off}")));
         }
+        for one in buf.chunks_exact(rec) {
+            f(one)?;
+        }
+        off += n as u64;
     }
     Ok(())
+}
+
+/// Call `f` with the key of each entry of the u64-digest map node `key`, in
+/// the stored order. The checks of [`load_u64_digest_map`], but the node
+/// is read in windows.
+fn for_each_map_value(
+    cs: &ChunkStore,
+    key: &ObjectKey,
+    f: &mut dyn FnMut(ObjectKey) -> Result<(), MetaError>,
+) -> Result<(), MetaError> {
+    const WHAT: &str = "u64-digest map node";
+    let mut r = chunk_store::file::FileReader::open(cs, crate::store_io::to_id(key))
+        .map_err(|e| crate::store_io::node_err(WHAT, key, e))?;
+    let len = r.len();
+    let head = if len >= 8 { r.read(cs, 0, 8).map_err(|e| crate::store_io::node_err(WHAT, key, e))? } else { Vec::new() };
+    if head.len() < 8 {
+        return Err(MetaError::Corrupted(format!("u64-digest map: expected at least 8 bytes, got {len}")));
+    }
+    let (count, expected) = map_size(&head);
+    if expected.map(|e| e as u64) != Some(len) {
+        return Err(MetaError::Corrupted(format!("u64-digest map: {len} bytes cannot hold {count} entries")));
+    }
+    for_each_window(cs, &mut r, WHAT, 8, MAP_ENTRY, &mut |e| f(parse_key(&e[8..MAP_ENTRY])))
+}
+
+/// Call `f` with each key of the manifest node `key` (the checks of
+/// [`load_manifest`], but the node is read in windows).
+fn for_each_manifest_key(
+    cs: &ChunkStore,
+    key: &ObjectKey,
+    f: &mut dyn FnMut(ObjectKey) -> Result<(), MetaError>,
+) -> Result<(), MetaError> {
+    const WHAT: &str = "manifest node";
+    let mut r = chunk_store::file::FileReader::open(cs, crate::store_io::to_id(key))
+        .map_err(|e| crate::store_io::node_err(WHAT, key, e))?;
+    let len = r.len();
+    if !len.is_multiple_of(KEY_BYTES as u64) {
+        return Err(MetaError::Corrupted(format!(
+            "manifest: expected a multiple of {KEY_BYTES} bytes, got {len}"
+        )));
+    }
+    for_each_window(cs, &mut r, WHAT, 0, KEY_BYTES, &mut |e| f(ObjectKey::read(e, 0)))
 }
 
 /// Error unless `len` is the size of a root record.
@@ -3151,5 +3231,50 @@ mod tests {
         assert_eq!(reloaded.inode_count(), count_before,
             "inode_count should match original after load_from_root round-trip");
     }
-}
+    /// The walk of the GC mark reads the map and manifest nodes in tiny
+    /// windows (in tests) and gives the keys of the whole-node loads.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn the_windowed_walk_gives_the_keys_of_the_whole_nodes() {
+        let (_dir, store) = make_store();
+        let r = store.root_ino();
+        for i in 0..40u32 {
+            let ino = store.create_inode(&new_file_meta()).unwrap();
+            store.link(r, &format!("f{i}"), ino).unwrap();
+            let parts: Vec<_> = (0..(i % 7)).map(|j| ObjectKey::example(1000 + i * 10 + j)).collect();
+            store.set_manifest(ino, &parts).unwrap();
+            if i % 3 == 0 {
+                store.set_xattr(ino, "user.a", b"x").unwrap();
+            }
+        }
+        let root = store.commit().unwrap();
+        let mut io = NodeReader(Arc::clone(store.io().lock().unwrap().store()));
+        // The keys of whole-node loads, as the mark had them before #207.
+        let bytes = io.get_node(&root).unwrap();
+        let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
+        let mut want = vec![root, at(root_rec::INODE_MAP), at(root_rec::INODE_DATA), at(root_rec::DIR_DATA),
+                            at(root_rec::MANIFEST_DATA), at(root_rec::XATTR_DATA), at(root_rec::REFCOUNTS)];
+        for o in [root_rec::INODE_DATA, root_rec::DIR_DATA, root_rec::XATTR_DATA] {
+            want.extend(load_u64_digest_map(&mut io, &at(o)).unwrap().into_values());
+        }
+        let mut want_content = Vec::new();
+        for m in load_u64_digest_map(&mut io, &at(root_rec::MANIFEST_DATA)).unwrap().into_values() {
+            want.push(m);
+            want_content.extend(load_manifest(&mut io, &m).unwrap());
+        }
+        let (nodes, content) = referenced(&mut io, &root).unwrap();
+        assert_eq!(nodes, want);
+        assert_eq!(content, want_content);
+        assert!(want.len() > 3 * (100 / MAP_ENTRY) && want_content.len() > 100 / KEY_BYTES, "many windows");
 
+        // A map node whose count does not fit its length is refused.
+        let mut bad = 3u64.to_le_bytes().to_vec();
+        bad.extend_from_slice(&[0u8; MAP_ENTRY * 2]);
+        let bad = crate::store_io::put_value(io.chunk_store(), &bad).unwrap();
+        let e = for_each_map_value(io.chunk_store(), &bad, &mut |_| Ok(())).unwrap_err();
+        assert!(e.to_string().contains("cannot hold 3 entries"), "{e}");
+        let short = crate::store_io::put_value(io.chunk_store(), &[1, 2, 3]).unwrap();
+        assert!(for_each_map_value(io.chunk_store(), &short, &mut |_| Ok(())).is_err());
+        assert!(for_each_manifest_key(io.chunk_store(), &short, &mut |_| Ok(())).is_err());
+    }
+}
