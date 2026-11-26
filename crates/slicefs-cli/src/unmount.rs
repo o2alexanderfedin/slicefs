@@ -31,9 +31,9 @@ pub fn run_unmount(
     mountpoint: &Path,
     store_path: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // The daemons of the mount point, found before the unmount (with no
-    // `--store`, the wait after the unmount needs them).
-    let daemons = if store_path.is_none() { mount_daemons(mountpoint) } else { Vec::new() };
+    // The daemons of the mount point, found before the unmount: the wait
+    // after the unmount needs them.
+    let daemons = mount_daemons(mountpoint);
 
     // Step 1 — Soft unmount.
     if try_soft_unmount(mountpoint) {
@@ -296,36 +296,41 @@ fn wait_store_free(store: &Path, limit: Duration) -> bool {
 }
 
 /// After the unmount: wait until the daemon has exited, then clean
-/// `mount.lock`. With `store`, the daemon has ended when the store lock is
-/// free (the daemon releases it last); without, wait for the `daemons`
-/// found before the unmount. An error after `EXIT_WAIT`.
+/// `mount.lock`. With `store`, first until the store lock is free (the
+/// daemon releases it last); then, also without `store`, until the
+/// `daemons` found before the unmount have exited (this covers a file
+/// system with no `flock`). An error after `EXIT_WAIT` in all; then
+/// `mount.lock` is left in place.
+///
+/// The daemons are found by the text of their arguments, so a mount point
+/// spelled otherwise at mount time (relative, or with spaces) is not
+/// found; `--store` is the reliable form.
 fn wait_daemon(mountpoint: &Path, store: Option<&Path>, daemons: &[i32]) -> Result<(), Box<dyn std::error::Error>> {
-    match store {
-        Some(store) => {
-            if !wait_store_free(store, EXIT_WAIT) {
-                return Err(format!(
-                    "{} is unmounted, but {} is still in use {} s later: the SliceFS daemon has not exited. \
-                     mount.lock is left in place. Wait for the daemon, or end it.",
-                    mountpoint.display(),
-                    store.display(),
-                    EXIT_WAIT.as_secs()
-                )
-                .into());
-            }
-            clean_mount_lock(Some(store));
-        }
-        None => {
-            let left = wait_exit(daemons, EXIT_WAIT);
-            if !left.is_empty() {
-                return Err(format!(
-                    "{} is unmounted, but the SliceFS daemon (pid {:?}) still runs {} s later. Wait for it, or end it.",
-                    mountpoint.display(),
-                    left,
-                    EXIT_WAIT.as_secs()
-                )
-                .into());
-            }
-        }
+    let t = Instant::now();
+    if let Some(store) = store
+        && !wait_store_free(store, EXIT_WAIT)
+    {
+        return Err(format!(
+            "{} is unmounted, but {} is still in use {} s later: the SliceFS daemon has not exited. \
+             mount.lock is left in place. Wait for the daemon, or end it.",
+            mountpoint.display(),
+            store.display(),
+            EXIT_WAIT.as_secs()
+        )
+        .into());
+    }
+    let left = wait_exit(daemons, EXIT_WAIT.saturating_sub(t.elapsed()));
+    if !left.is_empty() {
+        return Err(format!(
+            "{} is unmounted, but the SliceFS daemon (pid {:?}) still runs {} s later. Wait for it, or end it.",
+            mountpoint.display(),
+            left,
+            EXIT_WAIT.as_secs()
+        )
+        .into());
+    }
+    if store.is_some() {
+        clean_mount_lock(store);
     }
     Ok(())
 }

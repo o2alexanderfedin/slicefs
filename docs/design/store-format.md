@@ -194,14 +194,14 @@ A read-only mount makes no `mount.lock`, so the commands that look for
 - The lock is a `flock` on the store directory (not on `FORMAT`: a header
   rewrite replaces the `FORMAT` file, and a lock on the old file then
   protects nothing).
-- A read-only mount takes it shared, with no wait, and holds it until the
+- A read-only mount takes it shared, with a short retry (250 ms), and holds it until the
   mount ends. The order is: the header check reads `FORMAT`, then the
   `--hash` and `--auto-snapshot` checks (M11, M12), then the store lock
   (M13), then the `mount.lock` check (M8), the write-log check (M7) and the
   read-only open of the chunk store and the index. Thus the lock comes
   after the read of `FORMAT`, and before every other read of the store.
 - The commands that need no live mount (`gc` with no `mount.lock`,
-  `seed`, `snapshot create`, `snapshot switch`) take it exclusive, with no wait,
+  `seed`, `snapshot create`, `snapshot switch`) take it exclusive, with a short retry (250 ms),
   after their `mount.lock` check (`seed`: first, before the header
   check), and hold it while they run. If it is held, they are refused
   (M14).
@@ -209,7 +209,7 @@ A read-only mount makes no `mount.lock`, so the commands that look for
   lock is held, also while an offline `gc` runs. (It takes the lock
   exclusive and drops it at once, so a mount, `gc` or snapshot command
   that starts at the same moment can be refused, M13, M14 or M15.)
-- A writable mount takes it exclusive, with no wait, before it looks at
+- A writable mount takes it exclusive, with a short retry (250 ms), before it looks at
   `mount.lock`, and holds it for the life of the daemon: it is released
   last, after the final commit, the segment clean-up and the removal of
   `mount.lock`. If it is held, the mount is refused (M15) and `mount.lock`

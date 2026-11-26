@@ -22,7 +22,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use fuser::{mount, Config, MountOption, SessionACL};
@@ -325,7 +325,7 @@ fn set_test_panic_create(fs: &SliceFsFilesystem) {
     );
     let seen = std::sync::atomic::AtomicU64::new(0);
     fs.test_set_mkdir_hook(Some(Arc::new(move || {
-        if seen.fetch_add(1, Ordering::SeqCst) + 1 == k {
+        if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == k {
             panic!("SLICEFS_TEST_PANIC_CREATE: test panic in new entry number {k}");
         }
     })));
