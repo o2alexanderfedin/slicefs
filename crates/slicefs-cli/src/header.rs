@@ -30,17 +30,16 @@ pub const MAX_HEADER: usize = 64 * 1024;
 /// line `chunks <min> <avg> <max>`): an older build reads such a store, but
 /// would write it with another profile.
 pub const CHUNK_PROFILE_FLAG: &str = "chunk-profile";
-/// The release word of the `chunk-profile` flag. A placeholder until the
-/// owner names the release; tests use this constant, never its text.
-pub const CHUNK_PROFILE_RELEASE: &str = "v2.2";
+/// The release word of the `chunk-profile` flag: the first release that
+/// writes it. Tests use this constant, never its text.
+pub const CHUNK_PROFILE_RELEASE: &str = "v2.3";
 /// The incompat flag of a store that has, or had, objects with SHA-256 IDs
 /// (tag 0x12): an older build cannot verify them, so it must not open the
 /// store.
 pub const HASH_SHA256_FLAG: &str = "hash-sha256";
-/// The release word of the `hash-sha256` flag. A placeholder until the
-/// owner names the release, as [`CHUNK_PROFILE_RELEASE`]; tests use this
-/// constant, never its text.
-pub const HASH_SHA256_RELEASE: &str = "v2.2";
+/// The release word of the `hash-sha256` flag, as
+/// [`CHUNK_PROFILE_RELEASE`]. Tests use this constant, never its text.
+pub const HASH_SHA256_RELEASE: &str = "v2.3";
 /// The feature flags that this build knows (Phase 22: `chunk-profile`;
 /// Phase 23: `hash-sha256`). Add a name here with the rule of
 /// docs/design/store-format.md.
