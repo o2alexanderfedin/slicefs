@@ -61,7 +61,7 @@ in the container (a `-v DIR:/data:ro` volume, then `bench.sh /data`).
 
 | Env | Default | What |
 |---|---|---|
-| `WORK` | a new temp dir | The store (`WORK/store`, removed after each step), step logs, `results.csv`, `edits.csv`, `machine.txt` |
+| `WORK` | a new temp dir | The store (in `WORK/store.XXXXXX`, a new dir that the script makes; the store is removed after each step, the dir at exit), step logs, `results.csv`, `edits.csv`, `machine.txt` |
 | `BIN` | build it | The `chunk_profile_bench` binary. When unset, the script runs `cargo build --release -p chunk-store --example chunk_profile_bench` |
 | `PROFILES` | the five profiles | Profiles `MIN/AVG/MAX` in KiB |
 | `INPUTS` | `trees tar` | Inputs, in this order (also `rand`, `sparse`) |
@@ -82,8 +82,11 @@ After the runs, one `run=median` row per input and profile follows. In it,
 each number is the `median_low` of that column over the runs, so it is always
 a value from a real run. A column that is `NA` in every run stays `NA`.
 
-The script removes only `WORK/store`, which it makes, and it refuses an empty
-`WORK` or `/`. The script stops with a non-zero exit code when a step fails or
+The script removes only its own store dir `WORK/store.XXXXXX`, which it
+makes with `mktemp -d` at each start, so a `WORK/store` that is there
+already is never touched. It refuses an empty `WORK` or `/`. It writes
+`results.csv`, `edits.csv`, `machine.txt` and the step logs in `WORK` new at
+each start, so use a `WORK` of its own. The script stops with a non-zero exit code when a step fails or
 an input is missing.
 
 ## Smoke mode

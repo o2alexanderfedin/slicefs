@@ -6,7 +6,8 @@
 #
 # usage: bench.sh <data-dir> [runs]
 #        SMOKE=1 bench.sh                  (no data dir: the smoke data go in $WORK/smoke-data)
-# env:   WORK          work dir for the store, logs and results (default: a new temp dir)
+# env:   WORK          work dir for the store, logs and results (default: a new temp dir);
+#                      the store goes in a new WORK/store.XXXXXX dir that the script makes
 #        BIN           the chunk_profile_bench binary (default: build it in release)
 #        PROFILES      profiles MIN/AVG/MAX in KiB (default: 4/8/32 8/16/64 8/32/128 16/64/256 32/128/512)
 #        INPUTS        inputs, in order (default: trees tar; also rand, sparse)
@@ -43,7 +44,11 @@ abs() { case $1 in /*) echo "$1" ;; *) echo "$PWD/$1" ;; esac; }
 if [ -z "${WORK:-}" ]; then WORK=$(mktemp -d "${TMPDIR:-/tmp}/chunk-profiles.XXXXXX"); echo "work dir: $WORK" >&2; fi
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 [ -n "$WORK" ] && [ "$WORK" != / ] || { echo "refusing WORK=$WORK" >&2; exit 2; }
-STORE=${WORK:?}/store
+# The store lives in a dir that this script makes (mktemp), so the rm -rf of
+# each step never removes a path that the script did not make.
+STORE_DIR=$(mktemp -d "${WORK:?}/store.XXXXXX")
+trap 'rm -rf "$STORE_DIR"' EXIT
+STORE=$STORE_DIR/store
 
 if [ -z "${BIN:-}" ]; then
   echo "building chunk_profile_bench (release)" >&2
