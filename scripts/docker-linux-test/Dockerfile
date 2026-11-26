@@ -1,4 +1,6 @@
-FROM rust:1-bookworm
+# Pinned to RUST_STABLE in .github/workflows/safety.yml, so that the coverage gate and
+# the ci.yml Linux job do not change with a new Rust release. Change both together.
+FROM rust:1.100.0-bookworm
 RUN apt-get update -q && apt-get install -y -q libfuse-dev fuse pkg-config attr jq && rm -rf /var/lib/apt/lists/*
 # Coverage (Phase 21.2, TSAFE-05, mode `coverage` of run.sh): llvm-tools for the
 # image toolchain and cargo-llvm-cov from its release tarball, pinned to one

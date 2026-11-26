@@ -19,7 +19,8 @@ need_toolchain "$RUST_STABLE" clippy
 rustup component add --toolchain "$RUST_STABLE" clippy </dev/null
 cd "$REPO"
 
-cargo +"$RUST_STABLE" clippy --locked --workspace --all-targets -- -D warnings </dev/null
+cargo +"$RUST_STABLE" clippy --locked --workspace --all-targets -- -D warnings \
+  -D clippy::allow_attributes_without_reason </dev/null
 
 # A lint allow without a written reason (D-09). grep exits 1 when it finds
 # nothing, which is the good case here.

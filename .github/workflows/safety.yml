@@ -96,7 +96,7 @@ jobs:
     # and `COVERAGE merged ...` (with the FUSE smoke, information only). The
     # gate is the tests-only workspace number against
     # scripts/safety/coverage-floor.txt; with no floor the job fails.
-    # The toolchain is the one of the Docker image (rust:1-bookworm), not RUST_STABLE.
+    # The toolchain is the one of the Docker image (rust:1.100.0-bookworm, the same version as RUST_STABLE).
     steps:
       - uses: actions/checkout@v4
       - run: scripts/safety/coverage.sh
