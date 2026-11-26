@@ -135,8 +135,8 @@ older SliceFS never finds an unknown line without an unknown flag.
 What a SliceFS does when the header has a flag that it does not know (a
 known flag changes nothing in this table):
 
-| Class | Decision | Write commands (seed, gc, snapshot create, snapshot switch) | Read commands (stats, scrub, snapshot list) | mount |
-|-------|----------|-------------------------------------------------------------|----------------------------------------------|-------|
+| Class | Decision | Write commands (seed, gc, rehash, snapshot create, snapshot switch) | Read commands (stats, scrub, snapshot list) | mount |
+|-------|----------|---------------------------------------------------------------------|----------------------------------------------|-------|
 | compat | go on | run | run | read-write mount |
 | ro_compat | read-only | refused (M6w) | run | read-only mount (M6), see the read-only mode |
 | incompat | refuse | refused (M5) | refused (M5) | refused (M5) |
@@ -228,8 +228,8 @@ read-only chunk store. A metadata change would stay in RAM and is not
 committed.
 
 Commands that read: `stats`, `scrub`, `snapshot list`, and `mount` in this
-read-only mode. Commands that write: `seed`, `gc`, `snapshot create`,
-`snapshot switch`.
+read-only mode. Commands that write: `seed`, `gc`, `rehash`,
+`snapshot create`, `snapshot switch`.
 
 ### Store lock
 
@@ -247,10 +247,15 @@ A read-only mount makes no `mount.lock`, so the commands that look for
   read-only open of the chunk store and the index. Thus the lock comes
   after the read of `FORMAT`, and before every other read of the store.
 - The commands that need no live mount (`gc` with no `mount.lock`,
-  `seed`, `snapshot create`, `snapshot switch`) take it exclusive, with a short retry (250 ms),
-  after their `mount.lock` check (`seed`: first, before the header
-  check), and hold it while they run. If it is held, they are refused
-  (M14).
+  `seed`, `rehash`, `snapshot create`, `snapshot switch`) take it
+  exclusive, with a short retry (250 ms), after their `mount.lock` check
+  (`seed`: first, before the header check; `rehash`: after the check
+  that the store exists and that the target hash is known, before the
+  header check), and hold it while they run (`rehash`: to its end, its GC
+  included). If it is held, they are refused (M14).
+- `rehash` keeps its temp files (the old-to-new map and the refcount sort
+  files) in `<store>/rehash-tmp/`. It removes the directory at its end.
+  Every writable open of the store removes what a crash left there.
 - `stats` shows `Mounted` as `yes` when `mount.lock` exists or the store
   lock is held, also while an offline `gc` runs. (It takes the lock
   exclusive and drops it at once, so a mount, `gc` or snapshot command
@@ -272,7 +277,7 @@ Rule for later releases: only a SliceFS that knows the ro_compat flag can
 write the store. Before it writes a store that a read-only mount can use,
 each of its commands that writes takes the store lock exclusive (or
 refuses), also a read-write mount, `seed` and a header rewrite. In this
-release, `gc`, `seed`, `snapshot create`, `snapshot switch` and a
+release, `gc`, `seed`, `rehash`, `snapshot create`, `snapshot switch` and a
 read-write mount take it.
 
 This mode is only for an unknown ro_compat flag. A snapshot mount of a
@@ -298,9 +303,9 @@ write.
 | M10 | FORMAT is larger than 64 KiB. | `{store}/FORMAT is larger than 64 KiB; it is not a SliceFS store header.` |
 | M11 | A read-only mount with the option --hash. | `{store} can only be mounted read-only (feature {name} needs SliceFS {release} or later to write), so --hash cannot change its write hash.` |
 | M12 | A read-only mount with the option --auto-snapshot. | `{store} can only be mounted read-only (feature {name} needs SliceFS {release} or later to write), so --auto-snapshot cannot make a snapshot at unmount.` |
-| M13 | A read-only mount while a writable mount, gc, seed, snapshot create or snapshot switch holds the store lock. | `{store} is in use: it is mounted to write, or a command that writes it (gc, seed, snapshot create or snapshot switch) runs now. Mount it when that mount or command ends.` |
-| M14 | gc (offline), seed, snapshot create or snapshot switch while a mount or another of these commands holds the store lock. | `{store} is in use: it is mounted, or another command (gc, seed, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.` |
-| M15 | A writable mount while another mount, gc, seed, snapshot create or snapshot switch holds the store lock. | `{store} is in use: it is mounted, or a command (gc, seed, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.` |
+| M13 | A read-only mount while a writable mount, gc, seed, rehash, snapshot create or snapshot switch holds the store lock. | `{store} is in use: it is mounted to write, or a command that writes it (gc, seed, rehash, snapshot create or snapshot switch) runs now. Mount it when that mount or command ends.` |
+| M14 | gc (offline), seed, rehash, snapshot create or snapshot switch while a mount or another of these commands holds the store lock. | `{store} is in use: it is mounted, or another command (gc, seed, rehash, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.` |
+| M15 | A writable mount while another mount, gc, seed, rehash, snapshot create or snapshot switch holds the store lock. | `{store} is in use: it is mounted, or a command (gc, seed, rehash, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.` |
 | M16 | `seed` or `mount` with `--chunk-profile` that differs from the profile of the store (also a read-only mount). Nothing in the store changes. | `{store} has the chunk profile {have}; --chunk-profile {want} is another profile. The chunk profile of a store is fixed when the store is made.` |
 
 The values in the texts:
@@ -335,7 +340,7 @@ Other texts:
 
 - FORMAT is not UTF-8 text:
   `{store}/FORMAT is not UTF-8 text; it is not a SliceFS store header.`
-- `gc`, `snapshot create` or `snapshot switch` on a path with no
+- `gc`, `rehash`, `snapshot create` or `snapshot switch` on a path with no
   `segments/` directory (the command makes nothing there; the text is in
   `content.rs`):
   `failed to load segments: store not found at {store}: no segments/ directory`

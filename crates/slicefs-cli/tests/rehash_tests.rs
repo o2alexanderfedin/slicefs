@@ -12,14 +12,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chunk_store::file::file_objects;
+use chunk_store::{ChunkProfile, ObjectId};
 use metadata::segment::{load_store_from_segments, scan_store_with_log};
 use metadata::store::{content_keys, referenced_roots, DictMetadataStore};
 use metadata::wal::{create_wal, WalConfig};
 use slicefs_cli::content::{self, FORMAT, FORMAT_FILE, REHASH_TMP_DIR};
 use slicefs_cli::filesystem::SliceFsFilesystem;
 use slicefs_cli::header::{self, HASH_SHA256_FLAG, HASH_SHA256_RELEASE};
-use slicefs_cli::rehash::{rehash_report_with, run_rehash, RehashArgs};
-use slicefs_cli::seed::run_seed;
+use slicefs_cli::rehash::{rehash_report_with, run_rehash, RehashArgs, Step};
+use slicefs_cli::seed::{run_seed, run_seed_with};
 use slicefs_cli::snapshot::run_snapshot_create;
 use slicefs_traits::key::ObjectKey;
 use slicefs_traits::metadata::MetadataStore;
@@ -129,20 +130,35 @@ fn dump_root(store: &Path, root: &ObjectKey) -> BTreeMap<String, String> {
     common::dump(&fs)
 }
 
-/// The tags of every object of the current root and of each snapshot root.
-fn all_tags(store: &Path) -> BTreeSet<u8> {
+/// The current root and the snapshot roots, as the loader gives them.
+fn loader_roots(store: &Path) -> Vec<ObjectKey> {
     let (root, snaps) = load_store_from_segments(&store.join("segments")).unwrap();
+    root.into_iter().chain(snaps.iter().map(|s| s.root)).collect()
+}
+
+/// Every object of the current root and of each snapshot root: the
+/// metadata nodes, the file contents, and their manifest trees and chunks.
+fn live_ids(store: &Path) -> BTreeSet<ObjectId> {
     let mut io = content::store_io_read_only(store).unwrap();
     let cs = Arc::clone(io.store());
-    let mut tags = BTreeSet::new();
-    for r in root.into_iter().chain(snaps.iter().map(|s| s.root)) {
+    let mut ids = BTreeSet::new();
+    for r in loader_roots(store) {
         let mut keys = referenced_roots(&mut io, &r).unwrap();
         keys.extend(content_keys(&mut io, &r).unwrap());
         for k in keys.iter().filter(|k| **k != ObjectKey::ZERO) {
-            tags.extend(file_objects(&cs, content::to_id(k)).unwrap().iter().map(|id| id.tag()));
+            ids.extend(file_objects(&cs, content::to_id(k)).unwrap());
         }
     }
-    tags
+    ids
+}
+
+/// The tags of every object of the current root and of each snapshot root.
+fn live_tags(store: &Path) -> BTreeSet<u8> {
+    live_ids(store).iter().map(ObjectId::tag).collect()
+}
+
+fn all_tags(store: &Path) -> BTreeSet<u8> {
+    live_tags(store)
 }
 
 fn rehash(store: &Path, to: &str, dry_run: bool) -> String {
@@ -415,4 +431,410 @@ fn a_store_with_only_target_objects_gets_the_header_line() {
     assert!(report.contains("Every live object already has hash sha256"), "{report}");
     assert_eq!(segment_names(&store), names, "no new segment");
     assert!(marker(&store).contains("hash sha256\n"));
+}
+
+/// Write `bytes` at `off` into the existing file `name` of `parent`: a
+/// spliced file, whose old chunks around the range stay.
+fn overwrite(fs: &SliceFsFilesystem, parent: u64, name: &str, off: u64, bytes: &[u8]) {
+    let (ino, _) = fs.test_lookup(parent, name).unwrap();
+    let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+    fs.test_write(fh, off, bytes).unwrap();
+    fs.test_release(ino, fh).unwrap();
+}
+
+/// A store at `<dir>/store` with write hash `hash` and chunk profile
+/// `profile`. Seeded: a 400 KiB random file, a 10-byte file, an empty file,
+/// a 3 MiB sparse file with 64 KiB of data at 1 MiB, and a subdirectory with
+/// two files of equal content. Then by mounts: an xattr, a spliced edit of
+/// the 400 KiB file and a new file; snapshot `s1`; a new file and an edit;
+/// snapshot `s2`; one more edit.
+fn rich_store(hash: Option<&str>, profile: Option<ChunkProfile>) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(src.join("sub")).unwrap();
+    std::fs::write(src.join("big.bin"), data(11, 400 << 10)).unwrap();
+    std::fs::write(src.join("small.txt"), b"ten bytes!").unwrap();
+    std::fs::write(src.join("empty"), b"").unwrap();
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::File::create(src.join("sparse.bin")).unwrap();
+        f.set_len(3 << 20).unwrap();
+        f.seek(SeekFrom::Start(1 << 20)).unwrap();
+        f.write_all(&data(12, 64 << 10)).unwrap();
+    }
+    std::fs::write(src.join("sub/a.bin"), data(13, 30 << 10)).unwrap();
+    std::fs::write(src.join("sub/b.bin"), data(13, 30 << 10)).unwrap();
+    let store = dir.path().join("store");
+    run_seed_with(&store, &src, hash, profile).unwrap();
+
+    let fs = open_fs(&store);
+    let (big, _) = fs.test_lookup(1, "big.bin").unwrap();
+    fs.test_setxattr(big, "user.note", b"rehash keeps me").unwrap();
+    overwrite(&fs, 1, "big.bin", 150 << 10, &data(14, 8 << 10));
+    write_file(&fs, 1, "new1.bin", &data(15, 40 << 10));
+    close_fs(fs);
+    run_snapshot_create(&store, Some("s1".into())).unwrap();
+
+    let fs = open_fs(&store);
+    write_file(&fs, 1, "new2.bin", &data(16, 20 << 10));
+    overwrite(&fs, 1, "small.txt", 0, b"TEN");
+    close_fs(fs);
+    run_snapshot_create(&store, Some("s2".into())).unwrap();
+
+    let fs = open_fs(&store);
+    overwrite(&fs, 1, "big.bin", 300 << 10, &data(17, 4 << 10));
+    close_fs(fs);
+    dir
+}
+
+/// The snapshot list (version, name, `created_at`) and the dumps of the
+/// current tree and of each snapshot tree.
+#[derive(Debug, PartialEq)]
+struct Recorded {
+    snapshots: Vec<(u64, Option<String>, u64)>,
+    dumps: Vec<BTreeMap<String, String>>,
+}
+
+fn record(store: &Path) -> Recorded {
+    let (_, snaps) = load_store_from_segments(&store.join("segments")).unwrap();
+    let snapshots = snaps.iter().map(|s| (s.version, s.name.clone(), s.created_at)).collect();
+    let dumps = loader_roots(store).iter().map(|r| dump_root(store, r)).collect();
+    Recorded { snapshots, dumps }
+}
+
+/// The files and the snapshots are as recorded, and scrub passes.
+fn same_store(before: &Recorded, store: &Path) {
+    let now = record(store);
+    assert_eq!(now.snapshots, before.snapshots, "the snapshot list");
+    assert_eq!(now.dumps.len(), before.dumps.len());
+    for (i, (a, b)) in before.dumps.iter().zip(&now.dumps).enumerate() {
+        assert!(a == b, "root {i}: {:#?}", common::first_differences(a, b, 5));
+    }
+    slicefs_cli::scrub::run_scrub(store, false).unwrap();
+}
+
+/// D-05, HASH-02: the key of each file content of each root is the key of
+/// a fresh write of its bytes in the store opened as a mount opens it (the
+/// write hash and the chunk profile of the header).
+fn assert_fresh_write_keys(store: &Path) {
+    let keys: BTreeSet<ObjectKey> = {
+        let mut io = content::store_io_read_only(store).unwrap();
+        loader_roots(store).iter().flat_map(|r| content_keys(&mut io, r).unwrap()).filter(|k| *k != ObjectKey::ZERO).collect()
+    };
+    assert!(keys.len() > 3, "{} keys", keys.len());
+    let cs = content::open(store).unwrap();
+    for k in &keys {
+        let bytes = content::get_all(&cs, k).unwrap();
+        assert_eq!(content::put_all(&cs, &bytes).unwrap(), *k, "a fresh write of {} bytes", bytes.len());
+    }
+    cs.close().unwrap();
+}
+
+/// Rehash `store` to `to` (tag `tag`), then check: every live object has
+/// the tag; no object of another tag that the old roots used is left; the
+/// GC left no dead object; files, snapshots and scrub are as before; the
+/// keys are fresh-write keys.
+fn rehash_and_check(store: &Path, to: &str, tag: u8) {
+    let old_ids = live_ids(store);
+    let before = record(store);
+    let report = rehash(store, to, false);
+    assert_eq!(live_tags(store), BTreeSet::from([tag]), "{report}");
+    let cs = content::open_read_only(store).unwrap();
+    let left = old_ids.iter().filter(|id| id.tag() != tag && cs.contains(id)).count();
+    assert_eq!(left, 0, "old objects left, of {}", old_ids.len());
+    drop(cs);
+    assert!(report.contains("dead left: 0"), "{report}");
+    same_store(&before, store);
+    assert_fresh_write_keys(store);
+    assert!(marker(store).contains(&format!("hash {to}\n")), "{}", marker(store));
+    assert!(!store.join(REHASH_TMP_DIR).exists());
+}
+
+/// HASH-06: BLAKE3-256 to SHA-256 and back.
+#[test]
+fn round_trip_blake3_to_sha256_and_back() {
+    let dir = rich_store(None, None);
+    let store = dir.path().join("store");
+    assert_eq!(live_tags(&store), BTreeSet::from([0x1e]));
+    rehash_and_check(&store, "sha256", 0x12);
+    rehash_and_check(&store, "blake3-256", 0x1e);
+    // D-11: the flag stays after the way back.
+    let flag = format!("incompat {HASH_SHA256_FLAG} {HASH_SHA256_RELEASE}\n");
+    assert!(marker(&store).contains(&flag), "{}", marker(&store));
+}
+
+/// HASH-06: SHA-256 to BLAKE3-256 and back.
+#[test]
+fn round_trip_sha256_to_blake3_and_back() {
+    let dir = rich_store(Some("sha256"), None);
+    let store = dir.path().join("store");
+    assert_eq!(live_tags(&store), BTreeSet::from([0x12]));
+    rehash_and_check(&store, "blake3-256", 0x1e);
+    rehash_and_check(&store, "sha256", 0x12);
+}
+
+/// The second hash of the tests (`test-hasher` feature, tag 0xf0).
+const TEST_HASH: &str = "test-keyed-blake3";
+
+/// HASH-06, D-14: a store with live objects of three hashes (BLAKE3-256,
+/// the test keyed hash after a hash change with a spliced edit of an old
+/// file, and SHA-256) ends with one hash.
+#[test]
+fn round_trip_mixed_store_ends_with_one_hash() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("old.bin"), data(21, 1 << 20)).unwrap();
+    std::fs::write(src.join("keep.bin"), data(22, 60 << 10)).unwrap();
+    let store = dir.path().join("store");
+    run_seed(&store, &src, None).unwrap();
+
+    content::select_hash(&store, Some(TEST_HASH)).unwrap();
+    let fs = open_fs(&store);
+    overwrite(&fs, 1, "old.bin", 512 << 10, &data(23, 8 << 10));
+    write_file(&fs, 1, "keyed.bin", &data(24, 50 << 10));
+    close_fs(fs);
+    run_snapshot_create(&store, Some("mixed".into())).unwrap();
+
+    content::select_hash(&store, Some("sha256")).unwrap();
+    let fs = open_fs(&store);
+    write_file(&fs, 1, "sha.bin", &data(25, 50 << 10));
+    // Now the file root of old.bin has the SHA-256 tag over chunks of all
+    // three tags (D-14).
+    overwrite(&fs, 1, "old.bin", 100 << 10, &data(26, 8 << 10));
+    close_fs(fs);
+    assert_eq!(live_tags(&store), BTreeSet::from([0x1e, 0xf0, 0x12]));
+    let copy = dir.path().join("copy");
+    copy_dir(&store, &copy);
+
+    rehash_and_check(&store, "blake3-256", 0x1e);
+    rehash_and_check(&store, "sha256", 0x12);
+    // The target is the write hash of the header: the key-carrying nodes
+    // of the last commit already have the target tag but list old keys.
+    rehash_and_check(&copy, "sha256", 0x12);
+}
+
+/// A copy of the directory tree `from` at `to` (a store that no one holds).
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        if e.file_type().unwrap().is_dir() {
+            copy_dir(&e.path(), &to.join(e.file_name()));
+        } else {
+            std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+        }
+    }
+}
+
+/// HASH-02, D-05: with the 16/64/256 KiB profile, the rehashed keys are the
+/// keys of fresh writes under that profile.
+#[test]
+fn round_trip_large_profile_keys_equal_fresh_writes() {
+    let large = ChunkProfile::new(16384, 65536, 262144).unwrap();
+    let dir = rich_store(None, Some(large));
+    let store = dir.path().join("store");
+    assert_eq!(content::open_read_only(&store).unwrap().profile(), large);
+    rehash_and_check(&store, "sha256", 0x12);
+    assert_eq!(content::open_read_only(&store).unwrap().profile(), large);
+}
+
+/// A run to SHA-256 that a hook stops; the error text.
+fn stopped_run(store: &Path, stop_after: Option<Step>) -> String {
+    let args = RehashArgs { stop_after, ..RehashArgs::new(store, "sha256", false) };
+    match rehash_report_with(&args, &mut |_| {}) {
+        Ok(report) => panic!("the hook stops the run, but it ran:\n{report}"),
+        Err(e) => e.to_string(),
+    }
+}
+
+/// The root set that a crash leaves.
+enum Expect {
+    /// The old current root (and the old snapshot roots).
+    Old(ObjectKey),
+    /// New roots: the current root and every snapshot root have the
+    /// SHA-256 tag.
+    New,
+}
+
+/// The store after a crash opens with the old or the new roots, reads the
+/// same files, keeps the snapshot list and passes scrub. The writable open
+/// is the one of a mount (it removes `rehash-tmp`); nothing is committed,
+/// so the segments that the crash left stay for the rerun.
+fn assert_opens(store: &Path, before: &Recorded, expect: &Expect) {
+    let roots = loader_roots(store);
+    match expect {
+        Expect::Old(old) => assert_eq!(roots[0], *old, "the old root"),
+        Expect::New => assert!(roots.iter().all(|r| r.tag() == 0x12), "new roots: {roots:?}"),
+    }
+    content::open(store).unwrap().close().unwrap();
+    same_store(before, store);
+}
+
+/// Files ending in `.seg.tmp` in `segments/`.
+fn seg_tmps(store: &Path) -> Vec<String> {
+    segment_names(store).into_iter().filter(|n| n.ends_with(".seg.tmp")).collect()
+}
+
+/// After the rerun: one tag, the same files and snapshots, the header line
+/// and the flag, no temp files.
+fn assert_finished(store: &Path, before: &Recorded) {
+    assert_eq!(live_tags(store), BTreeSet::from([0x12]));
+    same_store(before, store);
+    let m = marker(store);
+    assert!(m.contains("hash sha256\n") && m.contains(&format!("incompat {HASH_SHA256_FLAG} ")), "{m}");
+    assert!(!store.join(REHASH_TMP_DIR).exists());
+    assert_eq!(seg_tmps(store), Vec::<String>::new());
+}
+
+/// HASH-04, D-06, D-18: a crash after each step leaves the old roots
+/// (before the switch) or the new roots (after it); a rerun finishes.
+#[test]
+fn crash_after_each_step_then_rerun() {
+    let steps = [
+        (Step::Checked, false),
+        (Step::FlagWritten, false),
+        (Step::Rewritten, false),
+        (Step::Synced, false),
+        (Step::Switched, true),
+        (Step::HeaderWritten, true),
+        (Step::GcDone, true),
+    ];
+    for (step, new) in steps {
+        let dir = seeded_with_snapshot();
+        let store = dir.path().join("store");
+        let old = loader_roots(&store)[0];
+        let before = record(&store);
+        let e = stopped_run(&store, Some(step));
+        assert!(e.contains("test hook"), "{step:?}: {e}");
+        let m = marker(&store);
+        match step {
+            Step::Checked => assert!(!m.contains(HASH_SHA256_FLAG), "{m}"),
+            Step::FlagWritten | Step::Rewritten | Step::Synced | Step::Switched => {
+                // The flag is there; the hash line is still the old one (after
+                // the switch: a legal mixed store).
+                assert!(m.contains(HASH_SHA256_FLAG) && m.contains("hash blake3-256\n"), "{step:?}: {m}");
+            }
+            Step::HeaderWritten | Step::GcDone => assert!(m.contains("hash sha256\n"), "{step:?}: {m}"),
+        }
+        assert_opens(&store, &before, &if new { Expect::New } else { Expect::Old(old) });
+        rehash(&store, "sha256", false);
+        assert_finished(&store, &before);
+    }
+}
+
+/// D-16, D-18: a crash inside the rewrite leaves `rehash-tmp` and the old
+/// roots; the writable open removes `rehash-tmp`; a rerun finishes.
+#[test]
+fn crash_inside_the_rewrite_then_rerun() {
+    let dir = seeded_with_snapshot();
+    let store = dir.path().join("store");
+    let old = loader_roots(&store)[0];
+    let before = record(&store);
+    let e = rehash_report_with(&RehashArgs { stop_after_values: Some(3), ..RehashArgs::new(&store, "sha256", false) }, &mut |_| {}).unwrap_err().to_string();
+    assert!(e.contains("stopped after 3 rewritten values") && e.contains("Nothing was switched"), "{e}");
+    assert!(store.join(REHASH_TMP_DIR).exists());
+    assert_opens(&store, &before, &Expect::Old(old));
+    assert!(!store.join(REHASH_TMP_DIR).exists(), "the writable open removes it");
+    rehash(&store, "sha256", false);
+    assert_finished(&store, &before);
+}
+
+/// R-06: a stale `.seg.tmp` (a switch that a crash cut before its rename)
+/// is ignored by the loaders and removed by the rerun.
+#[test]
+fn crash_with_a_stale_seg_tmp_then_rerun() {
+    let dir = seeded_with_snapshot();
+    let store = dir.path().join("store");
+    let old = loader_roots(&store)[0];
+    let before = record(&store);
+    stopped_run(&store, Some(Step::Synced));
+    let junk = store.join("segments").join("segment-999999.seg.tmp");
+    std::fs::write(&junk, b"a switch segment cut by a crash").unwrap();
+    assert_opens(&store, &before, &Expect::Old(old));
+    rehash(&store, "sha256", false);
+    assert!(!junk.exists());
+    assert_finished(&store, &before);
+}
+
+/// R-06: old segments that a crash left after the rename of the switch
+/// lose to the switch records (the loaders keep the last record of each
+/// snapshot version); a rerun finishes.
+#[test]
+fn crash_with_old_segments_left_after_the_switch() {
+    let dir = seeded_with_snapshot();
+    let store = dir.path().join("store");
+    let segs = store.join("segments");
+    let before = record(&store);
+    let old_segments: Vec<(String, Vec<u8>)> =
+        segment_names(&store).into_iter().map(|n| { let b = std::fs::read(segs.join(&n)).unwrap(); (n, b) }).collect();
+    stopped_run(&store, Some(Step::Switched));
+    for (n, b) in &old_segments {
+        assert!(!segs.join(n).exists(), "the switch removed {n}");
+        std::fs::write(segs.join(n), b).unwrap();
+    }
+    assert!(segment_names(&store).len() > old_segments.len());
+    assert_opens(&store, &before, &Expect::New);
+    rehash(&store, "sha256", false);
+    assert_finished(&store, &before);
+}
+
+/// The segment files of `store`: names and bytes.
+fn segment_files(store: &Path) -> BTreeMap<String, Vec<u8>> {
+    segment_names(store).into_iter().map(|n| { let b = std::fs::read(store.join("segments").join(&n)).unwrap(); (n, b) }).collect()
+}
+
+/// The verify error of a direct read of `id`, which must be `Corrupt`.
+fn corrupt_cause(store: &Path, id: &ObjectId) -> String {
+    let cs = content::open_read_only(store).unwrap();
+    assert!(cs.contains(id), "the open keeps the damaged object in its index");
+    match cs.read(id) {
+        Err(e @ chunk_store::Error::Corrupt(_)) => e.to_string(),
+        other => panic!("a read of the damaged object gives {other:?}, not Corrupt"),
+    }
+}
+
+/// D-15, HASH-04: a damaged old object stops the run before the switch,
+/// with the node kind and the verify error of that object; the dry-run
+/// stops with it too.
+#[test]
+fn verify_a_damaged_object_stops_before_the_switch() {
+    use chunk_store::ObjectHasher;
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let bytes = data(31, 256 << 10);
+    std::fs::write(src.join("data"), &bytes).unwrap();
+    let store = dir.path().join("store");
+    run_seed(&store, &src, None).unwrap();
+
+    // The largest chunk, in the largest pack file (the seed sealed it with
+    // an .idx, so an open takes its entries from the .idx and does not cut
+    // or drop the damaged record).
+    let r = chunk_store::chunk_ranges(&bytes).into_iter().max_by_key(|r| r.len()).unwrap();
+    assert!(r.len() >= 4096, "{r:?}");
+    let id = chunk_store::Blake3_256.id(&bytes[r]);
+    let pack = std::fs::read_dir(store.join("packs"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "pack"))
+        .max_by_key(|p| std::fs::metadata(p).unwrap().len())
+        .unwrap();
+    let mut p = std::fs::read(&pack).unwrap();
+    let at = p.windows(id.0.len()).position(|w| w == id.0).expect("the record of the chunk");
+    p[at + 100] ^= 0x5a;
+    std::fs::write(&pack, &p).unwrap();
+    let cause = corrupt_cause(&store, &id);
+    assert!(cause.starts_with("damaged data: object"), "{cause}");
+    let has_cause = |e: &str| e.contains(&cause);
+
+    let segments = segment_files(&store);
+    let e = refused(&store, "sha256", false);
+    assert!(e.contains("Nothing was switched") && e.contains("file content") && has_cause(&e), "{e}");
+    assert_eq!(segment_files(&store), segments, "no segment changes");
+    assert!(marker(&store).contains("hash blake3-256\n"), "{}", marker(&store));
+    assert_eq!(corrupt_cause(&store, &id), cause, "the run did not repair or drop the object");
+
+    let e = refused(&store, "sha256", true);
+    assert!(e.contains("file content") && has_cause(&e), "{e}");
 }
