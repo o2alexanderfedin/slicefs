@@ -73,6 +73,21 @@ jobs:
       - uses: actions/checkout@v4
       - run: scripts/safety/deadlock.sh
 
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Line coverage in the Linux Docker harness (TSAFE-05, D-31, D-32): the
+    # instrumented workspace tests, then the instrumented daemon through the
+    # FUSE smoke. The log prints `COVERAGE tests ...` (workspace and per crate)
+    # and `COVERAGE merged ...` (with the FUSE smoke, information only). The
+    # gate is the tests-only workspace number against
+    # scripts/safety/coverage-floor.txt; with no floor the job fails.
+    # The toolchain is the one of the Docker image (rust:1-bookworm), not RUST_STABLE.
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/safety/coverage.sh
+
   clippy:
     name: clippy-${{ matrix.name }}
     # clippy with -D warnings on the stable pin, and a written reason on every
