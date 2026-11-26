@@ -7,7 +7,8 @@
 //!
 //! The format marker (`FORMAT`) also records the write hash of the store:
 //! the hash of the IDs of new objects, as a line `hash <name>`. A marker
-//! without that line means blake3-256.
+//! without that line means blake3-256. A line `chunks <min> <avg> <max>`
+//! records the chunk profile of the store; no such line means 4/8/32 KiB.
 //! The metadata nodes are in the same chunk store (`metadata::store_io`,
 //! step 3).
 
@@ -16,7 +17,7 @@ use std::sync::Arc;
 
 use slicefs_traits::key::ObjectKey;
 use chunk_store::file::{FileReader, FileWriter};
-use chunk_store::{hasher_by_name, hasher_names, ChunkStore, ObjectHasher, Options, DEFAULT_HASHER};
+use chunk_store::{hasher_by_name, hasher_names, ChunkProfile, ChunkStore, ObjectHasher, Options, DEFAULT_HASHER};
 
 /// Shared handle of the content store.
 pub type Content = Arc<ChunkStore>;
@@ -57,6 +58,40 @@ fn hasher_of(store: &Path, h: Option<&Header>) -> std::io::Result<&'static dyn O
     })
 }
 
+/// The chunk profile of the parsed header `h`: the default profile
+/// (4/8/32 KiB) if there is no header or no `chunks` line.
+pub fn profile_of(h: Option<&Header>) -> ChunkProfile {
+    h.and_then(Header::chunk_profile).unwrap_or(ChunkProfile::DEFAULT)
+}
+
+/// Check `want` (`--chunk-profile`, `None`: none given) against the profile
+/// of the parsed header `h` of `store`. The profile of a store is fixed
+/// when the store is made: another profile is an error, never a rewrite.
+pub fn check_profile(store: &Path, h: Option<&Header>, want: Option<ChunkProfile>) -> std::io::Result<()> {
+    let have = profile_of(h);
+    match want {
+        Some(want) if want != have => Err(std::io::Error::other(header::msg_profile_differs(store, have, want))),
+        _ => Ok(()),
+    }
+}
+
+/// Parse `--chunk-profile`: `MIN/AVG/MAX`, three whole numbers of KiB (for
+/// example `16/64/256`) that [`ChunkProfile::new`] accepts. Refuses a sign,
+/// a unit, a space, an empty part and an overflow of the byte size.
+pub fn parse_chunk_profile(s: &str) -> Result<ChunkProfile, String> {
+    let bad = || format!("invalid chunk profile {s:?}; use MIN/AVG/MAX in KiB, for example 16/64/256");
+    let kib = |w: &str| {
+        if w.is_empty() || !w.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        w.parse::<u32>().ok()?.checked_mul(1024)
+    };
+    let parts: Vec<&str> = s.split('/').collect();
+    let [min, avg, max] = parts[..] else { return Err(bad()) };
+    let (min, avg, max) = (kib(min).ok_or_else(bad)?, kib(avg).ok_or_else(bad)?, kib(max).ok_or_else(bad)?);
+    ChunkProfile::new(min, avg, max).map_err(|reason| format!("chunk profile {s} KiB: {reason}"))
+}
+
 /// Parse `--hash`: the name of a known hasher.
 pub fn parse_hash(s: &str) -> Result<String, String> {
     hasher_by_name(s)
@@ -79,20 +114,33 @@ pub fn select_hash(store: &Path, name: Option<&str>) -> std::io::Result<()> {
 }
 
 /// The header check of a command that writes (`Want::Write`), with the
-/// write hash `name` of `--hash` (`None`: keep the recorded one). A store
-/// that this build may not write is refused, and is never rewritten.
-/// The hash is recorded in the header, and the line to print is returned
-/// when it changes the hash of an existing store. The rewrite changes only
-/// the hash line (it is line 2 when there was none); every other line
-/// stays in its order.
+/// write hash `name` of `--hash` (`None`: keep the recorded one) and the
+/// default chunk profile for a new store: [`check_write_with`] with no
+/// `--chunk-profile`.
 pub fn check_write(store: &Path, name: Option<&str>) -> std::io::Result<Option<String>> {
+    check_write_with(store, name, None)
+}
+
+/// The header check of a command that writes (`Want::Write`), with the
+/// write hash `name` of `--hash` (`None`: keep the recorded one) and the
+/// chunk profile `profile` of `--chunk-profile` (`None`: the recorded one,
+/// the default for a new store). A store that this build may not write is
+/// refused, and is never rewritten. A new store gets the hash and the
+/// profile in its first header write. On an existing store, another
+/// profile is refused before any rewrite ([`check_profile`]). The hash is
+/// recorded in the header, and the line to print is returned when it
+/// changes the hash of an existing store. The rewrite changes only the hash
+/// line (it is line 2 when there was none); every other line stays in its
+/// order.
+pub fn check_write_with(store: &Path, name: Option<&str>, profile: Option<ChunkProfile>) -> std::io::Result<Option<String>> {
     // The name first, so that an unknown name makes nothing; a new store
-    // gets the new hash in its first header write.
+    // gets the new hash and profile in its first header write.
     let new = match name {
         Some(n) => Some(hasher_by_name(n).ok_or_else(|| std::io::Error::other(parse_hash(n).unwrap_err()))?),
         None => None,
     };
-    let opened = header::check_with(store, Want::Write, new.unwrap_or(DEFAULT_HASHER))?;
+    let opened = header::check_with(store, Want::Write, new.unwrap_or(DEFAULT_HASHER), profile.unwrap_or(ChunkProfile::DEFAULT))?;
+    check_profile(store, opened.header.as_ref(), profile)?;
     let Some(new) = new else { return Ok(None) };
     let mut h = opened.header.ok_or_else(|| std::io::Error::other(format!("{}/FORMAT is missing after its write", store.display())))?;
     let current = hasher_of(store, Some(&h))?;
@@ -119,7 +167,7 @@ pub const GC_TMP_DIR: &str = "gc-tmp";
 pub fn open(store: &Path) -> std::io::Result<Content> {
     let opened = header::check(store, Want::Write)?;
     let hasher = hasher_of(store, opened.header.as_ref())?;
-    let opts = Options { hasher, gc_tmp_dir: Some(store.join(GC_TMP_DIR)), ..Options::default() };
+    let opts = Options { hasher, profile: profile_of(opened.header.as_ref()), gc_tmp_dir: Some(store.join(GC_TMP_DIR)), ..Options::default() };
     let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
     Ok(Arc::new(cs))
 }
@@ -151,7 +199,7 @@ pub fn store_io_read_only(store: &Path) -> std::io::Result<metadata::store_io::S
 pub fn open_read_only(store: &Path) -> std::io::Result<Content> {
     let opened = header::check(store, Want::Read)?;
     let hasher = hasher_of(store, opened.header.as_ref())?;
-    let opts = Options { read_only: true, hasher, ..Options::default() };
+    let opts = Options { read_only: true, hasher, profile: profile_of(opened.header.as_ref()), ..Options::default() };
     let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
     Ok(Arc::new(cs))
 }
@@ -349,6 +397,53 @@ pub(crate) mod tests {
         }
         for v in ["0", "1.5M", "64X", "64MB", "", "M", "+4M", "-4M", " 4M", "99999999999G", "99999999999999999999999"] {
             assert!(parse_dirty_bytes(v).is_err(), "{v:?} is refused");
+        }
+    }
+
+    #[test]
+    fn parse_chunk_profile_takes_whole_kib() {
+        assert_eq!(parse_chunk_profile("16/64/256"), Ok(ChunkProfile::new(16384, 65536, 262144).unwrap()));
+        assert_eq!(parse_chunk_profile("4/8/32"), Ok(ChunkProfile::DEFAULT));
+        for v in ["8/32/128", "32/128/512", "64/256/1024"] {
+            assert!(parse_chunk_profile(v).is_ok(), "{v}");
+        }
+    }
+
+    #[test]
+    fn parse_chunk_profile_refuses_bad_values() {
+        for v in [
+            "16/64",
+            "16/64/256/1024",
+            "16k/64/256",
+            "+16/64/256",
+            "-16/64/256",
+            " 16/64/256",
+            "16//256",
+            "12/24/48",
+            "64/16/256",
+            "0/8/32",
+            "1/2/32768",
+            "4194304/8388608/16777216",
+            "128/512/2048",
+        ] {
+            assert!(parse_chunk_profile(v).is_err(), "{v:?} is refused");
+        }
+        let err = parse_chunk_profile("16/64").unwrap_err();
+        assert!(err.contains("MIN/AVG/MAX"), "{err}");
+    }
+
+    /// A refused profile is named once, in KiB as typed, with the reason.
+    #[test]
+    fn a_refused_profile_is_named_once_in_kib() {
+        for (v, reason) in [
+            ("12/24/48", "each size must be a power of two"),
+            ("64/16/256", "min < avg < max"),
+            ("128/512/2048", "1024 KiB (1 MiB)"),
+        ] {
+            let err = parse_chunk_profile(v).unwrap_err();
+            assert_eq!(err.matches("chunk profile").count(), 1, "{err}");
+            assert!(err.starts_with(&format!("chunk profile {v} KiB: ")), "{err}");
+            assert!(err.contains(reason) && !err.contains("bytes"), "{err}");
         }
     }
 

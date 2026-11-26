@@ -50,9 +50,9 @@
 
 ### Chunk profiles (#67)
 
-- [ ] **PROF-01**: A store has one FastCDC profile (min/avg/max, powers of two, inside the crate limits), set at `seed` and kept in the store format marker. A mount with a different profile is refused. Without a setting, the profile is 4/8/32 KiB.
-- [ ] **PROF-02**: Every use of the chunk constants (writer buffers, zero-chunk shortcut, splice, read-ahead) reads the store profile. Two stores with different profiles work in one process. A golden cut-point test protects the cut points.
-- [ ] **PROF-03**: A reproducible benchmark reports, for 4/8/32, 8/16/64, 8/32/128, 16/64/256 and 32/128/512 KiB: physical bytes after dedup and zstd, object count, index RAM and cold-open time, ingest throughput, read latency, and rewrite bytes after small edits. The report recommends a default; the default does not change in v2.2.
+- [x] **PROF-01**: A store has one FastCDC profile (min/avg/max, powers of two, inside the crate limits), set at `seed` and kept in the store format marker. A mount with a different profile is refused. Without a setting, the profile is 4/8/32 KiB.
+- [x] **PROF-02**: Every use of the chunk constants (writer buffers, zero-chunk shortcut, splice, read-ahead) reads the store profile. Two stores with different profiles work in one process. A golden cut-point test protects the cut points.
+- [x] **PROF-03**: A reproducible benchmark reports, for 4/8/32, 8/16/64, 8/32/128, 16/64/256 and 32/128/512 KiB: physical bytes after dedup and zstd, object count, index RAM and cold-open time, ingest throughput, read latency, and rewrite bytes after small edits. The report recommends a default; the default does not change in v2.2.
 
 ### Hashes and rehash (#62)
 
@@ -121,9 +121,9 @@ Deferred; tracked, not in this roadmap.
 | TSAFE-04 | Phase 21.2 | Complete |
 | TSAFE-05 | Phase 21.2 | Complete |
 | TSAFE-06 | Phase 21.2 | Complete |
-| PROF-01 | Phase 22 | Pending |
-| PROF-02 | Phase 22 | Pending |
-| PROF-03 | Phase 22 | Pending |
+| PROF-01 | Phase 22 | Complete |
+| PROF-02 | Phase 22 | Complete |
+| PROF-03 | Phase 22 | Complete |
 | HASH-01 | Phase 23 | Pending |
 | HASH-02 | Phase 23 | Pending |
 | HASH-03 | Phase 23 | Pending |

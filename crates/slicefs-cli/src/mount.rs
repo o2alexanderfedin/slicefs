@@ -35,6 +35,7 @@ use metadata::wal::{WalConfig, create_wal};
 use crate::filesystem::{DirtyConfig, SliceFsFilesystem};
 use crate::header;
 use crate::util::ts;
+use chunk_store::ChunkProfile;
 
 // ── Store loading ─────────────────────────────────────────────────────────────
 
@@ -356,6 +357,9 @@ pub struct StartArgs {
     pub zstd_level: i32,
     /// `--hash`: a new write hash (`None` keeps the recorded one).
     pub hash: Option<String>,
+    /// `--chunk-profile`: the profile the store must have (`None` takes
+    /// the recorded one).
+    pub chunk_profile: Option<ChunkProfile>,
     /// The dirty-data values (checked by the caller before any side effect).
     pub dirty: DirtyConfig,
 }
@@ -400,8 +404,16 @@ pub fn start(
     #[cfg(target_os = "macos")] backend: Option<&crate::backend::FuseTBackend>,
     #[cfg(not(target_os = "macos"))] backend: Option<()>,
 ) -> Result<Started, Box<dyn std::error::Error>> {
-    // The store header first, before anything writes to the store.
-    let access = header::check(store_path, header::Want::Mount)?.access;
+    // The store header first, before anything writes to the store. Then
+    // `--chunk-profile` against the recorded profile, before the read-only
+    // option refusals and before any load. With no header (no store yet; a
+    // mount does not make one) there is nothing to compare: `load_store`
+    // refuses the path.
+    let opened = header::check(store_path, header::Want::Mount)?;
+    if opened.header.is_some() {
+        crate::content::check_profile(store_path, opened.header.as_ref(), args.chunk_profile)?;
+    }
+    let access = opened.access;
     // A read-only mount writes nothing: refuse the options that write.
     if let header::Access::ReadOnly(flag) = &access {
         if args.hash.is_some() {
@@ -642,6 +654,7 @@ pub fn run_mount(
     gc_interval_secs: u64,
     zstd_level: i32,
     hash: Option<&str>,
+    chunk_profile: Option<ChunkProfile>,
     dirty: DirtyConfig,
     workers: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -708,6 +721,7 @@ pub fn run_mount(
         gc_interval_secs,
         zstd_level,
         hash: hash.map(str::to_string),
+        chunk_profile,
         dirty,
     };
     #[cfg(target_os = "macos")]
@@ -879,7 +893,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mnt = dir.path().join("mnt");
         let cfg = DirtyConfig { budget: 8 << 20, limit: 16 << 20, ..DirtyConfig::default() };
-        let r = run_mount(&dir.path().join("no-store"), &mnt, true, false, 0, None, None, false, None, false, 0, 0, 0, None, cfg, None);
+        let r = run_mount(&dir.path().join("no-store"), &mnt, true, false, 0, None, None, false, None, false, 0, 0, 0, None, None, cfg, None);
         let err = r.expect_err("run_mount refuses the dirty values").to_string();
         assert!(!mnt.exists(), "the mount point was not made ({err})");
         assert!(err.contains("16777216") && err.contains("8388608"), "{err}");

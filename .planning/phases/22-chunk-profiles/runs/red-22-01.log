@@ -1,0 +1,77 @@
+# 22-01 red runs (before the code)
+
+## Task 1: cargo test -p slicefs-cli --test chunk_profile_tests (compile errors)
+error[E0432]: unresolved import `chunk_store::ChunkProfile`
+error[E0432]: unresolved imports `slicefs_cli::header::CHUNK_PROFILE_FLAG`, `slicefs_cli::header::CHUNK_PROFILE_RELEASE`
+error[E0425]: cannot find function `check_write_with` in module `content`
+error[E0425]: cannot find function `marker_with` in module `header`
+error[E0425]: cannot find function `check_write_with` in module `content`
+error[E0425]: cannot find function `check_write_with` in module `content`
+error[E0425]: cannot find function `check_write_with` in module `content`
+error[E0425]: cannot find function `check_write_with` in module `content`
+error[E0425]: cannot find function `check_write_with` in module `content`
+error[E0425]: cannot find function `check_write_with` in module `content`
+error[E0599]: no method named `profile` found for struct `Arc<ChunkStore>` in the current scope
+error[E0282]: type annotations needed
+error[E0282]: type annotations needed
+error[E0282]: type annotations needed
+error[E0599]: no method named `profile` found for struct `Arc<ChunkStore>` in the current scope
+error: could not compile `slicefs-cli` (test "chunk_profile_tests") due to 15 previous errors; 1 warning emitted
+
+## Task 2: cargo test -p chunk-store --test profile_tests (before the per-store zero chunk)
+test bad_profiles_are_refused ... ok
+test zero_chunks_of_each_store_need_no_store_read ... FAILED
+test the_five_profiles_and_the_limits_are_accepted ... ok
+thread 'zero_chunks_of_each_store_need_no_store_read' (137669824) panicked at crates/chunk-store/tests/profile_tests.rs:80:60:
+16/64/256 KiB: chunk store I/O: Input/output error (os error 5)
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+error: test failed, to rerun pass `-p chunk-store --test profile_tests`
+
+## Task 2: cargo test -p chunk-store --lib -- file::tests per-profile tests (before splice reads the profile)
+test file::tests::zero_runs_cut_at_max_for_each_profile ... ok
+test file::tests::a_splice_over_zeros_gives_the_key_of_a_full_write_for_each_profile ... FAILED
+thread 'file::tests::a_splice_over_zeros_gives_the_key_of_a_full_write_for_each_profile' (137670573) panicked at crates/chunk-store/src/file.rs:921:9:
+assertion `left == right` failed: 8/16/64 KiB: overwrite: keep 458752 changed [32775..33799] new_len 458752
+  left: ObjectId(1e:77c1688431408f5c)
+ right: ObjectId(1e:2d5d2eb576801767)
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 127 filtered out; finished in 0.03s
+error: test failed, to rerun pass `-p chunk-store --lib`
+
+## Task 2 guard mutation: drop the power-of-two check in ChunkProfile::new (bad_profiles_are_refused; undone)
+test bad_profiles_are_refused ... FAILED
+thread 'bad_profiles_are_refused' (137674039) panicked at crates/chunk-store/tests/profile_tests.rs:57:9:
+12288/24576/49152 bytes
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p chunk-store --test profile_tests`
+
+## Task 2 guard mutation: ChunkProfile::ranges caps max at max(32 KiB, 2 x avg) (zero_runs_cut_at_max_for_each_profile; undone)
+test file::tests::zero_runs_cut_at_max_for_each_profile ... FAILED
+thread 'file::tests::zero_runs_cut_at_max_for_each_profile' (137676668) panicked at crates/chunk-store/src/file.rs:1071:75:
+called `Result::unwrap()` on an `Err` value: "chunk profile 8192/16384/65536 bytes: a run of zeros does not cut into chunks of the max size"
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 128 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p chunk-store --lib`
+
+## Task 2 guard mutation: the max limit made exclusive (MAXIMUM_MIN..MAXIMUM_MAX) (the_five_profiles_and_the_limits_are_accepted; undone)
+test the_five_profiles_and_the_limits_are_accepted ... FAILED
+thread 'the_five_profiles_and_the_limits_are_accepted' (137681060) panicked at crates/chunk-store/tests/profile_tests.rs:37:5:
+assertion failed: ChunkProfile::new(MIB, 4 * MIB, 16 * MIB).is_ok()
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s
+error: test failed, to rerun pass `-p chunk-store --test profile_tests`
+
+## Task 3 guard mutation: ChunkProfile::DEFAULT avg 16384 (golden_cut_points; undone)
+test golden_cut_points ... FAILED
+thread 'golden_cut_points' (137747572) panicked at crates/chunk-store/tests/profile_tests.rs:147:5:
+assertion `left == right` failed
+  left: [29116, 47396, 67070, 74807, 92433, 110204, 128213, 155585, 176262, 202496, 219164, 237049, 254833, 275577, 291768, 307926, 324536, 336513, 368962, 395949, 412329, 431697, 464465, 481837, 503639, 521607, 535681, 540004, 556662, 578669, 611437, 616283, 624091, 656859, 665292, 676652, 696267, 725101, 749757, 757099, 773633, 802824, 824041, 846572, 864805, 887114, 910078, 942846, 961380, 965681, 989293, 1009540, 1021337, 1048576]
+ right: [13800, 23883, 29116, 38014, 47396, 56701, 67070, 74807, 86207, 92433, 101949, 110204, 114636, 120873, 130051, 140511, 151590, 160604, 176262, 195033, 215917, 222887, 228027, 237049, 247237, 254833, 273501, 289189, 301062, 307926, 318715, 324536, 333843, 338598, 348455, 368962, 380405, 391496, 400350, 412329, 421976, 431697, 439221, 467689, 476326, 481837, 491432, 501382, 513856, 521607, 529891, 535681, 545523, 556662, 567658, 577017, 590204, 606690, 614372, 623926, 633324, 644098, 655991, 664638, 676652, 696267, 704832, 719563, 735572, 749757, 757099, 772964, 787258, 796585, 802824, 811145, 824041, 832496, 843638, 857207, 864805, 873682, 887114, 893046, 903353, 910078, 928338, 946975, 956469, 961380, 971124, 982144, 989293, 994887, 1009540, 1017963, 1027243, 1047702, 1048576]
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.02s
+error: test failed, to rerun pass `-p chunk-store --test profile_tests`
+
+## Task 3 guard mutation: the store zero chunk made with CHUNK_MAX bytes, as the old process-wide one (two_profiles_in_one_process_read_back_byte_for_byte; undone)
+test two_profiles_in_one_process_read_back_byte_for_byte ... FAILED
+thread 'two_profiles_in_one_process_read_back_byte_for_byte' (137749140) panicked at crates/chunk-store/tests/profile_tests.rs:189:9:
+assertion `left == right` failed: 16/64/256 KiB: splice key
+  left: ObjectId(1e:eee3b81a1370213b)
+ right: ObjectId(1e:f1d9d9ddce05ed13)
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.32s
+error: test failed, to rerun pass `-p chunk-store --test profile_tests`

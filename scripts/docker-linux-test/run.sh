@@ -16,6 +16,7 @@
 #        scripts/docker-linux-test/run.sh coverage   (TSAFE-05: line coverage of the tests and the FUSE smoke; COVERAGE_FLOOR gates the tests number; see coverage.sh)
 #        scripts/docker-linux-test/run.sh index-bench [SIZES...]   (default sizes: 1000000 10000000)
 #        scripts/docker-linux-test/run.sh index-bench-cold [SIZES...]   (cold page cache; privileged; by hand)
+#        scripts/docker-linux-test/run.sh chunk-profiles-smoke   (chunk profile benchmark, SMOKE=1, no FUSE; by hand, not in CI)
 # SLICEFS_WORKERS (for example 4) passes --workers to the mounts of the scripts.
 # SLICEFS_TARGET_VOL names the cargo target volume (default slicefs-target), so
 # two runs from different trees at the same time do not share build output.
@@ -69,6 +70,19 @@ case "${1:-all}" in
           /target/release/index-bench run --dir /bench/$n --objects $n || exit 1
           echo "# size $n, load after: $(cat /proc/loadavg)"
         done' index-bench ${*:-1000000 10000000} ;;
+  chunk-profiles-smoke)
+    # The smoke mode of the chunk profile benchmark (#67, PROF-03). It mounts
+    # nothing: no FUSE device, no SYS_ADMIN and no unshare, so it does not use RUN.
+    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry \
+      -e CARGO_TARGET_DIR=/target slicefs-fusetest bash -c '
+        rustc -V
+        timeout 1200 cargo build -q --release --locked -j 1 -p chunk-store --example chunk_profile_bench || exit 1
+        echo "# load before: $(cat /proc/loadavg)"
+        SMOKE=1 RUNS=1 PROFILES="4/8/32 16/64/256" WORK=/tmp/cp BIN=/target/release/examples/chunk_profile_bench \
+          timeout 600 bash /src/scripts/chunk-profiles/bench.sh || exit 1
+        echo "# load after: $(cat /proc/loadavg)"
+        echo "# edits.csv rows: $(($(wc -l < /tmp/cp/edits.csv) - 1))"
+        cat /tmp/cp/machine.txt' ;;
   index-bench-cold)
     # The chunk index with a cold page cache (by hand). --privileged, because
     # only then can root in the container write /proc/sys/vm/drop_caches; this

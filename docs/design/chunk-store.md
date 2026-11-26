@@ -25,6 +25,17 @@ Measured on the macOS CI round trip (Boost 1.85, 77,655 files, FSKit):
 - Chunking: FastCDC v2020, average 8 KiB (min 4 KiB, max 32 KiB). The minimum is one
   4 KiB disk block; min 2 KiB stored less than 1 % less data on source trees and
   tars, with 5-9 % more chunks.
+  The profile (min/avg/max) is per store: `Options::profile` (a
+  `ChunkProfile`), read back with `ChunkStore::profile()`. It is set at
+  `seed` (`--chunk-profile MIN/AVG/MAX`, in KiB) and kept in FORMAT (the
+  `chunks` line and the ro_compat flag `chunk-profile`, see
+  `docs/design/store-format.md`). The default is 4/8/32 KiB. The max is
+  at most 1 MiB (`ChunkProfile::MAX_LIMIT`), which bounds the stream
+  buffer (see "Memory of a stream" below). The five measured profiles
+  (max up to 512 KiB) are in `docs/research/chunk-profiles.md`. Metadata
+  values (`metadata::store_io`) are cut with the same profile as file
+  data. Manifest node boundaries (`LEAF_ENTRIES`, `NODE_MIN`, `is_cut` on
+  IDs) do not depend on the profile.
 - Object ID: a hash tag byte, then the hash of the uncompressed bytes, the
   full 256 bits (33 bytes in all, the size of the `ObjectKey` that the
   metadata uses; collision strength 128 bits). The default hash is BLAKE3.
@@ -92,15 +103,24 @@ these inputs at a rebase.
 - Whole-node reuse: in copy mode, a whole old manifest node that ends before
   the next change is pushed as one entry one level up, so its entries are
   not read one by one.
-- Exact zero shortcut: a 32 KiB range that is known to be zeros (past
-  `keep`, or old zero chunks) and has no change is pushed as the zero chunk
-  without a read or a hash.
+- Exact zero shortcut: a range of the store max (32 KiB at the default
+  profile) that is known to be zeros (past `keep`, or old zero chunks) and
+  has no change is pushed as the zero chunk of the store without a read or
+  a hash.
 - The output key is always the key of a full `FileWriter` write of the same
   bytes (oracle tests). Chunking stays deterministic: the same bytes give
   the same chunks whatever the write history, so there is no forced cut. On long repeating non-zero data, FastCDC finds no old cut to
   resync at, so a rebase can cut again up to the end of the file. The CPU
   then follows the file size, but the memory stays fixed: one piece of at
-  most 2 x `CHUNK_MAX` and one decoded node per tree level.
+  most 2 x max of the store profile and one decoded node per tree level.
+- Memory of a stream: a `FileWriter` keeps under 2 x max bytes of the store
+  profile, and a stream step clones it. This buffer is not counted in
+  `--dirty-budget`. At the 1 MiB limit of max, that is under 2 MiB per
+  streaming file plus the clone during a step (under 4 MiB): bounded, not
+  O(file size). The total is N x that for N files that stream at the same
+  time (for example 50 streams: under 100 MiB, under 200 MiB during steps),
+  on top of the budget. At the default profile it is under 64 KiB per
+  stream.
 
 Small splices (debug build, tests in `file.rs` and `write_path_tests.rs`):
 

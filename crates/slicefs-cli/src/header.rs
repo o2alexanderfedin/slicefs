@@ -2,7 +2,8 @@
 //!
 //! The first line names the store format (`slicefs-store 7 ...`). Each
 //! later line is one item: the store setting `hash <name>` (the write
-//! hash), or a feature flag `<class> <name> <release>`, where the class is
+//! hash), the store setting `chunks <min> <avg> <max>` (the chunk profile,
+//! with the ro_compat flag `chunk-profile`), or a feature flag `<class> <name> <release>`, where the class is
 //! `compat`, `ro_compat` or `incompat` and the release is the lowest SliceFS
 //! release that knows the flag (shown in messages, never compared).
 //!
@@ -15,7 +16,7 @@
 use std::io::Read;
 use std::path::Path;
 
-use chunk_store::{ObjectHasher, DEFAULT_HASHER};
+use chunk_store::{ChunkProfile, ObjectHasher, DEFAULT_HASHER};
 
 /// The header file in the store root.
 pub const FORMAT_FILE: &str = "FORMAT";
@@ -25,13 +26,34 @@ pub const FORMAT_NUMBER: u32 = 7;
 pub const FORMAT: &str = "slicefs-store 7 (store header with feature flags)\n";
 /// The largest header that [`read`] accepts, in bytes.
 pub const MAX_HEADER: usize = 64 * 1024;
-/// The feature flags that this build knows. Format 7 ships no flag; Phases
-/// 22 and 23 add names here with the rule of docs/design/store-format.md.
-pub const KNOWN_FLAGS: &[&str] = &[];
+/// The ro_compat flag of a store with a non-default chunk profile (the
+/// line `chunks <min> <avg> <max>`): an older build reads such a store, but
+/// would write it with another profile.
+pub const CHUNK_PROFILE_FLAG: &str = "chunk-profile";
+/// The release word of the `chunk-profile` flag. A placeholder until the
+/// owner names the release; tests use this constant, never its text.
+pub const CHUNK_PROFILE_RELEASE: &str = "v2.2";
+/// The feature flags that this build knows (Phase 22: `chunk-profile`;
+/// Phase 23 adds names here with the rule of docs/design/store-format.md).
+pub const KNOWN_FLAGS: &[&str] = &[CHUNK_PROFILE_FLAG];
 
-/// The header of a new store whose new objects use `hasher`.
+/// The header of a new store whose new objects use `hasher` (the default
+/// chunk profile).
 pub fn marker(hasher: &dyn ObjectHasher) -> String {
-    format!("{FORMAT}hash {}\n", hasher.name())
+    marker_with(hasher, ChunkProfile::DEFAULT)
+}
+
+/// The header of a new store with the write hash `hasher` and the chunk
+/// profile `profile`. A non-default profile adds the line `chunks <min>
+/// <avg> <max>` (bytes) and its ro_compat flag; the default profile adds
+/// nothing, so the header of a default store stays as in format 7.
+pub fn marker_with(hasher: &dyn ObjectHasher, profile: ChunkProfile) -> String {
+    let mut s = format!("{FORMAT}hash {}\n", hasher.name());
+    if profile != ChunkProfile::DEFAULT {
+        s.push_str(&format!("chunks {} {} {}\n", profile.min(), profile.avg(), profile.max()));
+        s.push_str(&format!("ro_compat {CHUNK_PROFILE_FLAG} {CHUNK_PROFILE_RELEASE}\n"));
+    }
+    s
 }
 
 /// The class of a feature flag: what a build that does not know the flag
@@ -86,6 +108,10 @@ pub struct Flag {
 pub enum Line {
     /// `hash <name>`: the write hash of the store (a setting, not a flag).
     Hash(String),
+    /// `chunks <min> <avg> <max>`: the FastCDC profile of the store, in
+    /// bytes (a setting; it always comes with the ro_compat flag
+    /// `chunk-profile`).
+    Chunks(ChunkProfile),
     /// `<class> <name> <release>`.
     Flag(Flag),
     /// A line of a kind that this build does not know, as it is.
@@ -110,6 +136,14 @@ impl Header {
         })
     }
 
+    /// The chunk profile (`None`: no `chunks` line, the default profile).
+    pub fn chunk_profile(&self) -> Option<ChunkProfile> {
+        self.lines.iter().find_map(|l| match l {
+            Line::Chunks(p) => Some(*p),
+            _ => None,
+        })
+    }
+
     /// The feature flags, in their order.
     pub fn flags(&self) -> impl Iterator<Item = &Flag> {
         self.lines.iter().filter_map(|l| match l {
@@ -125,6 +159,7 @@ impl Header {
         for l in &self.lines {
             match l {
                 Line::Hash(name) => s.push_str(&format!("hash {name}\n")),
+                Line::Chunks(p) => s.push_str(&format!("chunks {} {} {}\n", p.min(), p.avg(), p.max())),
                 Line::Flag(f) => s.push_str(&format!("{} {} {}\n", f.class.word(), f.name, f.release)),
                 Line::Other(text) => s.push_str(&format!("{text}\n")),
             }
@@ -235,6 +270,12 @@ pub fn msg_lock_present(store: &Path, flag: &Flag) -> String {
     format!("{store}/mount.lock exists: the last mount did not end cleanly, or a mount runs now. This SliceFS can only mount the store read-only (feature {name} needs SliceFS {release} or later) and cannot replay the write log.")
 }
 
+/// `--chunk-profile want` on a store whose recorded profile is `have`.
+pub fn msg_profile_differs(store: &Path, have: ChunkProfile, want: ChunkProfile) -> String {
+    let store = store.display();
+    format!("{store} has the chunk profile {have}; --chunk-profile {want} is another profile. The chunk profile of a store is fixed when the store is made.")
+}
+
 fn msg_bad_line(store: &Path, k: usize, reason: &str, line: &str) -> String {
     let store = store.display();
     format!("{store}/FORMAT line {k}: {reason}: {line:?}")
@@ -278,9 +319,13 @@ pub fn read(store: &Path) -> std::io::Result<Option<String>> {
 /// number is parsed (the free text is not compared). A number below or
 /// above [`FORMAT_NUMBER`] is refused, and the other lines are not read
 /// (another format can have any layout). Every later line is kept in its
-/// order: `hash <name>` (at most one), a flag line `<class> <name>
+/// order: `hash <name>` (at most one), `chunks <min> <avg> <max>` (at most
+/// one; see [`parse_chunks`]), a flag line `<class> <name>
 /// <release>` (see [`valid_name_bytes`] and [`valid_release_bytes`]; a name once in
-/// the whole header), or a line of another kind.
+/// the whole header), or a line of another kind. The `chunks` line and the
+/// flag [`CHUNK_PROFILE_FLAG`] come together or not at all, and that flag is
+/// ro_compat (an older build that does not know it opens the store
+/// read-only and keeps the `chunks` line as a line of its feature).
 pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
     let mut pieces: Vec<&str> = text.split('\n').collect();
     if text.ends_with('\n') {
@@ -311,6 +356,12 @@ pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
                 }
                 Line::Hash(words[1].to_string())
             }
+            ("chunks", _) => {
+                if lines.iter().any(|l| matches!(l, Line::Chunks(_))) {
+                    return Err(bad("two chunks lines"));
+                }
+                Line::Chunks(parse_chunks(&words).ok_or_else(|| bad("bad chunks line"))?)
+            }
             (_, Some(class)) => {
                 if words.len() != 3 || !valid_name_bytes(words[1].as_bytes()) || !valid_release_bytes(words[2].as_bytes()) {
                     return Err(bad("bad feature flag line"));
@@ -325,7 +376,29 @@ pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
         };
         lines.push(parsed);
     }
+    // The `chunks` line and the `chunk-profile` flag come as a pair, and the
+    // flag is ro_compat. Index `j` of `lines` is line `j + 2` of the text.
+    let bad_at = |j: usize, reason: &str| refuse(msg_bad_line(store, j + 2, reason, pieces[j + 1]));
+    let chunks_at = lines.iter().position(|l| matches!(l, Line::Chunks(_)));
+    let flag_at = lines.iter().position(|l| matches!(l, Line::Flag(f) if f.name == CHUNK_PROFILE_FLAG));
+    match (chunks_at, flag_at) {
+        (Some(j), None) => return Err(bad_at(j, "chunks line with no chunk-profile flag")),
+        (None, Some(j)) => return Err(bad_at(j, "chunk-profile flag with no chunks line")),
+        (Some(_), Some(j)) if !matches!(&lines[j], Line::Flag(f) if f.class == Class::RoCompat) => {
+            return Err(bad_at(j, "the feature chunk-profile must be ro_compat"));
+        }
+        _ => {}
+    }
     Ok(Header { format, first: first.to_string(), lines })
+}
+
+/// The profile of the words of a `chunks` line: exactly three sizes after
+/// the word, ASCII digits only, each a u32, that [`ChunkProfile::new`]
+/// accepts (so a bad profile on disk never reaches FastCDC).
+fn parse_chunks(words: &[&str]) -> Option<ChunkProfile> {
+    let [_, min, avg, max] = words else { return None };
+    let size = |w: &str| if !w.is_empty() && w.bytes().all(|b| b.is_ascii_digit()) { w.parse::<u32>().ok() } else { None };
+    ChunkProfile::new(size(min)?, size(avg)?, size(max)?).ok()
 }
 
 // The byte-level core of `parse`: `valid_name_bytes`, `valid_release_bytes`,
@@ -405,16 +478,17 @@ pub fn decide(store: &Path, header: &Header, want: Want) -> std::io::Result<Acce
 /// access is read and write (`header: None`; a mount needs `segments/`, and
 /// `load_store` refuses a store with no committed state).
 pub fn check(store: &Path, want: Want) -> std::io::Result<Opened> {
-    check_with(store, want, DEFAULT_HASHER)
+    check_with(store, want, DEFAULT_HASHER, ChunkProfile::DEFAULT)
 }
 
-/// [`check`], where a new store gets the header of `hasher` (`--hash`).
-pub fn check_with(store: &Path, want: Want, hasher: &dyn ObjectHasher) -> std::io::Result<Opened> {
+/// [`check`], where a new store gets the header of `hasher` (`--hash`) and
+/// `profile` (`--chunk-profile`).
+pub fn check_with(store: &Path, want: Want, hasher: &dyn ObjectHasher, profile: ChunkProfile) -> std::io::Result<Opened> {
     let text = match read(store)? {
         Some(text) => text,
         None if has_data(store)? => return Err(refuse(msg_no_header(store))),
         None if want == Want::Write => {
-            match create_with(store, hasher) {
+            match create_with(store, hasher, profile) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e),
@@ -537,17 +611,17 @@ pub fn store_lock_held(store: &Path) -> bool {
 /// installed first. Tests that build a store with `StoreIo::open` or
 /// `ChunkStore::open` call it first.
 pub fn create(store: &Path) -> std::io::Result<()> {
-    create_with(store, DEFAULT_HASHER)
+    create_with(store, DEFAULT_HASHER, ChunkProfile::DEFAULT)
 }
 
-/// [`create`] with the header [`marker`]`(hasher)`.
-fn create_with(store: &Path, hasher: &dyn ObjectHasher) -> std::io::Result<()> {
+/// [`create`] with the header [`marker_with`]`(hasher, profile)`.
+fn create_with(store: &Path, hasher: &dyn ObjectHasher, profile: ChunkProfile) -> std::io::Result<()> {
     std::fs::create_dir_all(store)?;
     let format = store.join(FORMAT_FILE);
     if format.exists() {
         return Err(already_exists(store));
     }
-    let tmp = write_tmp(store, &marker(hasher))?;
+    let tmp = write_tmp(store, &marker_with(hasher, profile))?;
     let linked = match std::fs::hard_link(&tmp, &format) {
         // A file system with no hard links: the rename of before (it can
         // replace a header that a parallel create wrote at the same time).
@@ -842,6 +916,69 @@ mod tests {
     fn one_hash_line_at_most() {
         let err = parse(Path::new(STORE), &format!("{FORMAT}{HASH}{HASH}")).expect_err("refused").to_string();
         assert!(err.contains("line 3: two hash lines"), "{err}");
+    }
+
+    /// The `chunk-profile` flag line of this build.
+    fn profile_flag(class: &str) -> String {
+        format!("{class} {CHUNK_PROFILE_FLAG} {CHUNK_PROFILE_RELEASE}\n")
+    }
+
+    /// [Chunks line]: the `chunks` line and the ro_compat `chunk-profile`
+    /// flag come together or not at all (M9 with the line number).
+    #[test]
+    fn a_chunks_line_needs_the_flag_and_the_flag_needs_the_line() {
+        let chunks = "chunks 16384 65536 262144\n";
+        let ro = profile_flag("ro_compat");
+        let cases = [
+            (format!("{FORMAT}{HASH}{chunks}"), "line 3: chunks line with no chunk-profile flag"),
+            (format!("{FORMAT}{HASH}{ro}"), "line 3: chunk-profile flag with no chunks line"),
+            (format!("{FORMAT}{HASH}{chunks}{}", profile_flag("compat")), "line 4: the feature chunk-profile must be ro_compat"),
+            (format!("{FORMAT}{HASH}{}{chunks}", profile_flag("incompat")), "line 3: the feature chunk-profile must be ro_compat"),
+            (format!("{FORMAT}{HASH}{chunks}{ro}{chunks}"), "line 5: two chunks lines"),
+        ];
+        for (text, want) in cases {
+            let err = parse(Path::new(STORE), &text).expect_err(want).to_string();
+            assert!(err.contains(want), "{text:?}: {err}");
+        }
+    }
+
+    /// [Chunks line]: a `chunks` line has three sizes in decimal digits
+    /// that `ChunkProfile::new` accepts; anything else is M9, never a panic.
+    #[test]
+    fn a_bad_chunks_line_is_refused() {
+        let ro = profile_flag("ro_compat");
+        for line in [
+            "chunks 16384 65536",
+            "chunks 16384 65536 262144 1",
+            "chunks +16384 65536 262144",
+            "chunks 16384 65536 0x40000",
+            "chunks 12288 24576 49152",
+            "chunks 65536 16384 262144",
+            "chunks 32 256 1024",
+            "chunks 4096 8192 33554432",
+            "chunks 131072 524288 2097152",
+            "chunks 16384 65536 99999999999",
+        ] {
+            let err = parse(Path::new(STORE), &format!("{FORMAT}{HASH}{line}\n{ro}")).expect_err(line).to_string();
+            assert!(err.contains("line 3: bad chunks line"), "{line}: {err}");
+        }
+    }
+
+    /// [Chunks line]: a header with a profile opens read and write for
+    /// every `Want` (the flag is known here) and writes back byte for byte.
+    #[test]
+    fn a_profile_header_round_trips() {
+        let (chunks, ro) = ("chunks 16384 65536 262144\n", profile_flag("ro_compat"));
+        for text in [format!("{FORMAT}{HASH}{chunks}{ro}"), format!("{FORMAT}{HASH}{ro}{chunks}")] {
+            let h = parse(Path::new(STORE), &text).unwrap();
+            assert_eq!(h.chunk_profile(), Some(ChunkProfile::new(16384, 65536, 262144).unwrap()));
+            for want in ALL {
+                assert_eq!(decide(Path::new(STORE), &h, want).unwrap(), Access::ReadWrite, "{want:?}");
+            }
+            assert_eq!(h.to_text(), text);
+        }
+        let h = parse(Path::new(STORE), &format!("{FORMAT}{HASH}chunks 4096 8192 32768\n{ro}")).unwrap();
+        assert_eq!(h.chunk_profile(), Some(ChunkProfile::DEFAULT));
     }
 
     /// [Compat], [Parse order]: a rewrite by `select_hash` keeps every flag

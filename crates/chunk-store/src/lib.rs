@@ -102,19 +102,114 @@ impl std::fmt::Debug for ObjectId {
     }
 }
 
-/// FastCDC v2020 chunk sizes (bytes). The minimum is one 4 KiB disk block:
-/// no cut inside a file makes a chunk smaller than a block (min 2 KiB stored
-/// less than 1 % less data on source trees and tars, with 5-9 % more chunks).
+/// FastCDC v2020 chunk sizes (bytes) of the default profile
+/// ([`ChunkProfile::DEFAULT`]). Code with a store uses `store.profile()`.
+/// The minimum is one 4 KiB disk block: no cut inside a file makes a chunk
+/// smaller than a block (min 2 KiB stored less than 1 % less data on source
+/// trees and tars, with 5-9 % more chunks).
 pub const CHUNK_MIN: u32 = 4 * 1024;
 pub const CHUNK_AVG: u32 = 8 * 1024;
 pub const CHUNK_MAX: u32 = 32 * 1024;
 
-/// Content-defined chunk boundaries of `data` (FastCDC v2020, 4/8/32 KiB).
-/// The ranges cover `data` without gaps; empty input gives no chunks.
+/// Content-defined chunk boundaries of `data` with the default profile
+/// (FastCDC v2020, 4/8/32 KiB): `ChunkProfile::DEFAULT.ranges(data)`. Code
+/// with a store uses `store.profile().ranges(data)`. The ranges cover
+/// `data` without gaps; empty input gives no chunks.
 pub fn chunk_ranges(data: &[u8]) -> Vec<Range<usize>> {
-    fastcdc::v2020::FastCDC::new(data, CHUNK_MIN, CHUNK_AVG, CHUNK_MAX)
-        .map(|c| c.offset..c.offset + c.length)
-        .collect()
+    ChunkProfile::DEFAULT.ranges(data)
+}
+
+/// A FastCDC v2020 profile: the min, average and max chunk size in bytes.
+/// A store has one profile, fixed when the store is made (the caller keeps
+/// it in the store header). Made only by [`ChunkProfile::new`], which
+/// checks the limits, or [`ChunkProfile::DEFAULT`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ChunkProfile {
+    min: u32,
+    avg: u32,
+    max: u32,
+}
+
+impl ChunkProfile {
+    /// 4/8/32 KiB ([`CHUNK_MIN`], [`CHUNK_AVG`], [`CHUNK_MAX`]).
+    pub const DEFAULT: ChunkProfile = ChunkProfile { min: CHUNK_MIN, avg: CHUNK_AVG, max: CHUNK_MAX };
+
+    /// The largest max chunk size (bytes): 1 MiB. A streaming file keeps up
+    /// to 2 x max bytes in its `FileWriter` outside the dirty budget of a
+    /// mount, so this limit bounds that at about 2 MiB per stream.
+    pub const MAX_LIMIT: u32 = 1 << 20;
+
+    /// The profile `min`/`avg`/`max` (bytes). Refused: a size that is not a
+    /// power of two, sizes not in the order min < avg < max, a max above
+    /// [`ChunkProfile::MAX_LIMIT`] (1 MiB; so min is at most 256 KiB and
+    /// avg at most 512 KiB), a size below the fastcdc v2020 minimums (min
+    /// 64 B, avg 256 B, max 1 KiB), and a profile that does not cut a run
+    /// of zeros into chunks of `max` bytes (the zero chunk of the readers
+    /// and of `splice` needs it). The checks run in this order, so FastCDC
+    /// never gets values that make it panic. The error is the reason only
+    /// (it does not repeat the sizes): the caller names the profile in the
+    /// unit of its input.
+    pub fn new(min: u32, avg: u32, max: u32) -> std::result::Result<ChunkProfile, String> {
+        use fastcdc::v2020::{AVERAGE_MAX, AVERAGE_MIN, MAXIMUM_MAX, MAXIMUM_MIN, MINIMUM_MAX, MINIMUM_MIN};
+        if !(min.is_power_of_two() && avg.is_power_of_two() && max.is_power_of_two()) {
+            return Err("each size must be a power of two".to_string());
+        }
+        if !(min < avg && avg < max) {
+            return Err("the sizes must be min < avg < max".to_string());
+        }
+        if max > Self::MAX_LIMIT {
+            return Err("the max is above the limit of 1024 KiB (1 MiB)".to_string());
+        }
+        if !(MINIMUM_MIN..=MINIMUM_MAX).contains(&min)
+            || !(AVERAGE_MIN..=AVERAGE_MAX).contains(&avg)
+            || !(MAXIMUM_MIN..=MAXIMUM_MAX).contains(&max)
+        {
+            return Err("below the fastcdc limits (min at least 64 B, avg at least 256 B, max at least 1 KiB)".to_string());
+        }
+        let p = ChunkProfile { min, avg, max };
+        let m = max as usize;
+        let lens: Vec<usize> = p.ranges(&vec![0u8; 2 * m + 1]).iter().map(|r| r.len()).collect();
+        if lens != [m, m, 1] {
+            return Err("a run of zeros does not cut into chunks of the max size".to_string());
+        }
+        Ok(p)
+    }
+
+    /// Content-defined chunk boundaries of `data` (FastCDC v2020 with this
+    /// profile). The ranges cover `data` without gaps; empty input gives no
+    /// chunks.
+    pub fn ranges(&self, data: &[u8]) -> Vec<Range<usize>> {
+        fastcdc::v2020::FastCDC::new(data, self.min, self.avg, self.max)
+            .map(|c| c.offset..c.offset + c.length)
+            .collect()
+    }
+
+    /// The min chunk size (bytes).
+    pub fn min(&self) -> u32 {
+        self.min
+    }
+
+    /// The average chunk size (bytes).
+    pub fn avg(&self) -> u32 {
+        self.avg
+    }
+
+    /// The max chunk size (bytes).
+    pub fn max(&self) -> u32 {
+        self.max
+    }
+}
+
+impl std::fmt::Display for ChunkProfile {
+    /// `16/64/256 KiB` when each size is whole KiB, else `64/256/1024 B`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (a, b, c) = (self.min, self.avg, self.max);
+        if [a, b, c].iter().all(|s| s % 1024 == 0) {
+            write!(f, "{}/{}/{} KiB", a / 1024, b / 1024, c / 1024)
+        } else {
+            write!(f, "{a}/{b}/{c} B")
+        }
+    }
 }
 
 // ── Options and stats ─────────────────────────────────────────────────────────
@@ -133,6 +228,10 @@ pub struct Options {
     /// The hash of the IDs of new objects. Objects of other known hashes
     /// stay readable: each is verified with the hasher of its own tag.
     pub hasher: &'static dyn ObjectHasher,
+    /// The FastCDC profile of the file data and metadata values of this
+    /// store. Fixed when the store is made; the caller takes it from the
+    /// store header.
+    pub profile: ChunkProfile,
     /// The index writes its memtable to a new run file when it holds this
     /// many entries (a tuning and test knob; at least 1).
     pub index_memtable_limit: usize,
@@ -189,6 +288,7 @@ impl Default for Options {
             zstd_level: 3,
             read_only: false,
             hasher: DEFAULT_HASHER,
+            profile: ChunkProfile::DEFAULT,
             index_memtable_limit: 1 << 18,
             index_bloom_bits: index::DEFAULT_BLOOM_BITS,
             index_merge_fan_in: 4,
@@ -885,6 +985,10 @@ pub struct ChunkStore {
     /// the `TRUST` file, with no store lock (LOCK-01): one writer at a time,
     /// so the file never goes back to a lower floor.
     trust: Mutex<Option<u64>>,
+    /// The zero chunk of the store profile: one zero buffer of `max` bytes
+    /// and its ID for each known hasher, made on first use (see
+    /// [`ChunkStore::zero_chunk`]; bounded memory: one buffer per store).
+    zero: std::sync::OnceLock<(Vec<ObjectId>, Vec<u8>)>,
     /// Test hook: `gc_finish` calls it at the start of its pass 1 (with 1)
     /// and of its pass 2 (with 2), with no store lock held (see
     /// `race_tests.rs`).
@@ -1198,6 +1302,7 @@ impl ChunkStore {
             gc_timing: Mutex::new(Rank::Store, GcTiming::default()),
             locality: LocalityCache::default(),
             trust: Mutex::new(Rank::Store, trust_floor),
+            zero: std::sync::OnceLock::new(),
             #[cfg(test)]
             gc_pass_hook: Mutex::new(Rank::Store, None),
             #[cfg(test)]
@@ -2886,6 +2991,23 @@ impl ChunkStore {
     /// The hasher of new objects.
     pub fn hasher(&self) -> &'static dyn ObjectHasher {
         self.opts.hasher
+    }
+
+    /// The chunk profile of the store (see [`Options::profile`]).
+    pub fn profile(&self) -> ChunkProfile {
+        self.opts.profile
+    }
+
+    /// FastCDC cuts a run of zeros into chunks of the max size of the store
+    /// profile (`ChunkProfile::new` checks it), which have one ID for each
+    /// hash. Readers and `splice` use this one zero buffer of the store and
+    /// its IDs: no lookup, no I/O, no decompression (a flyweight for sparse
+    /// files).
+    pub(crate) fn zero_chunk(&self) -> &(Vec<ObjectId>, Vec<u8>) {
+        self.zero.get_or_init(|| {
+            let z = vec![0u8; self.opts.profile.max() as usize];
+            (hashers().iter().map(|h| h.id(&z)).collect(), z)
+        })
     }
 
     /// True if the store has `id` (false also if the index cannot be read).

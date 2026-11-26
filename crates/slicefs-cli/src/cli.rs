@@ -11,6 +11,7 @@
 
 use std::path::PathBuf;
 
+use chunk_store::ChunkProfile;
 use clap::{Parser, Subcommand};
 
 /// SliceFS deduplicating filesystem
@@ -94,6 +95,12 @@ pub enum Cmd {
         /// recorded; objects of the old hash stay readable.
         #[arg(long, value_name = "NAME", value_parser = crate::content::parse_hash)]
         hash: Option<String>,
+        /// Refuse the mount when the store has another chunk profile
+        /// (MIN/AVG/MAX in KiB, MAX at most 1024, for example 16/64/256).
+        /// Default: the profile that the store records. A mount does not
+        /// make a store, so it never sets the profile: `slicefs seed` does.
+        #[arg(long, value_name = "MIN/AVG/MAX", value_parser = crate::content::parse_chunk_profile)]
+        chunk_profile: Option<ChunkProfile>,
         /// Most dirty file data (data that is not stored yet) of all open
         /// files together. This is memory that the daemon may use. SIZE is
         /// bytes, or a number with K, M or G (1024-based). Default 64M, at
@@ -149,6 +156,12 @@ pub enum Cmd {
         /// recorded; objects of the old hash stay readable.
         #[arg(long, value_name = "NAME", value_parser = crate::content::parse_hash)]
         hash: Option<String>,
+        /// The FastCDC chunk sizes of a new store: MIN/AVG/MAX in KiB,
+        /// powers of two, MAX at most 1024 (for example 16/64/256). Default
+        /// 4/8/32. The profile is fixed when the store is made, so a store
+        /// with another profile is refused.
+        #[arg(long, value_name = "MIN/AVG/MAX", value_parser = crate::content::parse_chunk_profile)]
+        chunk_profile: Option<ChunkProfile>,
     },
 
     /// Run offline garbage collection on a SliceFS block store.
@@ -281,10 +294,11 @@ mod tests {
     fn test_seed() {
         let cli = Cli::try_parse_from(["slicefs", "seed", "/data", "/src"]).unwrap();
         match cli.command {
-            Cmd::Seed { store, source_dir, hash } => {
+            Cmd::Seed { store, source_dir, hash, chunk_profile } => {
                 assert_eq!(store, PathBuf::from("/data"));
                 assert_eq!(source_dir, PathBuf::from("/src"));
                 assert!(hash.is_none(), "no --hash: keep the store's recorded hash");
+                assert!(chunk_profile.is_none(), "no --chunk-profile: keep the store's recorded profile");
             }
             _ => panic!("expected Seed"),
         }
@@ -310,6 +324,39 @@ mod tests {
         ] {
             let err = Cli::try_parse_from(args).expect_err("an unknown hash is refused").to_string();
             assert!(err.contains("unknown hash \"md5\"") && err.contains("blake3-256"), "{err}");
+        }
+    }
+
+    /// `--chunk-profile` takes MIN/AVG/MAX in KiB on seed and mount; a bad
+    /// profile is refused at parse.
+    #[test]
+    fn test_chunk_profile_flag() {
+        let cli = Cli::try_parse_from(["slicefs", "seed", "/data", "/src", "--chunk-profile", "16/64/256"]).unwrap();
+        match cli.command {
+            Cmd::Seed { chunk_profile, .. } => assert_eq!(chunk_profile, Some(ChunkProfile::new(16384, 65536, 262144).unwrap())),
+            _ => panic!("expected Seed"),
+        }
+        let cli = Cli::try_parse_from(["slicefs", "mount", "/mnt", "--store", "/data", "--chunk-profile", "4/8/32"]).unwrap();
+        match cli.command {
+            Cmd::Mount { chunk_profile, .. } => assert_eq!(chunk_profile, Some(ChunkProfile::DEFAULT)),
+            _ => panic!("expected Mount"),
+        }
+        let cli = Cli::try_parse_from(["slicefs", "mount", "/mnt", "--store", "/data"]).unwrap();
+        match cli.command {
+            Cmd::Mount { chunk_profile, .. } => assert!(chunk_profile.is_none()),
+            _ => panic!("expected Mount"),
+        }
+        for value in ["16/64", "12/24/48"] {
+            for args in [
+                &["slicefs", "mount", "/mnt", "--store", "/data", "--chunk-profile", value][..],
+                &["slicefs", "seed", "/data", "/src", "--chunk-profile", value][..],
+            ] {
+                let err = Cli::try_parse_from(args).expect_err("a bad profile is refused").to_string();
+                assert!(err.contains("chunk profile"), "{value}: {err}");
+                if value == "16/64" {
+                    assert!(err.contains("MIN/AVG/MAX"), "{err}");
+                }
+            }
         }
     }
 
