@@ -216,6 +216,9 @@ A read-only mount makes no `mount.lock`, so the commands that look for
   is not touched (it belongs to the holder). With the lock held, an existing
   `mount.lock` is a crash leftover, and the dirty-mount replay runs. Thus
   two writable mounts of one store cannot run at the same time (#201).
+  `slicefs unmount` returns only after the daemon has exited (with
+  `--store`: when the store lock is free), at most 30 s; so a mount or a
+  command right after it is not refused (M15, M14).
 - On a file system with no `flock`, there is no lock, and the commands run
   as with no read-only mount.
 
