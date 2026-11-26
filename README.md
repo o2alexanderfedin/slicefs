@@ -9,7 +9,7 @@ SliceFS splits files into variable-sized content-addressed blocks, stores each u
 - **Crash-safe**: write log with crash replay, scrub, and online and offline GC (it deletes, compacts, or punches holes in pack files).
 - **Snapshots**: point-in-time create / list / switch.
 - **Compression**: zstd per object (dedup works on the original bytes, before compression). `slicefs mount --compression zstd[:LEVEL]|none` sets it for the new data of a mount. 8 Boost releases (1.80 to 1.87, as tars) in one store: 6,222 MiB of data in 891 MiB (6.99x).
-- **Hash agility**: an object ID names its hash (a tag byte, then a 32-byte digest). `slicefs mount --hash NAME` (or `seed --hash`) changes the hash of new objects and records it in the store; objects of the old hash stay readable and verifiable.
+- **Hash agility**: an object ID names its hash (a tag byte, then a 32-byte digest). The hashes are BLAKE3-256 (the default) and SHA-256 (`--hash sha256`). `slicefs mount --hash NAME` (or `seed --hash`) changes the hash of new objects and records it in the store; objects of the old hash stay readable and verifiable. `slicefs rehash --to <hash> <store>` converts a whole store to one hash: offline, crash-safe, with `--dry-run` (`docs/design/chunk-store.md`).
 - **Chunk profile**: `slicefs seed --chunk-profile 16/64/256 ./my-store DIR` fixes the FastCDC min/avg/max (KiB, powers of two, max at most 1024) of a new store; the default is 4/8/32. A `seed` or `mount` with another profile is refused (`docs/research/chunk-profiles.md`).
 
 ## Why SliceFS (compared with dedup in other file systems)
@@ -60,7 +60,7 @@ Windows is deferred because `winfsp-rs` is GPL-3; native Projected FS or Dokan a
 │   ├── cas-local/             # Reference/test impls of the CAS traits (Blake3 hasher, fixed chunker, stores) — not used by the binary
 │   ├── chunk-store/           # FastCDC + BLAKE3 objects in pack files: index, zstd, crash scan, GC
 │   ├── metadata/              # Inodes, directories, manifests, xattrs, WAL, segments, snapshots, GC mark
-│   └── slicefs-cli/           # `slicefs` binary — mount, unmount, seed, gc, snapshot, stats, scrub
+│   └── slicefs-cli/           # `slicefs` binary — mount, unmount, seed, gc, rehash, snapshot, stats, scrub
 ├── benchmarks/
 ├── .github/workflows/ci.yml   # CI: cargo test + pjdfstest (Linux), cargo test (macOS)
 └── .planning/                 # Design docs, roadmap, phase artifacts
