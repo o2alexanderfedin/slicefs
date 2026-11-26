@@ -640,8 +640,8 @@ fn round_trip_large_profile_keys_equal_fresh_writes() {
 }
 
 /// A run to SHA-256 that a hook stops; the error text.
-fn stopped_run(store: &Path, stop_after: Option<Step>, stop_after_values: Option<u64>) -> String {
-    let args = RehashArgs { stop_after, stop_after_values, ..RehashArgs::new(store, "sha256", false) };
+fn stopped_run(store: &Path, stop_after: Option<Step>) -> String {
+    let args = RehashArgs { stop_after, ..RehashArgs::new(store, "sha256", false) };
     match rehash_report_with(&args, &mut |_| {}) {
         Ok(report) => panic!("the hook stops the run, but it ran:\n{report}"),
         Err(e) => e.to_string(),
@@ -705,7 +705,7 @@ fn crash_after_each_step_then_rerun() {
         let store = dir.path().join("store");
         let old = loader_roots(&store)[0];
         let before = record(&store);
-        let e = stopped_run(&store, Some(step), None);
+        let e = stopped_run(&store, Some(step));
         assert!(e.contains("test hook"), "{step:?}: {e}");
         let m = marker(&store);
         match step {
@@ -731,7 +731,7 @@ fn crash_inside_the_rewrite_then_rerun() {
     let store = dir.path().join("store");
     let old = loader_roots(&store)[0];
     let before = record(&store);
-    let e = stopped_run(&store, None, Some(3));
+    let e = rehash_report_with(&RehashArgs { stop_after_values: Some(3), ..RehashArgs::new(&store, "sha256", false) }, &mut |_| {}).unwrap_err().to_string();
     assert!(e.contains("stopped after 3 rewritten values") && e.contains("Nothing was switched"), "{e}");
     assert!(store.join(REHASH_TMP_DIR).exists());
     assert_opens(&store, &before, &Expect::Old(old));
@@ -748,7 +748,7 @@ fn crash_with_a_stale_seg_tmp_then_rerun() {
     let store = dir.path().join("store");
     let old = loader_roots(&store)[0];
     let before = record(&store);
-    stopped_run(&store, Some(Step::Synced), None);
+    stopped_run(&store, Some(Step::Synced));
     let junk = store.join("segments").join("segment-999999.seg.tmp");
     std::fs::write(&junk, b"a switch segment cut by a crash").unwrap();
     assert_opens(&store, &before, &Expect::Old(old));
@@ -768,7 +768,7 @@ fn crash_with_old_segments_left_after_the_switch() {
     let before = record(&store);
     let old_segments: Vec<(String, Vec<u8>)> =
         segment_names(&store).into_iter().map(|n| { let b = std::fs::read(segs.join(&n)).unwrap(); (n, b) }).collect();
-    stopped_run(&store, Some(Step::Switched), None);
+    stopped_run(&store, Some(Step::Switched));
     for (n, b) in &old_segments {
         assert!(!segs.join(n).exists(), "the switch removed {n}");
         std::fs::write(segs.join(n), b).unwrap();

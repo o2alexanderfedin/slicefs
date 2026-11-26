@@ -110,3 +110,14 @@ Lines:
 - 668: `Expect::New`, a snapshot root is old (G6).
 - 646: the hooked run did not stop (G5).
 - 716: after `FlagWritten`, the header has no flag (G7).
+
+### Later change (same line count)
+`crash_inside_the_rewrite_then_rerun` now builds `RehashArgs {
+stop_after_values: Some(3), .. }` itself, and `stopped_run` takes only
+`stop_after`. The line numbers above did not move. G5 was run again on the
+new form:
+
+test crash_inside_the_rewrite_then_rerun ... FAILED
+thread 'crash_inside_the_rewrite_then_rerun' panicked at crates/slicefs-cli/tests/rehash_tests.rs:734:133:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 2.41s
+(734 is the `unwrap_err()` of the hooked run: the run did not stop)
