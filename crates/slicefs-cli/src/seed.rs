@@ -34,7 +34,13 @@ const S_IFDIR: u32 = 0o040_000;
 /// `hash` is `--hash`: the write hash of the new objects (`None`: the
 /// store's recorded hash, blake3-256 for a new store).
 pub fn run_seed(store_path: &Path, source_dir: &Path, hash: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    // The store header first: a new store gets it durably before `packs/`
+    // The exclusive store lock first, held to the end: seed writes a new
+    // root (and with --hash, the header), so it must not run beside a
+    // mount or an offline command (#201). The directory is made first so a
+    // new store can be locked too.
+    std::fs::create_dir_all(store_path)?;
+    let _store_lock = crate::header::lock_offline(store_path)?;
+    // The store header: a new store gets it durably before `packs/`
     // and `segments/` exist (with the hash of `--hash`); a store that this
     // build may not write is refused.
     if let Some(line) = content::check_write(store_path, hash)? {

@@ -112,7 +112,7 @@ cp file.bin /tmp/sfs/
 slicefs stats ./my-store
 slicefs snapshot list ./my-store
 
-# Unmount
+# Unmount (returns when the daemon has exited and the store is free)
 slicefs unmount /tmp/sfs
 ```
 

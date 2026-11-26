@@ -22,7 +22,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use fuser::{mount, Config, MountOption, SessionACL};
@@ -38,22 +38,37 @@ use crate::util::ts;
 
 // ── Store loading ─────────────────────────────────────────────────────────────
 
-/// The store of a writable mount: the metadata, its node store and the mount lock.
-type LoadedStore = (DictMetadataStore, Arc<Mutex<StoreIo>>, MountLock);
+/// The locks of a writable mount (#201): `mount.lock` and the exclusive
+/// store lock. The fields drop in their order: `mount.lock` is removed
+/// first, and the store lock is released last.
+pub struct WriteLocks {
+    /// `mount.lock`, the dirty-mount marker.
+    pub(crate) mount: MountLock,
+    /// The exclusive store lock (`header::lock_write_mount`).
+    pub(crate) store: header::StoreLock,
+}
 
-/// Load a seeded store from disk, returning `(DictMetadataStore, Arc<Mutex<StoreIo>>, MountLock)`.
+/// The store of a writable mount: the metadata, its node store and its locks.
+type LoadedStore = (DictMetadataStore, Arc<Mutex<StoreIo>>, WriteLocks);
+
+/// Load a seeded store from disk, returning `(DictMetadataStore, Arc<Mutex<StoreIo>>, WriteLocks)`.
 ///
-/// The returned `MountLock` must be kept alive for the duration of the mount;
-/// dropping it removes `mount.lock` from the store directory.
+/// The returned `WriteLocks` must be kept alive for the duration of the mount;
+/// dropping it removes `mount.lock` from the store directory, then releases
+/// the store lock.
 ///
 /// Steps:
 /// 1. Reject legacy `dictionary.bin` stores — re-seed required.
-/// 2. Acquire `mount.lock` (returns `DirtyMount` if previous mount crashed).
+/// 2. Take the exclusive store lock, with no wait. If another mount or an
+///    offline command holds it, refuse ("in use") and leave `mount.lock` as
+///    it is: it belongs to that holder.
+/// 3. Acquire `mount.lock` (returns `DirtyMount` if previous mount crashed).
+///    With the store lock held, an existing `mount.lock` is a crash leftover.
 ///    On dirty mount, segment-based WAL replay is implicit (re-loading segments
 ///    replays all mutations that were durably written before the crash).
-/// 3. Load state from segment files.
-/// 4. Reconstruct `DictMetadataStore` via `load_from_root`.
-/// 5. Create WAL with `wal_config` and attach it to the store.
+/// 4. Load state from segment files.
+/// 5. Reconstruct `DictMetadataStore` via `load_from_root`.
+/// 6. Create WAL with `wal_config` and attach it to the store.
 ///
 /// `hash` is `--hash`: a new write hash, recorded under the mount lock
 /// before the store opens (`None` keeps the recorded one).
@@ -81,8 +96,14 @@ pub fn load_store(
         return Err(header::msg_ro_write(store_path, &flag).into());
     }
 
-    // Step 2: Acquire mount lock.
-    // DirtyMount means a previous mount crashed — segments already contain all
+    // Step 2: the exclusive store lock, before mount.lock (#201). If it is
+    // held, a live daemon (or an offline command) owns the store and its
+    // mount.lock: refuse, and touch nothing.
+    let store_lock = header::lock_write_mount(store_path)?;
+
+    // Step 3: Acquire mount lock.
+    // With the store lock held, no other mount runs: DirtyMount means a
+    // previous mount crashed — segments already contain all
     // durably written mutations, so re-loading segments is idempotent WAL replay.
     let lock_result = acquire_mount_lock(store_path);
     let mount_lock = match lock_result {
@@ -97,7 +118,7 @@ pub fn load_store(
         Err(e) => return Err(format!("mount lock error: {}", e).into()),
     };
 
-    // Step 3: Load state from segment files.
+    // Step 4: Load state from segment files.
     let segs_dir = store_path.join("segments");
     let (last_root, snapshots) = load_store_from_segments(&segs_dir)
         .map_err(|e| format!("failed to load segments: {}", e))?;
@@ -106,7 +127,7 @@ pub fn load_store(
         format!("no committed state found in segments at {}", segs_dir.display())
     })?;
 
-    // Step 4: Reconstruct the metadata store on the chunk store (StoreIo), with the
+    // Step 5: Reconstruct the metadata store on the chunk store (StoreIo), with the
     // write hash of `--hash` (recorded now, under the lock).
     crate::content::select_hash(store_path, hash)?;
     chunk_store::retry::LOG_SYNCS.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -117,7 +138,7 @@ pub fn load_store(
     // Restore snapshot list from segment replay.
     meta.set_snapshots(snapshots);
 
-    // Step 5: Create WAL and attach to store.
+    // Step 6: Create WAL and attach to store.
     // Determine next segment_id from existing segments.
     let next_segment_id = next_segment_id(&segs_dir);
     std::fs::create_dir_all(&segs_dir)?;
@@ -125,7 +146,7 @@ pub fn load_store(
         .map_err(|e| format!("failed to create WAL: {}", e))?;
     meta.set_wal(wal);
 
-    Ok((meta, io, mount_lock))
+    Ok((meta, io, WriteLocks { mount: mount_lock, store: store_lock }))
 }
 
 /// The store of a read-only mount: the metadata and its node store.
@@ -304,7 +325,7 @@ fn set_test_panic_create(fs: &SliceFsFilesystem) {
     );
     let seen = std::sync::atomic::AtomicU64::new(0);
     fs.test_set_mkdir_hook(Some(Arc::new(move || {
-        if seen.fetch_add(1, Ordering::SeqCst) + 1 == k {
+        if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == k {
             panic!("SLICEFS_TEST_PANIC_CREATE: test panic in new entry number {k}");
         }
     })));
@@ -352,16 +373,16 @@ pub struct Started {
     flusher_fs: Option<Arc<SliceFsFilesystem>>,
     /// The online GC thread (`None`: not started) and its stop flag.
     online_gc: Option<std::thread::JoinHandle<()>>,
-    online_gc_shutdown: Arc<AtomicBool>,
+    online_gc_shutdown: Arc<crate::stop::StopSignal>,
     /// The segment GC thread (`None`: not started).
     segment_gc: Option<metadata::gc::background::GcHandle>,
     /// The commit timer thread (`None`: not started) and its stop flag.
     commit_timer: Option<std::thread::JoinHandle<()>>,
-    commit_shutdown: Arc<AtomicBool>,
+    commit_shutdown: Arc<crate::stop::StopSignal>,
     /// `mount.lock` (`None`: no lock taken). Dropped last.
     lock: Option<MountLock>,
-    /// The shared store lock of a read-only mount (`None`: not taken).
-    /// Dropped last.
+    /// The store lock: shared for a read-only mount, exclusive for a
+    /// writable mount (#201). Dropped last, after `lock`.
     store_lock: Option<header::StoreLock>,
 }
 
@@ -393,20 +414,29 @@ pub fn start(
     let snapshot_ref = args.snapshot_ref.as_deref();
     let wal_config = parse_wal_config(args.wal_strategy.as_deref());
 
-    // Read and write: today's load (lock, write hash, writable store, write
-    // log). Read-only: no mount.lock, no write log, a read-only store; the
-    // shared store lock first, so a SliceFS that can write the store sees
-    // the mount (no file is written for it).
-    let (meta, io, mount_lock, store_lock) = match &access {
+    // Read and write: today's load (the exclusive store lock, mount.lock,
+    // write hash, writable store, write log). Read-only: no mount.lock, no
+    // write log, a read-only store; the shared store lock first, so a
+    // SliceFS that can write the store sees the mount (no file is written
+    // for it).
+    // The locks are declared before everything else of the mount, so on an
+    // error below (`?`) they drop after it, the store lock last (#201).
+    let store_lock: Option<header::StoreLock>;
+    let mount_lock: Option<MountLock>;
+    let (meta, io) = match &access {
         header::Access::ReadWrite => {
-            let (meta, io, lock) = load_store(store_path, wal_config, args.hash.as_deref())?;
-            (meta, io, Some(lock), None)
+            let (meta, io, locks) = load_store(store_path, wal_config, args.hash.as_deref())?;
+            store_lock = Some(locks.store);
+            mount_lock = Some(locks.mount);
+            (meta, io)
         }
         header::Access::ReadOnly(flag) => {
-            let store_lock = header::lock_read_mount(store_path)?;
+            let lock = header::lock_read_mount(store_path)?;
             let (meta, io) = load_store_read_only(store_path, flag)?;
             println!("{}", header::msg_mount_read_only(store_path, flag));
-            (meta, io, None, Some(store_lock))
+            store_lock = Some(lock);
+            mount_lock = None;
+            (meta, io)
         }
     };
     // Replay, flusher and online GC: only a writable mount of the current
@@ -485,7 +515,7 @@ pub fn start(
 
     // GC of the stored objects while mounted (#25). Not on a snapshot mount:
     // its metadata is the snapshot, not the current root.
-    let online_gc_shutdown = Arc::new(AtomicBool::new(false));
+    let online_gc_shutdown = crate::stop::StopSignal::new();
     let online_gc = writable.then(|| {
         crate::online_gc::spawn_online_gc(
             Arc::downgrade(&fs),
@@ -507,7 +537,7 @@ pub fn start(
     });
 
     // Commit metadata periodically, so a crash does not lose everything since mount (#18).
-    let commit_shutdown = Arc::new(AtomicBool::new(false));
+    let commit_shutdown = crate::stop::StopSignal::new();
     let commit_timer = (access.is_read_write() && args.commit_interval_secs > 0).then(|| {
         crate::commit_timer::spawn_commit_timer(
             Arc::downgrade(&fs),
@@ -534,8 +564,10 @@ pub fn start(
 
 impl Started {
     /// Stop what [`start`] started, in this order: the flusher, the online
-    /// GC, the commit timer, the segment GC; then drop the file system and,
-    /// last, the mount lock (its drop removes `mount.lock`). Run it after
+    /// GC, the commit timer, the segment GC; then drop the file system,
+    /// then the mount lock (its drop removes `mount.lock`) and, last, the
+    /// store lock, so no other mount or offline command starts before all
+    /// of this ended. Run it after
     /// the FUSE session ended (`destroy` ran), also when the mount failed.
     pub fn stop(self) {
         let Started {
@@ -557,11 +589,11 @@ impl Started {
             fs.stop_flusher();
         }
         // Stop the GC thread before mount.lock is released.
-        online_gc_shutdown.store(true, Ordering::SeqCst);
+        online_gc_shutdown.stop();
         if let Some(h) = online_gc {
             let _ = h.join();
         }
-        commit_shutdown.store(true, Ordering::SeqCst);
+        commit_shutdown.stop();
         if let Some(h) = commit_timer {
             let _ = h.join();
         }
@@ -712,7 +744,7 @@ pub fn run_mount(
     // the session would never end (no destroy, no final commit): end it when
     // the mount is gone.
     #[cfg(target_os = "macos")]
-    let unmount_watch_shutdown = Arc::new(AtomicBool::new(false));
+    let unmount_watch_shutdown = crate::stop::StopSignal::new();
     #[cfg(target_os = "macos")]
     let unmount_watch =
         crate::fuset_watch::spawn_unmount_watcher(mountpoint, mounted_msg, Arc::clone(&unmount_watch_shutdown));
@@ -741,7 +773,7 @@ pub fn run_mount(
 
     #[cfg(target_os = "macos")]
     {
-        unmount_watch_shutdown.store(true, Ordering::SeqCst);
+        unmount_watch_shutdown.stop();
         let seen = unmount_watch.join().unwrap_or(true);
         if mounted.is_ok() && !seen {
             mounted = Err(std::io::Error::other(format!(
@@ -1376,6 +1408,50 @@ mod tests {
         let err = start(&store, &ro_args(), None).err().expect("the mount is refused").to_string();
         assert!(err.contains("is in use"), "{err}");
         drop(held);
+    }
+
+    /// #201: a writable mount holds the exclusive store lock from `start`
+    /// to the end of `stop`: a second mount and the offline commands are
+    /// refused with "in use", and the second mount leaves `mount.lock` of
+    /// the first in place. After `stop`, the store is free again.
+    #[test]
+    fn a_writable_mount_holds_the_store_lock_until_stop() {
+        let dir = ro_fixture(false);
+        let store = dir.path().join("store");
+        let s = start(&store, &ro_args(), None).expect("start");
+        assert_eq!(s.access, header::Access::ReadWrite);
+        let err = start(&store, &ro_args(), None).err().expect("a second mount is refused").to_string();
+        assert!(err.contains("in use"), "{err}");
+        assert!(store.join("mount.lock").exists(), "the second mount leaves mount.lock in place");
+        assert!(header::lock_offline(&store).is_err(), "offline commands see the mount");
+        let t0 = tree(&store);
+        let seed = crate::seed::run_seed(&store, &dir.path().join("src"), None).expect_err("seed is refused");
+        assert!(seed.to_string().contains("in use"), "{seed}");
+        assert!(tree(&store) == t0, "the refused seed wrote nothing");
+        fuser::Filesystem::destroy(&mut crate::fuse_callbacks::MountedFs::new(Arc::clone(&s.fs), None));
+        assert!(header::lock_offline(&store).is_err(), "the store lock is held after destroy, until stop");
+        s.stop();
+        assert!(!store.join("mount.lock").exists());
+        drop(header::lock_offline(&store).expect("the store is free after stop"));
+    }
+
+    /// A stop with nothing to write does not wait for a tick of a thread
+    /// (the online GC polls every 500 ms, the commit timer every 100 ms):
+    /// each thread wakes at once. The bound has a wide slack; the stop
+    /// takes a few ms.
+    #[test]
+    fn a_stop_does_not_wait_for_a_thread_tick() {
+        let dir = ro_fixture(false);
+        let store = dir.path().join("store");
+        let args = StartArgs { commit_interval_secs: 30, gc_interval_secs: 60, ..Default::default() };
+        let s = start(&store, &args, None).expect("start");
+        // The threads are now in their waits.
+        std::thread::sleep(Duration::from_millis(50));
+        fuser::Filesystem::destroy(&mut crate::fuse_callbacks::MountedFs::new(Arc::clone(&s.fs), None));
+        let t = std::time::Instant::now();
+        s.stop();
+        let took = t.elapsed();
+        assert!(took < Duration::from_millis(200), "stop took {took:?}");
     }
 
     /// Control of the tracer: the same steps on a normal store change its

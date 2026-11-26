@@ -449,8 +449,10 @@ fn has_data(store: &Path) -> std::io::Result<bool> {
 
 /// A `flock` on the store directory, held until the drop. A read-only
 /// mount holds it shared for its life (it writes nothing to the store, so
-/// it makes no `mount.lock`); a command that needs no live mount (offline
-/// gc, snapshot create, snapshot switch) holds it exclusive while it runs.
+/// it makes no `mount.lock`); a writable mount holds it exclusive for its
+/// life (taken before `mount.lock`, released after it); a command that
+/// needs no live mount (offline gc, snapshot create, snapshot switch)
+/// holds it exclusive while it runs.
 /// The lock is on the directory and not on FORMAT, because a header
 /// rewrite replaces the FORMAT file. A file system with no `flock` gives no
 /// lock (the commands run as before).
@@ -459,11 +461,30 @@ pub struct StoreLock {
     _dir: Option<std::fs::File>,
 }
 
-/// Take the store lock of `store`, shared or exclusive, with no wait.
-/// `Ok(None)` when another holder makes it wait.
+/// Take the store lock of `store`, shared or exclusive, without blocking.
+/// `Ok(None)` when another holder keeps it for more than `LOCK_RETRY`.
+///
+/// The short retry is for a false "held": the lock belongs to the open
+/// directory handle, and a child process that another thread of this process
+/// starts at that moment holds a copy of the handle for a short time (seen on
+/// macOS: about 5% of immediate re-locks with 4 threads that spawn). A real
+/// holder, such as a live mount, keeps it, and the caller is refused after
+/// the retry.
 fn try_store_lock(store: &Path, shared: bool) -> std::io::Result<Option<StoreLock>> {
+    const LOCK_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+    const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(10);
     let dir = std::fs::File::open(store)?;
-    let r = if shared { dir.try_lock_shared() } else { dir.try_lock() };
+    let start = std::time::Instant::now();
+    loop {
+        let r = if shared { dir.try_lock_shared() } else { dir.try_lock() };
+        match r {
+            Err(std::fs::TryLockError::WouldBlock) if start.elapsed() < LOCK_RETRY => std::thread::sleep(LOCK_POLL),
+            r => return lock_result(dir, r),
+        }
+    }
+}
+
+fn lock_result(dir: std::fs::File, r: Result<(), std::fs::TryLockError>) -> std::io::Result<Option<StoreLock>> {
     match r {
         Ok(()) => Ok(Some(StoreLock { _dir: Some(dir) })),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
@@ -472,19 +493,30 @@ fn try_store_lock(store: &Path, shared: bool) -> std::io::Result<Option<StoreLoc
     }
 }
 
-/// The shared store lock of a read-only mount. Refused while a command
-/// that writes (offline gc, snapshot create or switch) holds it.
+/// The shared store lock of a read-only mount. Refused while a writable
+/// mount or a command that writes (offline gc, snapshot create or switch)
+/// holds it.
 pub fn lock_read_mount(store: &Path) -> std::io::Result<StoreLock> {
     try_store_lock(store, true)?.ok_or_else(|| {
-        refuse(format!("{} is in use: a command that writes it (gc, snapshot create or snapshot switch) runs now. Mount it when that command ends.", store.display()))
+        refuse(format!("{} is in use: it is mounted to write, or a command that writes it (gc, seed, snapshot create or snapshot switch) runs now. Mount it when that mount or command ends.", store.display()))
     })
 }
 
 /// The exclusive store lock of a command that needs no live mount.
-/// Refused while a read-only mount (or another such command) holds it.
+/// Refused while a mount (or another such command) holds it.
 pub fn lock_offline(store: &Path) -> std::io::Result<StoreLock> {
     try_store_lock(store, false)?.ok_or_else(|| {
-        refuse(format!("{} is in use: it is mounted read-only, or another command (gc, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.", store.display()))
+        refuse(format!("{} is in use: it is mounted, or another command (gc, seed, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.", store.display()))
+    })
+}
+
+/// The exclusive store lock of a writable mount, held for the life of the
+/// daemon (#201). Refused while another mount or a command that needs no
+/// live mount holds it; then `mount.lock` belongs to that holder and is
+/// not touched.
+pub fn lock_write_mount(store: &Path) -> std::io::Result<StoreLock> {
+    try_store_lock(store, false)?.ok_or_else(|| {
+        refuse(format!("{} is in use: it is mounted, or a command (gc, seed, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.", store.display()))
     })
 }
 
@@ -587,6 +619,27 @@ mod tests {
     fn decide_text(text: &str, want: Want) -> std::io::Result<Access> {
         let store = Path::new(STORE);
         decide(store, &parse(store, text)?, want)
+    }
+
+    /// A child process that another thread starts holds a copy of the lock's
+    /// directory handle for a moment, so an immediate re-lock can see a false
+    /// "held". The short retry in `try_store_lock` must hide it.
+    #[test]
+    fn a_relock_is_not_refused_while_another_thread_spawns_processes() {
+        let d = tempfile::tempdir().unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spawner = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::process::Command::new("true").status();
+                }
+            })
+        };
+        let refused = (0..300).filter(|_| lock_offline(d.path()).is_err()).count();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        spawner.join().unwrap();
+        assert_eq!(refused, 0, "re-locks refused while another thread spawns");
     }
 
     fn ro_flag() -> Flag {
