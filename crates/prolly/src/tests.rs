@@ -433,8 +433,10 @@ fn canonical_root() {
     // (a) no keys; (b) one key; (c) two keys.
     for keep in [0usize, 1, 2] {
         let mut m: Model = es.iter().cloned().collect();
-        let (r, _) = apply_checked(&s, cfg, &root, &mut m, &dels(es[keep..].iter().map(|(k, _)| k)));
+        let (r, st) = apply_checked(&s, cfg, &root, &mut m, &dels(es[keep..].iter().map(|(k, _)| k)));
         assert_eq!(m.len(), keep);
+        // The batch itself (8-byte keys) counts in the high water.
+        assert!(st.high_water_bytes >= 8 * (es.len() - keep), "{st:?}");
         if keep == 0 {
             assert_eq!(r, empty);
         }

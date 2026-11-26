@@ -262,6 +262,10 @@ fn rewrite_level(w: &mut Work, root: &Root, level: u8, ops: &[Op]) -> Result<Rew
     let mut cur = LevelCursor::new(w, root, level)?;
     let mut out = Rewrite { new: Vec::new(), old: Vec::new() };
     let mut out_bytes = 0usize;
+    // The subtree counts pushed in this pass. In a valid tree they sum to at
+    // most the entries of the new tree; a crafted count that passes u64 is
+    // an error here, before any writer adds it.
+    let mut counts = 0u64;
     let mut i = 0;
     while i < ops.len() {
         cur.seek(w, &ops[i].0)?;
@@ -275,6 +279,7 @@ fn rewrite_level(w: &mut Work, root: &Root, level: u8, ops: &[Op]) -> Result<Rew
                 i + ops[i..].partition_point(|(k, _)| k.as_slice() <= c.last_key.as_slice())
             };
             let held = cur.held() + nb + pending;
+            w.note(held + lw.buffered_bytes() + out_bytes);
             let mut old = entries(n).into_iter().peekable();
             let mut ed = ops[i..j].iter().peekable();
             loop {
@@ -303,6 +308,11 @@ fn rewrite_level(w: &mut Work, root: &Root, level: u8, ops: &[Op]) -> Result<Rew
                         None => break,
                     }
                 };
+                if let Payload::Child { count, .. } = &p {
+                    counts = counts
+                        .checked_add(*count)
+                        .ok_or_else(|| Error::Corrupt("prolly node: subtree count above u64".into()))?;
+                }
                 if let Some(r) = push(w, &mut lw, k, p)? {
                     out_bytes += r.last_key.len() + ID_LEN + 8;
                     out.new.push(r);

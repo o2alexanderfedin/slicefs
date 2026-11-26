@@ -92,13 +92,8 @@ impl LevelWriter {
         child: Child,
         stats: &mut BuildStats,
     ) -> Result<Option<NodeRef>> {
-        // Counts of old children come from the store (apply): a crafted
-        // count must give an error, not an overflow.
-        self.count = self
-            .count
-            .checked_add(child.count)
-            .ok_or_else(|| Error::Corrupt("prolly node: subtree count above u64".into()))?;
         let cut = self.splitter.push(cfg, self.level, &child.last_key, internal_entry_len(child.last_key.len()));
+        self.count += child.count;
         self.children.push(child);
         if cut {
             self.flush(store, stats)
@@ -207,12 +202,13 @@ impl<'s> Builder<'s> {
 
     /// Adds a finished node of level `base - 1`; its last key must be above
     /// the last one.
+    #[allow(dead_code, reason = "the caller is apply in plan 24-02")]
     pub(crate) fn push_node(&mut self, r: NodeRef) -> Result<()> {
         debug_assert!(self.base > 0, "nodes go to a builder above level 0");
         self.check_order(&r.last_key)?;
         self.pushed += 1;
         self.last_pushed = Some(r.id);
-        self.stats.entries = self.stats.entries.saturating_add(r.count);
+        self.stats.entries += r.count;
         let child = Child { last_key: r.last_key, id: r.id, count: r.count };
         let out = self.levels[0].push_child(self.store, &self.cfg, child, &mut self.stats)?;
         self.cascade(0, out)?;
