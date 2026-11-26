@@ -36,13 +36,13 @@
     {
       "number": "24",
       "name": "Prolly evaluation",
-      "status": "in_progress"
+      "status": "complete"
     }
   ],
   "next": {
-    "command": "/gsd-progress --next",
-    "label": "Advance to the next step (verify)",
-    "reason": "Phase 9 of 9 · 67% · ready to verify"
+    "command": "/gsd-new-milestone",
+    "label": "Start a new milestone",
+    "reason": "All phases complete — start a new milestone"
   },
-  "updated_at": "2026-11-26T23:04:19.678Z"
+  "updated_at": "2026-11-26T23:28:11.544Z"
 }
