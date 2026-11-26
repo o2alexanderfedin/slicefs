@@ -8,6 +8,7 @@ members = [
     "crates/prolly",
     "benchmarks/chunk-bench",
     "benchmarks/index-bench",
+    "benchmarks/prolly-bench",
 ]
 exclude = ["vendor/fuser"]
 resolver = "2"

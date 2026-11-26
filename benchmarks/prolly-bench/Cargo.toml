@@ -1,0 +1,18 @@
+[package]
+name = "prolly-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Measure the prolly prototype against the metadata commit path (#19)"
+
+[dependencies]
+prolly = { path = "../../crates/prolly" }
+chunk-store = { path = "../../crates/chunk-store" }
+metadata = { path = "../../crates/metadata" }
+slicefs-traits = { path = "../../crates/slicefs-traits" }
+slicefs-cli = { path = "../../crates/slicefs-cli" }
+blake3.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
