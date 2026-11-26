@@ -34,8 +34,8 @@ table from the CSV files.
   costs flat 229.9 ms (208.7 CPU ms, 164,000 KB serialized, 589.5 MiB peak
   RSS), and prolly 21.8 ms (0.8 CPU ms, 10.7 KB, 94.2 MiB). By the scale
   rows, one flat map passes 100 ms per commit at about 1.7 million entries.
-- Disk: over 81 small commits and the version step, the flat store grew by
-  31.2 MiB and the prolly store by 17.5 MiB (apparent size, before GC).
+- Disk: over the 80 small commits and the version step, the flat store grew
+  by 31.2 MiB and the prolly store by 17.5 MiB (apparent size, before GC).
 - File manifests are already content-cut trees, and every metadata map node
   is already a FastCDC-cut value. A commit stores only the changed chunks of
   a map. The cost that is left is the full serialization, the hashing and the
@@ -164,8 +164,8 @@ to 21.4 ms in 19 of the 24 small-commit groups, and 23.5 to 40.4 ms in the
 other five (`whole` scatter and cluster K = 1,000, `flat` and `prolly`
 scatter K = 1,000, and `prolly` scatter K = 100). The gap is about the
 same in the three modes. So for small commits the wall time is mostly the
-sync, and a difference of one sync (about 20 ms) between two medians is
-noise of the disk, not work of the map. The CPU time, the serialized bytes
+sync, and a difference of one sync (about 20 ms) between two medians comes
+from the disk, not from the work of the map. The CPU time, the serialized bytes
 and the scale rows show the work. The decision below uses them first (a
 reading of this plan, recorded in the plan summary). On Linux (see "Linux
 Docker run") the gap is about 2 to 3 ms.
@@ -208,7 +208,9 @@ grows with the number of touched leaves: 5.8 CPU ms at scatter K = 100 and
 (21,521 changed entries) costs prolly 79.9 CPU ms and flat 27.2: a large
 batch is cheaper as a full rewrite. The prolly wall time at scatter K = 100
 (45.7 ms) is high because most syncs of that group took about 40 ms, not 20
-(median wall minus CPU 40.4 ms); its CPU time is lower than flat's.
+(median wall minus CPU 40.4 ms); its CPU time is lower than flat's. The 40 ms
+does not grow with the nodes written: prolly scatter K = 1,000 writes 401
+nodes and its median gap is 23.5 ms. The cause was not measured.
 
 ### Bytes per commit
 
@@ -271,13 +273,12 @@ and the fixed costs of a commit stay.
 
 The whole process reaches 103.4 MiB after the store load and 390.0 MiB at
 the end. Its high-water mark grows with every commit (123.3 MiB after the
-setup commit, 328.6 MiB before the version step, from the `maxrss_bytes`
-column), so a part of it is the chunk store and the allocator, not only the
-maps. The flat process, which holds only `inode_data` and its chunk store,
-reaches 107.8 MiB; the prolly process 26.6 MiB, with no map in RAM. On
-Linux the same processes peak at 147.8, 23.3 and 13.8 MiB (see "Linux Docker
-run"), so a large part of the macOS high-water mark is memory that the
-allocator keeps.
+setup commit and 328.6 MiB in the cluster K = 1,000 row, from the
+`maxrss_bytes` column), so it is not only the maps; the parts were not
+measured. The flat process, which holds only `inode_data` and its chunk
+store, reaches 107.8 MiB; the prolly process 26.6 MiB, with no map in RAM.
+On Linux the same processes peak at 147.8, 23.3 and 13.8 MiB (see "Linux
+Docker run"). The cause of the higher macOS numbers was not measured.
 
 ### On-disk size
 
@@ -287,7 +288,8 @@ allocator keeps.
 | flat | 2.7 | 33.9 | 31.2 | 2.7 | 34.1 | 31.4 | 1 |
 | prolly | 2.9 | 20.4 | 17.5 | 2.9 | 21.3 | 18.4 | 1 |
 
-After 81 small commits and the version step, with no GC, the prolly store
+After the 80 small commits and the version step (81 commits after the bulk
+build), with no GC, the prolly store
 of `inode_data` grew by 17.5 MiB and the flat store by 31.2 MiB (44 % less).
 The start sizes are close (2.9 against 2.7 MiB): a prolly node holds 41
 bytes per entry plus the length fields, and its 33-byte digests do not
@@ -308,8 +310,8 @@ edits and the creates, and the content of the version step.
 The cost of one small change grows linearly with N for flat (6.0, 42.2 and
 208.7 CPU ms), and stays near 0.8 CPU ms for prolly (one path of 3 or 4
 nodes). Flat's peak RSS also grows with N (24.5 to 589.5 MiB); prolly's grows
-less (7.9 to 94.2 MiB; at 4,000,000 entries that is mostly the chunk store
-with 49,012 objects). A bulk build is 1.7 to 2.2 times as slow for prolly
+less (7.9 to 94.2 MiB; on Linux 7.4 to 21.6 MiB with the same 49,012 new
+objects at 4,000,000 entries; what uses the memory was not measured). A bulk build is 1.7 to 2.2 times as slow for prolly
 as a full flat intern. By linear interpolation of the flat `apply1` wall times
 between the 1,000,000 and 4,000,000 rows, one flat map passes 100 ms per
 commit at about 1.67 million entries (by CPU time alone, at about 2.04
@@ -353,9 +355,10 @@ prolly-linux` of the tables script).
   cannot read the read-only source mount in the container; the source was
   the same work tree (commit `e16962c`, same code as `50965cb`).
 - Start 2026-11-26T20:44:32Z, end 20:47:09Z, 3 runs, no fallback, 6 digest
-  checks `ok=1`. The load in the VM was 2.40 before and 1.17 after. The host
-  was not quiet: jobs of other projects ran there (host 1-minute load about
-  8).
+  checks `ok=1`. The load in the VM was 2.40 before and 1.17 after. No host
+  load was read during this run; the last host reading, at the end of the
+  macOS run (20:42:59Z), was 7.79, with jobs of other projects running. So
+  the host was not quiet.
 
 The byte, object and node counts are the same as on macOS, or close. In the
 prolly rows the entries, serialized bytes, new objects and nodes read and
@@ -685,10 +688,11 @@ What would change the choice:
   interval much shorter than today's, would make the O(N) serialization the
   main cost. Then a new run of this benchmark at that scale (the scale rows,
   or a seeded tree of that size) should decide Q-1.
-- A cheaper first step exists without a format question of this size:
-  `inode_map` and `inode_data` hold the same entries, so one of the two can
-  go. That removes about a third of the serialized bytes per commit for all
-  K.
+- A smaller first step exists: `inode_map` and `inode_data` hold the same
+  entries, so one of the two can go. That removes about a third of the
+  serialized bytes per commit for all K. It changes the root record (one map
+  key less), so it is also a format change and an owner decision, but a much
+  smaller one than prolly maps.
 - If snapshot diff or sync between stores becomes a goal, the subtree skip
   of prolly roots adds a reason that this benchmark does not measure.
 
