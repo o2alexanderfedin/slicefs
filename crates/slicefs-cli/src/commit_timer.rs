@@ -15,7 +15,6 @@
 //! root record) runs after the gate is released, so FUSE requests wait only
 //! for the cut.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -23,6 +22,7 @@ use std::time::{Duration, Instant};
 use chunk_store::sync::raw::RwLock;
 
 use crate::filesystem::SliceFsFilesystem;
+use crate::stop::StopSignal;
 use slicefs_traits::metadata::MetaError;
 
 use crate::util::ts;
@@ -89,26 +89,23 @@ fn commit(fs: &SliceFsFilesystem, gate: &RwLock<()>, check_shutdown: bool) -> Re
     Ok(Some(CommitTimes { gate_wait, hold, total: w.elapsed() }))
 }
 
-/// Start the timer thread. It stops when `shutdown` is set, the store is
+/// Start the timer thread. It stops at once when `shutdown` is stopped, the store is
 /// dropped, or a commit finds the file system shut down.
 pub fn spawn_commit_timer(
     fs: Weak<SliceFsFilesystem>,
     gate: Arc<RwLock<()>>,
     interval: Duration,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<StopSignal>,
 ) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("slicefs-commit".into())
         .spawn(move || loop {
-            let start = Instant::now();
-            while start.elapsed() < interval {
-                if shutdown.load(Ordering::SeqCst) {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(100).min(interval));
+            // A stop wakes the wait at once.
+            if shutdown.wait(interval) {
+                return;
             }
             let Some(fs) = fs.upgrade() else { return };
-            if shutdown.load(Ordering::SeqCst) {
+            if shutdown.is_stopped() {
                 return;
             }
             if !fs.meta().has_uncommitted_changes() {
@@ -129,6 +126,7 @@ pub fn spawn_commit_timer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use crate::filesystem::SliceFsFilesystem;
     use metadata::store::DictMetadataStore;
     use slicefs_traits::metadata::MetadataStore;
@@ -151,7 +149,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
         let fs = Arc::new(SliceFsFilesystem::new(DictMetadataStore::new(io.clone()), io.clone(), None));
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = crate::stop::StopSignal::new();
         let h = spawn_commit_timer(Arc::downgrade(&fs), fs.commit_gate(), Duration::from_millis(200), stop.clone());
 
         let (ino, fh) = fs.test_create(1, "f", 0o100_644, 0o022, 0, 0).unwrap();
@@ -176,7 +174,7 @@ mod tests {
         // No change: no new commit.
         std::thread::sleep(Duration::from_millis(500));
         assert_eq!(fs.meta().current_root(), Some(root));
-        stop.store(true, Ordering::SeqCst);
+        stop.stop();
         h.join().unwrap();
     }
 
@@ -221,10 +219,10 @@ mod tests {
         let root = fs.meta().current_root();
         fs.test_create(1, "late", 0o100_644, 0o022, 0, 0).unwrap();
         assert!(fs.meta().has_uncommitted_changes(), "a change after the destroy work");
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = crate::stop::StopSignal::new();
         let h = spawn_commit_timer(Arc::downgrade(&fs), fs.commit_gate(), Duration::from_millis(50), stop.clone());
         let ended = wait_until(Duration::from_secs(10), || h.is_finished());
-        stop.store(true, Ordering::SeqCst);
+        stop.stop();
         h.join().unwrap();
         assert!(ended, "the timer ended when it found the file system shut down");
         assert!(fs.meta().has_uncommitted_changes(), "the timer made no commit");

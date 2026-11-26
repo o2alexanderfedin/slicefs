@@ -44,6 +44,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::filesystem::SliceFsFilesystem;
+use crate::stop::StopSignal;
 use crate::gc_pacing::{self, FreeRatio, Mode, RealClock, WritePacer};
 
 /// Default minimum seconds between two automatic GC runs on a mounted store.
@@ -60,7 +61,7 @@ pub const ACTIVE_FILE: &str = "gc.active";
 /// How often a running GC refreshes `gc.active`.
 const HEARTBEAT: Duration = Duration::from_secs(1);
 
-/// How often the GC thread looks for a request (and for shutdown).
+/// How often the GC thread looks for a request. A stop wakes it at once.
 const POLL: Duration = Duration::from_millis(500);
 
 /// How long `request_gc` waits for a mount to take the request.
@@ -220,13 +221,14 @@ fn skip_due_gc(unchanged: bool, rechecked: bool) -> bool {
 }
 
 /// Spawn the GC thread of a mount. `interval` of zero means: only on request.
-/// The thread ends when `shutdown` is set or the file system is gone; a GC
+/// The thread ends at once when `shutdown` is stopped, or when the file
+/// system is gone; a GC
 /// that runs then stops at its next check.
 pub fn spawn_online_gc(
     fs: Weak<SliceFsFilesystem>,
     store: PathBuf,
     interval: Duration,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<StopSignal>,
 ) -> JoinHandle<()> {
     let free = gc_pacing::store_free_ratio(&store);
     let caps = (gc_pacing::MARK_YIELD_CAP, gc_pacing::SWEEP_YIELD_CAP);
@@ -239,7 +241,7 @@ pub fn spawn_online_gc_with(
     fs: Weak<SliceFsFilesystem>,
     store: PathBuf,
     interval: Duration,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<StopSignal>,
     free: FreeRatio,
     caps: (Duration, Duration),
 ) -> JoinHandle<()> {
@@ -257,8 +259,7 @@ pub fn spawn_online_gc_with(
             let _ = std::fs::remove_file(store.join(ACTIVE_FILE));
             let _ = std::fs::remove_file(store.join(RUNNING_FILE));
             loop {
-                std::thread::sleep(POLL);
-                if shutdown.load(Ordering::SeqCst) {
+                if shutdown.wait(POLL) {
                     break;
                 }
                 let requested = std::fs::rename(store.join(REQUEST_FILE), store.join(RUNNING_FILE)).is_ok();
@@ -283,7 +284,7 @@ pub fn spawn_online_gc_with(
                 rechecked = unchanged;
                 let t = Instant::now();
                 let (outcome, waited, ran) = with_heartbeat(&store.join(ACTIVE_FILE), || {
-                    run_once(&fs, &store, full, &shutdown, &free, caps)
+                    run_once(&fs, &store, full, shutdown.flag(), &free, caps)
                 });
                 history = history.after(ran);
                 last_took = t.elapsed().saturating_sub(waited);

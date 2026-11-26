@@ -373,12 +373,12 @@ pub struct Started {
     flusher_fs: Option<Arc<SliceFsFilesystem>>,
     /// The online GC thread (`None`: not started) and its stop flag.
     online_gc: Option<std::thread::JoinHandle<()>>,
-    online_gc_shutdown: Arc<AtomicBool>,
+    online_gc_shutdown: Arc<crate::stop::StopSignal>,
     /// The segment GC thread (`None`: not started).
     segment_gc: Option<metadata::gc::background::GcHandle>,
     /// The commit timer thread (`None`: not started) and its stop flag.
     commit_timer: Option<std::thread::JoinHandle<()>>,
-    commit_shutdown: Arc<AtomicBool>,
+    commit_shutdown: Arc<crate::stop::StopSignal>,
     /// `mount.lock` (`None`: no lock taken). Dropped last.
     lock: Option<MountLock>,
     /// The store lock: shared for a read-only mount, exclusive for a
@@ -515,7 +515,7 @@ pub fn start(
 
     // GC of the stored objects while mounted (#25). Not on a snapshot mount:
     // its metadata is the snapshot, not the current root.
-    let online_gc_shutdown = Arc::new(AtomicBool::new(false));
+    let online_gc_shutdown = crate::stop::StopSignal::new();
     let online_gc = writable.then(|| {
         crate::online_gc::spawn_online_gc(
             Arc::downgrade(&fs),
@@ -537,7 +537,7 @@ pub fn start(
     });
 
     // Commit metadata periodically, so a crash does not lose everything since mount (#18).
-    let commit_shutdown = Arc::new(AtomicBool::new(false));
+    let commit_shutdown = crate::stop::StopSignal::new();
     let commit_timer = (access.is_read_write() && args.commit_interval_secs > 0).then(|| {
         crate::commit_timer::spawn_commit_timer(
             Arc::downgrade(&fs),
@@ -589,11 +589,11 @@ impl Started {
             fs.stop_flusher();
         }
         // Stop the GC thread before mount.lock is released.
-        online_gc_shutdown.store(true, Ordering::SeqCst);
+        online_gc_shutdown.stop();
         if let Some(h) = online_gc {
             let _ = h.join();
         }
-        commit_shutdown.store(true, Ordering::SeqCst);
+        commit_shutdown.stop();
         if let Some(h) = commit_timer {
             let _ = h.join();
         }
@@ -744,7 +744,7 @@ pub fn run_mount(
     // the session would never end (no destroy, no final commit): end it when
     // the mount is gone.
     #[cfg(target_os = "macos")]
-    let unmount_watch_shutdown = Arc::new(AtomicBool::new(false));
+    let unmount_watch_shutdown = crate::stop::StopSignal::new();
     #[cfg(target_os = "macos")]
     let unmount_watch =
         crate::fuset_watch::spawn_unmount_watcher(mountpoint, mounted_msg, Arc::clone(&unmount_watch_shutdown));
@@ -773,7 +773,7 @@ pub fn run_mount(
 
     #[cfg(target_os = "macos")]
     {
-        unmount_watch_shutdown.store(true, Ordering::SeqCst);
+        unmount_watch_shutdown.stop();
         let seen = unmount_watch.join().unwrap_or(true);
         if mounted.is_ok() && !seen {
             mounted = Err(std::io::Error::other(format!(
@@ -1433,6 +1433,25 @@ mod tests {
         s.stop();
         assert!(!store.join("mount.lock").exists());
         drop(header::lock_offline(&store).expect("the store is free after stop"));
+    }
+
+    /// A stop with nothing to write does not wait for a tick of a thread
+    /// (the online GC polls every 500 ms, the commit timer every 100 ms):
+    /// each thread wakes at once. The bound has a wide slack; the stop
+    /// takes a few ms.
+    #[test]
+    fn a_stop_does_not_wait_for_a_thread_tick() {
+        let dir = ro_fixture(false);
+        let store = dir.path().join("store");
+        let args = StartArgs { commit_interval_secs: 30, gc_interval_secs: 60, ..Default::default() };
+        let s = start(&store, &args, None).expect("start");
+        // The threads are now in their waits.
+        std::thread::sleep(Duration::from_millis(50));
+        fuser::Filesystem::destroy(&mut crate::fuse_callbacks::MountedFs::new(Arc::clone(&s.fs), None));
+        let t = std::time::Instant::now();
+        s.stop();
+        let took = t.elapsed();
+        assert!(took < Duration::from_millis(200), "stop took {took:?}");
     }
 
     /// Control of the tracer: the same steps on a normal store change its

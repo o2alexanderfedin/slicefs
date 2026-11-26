@@ -433,14 +433,14 @@ fn a_full_gc_request_runs_on_the_gc_thread() {
     write_file(&fs, "keep.bin", &keep);
     make_garbage(&fs, "del.bin", &data(46, 300_000));
     std::fs::write(dir.path().join("mount.lock"), b"").unwrap();
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = slicefs_cli::stop::StopSignal::new();
     let thread = spawn_online_gc(Arc::downgrade(&fs), dir.path().to_path_buf(), Duration::ZERO, Arc::clone(&shutdown));
     let (tx, rx) = std::sync::mpsc::channel();
     let store = dir.path().to_path_buf();
     std::thread::spawn(move || tx.send(request_gc_mode(&store, true)).unwrap());
     // request_gc_mode ends at the result, or when no mount takes the request.
     let outcome = rx.recv_timeout(Duration::from_secs(60)).expect("no GC result in 60 s").unwrap();
-    shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    shutdown.stop();
     thread.join().unwrap();
     assert!(outcome.starts_with("ok (full): "), "{outcome}");
     assert!(outcome.contains("dead left: 0"), "{outcome}");
@@ -523,7 +523,7 @@ fn low_space_starts_a_gc_without_the_interval() {
     let dir = TempDir::new().unwrap();
     let fs = Arc::new(make_fs(dir.path()));
     make_garbage(&fs, "del.bin", &data(53, 300_000));
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = slicefs_cli::stop::StopSignal::new();
     let caps = (Duration::from_millis(100), Duration::from_millis(100));
     let thread = spawn_online_gc_with(
         Arc::downgrade(&fs),
@@ -537,7 +537,7 @@ fn low_space_starts_a_gc_without_the_interval() {
     while fs.content().last_gc_timing().wall.is_zero() && t.elapsed() < Duration::from_secs(30) {
         std::thread::sleep(Duration::from_millis(50));
     }
-    shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    shutdown.stop();
     thread.join().unwrap();
     assert!(!fs.content().last_gc_timing().wall.is_zero(), "no GC ran in 30 s");
 }

@@ -26,5 +26,6 @@ pub mod snapshot;
 pub mod seed;
 pub mod signals;
 pub mod stats;
+pub mod stop;
 pub(crate) mod util;
 pub mod unmount;
