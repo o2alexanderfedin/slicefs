@@ -429,7 +429,7 @@ Plans:
 - [x] 21.2-07-PLAN.md — ThreadSanitizer (named set with the race tests and a 10 s stress run) and deadlock-detect stress scripts and jobs; first Linux CI run read by the orchestrator (CI run 45733741913 green: tsan 208 s, deadlock 111 s)
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 21.2-08-PLAN.md — Kani: byte-level core of the header parser, `write_end`, `hard_cap_of`, `dirty_move`, `workers_for_cpus`, `stripe`; nine harnesses, `kani.sh`
+- [x] 21.2-08-PLAN.md — Kani: byte-level core of the header parser, `write_end`, `hard_cap_of`, `dirty_move`, `workers_for_cpus`, `stripe`; nine harnesses, `kani.sh` (9 of 9 verified, about 37 s of solving)
 - [x] 21.2-09-PLAN.md — `docs/design/unsafe-review.md` for every crate and `unsafe-count.sh` in the clippy jobs
 - [ ] 21.2-10-PLAN.md — Coverage in Linux Docker (tests and FUSE smoke), job `coverage`, floor from the first Linux CI number minus 1 point
 
