@@ -266,3 +266,69 @@ fn sha256_seed_records_the_flag_and_tags_every_object() {
     let names: Vec<_> = st.flags.incompat.iter().map(|f| (f.name.as_str(), f.release.as_str(), f.known)).collect();
     assert_eq!(names, [(HASH_SHA256_FLAG, HASH_SHA256_RELEASE, true)]);
 }
+
+/// A BLAKE3-256 store from `seed` with one 100 KiB file `old.bin`.
+fn blake3_store() -> TempDir {
+    let src = TempDir::new().unwrap();
+    std::fs::write(src.path().join("old.bin"), data(1, 100_000)).unwrap();
+    let dir = TempDir::new().unwrap();
+    run_seed(dir.path(), src.path(), None).unwrap();
+    assert_eq!(marker(dir.path()), format!("{FORMAT}hash blake3-256\n"));
+    dir
+}
+
+/// D-11, the `mount --hash` path: the hash line and the flag reach disk in
+/// one header write before the first SHA-256 object; new files get tag
+/// 0x12, old files keep 0x1e, both read back, scrub passes. Then a change
+/// back to blake3-256 keeps the flag.
+#[test]
+fn sha256_mount_hash_change_writes_the_flag_with_the_hash_line() {
+    let dir = blake3_store();
+    let store = dir.path();
+    content::select_hash(store, Some("sha256")).unwrap();
+    assert_eq!(marker(store), format!("{FORMAT}hash sha256\n{}", sha256_flag()));
+
+    let fs = open_fs(store);
+    let new = write_file(&fs, 1, "new.bin", &data(2, 50_000));
+    let (old, _) = fs.test_lookup(1, "old.bin").unwrap();
+    assert_eq!((tag(&fs, new), tag(&fs, old)), (0x12, 0x1e));
+    assert_eq!(read_file(&fs, 1, "new.bin"), data(2, 50_000));
+    assert_eq!(read_file(&fs, 1, "old.bin"), data(1, 100_000));
+    close_fs(fs);
+    slicefs_cli::scrub::run_scrub(store, false).unwrap();
+}
+
+/// D-11: after the write hash goes back to blake3-256 the flag stays (the
+/// store still holds SHA-256 objects), and the store opens to write.
+#[test]
+fn sha256_flag_stays_after_the_hash_goes_back() {
+    let dir = blake3_store();
+    let store = dir.path();
+    content::select_hash(store, Some("sha256")).unwrap();
+    let fs = open_fs(store);
+    write_file(&fs, 1, "new.bin", &data(2, 50_000));
+    close_fs(fs);
+
+    content::select_hash(store, Some("blake3-256")).unwrap();
+    assert_eq!(marker(store), format!("{FORMAT}hash blake3-256\n{}", sha256_flag()));
+    slicefs_cli::header::check(store, slicefs_cli::header::Want::Write).unwrap();
+    let fs = open_fs(store);
+    assert_eq!(read_file(&fs, 1, "new.bin"), data(2, 50_000));
+    close_fs(fs);
+}
+
+/// D-18 step 2: `ensure_hash_flag` writes only the flag line (the hash
+/// line does not change), once; a hash with no flag writes nothing.
+#[test]
+fn sha256_ensure_hash_flag_writes_only_the_flag() {
+    let dir = blake3_store();
+    let store = dir.path();
+    let before = marker(store);
+    assert!(content::ensure_hash_flag(store, &chunk_store::hash::Sha256).unwrap());
+    assert_eq!(marker(store), format!("{before}{}", sha256_flag()));
+    let after = marker(store);
+    assert!(!content::ensure_hash_flag(store, &chunk_store::hash::Sha256).unwrap());
+    assert_eq!(marker(store), after, "a second call writes nothing");
+    assert!(!content::ensure_hash_flag(store, &chunk_store::Blake3_256).unwrap());
+    assert_eq!(marker(store), after);
+}
