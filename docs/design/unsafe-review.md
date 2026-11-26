@@ -82,7 +82,9 @@ next entry is the check for that.
   after the unmap.
 - **How it is tested**: the Miri test above, and the file tests of the next
   entry. A wrong `len` that stays inside the last page is not visible to a
-  test. This argument is the check.
+  test. This argument is the check. chunk-store has no other `unsafe` that
+  reads the mapping, so every read of the slice is bounds-checked safe
+  Rust.
 
 ### pack_io.rs: `RunMap::new` (`mmap` of a run file)
 
@@ -270,10 +272,11 @@ next entry is the check for that.
 - **How it is tested**: `signal_tests::a_signal_calls_the_stop_callback_and_ignored_signals_stay_ignored`
   in the CI jobs `linux` and `macos`.
 - **Note**: the handler does not save and restore `errno`. `write` sets
-  `errno` only when it fails. That needs a full pipe (64 KiB of signal
-  bytes that the thread did not read) or a closed fd, which do not occur.
-  The pipe is blocking, so a full pipe would block the handler. Saving
-  `errno` is a small follow-up.
+  `errno` only when it fails, for example on a closed fd. The fd is never
+  closed, so this does not occur. Saving `errno` is a small follow-up.
+  The pipe is blocking. A full pipe (64 KiB of signal bytes that the
+  thread did not read) would block the handler; it would not fail. That
+  many signals do not occur in practice.
 
 ### signals.rs: `pipe` in `install`
 
@@ -544,7 +547,9 @@ calls none of them: it makes no `BackingId` and does not set `clone_fd`.
 - **Safety argument**: An fd received with `SCM_RIGHTS` is new in this
   process, and no other value owns it. A negative fd is refused.
 - **How it is tested**: reached only when the direct mount fails (a user
-  that is not root). CI mounts as root, so no CI job reaches it.
+  that is not root: `fuse_mount_sys` returns `None` only on `EPERM`). The
+  CI Docker image has no `USER` line and the scripts do not change the
+  user, so CI mounts as root and no CI job reaches it.
 - **Note**: only the first fd of the message is taken. An extra fd would
   stay open (a leak, not memory damage). `fusermount` sends one.
 

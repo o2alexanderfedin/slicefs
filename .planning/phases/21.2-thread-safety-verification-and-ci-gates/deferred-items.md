@@ -44,3 +44,19 @@ Out-of-scope findings during execution. Not fixed in this phase unless a plan sa
 - Possible follow-up (not done): find why a fresh test-binary start can stall for
   60 s on macOS under load (an exec scan of a new binary is one guess), or raise
   `CHILD_LIMIT`, or make the child a small separate binary.
+
+## 2. Follow-ups of the unsafe review (found in 21.2-09)
+
+None of these is a memory-safety bug. Not done in this phase (D-33, and
+plan 21.2-09 changes no file under crates). See docs/design/unsafe-review.md.
+
+- `unmount.rs` `kill_processes_at_mountpoint` and `fuset_watch.rs`
+  `spawn_unmount_watcher`: skip a pid that is not `pid > 1` before `kill`
+  (0 signals the process group, -1 every process of the user), with a unit
+  test on `fuse_t_servers_of`.
+- `signals.rs` `on_signal`: save and restore `errno` around `write`.
+- Comment-only: a `SAFETY` comment on the four `unsafe` blocks of
+  `filesystem.rs` `compute_statfs`; the `alloc_tune.rs` macOS comment on the
+  call line; the `needless_range_loop` reason in
+  `crates/slicefs-cli/tests/lock_free_io.rs` says "the block number", but the
+  index there is the write number of the thread (from 21.2-03).
