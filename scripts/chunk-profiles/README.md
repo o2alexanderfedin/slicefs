@@ -86,8 +86,9 @@ The script removes only its own store dir `WORK/store.XXXXXX`, which it
 makes with `mktemp -d` at each start, so a `WORK/store` that is there
 already is never touched. It refuses an empty `WORK` or `/`. It writes
 `results.csv`, `edits.csv`, `machine.txt` and the step logs in `WORK` new at
-each start, so use a `WORK` of its own. The script stops with a non-zero exit code when a step fails or
-an input is missing.
+each start, so use a `WORK` of its own. The script stops with a non-zero exit code when a step fails (the median
+step too) or an input is missing. It needs `python3` for the median rows
+and checks for it at start.
 
 ## Smoke mode
 

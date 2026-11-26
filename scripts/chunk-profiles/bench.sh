@@ -39,6 +39,7 @@ D=${1:-}; N=${2:-${RUNS:-3}}
 # The smoke data never go in a real data dir: gen writes over the files of
 # the versions in BOOST_VERS, and those may be real Boost data.
 if [ "$SMOKE" = 1 ]; then [ -z "$D" ] || usage; else [ -n "$D" ] || usage; fi
+command -v python3 > /dev/null || { echo "python3 is needed (the median rows)" >&2; exit 2; }
 abs() { case $1 in /*) echo "$1" ;; *) echo "$PWD/$1" ;; esac; }
 
 if [ -z "${WORK:-}" ]; then WORK=$(mktemp -d "${TMPDIR:-/tmp}/chunk-profiles.XXXXXX"); echo "work dir: $WORK" >&2; fi
@@ -185,7 +186,7 @@ done
 # (always a value of a real run); a column that is NA in every run stays NA.
 for IN in $INPUTS; do
   for P in $PROFILES; do
-    row "$(python3 -c '
+    med=$(python3 -c '
 import csv, statistics, sys
 f, p, i = sys.argv[1:4]
 rows = [r for r in csv.reader(open(f)) if r[0] == p and r[1] == i and r[2] not in ("run", "median")]
@@ -194,7 +195,9 @@ for c in range(3, 28):
     vals = [(float(r[c]), r[c]) for r in rows if r[c] != "NA"]
     out.append(statistics.median_low(vals)[1] if vals else "NA")
 print(",".join(out))
-' "$R" "$P" "$IN")"
+' "$R" "$P" "$IN") || { echo "median failed: profile=$P input=$IN" >&2; exit 1; }
+    [ -n "$med" ] || { echo "empty median row: profile=$P input=$IN" >&2; exit 1; }
+    row "$med"
   done
 done
 
