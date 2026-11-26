@@ -35,18 +35,27 @@ pub fn remove_switch_tmps(dir: &Path) -> std::io::Result<usize> {
     Ok(n)
 }
 
-/// The largest id of a `segment-<n>.seg` file of `dir`, of any size (as
-/// `next_segment_id` of the mount), or 0.
-fn max_segment_id(dir: &Path) -> std::io::Result<u64> {
-    let mut max = 0;
+/// The ids of the `segment-<n>.seg` files of `dir`, of any size.
+fn segment_ids(dir: &Path) -> std::io::Result<Vec<u64>> {
+    let mut ids = Vec::new();
     for e in std::fs::read_dir(dir)?.filter_map(|e| e.ok()) {
         let name = e.file_name().to_string_lossy().to_string();
         let id = name.strip_prefix("segment-").and_then(|n| n.strip_suffix(".seg")).and_then(|n| n.parse::<u64>().ok());
-        if let Some(id) = id {
-            max = max.max(id);
-        }
+        ids.extend(id);
     }
-    Ok(max)
+    Ok(ids)
+}
+
+/// The largest id of a `segment-<n>.seg` file of `dir`, of any size (as
+/// `next_segment_id` of the mount), or 0.
+fn max_segment_id(dir: &Path) -> std::io::Result<u64> {
+    Ok(segment_ids(dir)?.into_iter().max().unwrap_or(0))
+}
+
+/// The number of `segment-<n>.seg` files of `dir`. More than one after a
+/// switch: a crash came before the older segments were removed.
+pub fn segment_file_count(dir: &Path) -> std::io::Result<usize> {
+    Ok(segment_ids(dir)?.len())
 }
 
 /// Make `root` and `snapshots` current in one atomic step; return the id of
@@ -62,22 +71,33 @@ fn max_segment_id(dir: &Path) -> std::io::Result<u64> {
 /// durable (synced) before this call.
 pub fn write_switch_segment(dir: &Path, root: ObjectKey, snapshots: &[SnapshotEntry]) -> Result<u64, SegmentError> {
     remove_switch_tmps(dir)?;
-    let id = max_segment_id(dir)? + 1;
+    // The ids come from file names: a name of id u64::MAX must not wrap the
+    // switch to the lowest id.
+    let id = max_segment_id(dir)?.checked_add(1).ok_or_else(|| SegmentError::from(std::io::Error::other("segment id overflow")))?;
     let tmp = dir.join(format!("segment-{id:06}{SWITCH_TMP_SUFFIX}"));
     let fin = dir.join(format!("segment-{id:06}.seg"));
-    let mut w = SegmentWriter::new(&tmp, id)?;
-    w.write_entry(&SegmentEntry::RootUpdate { root })?;
-    for s in snapshots {
-        w.write_entry(&SegmentEntry::SnapshotRecord {
-            version: s.version,
-            root: s.root,
-            created_at: s.created_at,
-            name: s.name.clone(),
-        })?;
+    let write = || -> Result<(), SegmentError> {
+        let mut w = SegmentWriter::new(&tmp, id)?;
+        w.write_entry(&SegmentEntry::RootUpdate { root })?;
+        for s in snapshots {
+            w.write_entry(&SegmentEntry::SnapshotRecord {
+                version: s.version,
+                root: s.root,
+                created_at: s.created_at,
+                name: s.name.clone(),
+            })?;
+        }
+        w.sync()?;
+        drop(w);
+        std::fs::rename(&tmp, &fin)?;
+        Ok(())
+    };
+    if let Err(e) = write() {
+        // Before the rename: the old state stays; the temp file goes (best
+        // effort; the next switch removes it too).
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
-    w.sync()?;
-    drop(w);
-    std::fs::rename(&tmp, &fin)?;
     std::fs::File::open(dir)?.sync_all()?;
     crate::wal::remove_segments_before(dir, id)?;
     std::fs::File::open(dir)?.sync_all()?;
@@ -233,6 +253,17 @@ mod tests {
         std::fs::write(seg(d.path(), 9), b"").unwrap();
         assert_eq!(write_switch_segment(d.path(), k(10), &new_snaps(&old)).unwrap(), 10);
         assert_eq!(names(d.path()), ["segment-000010.seg"]);
+    }
+
+    #[test]
+    fn a_switch_after_the_largest_id_is_an_error() {
+        let d = tempfile::TempDir::new().unwrap();
+        let old = old_store(d.path());
+        std::fs::write(d.path().join(format!("segment-{}.seg", u64::MAX)), b"").unwrap();
+        let before = names(d.path());
+        let e = write_switch_segment(d.path(), k(10), &new_snaps(&old)).unwrap_err();
+        assert!(e.to_string().contains("segment id overflow"), "{e}");
+        assert_eq!(names(d.path()), before, "nothing is written or removed");
     }
 
     #[test]

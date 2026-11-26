@@ -313,6 +313,20 @@ fn refuse_an_unknown_target() {
     assert_refused_and_unchanged(&store, &["unknown hash \"md5\""], || run_rehash(&store, "md5", false).unwrap_err().to_string());
 }
 
+/// WR-01: a header write hash that this build does not know is refused in
+/// the checks, before any write; the dry-run refuses with the same text.
+#[test]
+fn refuse_an_unknown_header_hash() {
+    let dir = seeded_small();
+    let store = dir.path().join("store");
+    let m = marker(&store);
+    assert!(m.contains("hash blake3-256\n"), "{m}");
+    std::fs::write(store.join(FORMAT_FILE), m.replace("hash blake3-256\n", "hash foo\n")).unwrap();
+    let parts = ["\"foo\"", "does not know"];
+    assert_refused_and_unchanged(&store, &parts, || refused(&store, "sha256", false));
+    assert_eq!(refused(&store, "sha256", true), refused(&store, "sha256", false));
+}
+
 /// A missing path and an empty directory are no store; nothing is made.
 #[test]
 fn refuse_a_path_with_no_store() {
@@ -345,6 +359,37 @@ fn dry_run_changes_nothing_and_reports_an_estimate() {
     assert!(report.starts_with("Rehash to sha256 (dry run, nothing written)"), "{report}");
     assert!(number_after(&report, "Objects of another hash: ") > 0, "{report}");
     assert!(report.contains("estimate"), "{report}");
+}
+
+/// The values and bytes of the read line of a report (`Read: ` in a real
+/// run, `Read and verified: ` in a dry-run).
+fn read_counts(report: &str) -> (u64, u64) {
+    let line = report.lines().find(|l| l.starts_with("Read")).unwrap_or_else(|| panic!("no read line in:\n{report}"));
+    let n: Vec<u64> = line.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).map(|s| s.parse().unwrap()).collect();
+    (n[0], n[1])
+}
+
+/// WR-02: with many values, one content in several files and a snapshot
+/// that shares most values, the dry-run reads and counts each value once,
+/// as the real run does.
+#[test]
+fn dry_run_counts_equal_the_real_run() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    for i in 0..300u64 {
+        std::fs::write(src.join(format!("f{i}")), data(100 + i, 600)).unwrap();
+    }
+    for i in 0..4 {
+        std::fs::write(src.join(format!("same{i}")), data(99, 40 << 10)).unwrap();
+    }
+    let store = dir.path().join("store");
+    run_seed(&store, &src, None).unwrap();
+    run_snapshot_create(&store, Some("s1".into())).unwrap();
+    run_snapshot_create(&store, Some("s2".into())).unwrap();
+    let dry = read_counts(&rehash(&store, "sha256", true));
+    let real = read_counts(&rehash(&store, "sha256", false));
+    assert_eq!(dry, real);
 }
 
 /// D-22: the dry-run makes the checks of a real run and refuses with the
@@ -777,6 +822,8 @@ fn crash_with_old_segments_left_after_the_switch() {
     assert_opens(&store, &before, &Expect::New);
     rehash(&store, "sha256", false);
     assert_finished(&store, &before);
+    // IN-02: the rerun removes the old segments.
+    assert_eq!(segment_names(&store).iter().filter(|n| n.ends_with(".seg")).count(), 1, "{:?}", segment_names(&store));
 }
 
 /// The segment files of `store`: names and bytes.
@@ -831,6 +878,8 @@ fn verify_a_damaged_object_stops_before_the_switch() {
     let segments = segment_files(&store);
     let e = refused(&store, "sha256", false);
     assert!(e.contains("Nothing was switched") && e.contains("file content") && has_cause(&e), "{e}");
+    assert!(e.contains("stay until the next `slicefs gc`"), "{e}");
+    assert!(!store.join(REHASH_TMP_DIR).exists(), "the error removes rehash-tmp");
     assert_eq!(segment_files(&store), segments, "no segment changes");
     assert!(marker(&store).contains("hash blake3-256\n"), "{}", marker(&store));
     assert_eq!(corrupt_cause(&store, &id), cause, "the run did not repair or drop the object");

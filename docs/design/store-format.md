@@ -254,7 +254,9 @@ A read-only mount makes no `mount.lock`, so the commands that look for
   header check), and hold it while they run (`rehash`: to its end, its GC
   included). If it is held, they are refused (M14).
 - `rehash` keeps its temp files (the old-to-new map and the refcount sort
-  files) in `<store>/rehash-tmp/`. It removes the directory at its end.
+  files) in `<store>/rehash-tmp/`. It removes the directory at its end,
+  and also on an error that is not a crash. The map of `rehash --dry-run`
+  goes to the system temp dir (`TMPDIR`), not to the store.
   Every writable open of the store removes what a crash left there.
 - `stats` shows `Mounted` as `yes` when `mount.lock` exists or the store
   lock is held, also while an offline `gc` runs. (It takes the lock
