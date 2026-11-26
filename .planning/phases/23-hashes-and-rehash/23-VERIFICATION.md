@@ -1,7 +1,8 @@
 ---
 phase: 23-hashes-and-rehash
 verified: 2026-11-26T17:02:52Z
-status: human_needed
+status: passed
+resolved: 2026-11-26
 score: 5/5 roadmap success criteria verified (6/6 requirements satisfied)
 covered_files:
   - .planning/phases/23-hashes-and-rehash/23-01-PLAN.md
@@ -189,3 +190,11 @@ No blocking gaps. Every roadmap success criterion and every requirement has code
 
 _Verified: 2026-11-26T17:02:52Z_
 _Verifier: Claude (gsd-verifier)_
+
+## Human items: resolved (2026-11-26)
+
+| Item | Result |
+|---|---|
+| 1. Hardware SHA-256 speed | Measured on GitHub runners with SHA instructions: ubuntu-latest (Xeon 8573C, `sha_ni`) 1484 MB/s, macos-latest (Apple M1, `FEAT_SHA256`) 1734 MB/s, ubuntu-24.04-arm (`sha2`) 1855 MB/s, on 8 KiB blocks. |
+| 2. Power loss before the sync (IN-04) | Tested in Docker with LazyFS and an fsync/rename kill shim (`scripts/power-loss/`, PR #206): 49 crash points, all mount with the old or the new roots. |
+| 3. RAM of the full GC step | Fixed in PR #209 (#207): the mark keys go through the external sort into `gc-tmp`. `gc --full` heap 109 MB at 1M files with 1 or 4 snapshots; rehash RSS 832 to 337 MiB. Still open in #207: the whole `.idx` decode and the Bloom filters (about 1.25 B per object). `scrub` has the same key list: #210. |
