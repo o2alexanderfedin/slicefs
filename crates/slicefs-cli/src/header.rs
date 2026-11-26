@@ -58,10 +58,16 @@ impl Class {
 
     /// The class of the first word of a line (`None`: not a flag line).
     pub fn from_word(w: &str) -> Option<Class> {
+        Class::from_word_bytes(w.as_bytes())
+    }
+
+    /// The class of the bytes of the first word of a line (`None`: not a
+    /// flag line). Part of the byte-level core that Kani proves.
+    pub fn from_word_bytes(w: &[u8]) -> Option<Class> {
         match w {
-            "compat" => Some(Class::Compat),
-            "ro_compat" => Some(Class::RoCompat),
-            "incompat" => Some(Class::Incompat),
+            b"compat" => Some(Class::Compat),
+            b"ro_compat" => Some(Class::RoCompat),
+            b"incompat" => Some(Class::Incompat),
             _ => None,
         }
     }
@@ -273,7 +279,7 @@ pub fn read(store: &Path) -> std::io::Result<Option<String>> {
 /// above [`FORMAT_NUMBER`] is refused, and the other lines are not read
 /// (another format can have any layout). Every later line is kept in its
 /// order: `hash <name>` (at most one), a flag line `<class> <name>
-/// <release>` (see [`valid_name`] and [`valid_release`]; a name once in
+/// <release>` (see [`valid_name_bytes`] and [`valid_release_bytes`]; a name once in
 /// the whole header), or a line of another kind.
 pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
     let mut pieces: Vec<&str> = text.split('\n').collect();
@@ -281,7 +287,7 @@ pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
         pieces.pop();
     }
     let first = pieces.first().copied().unwrap_or("");
-    let format = parse_first_line(first).ok_or_else(|| refuse(msg_unknown_format(store, first)))?;
+    let format = first_line_number(first.as_bytes()).ok_or_else(|| refuse(msg_unknown_format(store, first)))?;
     match format {
         n if n < FORMAT_NUMBER => {
             let what = match n {
@@ -298,7 +304,7 @@ pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
     for (i, &line) in pieces.iter().enumerate().skip(1) {
         let bad = |reason: &str| refuse(msg_bad_line(store, i + 1, reason, line));
         let words: Vec<&str> = line.split(' ').collect();
-        let parsed = match (words[0], Class::from_word(words[0])) {
+        let parsed = match (words[0], Class::from_word_bytes(words[0].as_bytes())) {
             ("hash", _) if words.len() == 2 => {
                 if lines.iter().any(|l| matches!(l, Line::Hash(_))) {
                     return Err(bad("two hash lines"));
@@ -306,7 +312,7 @@ pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
                 Line::Hash(words[1].to_string())
             }
             (_, Some(class)) => {
-                if words.len() != 3 || !valid_name(words[1]) || !valid_release(words[2]) {
+                if words.len() != 3 || !valid_name_bytes(words[1].as_bytes()) || !valid_release_bytes(words[2].as_bytes()) {
                     return Err(bad("bad feature flag line"));
                 }
                 let name = words[1];
@@ -322,32 +328,39 @@ pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
     Ok(Header { format, first: first.to_string(), lines })
 }
 
-/// A flag name: 1 to 64 of `a-z`, `0-9` and `-`, a letter or digit at each
-/// end, no `--`.
-fn valid_name(name: &str) -> bool {
-    let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-    let b = name.as_bytes();
+// The byte-level core of `parse`: `valid_name_bytes`, `valid_release_bytes`,
+// `first_line_number` and `Class::from_word_bytes`. Kani proves these free of
+// panic and overflow (`mod proofs`). `parse` itself (str splitting, messages
+// with `format!`) is not proven end to end: str-level harnesses did not finish
+// in 150 s (21.2 research). It is covered by these proofs and its unit tests.
+
+/// A flag name: 1 to 64 bytes of `a-z`, `0-9` and `-`, a letter or digit at
+/// each end, no `--`.
+fn valid_name_bytes(b: &[u8]) -> bool {
+    let alnum = |c: u8| c.is_ascii_lowercase() || c.is_ascii_digit();
     (1..=64).contains(&b.len())
         && b.iter().all(|&c| alnum(c) || c == b'-')
         && alnum(b[0])
         && alnum(b[b.len() - 1])
-        && !name.contains("--")
+        && !b.windows(2).any(|w| w == b"--")
 }
 
-/// A release: 1 to 32 visible ASCII characters (no space). It is shown in
+/// A release: 1 to 32 visible ASCII bytes (no space). It is shown in
 /// messages, never compared.
-fn valid_release(release: &str) -> bool {
-    (1..=32).contains(&release.len()) && release.bytes().all(|b| b.is_ascii_graphic())
+fn valid_release_bytes(b: &[u8]) -> bool {
+    (1..=32).contains(&b.len()) && b.iter().all(|c| c.is_ascii_graphic())
 }
 
-/// The format number of a first line `slicefs-store <digits>[ <free text>]`.
-fn parse_first_line(first: &str) -> Option<u32> {
-    let rest = first.strip_prefix("slicefs-store ")?;
-    let number = rest.split_once(' ').map_or(rest, |(n, _free)| n);
-    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+/// The format number of a first line `slicefs-store <digits>[ <free text>]`:
+/// the bytes after the prefix up to the first space (or the end), digits
+/// only, at most `u32::MAX` (else `None`).
+fn first_line_number(first: &[u8]) -> Option<u32> {
+    let rest = first.strip_prefix(b"slicefs-store ")?;
+    let number = rest.split(|&b| b == b' ').next().unwrap_or(rest);
+    if number.is_empty() || !number.iter().all(u8::is_ascii_digit) {
         return None;
     }
-    number.parse().ok()
+    number.iter().try_fold(0u32, |v, &d| v.checked_mul(10)?.checked_add(u32::from(d - b'0')))
 }
 
 /// The open decision for a parsed header. The unknown flags are the flags
@@ -807,5 +820,87 @@ mod tests {
         std::fs::write(d.path().join(FORMAT_FILE), b"slicefs-store 7 \xff\xfe\n").unwrap();
         let err = read(d.path()).expect_err("not UTF-8");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err}");
+    }
+
+    #[test]
+    fn the_byte_core_keeps_the_header_rules() {
+        let a64 = "a".repeat(64);
+        for n in ["a", "a-b", "a1", a64.as_str()] {
+            assert!(valid_name_bytes(n.as_bytes()), "{n}");
+        }
+        let a65 = "a".repeat(65);
+        for n in ["", "A", "-a", "a-", "a--b", "a_b", a65.as_str()] {
+            assert!(!valid_name_bytes(n.as_bytes()), "{n}");
+        }
+        let (g32, g33) = ("r".repeat(32), "r".repeat(33));
+        assert!(valid_release_bytes(b"r") && valid_release_bytes(g32.as_bytes()));
+        for r in ["", "a b", g33.as_str()] {
+            assert!(!valid_release_bytes(r.as_bytes()), "{r}");
+        }
+        let first = |l: &str| first_line_number(l.as_bytes());
+        assert_eq!(first("slicefs-store 7"), Some(7));
+        assert_eq!(first("slicefs-store 07 free text"), Some(7));
+        assert_eq!(first("slicefs-store 4294967295"), Some(u32::MAX));
+        for l in ["slicefs-store 4294967296", "slicefs-store +7", "slicefs-store ", "slicefs-store 7x", "slicefs-storE 7"] {
+            assert_eq!(first(l), None, "{l}");
+        }
+        assert_eq!(Class::from_word_bytes(b"compat"), Some(Class::Compat));
+        assert_eq!(Class::from_word_bytes(b"ro_compat"), Some(Class::RoCompat));
+        assert_eq!(Class::from_word_bytes(b"incompat"), Some(Class::Incompat));
+        assert_eq!(Class::from_word_bytes(b"compatx"), None);
+        assert_eq!(Class::from_word_bytes(b""), None);
+    }
+}
+
+// Kani proofs of the byte-level core (TSAFE-04). Each harness writes its
+// bound. Run with scripts/safety/kani.sh.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    // Bound: names up to 8 bytes (the real limit is 64; the loops are the same).
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn name_bytes_total() {
+        let b: [u8; 8] = kani::any();
+        let n: usize = kani::any();
+        kani::assume(n <= 8);
+        let _ = valid_name_bytes(&b[..n]);
+    }
+
+    // Bound: releases up to 8 bytes (the real limit is 32; the loop is the same).
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn release_bytes_total() {
+        let b: [u8; 8] = kani::any();
+        let n: usize = kani::any();
+        kani::assume(n <= 8);
+        let _ = valid_release_bytes(&b[..n]);
+    }
+
+    // Bound: the 14 prefix bytes and 12 symbolic bytes (u32::MAX has 10
+    // digits, so 12 bytes reach the overflow). Some(v) means that every
+    // byte before the first space is a digit.
+    #[kani::proof]
+    #[kani::unwind(28)]
+    fn first_line_number_total() {
+        let tail: [u8; 12] = kani::any();
+        let mut line = [0u8; 26];
+        line[..14].copy_from_slice(b"slicefs-store ");
+        line[14..].copy_from_slice(&tail);
+        if first_line_number(&line).is_some() {
+            let end = tail.iter().position(|&b| b == b' ').unwrap_or(tail.len());
+            assert!(end > 0 && tail[..end].iter().all(u8::is_ascii_digit));
+        }
+    }
+
+    // Bound: class words up to 9 bytes (the longest word, `ro_compat`, has 9).
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn class_word_total() {
+        let b: [u8; 9] = kani::any();
+        let n: usize = kani::any();
+        kani::assume(n <= 9);
+        let _ = Class::from_word_bytes(&b[..n]);
     }
 }
