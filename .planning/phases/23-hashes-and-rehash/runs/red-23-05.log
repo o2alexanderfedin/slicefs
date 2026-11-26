@@ -1,0 +1,56 @@
+# Plan 23-05: red runs (guard mutations)
+
+All tests of this plan passed on the first green run: plan 23-04 built the
+command. Each test is a guard. Each mutation below was made, run, and undone;
+`git status --short` showed only the test file after each undo.
+
+## Task 1: round_trip_*
+
+Command: cargo test -p slicefs-cli --test rehash_tests round_trip
+
+### Mutation A (rehash.rs): the switch writes the old snapshot roots
+`write_switch_segment(&segs, new.current, &old.snapshots)`. The GC of the run
+then frees the old snapshot trees, and the walk of the live objects fails.
+
+test round_trip_mixed_store_ends_with_one_hash ... FAILED
+test round_trip_sha256_to_blake3_and_back ... FAILED
+test round_trip_large_profile_keys_equal_fresh_writes ... FAILED
+test round_trip_blake3_to_sha256_and_back ... FAILED
+thread 'round_trip_mixed_store_ends_with_one_hash' panicked at crates/slicefs-cli/tests/rehash_tests.rs:146:54:
+thread 'round_trip_sha256_to_blake3_and_back' panicked at crates/slicefs-cli/tests/rehash_tests.rs:146:54:
+thread 'round_trip_large_profile_keys_equal_fresh_writes' panicked at crates/slicefs-cli/tests/rehash_tests.rs:146:54:
+thread 'round_trip_blake3_to_sha256_and_back' panicked at crates/slicefs-cli/tests/rehash_tests.rs:146:54:
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 14 filtered out; finished in 7.27s
+(line 146 is the `file_objects(..).unwrap()` of `live_ids`: an object of a
+snapshot tree is missing)
+
+### Mutation B2 (rehash/mod.rs) and mutation C (content.rs), in one run
+- B2: `value()` keeps a value when its own key has the target tag, with no
+  check of its tree (`old.tag() == self.target.tag()` in place of
+  `self.all_target(old)`).
+- C: `open_with_hasher` opens the conversion store with
+  `ChunkProfile::DEFAULT`, not the header profile.
+
+test round_trip_large_profile_keys_equal_fresh_writes ... FAILED
+test round_trip_blake3_to_sha256_and_back ... ok
+test round_trip_sha256_to_blake3_and_back ... ok
+test round_trip_mixed_store_ends_with_one_hash ... FAILED
+thread 'round_trip_large_profile_keys_equal_fresh_writes' panicked at crates/slicefs-cli/tests/rehash_tests.rs:528:9:
+assertion `left == right` failed: a fresh write of 20480 bytes
+thread 'round_trip_mixed_store_ends_with_one_hash' panicked at crates/slicefs-cli/tests/rehash_tests.rs:541:5:
+assertion `left == right` failed: Rehash to sha256: 2 roots (1 snapshots).
+  left: {18, 30, 240}
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 14 filtered out; finished in 12.09s
+(the copy of the three-hash store, rehashed to SHA-256, keeps the file root
+of old.bin, which has the SHA-256 tag over chunks of all three tags)
+
+### Mutations that did not turn red (not used)
+- The loaders keep the first record of each snapshot version (the plan's
+  example): not tried as a guard. The switch removes the older segments
+  right after its rename, so a normal run leaves one record per version.
+- The engine keeps a manifest list (`Blob::ManifestList`) of the target tag
+  as is: no test turned red. A manifest list is written when the content of
+  its file is set (`set_manifest`), under the same hash as that content key,
+  and an unchanged file keeps its list. So a target-tag manifest list over
+  keys of another tag does not come up on these stores. The D-14 case is a file root (a value) of the
+  target tag over old chunks, which mutation B2 covers.
