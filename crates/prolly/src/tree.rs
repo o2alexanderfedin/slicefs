@@ -232,7 +232,6 @@ impl<'s> Builder<'s> {
 
     /// Adds a finished node of level `base - 1`; its last key must be above
     /// the last one.
-    #[allow(dead_code, reason = "the caller is apply in plan 24-02")]
     pub(crate) fn push_node(&mut self, r: NodeRef) -> Result<()> {
         debug_assert!(self.base > 0, "nodes go to a builder above level 0");
         self.check_order(&r.last_key)?;

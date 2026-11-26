@@ -72,6 +72,11 @@ mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 [ -n "$WORK" ] && [ "$WORK" != / ] || { echo "refusing WORK=$WORK" >&2; exit 2; }
 
 if [ -z "${BIN:-}" ]; then
+  # cargo runs in REPO, so a relative CARGO_TARGET_DIR means REPO/that dir.
+  case ${CARGO_TARGET_DIR:-} in
+    '' | /*) ;;
+    *) CARGO_TARGET_DIR=$REPO/$CARGO_TARGET_DIR; export CARGO_TARGET_DIR ;;
+  esac
   echo "building prolly-bench (release)" >&2
   (cd "$REPO" && cargo build --release -p prolly-bench >&2)
   BIN=${CARGO_TARGET_DIR:-$REPO/target}/release/prolly-bench

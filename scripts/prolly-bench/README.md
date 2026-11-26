@@ -167,7 +167,7 @@ has 1 + 2 x 4 x 10 + 1 + 4 x 10 = 122 commits per mode.
 | Env | Default | What |
 |---|---|---|
 | `WORK` | a new temp dir | `results.csv`, `scale.csv`, `disk.csv`, `edits.csv`, `batches.csv`, `shape.txt`, `machine.txt`. The stores, step outputs and the smoke data go in `WORK/stores.XXXXXX`, a new dir that the script makes with `mktemp -d` and removes at exit (also after a signal) |
-| `BIN` | build it | The `prolly-bench` binary. When unset, the script runs `cargo build --release -p prolly-bench` |
+| `BIN` | build it | The `prolly-bench` binary. When unset, the script runs `cargo build --release -p prolly-bench` in the repo and takes the binary from `CARGO_TARGET_DIR` (a relative `CARGO_TARGET_DIR` is relative to the repo, as for cargo) or `target` |
 | `RUNS` | `3` | Runs, when the second argument is not given |
 | `SMOKE` | `0` | `1`: two small generated trees and a short edit script (see below) |
 | `BOOST_VERS` | `1_84_0 1_85_0` | Exactly two versions: the seed tree, then the next tree |
