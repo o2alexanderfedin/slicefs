@@ -1,0 +1,13 @@
+[package]
+name = "prolly"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Prototype prolly-tree map with nodes in the chunk store (#19); not used by SliceFS"
+
+[dependencies]
+chunk-store = { path = "../chunk-store" }
+blake3.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

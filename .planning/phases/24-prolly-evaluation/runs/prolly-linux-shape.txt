@@ -1,0 +1,22 @@
+run=0 seed secs=24.396 inode_count=84104
+run=1 info inode_data_entries=84104 inode_count_field=84104 next_ino=84105 map_bytes=10344832 maxrss_after_load=67854336
+run=1 version files_changed=18991 files_created=1588 files_deleted=734 dirs_created=150 dirs_deleted=28
+run=1 final entries=84173 digest=c3ee4c46ce2b0682373721f58e5cba45013db265fe39385db6e29d45ed5d1d76
+run=1 check mode=flat entries=84173 digest=c3ee4c46ce2b0682373721f58e5cba45013db265fe39385db6e29d45ed5d1d76 ok=1
+run=1 hash boundary_hash_ns_per_key=90.3
+run=1 check mode=prolly entries=84173 digest=c3ee4c46ce2b0682373721f58e5cba45013db265fe39385db6e29d45ed5d1d76 ok=1
+run=1 tree depth=3 nodes=1035 leaves=1018 leaf_bytes_min=684 leaf_bytes_mean=3729 leaf_bytes_max=6804 internal_nodes=17 internal_bytes_mean=3111
+run=2 info inode_data_entries=84104 inode_count_field=84104 next_ino=84105 map_bytes=10344832 maxrss_after_load=67903488
+run=2 version files_changed=18991 files_created=1588 files_deleted=734 dirs_created=150 dirs_deleted=28
+run=2 final entries=84173 digest=c3ee4c46ce2b0682373721f58e5cba45013db265fe39385db6e29d45ed5d1d76
+run=2 hash boundary_hash_ns_per_key=76.8
+run=2 check mode=prolly entries=84173 digest=c3ee4c46ce2b0682373721f58e5cba45013db265fe39385db6e29d45ed5d1d76 ok=1
+run=2 tree depth=3 nodes=1035 leaves=1018 leaf_bytes_min=684 leaf_bytes_mean=3729 leaf_bytes_max=6804 internal_nodes=17 internal_bytes_mean=3111
+run=2 check mode=flat entries=84173 digest=c3ee4c46ce2b0682373721f58e5cba45013db265fe39385db6e29d45ed5d1d76 ok=1
+run=3 info inode_data_entries=84104 inode_count_field=84104 next_ino=84105 map_bytes=10344832 maxrss_after_load=67747840
+run=3 version files_changed=18991 files_created=1588 files_deleted=734 dirs_created=150 dirs_deleted=28
+run=3 final entries=84173 digest=c3ee4c46ce2b0682373721f58e5cba45013db265fe39385db6e29d45ed5d1d76
+run=3 check mode=flat entries=84173 digest=c3ee4c46ce2b0682373721f58e5cba45013db265fe39385db6e29d45ed5d1d76 ok=1
+run=3 hash boundary_hash_ns_per_key=76.4
+run=3 check mode=prolly entries=84173 digest=c3ee4c46ce2b0682373721f58e5cba45013db265fe39385db6e29d45ed5d1d76 ok=1
+run=3 tree depth=3 nodes=1035 leaves=1018 leaf_bytes_min=684 leaf_bytes_mean=3729 leaf_bytes_max=6804 internal_nodes=17 internal_bytes_mean=3111

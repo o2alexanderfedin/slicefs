@@ -493,7 +493,23 @@ Plans:
   1. A prototype for one metadata map (for example the directory map) is a separate crate that is not wired into the root record; its nodes are chunk-store objects, and tests show that its node boundaries depend only on the keys
   2. A benchmark on the Boost trees (about 78,000 files per version) compares the current commit path with the prototype for commit time, CPU, peak memory, bytes written per commit, and on-disk size after several small commits; it runs outside the test suite
   3. A written decision (adopt, later, or drop) is in the design docs and on #19, and it states that file manifests are already content-cut trees
-**Plans**: TBD
+**Plans**: 5 plans
+
+Plans:
+**Wave 1**
+- [ ] 24-01-PLAN.md — Tracer: `crates/prolly` core (Dolt size-aware key splitter with basic-op exp, chunk-store nodes, streaming build, get, cursor, walk), golden root, boundary/size/memory tests
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 24-02-PLAN.md — `prolly::apply` (sorted batch, per-level rewrite with resync, canonical root), order independence, idempotency, model proptest, apply memory bound
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 24-03-PLAN.md — `benchmarks/prolly-bench`: seed, whole (real commit + edit script + version sync), batches, flat, prolly, scale; smoke test; unsafe-review entry
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 24-04-PLAN.md — `scripts/prolly-bench/bench.sh` with README, SMOKE mode, median rows, `prolly-bench-smoke` Docker mode (no FUSE), macOS and Linux smoke
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 24-05-PLAN.md — Phase gate, Boost run (time-limited, D-29 fallbacks), `docs/research/prolly-trees.md`, `docs/design/metadata-maps.md`, #19 text
 
 ## Progress
 
@@ -514,4 +530,4 @@ Plans:
 | 21. Worker pool | 9/9 | Complete    | 2026-11-24 |
 | 22. Chunk profiles | 4/4 | Complete    | 2026-11-26 |
 | 23. Hashes and rehash | 0/0 | Not started | - |
-| 24. Prolly evaluation | 0/0 | Not started | - |
+| 24. Prolly evaluation | 0/5 | Planned | - |

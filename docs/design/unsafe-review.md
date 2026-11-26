@@ -652,6 +652,7 @@ These tools run by hand only. They are not part of the daemon.
 - `benchmarks/index-bench/src/main.rs`: zeroed `rusage` and `getrusage`
   (three places), `task_info` for the RSS on macOS (two places, with a
   zeroed `mach_task_basic_info`), `sysconf(_SC_PAGESIZE)` and `sync`.
+- `benchmarks/prolly-bench/src/main.rs`: a zeroed `rusage` and `getrusage` in one helper (`rusage`).
 
 ## Follow-ups
 
@@ -672,6 +673,7 @@ compares these lines with the code.
 
 - count: benchmarks/chunk-bench/src/main.rs 2
 - count: benchmarks/index-bench/src/main.rs 11
+- count: benchmarks/prolly-bench/src/main.rs 2
 - count: crates/chunk-store/src/pack_io.rs 12
 - count: crates/chunk-store/tests/gc_full_memory_tests.rs 9
 - count: crates/metadata/src/store.rs 2

@@ -17,6 +17,7 @@
 #        scripts/docker-linux-test/run.sh index-bench [SIZES...]   (default sizes: 1000000 10000000)
 #        scripts/docker-linux-test/run.sh index-bench-cold [SIZES...]   (cold page cache; privileged; by hand)
 #        scripts/docker-linux-test/run.sh chunk-profiles-smoke   (chunk profile benchmark, SMOKE=1, no FUSE; by hand, not in CI)
+#        scripts/docker-linux-test/run.sh prolly-bench-smoke   (prolly prototype smoke, SMOKE=1, no FUSE; by hand, not in CI)
 # SLICEFS_WORKERS (for example 4) passes --workers to the mounts of the scripts.
 # SLICEFS_TARGET_VOL names the cargo target volume (default slicefs-target), so
 # two runs from different trees at the same time do not share build output.
@@ -83,6 +84,22 @@ case "${1:-all}" in
         echo "# load after: $(cat /proc/loadavg)"
         echo "# edits.csv rows: $(($(wc -l < /tmp/cp/edits.csv) - 1))"
         cat /tmp/cp/machine.txt' ;;
+  prolly-bench-smoke)
+    # The prolly tests (the golden root on Linux) and the smoke of the prolly
+    # benchmark (#19, PROLLY-02). It mounts nothing: no FUSE device, no SYS_ADMIN
+    # and no unshare, so it does not use RUN.
+    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry \
+      -e CARGO_TARGET_DIR=/target slicefs-fusetest bash -c '
+        set -o pipefail
+        rustc -V || exit 1
+        timeout 2400 cargo test -q --release --locked -j 2 -p prolly || exit 1
+        timeout 600 cargo test --release --locked -j 2 -p prolly --lib -- --exact tests::golden_root 2>&1 | grep -E "^test |^test result" || exit 1
+        timeout 2400 cargo build -q --release --locked -j 2 -p prolly-bench || exit 1
+        echo "# load before: $(cat /proc/loadavg)" || exit 1
+        SMOKE=1 RUNS=1 WORK=/tmp/pp BIN=/target/release/prolly-bench timeout 900 bash /src/scripts/prolly-bench/bench.sh || exit 1
+        echo "# load after: $(cat /proc/loadavg)" || exit 1
+        echo "# checks ok: $(grep -c ok=1 /tmp/pp/shape.txt)" || exit 1
+        cat /tmp/pp/machine.txt || exit 1' ;;
   index-bench-cold)
     # The chunk index with a cold page cache (by hand). --privileged, because
     # only then can root in the container write /proc/sys/vm/drop_caches; this
