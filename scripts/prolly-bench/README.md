@@ -79,7 +79,7 @@ per record: the first word is the kind, then `key=value` fields.
 |---|---|---|
 | `gen tree` | `SMOKE=1` only: a tree of N files in 16 subdirectories | none |
 | `seed` | Seeds the first tree with the seed code path of SliceFS (default profile and hash), once per start of the script | `seeded` |
-| `whole` | The real `DictMetadataStore` commit on a copy of the seeded store: a setup commit, the edit script, then the next tree as one commit (the version step) | the copy of `seeded` |
+| `whole` | The real `DictMetadataStore` commit on a copy of the seeded store: a setup commit, the `scatter` and `cluster` commits, the next tree as one commit (the version step), then the `insdel` commits | the copy of `seeded` |
 | `batches` | Not timed. For each pair of consecutive commit roots of `whole`, the change of the `inode_data` map (sorted puts and deletes), streamed from the two map nodes | reads the copy (opened read only) |
 | `flat` | The current design for one map: the whole `inode_data` map in RAM, interned in full per commit by a copy of `intern_u64_digest_map` (through `store_io::put_value`), then `cs.sync()` | a new store with only this map |
 | `prolly` | The prototype: a bulk build from the first map, then one `prolly::apply` of each batch and one `cs.sync()` per commit | a new store with only this map |

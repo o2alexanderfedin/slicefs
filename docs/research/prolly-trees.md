@@ -1,6 +1,10 @@
 # Prolly trees for the metadata maps (#19)
 
-Plan 24-05, run on 2026-11-26. The data is in
+Plan 24-05, run again on 2026-11-26 after the fixes of the code review
+(`.planning/phases/24-prolly-evaluation/24-REVIEW.md`, section "Fixes"): a
+new edit pattern with real inserts and deletes (`insdel`), the disk sizes
+with the pack index, the same timed regions in both map modes, and checks
+of the prototype. Every number here is from the new run. The data is in
 `.planning/phases/24-prolly-evaluation/runs/`: `prolly-results.csv` (one row
 per commit, mode and run, and one `median` row per mode, pattern and K),
 `prolly-scale.csv`, `prolly-disk.csv`, `prolly-edits.csv`,
@@ -16,26 +20,38 @@ table from the CSV files.
 
 ## Summary
 
-**Recommendation: later**
+**Recommendation: later** (the same as before the fixes; see
+"Recommendation" for the one Linux row that is not better)
 
 - A prolly map for `inode_data` does much less work per small commit than
   the flat map. For one changed file (scatter, K = 1): 3.3 KB serialized in
-  place of 3,448.3 KB, 0.6 CPU ms in place of 6.1, and 2.6 KB new stored in
-  place of 15.4 KB. The peak RSS of the process is 26.6 MiB in place of
-  107.8 MiB.
-- But at the Boost scale (84,104 inodes) the gain on the whole commit is
-  small. The estimated whole commit with a prolly `inode_data` is 56.4 ms
-  in place of 61.7 ms (91.4 %), and 35.2 CPU ms in place of 40.8 (86.5 %).
-  That is about 5 ms per commit, below the 10 ms limit of the rubric. At
-  K = 1,000 scattered files and at the version step, prolly is slower than
-  flat. A Linux Docker run, where a sync is cheap, gives the same answer:
-  4.4 to 6.6 ms (14.3 to 21.4 %) less per commit for K up to 10.
+  place of 3,448.3 KB, 0.6 CPU ms in place of 6.6, and 2.6 KB new stored in
+  place of 15.4 KB. The peak RSS of the process is 33.7 MiB in place of
+  175.4 MiB.
+- The `scatter` and `cluster` commits change mostly values: their creates
+  and deletes cancel inside the commit, so K = 1,000 changes about 500
+  values. The new `insdel` commits insert and delete K keys in the middle of
+  the map, so node boundaries move. Prolly stays better up to K = 100 on
+  macOS (10.1 against 12.5 CPU ms, 30.8 against 34.5 ms at K = 100), but
+  the margin is small at K = 100, and at K = 1,000 prolly is slower (46.3
+  against 24.2 CPU ms).
+- At the Boost scale (84,104 inodes) the gain on the whole commit is small.
+  The estimated whole commit with a prolly `inode_data` is 58.4 ms in place
+  of 63.9 ms (91.4 %), and 36.8 CPU ms in place of 42.9 (85.8 %). In the
+  rows where prolly helps the gain is 3.7 to 8.3 ms per commit, below the
+  10 ms limit of the rubric. At K = 1,000 (scatter and insdel) and at the
+  version step, prolly is slower than flat. A Linux Docker run, where a
+  sync is cheap, gives 3.4 to 6.5 ms (9.8 to 23.2 %) less per commit for K
+  up to 10, and at insdel K = 100 prolly is a little slower than flat there
+  (16.7 against 15.4 ms, 13.4 against 12.7 CPU ms).
 - The gain grows with the map. With 4,000,000 entries one changed value
-  costs flat 229.9 ms (208.7 CPU ms, 164,000 KB serialized, 589.5 MiB peak
-  RSS), and prolly 21.8 ms (0.8 CPU ms, 10.7 KB, 94.2 MiB). By the scale
-  rows, one flat map passes 100 ms per commit at about 1.7 million entries.
-- Disk: over the 80 small commits and the version step, the flat store grew
-  by 31.2 MiB and the prolly store by 17.5 MiB (apparent size, before GC).
+  costs flat 242.1 ms (221.2 CPU ms, 164,000 KB serialized, 591.5 MiB peak
+  RSS), and prolly 22.0 ms (0.9 CPU ms, 10.7 KB, 85.7 MiB). By the scale
+  rows, one flat map passes 100 ms per commit at about 1.6 million entries.
+- Disk, pack index included: over the 120 commits after the bulk step (80
+  small commits, the version step and 40 `insdel` commits), the flat store
+  grew by 64.4 MiB and the prolly store by 38.4 MiB (apparent size, before
+  GC).
 - File manifests are already content-cut trees, and every metadata map node
   is already a FastCDC-cut value. A commit stores only the changed chunks of
   a map. The cost that is left is the full serialization, the hashing and the
@@ -47,22 +63,28 @@ table from the CSV files.
 
 - Machine (from `prolly-machine.txt`): macOS (Darwin 25.2.0), x86_64,
   Intel Xeon W-3245 at 3.20 GHz, 32 CPUs, 192 GiB of memory, APFS. Commit
-  `50965cb` (the Task 1 commit of this plan; the code is the merged tree of
-  plans 24-01 to 24-04). `rustc 1.95.0-nightly`, release build.
-- Load: the 1-minute load was 5.78 before and 7.79 after the run
-  (`load_before=5.78 11.19 15.18`, `load_after=7.79 9.58 13.85`). The run
-  started after the 1-minute load came down to 8 or less. No cargo, rustc or
-  other SliceFS job ran. Jobs of other projects used about 3 CPUs at the
-  start and about 6 CPUs at the end of the run (of 32). So the machine was
-  not fully quiet. Byte, object and node counts do not change with load;
-  times can.
-- Start 2026-11-26T20:40:32Z, end 20:42:59Z: 147 s for 3 runs.
+  `9a26452` (the last fix commit of the review). `rustc 1.95.0-nightly`,
+  release build. The `rustc` line of `prolly-machine.txt` was filled in
+  after the run from the toolchain that built the binary: the wrapper that
+  waited for a quiet machine started `bench.sh` without `rustc` in its
+  `PATH`, so the script wrote `unknown`.
+- Load: the run was to start when the 1-minute load came down to 8 or
+  less, with no `slicefs-gcmem` container (the Docker runs of another
+  agent). The wait was limited to 30 minutes. In that time the load stayed
+  at 13 to 18 (jobs of other projects, and short Docker containers of
+  another project), so the wait expired and the run started at a load of
+  13.30 (`load_before=13.30 14.65 16.45`, `load_after=14.25 14.62 16.11`).
+  No `slicefs-gcmem` container ran, and no other SliceFS cargo job of this
+  run. Jobs of other projects used about 13 to 15 of the 32 CPUs, about
+  twice the load of the 24-05 run. Byte, object and node counts do not
+  change with load; times can.
+- Start 2026-11-26T22:18:56Z, end 22:21:47Z: 171 s for 3 runs.
 - Inputs: Boost 1_84_0 (the seed tree; `inode_data_entries=84104` in the
   `info` line of `prolly-shape.txt`) and Boost 1_85_0 (the version step:
   18,991 files changed, a count that includes the files that the edit
   script changed before; 1,588 files created and 734
-  deleted; 150 directories created and 28 deleted; 85,083 entries in the
-  final map).
+  deleted; 150 directories created and 28 deleted; 85,083 entries after
+  it). After the `insdel` commits the final map has 84,173 entries.
 - Command lines:
 
   ```sh
@@ -72,14 +94,17 @@ table from the CSV files.
   ```
 
   with the defaults `BOOST_VERS="1_84_0 1_85_0"`, `KS="1 10 100 1000"`,
-  `COMMITS=10`, `PATTERNS="scatter cluster"`, `SEED=24` and
+  `COMMITS=10`, `PATTERNS="scatter cluster insdel"`, `SEED=24` and
   `SCALE_NS="100000 1000000 4000000"`. `M` is the measure dir outside the
   repo.
-- Runs: 3, no fallback. 738 run rows and 30 median rows. The flat and the
+- Runs: 3, no fallback. 1,098 run rows and 42 median rows. The flat and the
   prolly digest checks gave `ok=1` in all 3 runs.
-- Before the long run, a quick pass on the same data (`RUNS=1 KS=1
-  COMMITS=1 PATTERNS=scatter SCALE_NS=100000`, 76 s) checked the tools. Its
-  files are `runs/prolly-quick-*`. Its numbers are not used here.
+- The edit script before the `insdel` commits is the same as in the first
+  run of plan 24-05: in every one of those rows (seq 0 to 81) the entries,
+  serialized bytes, new objects, new raw bytes and nodes read and written
+  are equal to the first run, on macOS and on Linux. Only the times changed.
+- The files `runs/prolly-quick-*` are the quick pass of the first run (the
+  code before the fixes). Their numbers are not used here.
 - Unchanged by this phase: FastCDC 4/8/32 KiB, BLAKE3-256 IDs and the 1 TiB
   cap (D-04). The store format does not change.
 
@@ -98,6 +123,10 @@ and its own store:
 - **`prolly`** is the prototype for the same map. It bulk-builds the first
   map, then does one `prolly::apply` of the changes and one `cs.sync()` per
   commit.
+- In both map modes the input is outside the timed region: `flat` fills its
+  map before the timer, and the prolly bulk build reads `base.bin` in pieces
+  outside the timer and times only the pushes, `finish` and the sync. The
+  same holds for the synthetic values of the scale rows.
 
 Why three processes, and not one map inside the real commit: the commit
 internals of `metadata` are private, and this phase does not change
@@ -129,13 +158,32 @@ Edit script (all from seed 24, the same in every run):
   `cluster` picks one start per commit and takes the next files in inode
   order. New inode numbers only grow, so creates go to the right edge of
   the map in both patterns. The "entries changed" column is the measured
-  `inode_data` change of a commit; it is smaller than K.
-- Version step (the last commit): the 1_85_0 tree as one commit, matched by
-  content key. A file with the same content key stays; a changed file gets
-  the new content; new files and directories are made; names that are only
-  in the store are removed.
+  `inode_data` change of a commit. It is about K / 2: a delete takes the
+  oldest file that the script made, and that is mostly a file of the same
+  commit, so most creates and deletes cancel (`prolly-batches.csv`: 502
+  puts and 2 deletes for K = 1,000). So these commits change mostly values,
+  plus a few entries at the right edge. With fixed-width values a changed
+  value moves no node boundary, which is the best case for prolly.
+- Version step: the 1_85_0 tree as one commit, matched by content key. A
+  file with the same content key stays; a changed file gets the new
+  content; new files and directories are made; names that are only in the
+  store are removed.
+- `insdel` commits (after the version step, so the commits before them are
+  the same as without them): for each K, 10 commits of K edits. Edit i of
+  commit seq is a delete when (i + seq) mod 2 is 0, else an insert. A
+  delete removes a random file of a random directory of the tree. An insert
+  makes a file that an earlier commit deleted again, at its freed inode
+  number, with its name and content and an mtime one second later
+  (`create_inode_at`); with no such file the edit is a delete. So every edit
+  inserts or deletes one key in the middle of the committed map, and the
+  `inode_data` change is exactly K entries (9 of the 10 commits of each K
+  are half inserts and half deletes; the first is mostly deletes). Inserts
+  and deletes in the middle move node boundaries, so prolly rewrites nodes
+  up to the next resync. The product never uses a freed inode number
+  again, so for `inode_data` the inserts are a stand-in: they show the cost
+  for a map whose keys can appear in the middle.
 
-That is 82 commits per mode and run. The columns that matter:
+That is 122 commits per mode and run. The columns that matter:
 
 - `total_ms`: wall time of the commit, sync included. `begin_ms` of `whole`
   is the clone of every map.
@@ -146,7 +194,8 @@ That is 82 commits per mode and run. The columns that matter:
 - `nodes_read` and `nodes_written`: prolly nodes read and written by
   `apply`.
 - `peak_rss_bytes`: peak RSS of the process (`/usr/bin/time -l`).
-- The on-disk size of each store at the start and at the end.
+- The on-disk size of each store at the start and at the end, each after a
+  close of the store, so the pack index is counted in all three modes.
 
 The prototype has no node cache (D-17). `nodes_read` shows the read cost
 without one: every `apply` reads its paths from the store.
@@ -158,17 +207,17 @@ process.
 
 How to read the wall times: each commit ends with one `cs.sync()`, which is
 `F_FULLFSYNC` on macOS. On this machine the wall time of a commit minus its
-CPU time is about 20 ms in most commits and about 40 ms in some. Computed
-from the run rows (the median of the 30 rows of each group): the gap is 20.3
-to 21.4 ms in 19 of the 24 small-commit groups, and 23.5 to 40.4 ms in the
-other five (`whole` scatter and cluster K = 1,000, `flat` and `prolly`
-scatter K = 1,000, and `prolly` scatter K = 100). The gap is about the
-same in the three modes. So for small commits the wall time is mostly the
-sync, and a difference of one sync (about 20 ms) between two medians comes
-from the disk, not from the work of the map. The CPU time, the serialized bytes
-and the scale rows show the work. The decision below uses them first (a
-reading of this plan, recorded in the plan summary). On Linux (see "Linux
-Docker run") the gap is about 2 to 3 ms.
+CPU time is about 20 ms. Computed from the run rows (the median of the 30
+rows of each group): the gap is 19.9 to 21.1 ms in 28 of the 36
+small-commit groups, and 23.3 to 25.9 ms in the other eight (the K = 1,000
+groups of `whole`, of `flat` and `prolly` scatter and insdel, and `whole`
+insdel K = 100). The gap is about the same in the three modes. In this run
+no group had the 40 ms syncs of the first run. So for small commits the
+wall time is mostly the sync, and a difference of one sync between two
+medians comes from the disk, not from the work of the map. The CPU time,
+the serialized bytes and the scale rows show the work. The decision below
+uses them first (a reading of plan 24-05, recorded in its summary). On
+Linux (see "Linux Docker run") the gap is about 2 to 5 ms.
 
 Limits:
 
@@ -185,32 +234,38 @@ Limits:
 
 | pattern | K | entries changed | whole ms | whole begin ms | whole CPU ms | flat ms | flat CPU ms | prolly ms | prolly CPU ms |
 |---|---|---|---|---|---|---|---|---|---|
-| setup | 0 | NA | 95.5 | 13.9 | 41.1 | - | - | - | - |
-| bulk | 0 | 84,105 | - | - | - | 56.0 | 30.1 | 89.0 | 64.0 |
-| scatter | 1 | 1 | 61.7 | 13.4 | 40.8 | 26.9 | 6.1 | 21.6 | 0.6 |
-| scatter | 10 | 6 | 59.6 | 11.7 | 38.6 | 27.1 | 6.2 | 22.4 | 1.3 |
-| scatter | 100 | 54 | 63.2 | 9.3 | 42.0 | 30.3 | 9.3 | 45.7 | 5.8 |
-| scatter | 1000 | 503 | 110.4 | 11.0 | 73.5 | 46.1 | 21.2 | 55.1 | 31.7 |
-| cluster | 1 | 1 | 56.5 | 8.3 | 34.9 | 26.5 | 5.7 | 20.8 | 0.5 |
-| cluster | 10 | 10 | 55.2 | 7.8 | 33.9 | 26.3 | 5.7 | 20.9 | 0.6 |
-| cluster | 100 | 54 | 56.4 | 7.8 | 34.6 | 26.2 | 5.8 | 21.1 | 0.6 |
-| cluster | 1000 | 504 | 67.7 | 8.0 | 40.9 | 26.7 | 6.1 | 21.9 | 1.2 |
-| version | 0 | 21,521 | 148.5 | 14.5 | 101.1 | 52.1 | 27.2 | 104.1 | 79.9 |
+| setup | 0 | NA | 88.7 | 14.7 | 45.8 | - | - | - | - |
+| bulk | 0 | 84,105 | - | - | - | 58.9 | 32.6 | 118.0 | 66.7 |
+| scatter | 1 | 1 | 63.9 | 13.5 | 42.9 | 26.1 | 6.6 | 20.6 | 0.6 |
+| scatter | 10 | 6 | 61.8 | 12.2 | 40.9 | 28.2 | 6.8 | 21.8 | 1.4 |
+| scatter | 100 | 54 | 66.2 | 10.4 | 44.6 | 31.0 | 10.4 | 26.6 | 6.0 |
+| scatter | 1000 | 503 | 100.4 | 10.9 | 74.4 | 46.1 | 22.7 | 57.7 | 34.2 |
+| cluster | 1 | 1 | 56.7 | 8.4 | 36.0 | 26.6 | 6.1 | 20.7 | 0.5 |
+| cluster | 10 | 10 | 57.3 | 8.3 | 36.6 | 26.4 | 6.1 | 20.8 | 0.7 |
+| cluster | 100 | 54 | 57.1 | 8.1 | 36.2 | 26.6 | 6.3 | 20.8 | 0.7 |
+| cluster | 1000 | 504 | 67.3 | 8.4 | 42.3 | 26.8 | 6.3 | 21.6 | 1.3 |
+| insdel | 1 | 1 | 59.0 | 10.5 | 38.7 | 28.6 | 6.6 | 20.9 | 0.6 |
+| insdel | 10 | 10 | 59.6 | 8.5 | 39.1 | 30.4 | 7.3 | 22.1 | 1.9 |
+| insdel | 100 | 100 | 77.1 | 8.5 | 51.8 | 34.5 | 12.5 | 30.8 | 10.1 |
+| insdel | 1000 | 1,000 | 127.5 | 10.7 | 101.2 | 49.5 | 24.2 | 69.5 | 46.3 |
+| version | 0 | 21,521 | 151.3 | 13.8 | 105.1 | 51.2 | 29.0 | 117.1 | 92.1 |
 
-The whole commit costs about 55 to 63 ms (34 to 42 CPU ms) for up to 100
-changed files. Of that, `begin_commit` (the clone of every map) is 7.8 to
-13.4 ms. For `inode_data` alone, flat costs about 6 CPU ms per commit up to
-K = 10 and in every cluster row (9.3 at scatter K = 100), because it
-serializes and hashes the full map every time. Prolly costs
-0.5 to 1.3 CPU ms up to K = 10 and for every cluster commit, and its cost
-grows with the number of touched leaves: 5.8 CPU ms at scatter K = 100 and
-31.7 CPU ms at scatter K = 1,000 (more than flat's 21.2). The version step
-(21,521 changed entries) costs prolly 79.9 CPU ms and flat 27.2: a large
-batch is cheaper as a full rewrite. The prolly wall time at scatter K = 100
-(45.7 ms) is high because most syncs of that group took about 40 ms, not 20
-(median wall minus CPU 40.4 ms); its CPU time is lower than flat's. The 40 ms
-does not grow with the nodes written: prolly scatter K = 1,000 writes 401
-nodes and its median gap is 23.5 ms. The cause was not measured.
+The whole commit costs about 57 to 66 ms (36 to 45 CPU ms) for up to 100
+changed files of `scatter` and `cluster` and for up to 10 of `insdel`
+(77.1 ms and 51.8 CPU ms at insdel K = 100). Of that, `begin_commit` (the
+clone of every map) is 8.1 to 13.5 ms. For `inode_data` alone, flat costs
+about 6 to 7 CPU ms per commit up to K = 10 and in every cluster row (10.4
+at scatter K = 100 and 12.5 at insdel K = 100), because it serializes and
+hashes the full map every time. Prolly costs 0.5 to 1.9 CPU ms up to K = 10
+and for every cluster commit, and its cost grows with the number of touched
+leaves: 6.0 CPU ms at scatter K = 100 and 34.2 at scatter K = 1,000 (more
+than flat's 22.7). The `insdel` commits cost prolly more for the same K,
+because each edit is a real insert or delete (K entries changed, not about
+K / 2) and moves boundaries: 10.1 CPU ms at K = 100 (flat 12.5) and 46.3 at
+K = 1,000 (flat 24.2). The version step (21,521 changed entries) costs
+prolly 92.1 CPU ms and flat 29.0: a large batch is cheaper as a full
+rewrite. In this run every prolly wall time for K up to 100 is lower than
+flat's.
 
 ### Bytes per commit
 
@@ -226,71 +281,91 @@ nodes and its median gap is 23.5 ms. The cause was not measured.
 | cluster | 10 | 10,345.4 | 29 | 61.9 | 3,448.4 | 3 | 20.6 | 11.8 | 5 | 9.0 | 9 | 5 |
 | cluster | 100 | 10,345.4 | 120 | 70.4 | 3,448.4 | 4 | 28.3 | 13.0 | 6 | 10.1 | 10 | 6 |
 | cluster | 1000 | 10,345.4 | 1,023 | 154.9 | 3,448.4 | 5 | 43.4 | 34.9 | 11 | 26.9 | 15 | 11 |
+| insdel | 1 | 10,465.4 | 7 | 31.0 | 3,488.4 | 2 | 18.6 | 9.1 | 3 | 6.8 | 6 | 3 |
+| insdel | 10 | 10,464.2 | 50 | 245.9 | 3,488.0 | 11 | 113.3 | 68.7 | 18 | 51.7 | 26 | 18 |
+| insdel | 100 | 10,454.4 | 359 | 1,644.4 | 3,484.7 | 82 | 861.9 | 467.2 | 112 | 345.2 | 133 | 117 |
+| insdel | 1000 | 10,353.5 | 2,396 | 5,094.5 | 3,451.1 | 258 | 2,424.0 | 2,205.4 | 555 | 1,685.3 | 580 | 564 |
 | version | 0 | 10,465.5 | 1,784 | 5,495.9 | 3,488.4 | 312 | 2,861.1 | 3,757.9 | 991 | 2,918.1 | 991 | 991 |
 
 Serialized and hashed per commit is not the same as new stored per commit
-(D-24). The whole commit serializes and hashes about 10.3 MB on every
-commit, whatever K is, but stores only 34.2 to 36.3 KB for one changed file: the
-FastCDC cut of `store_io` keeps every unchanged chunk. For `inode_data`,
-flat serializes 3,448 KB per commit and prolly 3.3 KB for one change. New
-stored bytes are small in both designs, and prolly stores less in every
-row: 2.6 KB against 15.4 KB at K = 1, 188.4 KB against 487.6 KB at scatter
-K = 100. Write amplification of prolly: one change writes one path of 3
-nodes (depth 3) and reads 6; 54 scattered changes write 64 nodes. Flat
-writes the changed FastCDC chunks and the manifest leaf of the map again
-(2 objects at K = 1, 48 at scatter K = 100).
+(D-24). The whole commit serializes and hashes about 10.3 to 10.5 MB on
+every commit, whatever K is, but stores only 31.0 to 36.3 KB for one
+changed file: the FastCDC cut of `store_io` keeps every unchanged chunk.
+For `inode_data`, flat serializes 3,448 to 3,488 KB per commit and prolly
+3.3 to 9.1 KB for one change. New stored bytes are small in both designs,
+and prolly stores less in every small-commit row: 2.6 KB against 15.4 KB at
+scatter K = 1, 188.4 KB against 487.6 KB at scatter K = 100, and 345.2 KB
+against 861.9 KB at insdel K = 100 (at the version step 2,918.1 against
+2,861.1 KB, 1.02 x). Write amplification of prolly: one change writes one
+path of 3 nodes (depth 3) and reads 6; 54 scattered value changes write 64
+nodes; 100 inserts and deletes write 117 and read 133; 1,000 inserts and
+deletes write 564 (401 for scatter K = 1,000). Flat writes the changed
+FastCDC chunks and the manifest leaf of the map again (2 objects at K = 1,
+48 at scatter K = 100, 82 at insdel K = 100).
 
 ### Estimated whole commit with a prolly inode_data (estimate, not measured)
 
 | pattern | K | whole ms | flat ms | prolly ms | estimate ms (whole - flat + prolly) | estimate / whole | whole CPU ms | estimate CPU ms (whole - flat + prolly) | estimate CPU / whole CPU |
 |---|---|---|---|---|---|---|---|---|---|
-| scatter | 1 | 61.7 | 26.9 | 21.6 | 56.4 | 91.4 % | 40.8 | 35.2 | 86.5 % |
-| scatter | 10 | 59.6 | 27.1 | 22.4 | 54.9 | 92.1 % | 38.6 | 33.7 | 87.4 % |
-| scatter | 100 | 63.2 | 30.3 | 45.7 | 78.6 | 124.5 % | 42.0 | 38.5 | 91.7 % |
-| scatter | 1000 | 110.4 | 46.1 | 55.1 | 119.5 | 108.2 % | 73.5 | 84.0 | 114.3 % |
-| cluster | 1 | 56.5 | 26.5 | 20.8 | 50.9 | 90.0 % | 34.9 | 29.7 | 84.9 % |
-| cluster | 10 | 55.2 | 26.3 | 20.9 | 49.8 | 90.2 % | 33.9 | 28.8 | 84.8 % |
-| cluster | 100 | 56.4 | 26.2 | 21.1 | 51.3 | 91.0 % | 34.6 | 29.4 | 85.0 % |
-| cluster | 1000 | 67.7 | 26.7 | 21.9 | 62.9 | 92.9 % | 40.9 | 36.0 | 88.0 % |
-| version | 0 | 148.5 | 52.1 | 104.1 | 200.5 | 135.0 % | 101.1 | 153.8 | 152.1 % |
+| scatter | 1 | 63.9 | 26.1 | 20.6 | 58.4 | 91.4 % | 42.9 | 36.8 | 85.8 % |
+| scatter | 10 | 61.8 | 28.2 | 21.8 | 55.4 | 89.7 % | 40.9 | 35.5 | 86.7 % |
+| scatter | 100 | 66.2 | 31.0 | 26.6 | 61.8 | 93.4 % | 44.6 | 40.2 | 90.2 % |
+| scatter | 1000 | 100.4 | 46.1 | 57.7 | 112.0 | 111.5 % | 74.4 | 85.9 | 115.6 % |
+| cluster | 1 | 56.7 | 26.6 | 20.7 | 50.8 | 89.7 % | 36.0 | 30.4 | 84.4 % |
+| cluster | 10 | 57.3 | 26.4 | 20.8 | 51.8 | 90.3 % | 36.6 | 31.1 | 85.0 % |
+| cluster | 100 | 57.1 | 26.6 | 20.8 | 51.3 | 89.9 % | 36.2 | 30.7 | 84.7 % |
+| cluster | 1000 | 67.3 | 26.8 | 21.6 | 62.1 | 92.2 % | 42.3 | 37.3 | 88.2 % |
+| insdel | 1 | 59.0 | 28.6 | 20.9 | 51.3 | 87.0 % | 38.7 | 32.7 | 84.4 % |
+| insdel | 10 | 59.6 | 30.4 | 22.1 | 51.3 | 86.0 % | 39.1 | 33.7 | 86.2 % |
+| insdel | 100 | 77.1 | 34.5 | 30.8 | 73.4 | 95.2 % | 51.8 | 49.4 | 95.4 % |
+| insdel | 1000 | 127.5 | 49.5 | 69.5 | 147.6 | 115.7 % | 101.2 | 123.3 | 121.8 % |
+| version | 0 | 151.3 | 51.2 | 117.1 | 217.2 | 143.5 % | 105.1 | 168.3 | 160.1 % |
 
 This is an estimate: the real commit does not run with a prolly map. If
 `inode_data` were a prolly map, a small commit at the Boost scale would be
-about 5 ms faster: 7 to 10 % of the wall time and 12 to 15 % of the CPU
-time. The scatter K = 100 wall row (124.5 %) is the sync effect of the
-table above; by CPU that row is 91.7 %. For scatter K = 1,000 and for the
-version step the estimate is worse than today. A prolly map for all four
-O(N) maps would gain more (not measured), but the clone in `begin_commit`
-and the fixed costs of a commit stay.
+about 4 to 8 ms faster: 4.8 to 14.0 % of the wall time and 4.6 to 15.6 %
+of the CPU time (3.7 to 8.3 ms and 2.4 to 6.1 CPU ms in the rows where
+prolly helps). The smallest gain is at insdel K = 100 (95.2 % of the wall
+time, 95.4 % of the CPU time). For K = 1,000 of scatter and insdel and for
+the version step the estimate is worse than today. A prolly map for all
+four O(N) maps would gain more (not measured), but the clone in
+`begin_commit` and the fixed costs of a commit stay.
 
 ### Peak memory
 
 | mode | peak RSS of the process (MiB) | ru_maxrss after the store load (MiB) | ru_maxrss after the last commit (MiB) |
 |---|---|---|---|
-| whole | 390.0 | 103.4 | 390.0 |
-| flat | 107.8 | - | 107.8 |
-| prolly | 26.6 | - | 26.2 |
+| whole | 478.2 | 104.0 | 468.9 |
+| flat | 175.4 | - | 171.2 |
+| prolly | 33.7 | - | 30.2 |
 
-The whole process reaches 103.4 MiB after the store load and 390.0 MiB at
-the end. Its high-water mark grows with every commit (123.3 MiB after the
-setup commit and 328.6 MiB in the cluster K = 1,000 row, from the
-`maxrss_bytes` column), so it is not only the maps; the parts were not
-measured. The flat process, which holds only `inode_data` and its chunk
-store, reaches 107.8 MiB; the prolly process 26.6 MiB, with no map in RAM.
-On Linux the same processes peak at 147.8, 23.3 and 13.8 MiB (see "Linux
-Docker run"). The cause of the higher macOS numbers was not measured.
+The whole process reaches 104.0 MiB after the store load and 478.2 MiB at
+the end. Its high-water mark grows with the commits (133.8 MiB after the
+setup commit, 421.9 MiB after the version step and 468.9 MiB after the
+last `insdel` commit, from the `maxrss_bytes` column), so it is not only
+the maps; the parts were not measured. The flat process, which holds only
+`inode_data` and its chunk store, reaches 175.4 MiB (115.7 MiB after the
+version step); the prolly process 33.7 MiB (26.3 MiB after the version
+step), with no map in RAM. These peaks are higher than in the first run
+(390.0, 107.8 and 26.6 MiB) because the run now has 40 more commits, and
+the macOS high-water marks grow with the commits. On Linux the same
+processes peak at 153.2, 22.6 and 14.0 MiB, and the flat and prolly peaks
+do not grow in the `insdel` commits (see "Linux Docker run"). The cause of
+the higher macOS numbers was not measured.
 
 ### On-disk size
 
 | mode | start apparent MiB | end apparent MiB | growth apparent MiB | start allocated MiB | end allocated MiB | growth allocated MiB | files at end |
 |---|---|---|---|---|---|---|---|
-| whole | 283.2 | 443.3 | 160.1 | 283.2 | 444.2 | 161.0 | 19 |
-| flat | 2.7 | 33.9 | 31.2 | 2.7 | 34.1 | 31.4 | 1 |
-| prolly | 2.9 | 20.4 | 17.5 | 2.9 | 21.3 | 18.4 | 1 |
+| whole | 283.2 | 513.5 | 230.3 | 283.2 | 514.2 | 231.0 | 21 |
+| flat | 2.7 | 67.1 | 64.4 | 2.7 | 67.7 | 64.9 | 6 |
+| prolly | 2.9 | 41.3 | 38.4 | 2.9 | 41.7 | 38.7 | 4 |
 
-After the 80 small commits and the version step (81 commits after the bulk
-build), with no GC, the prolly store
-of `inode_data` grew by 17.5 MiB and the flat store by 31.2 MiB (44 % less).
+All sizes are taken after a close of the store, so the pack index is in
+all three modes (in the first run the flat and prolly sizes did not count
+it). After the 120 commits after the bulk build (80 small commits, the
+version step and 40 `insdel` commits), with no GC, the prolly store of
+`inode_data` grew by 38.4 MiB and the flat store by 64.4 MiB (40 % less).
 The start sizes are close (2.9 against 2.7 MiB): a prolly node holds 41
 bytes per entry plus the length fields, and its 33-byte digests do not
 compress. The growth of `whole` includes the 4 KiB content of the content
@@ -300,23 +375,27 @@ edits and the creates, and the content of the version step.
 
 | n | op | flat ms | flat CPU ms | flat serialized KB | flat peak RSS MiB | prolly ms | prolly CPU ms | prolly serialized KB | prolly new objects | prolly peak RSS MiB |
 |---|---|---|---|---|---|---|---|---|---|---|
-| 100,000 | build | 60.8 | 35.2 | 4,100.0 | 24.5 | 103.8 | 78.9 | 4,573.0 | 1,218 | 7.9 |
-| 100,000 | apply1 | 29.0 | 6.0 | 4,100.0 | 24.5 | 21.4 | 0.7 | 7.6 | 3 | 7.9 |
-| 1,000,000 | build | 464.5 | 321.5 | 41,000.0 | 162.1 | 1,009.2 | 798.3 | 45,734.6 | 12,245 | 30.6 |
-| 1,000,000 | apply1 | 62.9 | 42.2 | 41,000.0 | 162.1 | 22.3 | 0.8 | 10.9 | 4 | 30.6 |
-| 4,000,000 | build | 1,817.3 | 1,308.1 | 164,000.0 | 589.5 | 3,672.7 | 3,082.1 | 182,940.7 | 49,012 | 94.2 |
-| 4,000,000 | apply1 | 229.9 | 208.7 | 164,000.0 | 589.5 | 21.8 | 0.8 | 10.7 | 4 | 94.2 |
+| 100,000 | build | 61.1 | 36.9 | 4,100.0 | 32.5 | 106.1 | 80.8 | 4,573.0 | 1,218 | 8.5 |
+| 100,000 | apply1 | 29.4 | 9.3 | 4,100.0 | 32.5 | 20.6 | 0.7 | 7.6 | 3 | 8.5 |
+| 1,000,000 | build | 462.6 | 341.2 | 41,000.0 | 164.1 | 977.8 | 791.0 | 45,734.6 | 12,245 | 36.7 |
+| 1,000,000 | apply1 | 64.4 | 44.1 | 41,000.0 | 164.1 | 44.6 | 0.9 | 10.9 | 4 | 36.7 |
+| 4,000,000 | build | 1,894.7 | 1,382.8 | 164,000.0 | 591.5 | 3,591.7 | 3,054.1 | 182,940.7 | 49,012 | 85.7 |
+| 4,000,000 | apply1 | 242.1 | 221.2 | 164,000.0 | 591.5 | 22.0 | 0.9 | 10.7 | 4 | 85.7 |
 
-The cost of one small change grows linearly with N for flat (6.0, 42.2 and
-208.7 CPU ms), and stays near 0.8 CPU ms for prolly (one path of 3 or 4
-nodes). Flat's peak RSS also grows with N (24.5 to 589.5 MiB); prolly's grows
-less (7.9 to 94.2 MiB; on Linux 7.4 to 21.6 MiB with the same 49,012 new
-objects at 4,000,000 entries; what uses the memory was not measured). A bulk build is 1.7 to 2.2 times as slow for prolly
-as a full flat intern. By linear interpolation of the flat `apply1` wall times
-between the 1,000,000 and 4,000,000 rows, one flat map passes 100 ms per
-commit at about 1.67 million entries (by CPU time alone, at about 2.04
-million). The whole commit interns three maps of this size and clones five,
-so it passes 100 ms at a smaller inode count (not measured).
+The cost of one small change grows linearly with N for flat (9.3, 44.1 and
+221.2 CPU ms), and stays near 0.8 CPU ms for prolly (one path of 3 or 4
+nodes). The prolly wall time of 44.6 ms at 1,000,000 entries is the sync
+effect of "Method" (0.9 CPU ms). Flat's peak RSS also grows with N (32.5
+to 591.5 MiB); prolly's grows less (8.5 to 85.7 MiB; on Linux 7.9 to 22.4
+MiB with the same 49,012 new objects at 4,000,000 entries; what uses the
+memory was not measured). A bulk build is 1.7 to 2.1 times as slow for
+prolly as a full flat intern; in this run the synthetic values are made
+outside the timer in both modes. By linear interpolation of the flat
+`apply1` wall times between the 1,000,000 and 4,000,000 rows, one flat map
+passes 100 ms per commit at about 1.60 million entries (by CPU time alone,
+at about 1.95 million). The whole commit interns three maps of this size
+and clones five, so it passes 100 ms at a smaller inode count (not
+measured).
 
 ### Tree shape
 
@@ -324,20 +403,21 @@ so it passes 100 ms at a smaller inode count (not measured).
 |---|---|
 | inode_data entries after the seed | 84,104 |
 | final tree: depth | 3 |
-| final tree: nodes | 1,042 |
-| final tree: leaves | 1,026 |
-| final tree: leaf bytes min | 549 |
-| final tree: leaf bytes mean | 3,740 |
+| final tree: nodes | 1,035 |
+| final tree: leaves | 1,018 |
+| final tree: leaf bytes min | 684 |
+| final tree: leaf bytes mean | 3,729 |
 | final tree: leaf bytes max | 6,804 |
-| final tree: internal nodes | 16 |
-| final tree: internal bytes mean | 3,327 |
-| boundary hash ns per key (median of runs) | 94.3 |
+| final tree: internal nodes | 17 |
+| final tree: internal bytes mean | 3,111 |
+| boundary hash ns per key (median of runs) | 99.5 |
 
-The final tree (85,083 entries) has depth 3, 1,026 leaves and 16 internal
-nodes. The node size spread (#19): leaves are 549 to 6,804 bytes with a mean
-of 3,740, as the Weibull rule predicts (mean about 0.906 x 4,096 plus the
-header). No node is near `NODE_MAX` (16,384). The boundary hash costs 94.3
-ns per key (D-12), so a bulk build of 84,104 keys spends about 8 ms in it.
+The final tree (84,173 entries, after the `insdel` commits) has depth 3,
+1,018 leaves and 17 internal nodes. The node size spread (#19): leaves are
+684 to 6,804 bytes with a mean of 3,729, as the Weibull rule predicts (mean
+about 0.906 x 4,096 plus the header). No node is near `NODE_MAX` (16,384).
+The boundary hash costs 99.5 ns per key (D-12), so a bulk build of 84,104
+keys spends about 8 ms in it.
 
 ### Linux Docker run
 
@@ -353,26 +433,30 @@ prolly-linux` of the tables script).
   same host, 32 CPUs, 16 GiB of memory for the VM, overlay file system for
   the stores, `rustc 1.100.0`, release build. `commit=unknown`, because git
   cannot read the read-only source mount in the container; the source was
-  the same work tree (commit `e16962c`, same code as `50965cb`).
-- Start 2026-11-26T20:44:32Z, end 20:47:09Z, 3 runs, no fallback, 6 digest
-  checks `ok=1`. The load in the VM was 2.40 before and 1.17 after. No host
-  load was read during this run; the last host reading, at the end of the
-  macOS run (20:42:59Z), was 7.79, with jobs of other projects running. So
-  the host was not quiet.
+  the same work tree at commit `9a26452`.
+- Start 2026-11-26T22:22:19Z, end 22:25:15Z, 3 runs, no fallback, 6 digest
+  checks `ok=1`. The load in the VM was 0.05 before and 1.06 after. The
+  host load was 13.80 before and 15.19 after (jobs of other projects), so
+  the host was not quiet. It ran right after the macOS run, not at the same
+  time.
 
 The byte, object and node counts are the same as on macOS, or close. In the
 prolly rows the entries, serialized bytes, new objects and nodes read and
-written are equal, and the stored bytes differ by at most 62 bytes (zstd of
+written are equal, and the stored bytes differ by at most 88 bytes (zstd of
 other digest bytes). The flat and whole rows differ a little more, because
 file times go into the inode digests and FastCDC cuts the flat map by
-content. The times differ: on Linux a sync costs about 2 to 3 ms (median
-wall minus CPU over the small commits: 3.0, 2.6 and 2.2 ms for whole, flat
-and prolly), so the wall time shows the work. The small-commit estimate is
-4.4 to 6.6 ms less per commit (14.3 to 21.4 %) for K up to 10, and worse
-than today at scatter K = 1,000 and at the version step. In the scale rows
-flat's `apply1` is 110.1 ms at 1,000,000 entries and 285.0 ms at 4,000,000;
-prolly's is 2.9 to 4.7 ms. Peak RSS is much lower than on macOS for the
-same work.
+content. The times differ: on Linux a sync costs about 2 to 5 ms (median
+wall minus CPU per small-commit group: 1.9 to 4.7 ms; the median over the
+groups is 2.6, 2.4 and 2.8 ms for whole, flat and prolly), so the wall time
+shows the work. The small-commit estimate is 3.4 to 6.5 ms less per commit
+(9.8 to 23.2 %) for K up to 10. At insdel K = 100 prolly is a little slower
+than flat (16.7 against 15.4 ms, 13.4 against 12.7 CPU ms; estimate 102.6
+%), and the estimate is worse than today at K = 1,000 (scatter and insdel)
+and at the version step. In the scale rows flat's `apply1` is 66.9 ms at
+1,000,000 entries and 243.7 ms at 4,000,000 (the first run had 110.1 and
+285.0 ms); prolly's is 2.8 to 5.2 ms. By the scale rows one flat map passes
+100 ms per commit at about 1.56 million entries on Linux. Peak RSS is much
+lower than on macOS for the same work.
 
 <details>
 <summary>Linux tables</summary>
@@ -381,17 +465,21 @@ same work.
 
 | pattern | K | entries changed | whole ms | whole begin ms | whole CPU ms | flat ms | flat CPU ms | prolly ms | prolly CPU ms |
 |---|---|---|---|---|---|---|---|---|---|
-| setup | 0 | NA | 40.7 | 9.6 | 35.5 | - | - | - | - |
-| bulk | 0 | 84,105 | - | - | - | 62.5 | 36.4 | 76.8 | 70.4 |
-| scatter | 1 | 1 | 30.7 | 6.1 | 27.3 | 8.6 | 6.2 | 2.5 | 0.3 |
-| scatter | 10 | 6 | 30.9 | 6.0 | 28.3 | 11.0 | 7.3 | 4.4 | 2.2 |
-| scatter | 100 | 54 | 38.7 | 6.1 | 35.5 | 14.2 | 10.5 | 11.3 | 7.7 |
-| scatter | 1000 | 503 | 76.9 | 6.3 | 70.7 | 29.7 | 27.4 | 46.2 | 43.6 |
-| cluster | 1 | 1 | 29.9 | 6.2 | 27.7 | 8.2 | 6.1 | 2.7 | 1.1 |
-| cluster | 10 | 10 | 30.6 | 6.2 | 28.2 | 8.3 | 6.1 | 3.9 | 1.3 |
-| cluster | 100 | 54 | 31.9 | 6.4 | 29.5 | 8.9 | 6.2 | 3.3 | 1.4 |
-| cluster | 1000 | 504 | 39.4 | 6.5 | 36.1 | 8.1 | 6.6 | 4.3 | 2.0 |
-| version | 0 | 21,521 | 150.9 | 29.2 | 156.0 | 36.9 | 33.1 | 138.3 | 111.0 |
+| setup | 0 | NA | 69.3 | 8.0 | 39.9 | - | - | - | - |
+| bulk | 0 | 84,105 | - | - | - | 44.5 | 35.2 | 75.6 | 69.1 |
+| scatter | 1 | 1 | 27.9 | 5.8 | 25.4 | 9.0 | 6.1 | 2.5 | 0.3 |
+| scatter | 10 | 6 | 29.4 | 5.8 | 26.7 | 9.3 | 7.2 | 4.9 | 2.3 |
+| scatter | 100 | 54 | 36.9 | 5.9 | 34.4 | 12.4 | 10.3 | 9.5 | 7.6 |
+| scatter | 1000 | 503 | 77.8 | 6.0 | 69.0 | 30.3 | 25.0 | 45.8 | 43.0 |
+| cluster | 1 | 1 | 28.9 | 6.0 | 26.4 | 8.4 | 6.2 | 3.6 | 1.0 |
+| cluster | 10 | 10 | 29.2 | 6.0 | 26.5 | 8.9 | 5.7 | 4.0 | 1.2 |
+| cluster | 100 | 54 | 31.4 | 6.1 | 27.9 | 8.4 | 6.1 | 4.1 | 1.1 |
+| cluster | 1000 | 504 | 38.2 | 6.2 | 34.8 | 9.3 | 6.1 | 4.9 | 1.9 |
+| insdel | 1 | 1 | 30.9 | 6.6 | 28.4 | 8.1 | 6.1 | 4.2 | 1.4 |
+| insdel | 10 | 10 | 34.7 | 6.5 | 31.6 | 9.3 | 7.0 | 5.9 | 3.1 |
+| insdel | 100 | 100 | 53.0 | 6.8 | 49.3 | 15.4 | 12.7 | 16.7 | 13.4 |
+| insdel | 1000 | 1,000 | 113.3 | 9.2 | 110.5 | 29.8 | 26.8 | 64.5 | 61.7 |
+| version | 0 | 21,521 | 153.3 | 29.1 | 151.8 | 38.7 | 30.8 | 112.2 | 108.4 |
 
 #### Linux: Bytes per commit
 
@@ -407,48 +495,56 @@ same work.
 | cluster | 10 | 10,345.4 | 30 | 73.0 | 3,448.4 | 3 | 31.4 | 11.8 | 5 | 9.0 | 9 | 5 |
 | cluster | 100 | 10,345.4 | 118 | 72.5 | 3,448.4 | 3 | 30.9 | 13.0 | 6 | 10.1 | 10 | 6 |
 | cluster | 1000 | 10,345.4 | 1,024 | 164.1 | 3,448.4 | 6 | 54.9 | 34.9 | 11 | 26.9 | 15 | 11 |
+| insdel | 1 | 10,465.4 | 9 | 24.1 | 3,488.4 | 3 | 13.5 | 9.1 | 3 | 6.8 | 6 | 3 |
+| insdel | 10 | 10,464.2 | 53 | 248.3 | 3,488.0 | 13 | 108.7 | 68.7 | 18 | 51.7 | 26 | 18 |
+| insdel | 100 | 10,454.4 | 363 | 1,571.5 | 3,484.7 | 86 | 792.1 | 467.2 | 112 | 345.1 | 133 | 117 |
+| insdel | 1000 | 10,353.5 | 2,400 | 5,054.9 | 3,451.1 | 263 | 2,387.2 | 2,205.4 | 555 | 1,685.4 | 580 | 564 |
 | version | 0 | 10,465.5 | 1,801 | 5,493.5 | 3,488.4 | 328 | 2,865.6 | 3,757.9 | 991 | 2,918.1 | 991 | 991 |
 
 #### Linux: Estimated whole commit with a prolly inode_data (estimate, not measured)
 
 | pattern | K | whole ms | flat ms | prolly ms | estimate ms (whole - flat + prolly) | estimate / whole | whole CPU ms | estimate CPU ms (whole - flat + prolly) | estimate CPU / whole CPU |
 |---|---|---|---|---|---|---|---|---|---|
-| scatter | 1 | 30.7 | 8.6 | 2.5 | 24.6 | 80.1 % | 27.3 | 21.3 | 78.3 % |
-| scatter | 10 | 30.9 | 11.0 | 4.4 | 24.3 | 78.6 % | 28.3 | 23.2 | 81.9 % |
-| scatter | 100 | 38.7 | 14.2 | 11.3 | 35.8 | 92.6 % | 35.5 | 32.7 | 92.1 % |
-| scatter | 1000 | 76.9 | 29.7 | 46.2 | 93.4 | 121.5 % | 70.7 | 86.9 | 123.0 % |
-| cluster | 1 | 29.9 | 8.2 | 2.7 | 24.4 | 81.7 % | 27.7 | 22.7 | 82.1 % |
-| cluster | 10 | 30.6 | 8.3 | 3.9 | 26.2 | 85.7 % | 28.2 | 23.5 | 83.1 % |
-| cluster | 100 | 31.9 | 8.9 | 3.3 | 26.3 | 82.6 % | 29.5 | 24.7 | 83.8 % |
-| cluster | 1000 | 39.4 | 8.1 | 4.3 | 35.6 | 90.4 % | 36.1 | 31.6 | 87.3 % |
-| version | 0 | 150.9 | 36.9 | 138.3 | 252.2 | 167.2 % | 156.0 | 233.8 | 149.9 % |
+| scatter | 1 | 27.9 | 9.0 | 2.5 | 21.4 | 76.8 % | 25.4 | 19.6 | 77.3 % |
+| scatter | 10 | 29.4 | 9.3 | 4.9 | 24.9 | 84.9 % | 26.7 | 21.8 | 81.8 % |
+| scatter | 100 | 36.9 | 12.4 | 9.5 | 34.0 | 92.3 % | 34.4 | 31.7 | 92.1 % |
+| scatter | 1000 | 77.8 | 30.3 | 45.8 | 93.3 | 120.0 % | 69.0 | 87.0 | 126.1 % |
+| cluster | 1 | 28.9 | 8.4 | 3.6 | 24.0 | 83.2 % | 26.4 | 21.3 | 80.6 % |
+| cluster | 10 | 29.2 | 8.9 | 4.0 | 24.3 | 83.3 % | 26.5 | 21.9 | 82.9 % |
+| cluster | 100 | 31.4 | 8.4 | 4.1 | 27.1 | 86.3 % | 27.9 | 22.9 | 82.1 % |
+| cluster | 1000 | 38.2 | 9.3 | 4.9 | 33.7 | 88.4 % | 34.8 | 30.5 | 87.8 % |
+| insdel | 1 | 30.9 | 8.1 | 4.2 | 27.1 | 87.5 % | 28.4 | 23.7 | 83.5 % |
+| insdel | 10 | 34.7 | 9.3 | 5.9 | 31.3 | 90.2 % | 31.6 | 27.7 | 87.5 % |
+| insdel | 100 | 53.0 | 15.4 | 16.7 | 54.4 | 102.6 % | 49.3 | 50.0 | 101.3 % |
+| insdel | 1000 | 113.3 | 29.8 | 64.5 | 148.1 | 130.6 % | 110.5 | 145.3 | 131.5 % |
+| version | 0 | 153.3 | 38.7 | 112.2 | 226.8 | 147.9 % | 151.8 | 229.4 | 151.1 % |
 
 #### Linux: Peak memory
 
 | mode | peak RSS of the process (MiB) | ru_maxrss after the store load (MiB) | ru_maxrss after the last commit (MiB) |
 |---|---|---|---|
-| whole | 147.8 | 64.8 | 147.8 |
-| flat | 23.3 | - | 23.3 |
-| prolly | 13.8 | - | 13.8 |
+| whole | 153.2 | 64.7 | 152.9 |
+| flat | 22.6 | - | 22.6 |
+| prolly | 14.0 | - | 14.0 |
 
 #### Linux: On-disk size
 
 | mode | start apparent MiB | end apparent MiB | growth apparent MiB | start allocated MiB | end allocated MiB | growth allocated MiB | files at end |
 |---|---|---|---|---|---|---|---|
-| whole | 283.2 | 443.6 | 160.4 | 283.2 | 443.6 | 160.4 | 19 |
-| flat | 2.7 | 34.4 | 31.7 | 2.7 | 34.4 | 31.7 | 1 |
-| prolly | 2.9 | 20.4 | 17.5 | 2.9 | 20.4 | 17.5 | 1 |
+| whole | 283.2 | 512.7 | 229.5 | 283.2 | 512.7 | 229.5 | 21 |
+| flat | 2.7 | 66.7 | 64.0 | 2.7 | 66.7 | 64.0 | 4 |
+| prolly | 2.9 | 41.3 | 38.4 | 2.9 | 41.3 | 38.4 | 4 |
 
 #### Linux: Scale
 
 | n | op | flat ms | flat CPU ms | flat serialized KB | flat peak RSS MiB | prolly ms | prolly CPU ms | prolly serialized KB | prolly new objects | prolly peak RSS MiB |
 |---|---|---|---|---|---|---|---|---|---|---|
-| 100,000 | build | 62.6 | 54.2 | 4,100.0 | 19.6 | 94.7 | 87.7 | 4,573.0 | 1,218 | 7.4 |
-| 100,000 | apply1 | 7.6 | 6.0 | 4,100.0 | 19.6 | 3.3 | 1.3 | 7.6 | 3 | 7.4 |
-| 1,000,000 | build | 498.2 | 506.7 | 41,000.0 | 135.8 | 922.0 | 911.5 | 45,734.6 | 12,245 | 15.9 |
-| 1,000,000 | apply1 | 110.1 | 85.9 | 41,000.0 | 135.8 | 4.7 | 1.8 | 10.9 | 4 | 15.9 |
-| 4,000,000 | build | 1,863.8 | 1,975.6 | 164,000.0 | 503.0 | 3,408.7 | 3,513.4 | 182,940.7 | 49,012 | 21.6 |
-| 4,000,000 | apply1 | 285.0 | 288.8 | 164,000.0 | 503.0 | 2.9 | 1.5 | 10.7 | 4 | 21.6 |
+| 100,000 | build | 45.6 | 36.7 | 4,100.0 | 19.5 | 88.0 | 81.3 | 4,573.0 | 1,218 | 7.9 |
+| 100,000 | apply1 | 7.5 | 6.0 | 4,100.0 | 19.5 | 5.2 | 1.7 | 7.6 | 3 | 7.9 |
+| 1,000,000 | build | 361.9 | 382.7 | 41,000.0 | 136.3 | 766.2 | 786.2 | 45,734.6 | 12,245 | 16.6 |
+| 1,000,000 | apply1 | 66.9 | 64.3 | 41,000.0 | 136.3 | 2.8 | 1.5 | 10.9 | 4 | 16.6 |
+| 4,000,000 | build | 1,325.1 | 1,420.6 | 164,000.0 | 503.3 | 3,047.6 | 3,135.3 | 182,940.7 | 49,012 | 22.4 |
+| 4,000,000 | apply1 | 243.7 | 241.3 | 164,000.0 | 503.3 | 3.3 | 1.5 | 10.7 | 4 | 22.4 |
 
 #### Linux: Tree shape
 
@@ -456,14 +552,14 @@ same work.
 |---|---|
 | inode_data entries after the seed | 84,104 |
 | final tree: depth | 3 |
-| final tree: nodes | 1,042 |
-| final tree: leaves | 1,026 |
-| final tree: leaf bytes min | 549 |
-| final tree: leaf bytes mean | 3,740 |
+| final tree: nodes | 1,035 |
+| final tree: leaves | 1,018 |
+| final tree: leaf bytes min | 684 |
+| final tree: leaf bytes mean | 3,729 |
 | final tree: leaf bytes max | 6,804 |
-| final tree: internal nodes | 16 |
-| final tree: internal bytes mean | 3,327 |
-| boundary hash ns per key (median of runs) | 76.9 |
+| final tree: internal nodes | 17 |
+| final tree: internal bytes mean | 3,111 |
+| boundary hash ns per key (median of runs) | 76.8 |
 
 </details>
 
@@ -521,8 +617,8 @@ orders, or by bulk build and by batches, gives the same root; a change of
 value bytes with the same length moves no boundary; no node is above
 `NODE_MAX`, and no node is below `NODE_MIN` except the last of a level.
 
-Measured node size spread on Boost: see "Tree shape" (leaves 549 to 6,804
-bytes, mean 3,740).
+Measured node size spread on Boost: see "Tree shape" (leaves 684 to 6,804
+bytes, mean 3,729).
 
 ## Node storage
 
@@ -550,7 +646,7 @@ survey (crates.io and docs.rs, 2026-11-26):
 
 All three have few downloads. So the prototype is an own small crate on the
 chunk store, with no new dependency (D-18). `crates/prolly` depends only on
-`chunk-store` and `blake3` (about 2,100 lines, 670 of them tests), and no
+`chunk-store` and `blake3` (about 2,300 lines, 740 of them tests), and no
 product crate depends on it.
 
 ## File manifests are already content-cut trees
@@ -596,7 +692,7 @@ Adoption is a store format change (D-28). It would change:
   (there are no deployments), but the new number must refuse old stores
   cleanly.
 
-Cost: the prototype is about 2,100 lines with tests for one generic map,
+Cost: the prototype is about 2,300 lines with tests for one generic map,
 with no wiring. Adoption adds the wiring in `metadata` (load, commit, the
 directory and refcount paths), the GC and rehash walks, the snapshot code,
 a bounded node cache, their tests, and the crash and replay tests of the
@@ -619,12 +715,21 @@ commit path. That is the work of a milestone, not of one phase.
 - **Single writer.** The design has one `apply` per root at a time. That
   fits the current commit lock, but a future parallel commit path would need
   a merge of two roots.
-- **Large batches.** A large batch (the version step, scatter K = 1,000) is
-  slower as a prolly `apply` than as a full flat rewrite. An adopted design
-  would need a switch to a bulk rebuild for large batches.
+- **Large batches and moving boundaries.** A large batch (the version step,
+  K = 1,000 of scatter and insdel) is slower as a prolly `apply` than as a
+  full flat rewrite. Inserts and deletes in the middle of the map cost more
+  than value changes, because they move boundaries: at 100 of them per
+  commit prolly is only a little better than flat on macOS and a little
+  worse on Linux. An adopted design would need a switch to a bulk rebuild
+  for large batches.
 - **Read cost without a cache.** Each `apply` reads its paths from the store
   (no node cache, D-17): 6 nodes for one change. A real adoption needs a
   bounded cache of the top levels.
+- **Tree consistency.** Each node is checked alone, and each child against
+  its parent entry (last key, first key above the previous sibling, count)
+  when it is loaded. The check is per path: a read that does not load a bad
+  node does not see it. A GC or a verify walk of an adopted design would
+  load every node.
 
 ## Owner questions
 
@@ -660,33 +765,48 @@ Reading of "better" (recorded in the plan summary): prolly is better when
 its CPU time is lower and its median wall time is lower, or higher by no
 more than the sync effect of "Method".
 
-The numbers that decided it:
+The numbers that decided it (the main run is macOS, as in the first run;
+the rows for K up to 100 are now nine: scatter, cluster and insdel):
 
-- Not `drop`: for K up to 100, prolly uses less CPU than flat in every row
-  (0.5 to 5.8 CPU ms against 5.7 to 9.3), and in the 1M and 4M scale rows
-  (0.8 against 42.2 and 208.7 CPU ms; 22.3 and 21.8 ms against 62.9 and
-  229.9 ms wall). Its new stored bytes are lower in every row (at most 0.47 x
-  flat's for K up to 100). Its median wall time is lower in 5 of the 6 rows
-  for K up to 100. The sixth (scatter K = 100, 45.7 against 30.3 ms) is the
-  sync effect: its sync took about 40 ms in place of 20, and its CPU time is
-  lower (5.8 against 9.3 ms). On Linux, where a sync is about 2 ms, prolly's
-  wall time is lower in all 6 rows.
-- Not `adopt`: in the rows where prolly helps (K up to 10, and cluster up to
-  K = 1,000), the estimated whole-commit gain at the Boost scale is 4.7 to
-  5.6 ms (7.1 to 10.0 % of the wall time) and 4.9 to 5.6 CPU ms (12.0 to
-  15.2 % of the CPU time). On Linux it is 3.8 to 6.6 ms (9.6 to 21.4 %). So
-  it is below 10 ms on both, and below 20 % on macOS. At scatter K = 1,000
-  and at the version step the estimate is worse than today.
+- Not `drop` on macOS: for K up to 100, prolly uses less CPU than flat in
+  all nine rows (0.5 to 10.1 CPU ms against 6.1 to 12.5), and its median
+  wall time is lower in all nine (20.6 to 30.8 ms against 26.1 to 34.5). In
+  the 1M and 4M scale rows it uses 0.9 against 44.1 and 221.2 CPU ms (44.6
+  and 22.0 ms against 64.4 and 242.1 ms wall; the 44.6 ms is the sync
+  effect). Its new stored bytes are lower in every row for K up to 100 (at
+  most 0.47 x flat's).
+- On Linux, one of the nine rows is not better: at insdel K = 100 (100 real
+  inserts and deletes) prolly is a little slower than flat, 16.7 against
+  15.4 ms and 13.4 against 12.7 CPU ms. The other eight Linux rows are
+  better in both, and so are the Linux scale rows. The rubric names no
+  system; plan 24-05 applied it to the macOS run and used Linux as a check.
+  Applied to the Linux run alone with "better in every row", this one row
+  would give `drop`. It shows where the break-even is: with moving
+  boundaries, prolly loses its lead at about 100 changed keys per commit at
+  this map size, while flat's cost does not depend on K.
+- Not `adopt`: in the rows where prolly helps (K up to 100 on macOS, and
+  cluster up to K = 1,000), the estimated whole-commit gain at the Boost
+  scale is 3.7 to 8.3 ms (4.8 to 14.0 % of the wall time) and 2.4 to 6.1 CPU
+  ms (4.6 to 15.6 % of the CPU time). On Linux it is 3.4 to 6.5 ms (9.8 to
+  23.2 %) for K up to 10. So it is below 10 ms on both, and below 20 % on
+  macOS (scatter K = 1 on Linux, 23.2 %, is above 20 % but at 6.5 ms below
+  10 ms). At K = 1,000 (scatter and insdel) and at the version step the
+  estimate is worse than today.
 - The gain is real for large stores. By the scale rows, one flat map passes
-  100 ms per commit at about 1.67 million entries on macOS (about 0.91
-  million on Linux, where the 1M row is already 110.1 ms), while prolly stays
-  under 2 CPU ms and near one sync of wall time.
+  100 ms per commit at about 1.6 million entries on macOS (about 1.56
+  million on Linux; the first run gave 1.67 and 0.91 million), while prolly
+  stays under 2 CPU ms and near one sync of wall time.
+
+So the recommendation stays `later`. The fixes did not change it, but the
+`insdel` rows make the case for prolly at the Boost scale weaker than the
+first run showed: with real inserts and deletes the gain per commit is
+smaller, and at 100 such changes it is gone on Linux.
 
 What would change the choice:
 
-- Stores with more than about one million inodes as a target, or a commit
-  interval much shorter than today's, would make the O(N) serialization the
-  main cost. Then a new run of this benchmark at that scale (the scale rows,
+- Stores with more than about one and a half million inodes as a target,
+  or a commit interval much shorter than today's, would make the O(N)
+  serialization the main cost. Then a new run of this benchmark at that scale (the scale rows,
   or a seeded tree of that size) should decide Q-1.
 - A smaller first step exists: `inode_map` and `inode_data` hold the same
   entries, so one of the two can go. That removes about a third of the
