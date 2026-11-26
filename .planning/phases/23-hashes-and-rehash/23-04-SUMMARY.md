@@ -38,10 +38,10 @@ decisions:
   - "On an engine error or a test hook stop, the open store is dropped with no close and rehash-tmp stays; the next writable open removes it"
   - "PROGRESS_EVERY = 5 s; the rewrite progress line is sent from the engine callback; step lines at each step"
 metrics:
-  duration: about 95 min
+  duration: about 50 min
   completed: 2026-11-26
 actuals:
-  tokens: 9500
+  tokens: 11400    # chars/4 of git diff 1aa0c71..9542d9e (45794 chars)
   tasks: 3
   commits: 3
 plan_head_before: 1aa0c71
@@ -137,6 +137,7 @@ See `runs/gate-23-04.log`.
   - Task 3: 1659 passed, 0 failed, 13 ignored, 81 result lines.
 - **`RUST_STABLE=stable scripts/safety/clippy.sh`** at every commit: `CLIPPY ... result=ok` and `UNSAFE files=31 tokens=132 result=ok`.
 - **Negative grep.** `rehash.rs` has 0 code lines with `gc_report`, `GarbageCollector`, `run_gc_mode` or `store_io(`.
+- **Binary check.** `target/debug/slicefs rehash --to sha256 <missing path>` prints `slicefs rehash error: failed to load segments: store not found at ...` and exits 1.
 
 ## Deviations from Plan
 
@@ -152,6 +153,7 @@ See `runs/gate-23-04.log`.
    - The test therefore asserts `new objects: 0 (0 bytes stored)`, the `Every live object already has hash sha256` line, no new segment file and the `hash sha256` header line. It does not assert `Rewritten: 0 values`.
 5. **Small addition.** `content::remove_rehash_tmp(store)` (pub) is shared by the writable open and the end of a run. It is reversible.
 6. **Process.** Clippy ran before each of the three commits, not only in Task 3, as the orchestrator asked.
+7. **Process.** The harness refused to write the plan commit ledger file (`gsd-plan-head-before-23-04` in the git dir). `plan_head_before` comes from the known BASE `1aa0c71`, and `commits` comes from `git rev-list --count 1aa0c71..9542d9e`.
 
 STATE.md, ROADMAP.md and REQUIREMENTS.md were not touched (orchestrator rule).
 
