@@ -50,7 +50,7 @@ use std::time::Duration;
 
 use chunk_store::{hasher_by_name, ObjectHasher};
 use metadata::rehash::{rehash_roots, Mode, RehashError, RehashOptions, RootSet, Stats};
-use metadata::segment::{remove_switch_tmps, scan_store_with_log, write_switch_segment};
+use metadata::segment::{remove_switch_tmps, scan_store_with_log, segment_file_count, write_switch_segment};
 
 use crate::content::{self, REHASH_TMP_DIR};
 use crate::gc;
@@ -227,9 +227,13 @@ fn rewrite_and_switch(
     progress("rehash: synced");
     hook(args, Step::Synced)?;
 
-    // Step 4: the switch, when a root changed.
+    // Step 4: the switch, when a root changed, or when more than one
+    // segment is left (a crash after the rename of an earlier switch, before
+    // the older segments went): the switch with the same roots removes them.
+    // The write log is empty (step 1), so the roots and the snapshot list
+    // are all that the segments hold.
     let changed = new != *old;
-    if changed {
+    if changed || segment_file_count(segs)? > 1 {
         write_switch_segment(segs, new.current, &new.snapshots)
             .map_err(|e| format!("rehash stopped in the switch: {e}. Run rehash again to finish the job."))?;
         progress("rehash: switch");

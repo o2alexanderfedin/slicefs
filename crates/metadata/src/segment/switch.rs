@@ -35,18 +35,27 @@ pub fn remove_switch_tmps(dir: &Path) -> std::io::Result<usize> {
     Ok(n)
 }
 
-/// The largest id of a `segment-<n>.seg` file of `dir`, of any size (as
-/// `next_segment_id` of the mount), or 0.
-fn max_segment_id(dir: &Path) -> std::io::Result<u64> {
-    let mut max = 0;
+/// The ids of the `segment-<n>.seg` files of `dir`, of any size.
+fn segment_ids(dir: &Path) -> std::io::Result<Vec<u64>> {
+    let mut ids = Vec::new();
     for e in std::fs::read_dir(dir)?.filter_map(|e| e.ok()) {
         let name = e.file_name().to_string_lossy().to_string();
         let id = name.strip_prefix("segment-").and_then(|n| n.strip_suffix(".seg")).and_then(|n| n.parse::<u64>().ok());
-        if let Some(id) = id {
-            max = max.max(id);
-        }
+        ids.extend(id);
     }
-    Ok(max)
+    Ok(ids)
+}
+
+/// The largest id of a `segment-<n>.seg` file of `dir`, of any size (as
+/// `next_segment_id` of the mount), or 0.
+fn max_segment_id(dir: &Path) -> std::io::Result<u64> {
+    Ok(segment_ids(dir)?.into_iter().max().unwrap_or(0))
+}
+
+/// The number of `segment-<n>.seg` files of `dir`. More than one after a
+/// switch: a crash came before the older segments were removed.
+pub fn segment_file_count(dir: &Path) -> std::io::Result<usize> {
+    Ok(segment_ids(dir)?.len())
 }
 
 /// Make `root` and `snapshots` current in one atomic step; return the id of

@@ -28,7 +28,7 @@ pub mod switch;
 
 pub use writer::SegmentWriter;
 pub use reader::SegmentReader;
-pub use switch::{remove_switch_tmps, write_switch_segment};
+pub use switch::{remove_switch_tmps, segment_file_count, write_switch_segment};
 
 use std::path::Path;
 use slicefs_traits::key::{ObjectKey, KEY_BYTES};

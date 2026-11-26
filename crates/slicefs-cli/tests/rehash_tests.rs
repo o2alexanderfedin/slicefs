@@ -822,6 +822,8 @@ fn crash_with_old_segments_left_after_the_switch() {
     assert_opens(&store, &before, &Expect::New);
     rehash(&store, "sha256", false);
     assert_finished(&store, &before);
+    // IN-02: the rerun removes the old segments.
+    assert_eq!(segment_names(&store).iter().filter(|n| n.ends_with(".seg")).count(), 1, "{:?}", segment_names(&store));
 }
 
 /// The segment files of `store`: names and bytes.
