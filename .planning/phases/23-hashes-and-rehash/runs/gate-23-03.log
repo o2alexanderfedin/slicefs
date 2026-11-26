@@ -1,0 +1,106 @@
+# 23-03 plan gates
+BASE=526609e (feature/phase-23-hashes-rehash)
+HEAD at the gate run: 1d1302f plus the Task 3 working tree
+
+## rehash:: unit tests: cargo test -p metadata --lib -- rehash::
+test rehash::map::tests::the_kind_is_part_of_the_key ... ok
+test rehash::map::tests::a_missing_key_is_none_and_an_inserted_key_is_found ... ok
+test rehash::tests::an_unknown_tag_stops_the_run ... ok
+test rehash::tests::a_stale_refcount_is_dropped_and_counted ... ok
+test rehash::tests::two_old_keys_of_one_content_merge_their_counts ... ok
+test rehash::tests::a_file_byte_equal_to_a_node_gets_both_translations ... ok
+test rehash::tests::a_target_tag_value_is_kept ... ok
+test rehash::map::tests::the_cache_stays_fixed_while_entries_grow ... ok
+test rehash::map::tests::entries_survive_growth ... ok
+test rehash::map::tests::cache_only_forgets_but_never_lies ... ok
+test rehash::tests::stop_after_values_stops_the_run ... ok
+test rehash::tests::a_damaged_object_stops_the_run ... ok
+test rehash::tests::progress_is_called_with_running_stats ... ok
+test rehash::tests::dry_run_writes_nothing_and_counts ... ok
+test rehash::tests::new_objects_survive_a_crash_after_sync ... ok
+test rehash::tests::a_root_rehashes_to_the_same_tree ... ok
+test rehash::tests::shared_values_are_rewritten_once ... ok
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 166 filtered out; finished in 0.53s
+
+## awk gate (whole-value or whole-map reads in engine code; expect 0)
+0
+
+## no change in segment/, wal/, hash.rs since BASE
+diff_exit=0
+
+## RUST_STABLE=stable scripts/safety/clippy.sh
+CLIPPY os=Darwin toolchain=stable result=ok
+UNSAFE files=31 tokens=132 result=ok
+clippy_exit=0
+
+## local gate: cargo test --workspace with the 4 standard skips
+test binaries=79 passed=1625 failed=0 ignored=12
+  11 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   2 test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   1 test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 4 filtered out; finished in 0.00s
+   1 test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   1 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   1 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+   1 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.85s
+   1 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.59s
+   1 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.29s
+   1 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.91s
+   1 test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+   1 test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.48s
+   1 test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.90s
+   1 test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.83s
+   1 test result: ok. 107 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+   1 test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.09s
+   1 test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+   1 test result: ok. 129 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.60s
+   1 test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.54s
+   1 test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.53s
+   1 test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+   1 test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.08s
+   1 test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.26s
+   1 test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.65s
+   1 test result: ok. 183 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.74s
+   1 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   1 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+   1 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.68s
+   1 test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.50s
+   1 test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.05s
+   1 test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.12s
+   1 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+   1 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+   1 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.51s
+   1 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.48s
+   1 test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+   1 test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.79s
+   1 test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.28s
+   1 test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.42s
+   1 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+   1 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+   1 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+   1 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.99s
+   1 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.38s
+   1 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.28s
+   1 test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+   1 test result: ok. 402 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.06s
+   1 test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.69s
+   1 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   1 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+   1 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.51s
+   1 test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.25s
+   1 test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.32s
+   1 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+   1 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+   1 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.98s
+   1 test result: ok. 6 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 9.55s
+   1 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+   1 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+   1 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+   1 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+   1 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.81s
+   1 test result: ok. 78 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.78s
+   1 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+   1 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+   1 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+   1 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.93s
+   1 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.10s
+gate_exit=0

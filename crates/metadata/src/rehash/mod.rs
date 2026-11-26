@@ -236,16 +236,27 @@ impl Walker<'_, '_> {
         Ok(got)
     }
 
-    /// End a value: the new key from the writer (counted as rewritten), or
-    /// in a dry-run the old key.
-    fn done(&mut self, kind: Kind, old: ObjectKey, w: Option<FileWriter>) -> Result<ObjectKey, RehashError> {
+    /// End a value of `len` bytes: the new key from the writer (counted as
+    /// rewritten), or in a dry-run the old key, with the objects of its
+    /// tree that have another tag counted.
+    fn done(&mut self, kind: Kind, what: &'static str, old: ObjectKey, len: u64, w: Option<FileWriter>) -> Result<ObjectKey, RehashError> {
         let new = match w {
             Some(w) => {
                 let new = to_key(w.finish(self.cs).map_err(RehashError::Write)?);
                 self.stats.values_rewritten += 1;
                 new
             }
-            None => old,
+            None => {
+                let tag = self.target.tag();
+                let mut other = 0u64;
+                for_each_file_object(self.cs, to_id(&old), |id| other += u64::from(id.tag() != tag))
+                    .map_err(|source| RehashError::Read { what, key: old, source })?;
+                if other > 0 {
+                    self.stats.other_tag_objects += other;
+                    self.stats.other_tag_bytes += len;
+                }
+                old
+            }
         };
         self.map.insert(kind, &old, &new)?;
         if let Some(n) = self.stop_after
@@ -288,7 +299,7 @@ impl Walker<'_, '_> {
         }
         self.stats.values_read += 1;
         self.stats.bytes_read += len;
-        self.done(Kind::Value, old, w)
+        self.done(Kind::Value, what, old, len, w)
     }
 
     /// The new key of a key-carrying node of records: each key translated,
@@ -366,7 +377,7 @@ impl Walker<'_, '_> {
         }
         self.stats.values_read += 1;
         self.stats.bytes_read += len;
-        self.done(kind, old, w)
+        self.done(kind, what, old, len, w)
     }
 
     /// The new key of a refcount table: each key translated, the rows
@@ -432,7 +443,7 @@ impl Walker<'_, '_> {
         self.stats.values_read += 1;
         self.stats.bytes_read += len;
         let Some(sorter) = sorter else {
-            return self.done(Kind::Refcounts, old, None);
+            return self.done(Kind::Refcounts, what, old, len, None);
         };
         let sorted = sorter.finish()?;
         // Pass 1: the count of distinct new keys.
@@ -477,7 +488,7 @@ impl Walker<'_, '_> {
             }
         }
         w.write(cs, &out).map_err(RehashError::Write)?;
-        self.done(Kind::Refcounts, old, Some(w))
+        self.done(Kind::Refcounts, what, old, len, Some(w))
     }
 
     /// The new key of a root record: its six keys translated, the other
@@ -523,7 +534,7 @@ impl Walker<'_, '_> {
             w.write(cs, &rec).map_err(RehashError::Write)?;
             Some(w)
         };
-        self.done(Kind::Root, old, w)
+        self.done(Kind::Root, "root record", old, root_rec::SIZE as u64, w)
     }
 }
 
@@ -588,6 +599,7 @@ mod tests {
     use chunk_store::file::file_objects;
     use chunk_store::hash::TestKeyedBlake3;
     use chunk_store::mem::MemIo;
+    use chunk_store::pack_io::{Kind as PackKind, PackIo};
     use chunk_store::{Blake3_256, Options};
     use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 
@@ -622,7 +634,7 @@ mod tests {
             .collect()
     }
 
-    fn rewrite(target: &'static dyn ObjectHasher, dir: &Path) -> RehashOptions<'static> {
+    fn rewrite<'a>(target: &'static dyn ObjectHasher, dir: &Path) -> RehashOptions<'a> {
         RehashOptions {
             target,
             mode: Mode::Rewrite { map_dir: dir.join("rehash-tmp") },
@@ -887,5 +899,151 @@ mod tests {
         assert_eq!(read(x), ky.0.to_vec(), "X keeps its old bytes");
         assert_eq!(read(y), y_bytes);
         assert_one_tag(&cs, &new.current, KEYED.tag());
+    }
+
+    fn dry<'a>(target: &'static dyn ObjectHasher) -> RehashOptions<'a> {
+        RehashOptions {
+            target,
+            mode: Mode::DryRun,
+            progress_every: Duration::from_secs(3600),
+            progress: None,
+            stop_after_values: None,
+        }
+    }
+
+    fn open_read_only(mem: &MemIo, hasher: &'static dyn ObjectHasher) -> Arc<ChunkStore> {
+        let opts = Options { hasher, read_only: true, ..Options::default() };
+        Arc::new(ChunkStore::open_with(Arc::new(mem.clone()), opts).unwrap())
+    }
+
+    #[test]
+    fn dry_run_writes_nothing_and_counts() {
+        let mem = MemIo::new();
+        let root = build(&mem);
+        let cs = open_read_only(&mem, BLAKE3);
+        let before = cs.stats();
+        let (same, stats) = rehash_roots(&cs, &one(root), dry(KEYED)).unwrap();
+        assert_eq!(same, one(root));
+        assert!(stats.values_read > 0 && stats.other_tag_objects > 0 && stats.other_tag_bytes > 0, "{stats:?}");
+        assert_eq!((stats.objects_written, stats.values_rewritten), (0, 0));
+        assert_eq!(cs.stats(), before);
+        drop(cs);
+
+        // Every object already has the target tag: nothing to do.
+        let new = {
+            let cs = open(&mem, KEYED);
+            let dir = tempfile::tempdir().unwrap();
+            let (new, _) = rehash_roots(&cs, &one(root), rewrite(KEYED, dir.path())).unwrap();
+            cs.sync().unwrap();
+            new
+        };
+        let cs = open_read_only(&mem, KEYED);
+        let (_, stats) = rehash_roots(&cs, &new, dry(KEYED)).unwrap();
+        assert_eq!(stats.other_tag_objects, 0, "{stats:?}");
+        assert!(stats.values_kept > 0, "{stats:?}");
+    }
+
+    #[test]
+    fn progress_is_called_with_running_stats() {
+        let mem = MemIo::new();
+        let (r1, r2) = build_two(&mem);
+        let cs = open(&mem, KEYED);
+        let dir = tempfile::tempdir().unwrap();
+        let mut seen: Vec<Stats> = Vec::new();
+        let mut f = |s: &Stats| seen.push(*s);
+        let opts = RehashOptions { progress_every: Duration::ZERO, progress: Some(&mut f), ..rewrite(KEYED, dir.path()) };
+        rehash_roots(&cs, &RootSet { current: r2, snapshots: vec![snap(1, r1)] }, opts).unwrap();
+        for r in 0..=2 {
+            assert!(seen.iter().any(|s| s.roots_done == r), "a call with {r} roots done");
+        }
+        for w in seen.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let up = [
+                (a.roots_done, b.roots_done),
+                (a.values_read, b.values_read),
+                (a.bytes_read, b.bytes_read),
+                (a.values_rewritten, b.values_rewritten),
+                (a.values_kept, b.values_kept),
+                (a.map_hits, b.map_hits),
+                (a.objects_written, b.objects_written),
+            ];
+            assert!(up.iter().all(|(x, y)| y >= x), "{a:?} then {b:?}");
+        }
+        let last = seen.last().unwrap();
+        assert_eq!((last.roots_done, last.roots_total), (2, 2));
+        assert!(last.objects_written > 0);
+    }
+
+    #[test]
+    fn stop_after_values_stops_the_run() {
+        let mem = MemIo::new();
+        let root = build(&mem);
+        let cs = open(&mem, KEYED);
+        let dir = tempfile::tempdir().unwrap();
+        let opts = RehashOptions { stop_after_values: Some(2), ..rewrite(KEYED, dir.path()) };
+        let r = rehash_roots(&cs, &one(root), opts);
+        assert!(matches!(r, Err(RehashError::Stopped(2))), "{r:?}");
+    }
+
+    #[test]
+    fn a_damaged_object_stops_the_run() {
+        let mem = MemIo::new();
+        let root = build(&mem);
+        let cs = open(&mem, KEYED);
+        // Random bytes are stored as they are: find a piece of the random
+        // file in the packs and change one byte of it.
+        let piece = noise(1, 300 << 10)[100_000..100_064].to_vec();
+        let (num, at) = mem
+            .list()
+            .unwrap()
+            .into_iter()
+            .find_map(|n| {
+                let b = mem.read(n, PackKind::Pack).ok()?;
+                b.windows(piece.len()).position(|w| w == piece.as_slice()).map(|i| (n, i))
+            })
+            .expect("the random bytes in a pack");
+        mem.flip(num, PackKind::Pack, at + 32);
+        let dir = tempfile::tempdir().unwrap();
+        let err = rehash_roots(&cs, &one(root), rewrite(KEYED, dir.path())).unwrap_err();
+        assert!(matches!(err, RehashError::Read { source: chunk_store::Error::Corrupt(_), .. }), "{err:?}");
+        assert!(err.to_string().contains("file content"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_tag_stops_the_run() {
+        let mem = MemIo::new();
+        let root = {
+            let cs = open(&mem, BLAKE3);
+            let m = DictMetadataStore::new(io(&cs));
+            let ino = m.create_inode(&InodeMeta::new_file(0, 0, 0, 0o100644)).unwrap();
+            m.link(m.root_ino(), "f", ino).unwrap();
+            m.set_manifest(ino, &[ObjectKey::new(0x77, [1; 32])]).unwrap();
+            m.commit().unwrap()
+        };
+        let cs = open(&mem, KEYED);
+        let dir = tempfile::tempdir().unwrap();
+        let err = rehash_roots(&cs, &one(root), rewrite(KEYED, dir.path())).unwrap_err();
+        assert!(matches!(err, RehashError::Read { source: chunk_store::Error::UnknownHash(_), .. }), "{err:?}");
+        assert!(err.to_string().contains("file content"), "{err}");
+    }
+
+    #[test]
+    fn new_objects_survive_a_crash_after_sync() {
+        let mem = MemIo::new();
+        let root = build(&mem);
+        let old = {
+            let cs = open(&mem, BLAKE3);
+            tree(&load(&cs, &root), &cs)
+        };
+        let new = {
+            let cs = open(&mem, KEYED);
+            let dir = tempfile::tempdir().unwrap();
+            let (new, _) = rehash_roots(&cs, &one(root), rewrite(KEYED, dir.path())).unwrap();
+            cs.sync().unwrap();
+            new
+        };
+        mem.crash();
+        let cs = open(&mem, KEYED);
+        assert_eq!(tree(&load(&cs, &new.current), &cs), old);
     }
 }

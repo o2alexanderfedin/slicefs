@@ -80,3 +80,43 @@ error: could not compile `metadata` (lib test) due to 23 previous errors; 1 warn
    2 error[E0425]: cannot find value `SLOT` in this scope
    5 error[E0433]: failed to resolve: use of undeclared type `KeyMap`
   14 error[E0433]: failed to resolve: use of undeclared type `Kind`
+
+## Task 3: the six tests before the dry-run counts; cargo test -p metadata --lib -- rehash::tests
+test rehash::tests::an_unknown_tag_stops_the_run ... ok
+test rehash::tests::two_old_keys_of_one_content_merge_their_counts ... ok
+test rehash::tests::a_file_byte_equal_to_a_node_gets_both_translations ... ok
+test rehash::tests::a_target_tag_value_is_kept ... ok
+test rehash::tests::a_stale_refcount_is_dropped_and_counted ... ok
+test rehash::tests::dry_run_writes_nothing_and_counts ... FAILED
+test rehash::tests::stop_after_values_stops_the_run ... ok
+test rehash::tests::a_damaged_object_stops_the_run ... ok
+test rehash::tests::progress_is_called_with_running_stats ... ok
+test rehash::tests::new_objects_survive_a_crash_after_sync ... ok
+test rehash::tests::a_root_rehashes_to_the_same_tree ... ok
+test rehash::tests::shared_values_are_rewritten_once ... ok
+thread 'rehash::tests::dry_run_writes_nothing_and_counts' (139839761) panicked at crates/metadata/src/rehash/mod.rs:916:9:
+test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 171 filtered out; finished in 1.51s
+error: test failed, to rerun pass `-p metadata --lib`
+
+## Task 3 guard mutations, one run: (1) progress callback never called; (2) stop hook removed; (3) value read errors become Corrupt strings (error kind lost); (4) crash test without cs.sync(). Each of progress, stop, damaged, unknown tag and crash turns red; stale refcount also (needs the Missing kind)
+test rehash::tests::an_unknown_tag_stops_the_run ... FAILED
+test rehash::tests::a_stale_refcount_is_dropped_and_counted ... FAILED
+test rehash::tests::two_old_keys_of_one_content_merge_their_counts ... ok
+test rehash::tests::a_file_byte_equal_to_a_node_gets_both_translations ... ok
+test rehash::tests::a_target_tag_value_is_kept ... ok
+test rehash::tests::dry_run_writes_nothing_and_counts ... FAILED
+test rehash::tests::a_damaged_object_stops_the_run ... FAILED
+test rehash::tests::stop_after_values_stops_the_run ... FAILED
+test rehash::tests::progress_is_called_with_running_stats ... FAILED
+test rehash::tests::new_objects_survive_a_crash_after_sync ... FAILED
+test rehash::tests::a_root_rehashes_to_the_same_tree ... ok
+test rehash::tests::shared_values_are_rewritten_once ... ok
+thread 'rehash::tests::an_unknown_tag_stops_the_run' (139841046) panicked at crates/metadata/src/rehash/mod.rs:1016:9:
+thread 'rehash::tests::a_stale_refcount_is_dropped_and_counted' (139841044) panicked at crates/metadata/src/rehash/mod.rs:795:86:
+thread 'rehash::tests::dry_run_writes_nothing_and_counts' (139841047) panicked at crates/metadata/src/rehash/mod.rs:917:9:
+thread 'rehash::tests::a_damaged_object_stops_the_run' (139841041) panicked at crates/metadata/src/rehash/mod.rs:998:9:
+thread 'rehash::tests::stop_after_values_stops_the_run' (139841051) panicked at crates/metadata/src/rehash/mod.rs:975:9:
+thread 'rehash::tests::progress_is_called_with_running_stats' (139841049) panicked at crates/metadata/src/rehash/mod.rs:947:13:
+thread 'rehash::tests::new_objects_survive_a_crash_after_sync' (139841048) panicked at crates/metadata/src/rehash/mod.rs:612:57:
+test result: FAILED. 5 passed; 7 failed; 0 ignored; 0 measured; 171 filtered out; finished in 1.60s
+error: test failed, to rerun pass `-p metadata --lib`
