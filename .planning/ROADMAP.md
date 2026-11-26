@@ -191,7 +191,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
 - [x] **Phase 21.1: Store header and format policy (#154)** (INSERTED) - one store header with format number and compat/ro-compat/incompat flags, format policy doc (completed 2026-11-24)
 - [x] **Phase 21.2: Thread-safety verification and CI gates** (INSERTED) - clippy, Miri, ThreadSanitizer, loom/shuttle models, Kani, deadlock-detect stress and Linux coverage as CI gates (release gate, manual run); fix the two Phase 19 races (completed 2026-11-25)
 - [x] **Phase 22: Chunk profiles** (#67) - FastCDC min/avg/max fixed per store at `seed`, benchmark of five profiles, default unchanged (parallel track) (completed 2026-11-26)
-- [ ] **Phase 23: Hashes and rehash** (#62) - SHA-256 write hash and an offline, crash-safe `slicefs rehash` (parallel track)
+- [x] **Phase 23: Hashes and rehash** (#62) - SHA-256 write hash and an offline, crash-safe `slicefs rehash` (parallel track) (completed 2026-11-26)
 - [ ] **Phase 24: Prolly evaluation** (#19) - one-map prototype, benchmark on Boost trees, written decision (parallel track)
 
 ### Phase 18: Spikes, baseline and stress harness
@@ -470,19 +470,19 @@ Plans:
   3. Rehash refuses while the store is mounted (OS file lock) and while the write log has records after the last root
   4. A crash at any point leaves a store that mounts with the old or the new root; GC frees the old objects after the switch, and old objects are verified as they are read
   5. Rehash reports progress, bytes rewritten and bytes freed; `--dry-run` changes nothing; and its memory stays bounded, with no in-RAM map of all objects
-**Plans**: 5 plans
+**Plans**: 5/5 plans complete
 
 Plans:
 **Wave 1**
-- [ ] 23-01-PLAN.md — Tracer: `Sha256` hasher (tag 0x12, `sha2` 0.11), `seed`/`mount --hash sha256`, `incompat hash-sha256` flag and pairing rule, `ensure_hash_flag`, drop the unused Phase 02 crate, store-format flag row
-- [ ] 23-02-PLAN.md — Tracer: last snapshot record per version in both loaders, atomic `write_switch_segment` (`.seg.tmp`, rename, dir sync), `gc_on_open_store` (GC with the held lock), switch crash-state tests
-- [ ] 23-03-PLAN.md — Tracer: rehash engine in `metadata::rehash` (streamed values, key-carrying nodes, refcount extsort), on-disk `KeyMap` with fixed RAM cache, kept rule, dry-run mode, progress and stop hooks
+- [x] 23-01-PLAN.md — Tracer: `Sha256` hasher (tag 0x12, `sha2` 0.11), `seed`/`mount --hash sha256`, `incompat hash-sha256` flag and pairing rule, `ensure_hash_flag`, drop the unused Phase 02 crate, store-format flag row
+- [x] 23-02-PLAN.md — Tracer: last snapshot record per version in both loaders, atomic `write_switch_segment` (`.seg.tmp`, rename, dir sync), `gc_on_open_store` (GC with the held lock), switch crash-state tests
+- [x] 23-03-PLAN.md — Tracer: rehash engine in `metadata::rehash` (streamed values, key-carrying nodes, refcount extsort), on-disk `KeyMap` with fixed RAM cache, kept rule, dry-run mode, progress and stop hooks
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 23-04-PLAN.md — Tracer: `slicefs rehash --to <hash> [--dry-run] <store>`: lock, header, mount.lock and write-log checks, run order, switch, header line, full GC, report, `rehash-tmp` cleanup, refusals
+- [x] 23-04-PLAN.md — Tracer: `slicefs rehash --to <hash> [--dry-run] <store>`: lock, header, mount.lock and write-log checks, run order, switch, header line, full GC, report, `rehash-tmp` cleanup, refusals
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 23-05-PLAN.md — HASH-06 round trips (both ways, mixed store, two profiles), crash after each step and torn switch states, damaged object, chunk-store/store-format/README docs, phase gate
+- [x] 23-05-PLAN.md — HASH-06 round trips (both ways, mixed store, two profiles), crash after each step and torn switch states, damaged object, chunk-store/store-format/README docs, phase gate
 
 ### Phase 24: Prolly evaluation
 
@@ -529,5 +529,5 @@ Plans:
 | 20. Dirty budget and rebase flusher | 8/8 | Complete    | 2026-11-23 |
 | 21. Worker pool | 9/9 | Complete    | 2026-11-24 |
 | 22. Chunk profiles | 4/4 | Complete    | 2026-11-26 |
-| 23. Hashes and rehash | 0/0 | Not started | - |
+| 23. Hashes and rehash | 5/5 | Complete    | 2026-11-26 |
 | 24. Prolly evaluation | 0/5 | Planned | - |

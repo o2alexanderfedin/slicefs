@@ -31,7 +31,7 @@
     {
       "number": "23",
       "name": "Hashes and rehash",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "24",
@@ -41,8 +41,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step",
-    "reason": "Phase 9 of 9 · 56% · executing"
+    "label": "Advance to the next step (verify)",
+    "reason": "Phase 9 of 9 · 67% · ready to verify"
   },
-  "updated_at": "2026-11-26T18:38:44.803Z"
+  "updated_at": "2026-11-26T23:04:19.678Z"
 }
