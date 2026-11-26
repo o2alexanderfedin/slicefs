@@ -431,7 +431,7 @@ Plans:
 **Wave 5** *(blocked on Wave 4 completion)*
 - [x] 21.2-08-PLAN.md — Kani: byte-level core of the header parser, `write_end`, `hard_cap_of`, `dirty_move`, `workers_for_cpus`, `stripe`; nine harnesses, `kani.sh` (9 of 9 verified, about 37 s of solving)
 - [x] 21.2-09-PLAN.md — `docs/design/unsafe-review.md` for every crate and `unsafe-count.sh` in the clippy jobs
-- [ ] 21.2-10-PLAN.md — Coverage in Linux Docker (tests and FUSE smoke), job `coverage`, floor from the first Linux CI number minus 1 point
+- [ ] 21.2-10-PLAN.md — Coverage in Linux Docker (tests and FUSE smoke), job `coverage`, floor from the first Linux CI number minus 1 point (local done: tests 91.27 %, merged 93.08 %; CI checkpoint and floor pending)
 
 **Wave 6** *(blocked on Wave 5 completion)*
 - [ ] 21.2-11-PLAN.md — Phase gate: job `kani`, measured time limits, ci.yml Linux steps in local Docker, one green Safety run of all 8 checks, TSAFE marks, check names for branch protection, deferred items
