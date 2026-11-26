@@ -184,3 +184,52 @@ pub fn gc_report(store_path: &Path, full: bool) -> Result<String, Box<dyn std::e
         stats.entries_scanned, stats.entries_removed, stats.segments_compacted
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use chunk_store::{ChunkStore, Options};
+    use metadata::store::DictMetadataStore;
+    use metadata::store_io::{put_value, StoreIo};
+    use slicefs_traits::metadata::{InodeMeta, MetadataStore};
+
+    use super::gc_on_open_store;
+
+    /// IN-06: the temp files of the mark cannot be written (`gc-tmp` is a
+    /// file, so the first spill fails with an I/O error in the middle of
+    /// the walk). The GC fails with an I/O error and deletes nothing; with
+    /// `gc-tmp` gone, the same GC frees the garbage.
+    #[test]
+    fn a_sorter_io_error_in_the_mark_fails_the_gc_and_deletes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        // Spills every 3 keys.
+        let opts = Options { gc_sort_chunk_ids: 3, gc_merge_fan_in: 2, ..Options::default() };
+        let cs = Arc::new(ChunkStore::open(dir.path(), opts).unwrap());
+        let m = DictMetadataStore::new(Arc::new(Mutex::new(StoreIo::new("/unused", Arc::clone(&cs)))));
+        let r = m.root_ino();
+        for i in 0..20 {
+            let ino = m.create_inode(&InodeMeta::new_file(0, 0, 0, 0o100644)).unwrap();
+            m.link(r, &format!("f{i}"), ino).unwrap();
+            let key = put_value(&cs, format!("bytes of f{i}").as_bytes()).unwrap();
+            m.set_manifest(ino, &[key]).unwrap();
+        }
+        m.commit().unwrap();
+        for i in 0..10 {
+            m.unlink(r, &format!("f{i}")).unwrap();
+        }
+        let root = m.commit().unwrap();
+        cs.sync().unwrap();
+        let objects = cs.stats().objects;
+        let tmp = dir.path().join("gc-tmp");
+        std::fs::write(&tmp, b"not a directory").unwrap();
+        for full in [false, true] {
+            let e = gc_on_open_store(&cs, &[root], full).unwrap_err().to_string();
+            assert!(e.contains("GC mark failed, nothing deleted") && !e.contains("orrupt"), "full {full}: {e}");
+            assert_eq!(cs.stats().objects, objects, "full {full}: something was deleted");
+        }
+        std::fs::remove_file(&tmp).unwrap();
+        let st = gc_on_open_store(&cs, &[root], false).unwrap();
+        assert!(st.removed_objects > 0, "no garbage to free: {st:?}");
+    }
+}
