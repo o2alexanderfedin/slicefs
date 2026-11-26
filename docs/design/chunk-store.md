@@ -266,6 +266,11 @@ every case, a second run of `rehash` finishes the job.
 A run always does the full GC, also when no root changed. Thus a second run
 after a crash between the switch and the GC frees the old objects.
 
+An error that is not a crash (a damaged object, a failed write) removes
+`rehash-tmp` and any `segment-*.seg.tmp` before the command returns. An
+error before the switch says that the new objects of the run stay until
+the next `slicefs gc` or rehash run.
+
 ### Conversion
 
 - Each value (a file content, and the inode, directory and xattr nodes) is
@@ -304,6 +309,11 @@ after a crash between the switch and the GC frees the old objects.
   Then the older segments are removed.
 - A `.seg.tmp` file is ignored by every loader, and the next run removes
   it.
+- When no root changes but more than one segment file is there (a crash
+  after the rename, before the older segments went), the run writes the
+  switch segment with the same roots. Thus the older segments are removed.
+  The write log is empty at that point, so the roots and the snapshot list
+  are all that the segments hold.
 - The loaders keep the last record of each snapshot version, in file
   order. So old segments that a crash left after the rename change
   nothing: the records of the switch segment win.
@@ -348,9 +358,11 @@ what a real run refuses. Then it reads and verifies the live tree through a
 read-only open and writes nothing in the store: no temp files, no flag,
 no header change, no pack. Its old-to-new map is the on-disk map of a real
 run, in a new directory of the system temp dir (`TMPDIR`, not the store),
-removed at the end; it takes about 134 bytes per distinct key there. So a
-value that files, roots or snapshots share is read and counted once, as in
-a real run. It reports the values read and verified, and the objects of
+removed at the end. So a value that files, roots or snapshots share is
+read and counted once, as in a real run. The map takes about 134 bytes per
+distinct key there. Where the temp dir is a RAM file system (tmpfs), the
+map is in RAM: for a large store, set `TMPDIR` to a directory on a disk.
+It reports the values read and verified, and the objects of
 another hash with their bytes. That count is an estimate of what a real
 run rewrites and of what its GC frees.
 
