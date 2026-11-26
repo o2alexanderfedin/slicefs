@@ -11,7 +11,7 @@ mod tree;
 mod tests;
 
 pub use rule::{boundary_hash, cut_probability, Splitter};
-pub use tree::{build, empty_root, get, BuildStats, Builder};
+pub use tree::{build, empty_root, get, iter, walk, BuildStats, Builder, Cursor, NodeInfo};
 
 /// Bytes of the node header: magic 4, level 1, entry count 4.
 pub const NODE_HEADER: usize = 9;

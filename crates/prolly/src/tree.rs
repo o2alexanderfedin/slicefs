@@ -304,3 +304,111 @@ pub fn get(store: &ChunkStore, root: &ObjectId, key: &[u8]) -> Result<Option<Vec
         }
     }
 }
+
+/// An ordered iterator over the entries of a tree. It holds one path of
+/// nodes (one per level), never the map.
+pub struct Cursor<'s> {
+    store: &'s ChunkStore,
+    stack: Vec<(Node, usize)>,
+    max_held: usize,
+    done: bool,
+}
+
+impl Cursor<'_> {
+    /// The most nodes held at one time so far.
+    pub fn max_nodes_held(&self) -> usize {
+        self.max_held
+    }
+}
+
+/// A cursor at the first entry of the tree `root`.
+pub fn iter<'s>(store: &'s ChunkStore, root: &ObjectId) -> Result<Cursor<'s>> {
+    let (n, _) = node::load(store, root, None)?;
+    Ok(Cursor { store, stack: vec![(n, 0)], max_held: 1, done: false })
+}
+
+impl Iterator for Cursor<'_> {
+    type Item = Result<(Vec<u8>, Vec<u8>)>;
+
+    /// The next entry in key order; after an error, `None`.
+    fn next(&mut self) -> Option<Self::Item> {
+        while !self.done {
+            let Some((n, i)) = self.stack.last_mut() else {
+                self.done = true;
+                break;
+            };
+            match n {
+                Node::Leaf(entries) => {
+                    if let Some(e) = entries.get_mut(*i) {
+                        *i += 1;
+                        return Some(Ok(std::mem::take(e)));
+                    }
+                    self.stack.pop();
+                }
+                Node::Internal { level, children } => {
+                    let Some(c) = children.get(*i) else {
+                        self.stack.pop();
+                        continue;
+                    };
+                    *i += 1;
+                    let (id, want) = (c.id, *level - 1);
+                    match node::load(self.store, &id, Some(want)) {
+                        Ok((child, _)) => {
+                            self.stack.push((child, 0));
+                            self.max_held = self.max_held.max(self.stack.len());
+                        }
+                        Err(e) => {
+                            self.done = true;
+                            return Some(Err(e));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+/// One node seen by `walk`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeInfo {
+    /// Level of the node (0 is a leaf).
+    pub level: u8,
+    /// Entries in the node.
+    pub entries: usize,
+    /// Encoded bytes of the node.
+    pub bytes: usize,
+    /// The last key of the node (empty for the empty leaf).
+    pub last_key: Vec<u8>,
+    /// True on the rightmost path: the last node of its level.
+    pub last_of_level: bool,
+}
+
+/// Calls `f` for every node of the tree `root`, depth first and left to
+/// right, holding one path of nodes.
+pub fn walk(store: &ChunkStore, root: &ObjectId, mut f: impl FnMut(&NodeInfo)) -> Result<()> {
+    walk_node(store, root, None, true, &mut f)
+}
+
+fn walk_node<F: FnMut(&NodeInfo)>(
+    store: &ChunkStore,
+    id: &ObjectId,
+    want_level: Option<u8>,
+    last_of_level: bool,
+    f: &mut F,
+) -> Result<()> {
+    let (n, bytes) = node::load(store, id, want_level)?;
+    let (level, entries, last_key) = match &n {
+        Node::Leaf(e) => (0, e.len(), e.last().map(|(k, _)| k.clone()).unwrap_or_default()),
+        Node::Internal { level, children } => {
+            (*level, children.len(), children.last().map(|c| c.last_key.clone()).unwrap_or_default())
+        }
+    };
+    f(&NodeInfo { level, entries, bytes, last_key, last_of_level });
+    if let Node::Internal { level, children } = &n {
+        for (i, c) in children.iter().enumerate() {
+            walk_node(store, &c.id, Some(level - 1), last_of_level && i + 1 == children.len(), f)?;
+        }
+    }
+    Ok(())
+}

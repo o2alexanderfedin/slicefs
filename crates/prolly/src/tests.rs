@@ -70,3 +70,144 @@ fn golden_root() {
         assert!((exp_neg(x) - (-x).exp()).abs() <= 1e-13, "x={x}");
     }
 }
+
+fn xorshift(s: &mut u64) -> u64 {
+    *s ^= *s << 13;
+    *s ^= *s >> 7;
+    *s ^= *s << 17;
+    *s
+}
+
+/// About `n` directory-style entries (D-10): key = parent u64 (big endian)
+/// then a name of 1 to 40 bytes; value of 0 to 200 bytes. Sorted, no
+/// duplicate keys.
+fn var_entries(n: usize, seed: u64) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut s = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+    let mut m = std::collections::BTreeMap::new();
+    for _ in 0..n {
+        let mut k = (xorshift(&mut s) % 64).to_be_bytes().to_vec();
+        let name_len = 1 + (xorshift(&mut s) % 40) as usize;
+        k.extend((0..name_len).map(|_| b'a' + (xorshift(&mut s) % 26) as u8));
+        let v: Vec<u8> = (0..xorshift(&mut s) % 201).map(|_| xorshift(&mut s) as u8).collect();
+        m.insert(k, v);
+    }
+    m.into_iter().collect()
+}
+
+fn nodes(s: &ChunkStore, root: &chunk_store::ObjectId) -> Vec<NodeInfo> {
+    let mut out = Vec::new();
+    walk(s, root, |n| out.push(n.clone())).unwrap();
+    out
+}
+
+fn entries_of(s: &ChunkStore, root: &chunk_store::ObjectId) -> Vec<(Vec<u8>, Vec<u8>)> {
+    iter(s, root).unwrap().collect::<Result<Vec<_>>>().unwrap()
+}
+
+#[test]
+fn cursor_iterates_in_order() {
+    let s = mem_store();
+    let es = u64_entries(2_000, 3);
+    let (root, _) = build(&s, Config::SMALL, es.clone()).unwrap();
+    assert_eq!(entries_of(&s, &root), es);
+    let empty = empty_root(&s).unwrap();
+    assert!(entries_of(&s, &empty).is_empty());
+    let (built_empty, _) = build(&s, Config::SMALL, Vec::<(Vec<u8>, Vec<u8>)>::new()).unwrap();
+    assert_eq!(built_empty, empty);
+    let (one, _) = build(&s, Config::SMALL, [(b"k", b"v")]).unwrap();
+    assert_eq!(entries_of(&s, &one), vec![(b"k".to_vec(), b"v".to_vec())]);
+}
+
+#[test]
+fn node_size_limits() {
+    let trees = [
+        ("default u64", Config::DEFAULT, u64_entries(20_000, 3)),
+        ("small u64", Config::SMALL, u64_entries(20_000, 3)),
+        ("small var", Config::SMALL, var_entries(5_000, 9)),
+    ];
+    for (what, cfg, es) in trees {
+        let s = mem_store();
+        let (root, _) = build(&s, cfg, es.iter().map(|(k, v)| (k, v))).unwrap();
+        assert_eq!(entries_of(&s, &root), es, "{what}");
+        let ns = nodes(&s, &root);
+        assert!(ns[0].level == 0 || ns[0].entries >= 2, "{what}: root {:?}", ns[0]);
+        for n in &ns {
+            assert!(n.bytes <= cfg.node_max(), "{what}: {n:?}");
+            if !n.last_of_level {
+                assert!(n.bytes >= cfg.node_min(), "{what}: {n:?}");
+                assert!(n.level == 0 || n.entries >= 2, "{what}: {n:?}");
+            }
+        }
+        if cfg == Config::DEFAULT {
+            let leaves: Vec<_> = ns.iter().filter(|n| n.level == 0).collect();
+            let mean = leaves.iter().map(|n| n.bytes).sum::<usize>() as f64 / leaves.len() as f64;
+            let l = cfg.weibull_l() as f64;
+            assert!((0.75 * l..=l).contains(&mean), "{what}: mean leaf {mean}");
+        }
+    }
+}
+
+#[test]
+fn boundaries_ignore_value_bytes() {
+    for cfg in [Config::SMALL, Config::DEFAULT] {
+        let s = mem_store();
+        let a = u64_entries(5_000, 3);
+        let b: Vec<_> = a.iter().map(|(k, v)| (k.clone(), v.iter().map(|x| x ^ 0xff).collect::<Vec<u8>>())).collect();
+        let (ra, _) = build(&s, cfg, a).unwrap();
+        let (rb, _) = build(&s, cfg, b).unwrap();
+        assert_ne!(ra, rb);
+        let shape = |r| nodes(&s, &r).into_iter().map(|n| (n.level, n.last_key)).collect::<Vec<_>>();
+        assert_eq!(shape(ra), shape(rb), "{cfg:?}");
+    }
+}
+
+#[test]
+fn levels_use_their_own_salt() {
+    let s = mem_store();
+    let (root, _) = build(&s, Config::DEFAULT, u64_entries(200_000, 3)).unwrap();
+    let ns = nodes(&s, &root);
+    let at = |level| ns.iter().filter(move |n| n.level == level);
+    let mean = |level| at(level).map(|n| n.bytes).sum::<usize>() as f64 / at(level).count() as f64;
+    assert!(at(1).count() >= 20, "level 1 has {} nodes", at(1).count());
+    let (m0, m1) = (mean(0), mean(1));
+    assert!(m1 >= m0 / 2.0 && m1 <= m0 * 2.0, "leaf mean {m0}, level-1 mean {m1}");
+    // The level-0 hash of a leaf-ending key is low (that is why the leaf
+    // ended there); the level-1 salt makes it uniform again.
+    let ends: Vec<_> = at(0).filter(|n| !n.last_of_level).map(|n| n.last_key.clone()).collect();
+    let h = |level| ends.iter().map(|k| boundary_hash(level, k) as f64 / 4_294_967_295.0).sum::<f64>() / ends.len() as f64;
+    assert!(h(0) < 0.1, "level-0 mean {}", h(0));
+    assert!((0.4..=0.6).contains(&h(1)), "level-1 mean {}", h(1));
+}
+
+#[test]
+fn same_set_twice_writes_nothing() {
+    let s = mem_store();
+    let (r1, _) = build(&s, Config::DEFAULT, u64_entries(3_000, 3)).unwrap();
+    let before = s.stats();
+    let (r2, _) = build(&s, Config::DEFAULT, u64_entries(3_000, 3)).unwrap();
+    assert_eq!(r1, r2);
+    let after = s.stats();
+    assert_eq!((after.objects, after.raw_bytes), (before.objects, before.raw_bytes));
+}
+
+#[test]
+fn memory_is_bounded() {
+    let mut high = Vec::new();
+    for n in [2_000, 40_000] {
+        let s = mem_store();
+        let (root, st) = build(&s, Config::SMALL, u64_entries(n, 3)).unwrap();
+        assert!(st.high_water_bytes <= st.depth as usize * Config::SMALL.node_max(), "{n}: {st:?}");
+        high.push(st.high_water_bytes);
+        if n == 40_000 {
+            let mut c = iter(&s, &root).unwrap();
+            let mut seen = 0;
+            for e in c.by_ref() {
+                e.unwrap();
+                seen += 1;
+            }
+            assert_eq!(seen, n);
+            assert_eq!(c.max_nodes_held(), st.depth as usize);
+        }
+    }
+    assert!(high[1] <= 3 * high[0], "high water {high:?}");
+}
