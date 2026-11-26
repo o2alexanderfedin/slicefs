@@ -1,0 +1,13 @@
+os=Darwin 25.2.0
+arch=x86_64
+cpu=Intel(R) Xeon(R) W-3245 CPU @ 3.20GHz
+cpus=32
+mem_bytes=206158430208
+fs=apfs
+rustc=unknown
+commit=3894905
+page_cache=warm (not dropped)
+load_before=8.00 8.98 10.79
+load_after=9.39 9.19 10.27
+start_utc=2026-11-26T10:32:32Z
+end_utc=2026-11-26T10:38:21Z
