@@ -217,7 +217,7 @@ One row per commit and mode (the line `commit` of `whole`, `flat` and
 | `entries_changed` | entries | `inode_data` entries put or deleted by this commit (puts + dels of the batch; for `bulk`, the entries of the first map); `NA` for seq 0 of `whole` |
 | `serialized_bytes` | bytes | Bytes serialized and hashed by the commit. `whole`: the six map nodes plus the 230-byte root record. `flat`: the `inode_data` node (8 + 41 x entries). `prolly`: the bytes of the nodes written |
 | `begin_ms` | ms | `whole`: `begin_commit` (it clones every map); `NA` for `flat` and `prolly` |
-| `finish_ms` | ms | `whole`: `finish_commit` (interns all maps, writes the root, syncs). `flat`, `prolly`: the intern or `apply`, plus `cs.sync()` |
+| `finish_ms` | ms | `whole`: `finish_commit` (interns all maps, writes the root, syncs). `flat`, `prolly`: the intern or `apply`, plus `cs.sync()`. The input is never in the time: `flat` has its map before the timer, and the `prolly` bulk build reads `base.bin` in pieces of 16,384 entries outside the timer (only the pushes, `finish` and the sync are timed) |
 | `total_ms` | ms | `begin_ms + finish_ms` (`whole`); `finish_ms` (`flat`, `prolly`) |
 | `cpu_user_s` | s | User CPU time of the commit (`getrusage` before and after) |
 | `cpu_sys_s` | s | System CPU time of the commit |
@@ -240,7 +240,7 @@ One row per commit and mode (the line `commit` of `whole`, `flat` and
 | `run` | | 1 to RUNS, or `median` |
 | `n` | entries | Synthetic entries (one of `SCALE_NS`) |
 | `op` | | `build` (the full map: a full intern or a bulk build) or `apply1` (one changed middle value: a full intern again, or one `apply`) |
-| `ms` | ms | Wall time of the op, `cs.sync()` included |
+| `ms` | ms | Wall time of the op, `cs.sync()` included. The values are made outside the timer in both modes: `flat` makes its map first, and the `prolly` build makes them in pieces of 16,384 entries and times only the pushes, `finish` and the sync |
 | `cpu_user_s` | s | User CPU time of the op |
 | `cpu_sys_s` | s | System CPU time of the op |
 | `maxrss_bytes` | bytes | `ru_maxrss` after the op |
