@@ -52,6 +52,7 @@ M=${MEASURE_ROOT:-$HOME/slicefs-measure}
 timeout 1200 scripts/macos-mount-test/fetch-boost.sh "$M/data" 1_84_0
 timeout 1200 cargo build --release -p chunk-store --example chunk_profile_bench
 OUT="$M/results/chunk-profiles-2026-11-26"
+mkdir -p "$M/results"
 WORK="$OUT" BIN=target/release/examples/chunk_profile_bench \
   timeout 5400 bash scripts/chunk-profiles/bench.sh "$M/data" 3 \
   > "$OUT.stdout.csv" 2> "$OUT.progress.log"
