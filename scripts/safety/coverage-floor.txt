@@ -1,0 +1,2 @@
+# TSAFE-05 floor: the first Linux CI tests-only workspace number (Safety run 45750602854: 91.27) minus 1 point; raise it on purpose only
+90.27
