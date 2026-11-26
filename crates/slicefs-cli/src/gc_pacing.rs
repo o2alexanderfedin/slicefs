@@ -88,14 +88,27 @@ pub fn mode_for(free: f64) -> Mode {
 /// `path`. On an error, or a file system that reports no blocks (some do on
 /// macOS), 1.0: "plenty", so a bad reading never makes the GC run more.
 pub fn free_ratio(path: &Path) -> f64 {
+    match fs_space(path) {
+        Some((free, total)) if total > 0 => (free as f64 / total as f64).clamp(0.0, 1.0),
+        _ => 1.0,
+    }
+}
+
+/// The available and total bytes of the file system that holds `path`
+/// (`statvfs`); `None` on an error or a file system that reports no blocks
+/// (some do on macOS). The GC temp space check of the chunk store
+/// (`chunk_store::Options::gc_free_space`).
+pub fn fs_space(path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return 1.0 };
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut sv: libc::statvfs = unsafe { std::mem::zeroed() };
     // SAFETY: `c` is a valid C string and `sv` a valid out buffer.
     if unsafe { libc::statvfs(c.as_ptr(), &mut sv) } != 0 || sv.f_blocks == 0 {
-        return 1.0;
+        return None;
     }
-    (sv.f_bavail as f64 / sv.f_blocks as f64).clamp(0.0, 1.0)
+    // (f64: the field types differ between macOS and Linux; exact up to 2^53.)
+    let unit = sv.f_frsize as f64;
+    Some(((sv.f_bavail as f64 * unit) as u64, (sv.f_blocks as f64 * unit) as u64))
 }
 
 /// A reader of the free ratio (injected in tests).

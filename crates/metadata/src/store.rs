@@ -1629,6 +1629,25 @@ pub(crate) fn for_each_referenced(
     })
 }
 
+/// About how many keys [`for_each_referenced`] gives for `root`, from the
+/// sizes of its four maps (no map is read): the 7 nodes of the root, one
+/// key per map entry, and one content key per manifest (a file with more
+/// extents gives more). For the temp space check of the GC mark.
+pub(crate) fn referenced_estimate(io: &mut impl crate::store_io::NodeRead, root: &ObjectKey) -> Result<u64, MetaError> {
+    const WHAT: &str = "u64-digest map node";
+    let cs = io.chunk_store();
+    let bytes = read_root(cs, root)?;
+    let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
+    let mut keys = 7u64;
+    for (off, per) in [(root_rec::INODE_DATA, 1), (root_rec::DIR_DATA, 1), (root_rec::XATTR_DATA, 1), (root_rec::MANIFEST_DATA, 2)] {
+        let key = at(off);
+        let r = chunk_store::file::FileReader::open(cs, crate::store_io::to_id(&key))
+            .map_err(|e| crate::store_io::node_err(WHAT, &key, e))?;
+        keys = keys.saturating_add((r.len().saturating_sub(8) / MAP_ENTRY as u64).saturating_mul(per));
+    }
+    Ok(keys)
+}
+
 /// Bytes of a map or manifest node that [`for_each_referenced`] reads at a
 /// time (rounded down to whole entries). Tiny in tests, so that a small
 /// node takes many windows.

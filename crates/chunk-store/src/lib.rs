@@ -269,6 +269,14 @@ pub struct Options {
     /// Most sorted chunks that one merge of the exact mark reads at a time
     /// (open files; 64 KiB of buffer each). A tuning and test knob.
     pub gc_merge_fan_in: usize,
+    /// Reads the free and total bytes of the file system that holds a path
+    /// (`statvfs`; injected in tests). With it, a GC mark that needs temp
+    /// files first checks that they fit
+    /// ([`ChunkStore::gc_temp_space_check`]), and each write of the temp
+    /// files of the mark checks it again, so that the GC leaves
+    /// [`gc_tmp_reserve`] free for the writes of the store. None (or a
+    /// reading of `None`): no check.
+    pub gc_free_space: Option<FreeSpaceFn>,
     /// The locality cache of `put` (#112; see `locality.rs`): after a few
     /// dedup hits in a row in one pack that this process sealed, the
     /// entries of its `.idx` answer the next dedup checks from RAM (at most
@@ -299,9 +307,38 @@ impl Default for Options {
             gc_tmp_dir: None,
             gc_sort_chunk_ids: extsort::SORT_CHUNK_BYTES / ID_LEN,
             gc_merge_fan_in: extsort::MERGE_FAN_IN,
+            gc_free_space: None,
             locality_cache: true,
         }
     }
+}
+
+/// Reads `(free, total)` bytes of the file system that holds a path; `None`
+/// if it cannot tell (see `Options::gc_free_space`).
+pub type FreeSpaceFn = fn(&Path) -> Option<(u64, u64)>;
+
+/// The least free space that the temp files of a GC mark leave on a file
+/// system of `total` bytes, for the writes of the store: 1 %, at least
+/// 64 MiB (not more than the file system).
+pub fn gc_tmp_reserve(total: u64) -> u64 {
+    (total / 100).max(64 << 20).min(total)
+}
+
+/// The error of a GC that has no space for its temp files (kind
+/// `StorageFull`): it stops before it deletes anything.
+fn gc_no_space(dir: &Path, need: u64, free: u64, reserve: u64) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::StorageFull,
+        format!(
+            "not enough free space for the GC temp files in {}: the GC needs about {} MiB more and leaves {} MiB \
+             free for writes, but only {} MiB are free; the GC did not start or stopped before it deleted anything. \
+             Free some space (delete files or snapshots), or move the store to a larger file system",
+            dir.display(),
+            need.div_ceil(1 << 20),
+            reserve >> 20,
+            free >> 20
+        ),
+    )
 }
 
 /// The shape of the index, for tests and tools.
@@ -925,6 +962,21 @@ impl ExactMark {
     pub fn inserted(&self) -> u64 {
         self.inserted
     }
+}
+
+/// Error if the file system of `dir` (or of the nearest parent that is
+/// there) has less than `need` plus [`gc_tmp_reserve`] bytes free.
+fn space_check(free_space: FreeSpaceFn, dir: &Path, need: u64) -> io::Result<()> {
+    let at = dir.ancestors().find(|p| p.exists()).unwrap_or(dir);
+    let Some((free, total)) = free_space(at) else { return Ok(()) };
+    if total == 0 {
+        return Ok(());
+    }
+    let reserve = gc_tmp_reserve(total);
+    if free < need.saturating_add(reserve) {
+        return Err(gc_no_space(dir, need, free, reserve));
+    }
+    Ok(())
 }
 
 /// The mark that a GC gets.
@@ -2046,15 +2098,48 @@ impl ChunkStore {
     /// An empty exact mark for [`ChunkStore::gc_finish_full`]: its IDs go
     /// to sorted temp files in `Options::gc_tmp_dir`.
     pub fn exact_mark(&self) -> Result<ExactMark> {
-        Ok(ExactMark { sorter: extsort::Sorter::new(self.gc_tmp()?, "live", self.sort_cfg()), inserted: 0 })
+        let sorter = self.with_space_check(extsort::Sorter::new(self.gc_tmp()?, "live", self.sort_cfg()));
+        Ok(ExactMark { sorter, inserted: 0 })
     }
 
     /// An empty external sorter of `N`-byte records, in a new temp
     /// directory below `Options::gc_tmp_dir` (removed when the sorter, or
     /// the sorted file it makes, is dropped; a writable open removes what a
     /// crash left). The GC mark streams the keys of its walk through it.
+    ///
+    /// No file is made while the records fit in RAM
+    /// (`Options::gc_sort_chunk_ids`). Each write of a temp file first
+    /// checks the free space (`Options::gc_free_space`).
     pub fn gc_sorter<const N: usize>(&self, name: &'static str) -> Result<extsort::Sorter<N>> {
-        Ok(extsort::Sorter::new(self.gc_tmp()?, name, self.sort_cfg()))
+        Ok(self.with_space_check(extsort::Sorter::new(self.gc_tmp()?, name, self.sort_cfg())))
+    }
+
+    /// Records that a GC sorter keeps in RAM before it writes a temp file.
+    pub fn gc_sort_chunk_records(&self) -> usize {
+        self.opts.gc_sort_chunk_ids.max(1)
+    }
+
+    /// Error (kind `StorageFull`) if the file system of the GC temp files
+    /// has less than `need` bytes free plus [`gc_tmp_reserve`]. Ok when
+    /// `need` is 0 or the free space is unknown.
+    pub fn gc_temp_space_check(&self, need: u64) -> Result<()> {
+        if need == 0 {
+            return Ok(());
+        }
+        match (self.opts.gc_free_space, &self.opts.gc_tmp_dir) {
+            (Some(f), Some(d)) => Ok(space_check(f, d, need)?),
+            _ => Ok(()),
+        }
+    }
+
+    fn with_space_check<const N: usize>(&self, s: extsort::Sorter<N>) -> extsort::Sorter<N> {
+        match (self.opts.gc_free_space, &self.opts.gc_tmp_dir) {
+            (Some(f), Some(d)) => {
+                let d = d.clone();
+                s.with_space_check(Arc::new(move |need| space_check(f, &d, need)))
+            }
+            _ => s,
+        }
     }
 
     fn gc_tmp(&self) -> Result<Arc<extsort::TmpDir>> {

@@ -13,11 +13,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use chunk_store::{ChunkStore, ExactMark, GcPacer, LiveFilter, NoPacer, ObjectId};
+use chunk_store::{ChunkStore, ExactMark, GcPacer, LiveFilter, NoPacer, ObjectId, ID_LEN};
 use slicefs_traits::key::{ObjectKey, KEY_BYTES};
 use slicefs_traits::metadata::MetaError;
 
-use crate::store::for_each_referenced;
+use crate::store::{for_each_referenced, referenced_estimate};
 use crate::store_io::{to_id, NodeRead, NodeReader};
 
 use crate::segment::compaction::{compact_segment, SegmentError};
@@ -61,6 +61,7 @@ pub fn live_objects_paced(
     stop: &AtomicBool,
     pacer: &dyn GcPacer,
 ) -> Result<Option<LiveFilter>, MetaError> {
+    check_temp_space(cs, meta_roots, file_roots, false)?;
     let mut live = cs.live_filter();
     let done = mark(cs, meta_roots, file_roots, stop, pacer, &mut |id| {
         live.insert(&id);
@@ -90,10 +91,46 @@ pub fn live_objects_exact_paced(
     stop: &AtomicBool,
     pacer: &dyn GcPacer,
 ) -> Result<Option<ExactMark>, MetaError> {
+    check_temp_space(cs, meta_roots, file_roots, true)?;
     let err = |e: chunk_store::Error| MetaError::Corrupted(format!("GC mark: temp file: {e}"));
     let mut live = cs.exact_mark().map_err(err)?;
     let done = mark(cs, meta_roots, file_roots, stop, pacer, &mut |id| live.insert(&id).map_err(err))?;
     Ok(done.then_some(live))
+}
+
+/// Before the walk of a mark: error (an I/O error of kind `StorageFull`,
+/// nothing deleted) if the temp files of the mark may not fit on the file
+/// system of the store (`ChunkStore::gc_temp_space_check`). The estimate:
+/// the keys of each root (`referenced_estimate`) at `KEY_BYTES` each, twice
+/// (the last merge has its inputs and its output), and for a full GC
+/// (`exact`) the IDs of the exact mark at `ID_LEN` each, twice. A sort that
+/// fits in RAM (`ChunkStore::gc_sort_chunk_records`) needs nothing. The
+/// estimate can be low (a file with many extents); each write of a temp
+/// file checks the space again, so the mark stops before the disk is full.
+fn check_temp_space(
+    cs: &Arc<ChunkStore>,
+    meta_roots: &[ObjectKey],
+    file_roots: &[ObjectKey],
+    exact: bool,
+) -> Result<(), MetaError> {
+    let mut io = NodeReader(Arc::clone(cs));
+    let mut keys = file_roots.len() as u64;
+    for root in meta_roots {
+        keys = keys.saturating_add(referenced_estimate(&mut io, root)?);
+    }
+    let ram = cs.gc_sort_chunk_records() as u64;
+    let objects = cs.stats().objects;
+    let mut need = 0u64;
+    if keys > ram {
+        need = need.saturating_add((KEY_BYTES as u64).saturating_mul(keys.saturating_add(keys.min(objects))));
+    }
+    if exact && objects > ram {
+        need = need.saturating_add((ID_LEN as u64).saturating_mul(objects).saturating_mul(2));
+    }
+    cs.gc_temp_space_check(need).map_err(|e| match e {
+        chunk_store::Error::Io(e) => MetaError::Io(e),
+        e => MetaError::Corrupted(format!("GC mark: temp space: {e}")),
+    })
 }
 
 /// The walk of a mark: calls `add` with every live object (an object can
@@ -104,8 +141,10 @@ pub fn live_objects_exact_paced(
 /// RAM does not grow with the file or root count (#207): every key of the
 /// walk (each root can give the same keys again) goes to an external sorter
 /// in `<store>/gc-tmp` (`ChunkStore::gc_sorter`), and the sorted keys
-/// without duplicates are read back one at a time. Disk: 33 bytes per key
-/// per root, removed at the end, also on an error or a stop.
+/// without duplicates are read back one at a time. Up to
+/// `ChunkStore::gc_sort_chunk_records` keys (4 MiB) the sort stays in RAM and
+/// makes no file. Disk above that: 33 bytes per key per root, at the last
+/// merge up to twice that; removed at the end, also on an error or a stop.
 fn mark(
     cs: &Arc<ChunkStore>,
     meta_roots: &[ObjectKey],
@@ -390,6 +429,68 @@ mod tests {
         assert_eq!(exact.inserted(), adds);
         drop(exact);
         assert_eq!(tmp_entries(dir.path()), 0);
+    }
+
+    #[test]
+    fn a_mark_that_fits_in_ram_makes_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cs = Arc::new(ChunkStore::open(dir.path(), Options::default()).unwrap());
+        let (roots, open_file) = build(&cs);
+        /// The most entries of `gc-tmp` at a safe point.
+        struct Peek<'a>(&'a std::path::Path, AtomicUsize);
+        impl GcPacer for Peek<'_> {
+            fn at_safe_point(&self) {
+                self.1.fetch_max(tmp_entries(self.0), Ordering::Relaxed);
+            }
+        }
+        let stop = AtomicBool::new(false);
+        let pacer = Peek(dir.path(), AtomicUsize::new(0));
+        assert!(live_objects_paced(&cs, &roots, &[open_file], &stop, &pacer).unwrap().is_some());
+        assert!(live_objects_exact_paced(&cs, &roots, &[open_file], &stop, &pacer).unwrap().is_some());
+        assert_eq!(pacer.1.load(Ordering::Relaxed), 0, "a temp file during the mark");
+        assert!(!dir.path().join("gc-tmp").exists(), "the temp directory was made");
+    }
+
+    /// 1 MiB free of 1 TiB: below the reserve.
+    fn no_space(_: &std::path::Path) -> Option<(u64, u64)> {
+        Some((1 << 20, 1 << 40))
+    }
+
+    fn plenty(_: &std::path::Path) -> Option<(u64, u64)> {
+        Some((1 << 39, 1 << 40))
+    }
+
+    #[test]
+    fn a_mark_without_space_for_its_temp_files_does_not_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let cs = open(dir.path());
+        let (roots, open_file) = build(&cs);
+        cs.close().unwrap();
+        drop(cs);
+        let stop = AtomicBool::new(false);
+        for (free, ok) in [(no_space as chunk_store::FreeSpaceFn, false), (plenty, true)] {
+            // Spills every 3 keys, so the mark needs temp files.
+            let opts = Options { gc_sort_chunk_ids: 3, gc_merge_fan_in: 2, gc_free_space: Some(free), ..Options::default() };
+            let cs = Arc::new(ChunkStore::open(dir.path(), opts).unwrap());
+            for exact in [false, true] {
+                let r = if exact {
+                    live_objects_exact(&cs, &roots, &[open_file], &stop).map(|m| m.is_some())
+                } else {
+                    live_objects(&cs, &roots, &[open_file], &stop).map(|m| m.is_some())
+                };
+                match r {
+                    Ok(done) => assert!(ok && done, "exact {exact}"),
+                    Err(MetaError::Io(e)) => {
+                        assert!(!ok, "exact {exact}: {e}");
+                        assert_eq!(e.kind(), std::io::ErrorKind::StorageFull);
+                        assert!(e.to_string().contains("not enough free space for the GC temp files"), "{e}");
+                    }
+                    Err(e) => panic!("exact {exact}: {e}"),
+                }
+                assert_eq!(tmp_entries(dir.path()), 0, "temp files left");
+            }
+            cs.close().unwrap();
+        }
     }
 
     #[test]

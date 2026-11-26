@@ -95,7 +95,7 @@ fn a_full_gc_frees_what_a_filter_gc_and_punching_left() {
     assert_eq!(st.packs_punched, 0, "{st:?}");
     assert_eq!(st.removed_objects, dead_left as u64, "{st:?}");
     exactly_live(&mem, &s, &objs, &live, "after the full GC");
-    assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0, "temp files left");
+    assert_eq!(std::fs::read_dir(tmp.path()).map(|d| d.count()).unwrap_or(0), 0, "temp files left");
     s.sync().unwrap();
     drop(s);
     mem.crash();
@@ -142,7 +142,7 @@ fn tiny_sort_chunks_force_several_merge_passes() {
     assert!(st.mark_merge_passes >= 2, "{st:?}");
     assert_eq!(st.dead_left, Some(0));
     exactly_live(&mem, &s, &objs, &live, "tiny chunks");
-    assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0, "temp files left");
+    assert_eq!(std::fs::read_dir(tmp.path()).map(|d| d.count()).unwrap_or(0), 0, "temp files left");
 }
 
 #[test]
@@ -192,7 +192,7 @@ fn a_full_gc_that_fails_loses_nothing_and_leaves_no_temp_files() {
         let r = s.gc_finish_full(m, b);
         mem.clear_fail_reads_after();
         assert!(r.is_err(), "fails after {after} reads");
-        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0, "temp files left after an error");
+        assert_eq!(std::fs::read_dir(tmp.path()).map(|d| d.count()).unwrap_or(0), 0, "temp files left after an error");
         for (id, d) in objs.iter().filter(|(id, _)| live.contains(id)) {
             assert_eq!(s.get(id).as_deref(), Some(d.as_slice()), "after {after}: live {id:?} lost");
         }
