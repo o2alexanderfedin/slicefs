@@ -36,13 +36,13 @@
     {
       "number": "24",
       "name": "Prolly evaluation",
-      "status": "pending"
+      "status": "in_progress"
     }
   ],
   "next": {
     "command": "/gsd-progress --next",
     "label": "Advance to the next step",
-    "reason": "Phase 8 of 9 · 56% · executing"
+    "reason": "Phase 9 of 9 · 56% · executing"
   },
-  "updated_at": "2026-11-26T13:42:21.784Z"
+  "updated_at": "2026-11-26T18:38:44.803Z"
 }
