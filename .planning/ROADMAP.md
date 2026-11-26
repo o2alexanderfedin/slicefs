@@ -470,7 +470,19 @@ Plans:
   3. Rehash refuses while the store is mounted (OS file lock) and while the write log has records after the last root
   4. A crash at any point leaves a store that mounts with the old or the new root; GC frees the old objects after the switch, and old objects are verified as they are read
   5. Rehash reports progress, bytes rewritten and bytes freed; `--dry-run` changes nothing; and its memory stays bounded, with no in-RAM map of all objects
-**Plans**: TBD
+**Plans**: 5 plans
+
+Plans:
+**Wave 1**
+- [ ] 23-01-PLAN.md — Tracer: `Sha256` hasher (tag 0x12, `sha2` 0.11), `seed`/`mount --hash sha256`, `incompat hash-sha256` flag and pairing rule, `ensure_hash_flag`, drop the unused Phase 02 crate, store-format flag row
+- [ ] 23-02-PLAN.md — Tracer: last snapshot record per version in both loaders, atomic `write_switch_segment` (`.seg.tmp`, rename, dir sync), `gc_on_open_store` (GC with the held lock), switch crash-state tests
+- [ ] 23-03-PLAN.md — Tracer: rehash engine in `metadata::rehash` (streamed values, key-carrying nodes, refcount extsort), on-disk `KeyMap` with fixed RAM cache, kept rule, dry-run mode, progress and stop hooks
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 23-04-PLAN.md — Tracer: `slicefs rehash --to <hash> [--dry-run] <store>`: lock, header, mount.lock and write-log checks, run order, switch, header line, full GC, report, `rehash-tmp` cleanup, refusals
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 23-05-PLAN.md — HASH-06 round trips (both ways, mixed store, two profiles), crash after each step and torn switch states, damaged object, chunk-store/store-format/README docs, phase gate
 
 ### Phase 24: Prolly evaluation
 
