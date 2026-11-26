@@ -254,6 +254,10 @@ fn malformed_node_is_an_error() {
     let out_of_order = raw(0, 2, &[raw_leaf_entry(b"b", b""), raw_leaf_entry(b"a", b"")].concat());
     let equal = raw(0, 2, &[raw_leaf_entry(b"a", b""), raw_leaf_entry(b"a", b"")].concat());
     let long_key = raw(0, 1, &raw_leaf_entry(&[b'a'; MAX_KEY + 1], b""));
+    let long_entry = raw(0, 1, &raw_leaf_entry(b"a", &[0; MAX_ENTRY]));
+    // 12 entries of 1,500 bytes: each within MAX_ENTRY, the node above NODE_MAX.
+    let big_node = raw(0, 12, &(0..12u8).map(|i| raw_leaf_entry(&[b'a', i], &[0; 1_494])).collect::<Vec<_>>().concat());
+    let long_child_key = encode_internal(1, &[Child { last_key: vec![b'a'; MAX_KEY + 1], id: leaf_id, count: 1 }]);
     let child = |id| Child { last_key: b"zz".to_vec(), id, count: 1 };
     let wrong_level = encode_internal(2, &[child(leaf_id)]);
     let cases: Vec<(&str, Vec<u8>)> = vec![
@@ -267,6 +271,9 @@ fn malformed_node_is_an_error() {
         ("internal with count 0", raw(1, 0, &[])),
         ("child at the wrong level", wrong_level),
         ("key above MAX_KEY", long_key),
+        ("entry above MAX_ENTRY", long_entry),
+        ("node above NODE_MAX", big_node),
+        ("child key above MAX_KEY", long_child_key),
     ];
     for (what, bytes) in cases {
         let bad = s.put(&bytes).unwrap();
@@ -332,6 +339,23 @@ fn inconsistent_tree_is_an_error() {
     assert!(matches!(got, Ok(Err(Error::Corrupt(_)))), "{got:?}");
     // A get whose path holds only good nodes does not see B (the check is per path).
     assert_eq!(get(&s, &root, b"a").unwrap(), Some(b"v".to_vec()));
+}
+
+/// A node of a larger config is refused by an apply of a smaller one: its
+/// entries could not be written again within the smaller size bound.
+#[test]
+fn foreign_config_node_is_an_error_in_apply() {
+    let s = mem_store();
+    let (root, _) = build(&s, Config::DEFAULT, [(b"k".to_vec(), vec![7; 300])]).unwrap();
+    let before = s.stats();
+    let got = apply(&s, Config::SMALL, &root, &[put(b"a", b"1")]);
+    assert!(matches!(got, Err(Error::Corrupt(_))), "{got:?}");
+    assert_eq!(s.stats(), before);
+    // The readers use the largest limits, so they read it.
+    assert_eq!(get(&s, &root, b"k").unwrap(), Some(vec![7; 300]));
+    // An apply with the config of the tree works.
+    let (r, _) = apply(&s, Config::DEFAULT, &root, &[put(b"a", b"1")]).unwrap();
+    assert_eq!(get(&s, &r, b"a").unwrap(), Some(b"1".to_vec()));
 }
 
 #[test]

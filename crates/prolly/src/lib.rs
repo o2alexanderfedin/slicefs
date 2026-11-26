@@ -25,7 +25,9 @@
 //! LE, the last key of the child, the child `ObjectId` (33 bytes) and the
 //! leaf entry count of the child's subtree `u64` LE. Keys are strictly
 //! ascending in every node. A damaged or crafted node gives
-//! `Error::Corrupt`, never a panic.
+//! `Error::Corrupt`, never a panic. A node is also checked against the
+//! size limits of a config (node bytes, key and entry sizes): `apply`
+//! against its own config, the readers against `Config::DEFAULT`.
 //!
 //! Each child is checked against its parent entry when `get`, the cursor,
 //! `walk` or `apply` loads it: its last key is the entry's key, its first

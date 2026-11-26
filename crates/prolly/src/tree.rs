@@ -300,6 +300,12 @@ impl<'s> Builder<'s> {
     }
 }
 
+/// The limits that `get`, the cursor and `walk` check nodes against: the
+/// largest config (the crate constants), so they read a tree of any config.
+/// `apply` checks against its own config, because it writes the old entries
+/// again.
+const READ_CFG: Config = Config::DEFAULT;
+
 /// The root of the empty map: the empty leaf object.
 pub fn empty_root(store: &ChunkStore) -> Result<ObjectId> {
     Ok(store.put(&encode_leaf(&[]))?)
@@ -322,7 +328,7 @@ where
 /// node of the path is checked against its parent entry; a bad node that
 /// is not on the path is not seen.
 pub fn get(store: &ChunkStore, root: &ObjectId, key: &[u8]) -> Result<Option<Vec<u8>>> {
-    let (mut n, _) = node::load(store, root, None)?;
+    let (mut n, _) = node::load(store, &READ_CFG, root, None)?;
     let mut lo: Option<Vec<u8>> = None;
     loop {
         match n {
@@ -334,7 +340,7 @@ pub fn get(store: &ChunkStore, root: &ObjectId, key: &[u8]) -> Result<Option<Vec
                 if i > 0 {
                     lo = Some(std::mem::take(&mut children[i - 1].last_key));
                 }
-                n = node::load_child(store, level - 1, &children[i], lo.as_deref())?.0;
+                n = node::load_child(store, &READ_CFG, level - 1, &children[i], lo.as_deref())?.0;
             }
             Node::Leaf(entries) => {
                 return Ok(entries.binary_search_by(|(k, _)| k.as_slice().cmp(key)).ok().map(|i| entries[i].1.clone()));
@@ -364,7 +370,7 @@ impl Cursor<'_> {
 
 /// A cursor at the first entry of the tree `root`.
 pub fn iter<'s>(store: &'s ChunkStore, root: &ObjectId) -> Result<Cursor<'s>> {
-    let (n, _) = node::load(store, root, None)?;
+    let (n, _) = node::load(store, &READ_CFG, root, None)?;
     Ok(Cursor { store, stack: vec![(n, 0, None)], max_held: 1, done: false })
 }
 
@@ -393,7 +399,7 @@ impl Iterator for Cursor<'_> {
                     };
                     let child_lo = if *i > 0 { Some(children[*i - 1].last_key.clone()) } else { lo.clone() };
                     *i += 1;
-                    match node::load_child(self.store, *level - 1, c, child_lo.as_deref()) {
+                    match node::load_child(self.store, &READ_CFG, *level - 1, c, child_lo.as_deref()) {
                         Ok((child, _)) => {
                             self.stack.push((child, 0, child_lo));
                             self.max_held = self.max_held.max(self.stack.len());
@@ -429,7 +435,7 @@ pub struct NodeInfo {
 /// right, holding one path of nodes. Each node is checked against its
 /// parent entry when it is loaded.
 pub fn walk(store: &ChunkStore, root: &ObjectId, mut f: impl FnMut(&NodeInfo)) -> Result<()> {
-    let (n, bytes) = node::load(store, root, None)?;
+    let (n, bytes) = node::load(store, &READ_CFG, root, None)?;
     walk_node(store, n, bytes, None, true, &mut f)
 }
 
@@ -453,7 +459,7 @@ fn walk_node<F: FnMut(&NodeInfo)>(
     if let Node::Internal { level, children } = &n {
         for (i, c) in children.iter().enumerate() {
             let child_lo = if i > 0 { Some(children[i - 1].last_key.as_slice()) } else { lo };
-            let (child, child_bytes) = node::load_child(store, level - 1, c, child_lo)?;
+            let (child, child_bytes) = node::load_child(store, &READ_CFG, level - 1, c, child_lo)?;
             walk_node(store, child, child_bytes, child_lo, last_of_level && i + 1 == children.len(), f)?;
         }
     }

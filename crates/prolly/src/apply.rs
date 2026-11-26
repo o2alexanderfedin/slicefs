@@ -95,16 +95,20 @@ struct Work<'s> {
 }
 
 impl Work<'_> {
+    /// Loads node `id` with the limits of the apply's config: the old
+    /// entries are written again, so each must fit the config (no key above
+    /// `max_key`, no entry above `max_entry`), else the size bound of the
+    /// new nodes would not hold.
     fn load(&mut self, id: &ObjectId, want: Option<u8>) -> Result<(Node, usize)> {
         self.reads += 1;
-        node::load(self.store, id, want)
+        node::load(self.store, &self.cfg, id, want)
     }
 
     /// Loads the child `entry` at `level` and checks it against the entry
-    /// (`node::load_child`).
+    /// (`node::load_child`), with the limits of the apply's config.
     fn load_child(&mut self, level: u8, entry: &Child, lo: Option<&[u8]>) -> Result<(Node, usize)> {
         self.reads += 1;
-        node::load_child(self.store, level, entry, lo)
+        node::load_child(self.store, &self.cfg, level, entry, lo)
     }
 
     fn note(&mut self, held: usize) {
