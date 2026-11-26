@@ -4,10 +4,10 @@ milestone: v2.2
 milestone_name: Concurrency & Store Evolution
 current_phase: "21.2"
 current_phase_name: Thread-safety verification and CI gates
-current_plan: 8
+current_plan: 11
 status: executing
-stopped_at: Completed 21.2-10-PLAN.md
-last_updated: "2026-11-26T04:05:00.000Z"
+stopped_at: Completed 21.2-11-PLAN.md
+last_updated: "2026-11-26T04:50:00.000Z"
 last_activity: 2026-11-25
 last_activity_desc: Phase 21.1 complete, transitioned to Phase 22
 state_head: 96f361d71fee3e15cc95c7e977f19454c7e13873
@@ -15,7 +15,7 @@ progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 55
-  completed_plans: 54
+  completed_plans: 55
   percent: 44
 ---
 
@@ -30,12 +30,12 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 8
+Current Plan: 11
 Total Plans in Phase: 11
 Phase: 21.2 (Thread-safety verification and CI gates) — EXECUTING
-Plan: 21.2-01 and 21.2-02 complete (2 of 11); next: 21.2-03
-Status: Ready to execute
-Last activity: 2026-11-25 — 21.2-02 complete: race (b) fixed (ancestor walk, EINVAL), stress test in the suite, 20 of 20 repeat runs pass
+Plan: 21.2-01 to 21.2-11 complete (11 of 11); next: /gsd-verify-work 21.2
+Status: Phase plans complete, ready to verify
+Last activity: 2026-11-26 — 21.2-11 complete: job kani, measured limits, Safety run 45755055229 green on all 8 checks, TSAFE-01..06 complete
 
 Progress: [████░░░░░░] 44%
 

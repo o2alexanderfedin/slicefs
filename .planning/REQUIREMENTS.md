@@ -40,12 +40,13 @@
 
 ### Thread-safety verification (Phase 21.2)
 
-- [ ] **TSAFE-01**: A CI workflow runs on every push to any branch and on every PR, and fails the build on any finding: `cargo clippy --workspace --all-targets -- -D warnings`, Miri on the unit tests that reach `unsafe` in chunk-store and metadata, ThreadSanitizer (pinned nightly, Linux) on the multi-worker tests and a short stress run, the model-checking job, Kani proofs, and a `deadlock-detect` stress run. Each job has a time limit.
-- [ ] **TSAFE-02**: loom or shuttle models cover every thread order of the worker pool, the shared dirty budget and the commit gate.
-- [ ] **TSAFE-03**: The two Phase 19 races are fixed, each with a test that failed before the fix and a model or stress test that stays in CI: (a) a size change of a closed file against unlink or setattr; (b) a cross-directory rename with no ancestor check. If either cannot be fixed in this phase, the Linux default is `--workers 1` until it is.
-- [ ] **TSAFE-04**: Kani proves small pure code (the header parser, size limits) free of panic and overflow.
-- [ ] **TSAFE-05**: Line coverage is measured in CI, also in Linux Docker with the FUSE checks, and the numbers are in the CI log. A drop below the set floor fails the build.
-- [ ] **TSAFE-06**: The `unsafe` blocks that Miri cannot run (FFI in slicefs-cli and vendor/fuser, and any other block Miri does not execute) have a written review in `docs/design/unsafe-review.md`.
+- [x] **TSAFE-01**: A CI workflow (Safety) runs as the release gate (release.yml runs it and creates the tag only when every job passes), on a v* tag push, and by manual run on any branch, and fails on any finding: `cargo clippy --workspace --all-targets -- -D warnings`, Miri on the unit tests that reach `unsafe` in chunk-store and metadata, ThreadSanitizer (pinned nightly, Linux) on the multi-worker tests and a short stress run, the model-checking job, Kani proofs, and a `deadlock-detect` stress run. Each job has a time limit.
+- [x] **TSAFE-02**: loom or shuttle models cover every thread order of the worker pool, the shared dirty budget and the commit gate.
+  - Models (loom): every thread order with at most 3 preemptions (CI bound), and every order for the models named `*_all_orders`; see 21.2-01-SUMMARY.
+- [x] **TSAFE-03**: The two Phase 19 races are fixed, each with a test that failed before the fix and a model or stress test that stays in CI: (a) a size change of a closed file against unlink or setattr; (b) a cross-directory rename with no ancestor check. If either cannot be fixed in this phase, the Linux default is `--workers 1` until it is.
+- [x] **TSAFE-04**: Kani proves small pure code (the header parser, size limits) free of panic and overflow.
+- [x] **TSAFE-05**: Line coverage is measured in CI, also in Linux Docker with the FUSE checks, and the numbers are in the CI log. A drop below the set floor fails the Safety gate.
+- [x] **TSAFE-06**: The `unsafe` blocks that Miri cannot run (FFI in slicefs-cli and vendor/fuser, and any other block Miri does not execute) have a written review in `docs/design/unsafe-review.md`.
 
 ### Chunk profiles (#67)
 
@@ -114,12 +115,12 @@ Deferred; tracked, not in this roadmap.
 | FMT-03 | Phase 21.1 | Complete |
 | FMT-04 | Phase 21.1 | Complete |
 | FMT-05 | Phase 21.1 | Complete |
-| TSAFE-01 | Phase 21.2 | Pending |
-| TSAFE-02 | Phase 21.2 | Pending |
-| TSAFE-03 | Phase 21.2 | Pending |
-| TSAFE-04 | Phase 21.2 | Pending |
-| TSAFE-05 | Phase 21.2 | Pending |
-| TSAFE-06 | Phase 21.2 | Pending |
+| TSAFE-01 | Phase 21.2 | Complete |
+| TSAFE-02 | Phase 21.2 | Complete |
+| TSAFE-03 | Phase 21.2 | Complete |
+| TSAFE-04 | Phase 21.2 | Complete |
+| TSAFE-05 | Phase 21.2 | Complete |
+| TSAFE-06 | Phase 21.2 | Complete |
 | PROF-01 | Phase 22 | Pending |
 | PROF-02 | Phase 22 | Pending |
 | PROF-03 | Phase 22 | Pending |

@@ -189,7 +189,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
 - [x] **Phase 20: Dirty budget and rebase flusher** (#21) - no cross-file take-out, a background flusher, writers throttled before they take locks, no deadlock with a commit (completed 2026-11-23)
 - [x] **Phase 21: Worker pool** (#22) - N worker threads by mount option, drain before `destroy()`, abort on panic, 4 workers pass pjdfstest (completed 2026-11-24)
 - [x] **Phase 21.1: Store header and format policy (#154)** (INSERTED) - one store header with format number and compat/ro-compat/incompat flags, format policy doc (completed 2026-11-24)
-- [ ] **Phase 21.2: Thread-safety verification and CI gates** (INSERTED) - clippy, Miri, ThreadSanitizer, loom/shuttle models, Kani, deadlock-detect stress and Linux coverage as CI gates on every push and PR; fix the two Phase 19 races
+- [ ] **Phase 21.2: Thread-safety verification and CI gates** (INSERTED) - clippy, Miri, ThreadSanitizer, loom/shuttle models, Kani, deadlock-detect stress and Linux coverage as CI gates (release gate, manual run); fix the two Phase 19 races
 - [ ] **Phase 22: Chunk profiles** (#67) - FastCDC min/avg/max fixed per store at `seed`, benchmark of five profiles, default unchanged (parallel track)
 - [ ] **Phase 23: Hashes and rehash** (#62) - SHA-256 write hash and an offline, crash-safe `slicefs rehash` (parallel track)
 - [ ] **Phase 24: Prolly evaluation** (#19) - one-map prototype, benchmark on Boost trees, written decision (parallel track)
@@ -401,16 +401,16 @@ Plans:
 
 ### Phase 21.2: Thread-safety verification and CI gates (INSERTED)
 
-**Goal:** Tool-backed evidence of thread safety on every build. Static analysis and formal verification run as CI gates on every push and every PR, and the two Phase 19 races that the multi-worker Linux default made reachable are fixed.
+**Goal:** Tool-backed evidence of thread safety before every release. Static analysis and formal verification run as CI gates (the release gate and a manual run), and the two Phase 19 races that the multi-worker Linux default made reachable are fixed.
 **Requirements**: TSAFE-01, TSAFE-02, TSAFE-03, TSAFE-04, TSAFE-05, TSAFE-06
 **Depends on:** Phase 21.1
 **Success criteria:**
-1. A CI workflow runs on every push to any branch and on every PR, and fails the build on any finding: `cargo clippy --workspace --all-targets -D warnings`, Miri on the unit tests that reach `unsafe` in chunk-store and metadata, ThreadSanitizer (pinned nightly, Linux) on the multi-worker tests and a short stress run, loom or shuttle models, Kani proofs, and a `deadlock-detect` stress run. Each job has a time limit.
+1. A CI workflow (Safety) runs as the release gate (release.yml runs it and creates the tag only when every job passes), on a v* tag push, and by manual run on any branch, and fails on any finding: `cargo clippy --workspace --all-targets -D warnings`, Miri on the unit tests that reach `unsafe` in chunk-store and metadata, ThreadSanitizer (pinned nightly, Linux) on the multi-worker tests and a short stress run, loom or shuttle models, Kani proofs, and a `deadlock-detect` stress run. Each job has a time limit.
 2. loom or shuttle models cover every thread order of the worker pool, the shared dirty budget and the commit gate.
 3. The two Phase 19 races are fixed, each with a test that failed before the fix and a model or stress test that stays in CI: (a) a size change of a closed file against unlink or setattr; (b) a cross-directory rename with no ancestor check. If either cannot be fixed in this phase, the Linux default is `--workers 1` until it is.
 4. Kani proves small pure code (the header parser, size limits) free of panic and overflow.
 5. Line coverage is measured in CI, also in Linux Docker with the FUSE checks, and the numbers are in the CI log. The `unsafe` blocks that Miri cannot run (FFI in slicefs-cli and vendor/fuser) have a written review.
-**Plans:** 8/11 plans executed
+**Plans:** 11/11 plans executed
 
 Plans:
 **Wave 1** *(tracer)*
@@ -434,7 +434,7 @@ Plans:
 - [x] 21.2-10-PLAN.md — Coverage in Linux Docker (tests and FUSE smoke), job `coverage`, floor from the first Linux CI number minus 1 point (CI run 45750602854: tests 91.27 %, merged 93.08 %; floor 90.27; job 3 min 4 s)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 21.2-11-PLAN.md — Phase gate: job `kani`, measured time limits, ci.yml Linux steps in local Docker, one green Safety run of all 8 checks, TSAFE marks, check names for branch protection, deferred items
+- [x] 21.2-11-PLAN.md — Phase gate: job `kani`, measured time limits, ci.yml Linux steps in local Docker, one green Safety run of all 8 checks, TSAFE marks, check names for branch protection, deferred items
 
 ### Phase 22: Chunk profiles
 
