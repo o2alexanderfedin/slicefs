@@ -45,6 +45,30 @@ jobs:
       - uses: actions/checkout@v4
       - run: scripts/safety/miri.sh
 
+  tsan:
+    name: tsan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # ThreadSanitizer on the multi-worker and race tests and a 10 s stress
+    # run, on the pinned nightly with -Zbuild-std (TSAFE-01, TSAFE-03, D-15 to D-17).
+    steps:
+      - uses: actions/checkout@v4
+      # Ubuntu kernels with vm.mmap_rnd_bits=32 make TSan abort with
+      # "unexpected memory mapping" (RESEARCH Pitfall 8).
+      - name: TSan memory layout
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - run: scripts/safety/tsan.sh
+
+  deadlock:
+    name: deadlock
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The in-process stress harness with the parking_lot deadlock detector,
+    # 8 workers, in release (TSAFE-01, D-30).
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/safety/deadlock.sh
+
   clippy:
     name: clippy-${{ matrix.name }}
     # clippy with -D warnings on the stable pin, and a written reason on every
