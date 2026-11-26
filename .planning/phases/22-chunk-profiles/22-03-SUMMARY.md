@@ -18,10 +18,10 @@ affects: [22-04]
 actuals:
   tokens: 15226
   tasks: 3
-  commits: 3
+  commits: 5
 
 plan_head_before: 0c803d9e49be46aee1b01cb93c2fd0a5bcd82c75
-plan_head_after: e22edcae8a54df0e44d2cdb360b98a61e8e6fd71
+plan_head_after: 30dcf794ff770bb67d9ca60ca57ae3c4ba075004
 
 tech-stack:
   added: []
@@ -46,14 +46,14 @@ key-decisions:
   - "ingest_secs is the wall time of store open, all writes and close (the seal and sync are part of the ingest cost)"
   - "The page cache is warmed: bench.sh reads each input once before the runs (as seed-measure.sh does)"
   - "RAND_BYTES and SPARSE_BYTES default to 1 GiB (the seed-measure.sh default); rand and sparse are not in the default INPUTS"
-  - "In SMOKE=1 a given data dir holds the smoke data; else it is WORK/smoke-data"
+  - "SMOKE=1 always makes its data in WORK/smoke-data and refuses a data dir argument (so gen never writes over real Boost data)"
   - "median rows: median_low over the non-NA values of a column; NA when every run is NA"
   - "Edit read-back window: 32 KiB on each side of p (up to 64 KiB plus the edit), and the length of the new content is checked"
   - "A probe file under 4096 bytes, or an edit base under 2 x EDIT_SIZE, exits 1 with a message (no underflow)"
 
 requirements-completed: [PROF-03]
 
-duration: 30min
+duration: not recorded
 completed: 2026-11-26
 ---
 
@@ -63,9 +63,8 @@ completed: 2026-11-26
 
 ## Performance
 
-- **Duration:** about 30 min
-- **Started:** 2026-11-26T07:20Z
-- **Completed:** 2026-11-26T07:52Z
+- **Duration:** not measured (the start time was not recorded)
+- **Completed:** about 2026-11-26T08:10Z (the last gate started at 07:50Z)
 - **Tasks:** 3 of 3
 - **Files:** 7 (1 example, 2 script files, 1 modified script, 3 run logs)
 
@@ -90,6 +89,9 @@ plus nine `edit` lines (rc=0). The `#[test]` and `unsafe` counts of the example 
 1. **Task 1: the benchmark example** - `a018afa` (feat)
 2. **Task 2: bench.sh, README, macOS smoke CSV** - `aa5145c` (feat)
 3. **Task 3: Linux Docker smoke mode, Linux smoke log, gate log** - `e22edca` (feat)
+4. **Fix: smoke mode never writes into a given data dir; logs again** - `30dcf79` (fix)
+
+The first version of this SUMMARY is `50516c3`. `commits: 5` counts it (measured with `git rev-list --count 0c803d9..30dcf79`).
 
 ## Gates
 
@@ -97,6 +99,7 @@ plus nine `edit` lines (rc=0). The `#[test]` and `unsafe` counts of the example 
 |------|--------|
 | Local gate before the Task 1 commit | exit 0; 1582 passed, 0 failed, 12 ignored (79 result lines) |
 | Local gate before the Task 2 and Task 3 commits (one run; no `.rs` change after Task 1) | exit 0; 1582 passed, 0 failed, 12 ignored (79 result lines) |
+| Local gate before the fix commit (its result lines are in gate-22-03.log) | exit 0; 1582 passed, 0 failed, 12 ignored (79 result lines); clippy and unsafe-count ok |
 | `scripts/safety/clippy.sh` (before Task 1, and before Tasks 2 and 3) | `CLIPPY os=Darwin toolchain=stable result=ok`, `UNSAFE files=31 tokens=132 result=ok` |
 | macOS smoke (`SMOKE=1 RUNS=1`, two profiles) | rc=0, `rows=8 medians=4 bad=0`, `edits=18`, machine.txt cpu and load lines 2, home paths 0 |
 | Linux Docker smoke | rc=0, header plus 4 median rows = 5, `os=Linux` 1, edits 18 |
@@ -118,12 +121,26 @@ See `key-decisions` in the frontmatter. All are reversible.
 - **Files modified:** scripts/chunk-profiles/bench.sh
 - **Commit:** aa5145c
 
+**2. [Rule 2 - Security] SMOKE=1 could write over real Boost data**
+- **Found during:** review before the plan close
+- **Issue:** in smoke mode the script took a data dir argument and the user `BOOST_VERS`, then ran `rm -rf DATA/x/boost_<v>` and wrote `DATA/boost_<v>.tar`. `SMOKE=1 BOOST_VERS="1_84_0 1_85_0" bench.sh DATA` would have removed the real trees and truncated the real tar. This broke T-22-10 and the claim that the script removes only `WORK/store`.
+- **Fix:** smoke mode always uses `WORK/smoke-data` and refuses a data dir argument (exit 2 with the usage line). The `rm -rf` of the smoke trees is gone (`gen` writes the same file names again). README smoke paragraph changed to match. The README table now has one row for each of the four latency columns.
+- **Proof:** a fake data dir with a marker in `x/boost_9_9_9/` and a `boost_9_9_9.tar`; `SMOKE=1 BOOST_VERS="9_9_8 9_9_9" bench.sh FAKE` exits 2, and the marker, the tar and the file count (2) do not change. `bench.sh <empty dir>` exits 2 with the fetch-boost.sh line.
+- **Files modified:** scripts/chunk-profiles/bench.sh, scripts/chunk-profiles/README.md
+- **Commit:** 30dcf79
+
+After the fix, the macOS smoke, the Linux Docker smoke, clippy and the local gate were run again, and the three run logs were saved again from those runs.
+
+### Wider check (not committed)
+
+`SMOKE=1 RUNS=2 INPUTS="trees tar rand sparse" RAND_BYTES=8388608 SPARSE_BYTES=33554432` with the default five profiles and no `BIN` (so the script ran the release build): rc=0, 61 lines of 28 fields (header, 40 run rows, 20 median rows), 270 edit rows. This covers the three profiles that the plan smoke does not run, medians over two runs, the `rand` and `sparse` inputs (edits over zeros) and the build path.
+
 ### Other notes
 
 - Clippy ran before the Task 1 commit (the launch rules ask for it before each code commit; the plan put it in Task 3).
 - One gate run covers the Task 2 and Task 3 commits. Both commits change only scripts, a README and logs, and the gate ran on the tree that holds all of them.
 - The README Linux note (a Task 3 file) went into the Task 2 commit, because the Linux smoke ran before the Task 2 commit.
-- The Docker image has no GNU `/usr/bin/time`, so `open_peak_rss_bytes` is `NA` in Linux Docker. The README says so. The Dockerfile was not changed (not in this plan's files).
+- The Docker image has no GNU `/usr/bin/time`, so `open_peak_rss_bytes` is `NA` in Linux Docker. The README says so. The Dockerfile was not changed (not in this plan's files). The GNU `time -v` branch of bench.sh has not run anywhere yet.
 - `commit=unknown` in the Linux machine.txt: git does not run on the read-only `/src` in the container. This is the planned fallback.
 - Scratch files went to `target/scratch` in the worktree (ignored by git), through `TMPDIR`.
 - Commit-protocol note: the branch `exec/22-03` is outside the generic `agent-*` allow-list. The launch instructions name this branch, and it is not protected.
@@ -149,5 +166,5 @@ None beyond the deviation above.
 
 ## Self-Check: PASSED
 
-- FOUND: crates/chunk-store/examples/chunk_profile_bench.rs, scripts/chunk-profiles/bench.sh (executable), scripts/chunk-profiles/README.md, runs/smoke-22-03-macos.csv, runs/smoke-22-03-linux.log, runs/gate-22-03.log
-- FOUND commits: a018afa, aa5145c, e22edca (ancestors of HEAD)
+- FOUND: crates/chunk-store/examples/chunk_profile_bench.rs, scripts/chunk-profiles/bench.sh (git mode 100755), scripts/chunk-profiles/README.md, runs/smoke-22-03-macos.csv, runs/smoke-22-03-linux.log, runs/gate-22-03.log
+- FOUND commits: a018afa, aa5145c, e22edca, 50516c3, 30dcf79 (in `git log` of exec/22-03)
