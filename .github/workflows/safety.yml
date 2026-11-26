@@ -1,7 +1,8 @@
 name: Safety
 
 # The thread-safety and memory-safety gates (Phase 21.2, TSAFE-01). They run
-# on every push to any branch and on every pull request. Each job runs one
+# only when a release tag (v*) is pushed, or by hand (Actions > Safety > Run
+# workflow, on any branch: run it before you tag). Each job runs one
 # script of scripts/safety/, so a developer runs the same command locally.
 # The tool pins are only in the `env:` block below (scripts/safety/toolchains.sh
 # reads them from here). The job names are the check names for branch
@@ -9,8 +10,8 @@ name: Safety
 # each with its own time limit.
 on:
   push:
-    branches: ["**"]
-  pull_request:
+    tags: ["v*"]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
