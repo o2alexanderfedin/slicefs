@@ -322,7 +322,10 @@ pub fn read(store: &Path) -> std::io::Result<Option<String>> {
 /// order: `hash <name>` (at most one), `chunks <min> <avg> <max>` (at most
 /// one; see [`parse_chunks`]), a flag line `<class> <name>
 /// <release>` (see [`valid_name_bytes`] and [`valid_release_bytes`]; a name once in
-/// the whole header), or a line of another kind.
+/// the whole header), or a line of another kind. The `chunks` line and the
+/// flag [`CHUNK_PROFILE_FLAG`] come together or not at all, and that flag is
+/// ro_compat (an older build that does not know it opens the store
+/// read-only and keeps the `chunks` line as a line of its feature).
 pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
     let mut pieces: Vec<&str> = text.split('\n').collect();
     if text.ends_with('\n') {
@@ -372,6 +375,19 @@ pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
             _ => Line::Other(line.to_string()),
         };
         lines.push(parsed);
+    }
+    // The `chunks` line and the `chunk-profile` flag come as a pair, and the
+    // flag is ro_compat. Index `j` of `lines` is line `j + 2` of the text.
+    let bad_at = |j: usize, reason: &str| refuse(msg_bad_line(store, j + 2, reason, pieces[j + 1]));
+    let chunks_at = lines.iter().position(|l| matches!(l, Line::Chunks(_)));
+    let flag_at = lines.iter().position(|l| matches!(l, Line::Flag(f) if f.name == CHUNK_PROFILE_FLAG));
+    match (chunks_at, flag_at) {
+        (Some(j), None) => return Err(bad_at(j, "chunks line with no chunk-profile flag")),
+        (None, Some(j)) => return Err(bad_at(j, "chunk-profile flag with no chunks line")),
+        (Some(_), Some(j)) if !matches!(&lines[j], Line::Flag(f) if f.class == Class::RoCompat) => {
+            return Err(bad_at(j, "the feature chunk-profile must be ro_compat"));
+        }
+        _ => {}
     }
     Ok(Header { format, first: first.to_string(), lines })
 }
@@ -900,6 +916,68 @@ mod tests {
     fn one_hash_line_at_most() {
         let err = parse(Path::new(STORE), &format!("{FORMAT}{HASH}{HASH}")).expect_err("refused").to_string();
         assert!(err.contains("line 3: two hash lines"), "{err}");
+    }
+
+    /// The `chunk-profile` flag line of this build.
+    fn profile_flag(class: &str) -> String {
+        format!("{class} {CHUNK_PROFILE_FLAG} {CHUNK_PROFILE_RELEASE}\n")
+    }
+
+    /// [Chunks line]: the `chunks` line and the ro_compat `chunk-profile`
+    /// flag come together or not at all (M9 with the line number).
+    #[test]
+    fn a_chunks_line_needs_the_flag_and_the_flag_needs_the_line() {
+        let chunks = "chunks 16384 65536 262144\n";
+        let ro = profile_flag("ro_compat");
+        let cases = [
+            (format!("{FORMAT}{HASH}{chunks}"), "line 3: chunks line with no chunk-profile flag"),
+            (format!("{FORMAT}{HASH}{ro}"), "line 3: chunk-profile flag with no chunks line"),
+            (format!("{FORMAT}{HASH}{chunks}{}", profile_flag("compat")), "line 4: the feature chunk-profile must be ro_compat"),
+            (format!("{FORMAT}{HASH}{}{chunks}", profile_flag("incompat")), "line 3: the feature chunk-profile must be ro_compat"),
+            (format!("{FORMAT}{HASH}{chunks}{ro}{chunks}"), "line 5: two chunks lines"),
+        ];
+        for (text, want) in cases {
+            let err = parse(Path::new(STORE), &text).expect_err(want).to_string();
+            assert!(err.contains(want), "{text:?}: {err}");
+        }
+    }
+
+    /// [Chunks line]: a `chunks` line has three sizes in decimal digits
+    /// that `ChunkProfile::new` accepts; anything else is M9, never a panic.
+    #[test]
+    fn a_bad_chunks_line_is_refused() {
+        let ro = profile_flag("ro_compat");
+        for line in [
+            "chunks 16384 65536",
+            "chunks 16384 65536 262144 1",
+            "chunks +16384 65536 262144",
+            "chunks 16384 65536 0x40000",
+            "chunks 12288 24576 49152",
+            "chunks 65536 16384 262144",
+            "chunks 32 256 1024",
+            "chunks 4096 8192 33554432",
+            "chunks 16384 65536 99999999999",
+        ] {
+            let err = parse(Path::new(STORE), &format!("{FORMAT}{HASH}{line}\n{ro}")).expect_err(line).to_string();
+            assert!(err.contains("line 3: bad chunks line"), "{line}: {err}");
+        }
+    }
+
+    /// [Chunks line]: a header with a profile opens read and write for
+    /// every `Want` (the flag is known here) and writes back byte for byte.
+    #[test]
+    fn a_profile_header_round_trips() {
+        let (chunks, ro) = ("chunks 16384 65536 262144\n", profile_flag("ro_compat"));
+        for text in [format!("{FORMAT}{HASH}{chunks}{ro}"), format!("{FORMAT}{HASH}{ro}{chunks}")] {
+            let h = parse(Path::new(STORE), &text).unwrap();
+            assert_eq!(h.chunk_profile(), Some(ChunkProfile::new(16384, 65536, 262144).unwrap()));
+            for want in ALL {
+                assert_eq!(decide(Path::new(STORE), &h, want).unwrap(), Access::ReadWrite, "{want:?}");
+            }
+            assert_eq!(h.to_text(), text);
+        }
+        let h = parse(Path::new(STORE), &format!("{FORMAT}{HASH}chunks 4096 8192 32768\n{ro}")).unwrap();
+        assert_eq!(h.chunk_profile(), Some(ChunkProfile::DEFAULT));
     }
 
     /// [Compat], [Parse order]: a rewrite by `select_hash` keeps every flag

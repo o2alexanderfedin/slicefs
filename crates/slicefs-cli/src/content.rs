@@ -75,6 +75,23 @@ pub fn check_profile(store: &Path, h: Option<&Header>, want: Option<ChunkProfile
     }
 }
 
+/// Parse `--chunk-profile`: `MIN/AVG/MAX`, three whole numbers of KiB (for
+/// example `16/64/256`) that [`ChunkProfile::new`] accepts. Refuses a sign,
+/// a unit, a space, an empty part and an overflow of the byte size.
+pub fn parse_chunk_profile(s: &str) -> Result<ChunkProfile, String> {
+    let bad = || format!("invalid chunk profile {s:?}; use MIN/AVG/MAX in KiB, for example 16/64/256");
+    let kib = |w: &str| {
+        if w.is_empty() || !w.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        w.parse::<u32>().ok()?.checked_mul(1024)
+    };
+    let parts: Vec<&str> = s.split('/').collect();
+    let [min, avg, max] = parts[..] else { return Err(bad()) };
+    let (min, avg, max) = (kib(min).ok_or_else(bad)?, kib(avg).ok_or_else(bad)?, kib(max).ok_or_else(bad)?);
+    ChunkProfile::new(min, avg, max).map_err(|reason| format!("chunk profile {s}: {reason}"))
+}
+
 /// Parse `--hash`: the name of a known hasher.
 pub fn parse_hash(s: &str) -> Result<String, String> {
     hasher_by_name(s)
@@ -381,6 +398,37 @@ pub(crate) mod tests {
         for v in ["0", "1.5M", "64X", "64MB", "", "M", "+4M", "-4M", " 4M", "99999999999G", "99999999999999999999999"] {
             assert!(parse_dirty_bytes(v).is_err(), "{v:?} is refused");
         }
+    }
+
+    #[test]
+    fn parse_chunk_profile_takes_whole_kib() {
+        assert_eq!(parse_chunk_profile("16/64/256"), Ok(ChunkProfile::new(16384, 65536, 262144).unwrap()));
+        assert_eq!(parse_chunk_profile("4/8/32"), Ok(ChunkProfile::DEFAULT));
+        for v in ["8/32/128", "32/128/512"] {
+            assert!(parse_chunk_profile(v).is_ok(), "{v}");
+        }
+    }
+
+    #[test]
+    fn parse_chunk_profile_refuses_bad_values() {
+        for v in [
+            "16/64",
+            "16/64/256/1024",
+            "16k/64/256",
+            "+16/64/256",
+            "-16/64/256",
+            " 16/64/256",
+            "16//256",
+            "12/24/48",
+            "64/16/256",
+            "0/8/32",
+            "1/2/32768",
+            "4194304/8388608/16777216",
+        ] {
+            assert!(parse_chunk_profile(v).is_err(), "{v:?} is refused");
+        }
+        let err = parse_chunk_profile("16/64").unwrap_err();
+        assert!(err.contains("MIN/AVG/MAX"), "{err}");
     }
 
     /// Pseudo-random bytes (xorshift64): no FastCDC cut is at a fixed place.
