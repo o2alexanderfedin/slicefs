@@ -1,0 +1,61 @@
+== gate 24-02, head 4e499db, 2026-11-26T19:11:16Z
+== cargo test -p prolly
+test tests::entry_too_large_is_an_error ... ok
+test tests::unsorted_input_is_an_error ... ok
+test tests::malformed_node_is_an_error_in_apply ... ok
+test tests::malformed_node_is_an_error ... ok
+test tests::apply_rejects_unsorted_batch ... ok
+test tests::same_set_twice_writes_nothing ... ok
+test tests::golden_root ... ok
+test tests::cursor_iterates_in_order ... ok
+test tests::apply_one_put_then_get ... ok
+test tests::same_batch_twice_writes_nothing ... ok
+test tests::canonical_root ... ok
+test tests::one_change_writes_one_path ... ok
+test tests::boundaries_ignore_value_bytes ... ok
+test tests::apply_inserts_equal_bulk ... ok
+test tests::memory_is_bounded ... ok
+test tests::build_then_get_roundtrip ... ok
+test tests::node_size_limits ... ok
+test tests::levels_use_their_own_salt ... ok
+test tests::variable_length_model ... ok
+test tests::apply_memory_is_bounded ... ok
+test tests::order_independence ... ok
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.14s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+== cargo +stable clippy --locked -p prolly --all-targets -- -D warnings -D clippy::allow_attributes_without_reason
+clippy=0
+    Checking chunk-store v0.1.0 (<repo>/crates/chunk-store)
+    Checking prolly v0.1.0 (<repo>/crates/prolly)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.01s
+== RUST_STABLE=stable scripts/safety/clippy.sh
+clippy_sh=0
+CLIPPY os=Darwin toolchain=stable result=ok
+UNSAFE files=31 tokens=132 result=ok
+== bash scripts/safety/unsafe-count.sh
+UNSAFE files=31 tokens=132 result=ok
+unsafe tokens in crates/prolly: 0
+HashMap in crates/prolly/src: 0
+== greps
+pub fn apply in apply.rs: 1
+LevelWriter in apply.rs: 4
+pub use apply:: in lib.rs: 1
+canonical/order/idempotent fns: 3
+with_cases(48): 1
+fn apply_memory_is_bounded: 1
+== no change to product crates and the store format since a882251
+diff_rc=0
+== files changed against the merge base with feature/phase-24-prolly-evaluation (work tree)
+rc=0
+crates/prolly/src/apply.rs
+crates/prolly/src/lib.rs
+crates/prolly/src/tests.rs
+crates/prolly/src/tree.rs
+== wc -l crates/prolly/src/*.rs
+     453 crates/prolly/src/apply.rs
+     232 crates/prolly/src/lib.rs
+     195 crates/prolly/src/node.rs
+     123 crates/prolly/src/rule.rs
+     666 crates/prolly/src/tests.rs
+     418 crates/prolly/src/tree.rs
+    2087 total

@@ -547,3 +547,120 @@ fn apply_rejects_unsorted_batch() {
     }
     assert_eq!(s.stats(), before);
 }
+
+/// A directory-style key (D-10) made from `x`: parent u64 (big endian),
+/// then a name of 1 to 40 bytes.
+fn var_key(x: u64) -> Vec<u8> {
+    let mut s = x | 1;
+    let mut k = (x % 64).to_be_bytes().to_vec();
+    let name_len = 1 + (x >> 8) as usize % 40;
+    k.extend((0..name_len).map(|_| b'a' + (xorshift(&mut s) % 26) as u8));
+    k
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig {
+        failure_persistence: None,
+        ..proptest::prelude::ProptestConfig::with_cases(48)
+    })]
+
+    #[test]
+    fn variable_length_model(
+        n in 0usize..400,
+        seed in proptest::prelude::any::<u64>(),
+        batches in proptest::collection::vec(
+            proptest::collection::vec((0u8..4, proptest::prelude::any::<u64>(), 0usize..201), 1..40),
+            1..5,
+        ),
+    ) {
+        let cfg = Config::SMALL;
+        let s = mem_store();
+        let mut m: Model = var_entries(n, seed).into_iter().collect();
+        let (mut root, _) = build(&s, cfg, m.iter()).unwrap();
+        for ops in batches {
+            let mut b: Vec<Edit> = ops
+                .into_iter()
+                .map(|(kind, x, vlen)| {
+                    let old = (!m.is_empty()).then(|| m.keys().nth(x as usize % m.len()).cloned()).flatten();
+                    let key = match (kind, old) {
+                        (0 | 2, Some(k)) => k,
+                        _ => var_key(x),
+                    };
+                    let value: Vec<u8> = (0..vlen).map(|i| (x >> (i % 8)) as u8).collect();
+                    if kind < 2 { Edit::Put { key, value } } else { Edit::Delete { key } }
+                })
+                .collect();
+            b.sort_by(|x, y| x.key().cmp(y.key()));
+            b.dedup_by(|x, y| x.key() == y.key());
+            root = apply_checked(&s, cfg, &root, &mut m, &b).0;
+            assert_eq!(entries_of(&s, &root), m.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>());
+            let mut sx = seed | 1;
+            for i in 0..20u64 {
+                let k = match m.keys().nth(xorshift(&mut sx) as usize % m.len().max(1)) {
+                    Some(k) if i % 2 == 0 => k.clone(),
+                    _ => var_key(xorshift(&mut sx)),
+                };
+                assert_eq!(get(&s, &root, &k).unwrap(), m.get(&k).cloned());
+            }
+        }
+    }
+}
+
+#[test]
+fn apply_memory_is_bounded() {
+    let cfg = Config::SMALL;
+    let s = mem_store();
+    let es = u64_entries(40_000, 3);
+    let (root, bst) = build(&s, cfg, es.clone()).unwrap();
+    let total = nodes(&s, &root).len() as u64;
+    let (depth, max) = (bst.depth as usize, cfg.node_max());
+    let mut m: Model = es.iter().cloned().collect();
+    let ten: Vec<Edit> = (0..10).map(|i| put(&es[i * 4_000 + 17].0, &[0x5a; 33])).collect();
+    let (_, st) = apply_checked(&s, cfg, &root, &mut m, &ten);
+    assert!(st.nodes_read <= (10 * depth * (depth + 2)) as u64, "{st:?}, depth {depth}");
+    assert!(st.nodes_read < total / 4, "{st:?}, {total} nodes");
+    assert!(st.high_water_bytes <= 4 * (depth + 1) * max, "{st:?}, depth {depth}");
+    let mut m: Model = es.iter().cloned().collect();
+    let many: Vec<Edit> = (0..1_000u64).map(|i| put(&(i * 120 + 4).to_be_bytes(), &[0x33; 33])).collect();
+    let batch_bytes: usize = many.len() * (8 + 33);
+    let (_, st) = apply_checked(&s, cfg, &root, &mut m, &many);
+    let bound = 4 * (depth + 1) * max + 2 * (depth + 1) * batch_bytes;
+    assert!(st.high_water_bytes <= bound, "{st:?}, bound {bound}");
+}
+
+#[test]
+fn malformed_node_is_an_error_in_apply() {
+    use crate::node::{encode_internal, encode_leaf, Child};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let s = mem_store();
+    let good_leaf = encode_leaf(&[(b"a".to_vec(), b"1".to_vec())]);
+    let leaf_id = s.put(&good_leaf).unwrap();
+    let mut wrong_magic = good_leaf.clone();
+    wrong_magic[0] = b'X';
+    let out_of_order = raw(0, 2, &[raw_leaf_entry(b"b", b""), raw_leaf_entry(b"a", b"")].concat());
+    let child = |id, count| Child { last_key: b"zz".to_vec(), id, count };
+    let wrong_level = encode_internal(2, &[child(leaf_id, 1)]);
+    // Two subtree counts whose sum is above u64::MAX.
+    let leaf_b = s.put(&encode_leaf(&[(b"zzz".to_vec(), b"2".to_vec())])).unwrap();
+    let big = |k: &[u8], id| Child { last_key: k.to_vec(), id, count: u64::MAX };
+    let leaf_m = s.put(&encode_leaf(&[(b"m".to_vec(), b"3".to_vec())])).unwrap();
+    let last = Child { last_key: b"zzz".to_vec(), id: leaf_b, count: 1 };
+    let huge_counts = encode_internal(1, &[big(b"a", leaf_id), big(b"m", leaf_m), last]);
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("wrong magic", wrong_magic),
+        ("child at the wrong level", wrong_level),
+        ("keys out of order", out_of_order),
+        ("count above the bytes", raw(0, u32::MAX, &[0; 11])),
+        ("subtree counts above u64", huge_counts),
+    ];
+    // The key goes to the last node of each level.
+    let batch = [put(b"zzzz", b"new")];
+    for (what, bytes) in cases {
+        let bad = s.put(&bytes).unwrap();
+        let parent = s.put(&encode_internal(if bytes[4] == 0 { 1 } else { bytes[4] + 1 }, &[child(bad, 1)])).unwrap();
+        for (place, root) in [("root", bad), ("child", parent)] {
+            let got = catch_unwind(AssertUnwindSafe(|| apply(&s, Config::SMALL, &root, &batch)));
+            assert!(matches!(got, Ok(Err(Error::Corrupt(_)))), "{what} as {place}: {got:?}");
+        }
+    }
+}
