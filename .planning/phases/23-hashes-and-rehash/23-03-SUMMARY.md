@@ -44,8 +44,8 @@ actuals:
   tokens: 18800
   tasks: 3
   commits: 3
-plan_head_before: 526609e
-plan_head_after: 14f6a07
+plan_head_before: 526609e4de6bba028cb4c1cc049631cffbecb51f
+plan_head_after: 14f6a0708d0ca929256c79ba09b89fa404aff395
 ---
 
 # Phase 23 Plan 03: Rehash engine Summary
@@ -82,7 +82,7 @@ BASE = `526609e` (`git merge-base HEAD feature/phase-23-hashes-rehash`), recorde
 | 2 | On-disk map with a fixed RAM cache; shared values; kept-as-is rule | 1d1302f |
 | 3 | Dry-run, progress, stop hook, error stops, durability after sync; gates | 14f6a07 |
 
-Tracer gate: after Task 1, `<verify>` passed again in full, so the plan went on to the expansion tasks.
+Tracer gate: the full Task 1 `<verify>` (crate tests, greps, clippy, local gate) ran once, before the Task 1 commit. Before expansion, only the three tracer tests ran again, in the first Task 2 test run, and they passed.
 
 ## TDD record (runs/red-23-03.log)
 
