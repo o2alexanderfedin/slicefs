@@ -112,10 +112,12 @@ class Tables:
         self.by = {(r["mode"], r["pattern"], r["k"]): r for r in self.results}
 
     def groups(self):
-        """(pattern, k) in the order setup, bulk, scatter by K, cluster by K, version."""
+        """(pattern, k) in the order setup, bulk, scatter by K, cluster by K,
+        insdel by K, version (insdel runs after the version step, but its rows
+        stand next to the other small commits)."""
         keys = {(r["pattern"], r["k"]) for r in self.results}
-        order = {"setup": 0, "bulk": 1, "scatter": 2, "cluster": 3, "version": 4}
-        return sorted(keys, key=lambda g: (order.get(g[0], 5), g[0], int(g[1])))
+        order = {"setup": 0, "bulk": 1, "scatter": 2, "cluster": 3, "insdel": 4, "version": 5}
+        return sorted(keys, key=lambda g: (order.get(g[0], 6), g[0], int(g[1])))
 
     def get(self, mode, g):
         return self.by.get((mode, g[0], g[1]))
@@ -201,10 +203,8 @@ class Tables:
                 continue
             peaks = [num(r["peak_rss_bytes"]) for r in rs if num(r["peak_rss_bytes"]) is not None]
             peak = "NA" if not peaks else f_mib(statistics.median_low(peaks))
+            # The median rows are in commit order, so the last one is the last commit.
             last = rs[-1]
-            for r in rs:
-                if r["pattern"] == "version":
-                    last = r
             after_load = (f_mib(load) if load is not None else "NA") if m == "whole" else "-"
             out.append(row([m, peak, after_load, f_mib(last["maxrss_bytes"])]))
         return out

@@ -134,13 +134,31 @@ All from `SEED` (default 24), so the same for every run:
   per commit, then takes the next regular files in inode order. New inode
   numbers only grow, so creates go to the right edge of the map in both
   patterns.
-- Version step (last seq, pattern `version`): the next tree as one commit.
-  A file with the same content key is left alone; a changed file gets new
-  content; new files and directories are made; names that are only in the
-  store are removed.
+- In `scatter` and `cluster` most creates and deletes cancel inside the
+  commit: a delete takes the oldest file that the script created, and that
+  is mostly a file of the same commit. So the `inode_data` change of these
+  commits is about K / 2 value replacements plus a few entries at the right
+  edge (see `batches.csv`). With fixed-width values a replacement moves no
+  node boundary.
+- Version step (seq after the `scatter` and `cluster` commits, pattern
+  `version`): the next tree as one commit. A file with the same content key
+  is left alone; a changed file gets new content; new files and directories
+  are made; names that are only in the store are removed.
+- `insdel` (after the version step, so the commits before it do not change):
+  for each K of `KS` and each of `COMMITS` commits, one commit with K edits.
+  Edit i of commit seq is a delete when (i + seq) mod 2 is 0, else an
+  insert. A delete removes a random regular file of a random directory of
+  the tree (not `bench`, and not a file inserted in the same commit). An
+  insert makes the oldest file that an earlier commit deleted again, at the
+  same inode number, name and content, with the mtime and ctime one second
+  later (`create_inode_at`); when there is none, the edit is a delete. So
+  each edit inserts or deletes one key in the middle of the committed map,
+  and the `inode_data` change of the commit is exactly K entries. The
+  product never uses a freed inode number again; the inserts stand for the
+  maps whose keys can appear in the middle.
 
-With the defaults (`KS="1 10 100 1000"`, `COMMITS=10`, two patterns) a run
-has 1 + 2 x 4 x 10 + 1 = 82 commits per mode.
+With the defaults (`KS="1 10 100 1000"`, `COMMITS=10`, three patterns) a run
+has 1 + 2 x 4 x 10 + 1 + 4 x 10 = 122 commits per mode.
 
 ## Environment
 
@@ -153,7 +171,7 @@ has 1 + 2 x 4 x 10 + 1 = 82 commits per mode.
 | `BOOST_VERS` | `1_84_0 1_85_0` | Exactly two versions: the seed tree, then the next tree |
 | `KS` | `1 10 100 1000` | Changed files per small commit |
 | `COMMITS` | `10` | Small commits per pattern and K |
-| `PATTERNS` | `scatter cluster` | Edit patterns |
+| `PATTERNS` | `scatter cluster insdel` | Edit patterns (`insdel` runs after the version step) |
 | `SEED` | `24` | Seed of the edit script and of the scale entries |
 | `SCALE_NS` | `100000 1000000 4000000` | Entry counts of the scale rows; empty (`SCALE_NS=`) skips them |
 
@@ -179,8 +197,8 @@ phase) for `disk.csv`. `edits.csv` and `batches.csv` have no median rows.
 new files), each file up to 4 KiB. It refuses a data dir argument, so smoke
 data never go over real data. It sets `BOOST_VERS="0_0_1 0_0_2"` and, unless
 they are set, `KS="1 10"`, `COMMITS=2` and `SCALE_NS="10000 50000"`. With
-`RUNS=1` it gives 30 run rows and 18 median rows in `results.csv`, 16 rows
-in `scale.csv`, 12 in `disk.csv`, 10 in `edits.csv` and 9 in `batches.csv`.
+`RUNS=1` it gives 42 run rows and 24 median rows in `results.csv`, 16 rows
+in `scale.csv`, 12 in `disk.csv`, 14 in `edits.csv` and 13 in `batches.csv`.
 It checks that the script works; its numbers say nothing about Boost
 (`machine.txt` has `bench_data=smoke`).
 
@@ -193,7 +211,7 @@ One row per commit and mode (the line `commit` of `whole`, `flat` and
 |---|---|---|
 | `mode` | | `whole`, `flat` or `prolly` |
 | `run` | | 1 to RUNS, or `median` |
-| `pattern` | | `setup`, `scatter`, `cluster` or `version` (`whole`); `bulk` for seq 0 of `flat` and `prolly` (the first full intern or bulk build) |
+| `pattern` | | `setup`, `scatter`, `cluster`, `version` or `insdel` (`whole`); `bulk` for seq 0 of `flat` and `prolly` (the first full intern or bulk build) |
 | `k` | files | K of the small commit; 0 for setup, bulk and version |
 | `seq` | | Commit number in the run, from 0; `all` in median rows |
 | `entries_changed` | entries | `inode_data` entries put or deleted by this commit (puts + dels of the batch; for `bulk`, the entries of the first map); `NA` for seq 0 of `whole` |
@@ -253,7 +271,7 @@ One row per commit and mode (the line `commit` of `whole`, `flat` and
 | `run`, `pattern`, `k`, `seq` | As in `results.csv` |
 | `meta` | Metadata changes (mtime and ctime) in the commit |
 | `content` | Content changes (new 4 KiB content) |
-| `create` | Files created |
+| `create` | Files created (`insdel`: files inserted again at a freed inode number) |
 | `delete` | Files deleted |
 
 `batches.csv` has one row per commit after the setup commit:
@@ -263,6 +281,7 @@ One row per commit and mode (the line `commit` of `whole`, `flat` and
 | `run`, `seq`, `pattern`, `k` | As in `results.csv` |
 | `puts` | `inode_data` entries put (new or changed value) |
 | `dels` | `inode_data` entries deleted |
+| `inserts` | The puts of keys that the old map did not have |
 
 `shape.txt` has the lines `seed` (prefix `run=0`) and `info`, `version`,
 `final`, `check`, `hash` and `tree` (prefix `run=<r>`) as the binary prints

@@ -156,7 +156,9 @@ pub(crate) fn batches(argv: &[String]) -> Res<()> {
         let mut old = MapStream::open(&cs, &maps[i - 1])?;
         let mut new = MapStream::open(&cs, &maps[i])?;
         let mut f = BufWriter::new(fs::File::create(batch_path(&out, r.seq))?);
-        let (mut puts, mut dels) = (0u64, 0u64);
+        // puts: new or changed values; inserts: the puts of keys that the
+        // old map does not have.
+        let (mut puts, mut dels, mut inserts) = (0u64, 0u64, 0u64);
         let rec = |f: &mut BufWriter<fs::File>, op: u8, ino: u64, key: &[u8; KEY_LEN]| -> Res<()> {
             f.write_all(&[op])?;
             f.write_all(&ino.to_le_bytes())?;
@@ -188,12 +190,13 @@ pub(crate) fn batches(argv: &[String]) -> Res<()> {
                 (_, Some((ni, nk))) => {
                     rec(&mut f, 1, ni, &nk)?;
                     puts += 1;
+                    inserts += 1;
                     n = new.next_entry()?;
                 }
             }
         }
         f.flush()?;
-        let line = format!("batch seq={} pattern={} k={} puts={puts} dels={dels}", r.seq, r.pattern, r.k);
+        let line = format!("batch seq={} pattern={} k={} puts={puts} dels={dels} inserts={inserts}", r.seq, r.pattern, r.k);
         println!("{line}");
         writeln!(txt, "{line}")?;
     }

@@ -28,7 +28,7 @@ use slicefs_traits::key::ObjectKey;
 
 const USAGE: &str = "usage: prolly-bench gen tree --dir D --files N --seed S [--max-bytes M] [--change-every K]
        prolly-bench seed --tree DIR --store S
-       prolly-bench whole --store S --roots FILE [--seed N] [--ks \"1 10 100 1000\"] [--commits N] [--patterns \"scatter cluster\"] [--next-tree DIR]
+       prolly-bench whole --store S --roots FILE [--seed N] [--ks \"1 10 100 1000\"] [--commits N] [--patterns \"scatter cluster insdel\"] [--next-tree DIR]
        prolly-bench batches --store S --roots FILE --out DIR
        prolly-bench flat --batches DIR --store F
        prolly-bench prolly --batches DIR --store P

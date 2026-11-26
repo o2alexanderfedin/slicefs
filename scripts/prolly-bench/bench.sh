@@ -17,7 +17,7 @@
 #        BOOST_VERS  the seed tree, then the next tree (default: 1_84_0 1_85_0)
 #        KS          changed files per small commit (default: 1 10 100 1000)
 #        COMMITS     small commits per pattern and K (default 10)
-#        PATTERNS    edit patterns (default: scatter cluster)
+#        PATTERNS    edit patterns (default: scatter cluster insdel; insdel runs after the version step)
 #        SEED        seed of the edit script (default 24)
 #        SCALE_NS    entry counts of the synthetic scale rows (default: 100000 1000000 4000000;
 #                    empty skips them)
@@ -29,7 +29,7 @@
 #         disk.csv     store size at the start and end of each mode, then run=median
 #                      rows per (mode, phase)
 #         edits.csv    the edit kinds of each whole commit
-#         batches.csv  the inode_data change (puts, dels) of each commit
+#         batches.csv  the inode_data change (puts, dels, inserts) of each commit
 #         shape.txt    the seed, info, version, hash, tree, final and check lines
 #         machine.txt  machine and run parameters (no path, host or user)
 set -euo pipefail
@@ -49,7 +49,7 @@ if [ "$SMOKE" = 1 ]; then
   KS=${KS:-1 10}; COMMITS=${COMMITS:-2}; SCALE_NS=${SCALE_NS-10000 50000}
 fi
 BOOST_VERS=${BOOST_VERS:-1_84_0 1_85_0}
-KS=${KS:-1 10 100 1000}; COMMITS=${COMMITS:-10}; PATTERNS=${PATTERNS:-scatter cluster}
+KS=${KS:-1 10 100 1000}; COMMITS=${COMMITS:-10}; PATTERNS=${PATTERNS:-scatter cluster insdel}
 SEED=${SEED:-24}; SCALE_NS=${SCALE_NS-100000 1000000 4000000}
 read -r -a VERS <<< "$BOOST_VERS"
 [ ${#VERS[@]} -eq 2 ] || { echo "BOOST_VERS must be two versions: the seed tree, then the next tree" >&2; exit 2; }
@@ -188,7 +188,7 @@ HDR=mode,run,pattern,k,seq,entries_changed,serialized_bytes,begin_ms,finish_ms,t
 SC_HDR=mode,run,n,op,ms,cpu_user_s,cpu_sys_s,maxrss_bytes,serialized_bytes,new_objects,new_stored_bytes,peak_rss_bytes
 DK_HDR=mode,run,phase,apparent_bytes,alloc_bytes,files
 echo "$HDR"; echo "$HDR" > "$R"; echo "$SC_HDR" > "$SC"; echo "$DK_HDR" > "$DK"
-echo run,pattern,k,seq,meta,content,create,delete > "$E"; echo run,seq,pattern,k,puts,dels > "$BT"; : > "$SH"
+echo run,pattern,k,seq,meta,content,create,delete > "$E"; echo run,seq,pattern,k,puts,dels,inserts > "$BT"; : > "$SH"
 # rows <file>: print and append to results.csv.
 rows() { tee -a "$R" < "$1"; }
 # shape <file> <run>: append the shape lines of a step to shape.txt.
@@ -220,7 +220,7 @@ for r in $(seq 1 "$N"); do
   step batches "$S/batches.txt" "$BIN" batches --store "$S/run" --roots "$S/roots.txt" --out "$S/b"
   csv "$S/whole.txt" commit "$r" "$RSS_WHOLE" "$HDR" "$S/batches.txt" > "$S/rows.csv"; rows "$S/rows.csv"
   csv "$S/whole.txt" commit "$r" NA run,pattern,k,seq,edits_meta,edits_content,edits_create,edits_delete >> "$E"
-  csv "$S/batches.txt" batch "$r" NA run,seq,pattern,k,puts,dels >> "$BT"
+  csv "$S/batches.txt" batch "$r" NA run,seq,pattern,k,puts,dels,inserts >> "$BT"
   csv "$S/whole.txt" disk "$r" NA "$DK_HDR" >> "$DK"
   shape "$S/whole.txt" "$r"; shape "$S/batches.txt" "$r"
   # flat first on odd runs, prolly first on even runs
