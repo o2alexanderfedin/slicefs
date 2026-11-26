@@ -21,10 +21,10 @@ affects: [phase-23, phase-24]
 actuals:
   tokens: 12617
   tasks: 3
-  commits: 3
+  commits: 5
 
 plan_head_before: ed1694a5df6e1140163c841c05f69c557ba9ade1
-plan_head_after: 3107c64dda919e898f04fa6212a18c8a7107b4e2
+plan_head_after: 18d8c5a23302c71cc2561257f93b09962dd7ed2f
 
 tech-stack:
   added: []
@@ -71,6 +71,10 @@ BASE: `ed1694a5df6e1140163c841c05f69c557ba9ade1` (head of `origin/feature/phase-
 1. **Task 1: phase gate; store-format, chunk-store and README docs** - `3894905` (docs)
 2. **Task 2: five-profile benchmark data** - `5536494` (chore)
 3. **Task 3: the report** - `3107c64` (docs)
+4. **SUMMARY, first version** - `9825cff` (docs)
+5. **Fix: report wording on the noise** - `18d8c5a` (docs): the random p50 runs of 4/8/32 and 8/16/64 KiB do not overlap (51.5..52.7 us against 60.4..62.5 us), so the +14.6 % is a real cost, not noise; the trees CPU times are the same within the run spread (4/8/32 KiB: 13.59..15.54 s); the tar CPU cause is marked as likely.
+
+`commits: 5` is measured with `git rev-list --count ed1694a..18d8c5a` and counts the first SUMMARY commit.
 
 ## Gates
 
@@ -139,6 +143,8 @@ None in code (this plan changes docs and data only).
 - **Read-only mount order in store-format.md.** The plan did not list it, but the doc's "mount is refused when (in this order)" list and the store-lock order sentence now name the `--chunk-profile` check (M16) first, as `mount::start` does it (right after `header::check`, before M11).
 - **JSON sample order** in the stats section follows the struct (`format`, `flags`, `chunk_profile`, `access`).
 - **`rustc=unknown` in machine.txt.** The launcher shell did not have the Rust tools in PATH, so `bench.sh` printed `unknown`. The binary was built just before with the PATH set (`rustc -V`: 1.95.0-nightly); the report says so.
+- **Not a fully quiet machine (plan truth: no other heavy job).** Test binaries of another project ran above 50 % CPU at the start (about six busy CPUs in `ps`), and the load did not fall below 7.7 in the wait. No cargo, rustc or SliceFS job ran. The load gate (load1 <= 8) was met at the start. The byte and object counts were identical in all three runs; only the times are affected, and the report says so.
+- **Metadata size is not measured.** The tool stores file content and manifest nodes only (no metadata values), as the 22-03 README says. The nearest numbers are the store apparent bytes (packs and index) and the index entries (= objects) in the report.
 - **Load above 8 for most of the wait.** The run started at load1 7.73 (8.00 by `uptime` at the start), inside the 30-minute limit. The report says that the times are indicative and the byte and object counts are firm.
 - **Task 2 commit type.** First committed as `data(22-04)`, then amended (local, before any other commit) to `chore(22-04)`, a type of the commit protocol.
 - **Branch.** `exec/22-04` is outside the generic `agent-*` allow-list; the launch instructions and plan rule 1 name it, and it is not protected (as in 22-01 to 22-03).
@@ -159,4 +165,4 @@ None. The full run fit easily in the 5400 s limit, so no fallback was needed.
 ## Self-Check: PASSED
 
 - FOUND: docs/research/chunk-profiles.md, runs/chunk-profiles-results.csv, runs/chunk-profiles-edits.csv, runs/chunk-profiles-machine.txt, runs/gate-22-04.log
-- FOUND commits: 3894905, 5536494, 3107c64 (ancestors of HEAD)
+- FOUND commits: 3894905, 5536494, 3107c64, 9825cff, 18d8c5a (ancestors of HEAD)
