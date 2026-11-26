@@ -26,9 +26,13 @@ The code is `crates/slicefs-cli/src/header.rs`.
 - For a new store, the header is written before `packs/` and `segments/`
   exist. Thus a crash cannot leave data with no header. With `seed --hash`,
   the first header has that hash, and SliceFS prints no hash-change line.
+  With `seed --chunk-profile MIN/AVG/MAX` (sizes in KiB) and a profile that
+  is not 4/8/32 KiB, the first header also has the `chunks` line and the
+  flag line `ro_compat chunk-profile <release>`. The default profile writes
+  neither line.
 - A rewrite (`--hash` on `mount` or `seed`) changes only the hash line. All
-  other lines stay, in their order, also the flag lines and the lines that
-  this SliceFS does not know. If there is no hash line, the new hash line
+  other lines stay, in their order, also the `chunks` line, the flag lines
+  and the lines that this SliceFS does not know. If there is no hash line, the new hash line
   becomes line 2.
 
 The header of a new store (format 7, no flags):
@@ -36,6 +40,17 @@ The header of a new store (format 7, no flags):
 ```
 slicefs-store 7 (store header with feature flags)
 hash blake3-256
+```
+
+The header of a new store with the chunk profile 16/64/256 KiB
+(`seed --chunk-profile 16/64/256`; `<release>` is the value of
+`CHUNK_PROFILE_RELEASE`):
+
+```
+slicefs-store 7 (store header with feature flags)
+hash blake3-256
+chunks 16384 65536 262144
+ro_compat chunk-profile <release>
 ```
 
 A header with one flag of each class (the names are examples, and
@@ -58,6 +73,7 @@ Lines are split into words at each space.
 | First line | `slicefs-store <number> [free text]` | `<number>` is decimal digits. The free text is optional and SliceFS does not read it. |
 | Flag line | `<class> <name> <release>` | Exactly three words. `<class>` is `compat`, `ro_compat` or `incompat`. |
 | Hash line | `hash <name>` | Exactly two words. At most one hash line. No hash line means `blake3-256`. |
+| Chunks line | `chunks <min> <avg> <max>` | The FastCDC chunk profile of the store. Exactly four words. The sizes are in bytes, as decimal digits. They are powers of two with min < avg < max, inside the limits of fastcdc v2020 (min 64 B to 1 MiB, avg 256 B to 4 MiB, max 1 KiB to 16 MiB), and FastCDC must cut a run of zeros at max. At most one chunks line. It always comes with the ro_compat flag `chunk-profile`, and the flag always comes with the line. No chunks line means 4/8/32 KiB. |
 | Other line | any other text | An unknown setting (see the parse order). |
 
 - `<name>`: 1 to 64 characters; lowercase letters `a-z`, digits `0-9` and
@@ -70,6 +86,9 @@ Lines are split into words at each space.
   an other line.
 - The hash line is a store setting, not a flag. A hash name that this
   SliceFS does not know is refused.
+- The chunks line is a store setting too. It comes with its flag, by the
+  rule below. SliceFS writes it only for a profile that is not 4/8/32 KiB;
+  a chunks line of 4/8/32 KiB with the flag is accepted.
 
 Parse order:
 
@@ -77,9 +96,11 @@ Parse order:
    form `slicefs-store <number>`, stop (M4). If the number is not 7, stop
    (M2 for a smaller number, M3 for a larger number). A store of another
    number can have another header layout, so SliceFS reads no more lines.
-2. Read all other lines. A bad flag line, a name that occurs two times, or
-   two hash lines stop the parse (M9). These errors occur also when a flag
-   is unknown.
+2. Read all other lines. A bad flag line, a name that occurs two times, two
+   hash lines, a bad chunks line or two chunks lines stop the parse (M9).
+   These errors occur also when a flag is unknown. Then a chunks line with
+   no `chunk-profile` flag, a `chunk-profile` flag with no chunks line, or
+   a `chunk-profile` flag that is not ro_compat stops the parse (M9).
 3. Find the unknown flags: the flags whose name is not in `KNOWN_FLAGS`.
    The strongest unknown flag decides:
    - an unknown incompat flag: refuse (M5);
@@ -130,11 +151,14 @@ The SliceFS classes use the same meanings. The differences:
 
 ## Flag list
 
-Store format 7 has no flags: `KNOWN_FLAGS` is empty.
+Store format 7 has one flag: `KNOWN_FLAGS` is `chunk-profile`.
 
 | Name | Class | Release | What it means |
 |------|-------|---------|---------------|
-| none yet | | | |
+| chunk-profile | ro_compat | `CHUNK_PROFILE_RELEASE` | The store has a FastCDC chunk profile that is not 4/8/32 KiB, in its `chunks` line. An older SliceFS can read the store: a reader takes each chunk length from the manifest entries, and its zero shortcut matches only zero chunks of its own max length (it reads all other chunks). It must not write the store: it would cut new data with 4/8/32 KiB, so a store would have two profiles, and a spliced file would not have the key of a new write of the same bytes. |
+
+The release word is the constant `CHUNK_PROFILE_RELEASE` in `header.rs`. It
+is a placeholder (now `v2.2`) until the release is named.
 
 Rule to add a flag:
 
@@ -169,6 +193,7 @@ A mount of a store with an unknown ro_compat flag is read-only:
 
 The mount is refused when (SliceFS does the checks in this order):
 
+- `--chunk-profile` names another profile than the store has (M16).
 - `--hash` is given (M11).
 - `--auto-snapshot` is given (M12).
 - The store lock is held exclusive: a writable mount or a command that
@@ -196,7 +221,8 @@ A read-only mount makes no `mount.lock`, so the commands that look for
   protects nothing).
 - A read-only mount takes it shared, with a short retry (250 ms), and holds it until the
   mount ends. The order is: the header check reads `FORMAT`, then the
-  `--hash` and `--auto-snapshot` checks (M11, M12), then the store lock
+  `--chunk-profile` check (M16), the `--hash` and `--auto-snapshot`
+  checks (M11, M12), then the store lock
   (M13), then the `mount.lock` check (M8), the write-log check (M7) and the
   read-only open of the chunk store and the index. Thus the lock comes
   after the read of `FORMAT`, and before every other read of the store.
@@ -255,6 +281,7 @@ write.
 | M13 | A read-only mount while a writable mount, gc, seed, snapshot create or snapshot switch holds the store lock. | `{store} is in use: it is mounted to write, or a command that writes it (gc, seed, snapshot create or snapshot switch) runs now. Mount it when that mount or command ends.` |
 | M14 | gc (offline), seed, snapshot create or snapshot switch while a mount or another of these commands holds the store lock. | `{store} is in use: it is mounted, or another command (gc, seed, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.` |
 | M15 | A writable mount while another mount, gc, seed, snapshot create or snapshot switch holds the store lock. | `{store} is in use: it is mounted, or a command (gc, seed, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.` |
+| M16 | `seed` or `mount` with `--chunk-profile` that differs from the profile of the store (also a read-only mount). Nothing in the store changes. | `{store} has the chunk profile {have}; --chunk-profile {want} is another profile. The chunk profile of a store is fixed when the store is made.` |
 
 The values in the texts:
 
@@ -262,12 +289,20 @@ The values in the texts:
 - `{n}` in M3: the format number of the store. `{known}` in M3: 7, the
   format number of this SliceFS. `{n}` in M7: the number of records in the
   write log.
+- `{have}` in M16: the profile of the store; `{want}`: the profile of the
+  option. Each is printed as `<min>/<avg>/<max> KiB` (in bytes, with `B`,
+  when a size is not whole KiB).
 - `{k}` in M9: the line number (the first line is 1). `{line:?}` in M4 and
   M9: the line, in double quotes.
 - `{reason}` in M9 is one of:
   - `bad feature flag line`
   - `the feature {name} is listed twice`
   - `two hash lines`
+  - `bad chunks line`
+  - `two chunks lines`
+  - `chunks line with no chunk-profile flag`
+  - `chunk-profile flag with no chunks line`
+  - `the feature chunk-profile must be ro_compat`
   - `unknown setting`
 - `{what}` in M2 is one of:
   - `metadata in vt0/` (format 0 to 4)
@@ -285,16 +320,20 @@ Other texts:
 
 ## Stats
 
-`slicefs stats` shows three lines after the line `Mounted`:
+`slicefs stats` shows four lines after the line `Mounted`:
 
 ```
 Store format     : 7
+Chunk profile    : 4/8/32 KiB
 Feature flags    : none
 Access           : read-write
 ```
 
 - `Store format`: the format number, or `none (no store header yet)` for an
   empty store with no header. The read writes nothing.
+- `Chunk profile`: the FastCDC min/avg/max of the store, from the
+  `chunks` line, or 4/8/32 KiB when there is no chunks line (also for an
+  empty store with no header).
 - `Feature flags`: `none`, or one line for each flag in the form
   `<class> <name> (needs SliceFS <release>; known here)` or
   `... unknown here)`. The order is compat, then ro_compat, then incompat.
@@ -302,17 +341,20 @@ Access           : read-write
 - `Access`: `read-write`, or `read-only` for a store with an unknown
   ro_compat flag. (A store with an unknown incompat flag is refused, M5.)
 
-With `--json`, the same data is in three fields:
+With `--json`, the same data is in four fields:
 
 ```
 "format": 7,
 "flags": {"compat": [], "ro_compat": [], "incompat": []},
+"chunk_profile": {"min": 4096, "avg": 8192, "max": 32768},
 "access": "read-write"
 ```
 
 - `format`: the number, or `null` for an empty store with no header.
 - `flags`: three lists. Each entry is
   `{"name": "<name>", "release": "<release>", "known": false}`.
+- `chunk_profile`: the FastCDC min, avg and max chunk sizes of the store,
+  in bytes.
 - `access`: `read-write` or `read-only`.
 
 ## Format policy
