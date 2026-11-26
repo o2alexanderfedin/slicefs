@@ -876,6 +876,8 @@ fn verify_a_damaged_object_stops_before_the_switch() {
     let segments = segment_files(&store);
     let e = refused(&store, "sha256", false);
     assert!(e.contains("Nothing was switched") && e.contains("file content") && has_cause(&e), "{e}");
+    assert!(e.contains("stay until the next `slicefs gc`"), "{e}");
+    assert!(!store.join(REHASH_TMP_DIR).exists(), "the error removes rehash-tmp");
     assert_eq!(segment_files(&store), segments, "no segment changes");
     assert!(marker(&store).contains("hash blake3-256\n"), "{}", marker(&store));
     assert_eq!(corrupt_cause(&store, &id), cause, "the run did not repair or drop the object");

@@ -65,19 +65,28 @@ pub fn write_switch_segment(dir: &Path, root: ObjectKey, snapshots: &[SnapshotEn
     let id = max_segment_id(dir)? + 1;
     let tmp = dir.join(format!("segment-{id:06}{SWITCH_TMP_SUFFIX}"));
     let fin = dir.join(format!("segment-{id:06}.seg"));
-    let mut w = SegmentWriter::new(&tmp, id)?;
-    w.write_entry(&SegmentEntry::RootUpdate { root })?;
-    for s in snapshots {
-        w.write_entry(&SegmentEntry::SnapshotRecord {
-            version: s.version,
-            root: s.root,
-            created_at: s.created_at,
-            name: s.name.clone(),
-        })?;
+    let write = || -> Result<(), SegmentError> {
+        let mut w = SegmentWriter::new(&tmp, id)?;
+        w.write_entry(&SegmentEntry::RootUpdate { root })?;
+        for s in snapshots {
+            w.write_entry(&SegmentEntry::SnapshotRecord {
+                version: s.version,
+                root: s.root,
+                created_at: s.created_at,
+                name: s.name.clone(),
+            })?;
+        }
+        w.sync()?;
+        drop(w);
+        std::fs::rename(&tmp, &fin)?;
+        Ok(())
+    };
+    if let Err(e) = write() {
+        // Before the rename: the old state stays; the temp file goes (best
+        // effort; the next switch removes it too).
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
-    w.sync()?;
-    drop(w);
-    std::fs::rename(&tmp, &fin)?;
     std::fs::File::open(dir)?.sync_all()?;
     crate::wal::remove_segments_before(dir, id)?;
     std::fs::File::open(dir)?.sync_all()?;

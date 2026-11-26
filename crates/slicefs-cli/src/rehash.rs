@@ -33,7 +33,10 @@
 //! 7. `rehash-tmp` is removed and the report is made.
 //!
 //! A run again after a crash at any step completes the job: values that
-//! already have the target hash are kept, and the GC always runs.
+//! already have the target hash are kept, and the GC always runs. An error
+//! that is not a crash (a damaged object, a failed write) removes
+//! `rehash-tmp` and a `segment-*.seg.tmp`; when it comes before the switch,
+//! its message says that the new objects of the run stay until the next GC.
 //!
 //! `--dry-run` takes the same lock and makes the same checks, then reads
 //! and verifies the live tree through a read-only open and writes nothing
@@ -46,7 +49,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use chunk_store::{hasher_by_name, ObjectHasher};
-use metadata::rehash::{rehash_roots, Mode, RehashOptions, RootSet, Stats};
+use metadata::rehash::{rehash_roots, Mode, RehashError, RehashOptions, RootSet, Stats};
 use metadata::segment::{remove_switch_tmps, scan_store_with_log, write_switch_segment};
 
 use crate::content::{self, REHASH_TMP_DIR};
@@ -104,10 +107,22 @@ pub fn msg_stale_mount_lock(store: &Path) -> String {
     format!("{} has a mount.lock file, but no mount holds the store: a mount did not end cleanly. Mount and unmount the store once, then run rehash again.", store.display())
 }
 
+/// A stop of a test hook: a crash, which leaves every file as it is.
+#[derive(Debug)]
+struct HookStop(String);
+
+impl std::fmt::Display for HookStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for HookStop {}
+
 /// Stop here if the hook asks for it.
 fn hook(args: &RehashArgs<'_>, step: Step) -> Result<(), Error> {
     if args.stop_after == Some(step) {
-        return Err(format!("rehash stopped after step {step:?} (test hook)").into());
+        return Err(Box::new(HookStop(format!("rehash stopped after step {step:?} (test hook)"))));
     }
     Ok(())
 }
@@ -158,8 +173,38 @@ pub fn rehash_report_with(args: &RehashArgs<'_>, progress: &mut dyn FnMut(&str))
     }
     hook(args, Step::FlagWritten)?;
 
+    // Steps 3 to 7. An error that is not a test-hook stop (a crash leaves
+    // its files) removes the temp files of the run, best effort: the error
+    // of the run is the one returned.
+    let r = rewrite_and_switch(args, target, &old, &segs, progress);
+    if let Err(e) = &r
+        && !e.is::<HookStop>()
+    {
+        let _ = content::remove_rehash_tmp(store);
+        let _ = remove_switch_tmps(&segs);
+    }
+    r
+}
+
+/// The error text of a stop before the switch.
+fn before_switch(e: impl std::fmt::Display) -> String {
+    format!(
+        "rehash stopped before the switch: {e}. Nothing was switched; the store still uses its old root. \
+         The new objects of this run stay until the next `slicefs gc` or rehash run."
+    )
+}
+
+/// Steps 3 to 7 of a real run.
+fn rewrite_and_switch(
+    args: &RehashArgs<'_>,
+    target: &'static dyn ObjectHasher,
+    old: &RootSet,
+    segs: &Path,
+    progress: &mut dyn FnMut(&str),
+) -> Result<String, Error> {
+    let store = args.store;
     // Step 3: the rewrite (the open removes a stale `rehash-tmp`).
-    remove_switch_tmps(&segs)?;
+    remove_switch_tmps(segs)?;
     let cs = content::open_with_hasher(store, target)?;
     let before = gc::store_usage(store);
     let map_dir = store.join(REHASH_TMP_DIR);
@@ -171,17 +216,22 @@ pub fn rehash_report_with(args: &RehashArgs<'_>, progress: &mut dyn FnMut(&str))
         progress: Some(&mut on_stats),
         stop_after_values: args.stop_after_values,
     };
-    let (new, stats) = rehash_roots(&cs, &old, opts)
-        .map_err(|e| format!("rehash stopped before the switch: {e}. Nothing was switched; the store still uses its old root."))?;
+    let (new, stats) = rehash_roots(&cs, old, opts).map_err(|e| -> Error {
+        match e {
+            RehashError::Stopped(_) => Box::new(HookStop(before_switch(&e))),
+            e => before_switch(e).into(),
+        }
+    })?;
     hook(args, Step::Rewritten)?;
-    cs.sync()?;
+    cs.sync().map_err(before_switch)?;
     progress("rehash: synced");
     hook(args, Step::Synced)?;
 
     // Step 4: the switch, when a root changed.
-    let changed = new != old;
+    let changed = new != *old;
     if changed {
-        write_switch_segment(&segs, new.current, &new.snapshots)?;
+        write_switch_segment(segs, new.current, &new.snapshots)
+            .map_err(|e| format!("rehash stopped in the switch: {e}. Run rehash again to finish the job."))?;
         progress("rehash: switch");
     } else {
         progress("rehash: no switch needed");
