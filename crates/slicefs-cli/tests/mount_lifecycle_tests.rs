@@ -512,6 +512,8 @@ fn test_load_store_with_multiple_valid_segments() {
     meta2.link(1, "second.txt", ino3).unwrap();
     meta2.commit().unwrap();
     meta2.shutdown_wal().unwrap();
+    // The second load ends (its locks go), so the third load can take them.
+    drop((meta2, _io2, _lock2));
 
     // Load a third time — both files should be present.
     let result3 = load_store(store_dir.path(), WalConfig::NoWal, None);
@@ -629,4 +631,50 @@ fn test_mount_lock_dropped_on_scope_exit() {
     }
 
     assert!(!lock_path.exists(), "mount.lock should be removed after MountLock is dropped");
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 11. Store lock of a writable mount (#201)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// #201: a writable load is refused while another holder has the store
+/// lock, and it does not touch the `mount.lock` of that holder.
+#[test]
+fn a_writable_load_is_refused_while_the_store_lock_is_held() {
+    let store_dir = TempDir::new().unwrap();
+    write_seeded_store_segments(&store_dir);
+    let lock_path = store_dir.path().join("mount.lock");
+    std::fs::write(&lock_path, b"live daemon").unwrap();
+
+    let held = slicefs_cli::header::lock_offline(store_dir.path()).unwrap();
+    let err = load_store(store_dir.path(), WalConfig::NoWal, None)
+        .err()
+        .expect("the load is refused while the store lock is held")
+        .to_string();
+    assert!(err.contains("in use"), "{err}");
+    assert_eq!(std::fs::read(&lock_path).unwrap(), b"live daemon", "mount.lock is left in place");
+    drop(held);
+}
+
+/// #201: a second writable load of a store that a live load holds is
+/// refused; the first keeps its `mount.lock`, and the offline commands see
+/// the store as in use.
+#[test]
+fn a_second_writable_load_is_refused_while_the_first_runs() {
+    let store_dir = TempDir::new().unwrap();
+    write_seeded_store_segments(&store_dir);
+    let lock_path = store_dir.path().join("mount.lock");
+
+    let first = load_store(store_dir.path(), WalConfig::NoWal, None).expect("first load");
+    let err = load_store(store_dir.path(), WalConfig::NoWal, None)
+        .err()
+        .expect("the second load is refused")
+        .to_string();
+    assert!(err.contains("in use"), "{err}");
+    assert!(lock_path.exists(), "the mount.lock of the first load is left in place");
+    assert!(slicefs_cli::header::lock_offline(store_dir.path()).is_err(), "offline commands see the store in use");
+
+    drop(first);
+    assert!(!lock_path.exists(), "mount.lock is removed when the first load ends");
+    load_store(store_dir.path(), WalConfig::NoWal, None).expect("a load after the first ended");
 }

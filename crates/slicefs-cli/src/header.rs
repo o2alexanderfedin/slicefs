@@ -449,8 +449,10 @@ fn has_data(store: &Path) -> std::io::Result<bool> {
 
 /// A `flock` on the store directory, held until the drop. A read-only
 /// mount holds it shared for its life (it writes nothing to the store, so
-/// it makes no `mount.lock`); a command that needs no live mount (offline
-/// gc, snapshot create, snapshot switch) holds it exclusive while it runs.
+/// it makes no `mount.lock`); a writable mount holds it exclusive for its
+/// life (taken before `mount.lock`, released after it); a command that
+/// needs no live mount (offline gc, snapshot create, snapshot switch)
+/// holds it exclusive while it runs.
 /// The lock is on the directory and not on FORMAT, because a header
 /// rewrite replaces the FORMAT file. A file system with no `flock` gives no
 /// lock (the commands run as before).
@@ -472,19 +474,30 @@ fn try_store_lock(store: &Path, shared: bool) -> std::io::Result<Option<StoreLoc
     }
 }
 
-/// The shared store lock of a read-only mount. Refused while a command
-/// that writes (offline gc, snapshot create or switch) holds it.
+/// The shared store lock of a read-only mount. Refused while a writable
+/// mount or a command that writes (offline gc, snapshot create or switch)
+/// holds it.
 pub fn lock_read_mount(store: &Path) -> std::io::Result<StoreLock> {
     try_store_lock(store, true)?.ok_or_else(|| {
-        refuse(format!("{} is in use: a command that writes it (gc, snapshot create or snapshot switch) runs now. Mount it when that command ends.", store.display()))
+        refuse(format!("{} is in use: it is mounted to write, or a command that writes it (gc, seed, snapshot create or snapshot switch) runs now. Mount it when that mount or command ends.", store.display()))
     })
 }
 
 /// The exclusive store lock of a command that needs no live mount.
-/// Refused while a read-only mount (or another such command) holds it.
+/// Refused while a mount (or another such command) holds it.
 pub fn lock_offline(store: &Path) -> std::io::Result<StoreLock> {
     try_store_lock(store, false)?.ok_or_else(|| {
-        refuse(format!("{} is in use: it is mounted read-only, or another command (gc, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.", store.display()))
+        refuse(format!("{} is in use: it is mounted, or another command (gc, seed, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.", store.display()))
+    })
+}
+
+/// The exclusive store lock of a writable mount, held for the life of the
+/// daemon (#201). Refused while another mount or a command that needs no
+/// live mount holds it; then `mount.lock` belongs to that holder and is
+/// not touched.
+pub fn lock_write_mount(store: &Path) -> std::io::Result<StoreLock> {
+    try_store_lock(store, false)?.ok_or_else(|| {
+        refuse(format!("{} is in use: it is mounted, or a command (gc, seed, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.", store.display()))
     })
 }
 

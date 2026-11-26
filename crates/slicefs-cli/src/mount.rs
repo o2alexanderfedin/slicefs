@@ -38,22 +38,37 @@ use crate::util::ts;
 
 // ── Store loading ─────────────────────────────────────────────────────────────
 
-/// The store of a writable mount: the metadata, its node store and the mount lock.
-type LoadedStore = (DictMetadataStore, Arc<Mutex<StoreIo>>, MountLock);
+/// The locks of a writable mount (#201): `mount.lock` and the exclusive
+/// store lock. The fields drop in their order: `mount.lock` is removed
+/// first, and the store lock is released last.
+pub struct WriteLocks {
+    /// `mount.lock`, the dirty-mount marker.
+    pub(crate) mount: MountLock,
+    /// The exclusive store lock (`header::lock_write_mount`).
+    pub(crate) store: header::StoreLock,
+}
 
-/// Load a seeded store from disk, returning `(DictMetadataStore, Arc<Mutex<StoreIo>>, MountLock)`.
+/// The store of a writable mount: the metadata, its node store and its locks.
+type LoadedStore = (DictMetadataStore, Arc<Mutex<StoreIo>>, WriteLocks);
+
+/// Load a seeded store from disk, returning `(DictMetadataStore, Arc<Mutex<StoreIo>>, WriteLocks)`.
 ///
-/// The returned `MountLock` must be kept alive for the duration of the mount;
-/// dropping it removes `mount.lock` from the store directory.
+/// The returned `WriteLocks` must be kept alive for the duration of the mount;
+/// dropping it removes `mount.lock` from the store directory, then releases
+/// the store lock.
 ///
 /// Steps:
 /// 1. Reject legacy `dictionary.bin` stores — re-seed required.
-/// 2. Acquire `mount.lock` (returns `DirtyMount` if previous mount crashed).
+/// 2. Take the exclusive store lock, with no wait. If another mount or an
+///    offline command holds it, refuse ("in use") and leave `mount.lock` as
+///    it is: it belongs to that holder.
+/// 3. Acquire `mount.lock` (returns `DirtyMount` if previous mount crashed).
+///    With the store lock held, an existing `mount.lock` is a crash leftover.
 ///    On dirty mount, segment-based WAL replay is implicit (re-loading segments
 ///    replays all mutations that were durably written before the crash).
-/// 3. Load state from segment files.
-/// 4. Reconstruct `DictMetadataStore` via `load_from_root`.
-/// 5. Create WAL with `wal_config` and attach it to the store.
+/// 4. Load state from segment files.
+/// 5. Reconstruct `DictMetadataStore` via `load_from_root`.
+/// 6. Create WAL with `wal_config` and attach it to the store.
 ///
 /// `hash` is `--hash`: a new write hash, recorded under the mount lock
 /// before the store opens (`None` keeps the recorded one).
@@ -81,8 +96,14 @@ pub fn load_store(
         return Err(header::msg_ro_write(store_path, &flag).into());
     }
 
-    // Step 2: Acquire mount lock.
-    // DirtyMount means a previous mount crashed — segments already contain all
+    // Step 2: the exclusive store lock, before mount.lock (#201). If it is
+    // held, a live daemon (or an offline command) owns the store and its
+    // mount.lock: refuse, and touch nothing.
+    let store_lock = header::lock_write_mount(store_path)?;
+
+    // Step 3: Acquire mount lock.
+    // With the store lock held, no other mount runs: DirtyMount means a
+    // previous mount crashed — segments already contain all
     // durably written mutations, so re-loading segments is idempotent WAL replay.
     let lock_result = acquire_mount_lock(store_path);
     let mount_lock = match lock_result {
@@ -97,7 +118,7 @@ pub fn load_store(
         Err(e) => return Err(format!("mount lock error: {}", e).into()),
     };
 
-    // Step 3: Load state from segment files.
+    // Step 4: Load state from segment files.
     let segs_dir = store_path.join("segments");
     let (last_root, snapshots) = load_store_from_segments(&segs_dir)
         .map_err(|e| format!("failed to load segments: {}", e))?;
@@ -106,7 +127,7 @@ pub fn load_store(
         format!("no committed state found in segments at {}", segs_dir.display())
     })?;
 
-    // Step 4: Reconstruct the metadata store on the chunk store (StoreIo), with the
+    // Step 5: Reconstruct the metadata store on the chunk store (StoreIo), with the
     // write hash of `--hash` (recorded now, under the lock).
     crate::content::select_hash(store_path, hash)?;
     chunk_store::retry::LOG_SYNCS.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -117,7 +138,7 @@ pub fn load_store(
     // Restore snapshot list from segment replay.
     meta.set_snapshots(snapshots);
 
-    // Step 5: Create WAL and attach to store.
+    // Step 6: Create WAL and attach to store.
     // Determine next segment_id from existing segments.
     let next_segment_id = next_segment_id(&segs_dir);
     std::fs::create_dir_all(&segs_dir)?;
@@ -125,7 +146,7 @@ pub fn load_store(
         .map_err(|e| format!("failed to create WAL: {}", e))?;
     meta.set_wal(wal);
 
-    Ok((meta, io, mount_lock))
+    Ok((meta, io, WriteLocks { mount: mount_lock, store: store_lock }))
 }
 
 /// The store of a read-only mount: the metadata and its node store.
@@ -360,8 +381,8 @@ pub struct Started {
     commit_shutdown: Arc<AtomicBool>,
     /// `mount.lock` (`None`: no lock taken). Dropped last.
     lock: Option<MountLock>,
-    /// The shared store lock of a read-only mount (`None`: not taken).
-    /// Dropped last.
+    /// The store lock: shared for a read-only mount, exclusive for a
+    /// writable mount (#201). Dropped last, after `lock`.
     store_lock: Option<header::StoreLock>,
 }
 
@@ -393,20 +414,29 @@ pub fn start(
     let snapshot_ref = args.snapshot_ref.as_deref();
     let wal_config = parse_wal_config(args.wal_strategy.as_deref());
 
-    // Read and write: today's load (lock, write hash, writable store, write
-    // log). Read-only: no mount.lock, no write log, a read-only store; the
-    // shared store lock first, so a SliceFS that can write the store sees
-    // the mount (no file is written for it).
-    let (meta, io, mount_lock, store_lock) = match &access {
+    // Read and write: today's load (the exclusive store lock, mount.lock,
+    // write hash, writable store, write log). Read-only: no mount.lock, no
+    // write log, a read-only store; the shared store lock first, so a
+    // SliceFS that can write the store sees the mount (no file is written
+    // for it).
+    // The locks are declared before everything else of the mount, so on an
+    // error below (`?`) they drop after it, the store lock last (#201).
+    let store_lock: Option<header::StoreLock>;
+    let mount_lock: Option<MountLock>;
+    let (meta, io) = match &access {
         header::Access::ReadWrite => {
-            let (meta, io, lock) = load_store(store_path, wal_config, args.hash.as_deref())?;
-            (meta, io, Some(lock), None)
+            let (meta, io, locks) = load_store(store_path, wal_config, args.hash.as_deref())?;
+            store_lock = Some(locks.store);
+            mount_lock = Some(locks.mount);
+            (meta, io)
         }
         header::Access::ReadOnly(flag) => {
-            let store_lock = header::lock_read_mount(store_path)?;
+            let lock = header::lock_read_mount(store_path)?;
             let (meta, io) = load_store_read_only(store_path, flag)?;
             println!("{}", header::msg_mount_read_only(store_path, flag));
-            (meta, io, None, Some(store_lock))
+            store_lock = Some(lock);
+            mount_lock = None;
+            (meta, io)
         }
     };
     // Replay, flusher and online GC: only a writable mount of the current
@@ -534,8 +564,10 @@ pub fn start(
 
 impl Started {
     /// Stop what [`start`] started, in this order: the flusher, the online
-    /// GC, the commit timer, the segment GC; then drop the file system and,
-    /// last, the mount lock (its drop removes `mount.lock`). Run it after
+    /// GC, the commit timer, the segment GC; then drop the file system,
+    /// then the mount lock (its drop removes `mount.lock`) and, last, the
+    /// store lock, so no other mount or offline command starts before all
+    /// of this ended. Run it after
     /// the FUSE session ended (`destroy` ran), also when the mount failed.
     pub fn stop(self) {
         let Started {
@@ -1376,6 +1408,31 @@ mod tests {
         let err = start(&store, &ro_args(), None).err().expect("the mount is refused").to_string();
         assert!(err.contains("is in use"), "{err}");
         drop(held);
+    }
+
+    /// #201: a writable mount holds the exclusive store lock from `start`
+    /// to the end of `stop`: a second mount and the offline commands are
+    /// refused with "in use", and the second mount leaves `mount.lock` of
+    /// the first in place. After `stop`, the store is free again.
+    #[test]
+    fn a_writable_mount_holds_the_store_lock_until_stop() {
+        let dir = ro_fixture(false);
+        let store = dir.path().join("store");
+        let s = start(&store, &ro_args(), None).expect("start");
+        assert_eq!(s.access, header::Access::ReadWrite);
+        let err = start(&store, &ro_args(), None).err().expect("a second mount is refused").to_string();
+        assert!(err.contains("in use"), "{err}");
+        assert!(store.join("mount.lock").exists(), "the second mount leaves mount.lock in place");
+        assert!(header::lock_offline(&store).is_err(), "offline commands see the mount");
+        let t0 = tree(&store);
+        let seed = crate::seed::run_seed(&store, &dir.path().join("src"), None).expect_err("seed is refused");
+        assert!(seed.to_string().contains("in use"), "{seed}");
+        assert!(tree(&store) == t0, "the refused seed wrote nothing");
+        fuser::Filesystem::destroy(&mut crate::fuse_callbacks::MountedFs::new(Arc::clone(&s.fs), None));
+        assert!(header::lock_offline(&store).is_err(), "the store lock is held after destroy, until stop");
+        s.stop();
+        assert!(!store.join("mount.lock").exists());
+        drop(header::lock_offline(&store).expect("the store is free after stop"));
     }
 
     /// Control of the tracer: the same steps on a normal store change its
