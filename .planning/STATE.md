@@ -6,8 +6,8 @@ current_phase: "21.2"
 current_phase_name: Thread-safety verification and CI gates
 current_plan: 8
 status: executing
-stopped_at: 21.2-10-PLAN.md at the CI checkpoint (Task 2; Task 3 floor pending)
-last_updated: "2026-11-26T03:35:00.000Z"
+stopped_at: Completed 21.2-10-PLAN.md
+last_updated: "2026-11-26T04:05:00.000Z"
 last_activity: 2026-11-25
 last_activity_desc: Phase 21.1 complete, transitioned to Phase 22
 state_head: 96f361d71fee3e15cc95c7e977f19454c7e13873
@@ -15,7 +15,7 @@ progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 55
-  completed_plans: 53
+  completed_plans: 54
   percent: 44
 ---
 
@@ -102,7 +102,7 @@ Progress: [████░░░░░░] 44%
 | Phase 21.2 P07 | 25 min | 2 tasks | 6 files |
 | Phase 21.2 P09 | about 50 min | 2 tasks | 3 files |
 | Phase 21.2 P08 | about 2 h | 2 tasks | 7 files |
-| Phase 21.2 P10 (to CI checkpoint) | about 30 min | 2 of 3 tasks | 7 files |
+| Phase 21.2 P10 | about 40 min | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -239,7 +239,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21.2]: 21.2-07: first CI run 45733741913 green (tsan 208 s, deadlock 111 s, 0 TSan reports); every TSan entry kept, no set change
 - [Phase 21.2]: 21.2-09: unsafe review in docs/design/unsafe-review.md (30 files, 128 tokens); no memory-safety bug; unsafe-count.sh in clippy.sh; pid > 1 guard and errno save are follow-ups (D-33)
 - [Phase 21.2]: 21.2-08: Kani 0.68.0 proves 9 harnesses (header byte core, workers_for_cpus, stripe, write_end, hard_cap_of, dirty_move) in about 37 s of solving; parse itself stays covered by unit tests; kani.sh uses terse output and checks the harness count
-- [Phase 21.2]: 21.2-10: coverage in Linux Docker with cargo-llvm-cov 0.9.2; gate on the tests-only workspace number (local 91.25 to 91.27 %), merged with the FUSE smoke printed (local 93.08 %, fuse_callbacks 9.60 -> 51.52 %); floor file waits for the first CI number
+- [Phase 21.2]: 21.2-10: coverage in Linux Docker with cargo-llvm-cov 0.9.2; gate on the tests-only workspace number (first CI run 45750602854: 91.27 %; local 91.25 to 91.27 %), merged with the FUSE smoke printed (CI 93.08 %, fuse_callbacks 9.60 -> 51.40 %); floor 90.27 in scripts/safety/coverage-floor.txt; job 3 min 4 s
 
 ### Pending Todos
 
