@@ -49,7 +49,7 @@ human_verification:
 **Status:** human_needed (one item: post the #19 text)
 **Re-verification:** No
 
-The test and clippy gate result on HEAD is recorded by the orchestrator. The verifier did not run cargo. In the orchestrator's gate log, which was still running at the time of this check, the `prolly` block (23 passed) and the `prolly-bench` smoke block (2 passed) are already complete. The gate of the fix branch is `runs/gate-24-fix.log`: prolly 23 passed, smoke 2 passed, clippy ok, workspace 1,696 passed.
+The test and clippy gate result on HEAD is recorded by the orchestrator. Result on 7fab663: `cargo test --workspace` (four skips) exit 0, 85 result lines, 1,696 passed, 0 failed, 13 ignored; `clippy.sh` result=ok, unsafe check result=ok. The verifier did not run cargo. In the orchestrator's gate log, which was still running at the time of this check, the `prolly` block (23 passed) and the `prolly-bench` smoke block (2 passed) are already complete. The gate of the fix branch is `runs/gate-24-fix.log`: prolly 23 passed, smoke 2 passed, clippy ok, workspace 1,696 passed.
 
 ## Roadmap criteria
 
