@@ -2,7 +2,7 @@
 //!
 //! Parses the CLI arguments and dispatches to the appropriate subcommand.
 
-use slicefs_cli::{cli, gc, mount, scrub, seed, snapshot, stats, unmount};
+use slicefs_cli::{cli, gc, mount, rehash, scrub, seed, snapshot, stats, unmount};
 use clap::Parser;
 use cli::{Cli, Cmd};
 
@@ -67,6 +67,16 @@ fn main() {
                     eprintln!("{{\"error\": \"{e}\"}}");
                 } else {
                     eprintln!("slicefs gc error: {e}");
+                }
+                std::process::exit(1);
+            }
+        }
+        Cmd::Rehash { to, dry_run, store } => {
+            if let Err(e) = rehash::run_rehash(&store, &to, dry_run) {
+                if json {
+                    eprintln!("{{\"error\": \"{e}\"}}");
+                } else {
+                    eprintln!("slicefs rehash error: {e}");
                 }
                 std::process::exit(1);
             }

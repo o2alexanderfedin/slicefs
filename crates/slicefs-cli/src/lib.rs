@@ -21,6 +21,7 @@ pub mod online_gc;
 #[cfg(target_os = "macos")]
 pub mod fuset_watch;
 pub mod mount;
+pub mod rehash;
 pub mod scrub;
 pub mod snapshot;
 pub mod seed;

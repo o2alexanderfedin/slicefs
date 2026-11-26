@@ -189,13 +189,42 @@ pub fn ensure_hash_flag(store: &Path, hasher: &dyn ObjectHasher) -> std::io::Res
 /// what a crash left).
 pub const GC_TMP_DIR: &str = "gc-tmp";
 
+/// The temp files of `slicefs rehash` (`<store>/rehash-tmp`): the
+/// old-to-new map and the refcount sort files. A writable open removes what
+/// a crash left. It is not under `gc-tmp`, which a second open in one
+/// process would remove.
+pub const REHASH_TMP_DIR: &str = "rehash-tmp";
+
+/// Remove `<store>/rehash-tmp` with all its files; no such directory is no
+/// error.
+pub fn remove_rehash_tmp(store: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(store.join(REHASH_TMP_DIR)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
 /// Open the content store of `store` to write. The header check comes
 /// first (`Want::Write`): a new store gets its header durably before the
 /// chunk store makes `packs/`; a store that this build may not write is
-/// refused.
+/// refused. The temp files of a crashed rehash are removed.
 pub fn open(store: &Path) -> std::io::Result<Content> {
+    open_inner(store, None)
+}
+
+/// [`open`], but new objects use `hasher`, not the write hash of the
+/// header (step 3 of `slicefs rehash`). The header does not change.
+pub fn open_with_hasher(store: &Path, hasher: &'static dyn ObjectHasher) -> std::io::Result<Content> {
+    open_inner(store, Some(hasher))
+}
+
+fn open_inner(store: &Path, hasher: Option<&'static dyn ObjectHasher>) -> std::io::Result<Content> {
     let opened = header::check(store, Want::Write)?;
-    let hasher = hasher_of(store, opened.header.as_ref())?;
+    let hasher = match hasher {
+        Some(h) => h,
+        None => hasher_of(store, opened.header.as_ref())?,
+    };
+    remove_rehash_tmp(store)?;
     let opts = Options { hasher, profile: profile_of(opened.header.as_ref()), gc_tmp_dir: Some(store.join(GC_TMP_DIR)), ..Options::default() };
     let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
     Ok(Arc::new(cs))
