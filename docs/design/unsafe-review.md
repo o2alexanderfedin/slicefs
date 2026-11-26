@@ -7,8 +7,9 @@ Miri does not execute. It covers every crate of the build: chunk-store,
 metadata, slicefs-cli, the benchmark tools and the vendored fuser.
 
 Miri runs the lib tests of chunk-store and metadata (Safety job `miri`,
-script `scripts/safety/miri.sh`). The Safety workflow runs when a `v*` tag
-is pushed, or when a person starts it by hand. A developer can run each
+script `scripts/safety/miri.sh`). The Safety workflow is the release gate:
+`release.yml` calls it before it makes a `v*` tag. It also runs on a `v*`
+tag and when a person starts it by hand. A developer can run each
 script locally. Miri cannot run a foreign
 function that it does not model, a file-backed `mmap` or a FUSE mount. For
 that code, this review gives the safety argument in words.
@@ -43,7 +44,7 @@ the file (`grep -ow unsafe`), comments included. The script
 `scripts/safety/unsafe-count.sh` counts the tokens again and compares them
 with these lines. A file whose count differs, or a file that is on one side
 only, fails the script. `scripts/safety/clippy.sh` runs it. Thus the Safety
-job `clippy` (on a `v*` tag or a manual run) fails on Linux and macOS when
+job `clippy` (in a release or a manual run) fails on Linux and macOS when
 the code has an `unsafe` token that this review does not count. Add or change a review entry, then change
 the count line.
 
