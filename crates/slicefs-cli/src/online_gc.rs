@@ -21,7 +21,10 @@
 //!
 //! A failed GC backs off: the next automatic GC waits 1 s, 2 s, 4 s, ... (up
 //! to the interval) after the end of the last one; a success resets it. A
-//! request from `slicefs gc` runs at once.
+//! request from `slicefs gc` runs at once. A GC without free space for its
+//! temp files is such a failure: it stops before the walk (or at a temp
+//! file write), deletes nothing, and leaves free space for the writes of
+//! the mount (`chunk_store::gc_tmp_reserve`).
 //!
 //! A request is a file in the store directory:
 //! 1. `slicefs gc` writes `gc.request` (with the text `full` for a full GC,

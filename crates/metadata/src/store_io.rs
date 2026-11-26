@@ -22,6 +22,9 @@ use slicefs_traits::metadata::MetaError;
 pub trait NodeRead {
     /// The bytes of the node `key`, or `None` if it is missing or damaged.
     fn get_node(&mut self, key: &ObjectKey) -> chunk_store::Result<Vec<u8>>;
+
+    /// The chunk store of the nodes (for reads of a node in windows).
+    fn chunk_store(&self) -> &ChunkStore;
 }
 
 /// Store nodes.
@@ -34,6 +37,10 @@ pub trait NodeWrite: NodeRead {
 impl<T: NodeRead + ?Sized> NodeRead for &mut T {
     fn get_node(&mut self, key: &ObjectKey) -> chunk_store::Result<Vec<u8>> {
         (**self).get_node(key)
+    }
+
+    fn chunk_store(&self) -> &ChunkStore {
+        (**self).chunk_store()
     }
 }
 
@@ -91,6 +98,10 @@ impl NodeRead for NodeReader {
     fn get_node(&mut self, key: &ObjectKey) -> chunk_store::Result<Vec<u8>> {
         get_value(&self.0, key)
     }
+
+    fn chunk_store(&self) -> &ChunkStore {
+        &self.0
+    }
 }
 
 /// Node writes on a shared chunk store, without the `StoreIo` lock (for a
@@ -120,6 +131,10 @@ impl NodeWriter {
 impl NodeRead for NodeWriter {
     fn get_node(&mut self, key: &ObjectKey) -> chunk_store::Result<Vec<u8>> {
         get_value(&self.cs, key)
+    }
+
+    fn chunk_store(&self) -> &ChunkStore {
+        &self.cs
     }
 }
 
@@ -219,6 +234,10 @@ impl StoreIo {
 impl NodeRead for StoreIo {
     fn get_node(&mut self, key: &ObjectKey) -> chunk_store::Result<Vec<u8>> {
         get_value(&self.cs, key)
+    }
+
+    fn chunk_store(&self) -> &ChunkStore {
+        &self.cs
     }
 }
 

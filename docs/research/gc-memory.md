@@ -11,6 +11,13 @@ file for each extra snapshot. With one snapshot, the GC heap goes above
 1 GiB at about 2.8 million files. The earlier estimate of 33 bytes per file
 was too low by a factor of 10 or more.
 
+Update (#207): the mark is now bounded. The GC heap no longer grows
+with the snapshot count. From 100k to 1M files it grows by 21 to 35 MB
+(measured), all outside the mark: mostly the Bloom filters of the index
+runs (about 15 bytes per tiny file, by design), which adds about 135 MB
+more at 10M files, plus the per-pack `.idx` part (at most about 150 MB).
+See "After the fix" at the end.
+
 ## How it was measured
 
 `scripts/gc-memory/run.sh [N ...]` (Linux, Docker, no FUSE mount). For each
@@ -123,7 +130,7 @@ stay in the process: the offline commands do not call
 The help of `gc --full` says "bounded RAM". That is true only for the sorted
 mark of the object IDs, not for the key list (1) in front of it.
 
-## A bounded version (sketch, not implemented)
+## A bounded version (sketch; items 1, 2 and 4 are done, see "After the fix")
 
 The parts for this are already in the code: the external sorter
 (`chunk_store::extsort`, used by `ExactMark`) and the windowed record
@@ -171,3 +178,123 @@ above, with item 4 as a quick fix). Also correct the "bounded RAM" text of
 engine itself, the data agrees with HASH-05: the dry-run heap is flat
 (75 to 95 MB, all at the store open), and the rewrite of a real run peaks
 below its GC step. The rewrite was not measured alone.
+
+## After the fix (#207)
+
+The fix does items 1, 2 and 4 of the sketch above. Item 3 (the `.idx`
+decode in windows) is not done; see below. The mark walk now gives every
+key to an external sort in `<store>/gc-tmp` and reads the sorted keys
+back one at a time, and it reads the map and manifest nodes in 1 MiB
+windows. The offline commands call `alloc_tune::tune_at_start`.
+
+Same script, same machine: `scripts/gc-memory/run.sh 100000 1000000`
+with `GCMEM_HEAPTRACK=1`, once with `GCMEM_SNAPS=1` and once with
+`GCMEM_SNAPS=4`. Heap peak in MB (heaptrack). The "before" values are
+from the tables above.
+
+| Files | Snapshots | heap gc | heap gc --full (before) | heap dry-run | heap rehash (before) |
+|---|---|---|---|---|---|
+| 100,000 | 1 | 74 | 75 (75) | 74 | 204 |
+| 1,000,000 | 1 | 96 | 109 (385) | 95 | 258 |
+| 100,000 | 4 | 75 | 75 | 75 | 204 |
+| 1,000,000 | 4 | 101 | 109 (735) | 95 | 258 (764) |
+
+Peak RSS in MiB, anon in parentheses. "Before" is from the tables above
+(no 100k row with 4 snapshots was measured before).
+
+| Files | Snapshots | Run | gc | gc --full | dry-run | rehash | rehash wall |
+|---|---|---|---|---|---|---|---|
+| 100,000 | 1 | before | 153 | 233 | 76 | 260 (214) | 11 s |
+| 100,000 | 1 | after | 125 (98) | 200 (174) | 75 (5) | 104 (68) | 4.3 s |
+| 1,000,000 | 1 | before | 562 | 559 | 258 | 832 (399) | 117 s |
+| 1,000,000 | 1 | after | 387 (172) | 494 (279) | 255 (19) | 337 (103) | 51 s |
+| 100,000 | 4 | after | 125 (101) | 176 (152) | 76 (5) | 100 (47) | 6.0 s |
+| 1,000,000 | 4 | before | 859 | 907 | 258 | 861 (615) | 68 s |
+| 1,000,000 | 4 | after | 386 (171) | 462 (246) | 256 (77) | 337 (101) | 69 s |
+
+(The rehash rows of this table ran on a store that heaptrack had
+converted first; see note (1) above. The heaptrack column is the real
+conversion.)
+
+Acceptance:
+
+- **Snapshots.** At 1M files, the heap with 4 snapshots is the heap with
+  1 snapshot within 5 MB in every command (before: +350 MB for
+  `gc --full`). So the heap does not grow with the snapshot count.
+- **Files.** From 100k to 1M files (10 times the files), the heap of
+  `gc` and `gc --full` grows by 21 to 35 MB, and the heap of a rehash by
+  54 MB (before: +310 MB for `gc --full` with 1 snapshot). Margin as
+  measured: the heap at 1M files is at most 35 MB (GC) or 55 MB (rehash)
+  above the heap at 100k files. This rest is not fixed: the Bloom filters
+  of the index runs (item 2 below) grow with the object count, about
+  15 bytes per tiny file, so about 135 MB more at 10M files.
+- At the peak of every command, no allocation of the metadata walk is in
+  the top sites (heaptrack): the mark keeps only its fixed buffers.
+
+What is left, and why it grows a little from 100k to 1M files (sites at
+the heap peak):
+
+1. **Per pack: the `.idx` read and decode** (`pack_io.rs:427` and
+   `decode_index`, at the open and in `pack_entries`): 73 MB at 100k
+   files, 93 MB at 1M files. The packs of the 1M store are fuller (more
+   tiny objects per 64 MiB pack). This part has the limit of one pack,
+   up to about 150 MB with tiny objects.
+2. **The Bloom filters of the index runs** (`run.rs:769`): 0.9 MB at 100k
+   files, 15 MB at 1M files (about 2.5 bytes per object). By design.
+3. **The mark of a normal GC**: a Bloom filter of about 1.25 bytes per
+   stored object (`ChunkStore::live_filter`), so it grows with the file
+   count: about 6 objects per tiny file give about 7.5 bytes per file,
+   75 MB at 10M files. By design (#113); `gc --full` has no filter (its
+   exact mark is in temp files).
+4. **The sweep of a GC that frees much** (rehash, step 6): the plans of
+   one group of up to 32 packs (`gc_prepare`, 151 MB, the same at both
+   sizes) and the dead sets of the group (36 MB), and the copy of the
+   memtable (`Index::snapshot`, 6 to 20 MB, bounded by the memtable
+   limit). These are bounded by the group size and the pack limit, not by
+   the file count.
+
+Item 3 of the sketch is not done: the callers need the entries of a
+pack as a list (the open replay, the active pack, `gc_prepare` and the
+compaction keep the entries of a pack), and the CRC of an `.idx` covers
+the whole file. A windowed decode alone does not remove that list, so it
+is not a small change, and the pack limit already bounds this part.
+
+The RSS stays above the heap: the file pages of the mapped index runs
+(RSS minus anon), and anon memory that the allocator keeps (anon minus
+heap, for example 172 MiB anon for 96 MB heap in `gc` at 1M files). The
+RSS went down by 12 to 60 % from before.
+
+Disk: while the keys fit in the 4 MiB sort buffer (about 127,000 keys,
+about 40,000 tiny files with one root), the sort stays in RAM and makes
+no file. Above that, the sort of the keys takes about 33 bytes per key
+per root in `<store>/gc-tmp` (about 100 bytes per tiny file per root).
+The peak is at the last merge, where its inputs and its output exist at
+the same time: up to twice that. `gc --full` adds its exact mark, about
+33 bytes per object, up to twice that at its last merge. The files are
+removed at the end, also after an error or a stop. The wall time of
+`gc --full` at 1M files and 1 snapshot is 73 s.
+
+Costs of the change for every GC that needs temp files (also the online
+GC of a mount): that temp disk space must be free before the GC frees
+anything. Before the walk, the mark checks the free space against an
+estimate (the keys from the map sizes of each root) and keeps a reserve
+for the writes of the store (1 % of the file system, at least 64 MiB);
+each write of a temp file checks again. A GC that does not fit does not
+start or stops, and deletes nothing; the online GC logs it and backs off.
+So a GC on a nearly full disk with a large store cannot free space; free
+some by other means. A stop request is checked in the merge passes too
+(before each merge and every 16,384 records), so an unmount does not wait
+for the sort.
+
+### Not done
+
+- `.idx` decode in windows (item 3 of the sketch): not done (see above),
+  so #207 is only partly done; keep it open or split this part out.
+- A `ChunkStore` opened with `open_with` and the default options has no
+  `gc_tmp_dir`, so every GC on it (now also a normal GC) fails; no caller
+  in the tree does this.
+- A writable open removes all of `gc-tmp`; on a file system without
+  `flock`, an offline command can remove the temp files of a running GC
+  of a mount, which then fails (safely, nothing deleted).
+- `slicefs scrub` still keeps all content keys of all roots in RAM
+  (`collect_content_keys`), O(files x roots); a follow-up issue is needed.

@@ -185,8 +185,9 @@ pub fn ensure_hash_flag(store: &Path, hasher: &dyn ObjectHasher) -> std::io::Res
     Ok(true)
 }
 
-/// The temp files of a full GC (`<store>/gc-tmp`; a writable open removes
-/// what a crash left).
+/// The temp files of a GC (`<store>/gc-tmp`: the sorted keys of the mark
+/// walk, and the exact mark of a full GC; a writable open removes what a
+/// crash left).
 pub const GC_TMP_DIR: &str = "gc-tmp";
 
 /// The temp files of `slicefs rehash` (`<store>/rehash-tmp`): the
@@ -225,7 +226,7 @@ fn open_inner(store: &Path, hasher: Option<&'static dyn ObjectHasher>) -> std::i
         None => hasher_of(store, opened.header.as_ref())?,
     };
     remove_rehash_tmp(store)?;
-    let opts = Options { hasher, profile: profile_of(opened.header.as_ref()), gc_tmp_dir: Some(store.join(GC_TMP_DIR)), ..Options::default() };
+    let opts = Options { hasher, profile: profile_of(opened.header.as_ref()), gc_tmp_dir: Some(store.join(GC_TMP_DIR)), gc_free_space: Some(crate::gc_pacing::fs_space), ..Options::default() };
     let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
     Ok(Arc::new(cs))
 }

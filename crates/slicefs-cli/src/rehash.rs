@@ -248,7 +248,10 @@ fn rewrite_and_switch(
     hook(args, Step::HeaderWritten)?;
 
     // Step 6: always a full GC, so a run after a crash between the switch
-    // and the GC frees the old objects.
+    // and the GC frees the old objects. The temp files of the rewrite (the
+    // old-to-new map, the refcount sort) are not needed after the switch:
+    // removed first, so the GC has their space for its own temp files.
+    content::remove_rehash_tmp(store)?;
     progress("rehash: gc");
     let roots: Vec<_> = std::iter::once(new.current).chain(new.snapshots.iter().map(|s| s.root)).collect();
     let freed = gc::gc_on_open_store(&cs, &roots, true)?;
@@ -257,7 +260,6 @@ fn rewrite_and_switch(
     // Step 7: clean up and report.
     cs.close()?;
     drop(cs);
-    content::remove_rehash_tmp(store)?;
     let after = gc::store_usage(store);
     let name = target.name();
     let mut lines = vec![

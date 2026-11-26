@@ -249,15 +249,15 @@ next entry is the check for that.
   is not checked for `pid > 1`. The risk is lower here: `pgrep -P` prints
   only the pids of real children.
 
-### gc_pacing.rs: `statvfs` in `free_ratio`
+### gc_pacing.rs: `statvfs` in `fs_space`
 
-- **File and item**: `crates/slicefs-cli/src/gc_pacing.rs`, `free_ratio`
-  (two `unsafe` blocks).
+- **File and item**: `crates/slicefs-cli/src/gc_pacing.rs`, `fs_space`
+  (two `unsafe` blocks; `free_ratio` and the GC temp space check use it).
 - **What it does**: reads the free and total blocks of the file system
   under the store.
 - **Safety argument**: All-zero is a valid value of `statvfs`. `c` is a
   `CString`, so it ends with a NUL and lives for the call. `&mut sv` is a
-  valid out buffer. An error gives `1.0` and the struct is not read.
+  valid out buffer. An error gives `None` and the struct is not read.
 - **How it is tested**: `gc_pacing::tests::the_free_ratio_of_a_real_path_is_a_ratio_and_an_error_is_plenty`
   in the CI jobs `linux` and `macos`.
 

@@ -7,6 +7,10 @@ use clap::Parser;
 use cli::{Cli, Cmd};
 
 fn main() {
+    // The allocator first, before any thread starts, for every command:
+    // the offline ones (seed, gc, rehash, scrub, ...) free large blocks
+    // too (#207). `mount` sets it again and logs the value.
+    slicefs_cli::alloc_tune::tune_at_start();
     let cli = Cli::parse();
     let json = cli.json;
 
