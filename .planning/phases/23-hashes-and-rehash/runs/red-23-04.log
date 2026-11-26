@@ -12,3 +12,28 @@ test a_blake3_store_rehashes_to_sha256 ... FAILED
 panicked at crates/slicefs-cli/tests/rehash_tests.rs:166:5: left: 0, right: 1 (snapshots before the rehash)
 cause: the test helper open_fs did not give the loaded snapshots to the metadata store, so its commit wrote a root
 segment with no snapshot record. Fix: open_fs calls set_snapshots, as a mount does. Then 2 passed.
+
+## Task 2: cargo test -p slicefs-cli --lib -- cli::tests::rehash (tests written, no Cmd::Rehash)
+error[E0599]: no variant named `Rehash` found for enum `cli::Cmd`
+   --> crates/slicefs-cli/src/cli.rs:645:18
+error[E0599]: no variant named `Rehash` found for enum `cli::Cmd`
+   --> crates/slicefs-cli/src/cli.rs:650:18
+error: could not compile `slicefs-cli` (lib test) due to 2 previous errors
+
+## Task 2: refusal tests are guards (the refusals came with the Task 1 run order)
+First run: 5 passed, 1 failed. refuse_with_write_log_records_after_the_last_root failed at its own setup
+assert "the write log has records": the test made the directory with simulate_mkdir, which writes no
+log record. Fix in the test: a logged request (handlers::handle_mkdir), as a mount runs it. Then 6 passed.
+store_header_tests with the rehash rows: 9 passed (guards, same mutations as below).
+
+Guard mutations in rehash.rs, all in one run (then undone with a checkout of the file):
+  M1 no require_store; M2 an unknown target falls back to the default hash; M3 no lock_offline;
+  M4 no mount.lock check; M5 no write-log check.
+cargo test -p slicefs-cli --test rehash_tests refuse:
+test refuse_a_path_with_no_store ... FAILED            (M1: "failed to load segments: segment I/O error: No such file or directory")
+test refuse_an_unknown_target ... FAILED               (M2: run_rehash is Ok)
+test refuse_while_the_store_lock_is_held_exclusive ... FAILED   (M3: "rehash is refused, but it ran")
+test refuse_with_a_mount_lock_file ... FAILED          (M4: "rehash is refused, but it ran")
+test refuse_while_the_store_lock_is_held_shared ... FAILED      (M3: "rehash is refused, but it ran")
+test refuse_with_write_log_records_after_the_last_root ... FAILED (M5: "rehash is refused, but it ran")
+test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 2 filtered out

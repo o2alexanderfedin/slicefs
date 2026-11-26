@@ -612,7 +612,7 @@ fn lock_result(dir: std::fs::File, r: Result<(), std::fs::TryLockError>) -> std:
 /// holds it.
 pub fn lock_read_mount(store: &Path) -> std::io::Result<StoreLock> {
     try_store_lock(store, true)?.ok_or_else(|| {
-        refuse(format!("{} is in use: it is mounted to write, or a command that writes it (gc, seed, snapshot create or snapshot switch) runs now. Mount it when that mount or command ends.", store.display()))
+        refuse(format!("{} is in use: it is mounted to write, or a command that writes it (gc, seed, rehash, snapshot create or snapshot switch) runs now. Mount it when that mount or command ends.", store.display()))
     })
 }
 
@@ -620,7 +620,7 @@ pub fn lock_read_mount(store: &Path) -> std::io::Result<StoreLock> {
 /// Refused while a mount (or another such command) holds it.
 pub fn lock_offline(store: &Path) -> std::io::Result<StoreLock> {
     try_store_lock(store, false)?.ok_or_else(|| {
-        refuse(format!("{} is in use: it is mounted, or another command (gc, seed, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.", store.display()))
+        refuse(format!("{} is in use: it is mounted, or another command (gc, seed, rehash, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.", store.display()))
     })
 }
 
@@ -630,7 +630,7 @@ pub fn lock_offline(store: &Path) -> std::io::Result<StoreLock> {
 /// not touched.
 pub fn lock_write_mount(store: &Path) -> std::io::Result<StoreLock> {
     try_store_lock(store, false)?.ok_or_else(|| {
-        refuse(format!("{} is in use: it is mounted, or a command (gc, seed, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.", store.display()))
+        refuse(format!("{} is in use: it is mounted, or a command (gc, seed, rehash, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.", store.display()))
     })
 }
 

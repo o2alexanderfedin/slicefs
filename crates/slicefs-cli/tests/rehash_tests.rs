@@ -11,13 +11,13 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use chunk_store::file::file_objects;
-use metadata::segment::load_store_from_segments;
+use metadata::segment::{load_store_from_segments, scan_store_with_log};
 use metadata::store::{content_keys, referenced_roots, DictMetadataStore};
 use metadata::wal::{create_wal, WalConfig};
 use slicefs_cli::content::{self, FORMAT, FORMAT_FILE, REHASH_TMP_DIR};
 use slicefs_cli::filesystem::SliceFsFilesystem;
-use slicefs_cli::header::{HASH_SHA256_FLAG, HASH_SHA256_RELEASE};
-use slicefs_cli::rehash::{rehash_report_with, RehashArgs};
+use slicefs_cli::header::{self, HASH_SHA256_FLAG, HASH_SHA256_RELEASE};
+use slicefs_cli::rehash::{rehash_report_with, run_rehash, RehashArgs};
 use slicefs_cli::seed::run_seed;
 use slicefs_cli::snapshot::run_snapshot_create;
 use slicefs_traits::key::ObjectKey;
@@ -204,4 +204,108 @@ fn a_writable_open_removes_a_stale_rehash_tmp() {
     assert!(tmp.join("x").exists(), "a read-only open writes nothing");
     content::open(&store).unwrap().close().unwrap();
     assert!(!tmp.exists());
+}
+
+/// A BLAKE3-256 store at `<dir>/store` with one small file.
+fn seeded_small() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("a.bin"), data(7, 20 << 10)).unwrap();
+    run_seed(&dir.path().join("store"), &src, None).unwrap();
+    dir
+}
+
+/// The error text of a run that must fail.
+fn refused(store: &Path, to: &str, dry_run: bool) -> String {
+    match rehash_report_with(&RehashArgs::new(store, to, dry_run), &mut |_| {}) {
+        Ok(report) => panic!("rehash is refused, but it ran:\n{report}"),
+        Err(e) => e.to_string(),
+    }
+}
+
+/// Assert that `f` gives an error with every part of `parts` and that the
+/// store tree does not change.
+fn assert_refused_and_unchanged(store: &Path, parts: &[&str], f: impl FnOnce() -> String) {
+    let files = tree(store);
+    let e = f();
+    assert!(parts.iter().all(|p| e.contains(p)), "{e}");
+    assert_eq!(tree(store), files, "a refusal changes no file");
+}
+
+/// D-02: a mount or a command holds the store lock exclusive.
+#[test]
+fn refuse_while_the_store_lock_is_held_exclusive() {
+    let dir = seeded_small();
+    let store = dir.path().join("store");
+    let lock = header::lock_offline(&store).unwrap();
+    assert_refused_and_unchanged(&store, &["in use"], || refused(&store, "sha256", false));
+    drop(lock);
+}
+
+/// D-02: a read-only mount holds the store lock shared.
+#[test]
+fn refuse_while_the_store_lock_is_held_shared() {
+    let dir = seeded_small();
+    let store = dir.path().join("store");
+    let lock = header::lock_read_mount(&store).unwrap();
+    assert_refused_and_unchanged(&store, &["in use"], || refused(&store, "sha256", false));
+    drop(lock);
+}
+
+/// R-01: a `mount.lock` file with a free store lock (a crashed mount).
+#[test]
+fn refuse_with_a_mount_lock_file() {
+    let dir = seeded_small();
+    let store = dir.path().join("store");
+    std::fs::write(store.join("mount.lock"), b"").unwrap();
+    assert_refused_and_unchanged(&store, &["mount.lock", "Mount and unmount the store once"], || refused(&store, "sha256", false));
+}
+
+/// Write-log records after the last root, and the store open with no
+/// commit: the store as a crashed mount leaves it.
+fn store_with_log_records() -> TempDir {
+    let dir = seeded_small();
+    let store = dir.path().join("store");
+    let fs = open_fs(&store);
+    // A logged request, as a mount runs it.
+    let r = slicefs_cli::handlers::handle_mkdir(&fs, 1, "not-in-a-root", 0o040_755, 0o022, 0, 0);
+    assert!(matches!(r, slicefs_cli::handlers::EntryResult::Ok(..)));
+    fs.meta().flush_wal().unwrap();
+    fs.meta().shutdown_wal().unwrap();
+    fs.content().close().unwrap();
+    drop(fs);
+    let (_, _, log) = scan_store_with_log(&store.join("segments")).unwrap();
+    assert!(!log.is_empty(), "the write log has records");
+    dir
+}
+
+/// D-17: write-log records after the last root.
+#[test]
+fn refuse_with_write_log_records_after_the_last_root() {
+    let dir = store_with_log_records();
+    let store = dir.path().join("store");
+    assert_refused_and_unchanged(&store, &["write-log records that are not in a root"], || refused(&store, "sha256", false));
+}
+
+/// D-23: an unknown target.
+#[test]
+fn refuse_an_unknown_target() {
+    let dir = seeded_small();
+    let store = dir.path().join("store");
+    assert_refused_and_unchanged(&store, &["unknown hash \"md5\""], || run_rehash(&store, "md5", false).unwrap_err().to_string());
+}
+
+/// A missing path and an empty directory are no store; nothing is made.
+#[test]
+fn refuse_a_path_with_no_store() {
+    let dir = TempDir::new().unwrap();
+    let (missing, empty) = (dir.path().join("missing"), dir.path().join("empty"));
+    std::fs::create_dir_all(&empty).unwrap();
+    for store in [&missing, &empty] {
+        let e = refused(store, "sha256", false);
+        assert!(e.contains("store not found"), "{e}");
+    }
+    assert!(!missing.exists(), "no directory is made");
+    assert_eq!(std::fs::read_dir(&empty).unwrap().count(), 0, "nothing is made");
 }
