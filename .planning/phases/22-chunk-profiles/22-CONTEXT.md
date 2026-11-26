@@ -74,6 +74,9 @@ Out of scope: a change of the default profile; size-class or bimodal chunking (p
 ### Docs
 - **D-29:** `docs/design/store-format.md`: the grammar table gets the `chunks` line, the flag list gets the `chunk-profile` row (class, release, meaning), with an example header. `docs/design/chunk-store.md`: the chunking section says the profile is per store and points to the header doc. README: one line for `--chunk-profile` if the README lists seed or mount options.
 
+### Settled during planning (2026-11-25, reversible)
+- D-18 narrowed: `mount` cannot make a store in this codebase (`load_store` in `mount.rs` refuses a path with no `segments/` and a store with no committed root). So only `seed` sets the profile of a new store; `mount --chunk-profile` only checks it against the recorded profile and refuses a different one (plan 22-02).
+
 ### Claude's Discretion
 - Type, field and function names; the exact header word (`chunks`) and message wording (plain, short); whether `chunk_ranges` and the constants stay as default-profile helpers or go; the benchmark example's internal structure; the plan split.
 - Suggested plan split (planner may change it): 01 chunk-store profile type, store field, `file.rs` reads, per-store zero chunk, golden and two-store tests (wave 1); 02 header line and flag, `--chunk-profile` on seed and mount, refusals, stats, docs, Kani (wave 2); 03 benchmark example and script with README (wave 2, after 01); 04 run the benchmark and write the report (wave 3).
