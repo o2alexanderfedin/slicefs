@@ -1,0 +1,8 @@
+run=0 seed secs=16.841 inode_count=84104
+run=1 info inode_data_entries=84104 inode_count_field=84104 next_ino=84105 map_bytes=10344832 maxrss_after_load=112558080
+run=1 version files_changed=14348 files_created=1588 files_deleted=734 dirs_created=150 dirs_deleted=28
+run=1 final entries=85081 digest=f796fbbab75a42e3585ae836aa545cb21bec4c1cc7affbb53be1511c7cd6d0e0
+run=1 check mode=flat entries=85081 digest=f796fbbab75a42e3585ae836aa545cb21bec4c1cc7affbb53be1511c7cd6d0e0 ok=1
+run=1 hash boundary_hash_ns_per_key=110.5
+run=1 check mode=prolly entries=85081 digest=f796fbbab75a42e3585ae836aa545cb21bec4c1cc7affbb53be1511c7cd6d0e0 ok=1
+run=1 tree depth=3 nodes=1042 leaves=1026 leaf_bytes_min=549 leaf_bytes_mean=3740 leaf_bytes_max=6804 internal_nodes=16 internal_bytes_mean=3327

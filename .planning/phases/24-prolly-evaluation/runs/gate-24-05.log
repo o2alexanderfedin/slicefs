@@ -1,0 +1,14 @@
+# gate 24-05 on the merged tree (head 7bbe75e, plans 24-01 to 24-04), before any benchmark, 2026-11-26T20:23:37Z
+# timeout 900 cargo test -p prolly -p prolly-bench (exit 0)
+     Running unittests src/lib.rs (target/debug/deps/prolly-dbc94d535b0e16ef)
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s
+     Running unittests src/main.rs (target/debug/deps/prolly_bench-84d2d526e43801fb)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/smoke.rs (target/debug/deps/smoke-1fb74d5d2350df6d)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.79s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+# RUST_STABLE=stable timeout 1800 scripts/safety/clippy.sh (exit 0)
+CLIPPY os=Darwin toolchain=stable result=ok
+UNSAFE files=32 tokens=134 result=ok
+# timeout 3600 cargo test --workspace -- --skip a_panic_on_another_thread_does_not_abort --skip a_reader_thread_panic_aborts_and_the_remount_replays --skip a_worker_panic_aborts_and_the_remount_replays --skip a_full_queue_that_stays_full_aborts (exit 0, 2026-11-26T20:26:14Z to 20:32:08Z)
+WORKSPACE test_result_lines=85 passed=1694 failed=0 ignored=13 result=ok
