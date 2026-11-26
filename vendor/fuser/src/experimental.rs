@@ -24,14 +24,14 @@ pub type Result<T> = std::result::Result<T, Errno>;
 
 /// Standard request context for all filesystem operations
 pub struct RequestContext {
-    uid: u32,
-    gid: u32,
+    uid: Option<u32>,
+    gid: Option<u32>,
     pid: u32,
     request_id: RequestId,
 }
 
 impl RequestContext {
-    fn new(uid: u32, gid: u32, pid: u32, request_id: RequestId) -> Self {
+    fn new(uid: Option<u32>, gid: Option<u32>, pid: u32, request_id: RequestId) -> Self {
         Self {
             uid,
             gid,
@@ -40,13 +40,15 @@ impl RequestContext {
         }
     }
 
-    /// The user making the request
-    pub fn user_id(&self) -> u32 {
+    /// The user making the request, or `None` where the kernel withheld it. See
+    /// [`Request::uid`] for when that is
+    pub fn user_id(&self) -> Option<u32> {
         self.uid
     }
 
-    /// The group the user belongs to
-    pub fn group_id(&self) -> u32 {
+    /// The group the user belongs to, or `None` where the kernel withheld it. See
+    /// [`Request::uid`] for when that is
+    pub fn group_id(&self) -> Option<u32> {
         self.gid
     }
 
@@ -84,6 +86,17 @@ impl DirEntListBuilder<'_> {
         name: T,
     ) -> bool {
         self.entries.add(ino, offset, kind, name)
+    }
+
+    /// Bytes still available for entries in this reply.
+    ///
+    /// Before any entry is added this is the buffer size the kernel asked for, which lets
+    /// a filesystem size a batch of work up front rather than discovering the limit only
+    /// when [`add()`](Self::add) reports the buffer full. Each entry costs its name plus a
+    /// fixed header, padded for alignment, so this is a budget rather than an entry count;
+    /// `add()` remains the authority on whether a particular entry fits.
+    pub fn remaining_capacity(&self) -> usize {
+        self.entries.remaining_capacity()
     }
 }
 
@@ -217,6 +230,7 @@ impl<T: AsyncFilesystem + Send + Sync + 'static> Filesystem for TokioAdapter<T> 
 
 /// Experimental async API. Expect this to change in the future
 #[async_trait::async_trait]
+#[allow(clippy::too_many_arguments)]
 pub trait AsyncFilesystem: Send + Sync + 'static {
     async fn lookup(
         &self,

@@ -41,6 +41,8 @@ pub use crate::ll::flags::fopen_flags::FopenFlags;
 pub use crate::ll::flags::init_flags::InitFlags;
 pub use crate::ll::flags::ioctl_flags::IoctlFlags;
 pub use crate::ll::flags::poll_flags::PollFlags;
+pub use crate::ll::flags::statx_flags::StatxAttributes;
+pub use crate::ll::flags::statx_flags::StatxMask;
 pub use crate::ll::flags::write_flags::WriteFlags;
 pub use crate::ll::fuse_abi::consts;
 pub use crate::ll::request::FileHandle;
@@ -71,11 +73,13 @@ pub use crate::reply::ReplyLseek;
 pub use crate::reply::ReplyOpen;
 pub use crate::reply::ReplyPoll;
 pub use crate::reply::ReplyStatfs;
+pub use crate::reply::ReplyStatx;
 pub use crate::reply::ReplyWrite;
 pub use crate::reply::ReplyXattr;
 pub use crate::request_param::Request;
 pub use crate::session::BackgroundSession;
 use crate::session::MAX_WRITE_SIZE;
+use crate::session::MIN_WRITE_SIZE;
 pub use crate::session::Session;
 pub use crate::session::SessionACL;
 pub use crate::session::SessionUnmounter;
@@ -107,13 +111,19 @@ mod time;
 const INIT_FLAGS: InitFlags = InitFlags::FUSE_ASYNC_READ.union(InitFlags::FUSE_BIG_WRITES);
 // TODO: Add FUSE_EXPORT_SUPPORT
 
-/// On macOS, we additionally support case insensitiveness, volume renames and xtimes
+/// On macOS, we additionally support case insensitiveness, volume renames, xtimes and the
+/// extended rename operations.
+///
+/// `FUSE_RENAME_SWAP`/`FUSE_RENAME_EXCL` must always be requested: macFUSE only sends the
+/// extended `fuse_rename_in` layout that fuser parses once they have been negotiated.
 /// TODO: we should eventually let the filesystem implementation decide which flags to set
 #[cfg(target_os = "macos")]
 const INIT_FLAGS: InitFlags = InitFlags::FUSE_ASYNC_READ
     .union(InitFlags::FUSE_CASE_INSENSITIVE)
     .union(InitFlags::FUSE_VOL_RENAME)
-    .union(InitFlags::FUSE_XTIMES);
+    .union(InitFlags::FUSE_XTIMES)
+    .union(InitFlags::FUSE_RENAME_SWAP)
+    .union(InitFlags::FUSE_RENAME_EXCL);
 // TODO: Add FUSE_EXPORT_SUPPORT and FUSE_BIG_WRITES (requires ABI 7.10)
 
 fn default_init_flags(capabilities: InitFlags) -> InitFlags {
@@ -122,6 +132,67 @@ fn default_init_flags(capabilities: InitFlags) -> InitFlags {
         flags |= InitFlags::FUSE_MAX_PAGES;
     }
     flags
+}
+
+/// What the kernel puts in a request header in place of ids it is not sending.
+pub(crate) const FUSE_INVALID_UIDGID: u32 = u32::MAX;
+
+/// Capabilities fuser has no implementation behind, whatever the kernel advertises.
+///
+/// Negotiating one of these makes the kernel change the protocol in a way fuser gets wrong, or
+/// claims a feature fuser cannot provide. Since the negotiated set is only ever echoed back to
+/// the kernel, an unimplemented capability fails silently rather than loudly, so
+/// [`KernelConfig::add_capabilities`] refuses them up front.
+///
+/// Every bit named here is above 31, where macFUSE defines no capability of its own. The refused
+/// bits that do alias one live in `ALIASED_UNSUPPORTED_CAPABILITIES`, which is empty on macOS.
+const UNSUPPORTED_CAPABILITIES: InitFlags = ALIASED_UNSUPPORTED_CAPABILITIES
+    // The kernel appends a fuse_secctx_header extension after the name of a create, mkdir,
+    // symlink or mknod request. fuser stops parsing at the name, so the security context is
+    // dropped and the filesystem creates unlabeled files while believing it labels them
+    .union(InitFlags::FUSE_SECURITY_CTX)
+    // Likewise for the fuse_supp_groups extension. Dropping it leaves the filesystem with the
+    // caller's fsgid in exactly the case the extension exists to correct
+    .union(InitFlags::FUSE_CREATE_SUPP_GROUP)
+    // Selecting DAX per inode requires FUSE_ATTR_DAX in the flags field of fuse_attr, which
+    // fuser sends as padding. Only a DAX-capable transport (virtiofs) advertises this
+    .union(InitFlags::FUSE_HAS_INODE_DAX)
+    // The kernel would route requests to io_uring queues that fuser never creates
+    .union(InitFlags::FUSE_OVER_IO_URING)
+    // Announces that the filesystem copes with requests the kernel resends. fuser cannot send
+    // the FUSE_NOTIFY_RESEND notification that asks for a resend in the first place
+    .union(InitFlags::FUSE_HAS_RESEND)
+    // The timeout is carried by a request_timeout field of fuse_init_out that fuser declares as
+    // reserved and always sends as zero, which the kernel reads as "no timeout requested"
+    .union(InitFlags::FUSE_REQUEST_TIMEOUT);
+
+/// The refused capabilities that occupy a bit below 32, where macFUSE assigns a meaning of its
+/// own. On macOS these bits are `FUSE_ALLOCATE` and `FUSE_RENAME_EXCL` - the latter of which
+/// fuser requests itself - so nothing is refused there.
+#[cfg(not(target_os = "macos"))]
+const ALIASED_UNSUPPORTED_CAPABILITIES: InitFlags = InitFlags::empty()
+    // Marking a submount root needs FUSE_ATTR_SUBMOUNT in the flags field of fuse_attr, which
+    // fuser sends as padding. Only a transport with submounts (virtiofs) advertises this
+    .union(InitFlags::FUSE_SUBMOUNTS)
+    // Read from a fuse_init_out field fuser leaves zeroed, which makes the kernel refuse the
+    // connection unless that happens to match its DAX alignment. Advertised by virtiofs alone
+    .union(InitFlags::FUSE_MAP_ALIGNMENT);
+#[cfg(target_os = "macos")]
+const ALIASED_UNSUPPORTED_CAPABILITIES: InitFlags = InitFlags::empty();
+
+/// Who a newly created inode belongs to.
+///
+/// The kernel decides this rather than the filesystem, and on an idmapped mount it is not the
+/// same as the caller's ids: it is those ids mapped through the mount's idmapping. It is given
+/// to the requests that create an inode, and to no others, which is why it is an argument to
+/// those rather than something [`Request`] carries. A rename is one of them only with
+/// `RENAME_WHITEOUT`, so it takes an `Option<Owner>` which is `Some` for exactly that flag.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Owner {
+    /// Owning user
+    pub uid: u32,
+    /// Owning group, before any setgid inheritance the filesystem applies
+    pub gid: u32,
 }
 
 /// File types
@@ -204,6 +275,114 @@ pub struct FileAttr {
     pub flags: u32,
 }
 
+/// What `statx(2)` reports, which is [`FileAttr`] plus the fields `stat(2)` has no room for.
+///
+/// In practice that means [`btime`](Self::btime): a creation time, which `FUSE_GETATTR` has
+/// no field for on Linux and which no other request can carry.
+#[derive(Debug, Clone, Copy)]
+pub struct StatxAttr {
+    /// Everything `stat(2)` also reports
+    pub attr: FileAttr,
+    /// Time of creation, reported to the caller only when this is `Some`. Unlike
+    /// [`FileAttr::crtime`] this is not macOS-only, since `statx(2)` has a field for it
+    pub btime: Option<SystemTime>,
+    /// Properties of the file that are set, such as immutable or append-only.
+    ///
+    /// **The kernel discards this.** `fuse_do_statx()` takes the mask, the creation time and
+    /// the basic stats out of the reply and ignores the attributes, so nothing set here
+    /// reaches `statx(2)`, and `chattr +i` cannot be made visible to it this way. The field
+    /// is part of the wire format and is sent regardless, so a filesystem that fills it needs
+    /// no change should the kernel start reading it.
+    pub attributes: StatxAttributes,
+    /// Properties this filesystem knows about at all, set or not, distinguishing "not set"
+    /// from "cannot say".
+    ///
+    /// Discarded by the kernel for the same reason as [`attributes`](Self::attributes).
+    pub attributes_mask: StatxAttributes,
+}
+
+impl From<FileAttr> for StatxAttr {
+    /// Reports what `stat(2)` would, and nothing beyond it
+    fn from(attr: FileAttr) -> Self {
+        Self {
+            attr,
+            btime: None,
+            attributes: StatxAttributes::empty(),
+            attributes_mask: StatxAttributes::empty(),
+        }
+    }
+}
+
+impl TryFrom<&std::fs::Metadata> for FileAttr {
+    type Error = io::Error;
+
+    /// Convert the metadata of a local file, as returned by [`std::fs::metadata`] and friends.
+    ///
+    /// This suits a filesystem backed by files on disk, which can answer `getattr` and `lookup
+    /// ` largely by passing the underlying file's metadata through. Note that `ino` is the
+    /// inode number of that underlying file, which a filesystem assigning its own inode
+    /// numbers will want to overwrite.
+    ///
+    /// `flags` carries the BSD file flags on macOS, where the FUSE protocol has a field for
+    /// them, and is zero everywhere else. `crtime` falls back to the epoch on a platform or
+    /// filesystem that does not record a creation time. `rdev` is taken from the metadata
+    /// only for a character or block device, being unspecified for every other kind of file,
+    /// and is zero otherwise.
+    ///
+    /// # Errors
+    /// Returns [`io::ErrorKind::InvalidData`] if the file is of a kind [`FileType`] cannot
+    /// represent, or if a field does not fit the width the FUSE protocol gives it. The latter
+    /// needs a filesystem well outside what Linux itself can represent, since the kernel reads
+    /// these back into the same widths.
+    fn try_from(metadata: &std::fs::Metadata) -> Result<Self, Self::Error> {
+        use std::os::unix::fs::MetadataExt;
+
+        fn narrow(value: u64, field: &str) -> io::Result<u32> {
+            u32::try_from(value).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{field} is {value}, which does not fit the FUSE protocol's u32"),
+                )
+            })
+        }
+
+        let kind = FileType::from_std(metadata.file_type()).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported file type {:?}", metadata.file_type()),
+            )
+        })?;
+
+        Ok(FileAttr {
+            ino: INodeNo(metadata.ino()),
+            size: metadata.size(),
+            blocks: metadata.blocks(),
+            atime: time::system_time_from_time(metadata.atime(), metadata.atime_nsec() as u32),
+            mtime: time::system_time_from_time(metadata.mtime(), metadata.mtime_nsec() as u32),
+            ctime: time::system_time_from_time(metadata.ctime(), metadata.ctime_nsec() as u32),
+            crtime: metadata.created().unwrap_or(SystemTime::UNIX_EPOCH),
+            kind,
+            perm: (metadata.mode() & 0o7777) as u16,
+            nlink: narrow(metadata.nlink(), "nlink")?,
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            // `st_rdev` is only defined for device files, and reading it elsewhere gets
+            // whatever the filesystem left there: FreeBSD's UFS stores a fast symlink's
+            // target in the same inode field, so a symlink reports the first eight bytes
+            // of its target as an rdev
+            rdev: match kind {
+                FileType::CharDevice | FileType::BlockDevice => narrow(metadata.rdev(), "rdev")?,
+                _ => 0,
+            },
+            blksize: narrow(metadata.blksize(), "blksize")?,
+            #[cfg(target_os = "macos")]
+            flags: std::os::macos::fs::MetadataExt::st_flags(metadata),
+            #[cfg(not(target_os = "macos"))]
+            flags: 0,
+        })
+    }
+}
+
 /// Configuration of the fuse kernel module connection
 #[derive(Debug)]
 pub struct KernelConfig {
@@ -217,10 +396,21 @@ pub struct KernelConfig {
     time_gran: Duration,
     max_stack_depth: u32,
     kernel_abi: Version,
+    /// Whether the mount carries `MountOption::DefaultPermissions`, which
+    /// `InitFlags::FUSE_ALLOW_IDMAP` cannot be negotiated without
+    default_permissions: bool,
+    /// The session's ACL, for the same reason
+    acl: SessionACL,
 }
 
 impl KernelConfig {
-    fn new(capabilities: InitFlags, max_readahead: u32, kernel_abi: Version) -> Self {
+    fn new(
+        capabilities: InitFlags,
+        max_readahead: u32,
+        kernel_abi: Version,
+        default_permissions: bool,
+        acl: SessionACL,
+    ) -> Self {
         Self {
             capabilities,
             requested: default_init_flags(capabilities),
@@ -234,7 +424,32 @@ impl KernelConfig {
             time_gran: Duration::new(0, 1),
             max_stack_depth: 0,
             kernel_abi,
+            default_permissions,
+            acl,
         }
+    }
+
+    /// Whether `InitFlags::FUSE_ALLOW_IDMAP` can be negotiated on this mount, given the
+    /// capabilities being added alongside it.
+    ///
+    /// Two things have to hold, and neither is fuser's choice. The kernel needs something to
+    /// check access against, since it withholds the caller's ids from the filesystem: it
+    /// refuses the connection outright - every request answered `ECONNREFUSED` - unless
+    /// `default_permissions` is in force. The mount option is one way to put it in force and
+    /// `InitFlags::FUSE_POSIX_ACL` is the other, the kernel setting it from that flag before
+    /// it looks at this one.
+    ///
+    /// And once the ids are withheld fuser cannot tell the mounting user's requests from
+    /// anyone else's, so `SessionACL::Owner` and `SessionACL::RootAndOwner` could not be
+    /// enforced; refusing is better than continuing to offer a restriction that has quietly
+    /// stopped applying.
+    fn idmap_available(&self, also_adding: InitFlags) -> bool {
+        // Requesting POSIX ACLs only counts if the kernel offers them, since a capability it
+        // does not offer is dropped from the negotiated set and sets nothing
+        let acl_forces_default_permissions = (self.requested | also_adding)
+            .intersection(self.capabilities)
+            .contains(InitFlags::FUSE_POSIX_ACL);
+        (self.default_permissions || acl_forces_default_permissions) && self.acl == SessionACL::All
     }
 
     /// Set the maximum stacking depth of the filesystem
@@ -295,10 +510,13 @@ impl KernelConfig {
     ///
     /// On success returns the previous value.
     /// # Errors
-    /// If the argument is too large, returns the nearest value which will succeed.
+    /// If the argument is too small or too large, returns the nearest value which will succeed.
     pub fn set_max_write(&mut self, value: u32) -> Result<u32, u32> {
-        if value == 0 {
-            return Err(1);
+        // The kernel clamps max_write below 4096 up to 4096 (process_init_reply()
+        // in fs/fuse/inode.c), so a smaller advertised value would not take
+        // effect: write requests of up to 4096 bytes would still arrive
+        if value < MIN_WRITE_SIZE as u32 {
+            return Err(MIN_WRITE_SIZE as u32);
         }
         if value > MAX_WRITE_SIZE as u32 {
             return Err(MAX_WRITE_SIZE as u32);
@@ -337,12 +555,26 @@ impl KernelConfig {
 
     /// Add a set of capabilities.
     ///
+    /// [`InitFlags::FUSE_ALLOW_IDMAP`] is accepted only where it can be honored: the session
+    /// must allow other users, and `default_permissions` must be in force, whether from
+    /// [`MountOption::DefaultPermissions`] or from negotiating [`InitFlags::FUSE_POSIX_ACL`].
+    /// Relying on the latter means adding it in this call or an earlier one, since what has
+    /// not been asked for yet cannot be counted on.
+    ///
     /// # Errors
-    /// When the argument includes capabilities not supported by the kernel, returns the bits of the capabilities not supported.
+    /// When the argument includes capabilities the kernel does not support, or ones fuser cannot
+    /// honor, returns the bits of the capabilities that were refused. Nothing is added in that
+    /// case, not even the capabilities that would have been accepted on their own.
     pub fn add_capabilities(&mut self, capabilities_to_add: InitFlags) -> Result<(), InitFlags> {
-        if !self.capabilities.contains(capabilities_to_add) {
-            let unsupported = capabilities_to_add & !self.capabilities;
-            return Err(unsupported);
+        let conditional = if self.idmap_available(capabilities_to_add) {
+            InitFlags::empty()
+        } else {
+            InitFlags::FUSE_ALLOW_IDMAP
+        };
+        let refused =
+            capabilities_to_add & (!self.capabilities | UNSUPPORTED_CAPABILITIES | conditional);
+        if !refused.is_empty() {
+            return Err(refused);
         }
         self.requested |= capabilities_to_add;
         Ok(())
@@ -438,7 +670,47 @@ pub trait Filesystem: Send + Sync + 'static {
         reply.error(Errno::ENOSYS);
     }
 
+    /// Get extended file attributes, for `statx(2)`.
+    ///
+    /// Answering this rather than leaving it to [`Filesystem::getattr`] lets a filesystem
+    /// report a creation time, which no other request can carry: `fuse_attr` has a field for
+    /// it on macOS alone, and `statx(2)` otherwise reports whatever the kernel last cached.
+    ///
+    /// It does not, despite the wire format having room for them, make the `STATX_ATTR_*`
+    /// properties reportable - see [`StatxAttr::attributes`].
+    ///
+    /// `mask` is what the caller asked for. It is a request rather than an obligation:
+    /// answering with more costs nothing, and what the reply actually carries is described by
+    /// the reply itself.
+    ///
+    /// Answering `ENOSYS`, which is the default, is permanent: the kernel stops sending
+    /// `FUSE_STATX` on this connection and serves `statx(2)` out of [`Filesystem::getattr`].
+    fn statx(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        fh: Option<FileHandle>,
+        flags: u32,
+        mask: StatxMask,
+        reply: ReplyStatx,
+    ) {
+        warn!(
+            "[Not Implemented] statx(ino: {ino:#x?}, fh: {fh:#x?}, flags: {flags:#x?}, \
+            mask: {mask:?})"
+        );
+        reply.error(Errno::ENOSYS);
+    }
+
     /// Set file attributes.
+    ///
+    /// `kill_suid_gid` asks the filesystem to clear the suid and sgid bits of the file as part
+    /// of this request, because the caller lacks `CAP_FSETID`. It is only ever set once
+    /// [`InitFlags::FUSE_HANDLE_KILLPRIV_V2`] has been negotiated, since the kernel otherwise
+    /// clears them itself.
+    ///
+    /// Honoring it is necessary but not sufficient: that capability also makes clearing the
+    /// `security.capability` xattr on every write, chown and truncate the filesystem's job,
+    /// and no argument reports that. See [`InitFlags::FUSE_HANDLE_KILLPRIV_V2`].
     fn setattr(
         &self,
         _req: &Request,
@@ -455,11 +727,13 @@ pub trait Filesystem: Send + Sync + 'static {
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
         flags: Option<BsdFileFlags>,
+        kill_suid_gid: bool,
         reply: ReplyAttr,
     ) {
         warn!(
             "[Not Implemented] setattr(ino: {ino:#x?}, mode: {mode:?}, uid: {uid:?}, \
-            gid: {gid:?}, size: {size:?}, fh: {fh:?}, flags: {flags:?})"
+            gid: {gid:?}, size: {size:?}, fh: {fh:?}, flags: {flags:?}, \
+            kill_suid_gid: {kill_suid_gid})"
         );
         reply.error(Errno::ENOSYS);
     }
@@ -480,6 +754,7 @@ pub trait Filesystem: Send + Sync + 'static {
         mode: u32,
         umask: u32,
         rdev: u32,
+        _owner: Owner,
         reply: ReplyEntry,
     ) {
         warn!(
@@ -497,6 +772,7 @@ pub trait Filesystem: Send + Sync + 'static {
         name: &OsStr,
         mode: u32,
         umask: u32,
+        _owner: Owner,
         reply: ReplyEntry,
     ) {
         warn!(
@@ -524,6 +800,7 @@ pub trait Filesystem: Send + Sync + 'static {
         parent: INodeNo,
         link_name: &OsStr,
         target: &Path,
+        _owner: Owner,
         reply: ReplyEntry,
     ) {
         warn!(
@@ -533,6 +810,9 @@ pub trait Filesystem: Send + Sync + 'static {
     }
 
     /// Rename a file.
+    ///
+    /// `flags` are the `renameat2` flags on Linux and the `renamex_np` flags on macOS. Reply
+    /// with EINVAL for any flag that isn't handled.
     fn rename(
         &self,
         _req: &Request,
@@ -541,6 +821,7 @@ pub trait Filesystem: Send + Sync + 'static {
         newparent: INodeNo,
         newname: &OsStr,
         flags: RenameFlags,
+        _owner: Option<Owner>,
         reply: ReplyEmpty,
     ) {
         warn!(
@@ -573,7 +854,23 @@ pub trait Filesystem: Send + Sync + 'static {
     /// anything in fh. There are also some flags (`direct_io`, `keep_cache`) which the
     /// filesystem may set, to change the way the file is opened. See `fuse_file_info`
     /// structure in <`fuse_common.h`> for more details.
-    fn open(&self, _req: &Request, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+    ///
+    /// `kill_suid_gid` asks the filesystem to clear the suid and sgid bits of the file, because
+    /// the open truncates it and the caller lacks `CAP_FSETID`. It is only ever set once
+    /// [`InitFlags::FUSE_HANDLE_KILLPRIV_V2`] has been negotiated, since the kernel otherwise
+    /// clears them itself.
+    ///
+    /// Honoring it is necessary but not sufficient: that capability also makes clearing the
+    /// `security.capability` xattr on every write, chown and truncate the filesystem's job,
+    /// and no argument reports that. See [`InitFlags::FUSE_HANDLE_KILLPRIV_V2`].
+    fn open(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _flags: OpenFlags,
+        _kill_suid_gid: bool,
+        reply: ReplyOpen,
+    ) {
         reply.opened(FileHandle(0), FopenFlags::empty());
     }
 
@@ -838,6 +1135,15 @@ pub trait Filesystem: Send + Sync + 'static {
     /// opened. See `fuse_file_info` structure in <`fuse_common.h`> for more details. If
     /// this method is not implemented or under Linux kernel versions earlier than
     /// 2.6.15, the `mknod()` and `open()` methods will be called instead.
+    ///
+    /// `kill_suid_gid` asks the filesystem to clear the suid and sgid bits of an existing file,
+    /// because the open truncates it and the caller lacks `CAP_FSETID`. It is only ever set once
+    /// [`InitFlags::FUSE_HANDLE_KILLPRIV_V2`] has been negotiated, since the kernel otherwise
+    /// clears them itself.
+    ///
+    /// Honoring it is necessary but not sufficient: that capability also makes clearing the
+    /// `security.capability` xattr on every write, chown and truncate the filesystem's job,
+    /// and no argument reports that. See [`InitFlags::FUSE_HANDLE_KILLPRIV_V2`].
     fn create(
         &self,
         _req: &Request,
@@ -846,11 +1152,13 @@ pub trait Filesystem: Send + Sync + 'static {
         mode: u32,
         umask: u32,
         flags: i32,
+        kill_suid_gid: bool,
+        _owner: Owner,
         reply: ReplyCreate,
     ) {
         warn!(
             "[Not Implemented] create(parent: {parent:#x?}, name: {name:?}, mode: {mode}, \
-            umask: {umask:#x?}, flags: {flags:#x?})"
+            umask: {umask:#x?}, flags: {flags:#x?}, kill_suid_gid: {kill_suid_gid})"
         );
         reply.error(Errno::ENOSYS);
     }
@@ -1005,6 +1313,50 @@ pub trait Filesystem: Send + Sync + 'static {
         reply.error(Errno::ENOSYS);
     }
 
+    /// Create an anonymous file, for `open()` with `O_TMPFILE`.
+    ///
+    /// The file has no name and belongs to no directory. `parent` is the directory it was
+    /// created in, which is where it will live if it is later given a name with `linkat()`;
+    /// until then nothing can reach it by path. Reply as for [`Filesystem::create`], with
+    /// an inode and an open file handle.
+    ///
+    /// Answering `ENOSYS`, which is the default, is permanent: the kernel stops offering
+    /// `O_TMPFILE` on this connection and reports `EOPNOTSUPP` to the caller without
+    /// asking again.
+    fn tmpfile(
+        &self,
+        _req: &Request,
+        parent: INodeNo,
+        mode: u32,
+        umask: u32,
+        flags: i32,
+        kill_suid_gid: bool,
+        _owner: Owner,
+        reply: ReplyCreate,
+    ) {
+        warn!(
+            "[Not Implemented] tmpfile(parent: {parent:#x?}, mode: {mode}, umask: {umask:#x?}, \
+            flags: {flags:#x?}, kill_suid_gid: {kill_suid_gid})"
+        );
+        reply.error(Errno::ENOSYS);
+    }
+
+    /// Synchronize the whole filesystem, for the `syncfs(2)` system call.
+    ///
+    /// `ino` is the root inode. Replying before everything the filesystem holds is durable
+    /// defeats the point of the call, so a filesystem that cannot make that guarantee is
+    /// better off leaving this unimplemented, which reports `ENOSYS` and makes the kernel
+    /// stop asking for the lifetime of the connection.
+    ///
+    /// Note that the kernel only propagates `syncfs(2)` on `fuseblk` and virtiofs
+    /// connections. A filesystem mounted by fuser is neither, so this is reachable only
+    /// for a session built with [`Session::from_fd`] on such a connection. Everywhere
+    /// else `syncfs(2)` succeeds without asking the filesystem anything.
+    fn syncfs(&self, _req: &Request, ino: INodeNo, reply: ReplyEmpty) {
+        warn!("[Not Implemented] syncfs(ino: {ino:#x?})");
+        reply.error(Errno::ENOSYS);
+    }
+
     /// macOS only: Rename the volume. Set `fuse_init_out.flags` during init to
     /// `FUSE_VOL_RENAME` to enable
     #[cfg(target_os = "macos")]
@@ -1071,4 +1423,292 @@ pub fn spawn_mount<'a, FS: Filesystem + Send + 'static + 'a, P: AsRef<Path>>(
     options: &Config,
 ) -> io::Result<BackgroundSession> {
     Session::new(filesystem, mountpoint.as_ref(), options).and_then(session::Session::spawn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_attr_from_metadata() {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"0123456789").unwrap();
+        // Ask for every mode bit the protocol carries, so that a conversion masking the wrong
+        // width shows up here. FreeBSD refuses setgid on a file whose group the caller is not
+        // in, where Linux drops the bit silently, so take whatever the platform stored rather
+        // than assuming the request succeeded
+        let set = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o6754)).is_ok();
+
+        let metadata = std::fs::metadata(&file).unwrap();
+        let attr = FileAttr::try_from(&metadata).unwrap();
+
+        assert_eq!(attr.kind, FileType::RegularFile);
+        assert_eq!(attr.size, 10);
+        // The file type bits belong to `kind`, and must not leak into `perm`
+        assert_eq!(u32::from(attr.perm), metadata.mode() & 0o7777);
+        // ...which only tests anything if the raw mode has bits outside that mask to drop
+        assert_ne!(metadata.mode() & !0o7777, 0);
+        if set {
+            // Where the platform took the whole request, every bit above the permissions has
+            // to survive too, which is what a conversion masking the wrong width would lose
+            assert_eq!(attr.perm, 0o6754);
+        }
+        assert_eq!(attr.ino, INodeNo(metadata.ino()));
+        assert_eq!(attr.uid, metadata.uid());
+        assert_eq!(attr.gid, metadata.gid());
+        assert_eq!(attr.nlink, 1);
+        assert_eq!(attr.blocks, metadata.blocks());
+        assert_eq!(
+            attr.mtime,
+            time::system_time_from_time(metadata.mtime(), metadata.mtime_nsec() as u32,)
+        );
+        // std exposes no accessor for the BSD flags, so they are always absent
+        assert_eq!(attr.flags, 0);
+
+        // Nothing but a device file has an rdev, whatever the platform left in the field
+        assert_eq!(attr.rdev, 0);
+
+        let attr = FileAttr::try_from(&std::fs::metadata(dir.path()).unwrap()).unwrap();
+        assert_eq!(attr.kind, FileType::Directory);
+
+        // A symlink only reports as one when the metadata was taken without following it
+        let link = dir.path().join("l");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let attr = FileAttr::try_from(&std::fs::symlink_metadata(&link).unwrap()).unwrap();
+        assert_eq!(attr.kind, FileType::Symlink);
+        // FreeBSD's UFS keeps a fast symlink's target in the inode field that a device file
+        // uses for its rdev, so reading it here would report the target's first eight bytes
+        assert_eq!(attr.rdev, 0);
+        let attr = FileAttr::try_from(&std::fs::metadata(&link).unwrap()).unwrap();
+        assert_eq!(attr.kind, FileType::RegularFile);
+    }
+
+    #[test]
+    fn file_attr_from_metadata_of_a_device() {
+        use std::os::unix::fs::MetadataExt;
+
+        // Every platform this builds on has /dev/null, and it is a character device on all of
+        // them, but its device number is assigned by the system and is not worth predicting
+        let metadata = std::fs::metadata("/dev/null").unwrap();
+        let attr = FileAttr::try_from(&metadata).unwrap();
+
+        assert_eq!(attr.kind, FileType::CharDevice);
+        assert_eq!(u64::from(attr.rdev), metadata.rdev());
+        assert_ne!(attr.rdev, 0);
+    }
+
+    #[test]
+    fn file_attr_from_metadata_of_a_fifo() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("p");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
+
+        let attr = FileAttr::try_from(&std::fs::symlink_metadata(&fifo).unwrap()).unwrap();
+        assert_eq!(attr.kind, FileType::NamedPipe);
+        assert_eq!(attr.perm, 0o400);
+    }
+
+    #[test]
+    fn kernel_config_set_max_write_bounds() {
+        let mut config = KernelConfig::new(
+            InitFlags::empty(),
+            65536,
+            Version(7, 31),
+            true,
+            SessionACL::All,
+        );
+        // Values the kernel would not honor (it clamps max_write below 4096 up
+        // to 4096) are rejected with the nearest value that will take effect
+        assert_eq!(config.set_max_write(0), Err(MIN_WRITE_SIZE as u32));
+        assert_eq!(
+            config.set_max_write(MIN_WRITE_SIZE as u32 - 1),
+            Err(MIN_WRITE_SIZE as u32)
+        );
+        // Values beyond the session's read buffer are rejected likewise
+        assert_eq!(
+            config.set_max_write(MAX_WRITE_SIZE as u32 + 1),
+            Err(MAX_WRITE_SIZE as u32)
+        );
+        // Rejected calls must leave the configured value unchanged
+        assert_eq!(config.max_write, MAX_WRITE_SIZE as u32);
+        // Both bounds themselves are accepted, returning the previous value
+        assert_eq!(
+            config.set_max_write(MIN_WRITE_SIZE as u32),
+            Ok(MAX_WRITE_SIZE as u32)
+        );
+        assert_eq!(
+            config.set_max_write(MAX_WRITE_SIZE as u32),
+            Ok(MIN_WRITE_SIZE as u32)
+        );
+    }
+
+    /// FUSE_ALLOW_IDMAP is refused unless the mount can carry it, since the kernel refuses
+    /// the connection without default_permissions and fuser cannot enforce an owner-only ACL
+    /// once the caller's ids are withheld
+    #[test]
+    fn add_capabilities_idmap_needs_default_permissions_and_allow_other() {
+        let cases = [
+            (true, SessionACL::All, true),
+            (false, SessionACL::All, false),
+            (true, SessionACL::Owner, false),
+            (true, SessionACL::RootAndOwner, false),
+            (false, SessionACL::Owner, false),
+        ];
+        for (default_permissions, acl, accepted) in cases {
+            let mut config = KernelConfig::new(
+                InitFlags::all(),
+                65536,
+                Version(7, 43),
+                default_permissions,
+                acl,
+            );
+            let result = config.add_capabilities(InitFlags::FUSE_ALLOW_IDMAP);
+            assert_eq!(
+                result.is_ok(),
+                accepted,
+                "default_permissions={default_permissions} acl={acl:?} should                  {} the capability",
+                if accepted { "accept" } else { "refuse" }
+            );
+            if !accepted {
+                assert_eq!(result, Err(InitFlags::FUSE_ALLOW_IDMAP));
+                assert!(!config.requested.contains(InitFlags::FUSE_ALLOW_IDMAP));
+            } else {
+                assert!(config.requested.contains(InitFlags::FUSE_ALLOW_IDMAP));
+            }
+        }
+    }
+
+    /// Negotiating POSIX ACLs puts default_permissions in force just as the mount option does,
+    /// the kernel setting it from that flag before it validates this one, so it satisfies the
+    /// requirement on its own - but only where the kernel offers it, since a capability it
+    /// does not offer is dropped from the negotiated set and sets nothing
+    #[test]
+    fn add_capabilities_idmap_accepts_posix_acl_for_default_permissions() {
+        // Both in one call
+        let mut config = KernelConfig::new(
+            InitFlags::all(),
+            65536,
+            Version(7, 43),
+            false,
+            SessionACL::All,
+        );
+        assert_eq!(
+            config.add_capabilities(InitFlags::FUSE_POSIX_ACL | InitFlags::FUSE_ALLOW_IDMAP),
+            Ok(())
+        );
+
+        // ACLs asked for first, in an earlier call
+        let mut config = KernelConfig::new(
+            InitFlags::all(),
+            65536,
+            Version(7, 43),
+            false,
+            SessionACL::All,
+        );
+        assert_eq!(config.add_capabilities(InitFlags::FUSE_POSIX_ACL), Ok(()));
+        assert_eq!(config.add_capabilities(InitFlags::FUSE_ALLOW_IDMAP), Ok(()));
+
+        // A kernel without POSIX ACLs would drop them, leaving nothing to force
+        // default_permissions and a connection the kernel would refuse
+        let mut config = KernelConfig::new(
+            InitFlags::all() & !InitFlags::FUSE_POSIX_ACL,
+            65536,
+            Version(7, 43),
+            false,
+            SessionACL::All,
+        );
+        assert_eq!(
+            config.add_capabilities(InitFlags::FUSE_POSIX_ACL | InitFlags::FUSE_ALLOW_IDMAP),
+            Err(InitFlags::FUSE_POSIX_ACL | InitFlags::FUSE_ALLOW_IDMAP)
+        );
+
+        // Neither one on its own is enough without allow_other
+        let mut config = KernelConfig::new(
+            InitFlags::all(),
+            65536,
+            Version(7, 43),
+            false,
+            SessionACL::Owner,
+        );
+        assert_eq!(
+            config.add_capabilities(InitFlags::FUSE_POSIX_ACL | InitFlags::FUSE_ALLOW_IDMAP),
+            Err(InitFlags::FUSE_ALLOW_IDMAP)
+        );
+    }
+
+    /// A kernel that does not offer it cannot have it forced on, whatever the mount looks like
+    #[test]
+    fn add_capabilities_idmap_needs_the_kernel_to_offer_it() {
+        let mut config = KernelConfig::new(
+            InitFlags::all() & !InitFlags::FUSE_ALLOW_IDMAP,
+            65536,
+            Version(7, 43),
+            true,
+            SessionACL::All,
+        );
+        assert_eq!(
+            config.add_capabilities(InitFlags::FUSE_ALLOW_IDMAP),
+            Err(InitFlags::FUSE_ALLOW_IDMAP)
+        );
+    }
+
+    #[test]
+    fn add_capabilities_refuses_unimplemented() {
+        // A kernel advertising everything, so only fuser's own limits can refuse anything
+        let mut config = KernelConfig::new(
+            InitFlags::all(),
+            65536,
+            Version(7, 43),
+            true,
+            SessionACL::All,
+        );
+        let before = config.requested;
+        for capability in UNSUPPORTED_CAPABILITIES {
+            assert_eq!(config.add_capabilities(capability), Err(capability));
+        }
+        // Now that setattr, open and create carry kill_suid_gid, this one is honored rather
+        // than refused, and must not drift back into the refused set
+        assert_eq!(
+            config.add_capabilities(InitFlags::FUSE_HANDLE_KILLPRIV_V2),
+            Ok(())
+        );
+        // A capability fuser implements is still accepted from the same kernel
+        assert_eq!(config.add_capabilities(InitFlags::FUSE_POSIX_ACL), Ok(()));
+        assert_eq!(
+            config.requested,
+            before | InitFlags::FUSE_HANDLE_KILLPRIV_V2 | InitFlags::FUSE_POSIX_ACL
+        );
+    }
+
+    #[test]
+    fn refused_capabilities_are_never_requested_by_default() {
+        // Below bit 32 a capability aliases a macFUSE one, some of which fuser requests itself.
+        // Refusing a bit fuser goes on to request would be incoherent, and on macOS would break
+        // the operations built on it, so the two sets must stay disjoint on every platform
+        assert!(UNSUPPORTED_CAPABILITIES.intersection(INIT_FLAGS).is_empty());
+    }
+
+    #[test]
+    fn add_capabilities_refuses_all_or_nothing() {
+        // Advertise everything except one capability fuser does implement
+        let capabilities = InitFlags::all() - InitFlags::FUSE_POSIX_ACL;
+        let mut config =
+            KernelConfig::new(capabilities, 65536, Version(7, 43), true, SessionACL::All);
+        let before = config.requested;
+        // Both reasons for refusing are reported together, and a capability that would have
+        // been accepted on its own is not added
+        assert_eq!(
+            config.add_capabilities(
+                InitFlags::FUSE_POSIX_ACL
+                    | InitFlags::FUSE_SECURITY_CTX
+                    | InitFlags::FUSE_ASYNC_DIO
+            ),
+            Err(InitFlags::FUSE_POSIX_ACL | InitFlags::FUSE_SECURITY_CTX)
+        );
+        assert_eq!(config.requested, before);
+    }
 }

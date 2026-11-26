@@ -613,7 +613,7 @@ calls none of them: it makes no `BackingId` and does not set `clone_fd`.
 ### mnt/fuse2_sys.rs: the `unsafe extern "C"` block
 
 - **File and item**: `vendor/fuser/src/mnt/fuse2_sys.rs`, the block with
-  `fuse_mount_compat25` (and `fuse_unmount_compat22` for other targets).
+  `fuse_mount_compat25`.
 - **Compiled for SliceFS**: Linux no (the module is compiled for the
   vendored tests, but this block is `cfg(fuser_mount_impl = "libfuse2")`),
   macOS yes.
@@ -627,16 +627,19 @@ calls none of them: it makes no `BackingId` and does not set `clone_fd`.
 
 ### Not compiled for SliceFS
 
-- `mnt/fuse2.rs`, `MountImpl::umount_impl`, the `fuse_unmount_compat22`
-  block: not compiled (its cfg leaves out macOS, and Linux does not build
-  `fuse2.rs`).
-- `mnt/fuse3.rs`, 6 tokens (`fuse_session_new`, `fuse_session_mount`,
-  `fuse_session_fd`, `BorrowedFd::borrow_raw`, the unmount block,
+- `mnt/fuse3.rs`, 7 tokens (`fuse_session_new`, `fuse_session_mount`,
+  `fuse_session_fd`, `BorrowedFd::borrow_raw`, the Linux unmount block of
+  `umount_impl`, the `fuse_session_destroy` block of `Drop for MountImpl`,
   `unsafe impl Send for MountImpl`): not compiled (`libfuse3` only).
 - `mnt/fuse3_sys.rs`, the `unsafe extern "C"` block: not compiled
   (`libfuse3` only).
-- `mnt/mod.rs`, the `CStr::from_ptr` of a test of `with_fuse_args`: test
-  code; it runs in the vendored lib tests of the CI job `linux`.
+- `mnt/mod.rs`, the `CStr::from_ptr` of two tests of `with_fuse_args`
+  (`fuse_args`, `fuse_args_escaping`): test code; it runs in the vendored
+  lib tests of the CI job `linux`.
+- `session.rs`, 3 tokens in Linux-only mount tests (the `renameat2`
+  syscall of `rename_names_an_owner_only_for_a_whiteout`, the zeroed
+  `libc::statx` and the `statx` call of `statx_reports_btime`): test code;
+  it runs in the vendored lib tests of the CI job `linux`.
 - `examples/passthrough_fork.rs` (`wrap_backing`, `fork`,
   `OwnedFd::from_raw_fd`) and `examples/simple.rs` (3 tokens): fuser
   examples. SliceFS does not build them.
@@ -689,11 +692,12 @@ compares these lines with the code.
 - count: vendor/fuser/examples/simple.rs 3
 - count: vendor/fuser/src/channel.rs 3
 - count: vendor/fuser/src/forget_one.rs 1
-- count: vendor/fuser/src/mnt/fuse2.rs 3
+- count: vendor/fuser/src/mnt/fuse2.rs 2
 - count: vendor/fuser/src/mnt/fuse2_sys.rs 1
-- count: vendor/fuser/src/mnt/fuse3.rs 6
+- count: vendor/fuser/src/mnt/fuse3.rs 7
 - count: vendor/fuser/src/mnt/fuse3_sys.rs 1
 - count: vendor/fuser/src/mnt/fuse_pure.rs 5
-- count: vendor/fuser/src/mnt/mod.rs 1
+- count: vendor/fuser/src/mnt/mod.rs 2
 - count: vendor/fuser/src/passthrough.rs 3
 - count: vendor/fuser/src/reply.rs 6
+- count: vendor/fuser/src/session.rs 3

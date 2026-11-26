@@ -1,54 +1,52 @@
-# Local patches to fuser 0.18.0
+# Local patches to fuser 0.19.0
 
-This is fuser 0.18.0 from crates.io (upstream commit `9c957f74efe715112049298cdf1d601781829c8d`)
-with the patches below. SliceFS uses it through `[patch.crates-io]` in the workspace `Cargo.toml`.
-Drop this copy when upstream ships the fix.
+This is the fuser source tree at tag `v0.19.0` (upstream commit `893dfeb`), with the patches
+below. SliceFS uses it through `[patch.crates-io]` in the workspace `Cargo.toml`.
+Drop this copy when upstream ships the fixes.
+
+All three patches are for FUSE-T on macOS. They were found with FUSE-T 1.2.x; see the
+upstream issue https://github.com/cberner/fuser/issues/761.
 
 ## 1. Size the INIT reply for the negotiated protocol minor version
 
-File: `src/ll/request.rs`, `Init::reply()`.
+Upstream PR: https://github.com/cberner/fuser/pull/789 (open).
+Files: `src/ll/fuse_abi.rs`, `src/ll/request.rs` (`Init::reply()`, unit tests).
 
-fuser declares protocol 7.19 on macOS (`FUSE_KERNEL_MINOR_VERSION = 19`) but picked the
-`fuse_init_out` size from the *kernel's* minor version only. When the peer announces minor >= 23,
-fuser sent the full 64-byte struct while claiming 7.19.
+fuser declares protocol 7.19 on macOS but picked the `fuse_init_out` size from the peer's
+minor version only. FUSE-T offers 7.23, so fuser sent the 64-byte 7.23 reply while claiming
+7.19. FUSE-T uses the INIT reply to choose a protocol profile: a 64-byte reply makes it pick
+its libfuse3 profile with Linux struct layouts, but fuser then sends macOS layouts, so FUSE-T
+closes the connection after the first GETATTR. With the reply sized for
+`min(peer minor, our minor)` (24 bytes for 7.19), FUSE-T picks its libfuse2-compatible profile
+with macOS layouts.
 
-FUSE-T 1.2.x uses the INIT reply to choose a protocol profile. A 64-byte reply makes it pick the
-"v3" (libfuse3, Linux struct layout) profile, but fuser then sends macOS layouts (for example
-`fuse_attr` with `crtime`/`flags`), so FUSE-T closes the connection after the first GETATTR and
-fuser reports "Invalid request" (a 0-byte read). With the reply sized for
-`min(kernel minor, our minor)` (24 bytes for 7.19), FUSE-T picks the "v2" (libfuse2-compatible,
-macOS layout) profile and everything works.
+## 2. Parse the `fuse_rename_in` layout that the peer sends on macOS
 
+Upstream PR: https://github.com/cberner/fuser/pull/789 (open), same commit as patch 1.
+File: `src/ll/request.rs` (`FUSE_RENAME` parsing, unit tests).
 
-## 2. Framed I/O when the channel fd is a stream socket (FUSE-T)
+fuser always parsed `fuse_rename_in` on macOS with macFUSE's extended layout, which carries
+the `renamex_np` flags. macFUSE sends that layout only when FUSE_RENAME_SWAP was negotiated.
+FUSE-T sends the plain 8-byte layout, so the names were read from the wrong offset and `mv`
+failed. fuser now parses the extension only when FUSE_RENAME_SWAP was negotiated, as macFUSE's
+own libfuse does.
 
-File: `src/channel.rs`.
+## 3. Read and write whole messages on a stream socket
 
-FUSE-T hands libfuse a `SOCK_STREAM` socket instead of a character device. fuser read one
-request per `read()` and wrote one reply per `writev()`, which is only correct for a device.
-On the socket, a 512 KiB WRITE arrived in pieces ("Short read of FUSE request (80 < 524368)"),
-the request was dropped, never answered, and `cp` into the mount hung (on every backend).
+Not yet sent upstream.
+Files: `src/channel.rs` (`StreamSocket`, unit tests), `src/dev_fuse.rs` (`DevFuse` keeps the
+detected socket state; `DevFuse::new`), and the places that build a `DevFuse`
+(`src/session.rs`, `src/notify.rs` test, `src/mnt/fuse2.rs`, `src/mnt/fuse3.rs`,
+`src/mnt/fuse_pure.rs`).
 
-When the fd is a socket (checked once with `fstat`), `receive()` now reads the 40-byte header,
-then exactly the rest of the request, and maps EOF to `ENODEV` (clean exit on unmount).
-`send()` takes a lock and loops until the whole reply is written. Device fds are unchanged.
-This mirrors `lib/fuse_kern_chan.c` in FUSE-T's libfuse.
+FUSE-T hands libfuse a `SOCK_STREAM` socket instead of a character device. A device returns
+one whole request per `read()` and takes one whole reply per `writev()`; a stream socket can
+split either. A large WRITE then arrived in parts ("Short read of FUSE request"), was dropped,
+never answered, and `cp` into the mount hung.
 
-## 3. Parse both `fuse_rename_in` layouts on macOS
-
-Files: `src/ll/request.rs` (`FUSE_RENAME` parsing, `Rename` struct, 2 new unit tests),
-`src/ll/argument.rs` (`ArgumentIterator::peek`).
-
-With `macfuse-4-compat`, fuser always parsed `fuse_rename_in` as 16 bytes (`newdir`, `flags`,
-`padding`). The peer uses that layout only when FUSE_RENAME_SWAP was negotiated; otherwise it
-sends the 8-byte compat layout (`newdir` only). FUSE-T sends the 8-byte layout, so the old
-names were misparsed, fuser answered ENOSYS, and `mv` failed with "Permission denied".
-
-fuser now reads `newdir`, and on macOS skips `flags`/`padding` only if the remaining bytes
-contain more than two NULs. The two names never contain NUL, so the compat layout leaves
-exactly two, while the extended layout adds at least four zero padding bytes. The rename
-`flags` were never used by fuser (it always passes `RenameFlags::empty()`), so nothing is lost.
-
-## Upstream
-
-Reported upstream: https://github.com/cberner/fuser/issues/761 — drop this copy once fuser ships the fixes.
+When the fd is a stream socket (checked once with `getsockopt(SO_TYPE) == SOCK_STREAM`),
+`receive()` reads the 40-byte header, then exactly the rest of the request, and maps EOF
+before a request to `ENODEV` (clean exit on unmount). `send()` loops until the whole reply
+is written. Reads and writes each take their own lock, so concurrent readers or senders
+cannot interleave bytes. Devices and seqpacket sockets are unchanged. This mirrors
+`lib/fuse_kern_chan.c` in FUSE-T's libfuse.

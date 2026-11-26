@@ -1,5 +1,56 @@
 # FUSE for Rust - Changelog
 
+## 0.19.0 - 2026-11-20
+
+Breaking changes:
+* `Request::uid()` and `Request::gid()` return `Option<u32>`, since an idmapped mount has no caller
+  ids. `experimental::RequestContext::user_id()` and `group_id()` likewise return `Option<u32>`
+* Add an `Owner` argument to `mknod()`, `mkdir()`, `symlink()`, `create()` and `tmpfile()`, and an
+  `Option<Owner>` argument to `rename()`
+* Add a `kill_suid_gid` argument to `setattr()`, `open()` and `create()`, for
+  `FUSE_HANDLE_KILLPRIV_V2`
+* `KernelConfig::add_capabilities()` refuses capabilities fuser cannot honor, such as
+  `FUSE_SECURITY_CTX` and `FUSE_OVER_IO_URING`
+* `KernelConfig::set_max_write()` rejects values below 4096
+* `Session::new()` rejects `MountOption::Subtype` and `MountOption::CUSTOM` values containing a
+  comma or backslash, and any mount option value containing a NUL
+* Dropping a `BackgroundSession` now waits for the session to end, so that `Filesystem::destroy()`
+  has run. The `guard` field is now private
+* Unmount lazily as root on Linux, instead of failing with `EBUSY`.
+  `BackgroundSession::umount_and_join()` returns `EBUSY` if the filesystem is still in use
+* macOS: forward the `renamex_np(2)` flags to `rename()`. Filesystems must reply `EINVAL` to flags
+  they do not support
+* Remove the `macfuse-4-compat` feature flag
+
+New features:
+* Support idmapped mounts via `InitFlags::FUSE_ALLOW_IDMAP`, which requires `allow_other` and
+  `default_permissions`
+* Support `InitFlags::FUSE_HANDLE_KILLPRIV_V2`
+* Support `InitFlags::FUSE_SETXATTR_EXT`
+* Add `Filesystem::statx()` (ABI 7.39)
+* Add `Filesystem::tmpfile()` for `O_TMPFILE`
+* Add `Filesystem::syncfs()`
+* Add `Notifier::inc_epoch()` to invalidate every cached directory entry at once
+* Add `Notifier::expire_entry()`
+* Add `remaining_capacity()` to `ReplyDirectory`, `ReplyDirectoryPlus` and the experimental
+  `DirEntListBuilder`
+* Add `TryFrom<&std::fs::Metadata>` for `FileAttr`
+* Report ABI 7.44 to the kernel on non-macOS platforms, up from 7.40
+
+Bug fixes:
+* Fix unmounting with `MountOption::AutoUnmount` from within the mounting process
+* Fix `Session::run()` returning an error after the connection was aborted with
+  `FUSE_ABORT_ERROR`
+* Fix meaningless errors, such as `Success (os error 0)`, when mounting fails inside libfuse
+* Log which path could not be reached when a mount fails
+* Fix teardown unmounting again after an external unmount, which could unmount an unrelated
+  filesystem mounted at the same path
+* Fix `MountOption::FSName` values containing a comma being parsed as further mount options
+* Report `fusermount` unmount failures from the pure-rust and `libfuse2` backends
+* Fix a per-mount memory leak in the `libfuse3` backend
+* Fix corruption of pre-1970 timestamps with fractional seconds in `setattr()`
+* macOS: fix garbled names in `rename()`
+
 ## 0.18.0 - 2026-07-22
 * Remove deprecated feature flags `abi-*`
 * Rename `mount2()` to `mount()`

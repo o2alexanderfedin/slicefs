@@ -21,6 +21,7 @@ use serde::Serialize;
 
 use crate::Errno;
 use crate::ll::argument::ArgumentIterator;
+use crate::ll::flags::init_flags::InitFlags;
 use crate::ll::fuse_abi as abi;
 use crate::ll::fuse_abi::fuse_in_header;
 use crate::ll::fuse_abi::fuse_opcode;
@@ -264,8 +265,10 @@ mod op {
     use crate::ll::flags::fsync_flags::FsyncFlags;
     use crate::ll::flags::getattr_flags::GetattrFlags;
     use crate::ll::flags::init_flags::InitFlags;
+    use crate::ll::flags::open_in_flags::OpenInFlags;
     use crate::ll::flags::read_flags::ReadFlags;
     use crate::ll::flags::release_flags::ReleaseFlags;
+    use crate::ll::flags::statx_flags::StatxMask;
     use crate::ll::request::FileHandle;
     use crate::ll::request::FilenameInDir;
     use crate::ll::request::INodeNo;
@@ -338,6 +341,39 @@ mod op {
             } else {
                 None
             }
+        }
+    }
+
+    /// Get extended file attributes, for `statx(2)`.
+    #[derive(Debug)]
+    pub(crate) struct StatX<'a> {
+        #[expect(dead_code)]
+        header: &'a fuse_in_header,
+        arg: &'a fuse_statx_in,
+    }
+
+    impl StatX<'_> {
+        pub(crate) fn file_handle(&self) -> Option<FileHandle> {
+            if GetattrFlags::from_bits_retain(self.arg.getattr_flags)
+                .contains(GetattrFlags::FUSE_GETATTR_FH)
+            {
+                Some(FileHandle(self.arg.fh))
+            } else {
+                None
+            }
+        }
+
+        /// The `AT_STATX_*` sync flags the caller passed. The kernel sends zero for now,
+        /// having no way to act on them yet
+        pub(crate) fn flags(&self) -> u32 {
+            self.arg.sx_flags
+        }
+
+        /// What the caller asked for, which is a request rather than an obligation: answering
+        /// with more than this costs nothing, and answering with less is what
+        /// `StatxAttr`'s own mask reports
+        pub(crate) fn mask(&self) -> StatxMask {
+            StatxMask::from_bits_retain(self.arg.sx_mask)
         }
     }
 
@@ -482,6 +518,13 @@ mod op {
             #[cfg(not(target_os = "macos"))]
             None
         }
+        /// Whether the filesystem must clear suid and sgid as part of this request.
+        ///
+        /// Only ever true once `FUSE_HANDLE_KILLPRIV_V2` has been negotiated, since the kernel
+        /// otherwise clears them itself.
+        pub(crate) fn kill_suid_gid(&self) -> bool {
+            self.valid().contains(FattrFlags::FATTR_KILL_SUIDGID)
+        }
 
         // TODO: Why does *set*attr want to have an attr response?
     }
@@ -606,7 +649,10 @@ mod op {
     #[derive(Debug)]
     pub(crate) struct Rename<'a> {
         header: &'a fuse_in_header,
-        newdir: u64,
+        arg: &'a fuse_rename_in,
+        /// The `renamex_np` flags, carried only by macFUSE's extended layout
+        #[cfg(target_os = "macos")]
+        flags: u32,
         name: &'a Path,
         newname: &'a Path,
     }
@@ -619,9 +665,16 @@ mod op {
         }
         pub(crate) fn dest(&self) -> FilenameInDir<'a> {
             FilenameInDir::<'a> {
-                dir: INodeNo(self.newdir),
+                dir: INodeNo(self.arg.newdir),
                 name: self.newname,
             }
+        }
+        /// Flags as passed to `renamex_np`: [`crate::RenameFlags::RENAME_SWAP`] and
+        /// [`crate::RenameFlags::RENAME_EXCL`]. If you don't handle a particular flag
+        /// reply with an EINVAL error.
+        #[cfg(target_os = "macos")]
+        pub(crate) fn flags(&self) -> crate::RenameFlags {
+            crate::RenameFlags::from_bits_retain(self.flags)
         }
     }
 
@@ -664,6 +717,14 @@ mod op {
     impl Open<'_> {
         pub(crate) fn flags(&self) -> OpenFlags {
             OpenFlags(self.arg.flags)
+        }
+        /// Whether the filesystem must clear suid and sgid as part of this request.
+        ///
+        /// Only ever true once `FUSE_HANDLE_KILLPRIV_V2` has been negotiated, since the kernel
+        /// otherwise clears them itself.
+        pub(crate) fn kill_suid_gid(&self) -> bool {
+            OpenInFlags::from_bits_retain(self.arg.open_flags)
+                .contains(OpenInFlags::FUSE_OPEN_KILL_SUIDGID)
         }
     }
 
@@ -832,12 +893,19 @@ mod op {
         #[expect(dead_code)]
         header: &'a fuse_in_header,
         arg: &'a fuse_setxattr_in,
+        /// Only carried when `FUSE_SETXATTR_EXT` was negotiated; 0 otherwise
+        setxattr_flags: u32,
         name: &'a OsStr,
         value: &'a [u8],
     }
     impl<'a> SetXAttr<'a> {
         pub(crate) fn name(&self) -> &'a OsStr {
             self.name
+        }
+        /// The `FUSE_SETXATTR_*` flags. Always 0 unless `FUSE_SETXATTR_EXT` has been
+        /// negotiated, which never happens on macOS
+        pub(crate) fn setxattr_flags(&self) -> u32 {
+            self.setxattr_flags
         }
         pub(crate) fn value(&self) -> &'a [u8] {
             self.value
@@ -970,6 +1038,21 @@ mod op {
         }
     }
 
+    /// How much of `fuse_init_out` to send. The layout follows the protocol version both sides
+    /// speak, the lower of the two minors, not the peer's alone: a peer newer than fuser, such
+    /// as FUSE-T offering 7.23 to fuser's 7.19 on macOS, picks its protocol from the size of
+    /// the reply and would otherwise expect layouts fuser does not send.
+    pub(crate) fn init_out_size(peer_minor: u32, our_minor: u32) -> usize {
+        let minor = peer_minor.min(our_minor);
+        if minor < 5 {
+            FUSE_COMPAT_INIT_OUT_SIZE
+        } else if minor < 23 {
+            FUSE_COMPAT_22_INIT_OUT_SIZE
+        } else {
+            size_of::<fuse_init_out>()
+        }
+    }
+
     #[derive(Debug)]
     pub(crate) struct Init<'a> {
         #[expect(dead_code)]
@@ -1021,19 +1104,9 @@ mod op {
             }
 
             let init = init.as_bytes();
-            // Size the reply for the *negotiated* minor version: the smaller of the
-            // kernel's and ours. Using only the kernel's minor sends the full struct
-            // while claiming minor 19 on macOS, which FUSE-T 1.2.x reads as a
-            // libfuse3 client and switches to Linux struct layouts.
-            let negotiated_minor = self.arg.minor.min(FUSE_KERNEL_MINOR_VERSION);
-            let init = if negotiated_minor < 5 {
-                &init[..FUSE_COMPAT_INIT_OUT_SIZE]
-            } else if negotiated_minor < 23 {
-                &init[..FUSE_COMPAT_22_INIT_OUT_SIZE]
-            } else {
-                init
-            };
-            ResponseData::new_data(init)
+            ResponseData::new_data(
+                &init[..init_out_size(self.arg.minor, FUSE_KERNEL_MINOR_VERSION)],
+            )
         }
 
         /// Reply with only our version, used when kernel major version > our major version.
@@ -1259,6 +1332,54 @@ mod op {
         }
         pub(crate) fn umask(&self) -> u32 {
             self.arg.umask
+        }
+        /// Whether the filesystem must clear suid and sgid as part of this request.
+        ///
+        /// Only ever true once `FUSE_HANDLE_KILLPRIV_V2` has been negotiated, since the kernel
+        /// otherwise clears them itself.
+        pub(crate) fn kill_suid_gid(&self) -> bool {
+            OpenInFlags::from_bits_retain(self.arg.open_flags)
+                .contains(OpenInFlags::FUSE_OPEN_KILL_SUIDGID)
+        }
+    }
+
+    /// Create an anonymous file, for `open()` with `O_TMPFILE`.
+    ///
+    /// The file has no name and belongs to no directory: only the directory it is created
+    /// in is given, so that the filesystem knows where it will live if it is later given a
+    /// name with `linkat()`. The kernel does send a name, but it is the placeholder `/`
+    /// that the VFS gives every anonymous dentry, so it says nothing and is not passed on.
+    ///
+    /// Answering with `ENOSYS` is permanent: the kernel stops offering `O_TMPFILE` on this
+    /// connection and reports `EOPNOTSUPP` without asking again.
+    #[derive(Debug)]
+    pub(crate) struct TmpFile<'a> {
+        #[expect(dead_code)]
+        header: &'a fuse_in_header,
+        arg: &'a fuse_create_in,
+        /// The placeholder the VFS names anonymous dentries, read only to check the
+        /// length the kernel sent
+        #[expect(dead_code)]
+        name: &'a Path,
+    }
+    impl TmpFile<'_> {
+        pub(crate) fn mode(&self) -> u32 {
+            self.arg.mode
+        }
+        /// Flags as passed to the `open()` call
+        pub(crate) fn flags(&self) -> i32 {
+            self.arg.flags
+        }
+        pub(crate) fn umask(&self) -> u32 {
+            self.arg.umask
+        }
+        /// Whether the filesystem must clear suid and sgid as part of this request.
+        ///
+        /// Only ever true once `FUSE_HANDLE_KILLPRIV_V2` has been negotiated, since the kernel
+        /// otherwise clears them itself.
+        pub(crate) fn kill_suid_gid(&self) -> bool {
+            OpenInFlags::from_bits_retain(self.arg.open_flags)
+                .contains(OpenInFlags::FUSE_OPEN_KILL_SUIDGID)
         }
     }
 
@@ -1569,6 +1690,20 @@ mod op {
         }
     }
 
+    /// Synchronize the whole filesystem.
+    ///
+    /// The kernel sends this for `syncfs(2)`, and only on connections where it
+    /// propagates that call at all, which are `fuseblk` and virtiofs mounts. It carries
+    /// no arguments beyond the root inode the request is addressed to.
+    #[derive(Debug)]
+    pub(crate) struct SyncFs<'a> {
+        #[expect(dead_code)]
+        header: &'a fuse_in_header,
+        /// Read to check the length the kernel sent, and reserved by the protocol
+        #[expect(dead_code)]
+        arg: &'a fuse_syncfs_in,
+    }
+
     /// `MacOS` only: Rename the volume. Set `fuse_init_out.flags` during init to
     /// `FUSE_VOL_RENAME` to enable
     #[cfg(target_os = "macos")]
@@ -1640,6 +1775,8 @@ mod op {
         header: &'a fuse_in_header,
         opcode: &fuse_opcode,
         data: &'a [u8],
+        // Only the setxattr layout depends on this, and that is not reachable on macOS
+        #[cfg_attr(target_os = "macos", allow(unused_variables))] negotiated: InitFlags,
     ) -> Option<Operation<'a>> {
         let mut data = ArgumentIterator::new(data);
         Some(match opcode {
@@ -1684,25 +1821,22 @@ mod op {
                 header,
                 name: data.fetch_str()?.as_ref(),
             }),
-            fuse_opcode::FUSE_RENAME => {
-                // `fuse_rename_in` starts with `newdir: u64`. On macOS it may also carry
-                // `flags: u32, padding: u32`, but only when the peer negotiated
-                // FUSE_RENAME_SWAP; otherwise the 8-byte compat layout is sent (FUSE-T
-                // does this). The two names that follow never contain NUL, so the
-                // compat layout leaves exactly two NULs after `newdir`, while the
-                // extended layout adds at least four zero padding bytes.
-                let newdir = *data.fetch::<u64>()?;
+            fuse_opcode::FUSE_RENAME => Operation::Rename(Rename {
+                header,
+                arg: data.fetch()?,
+                // macFUSE adds the renamex_np flags only when it offers FUSE_RENAME_SWAP, which
+                // fuser always requests: as in its libfuse, the layout follows that capability.
+                // FUSE-T, which does not offer it, sends the plain layout
                 #[cfg(target_os = "macos")]
-                if data.peek().iter().filter(|b| **b == 0).count() > 2 {
-                    let _flags_and_padding: &[u32; 2] = data.fetch()?;
-                }
-                Operation::Rename(Rename {
-                    header,
-                    newdir,
-                    name: data.fetch_str()?.as_ref(),
-                    newname: data.fetch_str()?.as_ref(),
-                })
-            }
+                flags: if negotiated.contains(InitFlags::FUSE_RENAME_SWAP) {
+                    let ext: &fuse_rename_in_macos_ext = data.fetch()?;
+                    ext.flags
+                } else {
+                    0
+                },
+                name: data.fetch_str()?.as_ref(),
+                newname: data.fetch_str()?.as_ref(),
+            }),
             fuse_opcode::FUSE_LINK => Operation::Link(Link {
                 header,
                 arg: data.fetch()?,
@@ -1735,13 +1869,30 @@ mod op {
                 arg: data.fetch()?,
             }),
             fuse_opcode::FUSE_SETXATTR => Operation::SetXAttr({
+                let arg = data.fetch()?;
+                // Once FUSE_SETXATTR_EXT is negotiated the kernel sends an extended
+                // fuse_setxattr_in, whose extra fields sit between the struct and the name
+                #[cfg(not(target_os = "macos"))]
+                let setxattr_flags = if negotiated.contains(InitFlags::FUSE_SETXATTR_EXT) {
+                    let ext: &fuse_setxattr_in_ext = data.fetch()?;
+                    ext.setxattr_flags
+                } else {
+                    0
+                };
+                #[cfg(target_os = "macos")]
+                let setxattr_flags: u32 = 0;
                 let out = SetXAttr {
                     header,
-                    arg: data.fetch()?,
+                    arg,
+                    setxattr_flags,
                     name: data.fetch_str()?,
                     value: data.fetch_all(),
                 };
-                assert!(out.value.len() == out.arg.size as usize);
+                // A value length that disagrees with the header means the layout was
+                // misread; reject the request rather than taking down the session
+                if out.value.len() != out.arg.size as usize {
+                    return None;
+                }
                 out
             }),
             fuse_opcode::FUSE_GETXATTR => Operation::GetXAttr(GetXAttr {
@@ -1870,6 +2021,19 @@ mod op {
                 header,
                 arg: data.fetch()?,
             }),
+            fuse_opcode::FUSE_SYNCFS => Operation::SyncFs(SyncFs {
+                header,
+                arg: data.fetch()?,
+            }),
+            fuse_opcode::FUSE_TMPFILE => Operation::TmpFile(TmpFile {
+                header,
+                arg: data.fetch()?,
+                name: data.fetch_str()?.as_ref(),
+            }),
+            fuse_opcode::FUSE_STATX => Operation::StatX(StatX {
+                header,
+                arg: data.fetch()?,
+            }),
 
             #[cfg(target_os = "macos")]
             fuse_opcode::FUSE_SETVOLNAME => Operation::SetVolName(SetVolName {
@@ -1903,6 +2067,7 @@ pub(crate) enum Operation<'a> {
     Lookup(Lookup<'a>),
     Forget(Forget<'a>),
     GetAttr(GetAttr<'a>),
+    StatX(StatX<'a>),
     SetAttr(SetAttr<'a>),
     ReadLink(#[expect(dead_code)] ReadLink<'a>),
     SymLink(SymLink<'a>),
@@ -1944,6 +2109,8 @@ pub(crate) enum Operation<'a> {
     Rename2(Rename2<'a>),
     Lseek(Lseek<'a>),
     CopyFileRange(CopyFileRange<'a>),
+    SyncFs(SyncFs<'a>),
+    TmpFile(TmpFile<'a>),
 
     #[cfg(target_os = "macos")]
     SetVolName(SetVolName<'a>),
@@ -1962,6 +2129,7 @@ impl fmt::Display for Operation<'_> {
             Operation::Lookup(x) => write!(f, "LOOKUP name {:?}", x.name()),
             Operation::Forget(x) => write!(f, "FORGET nlookup {}", x.nlookup()),
             Operation::GetAttr(_) => write!(f, "GETATTR"),
+            Operation::StatX(x) => write!(f, "STATX mask {:?}", x.mask()),
             Operation::SetAttr(x) => x.fmt(f),
             Operation::ReadLink(_) => write!(f, "READLINK"),
             Operation::SymLink(x) => {
@@ -2120,6 +2288,14 @@ impl fmt::Display for Operation<'_> {
                 x.dest(),
                 x.len()
             ),
+            Operation::SyncFs(_) => write!(f, "SYNCFS"),
+            Operation::TmpFile(x) => write!(
+                f,
+                "TMPFILE mode {:#05o}, umask {:#05o}, flags {:#x?}",
+                x.mode(),
+                x.umask(),
+                x.flags()
+            ),
 
             #[cfg(target_os = "macos")]
             Operation::SetVolName(x) => write!(f, "SETVOLNAME name {:?}", x.name()),
@@ -2144,6 +2320,9 @@ impl fmt::Display for Operation<'_> {
 pub(crate) struct AnyRequest<'a> {
     header: &'a fuse_in_header,
     data: &'a [u8],
+    /// Capabilities negotiated during INIT. Some request layouts depend on them, so a
+    /// request parsed without them (i.e. during the handshake itself) must assume none
+    negotiated: InitFlags,
 }
 
 impl<'a> AnyRequest<'a> {
@@ -2184,7 +2363,14 @@ impl<'a> AnyRequest<'a> {
             |e: num_enum::TryFromPrimitiveError<_>| RequestError::UnknownOperation(e.number),
         )?;
         // Parse/check operation arguments
-        op::parse(self.header, &opcode, self.data).ok_or(RequestError::InsufficientData)
+        op::parse(self.header, &opcode, self.data, self.negotiated)
+            .ok_or(RequestError::InsufficientData)
+    }
+
+    /// Records the capabilities negotiated during INIT, which some later request
+    /// layouts depend on.
+    pub(crate) fn set_negotiated(&mut self, negotiated: InitFlags) {
+        self.negotiated = negotiated;
     }
 
     pub(crate) fn header(&self) -> &fuse_in_header {
@@ -2229,6 +2415,9 @@ impl<'a> TryFrom<&'a [u8]> for AnyRequest<'a> {
         Ok(Self {
             header,
             data: &data[size_of::<fuse_in_header>()..header.len as usize],
+            // The handshake parses INIT itself, whose layout never varies; callers
+            // dispatching later requests set this from the negotiated result
+            negotiated: InitFlags::empty(),
         })
     }
 }
@@ -2236,7 +2425,9 @@ impl<'a> TryFrom<&'a [u8]> for AnyRequest<'a> {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
+    use std::path::Path;
 
+    use crate::StatxMask;
     use crate::ll::request::*;
     use crate::ll::test::AlignedData;
 
@@ -2297,61 +2488,56 @@ mod tests {
         0x66, 0x6f, 0x6f, 0x2e, 0x74, 0x78, 0x74, 0x00, // name
     ]);
 
-    /// RENAME with the 8-byte compat `fuse_rename_in` (newdir only), as sent by
-    /// Linux and by FUSE-T on macOS when FUSE_RENAME_SWAP is not negotiated.
-    #[cfg(target_endian = "little")]
-    const RENAME_COMPAT_REQUEST: AlignedData<[u8; 64]> = AlignedData([
-        0x3c, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, // len = 60, opcode = 12
-        0x0d, 0xf0, 0xad, 0xba, 0xef, 0xbe, 0xad, 0xde, // unique
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // nodeid = 1
-        0x0d, 0xd0, 0x01, 0xc0, 0xfe, 0xca, 0x01, 0xc0, // uid, gid
-        0x5e, 0xba, 0xde, 0xc0, 0x00, 0x00, 0x00, 0x00, // pid, padding
-        0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // newdir = 3
-        0x61, 0x2e, 0x74, 0x78, 0x74, 0x00, 0x62, 0x2e, // "a.txt\0" "b.
-        0x74, 0x78, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, // txt\0" + unused tail
-    ]);
-
-    /// RENAME with the 16-byte macOS `fuse_rename_in` (newdir, flags, padding),
-    /// as sent when FUSE_RENAME_SWAP is negotiated.
-    #[cfg(all(target_endian = "little", target_os = "macos"))]
-    const RENAME_EXTENDED_REQUEST: AlignedData<[u8; 72]> = AlignedData([
-        0x44, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, // len = 68, opcode = 12
-        0x0d, 0xf0, 0xad, 0xba, 0xef, 0xbe, 0xad, 0xde, // unique
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // nodeid = 1
-        0x0d, 0xd0, 0x01, 0xc0, 0xfe, 0xca, 0x01, 0xc0, // uid, gid
-        0x5e, 0xba, 0xde, 0xc0, 0x00, 0x00, 0x00, 0x00, // pid, padding
-        0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // newdir = 3
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // flags = 0, padding
-        0x61, 0x2e, 0x74, 0x78, 0x74, 0x00, 0x62, 0x2e, // "a.txt\0" "b.
-        0x74, 0x78, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, // txt\0" + unused tail
+    #[cfg(target_endian = "big")]
+    const RENAME_REQUEST: AlignedData<[u8; 64]> = AlignedData([
+        0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x0c, // len, opcode
+        0xde, 0xad, 0xbe, 0xef, 0xba, 0xad, 0xd0, 0x0d, // unique
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, // nodeid
+        0xc0, 0x01, 0xd0, 0x0d, 0xc0, 0x01, 0xca, 0xfe, // uid, gid
+        0xc0, 0xde, 0xba, 0x5e, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, // newdir
+        0x6f, 0x6c, 0x64, 0x2e, 0x74, 0x78, 0x74, 0x00, // name
+        0x6e, 0x65, 0x77, 0x2e, 0x74, 0x78, 0x74, 0x00, // newname
     ]);
 
     #[cfg(target_endian = "little")]
-    fn assert_rename_a_to_b(req: &AnyRequest<'_>) {
-        match req.operation().unwrap() {
-            Operation::Rename(x) => {
-                assert_eq!(x.src().dir, INodeNo(1));
-                assert_eq!(x.src().name, Path::new("a.txt"));
-                assert_eq!(x.dest().dir, INodeNo(3));
-                assert_eq!(x.dest().name, Path::new("b.txt"));
-            }
-            _ => panic!("Unexpected request operation"),
-        }
-    }
+    const RENAME_REQUEST: AlignedData<[u8; 64]> = AlignedData([
+        0x40, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, // len, opcode
+        0x0d, 0xf0, 0xad, 0xba, 0xef, 0xbe, 0xad, 0xde, // unique
+        0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // nodeid
+        0x0d, 0xd0, 0x01, 0xc0, 0xfe, 0xca, 0x01, 0xc0, // uid, gid
+        0x5e, 0xba, 0xde, 0xc0, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x00, 0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, // newdir
+        0x6f, 0x6c, 0x64, 0x2e, 0x74, 0x78, 0x74, 0x00, // name
+        0x6e, 0x65, 0x77, 0x2e, 0x74, 0x78, 0x74, 0x00, // newname
+    ]);
 
-    #[test]
-    #[cfg(target_endian = "little")]
-    fn rename_compat_layout() {
-        let req = AnyRequest::try_from(&RENAME_COMPAT_REQUEST[..60]).unwrap();
-        assert_rename_a_to_b(&req);
-    }
+    // macFUSE's extended fuse_rename_in layout, which carries the renamex_np flags
+    #[cfg(all(target_endian = "big", target_os = "macos"))]
+    const RENAME_EXT_REQUEST: AlignedData<[u8; 72]> = AlignedData([
+        0x00, 0x00, 0x00, 0x48, 0x00, 0x00, 0x00, 0x0c, // len, opcode
+        0xde, 0xad, 0xbe, 0xef, 0xba, 0xad, 0xd0, 0x0d, // unique
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, // nodeid
+        0xc0, 0x01, 0xd0, 0x0d, 0xc0, 0x01, 0xca, 0xfe, // uid, gid
+        0xc0, 0xde, 0xba, 0x5e, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, // newdir
+        0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, // flags (RENAME_SWAP), padding
+        0x6f, 0x6c, 0x64, 0x2e, 0x74, 0x78, 0x74, 0x00, // name
+        0x6e, 0x65, 0x77, 0x2e, 0x74, 0x78, 0x74, 0x00, // newname
+    ]);
 
-    #[test]
     #[cfg(all(target_endian = "little", target_os = "macos"))]
-    fn rename_extended_layout() {
-        let req = AnyRequest::try_from(&RENAME_EXTENDED_REQUEST[..68]).unwrap();
-        assert_rename_a_to_b(&req);
-    }
+    const RENAME_EXT_REQUEST: AlignedData<[u8; 72]> = AlignedData([
+        0x48, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, // len, opcode
+        0x0d, 0xf0, 0xad, 0xba, 0xef, 0xbe, 0xad, 0xde, // unique
+        0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // nodeid
+        0x0d, 0xd0, 0x01, 0xc0, 0xfe, 0xca, 0x01, 0xc0, // uid, gid
+        0x5e, 0xba, 0xde, 0xc0, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x00, 0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, // newdir
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // flags (RENAME_SWAP), padding
+        0x6f, 0x6c, 0x64, 0x2e, 0x74, 0x78, 0x74, 0x00, // name
+        0x6e, 0x65, 0x77, 0x2e, 0x74, 0x78, 0x74, 0x00, // newname
+    ]);
 
     #[test]
     fn short_read_header() {
@@ -2388,6 +2574,57 @@ mod tests {
         }
     }
 
+    /// The plain layout: Linux, and macOS FUSE implementations that do not offer
+    /// FUSE_RENAME_SWAP, such as FUSE-T
+    #[test]
+    fn rename() {
+        let req = AnyRequest::try_from(&RENAME_REQUEST[..]).unwrap();
+        assert_eq!(req.header.opcode, 12);
+        match req.operation().unwrap() {
+            Operation::Rename(x) => {
+                assert_eq!(x.src().dir, INodeNo(0x1122_3344_5566_7788));
+                assert_eq!(x.src().name, Path::new("old.txt"));
+                assert_eq!(x.dest().dir, INodeNo(0x99aa_bbcc_ddee_ff00));
+                assert_eq!(x.dest().name, Path::new("new.txt"));
+                #[cfg(target_os = "macos")]
+                assert_eq!(x.flags(), crate::RenameFlags::empty());
+            }
+            _ => panic!("Unexpected request operation"),
+        }
+    }
+
+    /// macFUSE's extended layout, sent once it offers FUSE_RENAME_SWAP
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn rename_macfuse_extended() {
+        let mut req = AnyRequest::try_from(&RENAME_EXT_REQUEST[..]).unwrap();
+        req.set_negotiated(InitFlags::FUSE_RENAME_SWAP | InitFlags::FUSE_RENAME_EXCL);
+        match req.operation().unwrap() {
+            Operation::Rename(x) => {
+                assert_eq!(x.src().name, Path::new("old.txt"));
+                assert_eq!(x.dest().dir, INodeNo(0x99aa_bbcc_ddee_ff00));
+                assert_eq!(x.dest().name, Path::new("new.txt"));
+                assert_eq!(x.flags(), crate::RenameFlags::RENAME_SWAP);
+            }
+            _ => panic!("Unexpected request operation"),
+        }
+    }
+
+    /// The INIT reply is sized for the protocol both sides speak, so a peer newer than
+    /// fuser gets the layout of fuser's own minor (#761)
+    #[test]
+    fn init_reply_size_follows_the_lower_minor() {
+        use crate::ll::fuse_abi::fuse_init_out;
+        let full = size_of::<fuse_init_out>();
+        // FUSE-T offers 7.23 to fuser's 7.19 on macOS: a 7.19 reply, not the 7.23 one
+        assert_eq!(op::init_out_size(23, 19), 24);
+        assert_eq!(op::init_out_size(19, 19), 24);
+        assert_eq!(op::init_out_size(19, 44), 24);
+        assert_eq!(op::init_out_size(4, 44), 8);
+        assert_eq!(op::init_out_size(23, 44), full);
+        assert_eq!(op::init_out_size(50, 44), full);
+    }
+
     #[test]
     fn mknod() {
         let req = AnyRequest::try_from(&MKNOD_REQUEST[..]).unwrap();
@@ -2403,6 +2640,344 @@ mod tests {
                 assert_eq!(x.mode(), 0o644);
                 assert_eq!(x.umask(), 0o755);
                 assert_eq!(x.name(), OsStr::new("foo.txt"));
+            }
+            _ => panic!("Unexpected request operation"),
+        }
+    }
+
+    // 40 byte header + 8 byte fuse_setxattr_in + "user.a\0" + "VAL"
+    #[cfg(all(target_endian = "little", not(target_os = "macos")))]
+    const SETXATTR_REQUEST: AlignedData<[u8; 58]> = AlignedData([
+        0x3a, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, // len, opcode
+        0x0d, 0xf0, 0xad, 0xba, 0xef, 0xbe, 0xad, 0xde, // unique
+        0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // nodeid
+        0x0d, 0xd0, 0x01, 0xc0, 0xfe, 0xca, 0x01, 0xc0, // uid, gid
+        0x5e, 0xba, 0xde, 0xc0, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x03, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, // size, flags
+        0x75, 0x73, 0x65, 0x72, 0x2e, 0x61, 0x00, // name "user.a"
+        0x56, 0x41, 0x4c, // value "VAL"
+    ]);
+
+    // The same request in the extended layout the kernel sends once FUSE_SETXATTR_EXT
+    // has been negotiated: 8 further bytes sit between the struct and the name
+    #[cfg(all(target_endian = "little", not(target_os = "macos")))]
+    const SETXATTR_EXT_REQUEST: AlignedData<[u8; 66]> = AlignedData([
+        0x42, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, // len, opcode
+        0x0d, 0xf0, 0xad, 0xba, 0xef, 0xbe, 0xad, 0xde, // unique
+        0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // nodeid
+        0x0d, 0xd0, 0x01, 0xc0, 0xfe, 0xca, 0x01, 0xc0, // uid, gid
+        0x5e, 0xba, 0xde, 0xc0, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x03, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, // size, flags
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // setxattr_flags, padding
+        0x75, 0x73, 0x65, 0x72, 0x2e, 0x61, 0x00, // name "user.a"
+        0x56, 0x41, 0x4c, // value "VAL"
+    ]);
+
+    #[test]
+    #[cfg(all(target_endian = "little", not(target_os = "macos")))]
+    fn setxattr_compat() {
+        let req = AnyRequest::try_from(&SETXATTR_REQUEST[..]).unwrap();
+        match req.operation().unwrap() {
+            Operation::SetXAttr(x) => {
+                assert_eq!(x.name(), OsStr::new("user.a"));
+                assert_eq!(x.value(), b"VAL");
+                assert_eq!(x.flags(), 0x11);
+                assert_eq!(x.setxattr_flags(), 0);
+            }
+            _ => panic!("Unexpected request operation"),
+        }
+    }
+
+    #[test]
+    #[cfg(all(target_endian = "little", not(target_os = "macos")))]
+    fn setxattr_extended() {
+        let mut req = AnyRequest::try_from(&SETXATTR_EXT_REQUEST[..]).unwrap();
+        req.set_negotiated(InitFlags::FUSE_SETXATTR_EXT);
+        match req.operation().unwrap() {
+            Operation::SetXAttr(x) => {
+                assert_eq!(x.name(), OsStr::new("user.a"));
+                assert_eq!(x.value(), b"VAL");
+                assert_eq!(x.flags(), 0x11);
+                assert_eq!(x.setxattr_flags(), 1);
+            }
+            _ => panic!("Unexpected request operation"),
+        }
+    }
+
+    /// Reading an extended request with the compat layout shifts the name and value by
+    /// eight bytes. That must fail the request rather than take down the session.
+    #[test]
+    #[cfg(all(target_endian = "little", not(target_os = "macos")))]
+    fn setxattr_layout_mismatch_is_rejected() {
+        let req = AnyRequest::try_from(&SETXATTR_EXT_REQUEST[..]).unwrap();
+        assert!(req.operation().is_err());
+    }
+
+    #[cfg(all(target_endian = "little", not(target_os = "macos")))]
+    const OPEN_KILL_SUIDGID_REQUEST: AlignedData<[u8; 48]> = AlignedData([
+        0x30, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00, // len, opcode
+        0x0d, 0xd0, 0xad, 0xba, 0xef, 0xbe, 0xad, 0xde, // unique
+        0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // nodeid
+        0x0d, 0xd0, 0x01, 0xc0, 0xfe, 0xca, 0x01, 0xc0, // uid, gid
+        0x5e, 0xba, 0xde, 0xc0, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x01, 0x02, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // flags, open_flags (KILL_SUIDGID)
+    ]);
+
+    #[cfg(all(target_endian = "little", not(target_os = "macos")))]
+    const CREATE_KILL_SUIDGID_REQUEST: AlignedData<[u8; 64]> = AlignedData([
+        0x40, 0x00, 0x00, 0x00, 0x23, 0x00, 0x00, 0x00, // len, opcode
+        0x0d, 0xd0, 0xad, 0xba, 0xef, 0xbe, 0xad, 0xde, // unique
+        0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // nodeid
+        0x0d, 0xd0, 0x01, 0xc0, 0xfe, 0xca, 0x01, 0xc0, // uid, gid
+        0x5e, 0xba, 0xde, 0xc0, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x41, 0x02, 0x00, 0x00, 0xa4, 0x81, 0x00, 0x00, // flags, mode
+        0x12, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // umask, open_flags (KILL_SUIDGID)
+        0x66, 0x6f, 0x6f, 0x2e, 0x74, 0x78, 0x74, 0x00, // name
+    ]);
+
+    #[cfg(all(target_endian = "little", not(target_os = "macos")))]
+    const SETATTR_KILL_SUIDGID_REQUEST: AlignedData<[u8; 128]> = AlignedData([
+        0x80, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, // len, opcode
+        0x0d, 0xd0, 0xad, 0xba, 0xef, 0xbe, 0xad, 0xde, // unique
+        0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // nodeid
+        0x0d, 0xd0, 0x01, 0xc0, 0xfe, 0xca, 0x01, 0xc0, // uid, gid
+        0x5e, 0xba, 0xde, 0xc0, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x08, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, // valid (SIZE | KILL_SUIDGID), padding
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // fh
+        0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // size
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // lock_owner
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // atime
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mtime
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // ctime
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // atimensec, mtimensec
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // ctimensec, mode
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // unused4, uid
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // gid, unused5
+    ]);
+
+    /// The three signals that FUSE_HANDLE_KILLPRIV_V2 adds. Each rides in a field fuser used to
+    /// ignore, so a filesystem that negotiated the capability was never told to clear the bits.
+    #[test]
+    #[cfg(all(target_endian = "little", not(target_os = "macos")))]
+    fn kill_suid_gid_is_parsed() {
+        let req = AnyRequest::try_from(&OPEN_KILL_SUIDGID_REQUEST[..]).unwrap();
+        match req.operation().unwrap() {
+            Operation::Open(x) => {
+                assert!(x.kill_suid_gid());
+                // The O_* flags share the request and must not be disturbed by reading it
+                assert_eq!(x.flags().0, 0x201);
+            }
+            _ => panic!("Unexpected request operation"),
+        }
+
+        let req = AnyRequest::try_from(&CREATE_KILL_SUIDGID_REQUEST[..]).unwrap();
+        match req.operation().unwrap() {
+            Operation::Create(x) => {
+                assert!(x.kill_suid_gid());
+                assert_eq!(x.name(), Path::new("foo.txt"));
+                assert_eq!(x.mode(), 0o100644);
+                assert_eq!(x.umask(), 0o22);
+            }
+            _ => panic!("Unexpected request operation"),
+        }
+
+        let req = AnyRequest::try_from(&SETATTR_KILL_SUIDGID_REQUEST[..]).unwrap();
+        match req.operation().unwrap() {
+            Operation::SetAttr(x) => {
+                assert!(x.kill_suid_gid());
+                assert_eq!(x.size(), Some(0x1234));
+                // FATTR_KILL_SUIDGID must not be mistaken for one of the value-carrying bits
+                assert_eq!(x.mode(), None);
+                assert_eq!(x.uid(), None);
+                assert_eq!(x.gid(), None);
+            }
+            _ => panic!("Unexpected request operation"),
+        }
+    }
+
+    /// Without the capability the kernel leaves these fields zero, and every request must then
+    /// report that the filesystem has nothing to clear
+    #[test]
+    #[cfg(all(target_endian = "little", not(target_os = "macos")))]
+    fn kill_suid_gid_defaults_to_false() {
+        let mut open = OPEN_KILL_SUIDGID_REQUEST;
+        open.0[44] = 0;
+        match AnyRequest::try_from(&open[..])
+            .unwrap()
+            .operation()
+            .unwrap()
+        {
+            Operation::Open(x) => assert!(!x.kill_suid_gid()),
+            _ => panic!("Unexpected request operation"),
+        }
+
+        let mut create = CREATE_KILL_SUIDGID_REQUEST;
+        create.0[52] = 0;
+        match AnyRequest::try_from(&create[..])
+            .unwrap()
+            .operation()
+            .unwrap()
+        {
+            Operation::Create(x) => assert!(!x.kill_suid_gid()),
+            _ => panic!("Unexpected request operation"),
+        }
+
+        let mut setattr = SETATTR_KILL_SUIDGID_REQUEST;
+        setattr.0[41] = 0;
+        match AnyRequest::try_from(&setattr[..])
+            .unwrap()
+            .operation()
+            .unwrap()
+        {
+            Operation::SetAttr(x) => {
+                assert!(!x.kill_suid_gid());
+                // Clearing the bit must leave the rest of the valid mask alone
+                assert_eq!(x.size(), Some(0x1234));
+            }
+            _ => panic!("Unexpected request operation"),
+        }
+    }
+
+    // 40 byte header + 8 byte fuse_syncfs_in, addressed to the root inode
+    #[cfg(target_endian = "little")]
+    const SYNCFS_REQUEST: AlignedData<[u8; 48]> = AlignedData([
+        0x30, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, // len, opcode
+        0x0d, 0xf0, 0xad, 0xba, 0xef, 0xbe, 0xad, 0xde, // unique
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // nodeid
+        0x0d, 0xd0, 0x01, 0xc0, 0xfe, 0xca, 0x01, 0xc0, // uid, gid
+        0x5e, 0xba, 0xde, 0xc0, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // padding
+    ]);
+
+    #[cfg(target_endian = "big")]
+    const SYNCFS_REQUEST: AlignedData<[u8; 48]> = AlignedData([
+        0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x32, // len, opcode
+        0xde, 0xad, 0xbe, 0xef, 0xba, 0xad, 0xf0, 0x0d, // unique
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // nodeid
+        0xc0, 0x01, 0xd0, 0x0d, 0xc0, 0x01, 0xca, 0xfe, // uid, gid
+        0xc0, 0xde, 0xba, 0x5e, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // padding
+    ]);
+
+    #[test]
+    fn syncfs() {
+        let req = AnyRequest::try_from(&SYNCFS_REQUEST[..]).unwrap();
+        assert_eq!(req.header.opcode, 50);
+        assert_eq!(req.nodeid(), INodeNo::ROOT);
+        assert!(matches!(req.operation().unwrap(), Operation::SyncFs(_)));
+    }
+
+    /// The kernel sends the whole `fuse_syncfs_in`, and a request whose header is honest
+    /// about carrying none of it is not one this can answer
+    #[test]
+    fn syncfs_without_its_argument() {
+        let mut short = AlignedData([0u8; 40]);
+        short.0.copy_from_slice(&SYNCFS_REQUEST[..40]);
+        short.0[..4].copy_from_slice(&40u32.to_ne_bytes());
+
+        let req = AnyRequest::try_from(&short[..]).unwrap();
+        assert!(req.operation().is_err());
+    }
+
+    // 40 byte header + 16 byte fuse_create_in + the placeholder name "/".
+    // O_TMPFILE, and so this operation, exists on Linux alone
+    #[cfg(all(target_os = "linux", target_endian = "little"))]
+    const TMPFILE_REQUEST: AlignedData<[u8; 58]> = AlignedData([
+        0x3a, 0x00, 0x00, 0x00, 0x33, 0x00, 0x00, 0x00, // len, opcode
+        0x0d, 0xf0, 0xad, 0xba, 0xef, 0xbe, 0xad, 0xde, // unique
+        0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // nodeid
+        0x0d, 0xd0, 0x01, 0xc0, 0xfe, 0xca, 0x01, 0xc0, // uid, gid
+        0x5e, 0xba, 0xde, 0xc0, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x02, 0x00, 0x41, 0x00, 0xa0, 0x81, 0x00, 0x00, // flags (O_RDWR|O_TMPFILE), mode
+        0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // umask, open_flags
+        0x2f, 0x00, // name ("/")
+    ]);
+
+    #[cfg(all(target_os = "linux", target_endian = "big"))]
+    const TMPFILE_REQUEST: AlignedData<[u8; 58]> = AlignedData([
+        0x00, 0x00, 0x00, 0x3a, 0x00, 0x00, 0x00, 0x33, // len, opcode
+        0xde, 0xad, 0xbe, 0xef, 0xba, 0xad, 0xf0, 0x0d, // unique
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, // nodeid
+        0xc0, 0x01, 0xd0, 0x0d, 0xc0, 0x01, 0xca, 0xfe, // uid, gid
+        0xc0, 0xde, 0xba, 0x5e, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x00, 0x41, 0x00, 0x02, 0x00, 0x00, 0x81, 0xa0, // flags (O_RDWR|O_TMPFILE), mode
+        0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x00, // umask, open_flags
+        0x2f, 0x00, // name ("/")
+    ]);
+
+    // 40 byte header + 24 byte fuse_statx_in
+    #[cfg(target_endian = "little")]
+    const STATX_REQUEST: AlignedData<[u8; 64]> = AlignedData([
+        0x40, 0x00, 0x00, 0x00, 0x34, 0x00, 0x00, 0x00, // len, opcode (52)
+        0x0d, 0xf0, 0xad, 0xba, 0xef, 0xbe, 0xad, 0xde, // unique
+        0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // nodeid
+        0x0d, 0xd0, 0x01, 0xc0, 0xfe, 0xca, 0x01, 0xc0, // uid, gid
+        0x5e, 0xba, 0xde, 0xc0, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // getattr_flags (FH), reserved
+        0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, // fh
+        0x00, 0x00, 0x00, 0x00, 0xff, 0x0f, 0x00, 0x00, // sx_flags, sx_mask
+    ]);
+
+    #[cfg(target_endian = "big")]
+    const STATX_REQUEST: AlignedData<[u8; 64]> = AlignedData([
+        0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x34, // len, opcode (52)
+        0xde, 0xad, 0xbe, 0xef, 0xba, 0xad, 0xf0, 0x0d, // unique
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, // nodeid
+        0xc0, 0x01, 0xd0, 0x0d, 0xc0, 0x01, 0xca, 0xfe, // uid, gid
+        0xc0, 0xde, 0xba, 0x5e, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, // getattr_flags (FH), reserved
+        0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, // fh
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0xff, // sx_flags, sx_mask
+    ]);
+
+    #[test]
+    fn statx() {
+        let req = AnyRequest::try_from(&STATX_REQUEST[..]).unwrap();
+        assert_eq!(req.header.opcode, 52);
+        assert_eq!(req.nodeid(), INodeNo(0x1122_3344_5566_7788));
+        match req.operation().unwrap() {
+            Operation::StatX(x) => {
+                assert_eq!(x.file_handle(), Some(FileHandle(0x4455_6677_8899_aabb)));
+                assert_eq!(x.flags(), 0);
+                // What the kernel asks for: STATX_BASIC_STATS | STATX_BTIME
+                assert_eq!(x.mask(), StatxMask::BASIC_STATS | StatxMask::BTIME);
+            }
+            _ => panic!("Unexpected request operation"),
+        }
+    }
+
+    /// Without `FUSE_GETATTR_FH` the handle is absent whatever the field holds, as for getattr
+    #[test]
+    fn statx_without_file_handle() {
+        let mut data = STATX_REQUEST;
+        // getattr_flags occupies bytes 40..44; its low byte is where FUSE_GETATTR_FH sits
+        data.0[if cfg!(target_endian = "little") {
+            40
+        } else {
+            43
+        }] = 0x00;
+        let req = AnyRequest::try_from(&data[..]).unwrap();
+        match req.operation().unwrap() {
+            Operation::StatX(x) => assert_eq!(x.file_handle(), None),
+            _ => panic!("Unexpected request operation"),
+        }
+    }
+
+    /// A tmpfile request is a create request on the wire, minus a name that means anything
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn tmpfile() {
+        let req = AnyRequest::try_from(&TMPFILE_REQUEST[..]).unwrap();
+        assert_eq!(req.header.opcode, 51);
+        assert_eq!(req.nodeid(), INodeNo(0x1122_3344_5566_7788));
+        match req.operation().unwrap() {
+            Operation::TmpFile(x) => {
+                assert_eq!(x.mode(), 0o100_640);
+                assert_eq!(x.umask(), 0o22);
+                // O_TMPFILE is O_DIRECTORY | 0o20_000_000 on every architecture fuser builds for
+                assert_eq!(x.flags(), libc::O_RDWR | libc::O_TMPFILE);
+                assert!(!x.kill_suid_gid());
             }
             _ => panic!("Unexpected request operation"),
         }

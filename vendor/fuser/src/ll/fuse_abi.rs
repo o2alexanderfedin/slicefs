@@ -30,6 +30,7 @@ use zerocopy::IntoBytes;
 use zerocopy::KnownLayout;
 
 use crate::ll::flags::fattr_flags::FattrFlags;
+use crate::ll::request::Version;
 
 pub(crate) const FUSE_KERNEL_VERSION: u32 = 7;
 
@@ -40,7 +41,11 @@ pub(crate) const FUSE_KERNEL_MINOR_VERSION: u32 = if cfg!(target_os = "macos") {
     // So let's declare protocol version 19 to be safe.
     19
 } else {
-    40
+    // 7.44 is what `FUSE_NOTIFY_INC_EPOCH` needs. Everything 7.41 through 7.43 added is a
+    // capability the kernel only acts on once negotiated: `FUSE_ALLOW_IDMAP` is accepted only
+    // where it can be honored, and the other two are refused in `UNSUPPORTED_CAPABILITIES`,
+    // so declaring this adds no obligation beyond the notification itself
+    44
 };
 
 #[repr(C)]
@@ -161,6 +166,9 @@ pub(crate) enum fuse_opcode {
     FUSE_RENAME2 = 45,
     FUSE_LSEEK = 46,
     FUSE_COPY_FILE_RANGE = 47,
+    FUSE_SYNCFS = 50,
+    FUSE_TMPFILE = 51,
+    FUSE_STATX = 52,
 
     #[cfg(target_os = "macos")]
     FUSE_SETVOLNAME = 61,
@@ -182,6 +190,76 @@ pub(crate) enum fuse_notify_code {
     FUSE_NOTIFY_STORE = 4,
     FUSE_NOTIFY_RETRIEVE = 5,
     FUSE_NOTIFY_DELETE = 6,
+    FUSE_NOTIFY_RESEND = 7,
+    FUSE_NOTIFY_INC_EPOCH = 8,
+}
+
+/// ABI version that added `FUSE_NOTIFY_INC_EPOCH`. An older kernel has no case for the
+/// code and answers the write with `EINVAL`
+pub(crate) const FUSE_NOTIFY_INC_EPOCH_VERSION: Version = Version(7, 44);
+
+/// ABI version that added `FUSE_STATX`. An older kernel never sends the opcode, and answers
+/// `statx(2)` out of what `FUSE_GETATTR` gives it, so nothing outside the tests has to ask -
+/// and only the Linux ones, since `statx(2)` is Linux's
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) const FUSE_STATX_VERSION: Version = Version(7, 39);
+
+/// A timestamp as `struct statx` carries one, which unlike `fuse_attr`'s pair of fields is a
+/// signed second count with its own padding
+#[repr(C)]
+#[derive(Debug, Default, IntoBytes, Clone, Copy, KnownLayout, Immutable)]
+pub(crate) struct fuse_sx_time {
+    pub(crate) tv_sec: i64,
+    pub(crate) tv_nsec: u32,
+    pub(crate) __reserved: i32,
+}
+
+/// The `struct statx` payload, laid out as the kernel's `fuse_statx`. Every field the caller
+/// did not ask for is still sent, and `mask` is what says which of them mean anything
+#[repr(C)]
+#[derive(Debug, Default, IntoBytes, Clone, Copy, KnownLayout, Immutable)]
+pub(crate) struct fuse_statx {
+    pub(crate) mask: u32,
+    pub(crate) blksize: u32,
+    pub(crate) attributes: u64,
+    pub(crate) nlink: u32,
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
+    pub(crate) mode: u16,
+    pub(crate) __spare0: [u16; 1],
+    pub(crate) ino: u64,
+    pub(crate) size: u64,
+    pub(crate) blocks: u64,
+    pub(crate) attributes_mask: u64,
+    pub(crate) atime: fuse_sx_time,
+    pub(crate) btime: fuse_sx_time,
+    pub(crate) ctime: fuse_sx_time,
+    pub(crate) mtime: fuse_sx_time,
+    pub(crate) rdev_major: u32,
+    pub(crate) rdev_minor: u32,
+    pub(crate) dev_major: u32,
+    pub(crate) dev_minor: u32,
+    pub(crate) __spare2: [u64; 14],
+}
+
+#[repr(C)]
+#[derive(Debug, FromBytes, KnownLayout, Immutable)]
+pub(crate) struct fuse_statx_in {
+    pub(crate) getattr_flags: u32,
+    pub(crate) reserved: u32,
+    pub(crate) fh: u64,
+    pub(crate) sx_flags: u32,
+    pub(crate) sx_mask: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, IntoBytes, KnownLayout, Immutable)]
+pub(crate) struct fuse_statx_out {
+    pub(crate) attr_valid: u64,
+    pub(crate) attr_valid_nsec: u32,
+    pub(crate) flags: u32,
+    pub(crate) spare: [u64; 2],
+    pub(crate) stat: fuse_statx,
 }
 
 #[repr(C)]
@@ -263,9 +341,16 @@ pub(crate) struct fuse_mkdir_in {
 #[derive(Debug, FromBytes, KnownLayout, Immutable)]
 pub(crate) struct fuse_rename_in {
     pub(crate) newdir: u64,
-    #[cfg(feature = "macfuse-4-compat")]
+}
+
+/// What macFUSE appends to `fuse_rename_in`: the `renamex_np(2)` flags. It only does so when
+/// it offers `FUSE_RENAME_SWAP`; other macOS FUSE implementations, such as FUSE-T, send the
+/// plain struct.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Debug, FromBytes, KnownLayout, Immutable)]
+pub(crate) struct fuse_rename_in_macos_ext {
     pub(crate) flags: u32,
-    #[cfg(feature = "macfuse-4-compat")]
     pub(crate) padding: u32,
 }
 
@@ -349,7 +434,7 @@ pub(crate) struct fuse_open_in {
     // NOTE: this field is defined as u32 in fuse_kernel.h in libfuse. However, it is then cast
     // to an i32 when invoking the filesystem's open method and this matches the open() syscall
     pub(crate) flags: i32,
-    pub(crate) unused: u32,
+    pub(crate) open_flags: u32,
 }
 
 #[repr(C)]
@@ -360,7 +445,7 @@ pub(crate) struct fuse_create_in {
     pub(crate) flags: i32,
     pub(crate) mode: u32,
     pub(crate) umask: u32,
-    pub(crate) padding: u32,
+    pub(crate) open_flags: u32,
 }
 
 #[repr(C)]
@@ -456,6 +541,17 @@ pub(crate) struct fuse_setxattr_in {
     #[cfg(target_os = "macos")]
     pub(crate) position: u32,
     #[cfg(target_os = "macos")]
+    pub(crate) padding: u32,
+}
+
+/// Tail of the extended `fuse_setxattr_in`, which the kernel appends to the layout above
+/// once `FUSE_SETXATTR_EXT` has been negotiated. Never sent on macOS, where bit 29 means
+/// `FUSE_CASE_INSENSITIVE` instead
+#[cfg(not(target_os = "macos"))]
+#[repr(C)]
+#[derive(Debug, FromBytes, KnownLayout, Immutable)]
+pub(crate) struct fuse_setxattr_in_ext {
+    pub(crate) setxattr_flags: u32,
     pub(crate) padding: u32,
 }
 
@@ -638,7 +734,7 @@ pub(crate) struct fuse_fallocate_in {
 }
 
 #[repr(C)]
-#[derive(Debug, FromBytes, KnownLayout, Immutable)]
+#[derive(Debug, Clone, FromBytes, KnownLayout, Immutable)]
 pub(crate) struct fuse_in_header {
     pub(crate) len: u32,
     pub(crate) opcode: u32,
@@ -688,8 +784,13 @@ pub(crate) struct fuse_notify_inval_inode_out {
 pub(crate) struct fuse_notify_inval_entry_out {
     pub(crate) parent: u64,
     pub(crate) namelen: u32,
-    pub(crate) padding: u32,
+    pub(crate) flags: u32,
 }
+
+/// Expire the entry rather than invalidating it: the kernel marks it for revalidation
+/// on next use instead of forcibly detaching it, which would also detach any submounts
+/// beneath it. Requires `FUSE_HAS_EXPIRE_ONLY`
+pub(crate) const FUSE_EXPIRE_ONLY: u32 = 1 << 0;
 
 #[repr(C)]
 #[derive(Debug, IntoBytes, KnownLayout, Immutable)]
@@ -745,6 +846,12 @@ pub(crate) struct fuse_lseek_in {
 #[derive(Debug, IntoBytes, KnownLayout, Immutable)]
 pub(crate) struct fuse_lseek_out {
     pub(crate) offset: i64,
+}
+
+#[repr(C)]
+#[derive(Debug, FromBytes, KnownLayout, Immutable)]
+pub(crate) struct fuse_syncfs_in {
+    pub(crate) padding: u64,
 }
 
 #[repr(C)]
