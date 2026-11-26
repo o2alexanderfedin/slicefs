@@ -1,7 +1,84 @@
 //! A prototype prolly-tree map (a sorted map of byte keys to byte values)
 //! whose nodes are chunk-store objects, for issue #19.
 //!
-//! Task 3 completes this doc.
+//! # Status
+//!
+//! A prototype for the evaluation of #19. SliceFS does not use it: it is
+//! not wired into the root record, the commit path or a mount, and no
+//! product crate depends on it.
+//!
+//! # Storage
+//!
+//! Each node is one chunk-store object (`ChunkStore::put`, read back with
+//! the hash-verified `ChunkStore::read`), so it is deduplicated, compressed
+//! and packed like a file chunk. Nodes are not cut again by FastCDC. A
+//! child pointer is the child's `ObjectId`, and the root of a map is one
+//! `ObjectId`. The empty map is the empty leaf object (`empty_root`).
+//! Nothing else is written: no root record, segment record or header line.
+//!
+//! # Node format
+//!
+//! The node bytes are private to this crate; this is not a store format.
+//! Header (`NODE_HEADER` = 9 bytes): `NODE_MAGIC` (`SPT1`), level `u8`,
+//! entry count `u32` LE. A leaf entry (level 0) is klen `u16` LE, vlen
+//! `u16` LE, key, value. An internal entry (level 1 and up) is klen `u16`
+//! LE, the last key of the child, the child `ObjectId` (33 bytes) and the
+//! leaf entry count of the child's subtree `u64` LE. Keys are strictly
+//! ascending in every node. A damaged or crafted node gives
+//! `Error::Corrupt`, never a panic.
+//!
+//! # Boundary rule
+//!
+//! This is Dolt's size-aware key splitter (`go/store/prolly/tree/node_splitter.go`
+//! and `chunker.go` of `dolthub/dolt`, read at commit d5a833f8df56e35c8fffccb48cfa5d790726aa57).
+//! One `Splitter` decides every cut at every level. After an entry that
+//! grows the node from `before` to `after` bytes:
+//!
+//! - an internal node never ends after its first entry;
+//! - the node ends when `after > NODE_MAX - MAX_ENTRY` (the forced cut);
+//! - else it does not end when `after < NODE_MIN` (512 B);
+//! - else it ends when `boundary_hash(level, key) / (2^32 - 1)` is below
+//!   `1 - e^-((after^4 - before^4) / L^4)` with `L = WEIBULL_L` (4,096) and
+//!   the shape `WEIBULL_K` = 4. That is the conditional Weibull CDF of
+//!   Dolt; the mean node is about 0.906 x L, about 3.7 KB.
+//!
+//! `boundary_hash` is the first 4 bytes (LE) of BLAKE3 over the byte
+//! `level + 1` and the key: over the key only, with a salt per level.
+//! Two changes to Dolt: (1) the forced cut at `NODE_MAX - MAX_ENTRY` with
+//! the limits `MAX_ENTRY` and `MAX_KEY`, so no node is above `NODE_MAX`
+//! (Dolt cuts after the entry that passes its maximum); (2) the size
+//! counted is the encoded node size, header and length fields included
+//! (Dolt counts key and value bytes only), so `NODE_MAX` bounds the object.
+//! The decision reads only the entries since the last cut and the current
+//! key, with no look-ahead.
+//!
+//! # What the boundaries depend on
+//!
+//! With fixed-width values, the node boundaries are a function of the key
+//! set alone. With variable-width values, they depend on the key set and
+//! the entry byte lengths, never on the value bytes. An internal entry has
+//! a fixed-width child ID and count, so its level cuts only on the last
+//! keys of the children and their lengths.
+//!
+//! # Memory
+//!
+//! Build keeps one node in progress per level, and the cursor, `get` and
+//! `walk` hold one path of nodes: O(depth x node_max) bytes, never
+//! O(entries). There is no node cache.
+//!
+//! # Concurrency
+//!
+//! The design is a single writer per map. Nodes are immutable
+//! content-addressed objects, so readers of an existing root are safe at
+//! any time, and no type of this crate holds shared mutable state.
+//!
+//! # Floats
+//!
+//! The cut test uses only the four basic float operations (an exact u64
+//! difference and an own `e^-x`), so node IDs are the same on every
+//! platform; `golden_root` pins them. Whether this rule and its constants
+//! would become part of a frozen store format is owner question Q-3 of
+//! Phase 24 (a one-way door, not decided here).
 
 mod node;
 mod rule;

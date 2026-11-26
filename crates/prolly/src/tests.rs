@@ -211,3 +211,101 @@ fn memory_is_bounded() {
     }
     assert!(high[1] <= 3 * high[0], "high water {high:?}");
 }
+
+/// Node bytes with any header and body (no checks).
+fn raw(level: u8, count: u32, body: &[u8]) -> Vec<u8> {
+    let mut b = NODE_MAGIC.to_vec();
+    b.push(level);
+    b.extend_from_slice(&count.to_le_bytes());
+    b.extend_from_slice(body);
+    b
+}
+
+fn raw_leaf_entry(k: &[u8], v: &[u8]) -> Vec<u8> {
+    let mut b = (k.len() as u16).to_le_bytes().to_vec();
+    b.extend_from_slice(&(v.len() as u16).to_le_bytes());
+    b.extend_from_slice(k);
+    b.extend_from_slice(v);
+    b
+}
+
+/// `get` (of a key routed to the first child), a full cursor run and
+/// `walk`, each caught for panics.
+fn read_all(s: &ChunkStore, root: &chunk_store::ObjectId) -> Vec<std::thread::Result<Result<()>>> {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    vec![
+        catch_unwind(AssertUnwindSafe(|| get(s, root, b"a").map(|_| ()))),
+        catch_unwind(AssertUnwindSafe(|| iter(s, root).and_then(|c| c.collect::<Result<Vec<_>>>()).map(|_| ()))),
+        catch_unwind(AssertUnwindSafe(|| walk(s, root, |_| {}))),
+    ]
+}
+
+#[test]
+fn malformed_node_is_an_error() {
+    use crate::node::{encode_internal, encode_leaf, Child};
+    let s = mem_store();
+    let good_leaf = encode_leaf(&[(b"a".to_vec(), b"1".to_vec())]);
+    let leaf_id = s.put(&good_leaf).unwrap();
+    let mut wrong_magic = good_leaf.clone();
+    wrong_magic[0] = b'X';
+    let mut trailing = good_leaf.clone();
+    trailing.push(0);
+    let past_end = raw(0, 1, &[10, 0, 0, 0, b'a', b'b', b'c']);
+    let out_of_order = raw(0, 2, &[raw_leaf_entry(b"b", b""), raw_leaf_entry(b"a", b"")].concat());
+    let equal = raw(0, 2, &[raw_leaf_entry(b"a", b""), raw_leaf_entry(b"a", b"")].concat());
+    let long_key = raw(0, 1, &raw_leaf_entry(&[b'a'; MAX_KEY + 1], b""));
+    let child = |id| Child { last_key: b"zz".to_vec(), id, count: 1 };
+    let wrong_level = encode_internal(2, &[child(leaf_id)]);
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("wrong magic", wrong_magic),
+        ("5-byte node", good_leaf[..5].to_vec()),
+        ("count above the bytes", raw(0, u32::MAX, &[0; 11])),
+        ("entry past the end", past_end),
+        ("trailing bytes", trailing),
+        ("keys out of order", out_of_order),
+        ("equal keys", equal),
+        ("internal with count 0", raw(1, 0, &[])),
+        ("child at the wrong level", wrong_level),
+        ("key above MAX_KEY", long_key),
+    ];
+    for (what, bytes) in cases {
+        let bad = s.put(&bytes).unwrap();
+        // As the root, and as the child of a good level-1 node.
+        let parent = s.put(&encode_internal(1, &[child(bad)])).unwrap();
+        for (place, root) in [("root", bad), ("child", parent)] {
+            for got in read_all(&s, &root) {
+                assert!(matches!(got, Ok(Err(Error::Corrupt(_)))), "{what} as {place}: {got:?}");
+            }
+        }
+    }
+    // A child that is not in the store.
+    let missing = s.put(&encode_internal(1, &[child(chunk_store::ObjectId([0x1e; chunk_store::ID_LEN]))])).unwrap();
+    for got in read_all(&s, &missing) {
+        assert!(matches!(got, Ok(Err(Error::Store(_)))), "missing child: {got:?}");
+    }
+    // The good leaf under a good parent still reads.
+    let ok = s.put(&encode_internal(1, &[child(leaf_id)])).unwrap();
+    assert_eq!(get(&s, &ok, b"a").unwrap(), Some(b"1".to_vec()));
+}
+
+#[test]
+fn entry_too_large_is_an_error() {
+    let s = mem_store();
+    let before = s.stats();
+    let mut b = Builder::new(&s, Config::SMALL);
+    assert!(matches!(b.push(b"k", &[0; 300]), Err(Error::EntryTooLarge { len: 305, max: 256 })));
+    assert!(matches!(b.push(&[b'k'; 129], b""), Err(Error::KeyTooLarge { len: 129, max: 128 })));
+    assert_eq!(s.stats(), before);
+}
+
+#[test]
+fn unsorted_input_is_an_error() {
+    let s = mem_store();
+    let mut b = Builder::new(&s, Config::SMALL);
+    b.push(b"b", b"").unwrap();
+    assert!(matches!(b.push(b"a", b""), Err(Error::Unsorted)));
+    let mut b = Builder::new(&s, Config::SMALL);
+    b.push(b"a", b"").unwrap();
+    assert!(matches!(b.push(b"a", b""), Err(Error::Unsorted)));
+    assert!(matches!(build(&s, Config::SMALL, [(b"b", b""), (b"a", b"")]), Err(Error::Unsorted)));
+}
