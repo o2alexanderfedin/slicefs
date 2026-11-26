@@ -1,0 +1,22 @@
+# Gate of the review fixes (24-REVIEW.md, branch exec/24-fix), run before the
+# last code commit (IN-05) on the tree of that commit (macOS host).
+
+$ timeout 900 cargo test -p prolly -p prolly-bench
+prolly: test result: ok. 23 passed; 0 failed; 0 ignored
+prolly-bench (unit): test result: ok. 0 passed; 0 failed; 0 ignored
+prolly-bench (smoke): test result: ok. 2 passed; 0 failed; 0 ignored
+exit 0 (started 21:40:11Z)
+
+$ RUST_STABLE=stable timeout 1800 scripts/safety/clippy.sh
+CLIPPY os=Darwin toolchain=stable result=ok
+UNSAFE files=32 tokens=134 result=ok
+exit 0
+
+$ timeout 3600 cargo test --workspace -- --skip a_panic_on_another_thread_does_not_abort --skip a_reader_thread_panic_aborts_and_the_remount_replays --skip a_worker_panic_aborts_and_the_remount_replays --skip a_full_queue_that_stays_full_aborts
+85 "test result" lines: 1696 passed, 0 failed, 13 ignored
+exit 0 (2026-11-26T21:41:29Z to 21:47:16Z)
+
+# Also before the commit: SMOKE=1 RUNS=1 bench.sh from another directory with
+# CARGO_TARGET_DIR=target (relative; it built in the repo target, exit 0), and
+# a quick Boost pass (RUNS=1 KS="1 1000" COMMITS=2 PATTERNS="scatter insdel"
+# SCALE_NS=100000, exit 0, 2 checks ok=1). Their numbers are not used.
