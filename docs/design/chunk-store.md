@@ -344,9 +344,9 @@ the next `slicefs gc` or rehash run.
   room for up to a second copy of the live data until the GC of step 7
   frees the old objects. The report shows the store disk usage before and
   after.
-- The GC mark of step 7 holds one 33-byte key per metadata node and per
-  file of all roots. This is the existing bound of the GC mark (see "Full
-  GC"), not a bound of the rewrite.
+- The GC of step 7 uses the mark of every GC (see "The mark walk" below):
+  its RAM does not grow with the file or root count. Its temp files take
+  about 33 bytes per key per root (about 3 keys per file).
 - Time: a rehash to SHA-256 on a CPU without SHA instructions runs at about
   250 MB/s per core for the hash, plus zstd. A large store can take hours.
   The progress lines show where the run is.
@@ -1543,6 +1543,23 @@ The RAM of a GC: the totals of each pack, the entries of one pack, the
 memtable copy, and the filters and fences of the pending runs of one
 group.
 
+The mark walk (#207) gives every key of every root (each metadata node,
+each manifest list, each file content key, and the file roots of open
+handles) to an external sort (`ChunkStore::gc_sorter`, the sorter of the
+full GC below) in `<store>/gc-tmp`, and reads the sorted keys without
+duplicates back one at a time. For each key it adds the objects of that
+value to the mark. A snapshot of the same tree gives the same keys again,
+but they go to disk, not to RAM. The map and manifest nodes are read in
+1 MiB windows of whole entries, never whole. RAM: one sort buffer
+(4 MiB), the merge buffers (32 x 64 KiB), and two read windows. Disk:
+about 33 bytes per key per root (a tiny file is 3 keys: inode node,
+manifest list, content), removed at the end, also after an error or a
+stop. An online GC, `slicefs gc`, `gc --full` and the GC of
+`slicefs rehash` share this walk. The RAM that stays (measured in
+`docs/research/gc-memory.md`): the per-pack `.idx` decode (bounded by the
+pack limit) and the Bloom filters of the index runs and of the mark
+(about 1.25 to 2.5 bytes per object, by design).
+
 The mark (#113) is a Bloom filter of the live IDs, not a set of them:
 10 bits (1.25 bytes) for each object of the store
 (`ChunkStore::live_filter`). A false positive only keeps a dead object; a
@@ -1577,8 +1594,9 @@ next one, and a dead object does not stay forever.
 mounted store), runs a GC that frees every dead object. It uses
 `gc_begin_full`, `metadata::gc::live_objects_exact` and `gc_finish_full`:
 
-- Exact mark in bounded RAM. The mark (and the objects put or read before
-  `gc_finish_full`, also the nodes that the mark reads) go to an external
+- Exact mark in bounded RAM (after the mark walk above). The mark (and
+  the objects put or read before `gc_finish_full`, also the nodes that
+  the mark reads) go to an external
   sort: a buffer of `Options::gc_sort_chunk_ids` IDs (default 4 MiB of
   IDs, 127,100) is sorted, deduplicated and written to a temp file. Then
   merges of at most `Options::gc_merge_fan_in` files (default 32; the

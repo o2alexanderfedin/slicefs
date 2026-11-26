@@ -1,5 +1,6 @@
-//! External sort of fixed-size records in bounded RAM: the exact mark of a
-//! full GC (see `ChunkStore::gc_finish_full`), and the refcount rows of
+//! External sort of fixed-size records in bounded RAM: the keys of the GC
+//! mark walk (`ChunkStore::gc_sorter`, #207), the exact mark of a full GC
+//! (see `ChunkStore::gc_finish_full`), and the refcount rows of
 //! `slicefs rehash` (sorted by their new keys).
 //!
 //! Records go into a buffer of at most `SortCfg::chunk_records`; a full

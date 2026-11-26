@@ -171,9 +171,11 @@ pub enum Cmd {
     Gc {
         /// Path to the SliceFS block store directory.
         store: PathBuf,
-        /// Full GC: an exact mark (sorted temp files in the store, bounded
-        /// RAM) and no holes, so every dead object goes. Slower than the
-        /// normal GC, which can keep a few dead objects.
+        /// Full GC: an exact mark (sorted temp files in the store) and no
+        /// holes, so every dead object goes. Slower than the normal GC,
+        /// which can keep a few dead objects. In both modes the RAM of the
+        /// mark does not grow with the file or snapshot count; the temp
+        /// files take about 33 bytes per key per root.
         #[arg(long)]
         full: bool,
     },

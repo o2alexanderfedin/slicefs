@@ -6,10 +6,12 @@
 //! slicefs gc [--full] <store>
 //! ```
 //!
-//! `--full` runs a full GC: an exact mark in sorted temp files (bounded
-//! RAM) and no holes, so every dead object goes (see
-//! `ChunkStore::gc_finish_full`). Both modes print the disk usage of the
-//! store before and after.
+//! `--full` runs a full GC: an exact mark in sorted temp files and no
+//! holes, so every dead object goes (see `ChunkStore::gc_finish_full`).
+//! In both modes the mark walk sorts its keys in temp files
+//! (`<store>/gc-tmp`), so its RAM does not grow with the file or snapshot
+//! count (#207). Both modes print the disk usage of the store before and
+//! after.
 //!
 //! The command:
 //! 1. If the store is mounted (`mount.lock` present), asks the mount to run

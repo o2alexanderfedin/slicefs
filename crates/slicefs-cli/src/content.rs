@@ -185,8 +185,9 @@ pub fn ensure_hash_flag(store: &Path, hasher: &dyn ObjectHasher) -> std::io::Res
     Ok(true)
 }
 
-/// The temp files of a full GC (`<store>/gc-tmp`; a writable open removes
-/// what a crash left).
+/// The temp files of a GC (`<store>/gc-tmp`: the sorted keys of the mark
+/// walk, and the exact mark of a full GC; a writable open removes what a
+/// crash left).
 pub const GC_TMP_DIR: &str = "gc-tmp";
 
 /// The temp files of `slicefs rehash` (`<store>/rehash-tmp`): the
