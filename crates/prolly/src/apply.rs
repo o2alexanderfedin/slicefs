@@ -100,6 +100,13 @@ impl Work<'_> {
         node::load(self.store, id, want)
     }
 
+    /// Loads the child `entry` at `level` and checks it against the entry
+    /// (`node::load_child`).
+    fn load_child(&mut self, level: u8, entry: &Child, lo: Option<&[u8]>) -> Result<(Node, usize)> {
+        self.reads += 1;
+        node::load_child(self.store, level, entry, lo)
+    }
+
     fn note(&mut self, held: usize) {
         self.high = self.high.max(held);
     }
@@ -128,6 +135,21 @@ struct Frame {
     children: Vec<Child>,
     at: usize,
     bytes: usize,
+    /// The bound that the first key of `children[0]` must be above (`None`
+    /// on the leftmost path).
+    lo: Option<Vec<u8>>,
+}
+
+impl Frame {
+    /// The bound of the first key of child `i`: the last key of the
+    /// previous child, or the bound of the frame.
+    fn lo_of(&self, i: usize) -> Option<&[u8]> {
+        if i > 0 {
+            Some(&self.children[i - 1].last_key)
+        } else {
+            self.lo.as_deref()
+        }
+    }
 }
 
 /// A forward-only position on the nodes of one level: the path of decoded
@@ -152,10 +174,11 @@ impl LevelCursor {
         let top = root.node.level();
         let first = if level == top {
             // A virtual parent of the root; the root is the last node of its level.
-            Frame { level, children: vec![Child { last_key: Vec::new(), id: root.id, count: 0 }], at: 0, bytes: 0 }
+            // It is never loaded as a child, so its entry is not checked.
+            Frame { level, children: vec![Child { last_key: Vec::new(), id: root.id, count: 0 }], at: 0, bytes: 0, lo: None }
         } else {
             let children = children_of(root.node.clone())?;
-            Frame { level: top - 1, children, at: 0, bytes: root.bytes }
+            Frame { level: top - 1, children, at: 0, bytes: root.bytes, lo: None }
         };
         let mut c = LevelCursor { level, path: vec![first] };
         c.descend(w, None)?;
@@ -172,11 +195,12 @@ impl LevelCursor {
     fn descend(&mut self, w: &mut Work, key: Option<&[u8]>) -> Result<()> {
         while self.deepest().level > self.level {
             let f = self.deepest();
-            let (id, want) = (f.children[f.at].id, f.level);
-            let (n, bytes) = w.load(&id, Some(want))?;
+            let want = f.level;
+            let lo = f.lo_of(f.at).map(<[u8]>::to_vec);
+            let (n, bytes) = w.load_child(want, &f.children[f.at], lo.as_deref())?;
             let children = children_of(n)?;
             let at = key.map_or(0, |k| children.partition_point(|c| c.last_key.as_slice() < k).min(children.len() - 1));
-            self.path.push(Frame { level: want - 1, children, at, bytes });
+            self.path.push(Frame { level: want - 1, children, at, bytes, lo });
         }
         Ok(())
     }
@@ -220,6 +244,12 @@ impl LevelCursor {
     fn current(&self) -> &Child {
         let f = self.deepest();
         &f.children[f.at]
+    }
+
+    /// The bound that the first key of the current node must be above.
+    fn current_lo(&self) -> Option<&[u8]> {
+        let f = self.deepest();
+        f.lo_of(f.at)
     }
 
     fn is_last(&self) -> bool {
@@ -272,7 +302,7 @@ fn rewrite_level(w: &mut Work, root: &Root, level: u8, ops: &[Op]) -> Result<Rew
         let mut lw = LevelWriter::new(level);
         loop {
             let c = cur.current().clone();
-            let (n, nb) = if top { (root.node.clone(), root.bytes) } else { w.load(&c.id, Some(level))? };
+            let (n, nb) = if top { (root.node.clone(), root.bytes) } else { w.load_child(level, &c, cur.current_lo())? };
             let j = if cur.is_last() {
                 ops.len()
             } else {
@@ -451,13 +481,20 @@ pub fn apply(store: &ChunkStore, cfg: Config, root: &ObjectId, batch: &[Edit]) -
 /// The canonical root under the single node `id` of level `level`: while
 /// it is an internal node with one child, that child.
 fn collapse(w: &mut Work, mut id: ObjectId, mut level: u8) -> Result<ObjectId> {
+    // The first node is new (this apply wrote it); each later one is the
+    // only child of the node before it, checked against that entry.
+    let mut entry: Option<Child> = None;
     while level > 0 {
-        let (n, bytes) = w.load(&id, Some(level))?;
+        let (n, bytes) = match &entry {
+            None => w.load(&id, Some(level))?,
+            Some(c) => w.load_child(level, c, None)?,
+        };
         w.note(bytes);
         let children = children_of(n)?;
         let [only] = children.as_slice() else { break };
         id = only.id;
         level -= 1;
+        entry = Some(only.clone());
     }
     Ok(id)
 }

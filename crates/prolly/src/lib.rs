@@ -27,6 +27,15 @@
 //! ascending in every node. A damaged or crafted node gives
 //! `Error::Corrupt`, never a panic.
 //!
+//! Each child is checked against its parent entry when `get`, the cursor,
+//! `walk` or `apply` loads it: its last key is the entry's key, its first
+//! key is above the last key of the previous sibling (or the bound that the
+//! path carries down), and its leaf entry count is the entry's count. So
+//! the keys of a loaded path are in order and its counts are true, and a
+//! crafted tree whose nodes are each valid but do not fit together gives
+//! `Error::Corrupt` once a bad node is on the path. The check is per path:
+//! a `get` whose path does not hold the bad node does not see it.
+//!
 //! # Boundary rule
 //!
 //! This is Dolt's size-aware key splitter (`go/store/prolly/tree/node_splitter.go`

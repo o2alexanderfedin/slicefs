@@ -283,9 +283,55 @@ fn malformed_node_is_an_error() {
     for got in read_all(&s, &missing) {
         assert!(matches!(got, Ok(Err(Error::Store(_)))), "missing child: {got:?}");
     }
-    // The good leaf under a good parent still reads.
-    let ok = s.put(&encode_internal(1, &[child(leaf_id)])).unwrap();
+    // The good leaf under a parent entry that fits it (last key, count) still reads.
+    let ok = s.put(&encode_internal(1, &[Child { last_key: b"a".to_vec(), id: leaf_id, count: 1 }])).unwrap();
     assert_eq!(get(&s, &ok, b"a").unwrap(), Some(b"1".to_vec()));
+}
+
+/// Trees whose nodes are each valid but do not fit their parent entries:
+/// each read and apply that loads the bad node gives `Error::Corrupt`.
+#[test]
+fn inconsistent_tree_is_an_error() {
+    use crate::node::{encode_internal, encode_leaf, Child};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let s = mem_store();
+    let leaf = |es: &[&[u8]]| s.put(&encode_leaf(&es.iter().map(|k| (k.to_vec(), b"v".to_vec())).collect::<Vec<_>>())).unwrap();
+    let entry = |k: &[u8], id, count| Child { last_key: k.to_vec(), id, count };
+    let a = leaf(&[b"a", b"m"]);
+    let b = leaf(&[b"b", b"z"]);
+    let good = leaf(&[b"n", b"z"]);
+    let level1 = |cs: &[Child]| s.put(&encode_internal(1, cs)).unwrap();
+    // (what, root, a key whose path holds the bad node)
+    let cases = [
+        // The example of the review: B holds "b", which is below A's last key "m".
+        ("first key not above the previous sibling", level1(&[entry(b"m", a, 2), entry(b"z", b, 2)]), b"y" as &[u8]),
+        ("last key is not the entry's key", level1(&[entry(b"q", a, 2), entry(b"z", good, 2)]), b"a"),
+        ("leaf count is not the entry's count", level1(&[entry(b"m", a, 5), entry(b"z", good, 2)]), b"a"),
+        (
+            "subtree count is not the entry's count",
+            s.put(&encode_internal(2, &[entry(b"z", level1(&[entry(b"m", a, 2), entry(b"z", good, 2)]), 3)])).unwrap(),
+            b"a",
+        ),
+    ];
+    for (what, root, key) in cases {
+        let got = [
+            catch_unwind(AssertUnwindSafe(|| get(&s, &root, key).map(|_| ()))),
+            catch_unwind(AssertUnwindSafe(|| iter(&s, &root).and_then(|c| c.collect::<Result<Vec<_>>>()).map(|_| ()))),
+            catch_unwind(AssertUnwindSafe(|| walk(&s, &root, |_| {}))),
+            catch_unwind(AssertUnwindSafe(|| apply(&s, Config::SMALL, &root, &[put(key, b"new")]).map(|_| ()))),
+        ];
+        for (i, g) in got.into_iter().enumerate() {
+            assert!(matches!(g, Ok(Err(Error::Corrupt(_)))), "{what}, check {i}: {g:?}");
+        }
+    }
+    // The case of the review in apply: a put into A, whose rewrite runs on
+    // into B (A is below NODE_MIN, so no cut at its end), is an error, and
+    // no root that reads back wrong is returned.
+    let root = level1(&[entry(b"m", a, 2), entry(b"z", b, 2)]);
+    let got = catch_unwind(AssertUnwindSafe(|| apply(&s, Config::SMALL, &root, &[put(b"c", b"new")])));
+    assert!(matches!(got, Ok(Err(Error::Corrupt(_)))), "{got:?}");
+    // A get whose path holds only good nodes does not see B (the check is per path).
+    assert_eq!(get(&s, &root, b"a").unwrap(), Some(b"v".to_vec()));
 }
 
 #[test]

@@ -40,6 +40,20 @@ impl Node {
             Node::Internal { children, .. } => children.len(),
         }
     }
+
+    fn first_key(&self) -> Option<&[u8]> {
+        match self {
+            Node::Leaf(e) => e.first().map(|(k, _)| k.as_slice()),
+            Node::Internal { children, .. } => children.first().map(|c| c.last_key.as_slice()),
+        }
+    }
+
+    fn last_key(&self) -> Option<&[u8]> {
+        match self {
+            Node::Leaf(e) => e.last().map(|(k, _)| k.as_slice()),
+            Node::Internal { children, .. } => children.last().map(|c| c.last_key.as_slice()),
+        }
+    }
 }
 
 /// Encoded bytes of a leaf entry.
@@ -192,4 +206,33 @@ pub(crate) fn load(store: &ChunkStore, id: &ObjectId, want_level: Option<u8>) ->
         }
     }
     Ok((node, bytes.len()))
+}
+
+/// Reads and decodes the child `entry` of a node, at `level`, and checks
+/// it against the entry: its last key is the entry's key, its first key is
+/// above `lo` (the last key of the previous sibling, or the bound of the
+/// parent; `None` on the leftmost path), and its leaf entries are the
+/// entry's count. With the order inside each node, these keep the keys of
+/// a tree in order and its counts true along every loaded path.
+pub(crate) fn load_child(store: &ChunkStore, level: u8, entry: &Child, lo: Option<&[u8]>) -> Result<(Node, usize)> {
+    let (node, bytes) = load(store, &entry.id, Some(level))?;
+    if node.last_key() != Some(entry.last_key.as_slice()) {
+        return Err(corrupt("child's last key is not its parent entry's key"));
+    }
+    if let (Some(lo), Some(first)) = (lo, node.first_key()) {
+        if first <= lo {
+            return Err(corrupt("child's first key is not above the previous sibling"));
+        }
+    }
+    let count = match &node {
+        Node::Leaf(e) => e.len() as u64,
+        Node::Internal { children, .. } => children
+            .iter()
+            .try_fold(0u64, |n, c| n.checked_add(c.count))
+            .ok_or_else(|| corrupt("subtree count above u64"))?,
+    };
+    if count != entry.count {
+        return Err(corrupt("child's entry count is not its parent entry's count"));
+    }
+    Ok((node, bytes))
 }
