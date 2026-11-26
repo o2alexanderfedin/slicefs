@@ -28,7 +28,6 @@ thiserror      = { workspace = true }
 tracing        = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
-sha2-compress  = { workspace = true }
 parking_lot    = { workspace = true }
 
 # Models of the lock protocol: built only with `--cfg loom`, never in a normal build.

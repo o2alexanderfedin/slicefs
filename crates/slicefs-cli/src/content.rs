@@ -131,7 +131,10 @@ pub fn check_write(store: &Path, name: Option<&str>) -> std::io::Result<Option<S
 /// recorded in the header, and the line to print is returned when it
 /// changes the hash of an existing store. The rewrite changes only the hash
 /// line (it is line 2 when there was none); every other line stays in its
-/// order.
+/// order. A hash that needs a flag ([`header::hash_flag`]: SHA-256) gets it
+/// at the end of the lines in the same header write, so the flag is on disk
+/// before the first object of that hash. The flag stays when the hash
+/// changes back.
 pub fn check_write_with(store: &Path, name: Option<&str>, profile: Option<ChunkProfile>) -> std::io::Result<Option<String>> {
     // The name first, so that an unknown name makes nothing; a new store
     // gets the new hash and profile in its first header write.
@@ -152,8 +155,34 @@ pub fn check_write_with(store: &Path, name: Option<&str>, profile: Option<ChunkP
         Some(l) => *l = Line::Hash(new.name().to_string()),
         None => h.lines.insert(0, Line::Hash(new.name().to_string())),
     }
+    add_hash_flag(&mut h, new);
     header::write_header(store, &h)?;
     Ok(Some(line))
+}
+
+/// Add the flag that `hasher` needs ([`header::hash_flag`]) at the end of
+/// the lines of `h`, when it is not there. True when it added the line.
+fn add_hash_flag(h: &mut Header, hasher: &dyn ObjectHasher) -> bool {
+    match header::hash_flag(hasher) {
+        Some(f) if !h.flags().any(|g| g.name == f.name) => {
+            h.lines.push(Line::Flag(f));
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Write the flag that `hasher` needs (only the flag line; the hash line
+/// does not change). True when it wrote. Step 2 of `slicefs rehash`: the
+/// flag is on disk before the first object of `hasher`.
+pub fn ensure_hash_flag(store: &Path, hasher: &dyn ObjectHasher) -> std::io::Result<bool> {
+    let opened = header::check(store, Want::Write)?;
+    let mut h = opened.header.ok_or_else(|| std::io::Error::other(format!("{}/FORMAT is missing after its write", store.display())))?;
+    if !add_hash_flag(&mut h, hasher) {
+        return Ok(false);
+    }
+    header::write_header(store, &h)?;
+    Ok(true)
 }
 
 /// The temp files of a full GC (`<store>/gc-tmp`; a writable open removes

@@ -1,0 +1,55 @@
+# red-23-01: test-first runs of plan 23-01, before the code (base 526609e)
+
+## Task 1: cargo test -p chunk-store --lib -- hash::tests (tests written, no Sha256 yet)
+error[E0425]: cannot find value `Sha256` in this scope
+   --> crates/chunk-store/src/hash.rs:141:29
+error[E0425]: cannot find value `Sha256` in this scope
+   --> crates/chunk-store/src/hash.rs:143:20
+error[E0425]: cannot find value `Sha256` in this scope
+   --> crates/chunk-store/src/hash.rs:144:20
+error[E0425]: cannot find value `Sha256` in this scope
+   --> crates/chunk-store/src/hash.rs:158:24
+error: could not compile `chunk-store` (lib test) due to 4 previous errors
+exit=101
+(lookup_by_name_and_tag and every_known_hasher_round_trips are in the same
+module: they do not compile either; the first also fails at run time before
+the code, as hasher_by_name("sha256") is None.)
+
+## Task 1: cargo test -p slicefs-cli --test hash_change_tests (tracer written, no flag yet)
+error[E0432]: unresolved imports `slicefs_cli::header::HASH_SHA256_FLAG`, `slicefs_cli::header::HASH_SHA256_RELEASE`
+  --> crates/slicefs-cli/tests/hash_change_tests.rs:16:27
+error: could not compile `slicefs-cli` (test "hash_change_tests") due to 1 previous error
+exit=101
+
+## Task 2: cargo test -p slicefs-cli --lib -- header::tests (tests written, no pairing rule yet)
+test header::tests::marker_of_sha256_has_the_flag ... ok
+test header::tests::the_hash_sha256_flag_without_the_line_is_valid ... ok
+test header::tests::hash_sha256_needs_the_incompat_flag ... FAILED
+test header::tests::the_hash_sha256_flag_must_be_incompat ... FAILED
+refused: Header { format: 7, first: "slicefs-store 7 (store header with feature flags)", lines: [Hash("sha256")] }
+ro_compat: Header { format: 7, first: "slicefs-store 7 (store header with feature flags)", lines: [Hash("sha256"), Flag(Flag { class: RoCompat, name: "hash-sha256", release: "v2.2" })] }
+test result: FAILED. 22 passed; 2 failed; 0 ignored; 0 measured; 382 filtered out
+Guards (pass before the code of this task):
+- marker_of_sha256_has_the_flag: the marker_with part came in Task 1. Mutation
+  that turns it red: remove the hash_flag push in marker_with.
+- the_hash_sha256_flag_without_the_line_is_valid: guards that the new rule
+  does not refuse a flag with no hash line. Mutation that turns it red: in
+  parse, refuse a hash-sha256 flag when there is no `hash sha256` line.
+
+## Task 2: cargo test -p slicefs-cli --test hash_change_tests (first run: no ensure_hash_flag)
+error[E0425]: cannot find function `ensure_hash_flag` in module `content`
+   --> crates/slicefs-cli/tests/hash_change_tests.rs:327:22
+error[E0425]: cannot find function `ensure_hash_flag` in module `content`
+   --> crates/slicefs-cli/tests/hash_change_tests.rs:330:23
+error[E0425]: cannot find function `ensure_hash_flag` in module `content`
+   --> crates/slicefs-cli/tests/hash_change_tests.rs:332:23
+error: could not compile `slicefs-cli` (test "hash_change_tests") due to 3 previous errors
+
+## Task 2: same tests, ensure_hash_flag added, check_write_with not changed yet
+test sha256_ensure_hash_flag_writes_only_the_flag ... ok
+test sha256_mount_hash_change_writes_the_flag_with_the_hash_line ... FAILED
+test sha256_flag_stays_after_the_hash_goes_back ... FAILED
+thread 'sha256_mount_hash_change_writes_the_flag_with_the_hash_line' panicked at crates/slicefs-cli/tests/hash_change_tests.rs:289:5:
+thread 'sha256_flag_stays_after_the_hash_goes_back' panicked at crates/slicefs-cli/tests/hash_change_tests.rs:313:5:
+test result: FAILED. 5 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+(Both fail at the FORMAT assertion: the rewrite wrote `hash sha256` and no flag.)
