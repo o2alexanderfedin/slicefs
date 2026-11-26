@@ -365,7 +365,7 @@ pub(crate) fn write_root_segment(
 }
 
 /// Delete the segment files of `dir` whose id is lower than `id`.
-fn remove_segments_before(dir: &Path, id: u64) -> std::io::Result<()> {
+pub(crate) fn remove_segments_before(dir: &Path, id: u64) -> std::io::Result<()> {
     for e in std::fs::read_dir(dir)?.filter_map(|e| e.ok()) {
         let name = e.file_name().to_string_lossy().to_string();
         let old = name.strip_prefix("segment-").and_then(|n| n.strip_suffix(".seg")).and_then(|n| n.parse::<u64>().ok());

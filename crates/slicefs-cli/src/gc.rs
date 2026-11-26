@@ -23,6 +23,10 @@
 //! On a mounted store, the mount's GC thread does the work.
 
 use std::path::Path;
+use std::sync::Arc;
+
+use chunk_store::ChunkStore;
+use slicefs_traits::key::ObjectKey;
 
 use metadata::gc::{live_objects, live_objects_exact, GarbageCollector};
 use metadata::segment::load_store_from_segments;
@@ -86,6 +90,44 @@ pub fn run_gc_mode(store_path: &Path, full: bool) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+/// The GC of the chunk store (mark and sweep, a full GC if `full`) on a
+/// store that the caller has open and holds the store lock for (`gc_report`,
+/// rehash). It takes no lock, opens nothing and does not touch the segments.
+/// `roots` must be every live root (the current root and every snapshot
+/// root): an object that no root reaches is deleted. A failed mark stops
+/// before anything is deleted.
+pub fn gc_on_open_store(
+    cs: &Arc<ChunkStore>,
+    roots: &[ObjectKey],
+    full: bool,
+) -> Result<chunk_store::GcStats, Box<dyn std::error::Error>> {
+    let no_stop = std::sync::atomic::AtomicBool::new(false);
+    let content = if full {
+        let boundary = cs.gc_begin_full()?;
+        let marked = live_objects_exact(cs, roots, &[], &no_stop);
+        let ids = match marked {
+            Ok(Some(ids)) => ids,
+            Ok(None) => {
+                cs.gc_abort();
+                return Err("GC mark stopped, nothing deleted".into());
+            }
+            Err(e) => {
+                cs.gc_abort();
+                return Err(format!("GC mark failed, nothing deleted: {}", e).into());
+            }
+        };
+        cs.gc_finish_full(ids, boundary)
+    } else {
+        let ids = live_objects(cs, roots, &[], &no_stop)
+            .map_err(|e| format!("GC mark failed, nothing deleted: {}", e))?
+            .ok_or("GC mark stopped, nothing deleted")?;
+        let boundary = cs.gc_begin()?;
+        cs.gc_finish(&ids, boundary)
+    }
+    .map_err(|e| format!("GC of file content failed: {}", e))?;
+    Ok(content)
+}
+
 /// Run the GC and return its report (the lines that `slicefs gc` prints).
 pub fn gc_report(store_path: &Path, full: bool) -> Result<String, Box<dyn std::error::Error>> {
     // An existing store only, then the store header, before anything writes
@@ -122,30 +164,7 @@ pub fn gc_report(store_path: &Path, full: bool) -> Result<String, Box<dyn std::e
     // object, bad record) stops here, before anything is deleted.
     let mut io = crate::content::store_io(store_path)?;
     let cs = std::sync::Arc::clone(io.store());
-    let no_stop = std::sync::atomic::AtomicBool::new(false);
-    let content = if full {
-        let boundary = cs.gc_begin_full()?;
-        let marked = live_objects_exact(&cs, &roots, &[], &no_stop);
-        let ids = match marked {
-            Ok(Some(ids)) => ids,
-            Ok(None) => {
-                cs.gc_abort();
-                return Err("GC mark stopped, nothing deleted".into());
-            }
-            Err(e) => {
-                cs.gc_abort();
-                return Err(format!("GC mark failed, nothing deleted: {}", e).into());
-            }
-        };
-        cs.gc_finish_full(ids, boundary)
-    } else {
-        let ids = live_objects(&cs, &roots, &[], &no_stop)
-            .map_err(|e| format!("GC mark failed, nothing deleted: {}", e))?
-            .ok_or("GC mark stopped, nothing deleted")?;
-        let boundary = cs.gc_begin()?;
-        cs.gc_finish(&ids, boundary)
-    }
-    .map_err(|e| format!("GC of file content failed: {}", e))?;
+    let content = gc_on_open_store(&cs, &roots, full)?;
     cs.close()?;
 
     let gc = GarbageCollector::new(segs_dir);

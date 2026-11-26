@@ -1,0 +1,6 @@
+# Red run, Task 1 (before the code): cargo test -p slicefs-cli --test snapshot_switch_gc_tests
+error[E0432]: unresolved import `metadata::segment::write_switch_segment`
+ --> crates/slicefs-cli/tests/snapshot_switch_gc_tests.rs:8:72
+error[E0425]: cannot find function `gc_on_open_store` in module `slicefs_cli::gc`
+   --> crates/slicefs-cli/tests/snapshot_switch_gc_tests.rs:114:34
+error: could not compile `slicefs-cli` (test "snapshot_switch_gc_tests") due to 2 previous errors
