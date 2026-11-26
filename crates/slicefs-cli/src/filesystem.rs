@@ -830,11 +830,11 @@ pub(crate) struct FlushCtl {
     pub(crate) freed: sync::Condvar,
     /// True while a flusher loop runs. With no flusher, a writer over the
     /// budget does not wait (it pays at once).
-    pub(crate) running: AtomicBool,
+    pub(crate) running: raw::atomic::AtomicBool,
     /// The wait limit of a throttled writer, in ms (`THROTTLE_WAIT`).
-    pub(crate) throttle_wait_ms: AtomicU64,
+    pub(crate) throttle_wait_ms: raw::atomic::AtomicU64,
     /// The pass interval of the flusher, in ms (`FLUSH_PASS`).
-    pub(crate) pass_ms: AtomicU64,
+    pub(crate) pass_ms: raw::atomic::AtomicU64,
     /// The idle time of a file, in ms (`DIRTY_IDLE`).
     pub(crate) idle_ms: AtomicU64,
     /// The maximum age of dirty data, in ms (`DIRTY_EXPIRE`).
@@ -855,9 +855,9 @@ pub(crate) struct FlushCtl {
     /// half the budget leaves it false, so the first write that finds the
     /// total at half kicks. The next pass sets it again: a timed pass, or
     /// a pass kicked at the budget.
-    pub(crate) empty_pass: AtomicBool,
+    pub(crate) empty_pass: raw::atomic::AtomicBool,
     /// Writers in a throttle wait now.
-    pub(crate) throttled_now: AtomicUsize,
+    pub(crate) throttled_now: raw::atomic::AtomicUsize,
     pub(crate) passes: AtomicU64,
     pub(crate) steps: AtomicU64,
     pub(crate) published: AtomicU64,
@@ -884,15 +884,15 @@ impl FlushCtl {
             flags: sync::Mutex::new(Rank::Short, FlushFlags::default()),
             wake: sync::Condvar::new(),
             freed: sync::Condvar::new(),
-            running: AtomicBool::new(false),
-            throttle_wait_ms: AtomicU64::new(THROTTLE_WAIT.as_millis() as u64),
-            pass_ms: AtomicU64::new(FLUSH_PASS.as_millis() as u64),
+            running: raw::atomic::AtomicBool::new(false),
+            throttle_wait_ms: raw::atomic::AtomicU64::new(THROTTLE_WAIT.as_millis() as u64),
+            pass_ms: raw::atomic::AtomicU64::new(FLUSH_PASS.as_millis() as u64),
             idle_ms: AtomicU64::new(DIRTY_IDLE.as_millis() as u64),
             expire_ms: AtomicU64::new(DIRTY_EXPIRE.as_millis() as u64),
             hot_ms: AtomicU64::new(HOT_WINDOW.as_millis() as u64),
             clock_offset_ms: AtomicU64::new(0),
-            empty_pass: AtomicBool::new(false),
-            throttled_now: AtomicUsize::new(0),
+            empty_pass: raw::atomic::AtomicBool::new(false),
+            throttled_now: raw::atomic::AtomicUsize::new(0),
             passes: AtomicU64::new(0),
             steps: AtomicU64::new(0),
             published: AtomicU64::new(0),
@@ -923,6 +923,16 @@ impl FlushCtl {
     /// the new total or waits already and gets the notify.
     pub(crate) fn notify_freed(&self) {
         drop(self.flags.lock());
+        self.freed.notify_all();
+    }
+
+    /// Ask the flusher loop to end and wake every throttled writer (the
+    /// stop step of `SliceFsFilesystem::stop_flusher`; the M2 model calls
+    /// it). The stop is set under the flags lock: a writer checks it under
+    /// that lock, so it sees it or waits already and gets the notify.
+    pub(crate) fn request_stop(&self) {
+        self.flags.lock().stop = true;
+        self.wake.notify_all();
         self.freed.notify_all();
     }
 }
@@ -1050,10 +1060,10 @@ impl Drop for ExclusiveWait<'_> {
 }
 
 /// Lowers `FlushCtl::throttled_now` when dropped (every exit of a wait).
-struct ThrottledNow<'a>(&'a AtomicUsize);
+struct ThrottledNow<'a>(&'a raw::atomic::AtomicUsize);
 
 impl<'a> ThrottledNow<'a> {
-    fn enter(n: &'a AtomicUsize) -> Self {
+    fn enter(n: &'a raw::atomic::AtomicUsize) -> Self {
         n.fetch_add(1, Ordering::Relaxed);
         ThrottledNow(n)
     }
@@ -1925,6 +1935,51 @@ impl SliceFsFilesystem {
     pub fn read_content(&self, key: &ObjectKey) -> Option<Vec<u8>> {
         content::get_all(&self.content, key)
     }
+}
+
+/// The wait of a writer over the budget (the wait part of
+/// `SliceFsFilesystem::throttle_write`, with `now` for its `dirty_now`):
+/// it counts the wait, kicks the flusher under the flags lock, and waits
+/// on `freed` in slices of `THROTTLE_SLICE` until the total from `now` is
+/// below the budget (returns false: no pay), the flusher stopped or ended,
+/// a pass that began in the wait could not free memory, or the wait limit
+/// passed (returns true: the writer pays). A free function, so the dirty
+/// budget model (`loom_tests`) runs it with a model total.
+pub(crate) fn throttle_wait(ctl: &FlushCtl, now: impl Fn() -> (usize, usize)) -> bool {
+    ctl.throttled.fetch_add(1, Ordering::Relaxed);
+    let _now = ThrottledNow::enter(&ctl.throttled_now);
+    let start = Instant::now();
+    let deadline = start + Duration::from_millis(ctl.throttle_wait_ms.load(Ordering::Relaxed));
+    let mut flags = ctl.flags.lock();
+    // Only a pass with a higher number began after this point.
+    let seen = flags.pass_begun;
+    flags.kicked = true;
+    ctl.wake.notify_all();
+    let pay = loop {
+        // Under the flags lock: the flusher lowers the total before it
+        // takes this lock to notify, so no wakeup is lost.
+        let (total, budget) = now();
+        if total < budget {
+            break false;
+        }
+        if flags.stop || !ctl.running.load(Ordering::Acquire) {
+            ctl.stop_exits.fetch_add(1, Ordering::Relaxed);
+            break true;
+        }
+        if flags.pass_done > seen && flags.pass_stuck {
+            ctl.no_room_exits.fetch_add(1, Ordering::Relaxed);
+            break true;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            ctl.timeouts.fetch_add(1, Ordering::Relaxed);
+            break true;
+        }
+        ctl.freed.wait_for(&mut flags, left.min(THROTTLE_SLICE));
+    };
+    drop(flags);
+    ctl.max_wait_ms.fetch_max(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+    pay
 }
 
 /// Hold `gate` shared with its `Rank::Gate` entry (the body of
@@ -3497,40 +3552,7 @@ impl SliceFsFilesystem {
         if !ctl.running.load(Ordering::Acquire) {
             return Admit { pay: true };
         }
-        ctl.throttled.fetch_add(1, Ordering::Relaxed);
-        let _now = ThrottledNow::enter(&ctl.throttled_now);
-        let start = Instant::now();
-        let deadline = start + Duration::from_millis(ctl.throttle_wait_ms.load(Ordering::Relaxed));
-        let mut flags = ctl.flags.lock();
-        // Only a pass with a higher number began after this point.
-        let seen = flags.pass_begun;
-        flags.kicked = true;
-        ctl.wake.notify_all();
-        let pay = loop {
-            // Under the flags lock: the flusher lowers the total before it
-            // takes this lock to notify, so no wakeup is lost.
-            let (total, budget) = self.dirty_now();
-            if total < budget {
-                break false;
-            }
-            if flags.stop || !ctl.running.load(Ordering::Acquire) {
-                ctl.stop_exits.fetch_add(1, Ordering::Relaxed);
-                break true;
-            }
-            if flags.pass_done > seen && flags.pass_stuck {
-                ctl.no_room_exits.fetch_add(1, Ordering::Relaxed);
-                break true;
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                ctl.timeouts.fetch_add(1, Ordering::Relaxed);
-                break true;
-            }
-            ctl.freed.wait_for(&mut flags, left.min(THROTTLE_SLICE));
-        };
-        drop(flags);
-        ctl.max_wait_ms.fetch_max(start.elapsed().as_millis() as u64, Ordering::Relaxed);
-        Admit { pay }
+        Admit { pay: throttle_wait(ctl, || self.dirty_now()) }
     }
 
     /// Wake the flusher for a pass now (the background threshold, half the
@@ -3573,12 +3595,7 @@ impl SliceFsFilesystem {
             "stop_flusher with a lock held: {:?}",
             sync::rank::held()
         );
-        let ctl = &*self.flush_ctl;
-        // The stop is set under the flags lock: a writer checks it under
-        // that lock, so it sees it or waits already and gets the notify.
-        ctl.flags.lock().stop = true;
-        ctl.wake.notify_all();
-        ctl.freed.notify_all();
+        self.flush_ctl.request_stop();
         // Take the handle, then join with no lock held.
         let Some(h) = self.flusher_thread.lock().take() else { return };
         if h.thread().id() == std::thread::current().id() {
@@ -7236,6 +7253,96 @@ mod loom_tests {
             for t in threads {
                 t.join().unwrap();
             }
+        });
+    }
+
+    /// The budget of the M2 models (the total starts at or above it).
+    const BUDGET: usize = 100;
+
+    /// A real flush control block for the M2 models, as `throttle_write`
+    /// finds it before the wait: the flusher is marked as running (the
+    /// writer enters the wait only after it saw `running`) and kicked (a
+    /// write at or above the budget kicks the flusher before its wait,
+    /// `kick_flusher`). Real time is not modeled: the wait limit and the
+    /// pass interval are one hour, so no wait ends by time, and under loom
+    /// `wait_for` never times out anyway. So a lost wakeup shows as a
+    /// deadlock report, not as a slow pass (RESEARCH Pitfall 4).
+    fn model_ctl() -> Arc<FlushCtl> {
+        let ctl = FlushCtl::new();
+        ctl.throttle_wait_ms.store(3_600_000, Ordering::Relaxed);
+        ctl.pass_ms.store(3_600_000, Ordering::Relaxed);
+        ctl.running.store(true, Ordering::Release);
+        ctl.flags.lock().kicked = true;
+        Arc::new(ctl)
+    }
+
+    /// M2, the shared dirty budget: one writer over the budget in the real
+    /// `throttle_wait`, against the real `flusher::flusher_loop` with a pass
+    /// that, like a flusher step, lowers a model total below the budget
+    /// when it finds it at or above the budget and then calls the real
+    /// `FlushCtl::notify_freed` (a pass that finds nothing to free does not
+    /// notify). Threads: 3 (main, writer, flusher). Bound: the
+    /// `LOOM_MAX_PREEMPTIONS` of model.sh (default 3). Invariants: the
+    /// writer leaves the wait with no pay (it never waits while the total
+    /// is below the budget, and the notify of the pass is not lost: "the
+    /// flusher lowers the total before it takes this lock to notify"), then
+    /// `request_stop` ends the flusher; no deadlock in any order.
+    #[test]
+    fn loom_throttle_writer_leaves_after_a_pass_frees() {
+        loom::model(|| {
+            let ctl = model_ctl();
+            let total = Arc::new(ModelUsize::new(BUDGET));
+            let flusher = {
+                let (ctl, total) = (Arc::clone(&ctl), Arc::clone(&total));
+                raw::thread::spawn(move || {
+                    crate::flusher::flusher_loop(&ctl, || {
+                        if total.load(Ordering::Relaxed) >= BUDGET {
+                            total.store(0, Ordering::Relaxed);
+                            ctl.notify_freed();
+                        }
+                        true
+                    })
+                })
+            };
+            let writer = {
+                let (ctl, total) = (Arc::clone(&ctl), Arc::clone(&total));
+                raw::thread::spawn(move || throttle_wait(&ctl, || (total.load(Ordering::Relaxed), BUDGET)))
+            };
+            assert!(!writer.join().unwrap(), "the writer pays although the pass freed");
+            ctl.request_stop();
+            flusher.join().unwrap();
+            assert_eq!(ctl.stop_exits.load(Ordering::Relaxed), 0);
+        });
+    }
+
+    /// M2, the stop: two writers over the budget in the real
+    /// `throttle_wait`, the real `flusher_loop` with a pass that frees
+    /// nothing, and the real `FlushCtl::request_stop` (the stop step of
+    /// `stop_flusher`) on the main thread. Threads: 4 (main, 2 writers,
+    /// flusher). Bound: the `LOOM_MAX_PREEMPTIONS` of model.sh (default 3).
+    /// Invariants: the stop wakes both writers (or they see it, or see the
+    /// flusher gone, when they enter), each pays, `stop_exits` is 2, and the
+    /// flusher ends; no deadlock in any order.
+    #[test]
+    fn loom_throttle_stop_wakes_two_writers() {
+        loom::model(|| {
+            let ctl = model_ctl();
+            let flusher = {
+                let ctl = Arc::clone(&ctl);
+                raw::thread::spawn(move || crate::flusher::flusher_loop(&ctl, || true))
+            };
+            let writers: Vec<_> = (0..2)
+                .map(|_| {
+                    let ctl = Arc::clone(&ctl);
+                    raw::thread::spawn(move || throttle_wait(&ctl, || (BUDGET, BUDGET)))
+                })
+                .collect();
+            ctl.request_stop();
+            for w in writers {
+                assert!(w.join().unwrap(), "a writer does not pay after the stop");
+            }
+            assert_eq!(ctl.stop_exits.load(Ordering::Relaxed), 2);
+            flusher.join().unwrap();
         });
     }
 }

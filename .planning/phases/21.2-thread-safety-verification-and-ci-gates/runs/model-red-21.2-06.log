@@ -164,3 +164,176 @@ test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 381 filtered out
 
 error: test failed, to rerun pass `-p slicefs-cli --lib`
 MODEL FAILED crate=slicefs-cli: cargo exit 101
+
+# red run 2 at 5751c38: notify_freed without the flags lock (planted, not committed)
+# plant: notify_freed called freed.notify_all() with no take-and-drop of flags
+# command: RUST_STABLE=stable timeout 580 scripts/safety/model.sh (bound 3); exit 1
+# result: loom_throttle_writer_leaves_after_a_pass_frees reports 'deadlock' (main, writer and flusher all blocked); the deadlock panic then unwinds through loom drops, so the test binary ends with SIGABRT and cargo exits 101 (no 'test result' line; the same shape as red run 3 of plan 21.2-01)
+TOOLCHAINS stable=stable nightly=nightly-2026-02-11 kani=0.68.0
+MODEL bound=3
+warning: unused workspace dependency `anyhow`
+  --> Cargo.toml:33:1
+   |
+33 | anyhow     = "1"
+   | ^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `anyhow`
+warning: unused workspace dependency `bincode`
+  --> Cargo.toml:22:1
+   |
+22 | bincode    = "2"
+   | ^^^^^^^
+   |
+help: consider removing the workspace dependency `bincode`
+warning: unused workspace dependency `criterion`
+  --> Cargo.toml:24:1
+   |
+24 | criterion  = { version = "0.5", features = ["html_reports"] }
+   | ^^^^^^^^^
+   |
+help: consider removing the workspace dependency `criterion`
+warning: unused workspace dependency `redb`
+  --> Cargo.toml:29:1
+   |
+29 | redb       = "3.1"
+   | ^^^^
+   |
+help: consider removing the workspace dependency `redb`
+warning: unused workspace dependency `tokio`
+  --> Cargo.toml:31:1
+   |
+31 | tokio      = { version = "1", features = ["full"] }
+   | ^^^^^
+   |
+help: consider removing the workspace dependency `tokio`
+warning: workspace (manifest) generated 5 warnings
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running unittests src/lib.rs (target/loom/release/build/chunk-store/b5753f253ea230dc/out/chunk_store-b5753f253ea230dc)
+
+running 1 test
+test sync::loom_tests::loom_shim_condvar_wakes_a_waiter_all_orders ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 106 filtered out; finished in 0.00s
+
+MODEL crate=chunk-store passed=1
+warning: unused workspace dependency `anyhow`
+  --> Cargo.toml:33:1
+   |
+33 | anyhow     = "1"
+   | ^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `anyhow`
+warning: unused workspace dependency `bincode`
+  --> Cargo.toml:22:1
+   |
+22 | bincode    = "2"
+   | ^^^^^^^
+   |
+help: consider removing the workspace dependency `bincode`
+warning: unused workspace dependency `criterion`
+  --> Cargo.toml:24:1
+   |
+24 | criterion  = { version = "0.5", features = ["html_reports"] }
+   | ^^^^^^^^^
+   |
+help: consider removing the workspace dependency `criterion`
+warning: unused workspace dependency `redb`
+  --> Cargo.toml:29:1
+   |
+29 | redb       = "3.1"
+   | ^^^^
+   |
+help: consider removing the workspace dependency `redb`
+warning: unused workspace dependency `tokio`
+  --> Cargo.toml:31:1
+   |
+31 | tokio      = { version = "1", features = ["full"] }
+   | ^^^^^
+   |
+help: consider removing the workspace dependency `tokio`
+warning: workspace (manifest) generated 5 warnings
+   Compiling slicefs-cli v0.1.0 (<repo>/crates/slicefs-cli)
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 6 warnings
+    Finished `release` profile [optimized] target(s) in 8.89s
+     Running unittests src/lib.rs (target/loom/release/build/slicefs-cli/6f10f32bb8d077d1/out/slicefs_cli-6f10f32bb8d077d1)
+
+running 6 tests
+
+thread 'filesystem::loom_tests::loom_throttle_writer_leaves_after_a_pass_frees' (136408347) panicked at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/loom-0.7.3/src/rt/execution.rs:215:13:
+deadlock; threads = [(Id(0), Blocked(Location(None))), (Id(1), Blocked(Location(None))), (Id(2), Blocked(Location(None)))]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'filesystem::loom_tests::loom_throttle_writer_leaves_after_a_pass_frees' (136408347) panicked at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/loom-0.7.3/src/rt/thread.rs:276:39:
+called `Option::unwrap()` on a `None` value
+stack backtrace:
+   0:        0x10347bb1a - <<std[10e7071562a42ea5]::sys::backtrace::BacktraceLock>::print::DisplayBacktrace as core[eeba2905da393f]::fmt::Display>::fmt
+   1:        0x103490fb7 - core[eeba2905da393f]::fmt::write
+   2:        0x10347fecb - <alloc[fe168fecdc3810d2]::vec::Vec<u8> as core[eeba2905da393f]::io::write::Write>::write_fmt
+   3:        0x10345667c - std[10e7071562a42ea5]::panicking::default_hook::{closure#0}
+   4:        0x1034731cc - std[10e7071562a42ea5]::panicking::default_hook
+   5:        0x1031a2ab6 - test[4c49b7add524a0bd]::test_main_inner::{closure#0}
+   6:        0x1033f3bbb - generator[d80bb00c07764ef0]::detail::gen::catch_unwind_filter::<generator[d80bb00c07764ef0]::detail::gen::gen_init_impl::{closure#0}, ()>::{closure#0}::{closure#0}
+   7:        0x1034736a7 - std[10e7071562a42ea5]::panicking::panic_with_hook
+   8:        0x103456762 - std[10e7071562a42ea5]::panicking::panic_handler::{closure#0}
+   9:        0x10344b7e9 - std[10e7071562a42ea5]::sys::backtrace::__rust_end_short_backtrace::<std[10e7071562a42ea5]::panicking::panic_handler::{closure#0}, !>
+  10:        0x1034570c4 - __rustc[45371133cddedda4]::rust_begin_unwind
+  11:        0x1034b973b - core[eeba2905da393f]::panicking::panic_fmt
+  12:        0x1034b970e - core[eeba2905da393f]::panicking::panic
+  13:        0x1034b94b8 - core[eeba2905da393f]::option::unwrap_failed
+  14:        0x10336b885 - <scoped_tls[e73dd6b30b8fac42]::ScopedKey<core[eeba2905da393f]::cell::RefCell<loom[28dfa5244dfebcf9]::rt::scheduler::State>>>::with::<<loom[28dfa5244dfebcf9]::rt::scheduler::Scheduler>::with_state<<loom[28dfa5244dfebcf9]::rt::scheduler::Scheduler>::with_execution<loom[28dfa5244dfebcf9]::rt::branch<<loom[28dfa5244dfebcf9]::rt::object::Ref<loom[28dfa5244dfebcf9]::rt::atomic::State>>::branch_action<loom[28dfa5244dfebcf9]::rt::atomic::Action>::{closure#0}, ()>::{closure#0}, ((), bool)>::{closure#0}, ((), bool)>::{closure#0}, ((), bool)>
+  15:        0x103371367 - <loom[28dfa5244dfebcf9]::rt::atomic::Atomic<bool>>::store
+  16:        0x103073e50 - core[eeba2905da393f]::ptr::drop_glue::<slicefs_cli[94b8e343859fae22]::flusher::Running>
+  17:        0x1030758fe - slicefs_cli[94b8e343859fae22]::flusher::flusher_loop::<slicefs_cli[94b8e343859fae22]::filesystem::loom_tests::loom_throttle_writer_leaves_after_a_pass_frees::{closure#0}::{closure#0}::{closure#0}>
+  18:        0x1030e2645 - <loom[28dfa5244dfebcf9]::rt::spawn<loom[28dfa5244dfebcf9]::thread::spawn_internal<slicefs_cli[94b8e343859fae22]::filesystem::loom_tests::loom_throttle_writer_leaves_after_a_pass_frees::{closure#0}::{closure#0}, ()>::{closure#0}>::{closure#1} as core[eeba2905da393f]::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+  19:        0x103379c2e - <generator[d80bb00c07764ef0]::stack::StackBox<<generator[d80bb00c07764ef0]::gen_impl::GeneratorImpl<core[eeba2905da393f]::option::Option<alloc[fe168fecdc3810d2]::boxed::Box<dyn core[eeba2905da393f]::ops::function::FnOnce<(), Output = ()>>>, ()>>::install_code<loom[28dfa5244dfebcf9]::rt::scheduler::spawn_thread::{closure#0}>::{closure#0}>>::call_once
+  20:        0x1034b1b28 - generator[d80bb00c07764ef0]::detail::gen::gen_init_impl
+  21:        0x1034b1abc - generator[d80bb00c07764ef0]::detail::asm::gen_init
+
+thread 'filesystem::loom_tests::loom_throttle_writer_leaves_after_a_pass_frees' (136408347) panicked at /rustc/0ef1bc386059596dada8fb65b50425aab2ea637a/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `-p slicefs-cli --lib`
+
+Caused by:
+  process didn't exit successfully: `<repo>/target/loom/release/build/slicefs-cli/6f10f32bb8d077d1/out/slicefs_cli-6f10f32bb8d077d1 loom_` (signal: 6, SIGABRT: process abort signal)
+MODEL FAILED crate=slicefs-cli: cargo exit 101
