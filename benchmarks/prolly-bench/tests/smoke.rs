@@ -65,13 +65,13 @@ fn smoke_end_to_end() {
         "--commits",
         "1",
         "--patterns",
-        "scatter cluster",
+        "scatter cluster insdel",
         "--next-tree",
         p(&tree2),
     ]);
-    // Setup, 2 patterns x 2 K x 1 commit, version.
+    // Setup, 2 patterns x 2 K x 1 commit, version, then insdel x 2 K x 1 commit.
     let commits: Vec<&str> = lines(&out, "commit").into_iter().filter(|l| l.contains(" mode=whole ")).collect();
-    assert_eq!(commits.len(), 6, "{out}");
+    assert_eq!(commits.len(), 8, "{out}");
     assert!(commits.iter().map(|l| num(l, "edits_delete")).sum::<u64>() >= 1, "{out}");
     let version = lines(&out, "version");
     assert_eq!(version.len(), 1, "{out}");
@@ -81,6 +81,17 @@ fn smoke_end_to_end() {
     let out = ok(&["batches", "--store", p(&store), "--roots", p(&roots), "--out", p(&batches)]);
     let b1 = lines(&out, "batch").into_iter().find(|l| l.contains(" seq=1 ")).expect("a batch seq=1 line");
     assert!(num(b1, "puts") >= 1, "{b1}");
+    // insdel: each edit is one real insert (a key that the old map lacks, at a
+    // freed inode number in the middle of the map) or one real delete, so the
+    // inode_data change of the commit is exactly K entries.
+    let insdel: Vec<&str> = lines(&out, "batch").into_iter().filter(|l| l.contains(" pattern=insdel ")).collect();
+    assert_eq!(insdel.len(), 2, "{out}");
+    for l in &insdel {
+        assert_eq!(num(l, "puts") + num(l, "dels"), num(l, "k"), "{l}");
+        assert_eq!(num(l, "puts"), num(l, "inserts"), "{l}");
+    }
+    assert!(insdel.iter().map(|l| num(l, "inserts")).sum::<u64>() >= 1, "{out}");
+    assert!(insdel.iter().map(|l| num(l, "dels")).sum::<u64>() >= 1, "{out}");
 
     let out = ok(&["prolly", "--batches", p(&batches), "--store", p(&pstore)]);
     let check = lines(&out, "check");
@@ -89,12 +100,19 @@ fn smoke_end_to_end() {
     assert_eq!(lines(&out, "hash").len(), 1, "{out}");
     assert_eq!(lines(&out, "tree").len(), 1, "{out}");
     let prolly_commits = lines(&out, "commit").len();
+    // The sizes are taken after a close, so each counts a pack and its index.
+    let disk = lines(&out, "disk");
+    assert_eq!(disk.len(), 2, "{out}");
+    assert!(disk.iter().all(|l| num(l, "files") >= 2), "{out}");
 
     let out = ok(&["flat", "--batches", p(&batches), "--store", p(&t.join("flat"))]);
     let check = lines(&out, "check");
     assert_eq!(check.len(), 1, "{out}");
     assert!(check[0].contains("mode=flat") && check[0].ends_with(" ok=1"), "{out}");
     assert_eq!(lines(&out, "commit").len(), prolly_commits, "{out}");
+    let disk = lines(&out, "disk");
+    assert_eq!(disk.len(), 2, "{out}");
+    assert!(disk.iter().all(|l| num(l, "files") >= 2), "{out}");
 
     for mode in ["flat", "prolly"] {
         let store = t.join(format!("scale-{mode}"));

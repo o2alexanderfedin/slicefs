@@ -5,7 +5,7 @@
 //! Internal entry (level > 0): klen `u16` LE, key (the last key of the
 //! child), child `ObjectId` (`ID_LEN` bytes), subtree entry count `u64` LE.
 
-use crate::{Error, Result, MAX_KEY, NODE_HEADER, NODE_MAGIC};
+use crate::{Config, Error, Result, NODE_HEADER, NODE_MAGIC};
 use chunk_store::{ChunkStore, ObjectId, ID_LEN};
 
 /// One entry of an internal node: a child node and what it covers.
@@ -38,6 +38,20 @@ impl Node {
         match self {
             Node::Leaf(e) => e.len(),
             Node::Internal { children, .. } => children.len(),
+        }
+    }
+
+    fn first_key(&self) -> Option<&[u8]> {
+        match self {
+            Node::Leaf(e) => e.first().map(|(k, _)| k.as_slice()),
+            Node::Internal { children, .. } => children.first().map(|c| c.last_key.as_slice()),
+        }
+    }
+
+    fn last_key(&self) -> Option<&[u8]> {
+        match self {
+            Node::Leaf(e) => e.last().map(|(k, _)| k.as_slice()),
+            Node::Internal { children, .. } => children.last().map(|c| c.last_key.as_slice()),
         }
     }
 }
@@ -110,20 +124,29 @@ impl<'a> Input<'a> {
         Ok(u16::from_le_bytes([s[0], s[1]]) as usize)
     }
 
-    fn key(&mut self) -> Result<Vec<u8>> {
+    fn key(&mut self, cfg: &Config) -> Result<Vec<u8>> {
         let klen = self.u16()?;
-        if klen > MAX_KEY {
-            return Err(corrupt("key above MAX_KEY"));
+        if klen > cfg.max_key() {
+            return Err(corrupt("key above the config's max_key"));
+        }
+        if internal_entry_len(klen) > cfg.max_entry() {
+            return Err(corrupt("entry above the config's max_entry"));
         }
         Ok(self.take(klen)?.to_vec())
     }
 }
 
 /// Decodes node bytes. Never panics: every length is checked against the
-/// buffer before use, and the count before any allocation.
-pub(crate) fn decode(bytes: &[u8]) -> Result<Node> {
+/// buffer before use, and the count before any allocation. The sizes are
+/// checked against `cfg`: the node is at most `node_max` bytes, each key
+/// at most `max_key` and each entry at most `max_entry`, so a node that a
+/// writer pushes again cannot break the size bound.
+pub(crate) fn decode(bytes: &[u8], cfg: &Config) -> Result<Node> {
     if bytes.len() < NODE_HEADER {
         return Err(corrupt("shorter than the header"));
+    }
+    if bytes.len() > cfg.node_max() {
+        return Err(corrupt("node above the config's node_max"));
     }
     if bytes[..4] != NODE_MAGIC {
         return Err(corrupt("wrong magic"));
@@ -144,8 +167,11 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Node> {
         for _ in 0..count {
             let klen = r.u16()?;
             let vlen = r.u16()?;
-            if klen > MAX_KEY {
-                return Err(corrupt("key above MAX_KEY"));
+            if klen > cfg.max_key() {
+                return Err(corrupt("key above the config's max_key"));
+            }
+            if leaf_entry_len(klen, vlen) > cfg.max_entry() {
+                return Err(corrupt("entry above the config's max_entry"));
             }
             let k = r.take(klen)?.to_vec();
             let v = r.take(vlen)?.to_vec();
@@ -158,7 +184,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Node> {
     } else {
         let mut children: Vec<Child> = Vec::with_capacity(count);
         for _ in 0..count {
-            let last_key = r.key()?;
+            let last_key = r.key(cfg)?;
             let id = <[u8; ID_LEN]>::try_from(r.take(ID_LEN)?).map_err(|_| corrupt("bad child id"))?;
             let c = r.take(8)?;
             let n = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
@@ -175,11 +201,12 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Node> {
     Ok(node)
 }
 
-/// Reads (hash-verified) and decodes node `id`. With `want_level` (a
-/// child), the node must be at that level and must not be empty.
-pub(crate) fn load(store: &ChunkStore, id: &ObjectId, want_level: Option<u8>) -> Result<(Node, usize)> {
+/// Reads (hash-verified) and decodes node `id` with the limits of `cfg`.
+/// With `want_level` (a child), the node must be at that level and must
+/// not be empty.
+pub(crate) fn load(store: &ChunkStore, cfg: &Config, id: &ObjectId, want_level: Option<u8>) -> Result<(Node, usize)> {
     let bytes = store.read(id)?;
-    let node = decode(&bytes)?;
+    let node = decode(&bytes, cfg)?;
     if let Some(want) = want_level {
         if node.level() != want {
             return Err(Error::Corrupt(format!(
@@ -192,4 +219,39 @@ pub(crate) fn load(store: &ChunkStore, id: &ObjectId, want_level: Option<u8>) ->
         }
     }
     Ok((node, bytes.len()))
+}
+
+/// Reads and decodes the child `entry` of a node, at `level`, and checks
+/// it against the entry: its last key is the entry's key, its first key is
+/// above `lo` (the last key of the previous sibling, or the bound of the
+/// parent; `None` on the leftmost path), and its leaf entries are the
+/// entry's count. With the order inside each node, these keep the keys of
+/// a tree in order and its counts true along every loaded path.
+pub(crate) fn load_child(
+    store: &ChunkStore,
+    cfg: &Config,
+    level: u8,
+    entry: &Child,
+    lo: Option<&[u8]>,
+) -> Result<(Node, usize)> {
+    let (node, bytes) = load(store, cfg, &entry.id, Some(level))?;
+    if node.last_key() != Some(entry.last_key.as_slice()) {
+        return Err(corrupt("child's last key is not its parent entry's key"));
+    }
+    if let (Some(lo), Some(first)) = (lo, node.first_key()) {
+        if first <= lo {
+            return Err(corrupt("child's first key is not above the previous sibling"));
+        }
+    }
+    let count = match &node {
+        Node::Leaf(e) => e.len() as u64,
+        Node::Internal { children, .. } => children
+            .iter()
+            .try_fold(0u64, |n, c| n.checked_add(c.count))
+            .ok_or_else(|| corrupt("subtree count above u64"))?,
+    };
+    if count != entry.count {
+        return Err(corrupt("child's entry count is not its parent entry's count"));
+    }
+    Ok((node, bytes))
 }

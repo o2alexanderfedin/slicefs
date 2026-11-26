@@ -28,7 +28,7 @@ use slicefs_traits::key::ObjectKey;
 
 const USAGE: &str = "usage: prolly-bench gen tree --dir D --files N --seed S [--max-bytes M] [--change-every K]
        prolly-bench seed --tree DIR --store S
-       prolly-bench whole --store S --roots FILE [--seed N] [--ks \"1 10 100 1000\"] [--commits N] [--patterns \"scatter cluster\"] [--next-tree DIR]
+       prolly-bench whole --store S --roots FILE [--seed N] [--ks \"1 10 100 1000\"] [--commits N] [--patterns \"scatter cluster insdel\"] [--next-tree DIR]
        prolly-bench batches --store S --roots FILE --out DIR
        prolly-bench flat --batches DIR --store F
        prolly-bench prolly --batches DIR --store P
@@ -58,8 +58,9 @@ pub(crate) const RR_INODE_COUNT: usize = 222;
 pub(crate) const KEY_LEN: usize = 33;
 /// One map entry: ino u64 LE and a key (`MAP_ENTRY` of store.rs).
 pub(crate) const MAP_ENTRY: usize = 8 + KEY_LEN;
-/// The chunk-store record header per object: `ID_LEN + 9`.
-pub(crate) const REC_HEADER_BYTES: u64 = 42;
+/// The chunk-store record bytes per object besides its payload: the
+/// header (`ID_LEN + 9` = 42) and the CRC (4).
+pub(crate) const REC_OVERHEAD_BYTES: u64 = 42 + 4;
 /// Bytes of new content for a content change or a create.
 pub(crate) const CONTENT_BYTES: usize = 4096;
 /// Read size of the map streams and of file writes.
@@ -360,12 +361,12 @@ pub(crate) fn serialized_bytes(cs: &ChunkStore, rr: &RootRec) -> Res<u64> {
 }
 
 /// The `new_*` fields of a `stats()` delta; record bytes count the record
-/// header of each new object.
+/// header and CRC of each new object.
 pub(crate) fn stats_delta(before: &Stats, after: &Stats) -> String {
     let objects = after.objects.saturating_sub(before.objects);
     let raw = after.raw_bytes.saturating_sub(before.raw_bytes);
     let stored = after.stored_bytes.saturating_sub(before.stored_bytes);
-    let record = stored + REC_HEADER_BYTES * objects;
+    let record = stored + REC_OVERHEAD_BYTES * objects;
     format!("new_objects={objects} new_raw_bytes={raw} new_stored_bytes={stored} new_record_bytes={record}")
 }
 

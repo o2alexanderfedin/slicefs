@@ -47,11 +47,38 @@ pub(crate) struct LevelWriter {
     emitted: u64,
     /// The first node this level wrote.
     first: Option<ObjectId>,
+    /// The last key of the last node this level wrote: every key pushed
+    /// after it must be above it.
+    prev: Option<Vec<u8>>,
 }
 
 impl LevelWriter {
     pub fn new(level: u8) -> Self {
-        Self { level, splitter: Splitter::new(), leaf: Vec::new(), children: Vec::new(), count: 0, emitted: 0, first: None }
+        Self {
+            level,
+            splitter: Splitter::new(),
+            leaf: Vec::new(),
+            children: Vec::new(),
+            count: 0,
+            emitted: 0,
+            first: None,
+            prev: None,
+        }
+    }
+
+    /// A key that is not above the last key pushed is an error: the input
+    /// came from a damaged or crafted tree (the builder checks its own
+    /// input first).
+    fn check_ascending(&self, key: &[u8]) -> Result<()> {
+        let last = if self.level == 0 {
+            self.leaf.last().map(|(k, _)| k.as_slice())
+        } else {
+            self.children.last().map(|c| c.last_key.as_slice())
+        };
+        match last.or(self.prev.as_deref()) {
+            Some(last) if key <= last => Err(Error::Corrupt("prolly: keys not ascending in a rewrite".into())),
+            _ => Ok(()),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -75,6 +102,7 @@ impl LevelWriter {
         value: &[u8],
         stats: &mut BuildStats,
     ) -> Result<Option<NodeRef>> {
+        self.check_ascending(key)?;
         let cut = self.splitter.push(cfg, self.level, key, leaf_entry_len(key.len(), value.len()));
         self.leaf.push((key.to_vec(), value.to_vec()));
         self.count += 1;
@@ -92,6 +120,7 @@ impl LevelWriter {
         child: Child,
         stats: &mut BuildStats,
     ) -> Result<Option<NodeRef>> {
+        self.check_ascending(&child.last_key)?;
         let cut = self.splitter.push(cfg, self.level, &child.last_key, internal_entry_len(child.last_key.len()));
         self.count += child.count;
         self.children.push(child);
@@ -122,6 +151,7 @@ impl LevelWriter {
         }
         self.emitted += 1;
         self.first.get_or_insert(id);
+        self.prev = Some(last_key.clone());
         let r = NodeRef { last_key, id, count: self.count, bytes: bytes.len() };
         self.leaf.clear();
         self.children.clear();
@@ -202,7 +232,6 @@ impl<'s> Builder<'s> {
 
     /// Adds a finished node of level `base - 1`; its last key must be above
     /// the last one.
-    #[allow(dead_code, reason = "the caller is apply in plan 24-02")]
     pub(crate) fn push_node(&mut self, r: NodeRef) -> Result<()> {
         debug_assert!(self.base > 0, "nodes go to a builder above level 0");
         self.check_order(&r.last_key)?;
@@ -270,6 +299,12 @@ impl<'s> Builder<'s> {
     }
 }
 
+/// The limits that `get`, the cursor and `walk` check nodes against: the
+/// largest config (the crate constants), so they read a tree of any config.
+/// `apply` checks against its own config, because it writes the old entries
+/// again.
+const READ_CFG: Config = Config::DEFAULT;
+
 /// The root of the empty map: the empty leaf object.
 pub fn empty_root(store: &ChunkStore) -> Result<ObjectId> {
     Ok(store.put(&encode_leaf(&[]))?)
@@ -288,15 +323,23 @@ where
     b.finish()
 }
 
-/// The value of `key` in the tree `root`, reading one path of nodes.
+/// The value of `key` in the tree `root`, reading one path of nodes. Each
+/// node of the path is checked against its parent entry; a bad node that
+/// is not on the path is not seen.
 pub fn get(store: &ChunkStore, root: &ObjectId, key: &[u8]) -> Result<Option<Vec<u8>>> {
-    let (mut n, _) = node::load(store, root, None)?;
+    let (mut n, _) = node::load(store, &READ_CFG, root, None)?;
+    let mut lo: Option<Vec<u8>> = None;
     loop {
         match n {
-            Node::Internal { level, children } => {
+            Node::Internal { level, mut children } => {
                 let i = children.partition_point(|c| c.last_key.as_slice() < key);
-                let Some(c) = children.get(i) else { return Ok(None) };
-                n = node::load(store, &c.id, Some(level - 1))?.0;
+                if i >= children.len() {
+                    return Ok(None);
+                }
+                if i > 0 {
+                    lo = Some(std::mem::take(&mut children[i - 1].last_key));
+                }
+                n = node::load_child(store, &READ_CFG, level - 1, &children[i], lo.as_deref())?.0;
             }
             Node::Leaf(entries) => {
                 return Ok(entries.binary_search_by(|(k, _)| k.as_slice().cmp(key)).ok().map(|i| entries[i].1.clone()));
@@ -306,10 +349,13 @@ pub fn get(store: &ChunkStore, root: &ObjectId, key: &[u8]) -> Result<Option<Vec
 }
 
 /// An ordered iterator over the entries of a tree. It holds one path of
-/// nodes (one per level), never the map.
+/// nodes (one per level), never the map. Each node is checked against its
+/// parent entry when it is loaded.
 pub struct Cursor<'s> {
     store: &'s ChunkStore,
-    stack: Vec<(Node, usize)>,
+    /// Per node of the path: the node, the next entry, and the bound that
+    /// its first key must be above (`None` on the leftmost path).
+    stack: Vec<(Node, usize, Option<Vec<u8>>)>,
     max_held: usize,
     done: bool,
 }
@@ -323,8 +369,8 @@ impl Cursor<'_> {
 
 /// A cursor at the first entry of the tree `root`.
 pub fn iter<'s>(store: &'s ChunkStore, root: &ObjectId) -> Result<Cursor<'s>> {
-    let (n, _) = node::load(store, root, None)?;
-    Ok(Cursor { store, stack: vec![(n, 0)], max_held: 1, done: false })
+    let (n, _) = node::load(store, &READ_CFG, root, None)?;
+    Ok(Cursor { store, stack: vec![(n, 0, None)], max_held: 1, done: false })
 }
 
 impl Iterator for Cursor<'_> {
@@ -333,7 +379,7 @@ impl Iterator for Cursor<'_> {
     /// The next entry in key order; after an error, `None`.
     fn next(&mut self) -> Option<Self::Item> {
         while !self.done {
-            let Some((n, i)) = self.stack.last_mut() else {
+            let Some((n, i, lo)) = self.stack.last_mut() else {
                 self.done = true;
                 break;
             };
@@ -350,11 +396,11 @@ impl Iterator for Cursor<'_> {
                         self.stack.pop();
                         continue;
                     };
+                    let child_lo = if *i > 0 { Some(children[*i - 1].last_key.clone()) } else { lo.clone() };
                     *i += 1;
-                    let (id, want) = (c.id, *level - 1);
-                    match node::load(self.store, &id, Some(want)) {
+                    match node::load_child(self.store, &READ_CFG, *level - 1, c, child_lo.as_deref()) {
                         Ok((child, _)) => {
-                            self.stack.push((child, 0));
+                            self.stack.push((child, 0, child_lo));
                             self.max_held = self.max_held.max(self.stack.len());
                         }
                         Err(e) => {
@@ -385,19 +431,23 @@ pub struct NodeInfo {
 }
 
 /// Calls `f` for every node of the tree `root`, depth first and left to
-/// right, holding one path of nodes.
+/// right, holding one path of nodes. Each node is checked against its
+/// parent entry when it is loaded.
 pub fn walk(store: &ChunkStore, root: &ObjectId, mut f: impl FnMut(&NodeInfo)) -> Result<()> {
-    walk_node(store, root, None, true, &mut f)
+    let (n, bytes) = node::load(store, &READ_CFG, root, None)?;
+    walk_node(store, n, bytes, None, true, &mut f)
 }
 
+/// Visits the loaded node `n` and its subtree; `lo` is the bound that the
+/// first key of `n` was checked against.
 fn walk_node<F: FnMut(&NodeInfo)>(
     store: &ChunkStore,
-    id: &ObjectId,
-    want_level: Option<u8>,
+    n: Node,
+    bytes: usize,
+    lo: Option<&[u8]>,
     last_of_level: bool,
     f: &mut F,
 ) -> Result<()> {
-    let (n, bytes) = node::load(store, id, want_level)?;
     let (level, entries, last_key) = match &n {
         Node::Leaf(e) => (0, e.len(), e.last().map(|(k, _)| k.clone()).unwrap_or_default()),
         Node::Internal { level, children } => {
@@ -407,7 +457,9 @@ fn walk_node<F: FnMut(&NodeInfo)>(
     f(&NodeInfo { level, entries, bytes, last_key, last_of_level });
     if let Node::Internal { level, children } = &n {
         for (i, c) in children.iter().enumerate() {
-            walk_node(store, &c.id, Some(level - 1), last_of_level && i + 1 == children.len(), f)?;
+            let child_lo = if i > 0 { Some(children[i - 1].last_key.as_slice()) } else { lo };
+            let (child, child_bytes) = node::load_child(store, &READ_CFG, level - 1, c, child_lo)?;
+            walk_node(store, child, child_bytes, child_lo, last_of_level && i + 1 == children.len(), f)?;
         }
     }
     Ok(())

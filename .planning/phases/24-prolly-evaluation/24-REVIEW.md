@@ -194,6 +194,87 @@ A crafted or foreign-config node with a 60 KB entry is pushed again. The forced 
 A related nit: `#[allow(dead_code, reason = "the caller is apply in plan 24-02")]` at `crates/prolly/src/tree.rs:205` is stale, because `apply.rs:437-439` now calls `push_node`.
 **Fix:** `case $CARGO_TARGET_DIR in /*) ;; ?*) CARGO_TARGET_DIR=$REPO/$CARGO_TARGET_DIR ;; esac` before building. Remove the stale `allow`.
 
+## Fixes
+
+Fixed on the branch `exec/24-fix` (base `deea9f7`), one commit per finding.
+No product crate and no store format changed (`git diff deea9f7` is empty
+for `crates/metadata`, `crates/chunk-store`, `crates/slicefs-cli`,
+`crates/slicefs-traits`, `docs/design/store-format.md`, `Cargo.toml` and
+`Cargo.lock`).
+
+| Finding | Commit | Fix |
+|---|---|---|
+| WR-01 | 4eab5b8 | A new edit pattern `insdel`, after the version step, so the old commits and their rows do not change. Each edit deletes a random file of the tree, or inserts a file that an earlier commit deleted again at its freed inode number (`create_inode_at`, with a new mtime). So each commit changes exactly K `inode_data` keys in the middle of the map, and no key is both inserted and deleted in one commit. `batches` counts the inserts (a new `inserts` column in `batches.csv`). The `insdel` rows stand next to the `scatter` and `cluster` rows; the old rows stay. The smoke test checks that an `insdel` commit changes exactly K keys, with real inserts and deletes. The report now says why the `scatter` and `cluster` commits change about K / 2 values. |
+| WR-02 | 9037d2f | `flat` and `prolly` close the store before each disk line (start: after the bulk step, then the store opens again; end: after the last commit), so the pack index is counted, as for `whole`. The smoke test checks that each replay disk line counts a pack and its index. |
+| WR-03 | 69384d7 | The prolly bulk build and the prolly scale build are timed in pieces of 16,384 entries. The input of a piece is read (`base.bin`) or made (the synthetic values) outside the timer, as `flat` does, and wall and CPU time add up over the timed pieces. No whole input is held in RAM, and the values do not change. |
+| WR-04 | fd36069 | `node::load_child`: when `get`, the cursor, `walk` or `apply` loads a child, its last key must be the parent entry's key, its first key must be above the last key of the previous sibling (a bound carried down the path), and its leaf entry count must be the entry's count; else `Error::Corrupt`. `LevelWriter` refuses a key that does not ascend. The check is per path, and the crate doc says so. Test `inconsistent_tree_is_an_error`: the A/B tree of this review and three other crafted trees, for `get`, `iter`, `walk` and `apply`. |
+| IN-01 | 51fa660 | `REC_OVERHEAD_BYTES = 42 + 4` (record header and CRC); the README row says so. |
+| IN-02 | 9b94a66 | `decode` takes a config and refuses a node above `node_max`, a key above `max_key` and an entry above `max_entry`. `apply` loads every node with its own config (it writes the old entries again); `get`, the cursor and `walk` use `Config::DEFAULT`, the largest limits. New tests: an entry above `MAX_ENTRY`, a node above `NODE_MAX`, an internal key above `MAX_KEY`, and a `DEFAULT` tree that an apply with `Config::SMALL` refuses before it writes anything. |
+| IN-03 | ad62442 | `intern_flat` returns the key of the stored value. The flat check streams that value back (`MapStream`) and digests it. |
+| IN-04 | 9521872 | `batches` opens the store with `read_only: true`. |
+| IN-05 | 9a26452 | `bench.sh` makes a relative `CARGO_TARGET_DIR` relative to the repo before the build. The stale `allow(dead_code)` of `push_node` is removed. |
+
+Gate before the last code commit (IN-05), on its tree (`runs/gate-24-fix.log`):
+
+- `cargo test -p prolly -p prolly-bench`: exit 0; prolly 23 passed, smoke 2 passed.
+- `RUST_STABLE=stable scripts/safety/clippy.sh`: `CLIPPY os=Darwin toolchain=stable result=ok`, `UNSAFE files=32 tokens=134 result=ok`.
+- `timeout 3600 cargo test --workspace` with the four `--skip` names: exit 0; 85 `test result` lines, 1,696 passed, 0 failed, 13 ignored.
+
+Benchmark again (commit e2dc575), as plan 24-05 did it: `bench.sh DATA 3`
+with the defaults (now with `PATTERNS="scatter cluster insdel"`), in
+process, no mount; on the macOS host and in Linux Docker with GNU `time`.
+
+- macOS: 2026-11-26T22:18:56Z to 22:21:47Z. The script waited 30 minutes for
+  a 1-minute load of 8 or less and no `slicefs-gcmem` container; the load
+  stayed at 13 to 18 (jobs of other projects), so it started at 13.30
+  (after: 14.25). `docker ps` showed no `slicefs-gcmem` container at the
+  start or the end. The `rustc` line of `prolly-machine.txt` was filled in
+  by hand from the toolchain that built the binary (the wait script had no
+  `rustc` in its `PATH`).
+- Linux Docker: 22:22:19Z to 22:25:15Z; VM load 0.05 before and 1.06 after,
+  host load 13.80 and 15.19.
+- 6 digest checks `ok=1` on each system. `REPORT-OK` for both stems.
+- In every old row (seq 0 to 81) the entries, serialized bytes, new objects,
+  new raw bytes and nodes read and written are equal to the first run on
+  both systems, so the fixes WR-02 to WR-04 and IN-02 did not change what
+  is written.
+
+Old against new headline numbers (macOS, median, scatter K = 1 unless named):
+
+| | first run | after the fixes |
+|---|---|---|
+| whole commit ms (CPU ms) | 61.7 (40.8) | 63.9 (42.9) |
+| flat `inode_data` CPU ms | 6.1 | 6.6 |
+| prolly `inode_data` CPU ms | 0.6 | 0.6 |
+| estimated whole commit with prolly ms (of whole) | 56.4 (91.4 %) | 58.4 (91.4 %) |
+| gain where prolly helps, ms per commit | 4.7 to 5.6 | 3.7 to 8.3 |
+| 4,000,000 entries, one change: flat ms, prolly ms | 229.9, 21.8 | 242.1, 22.0 |
+| flat map passes 100 ms per commit at | 1.67 M entries | 1.60 M entries |
+| disk growth flat, prolly MiB | 31.2, 17.5 (81 commits, no index) | 64.4, 38.4 (121 commits, index) |
+| peak RSS whole, flat, prolly MiB | 390.0, 107.8, 26.6 (82 commits) | 478.2, 175.4, 33.7 (122 commits) |
+
+The peak memory table now takes "ru_maxrss after the last commit" from the
+last commit of each run (it took the median row of the last group, which is
+no longer one commit).
+
+The new `insdel` rows (macOS; Linux in brackets), CPU ms and wall ms:
+
+| K | entries changed | flat CPU ms | prolly CPU ms | flat ms | prolly ms | prolly nodes written | estimate / whole |
+|---|---|---|---|---|---|---|---|
+| 1 | 1 | 6.6 (6.1) | 0.6 (1.4) | 28.6 (8.1) | 20.9 (4.2) | 3 | 87.0 % (87.5 %) |
+| 10 | 10 | 7.3 (7.0) | 1.9 (3.1) | 30.4 (9.3) | 22.1 (5.9) | 18 | 86.0 % (90.2 %) |
+| 100 | 100 | 12.5 (12.7) | 10.1 (13.4) | 34.5 (15.4) | 30.8 (16.7) | 117 | 95.2 % (102.6 %) |
+| 1000 | 1,000 | 24.2 (26.8) | 46.3 (61.7) | 49.5 (29.8) | 69.5 (64.5) | 564 | 115.7 % (130.6 %) |
+
+Recommendation: still **later** by the rubric on the main (macOS) run, as
+plan 24-05 applied it. The fixes did not change the word, but the `insdel`
+rows weaken the case: on Linux, prolly is a little slower than flat at
+insdel K = 100 (16.7 against 15.4 ms, 13.4 against 12.7 CPU ms), so a strict
+reading of the `drop` rule on the Linux run alone would give `drop` for that
+one row. The report (`docs/research/prolly-trees.md`), the design section
+(`docs/design/metadata-maps.md`) and the #19 text (`24-ISSUE-19-COMMENT.md`,
+not posted) say this.
+
 ---
 
 _Reviewed: 2026-11-26_

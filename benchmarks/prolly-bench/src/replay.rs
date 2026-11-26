@@ -25,6 +25,11 @@ const BATCH_REC: usize = 1 + MAP_ENTRY;
 /// Base records per read of the hash-cost loop (about 41 KB).
 const HASH_PIECE_ENTRIES: usize = 1024;
 
+/// Entries per piece of a build that is timed in pieces (the prolly bulk
+/// build and the prolly scale build): the input of a piece is read or made
+/// outside the timer, as flat's input is.
+const BUILD_PIECE_ENTRIES: usize = 16_384;
+
 /// The entries of one `u64 -> key` map node, in order, read in `PIECE`
 /// reads: it holds at most one piece and one partial record.
 struct MapStream<'s> {
@@ -139,7 +144,9 @@ pub(crate) fn batches(argv: &[String]) -> Res<()> {
     let roots = read_roots(&a.path("roots")?)?;
     let out = a.path("out")?;
     fs::create_dir_all(&out)?;
-    let cs = ChunkStore::open(&store, Options::default())?;
+    // Read only: the store of whole was measured, so this step must not
+    // recover, merge or write it.
+    let cs = ChunkStore::open(&store, Options { read_only: true, ..Options::default() })?;
     let maps: Vec<ObjectKey> =
         roots.iter().map(|r| root_record(&cs, &r.root).map(|rr| rr.inode_data())).collect::<Res<_>>()?;
     let mut txt = BufWriter::new(fs::File::create(out.join("batches.txt"))?);
@@ -156,7 +163,9 @@ pub(crate) fn batches(argv: &[String]) -> Res<()> {
         let mut old = MapStream::open(&cs, &maps[i - 1])?;
         let mut new = MapStream::open(&cs, &maps[i])?;
         let mut f = BufWriter::new(fs::File::create(batch_path(&out, r.seq))?);
-        let (mut puts, mut dels) = (0u64, 0u64);
+        // puts: new or changed values; inserts: the puts of keys that the
+        // old map does not have.
+        let (mut puts, mut dels, mut inserts) = (0u64, 0u64, 0u64);
         let rec = |f: &mut BufWriter<fs::File>, op: u8, ino: u64, key: &[u8; KEY_LEN]| -> Res<()> {
             f.write_all(&[op])?;
             f.write_all(&ino.to_le_bytes())?;
@@ -188,12 +197,13 @@ pub(crate) fn batches(argv: &[String]) -> Res<()> {
                 (_, Some((ni, nk))) => {
                     rec(&mut f, 1, ni, &nk)?;
                     puts += 1;
+                    inserts += 1;
                     n = new.next_entry()?;
                 }
             }
         }
         f.flush()?;
-        let line = format!("batch seq={} pattern={} k={} puts={puts} dels={dels}", r.seq, r.pattern, r.k);
+        let line = format!("batch seq={} pattern={} k={} puts={puts} dels={dels} inserts={inserts}", r.seq, r.pattern, r.k);
         println!("{line}");
         writeln!(txt, "{line}")?;
     }
@@ -324,6 +334,58 @@ fn measure<T>(cs: &ChunkStore, f: impl FnOnce() -> Res<T>) -> Res<(T, Measured)>
     Ok((out, Measured { ms, u0, u1, s0, s1 }))
 }
 
+/// A step timed in pieces: wall and CPU time add up over the timed pieces
+/// only, so the work between them (reading or making the input) is not in
+/// the numbers. The store stats are taken at the start and at the end.
+struct Pieces {
+    ms: f64,
+    user_s: f64,
+    sys_s: f64,
+    s0: Stats,
+}
+
+impl Pieces {
+    fn new(cs: &ChunkStore) -> Self {
+        Pieces { ms: 0.0, user_s: 0.0, sys_s: 0.0, s0: cs.stats() }
+    }
+
+    /// Runs and times one piece.
+    fn time<T>(&mut self, f: impl FnOnce() -> Res<T>) -> Res<T> {
+        let u0 = rusage();
+        let t = Instant::now();
+        let out = f()?;
+        self.ms += ms(t);
+        let u1 = rusage();
+        self.user_s += u1.user_s - u0.user_s;
+        self.sys_s += u1.sys_s - u0.sys_s;
+        Ok(out)
+    }
+
+    /// The sums as one `Measured` (the RSS is the high-water mark now).
+    fn done(self, cs: &ChunkStore) -> Measured {
+        let now = rusage();
+        Measured {
+            ms: self.ms,
+            u0: Usage { user_s: 0.0, sys_s: 0.0, maxrss_bytes: 0 },
+            u1: Usage { user_s: self.user_s, sys_s: self.sys_s, maxrss_bytes: now.maxrss_bytes },
+            s0: self.s0,
+            s1: cs.stats(),
+        }
+    }
+}
+
+/// Reads into `buf` until it is full or the file ends; returns the bytes read.
+fn read_piece(r: &mut impl Read, buf: &mut [u8]) -> Res<usize> {
+    let mut n = 0;
+    while n < buf.len() {
+        match r.read(&mut buf[n..])? {
+            0 => break,
+            k => n += k,
+        }
+    }
+    Ok(n)
+}
+
 /// Times `f` (it returns its result, the serialized bytes and, for
 /// prolly, the nodes read and written) and prints one `commit` line of a
 /// replay mode.
@@ -338,6 +400,22 @@ fn timed<T>(
     f: impl FnOnce() -> Res<(T, u64, Option<(u64, u64)>)>,
 ) -> Res<T> {
     let ((out, ser, nodes), m) = measure(cs, f)?;
+    commit_line(mode, pattern, k, seq, changed, ser, nodes, &m);
+    Ok(out)
+}
+
+/// Prints one `commit` line of a replay mode.
+#[allow(clippy::too_many_arguments, reason = "one output line of many fields")]
+fn commit_line(
+    mode: &str,
+    pattern: &str,
+    k: u64,
+    seq: u64,
+    changed: u64,
+    ser: u64,
+    nodes: Option<(u64, u64)>,
+    m: &Measured,
+) {
     let nodes = match nodes {
         Some((r, w)) => format!("nodes_read={r} nodes_written={w}"),
         None => "nodes_read=NA nodes_written=NA".to_string(),
@@ -348,7 +426,6 @@ fn timed<T>(
         stats_delta(&m.s0, &m.s1),
         t = m.ms
     );
-    Ok(out)
 }
 
 // ── flat ─────────────────────────────────────────────────────────────────────
@@ -357,16 +434,17 @@ fn timed<T>(
 /// `crates/metadata/src/store.rs` (private there; copied so that `metadata`
 /// is not changed, D-01, D-22): the count u64 LE, then ino u64 LE and the
 /// key per entry in ino order, stored as one value through
-/// `store_io::put_value` (FastCDC chunks under a manifest tree).
-fn intern_flat(cs: &ChunkStore, map: &BTreeMap<u64, [u8; KEY_LEN]>) -> Res<u64> {
+/// `store_io::put_value` (FastCDC chunks under a manifest tree). Returns
+/// the key of the value and its byte length.
+fn intern_flat(cs: &ChunkStore, map: &BTreeMap<u64, [u8; KEY_LEN]>) -> Res<(ObjectKey, u64)> {
     let mut bytes = Vec::with_capacity(8 + map.len() * MAP_ENTRY);
     bytes.extend_from_slice(&(map.len() as u64).to_le_bytes());
     for (ino, key) in map {
         bytes.extend_from_slice(&ino.to_le_bytes());
         bytes.extend_from_slice(key);
     }
-    put_value(cs, &bytes)?;
-    Ok(bytes.len() as u64)
+    let key = put_value(cs, &bytes)?;
+    Ok((key, bytes.len() as u64))
 }
 
 /// The current design for one map: the whole map in RAM, interned in full
@@ -385,12 +463,16 @@ pub(crate) fn flat(argv: &[String]) -> Res<()> {
         map.insert(ino, *key);
         Ok(())
     })?;
-    timed("flat", &cs, "bulk", 0, 0, map.len() as u64, || {
-        let ser = intern_flat(&cs, &map)?;
+    let mut last = timed("flat", &cs, "bulk", 0, 0, map.len() as u64, || {
+        let (key, ser) = intern_flat(&cs, &map)?;
         cs.sync()?;
-        Ok(((), ser, None))
+        Ok((key, ser, None))
     })?;
+    // The disk sizes are taken after a close, which writes the pack index,
+    // as for whole (D-23: index included); the store is opened again.
+    cs.close()?;
     print_disk("flat", "start", &store)?;
+    let cs = ChunkStore::open(&store, Options::default())?;
 
     for bl in &plan.batches {
         let changed = for_each_batch(&dir, bl.seq, |put, ino, key| {
@@ -400,20 +482,23 @@ pub(crate) fn flat(argv: &[String]) -> Res<()> {
                 map.remove(&ino);
             }
         })?;
-        timed("flat", &cs, &bl.pattern, bl.k, bl.seq, changed, || {
-            let ser = intern_flat(&cs, &map)?;
+        last = timed("flat", &cs, &bl.pattern, bl.k, bl.seq, changed, || {
+            let (key, ser) = intern_flat(&cs, &map)?;
             cs.sync()?;
-            Ok(((), ser, None))
+            Ok((key, ser, None))
         })?;
     }
 
+    // The check reads the last stored value back from the store (as prolly
+    // iterates its stored tree), so it proves what was written.
     let mut d = Digest::new();
-    for (ino, key) in &map {
-        d.add(*ino, key);
+    let mut s = MapStream::open(&cs, &last)?;
+    while let Some((ino, key)) = s.next_entry()? {
+        d.add(ino, &key);
     }
     check("flat", &plan, &d)?;
-    print_disk("flat", "end", &store)?;
     cs.close()?;
+    print_disk("flat", "end", &store)?;
     Ok(())
 }
 
@@ -446,13 +531,7 @@ pub(crate) fn prolly(argv: &[String]) -> Res<()> {
     let mut r = fs::File::open(dir.join("base.bin"))?;
     let mut piece = vec![0u8; HASH_PIECE_ENTRIES * MAP_ENTRY];
     loop {
-        let mut n = 0;
-        while n < piece.len() {
-            match r.read(&mut piece[n..])? {
-                0 => break,
-                k => n += k,
-            }
-        }
+        let n = read_piece(&mut r, &mut piece)?;
         if n == 0 {
             break;
         }
@@ -466,14 +545,39 @@ pub(crate) fn prolly(argv: &[String]) -> Res<()> {
     std::hint::black_box(acc);
     println!("hash boundary_hash_ns_per_key={:.1}", hash_ns as f64 / base_n.max(1) as f64);
 
-    let mut root: ObjectId = timed("prolly", &cs, "bulk", 0, 0, base_n, || {
-        let mut b = prolly::Builder::new(&cs, cfg);
-        for_each_base(&dir, |ino, key| Ok(b.push(&pkey(ino), key)?))?;
+    // The bulk build, timed in pieces: base.bin is read outside the timer,
+    // as flat reads it into its map before its timed intern.
+    let mut tm = Pieces::new(&cs);
+    let mut b = prolly::Builder::new(&cs, cfg);
+    let mut r = fs::File::open(dir.join("base.bin"))?;
+    let mut piece = vec![0u8; BUILD_PIECE_ENTRIES * MAP_ENTRY];
+    loop {
+        let n = read_piece(&mut r, &mut piece)?;
+        if n == 0 {
+            break;
+        }
+        if n % MAP_ENTRY != 0 {
+            return run_fail("base.bin is not whole records");
+        }
+        tm.time(|| {
+            for rec in piece[..n].as_chunks::<MAP_ENTRY>().0 {
+                let ino = u64::from_le_bytes(rec[..8].try_into().expect("8 bytes"));
+                b.push(&pkey(ino), &rec[8..])?;
+            }
+            Ok(())
+        })?;
+    }
+    drop(piece);
+    let (mut root, st) = tm.time(|| {
         let (root, st) = b.finish()?;
         cs.sync()?;
-        Ok((root, st.bytes_written, Some((0, st.nodes_written))))
+        Ok((root, st))
     })?;
+    commit_line("prolly", "bulk", 0, 0, base_n, st.bytes_written, Some((0, st.nodes_written)), &tm.done(&cs));
+    // As in flat: the sizes after a close (pack index included), then open again.
+    cs.close()?;
     print_disk("prolly", "start", &store)?;
+    let cs = ChunkStore::open(&store, Options::default())?;
 
     for bl in &plan.batches {
         // One batch in RAM (D-02), read straight into edits.
@@ -499,9 +603,9 @@ pub(crate) fn prolly(argv: &[String]) -> Res<()> {
         d.add(ino, &v);
     }
     check("prolly", &plan, &d)?;
-    print_disk("prolly", "end", &store)?;
     print_tree(&cs, &root)?;
     cs.close()?;
+    print_disk("prolly", "end", &store)?;
     Ok(())
 }
 
@@ -569,14 +673,14 @@ pub(crate) fn scale(argv: &[String]) -> Res<()> {
         "flat" => {
             let mut map: BTreeMap<u64, [u8; KEY_LEN]> = (2..n + 2).map(|ino| (ino, synth_value(&mut rng))).collect();
             let (ser, m) = measure(&cs, || {
-                let ser = intern_flat(&cs, &map)?;
+                let (_, ser) = intern_flat(&cs, &map)?;
                 cs.sync()?;
                 Ok(ser)
             })?;
             line("build", ser, &m);
             map.insert(mid, synth_value(&mut rng));
             let (ser, m) = measure(&cs, || {
-                let ser = intern_flat(&cs, &map)?;
+                let (_, ser) = intern_flat(&cs, &map)?;
                 cs.sync()?;
                 Ok(ser)
             })?;
@@ -584,16 +688,32 @@ pub(crate) fn scale(argv: &[String]) -> Res<()> {
         }
         "prolly" => {
             let cfg = Config::DEFAULT;
-            let ((root, ser), m) = measure(&cs, || {
-                let mut b = prolly::Builder::new(&cs, cfg);
-                for ino in 2..n + 2 {
-                    b.push(&pkey(ino), &synth_value(&mut rng))?;
-                }
+            // Timed in pieces: the values of a piece are made outside the
+            // timer, as flat makes its map before its timed intern; the same
+            // RNG order as flat, so both get the same values.
+            let mut tm = Pieces::new(&cs);
+            let mut b = prolly::Builder::new(&cs, cfg);
+            let mut vals: Vec<[u8; KEY_LEN]> = Vec::with_capacity(BUILD_PIECE_ENTRIES);
+            let mut from = 2;
+            while from < n + 2 {
+                let to = (from + BUILD_PIECE_ENTRIES as u64).min(n + 2);
+                vals.clear();
+                vals.extend((from..to).map(|_| synth_value(&mut rng)));
+                tm.time(|| {
+                    for (ino, v) in (from..to).zip(&vals) {
+                        b.push(&pkey(ino), v)?;
+                    }
+                    Ok(())
+                })?;
+                from = to;
+            }
+            drop(vals);
+            let (root, st) = tm.time(|| {
                 let (root, st) = b.finish()?;
                 cs.sync()?;
-                Ok((root, st.bytes_written))
+                Ok((root, st))
             })?;
-            line("build", ser, &m);
+            line("build", st.bytes_written, &tm.done(&cs));
             let edit = [Edit::Put { key: pkey(mid).to_vec(), value: synth_value(&mut rng).to_vec() }];
             let (ser, m) = measure(&cs, || {
                 let (_, st) = prolly::apply(&cs, cfg, &root, &edit)?;

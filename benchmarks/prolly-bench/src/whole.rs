@@ -1,7 +1,7 @@
 //! The `whole` mode: the real `DictMetadataStore` on a copy of a seeded
 //! store. It runs a seeded edit script of small commits, then optionally
-//! one version commit, and times `begin_commit` and `finish_commit` apart
-//! (public API only, D-22).
+//! one version commit, then the `insdel` commits, and times `begin_commit`
+//! and `finish_commit` apart (public API only, D-22).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
@@ -27,6 +27,22 @@ const MAX_DRAWS: u32 = 10_000;
 /// The directory under the root that holds the created files.
 const BENCH_DIR: &str = "bench";
 
+/// The pattern of real inserts and deletes in the middle of the map: each
+/// edit deletes a random file of the tree or inserts a file at an inode
+/// number that an earlier commit freed. It runs after the version step, so
+/// the commits before it are the same as without it.
+const INSDEL: &str = "insdel";
+
+/// A file that an `insdel` delete removed: enough to insert it again at
+/// the same inode number.
+struct Freed {
+    ino: u64,
+    dir: u64,
+    name: String,
+    meta: InodeMeta,
+    manifest: Vec<ObjectKey>,
+}
+
 /// The state of one `whole` run.
 struct Whole {
     meta: DictMetadataStore,
@@ -43,6 +59,8 @@ struct Whole {
     creates: u64,
     /// The last cluster pick of this commit.
     cluster_at: Option<u64>,
+    /// The files that `insdel` deleted and did not insert again, oldest first.
+    freed: VecDeque<Freed>,
 }
 
 /// The counts of the version step.
@@ -63,8 +81,8 @@ pub(crate) fn run(argv: &[String]) -> Res<()> {
     let seed = a.num("seed", Some(24))?;
     let ks = a.nums("ks", "1 10 100 1000")?;
     let commits = a.num("commits", Some(10))?;
-    let patterns = a.words("patterns", "scatter cluster");
-    if let Some(p) = patterns.iter().find(|p| !matches!(p.as_str(), "scatter" | "cluster")) {
+    let patterns = a.words("patterns", "scatter cluster insdel");
+    if let Some(p) = patterns.iter().find(|p| !matches!(p.as_str(), "scatter" | "cluster" | INSDEL)) {
         return usage(format!("--patterns: unknown pattern {p}"));
     }
     let next_tree = a.opt("next-tree").map(Path::new);
@@ -111,6 +129,7 @@ pub(crate) fn run(argv: &[String]) -> Res<()> {
         created: VecDeque::new(),
         creates: 0,
         cluster_at: None,
+        freed: VecDeque::new(),
     };
     w.commit("setup", 0, 0, [0; 4])?;
 
@@ -118,7 +137,7 @@ pub(crate) fn run(argv: &[String]) -> Res<()> {
     // K = 1 rotates the kinds over the commits and a larger K splits them
     // about equally.
     let mut seq = 1;
-    for pattern in &patterns {
+    for pattern in patterns.iter().filter(|p| p.as_str() != INSDEL) {
         let cluster = pattern == "cluster";
         for &k in &ks {
             for _ in 0..commits {
@@ -144,6 +163,34 @@ pub(crate) fn run(argv: &[String]) -> Res<()> {
             v.files_changed, v.files_created, v.files_deleted, v.dirs_created, v.dirs_deleted
         );
         w.commit("version", 0, seq, [0; 4])?;
+        seq += 1;
+    }
+
+    // The insdel commits: edit i of commit seq is a delete when (i + seq)
+    // mod 2 is 0, else an insert of a file that an earlier commit deleted
+    // (a delete when there is none). So no key is both inserted and deleted
+    // in one commit, and each edit changes one key of the committed map.
+    if patterns.iter().any(|p| p == INSDEL) {
+        let dirs = w.tree_dirs()?;
+        for &k in &ks {
+            for _ in 0..commits {
+                let mut avail = w.freed.len();
+                let mut inserted = Vec::new();
+                let mut kinds = [0u64; 4];
+                for i in 0..k {
+                    if (i + seq) % 2 == 1 && avail > 0 {
+                        avail -= 1;
+                        inserted.push(w.insert_freed()?);
+                        kinds[2] += 1;
+                    } else {
+                        w.delete_random(&dirs, &inserted)?;
+                        kinds[3] += 1;
+                    }
+                }
+                w.commit(INSDEL, k, seq, kinds)?;
+                seq += 1;
+            }
+        }
     }
 
     w.roots.sync_all()?;
@@ -246,6 +293,65 @@ impl Whole {
 
     fn is_file(&self, ino: u64) -> bool {
         self.meta.get_inode(ino).is_ok_and(|m| m.mode & S_IFMT == S_IFREG)
+    }
+
+    /// Every directory of the tree, root included, `bench` and its files
+    /// not: the places of the `insdel` deletes. One listing at a time.
+    fn tree_dirs(&self) -> Res<Vec<u64>> {
+        let mut dirs = Vec::new();
+        let mut todo = vec![1];
+        while let Some(dir) = todo.pop() {
+            dirs.push(dir);
+            for e in self.meta.list_directory(dir)? {
+                if !is_dot(&e.name)
+                    && !(dir == 1 && e.name == BENCH_DIR)
+                    && self.meta.get_inode(e.ino)?.mode & S_IFMT == S_IFDIR
+                {
+                    todo.push(e.ino);
+                }
+            }
+        }
+        dirs.sort_unstable();
+        Ok(dirs)
+    }
+
+    /// Deletes a random regular file of a random directory of `dirs`, not
+    /// one of `skip` (the inserts of this commit), and keeps it in `freed`.
+    fn delete_random(&mut self, dirs: &[u64], skip: &[u64]) -> Res<()> {
+        for _ in 0..MAX_DRAWS {
+            let dir = dirs[(self.rng.next() % dirs.len() as u64) as usize];
+            let mut files = Vec::new();
+            for e in self.meta.list_directory(dir)? {
+                if !is_dot(&e.name) && !skip.contains(&e.ino) && self.is_file(e.ino) {
+                    files.push((e.name, e.ino));
+                }
+            }
+            if files.is_empty() {
+                continue;
+            }
+            let (name, ino) = files.swap_remove((self.rng.next() % files.len() as u64) as usize);
+            let meta = self.meta.get_inode(ino)?;
+            let manifest = self.meta.get_manifest(ino)?;
+            self.meta.unlink(dir, &name)?;
+            self.meta.delete_inode(ino)?;
+            self.freed.push_back(Freed { ino, dir, name, meta, manifest });
+            return Ok(());
+        }
+        run_fail(format!("no regular file for a delete in {MAX_DRAWS} draws"))
+    }
+
+    /// Inserts the oldest freed file again at its inode number, name and
+    /// content, with the mtime and ctime one second later (so its
+    /// `inode_data` value is new, not a value that the store already has).
+    fn insert_freed(&mut self) -> Res<u64> {
+        let f = self.freed.pop_front().ok_or_else(|| Fail::Run("no freed file to insert".into()))?;
+        let mut m = f.meta;
+        m.mtime_sec += 1;
+        m.ctime_sec += 1;
+        self.meta.create_inode_at(f.ino, &m)?;
+        self.meta.link(f.dir, &f.name, f.ino)?;
+        self.meta.set_manifest(f.ino, &f.manifest)?;
+        Ok(f.ino)
     }
 
     /// One timed commit: `begin_commit` and `finish_commit` apart, with the
