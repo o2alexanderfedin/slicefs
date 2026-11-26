@@ -1,0 +1,30 @@
+# Red run, Task 1 (before the code): cargo test -p slicefs-cli --test snapshot_switch_gc_tests
+error[E0432]: unresolved import `metadata::segment::write_switch_segment`
+ --> crates/slicefs-cli/tests/snapshot_switch_gc_tests.rs:8:72
+error[E0425]: cannot find function `gc_on_open_store` in module `slicefs_cli::gc`
+   --> crates/slicefs-cli/tests/snapshot_switch_gc_tests.rs:114:34
+error: could not compile `slicefs-cli` (test "snapshot_switch_gc_tests") due to 2 previous errors
+
+# Task 1 green after the code: test a_superseded_snapshot_root_is_no_longer_kept_by_gc ... ok
+
+# Task 2, mutation 1: write_switch_segment does not rename the .seg.tmp (cargo test -p metadata --lib -- segment::switch::)
+test segment::switch::tests::both_loaders_keep_the_last_record_of_each_version ... ok
+test segment::switch::tests::a_switch_makes_the_new_roots_current ... FAILED
+test segment::switch::tests::the_switch_id_counts_short_segment_files ... FAILED
+test segment::switch::tests::a_mount_segment_after_the_switch_is_the_write_log ... FAILED
+test segment::switch::tests::old_segments_left_after_the_rename_lose_to_the_switch ... FAILED
+test segment::switch::tests::a_switch_tmp_before_the_rename_is_ignored ... FAILED
+test segment::switch::tests::a_stale_switch_tmp_is_removed_by_the_next_switch ... FAILED
+test result: FAILED. 1 passed; 6 failed; 0 ignored; 0 measured; 166 filtered out; finished in 0.87s
+
+# Task 2, mutation 2: scan_store_with_log returns the snapshots without last_per_version
+test segment::switch::tests::both_loaders_keep_the_last_record_of_each_version ... FAILED
+test segment::switch::tests::a_switch_makes_the_new_roots_current ... ok
+test segment::switch::tests::the_switch_id_counts_short_segment_files ... ok
+test segment::switch::tests::old_segments_left_after_the_rename_lose_to_the_switch ... FAILED
+test segment::switch::tests::a_mount_segment_after_the_switch_is_the_write_log ... ok
+test segment::switch::tests::a_switch_tmp_before_the_rename_is_ignored ... ok
+test segment::switch::tests::a_stale_switch_tmp_is_removed_by_the_next_switch ... ok
+test result: FAILED. 5 passed; 2 failed; 0 ignored; 0 measured; 166 filtered out; finished in 0.43s
+
+# Both mutations undone; all 7 segment::switch tests ok.

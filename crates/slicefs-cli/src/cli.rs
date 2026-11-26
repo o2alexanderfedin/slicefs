@@ -178,6 +178,22 @@ pub enum Cmd {
         full: bool,
     },
 
+    /// Convert an offline store to another hash: rewrite every live
+    /// object, switch the root and every snapshot in one step, record the
+    /// hash, and free the old objects with a full GC. The store must not be
+    /// mounted.
+    Rehash {
+        /// The target hash, for example sha256 or blake3-256.
+        #[arg(long, value_name = "NAME", value_parser = crate::content::parse_hash)]
+        to: String,
+        /// Walk and verify the store and report what a real run would
+        /// rewrite; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Path to the SliceFS block store directory.
+        store: PathBuf,
+    },
+
     /// Manage snapshots for a SliceFS block store.
     ///
     /// Snapshots capture an immutable point-in-time view of the filesystem.
@@ -636,5 +652,27 @@ mod tests {
     #[test]
     fn workers_above_eight_is_accepted() {
         assert_eq!(workers(&["--workers", "16"]).unwrap(), Some(16));
+    }
+
+    #[test]
+    fn rehash_parses_to_and_dry_run() {
+        let cli = Cli::try_parse_from(["slicefs", "rehash", "--to", "sha256", "./s"]).unwrap();
+        match cli.command {
+            Cmd::Rehash { to, dry_run, store } => assert_eq!((to.as_str(), dry_run, store), ("sha256", false, PathBuf::from("./s"))),
+            _ => panic!("expected Rehash"),
+        }
+        let cli = Cli::try_parse_from(["slicefs", "rehash", "--to", "blake3-256", "--dry-run", "./s"]).unwrap();
+        match cli.command {
+            Cmd::Rehash { to, dry_run, .. } => assert_eq!((to.as_str(), dry_run), ("blake3-256", true)),
+            _ => panic!("expected Rehash"),
+        }
+    }
+
+    /// `--to` is required and takes a known hash name.
+    #[test]
+    fn rehash_refuses_an_unknown_hash() {
+        let err = Cli::try_parse_from(["slicefs", "rehash", "--to", "md5", "./s"]).expect_err("an unknown hash is refused").to_string();
+        assert!(err.contains("unknown hash \"md5\"") && err.contains("sha256"), "{err}");
+        Cli::try_parse_from(["slicefs", "rehash", "./s"]).expect_err("--to is required");
     }
 }

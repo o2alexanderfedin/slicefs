@@ -11,7 +11,7 @@ use std::path::Path;
 
 use slicefs_cli::header::{self, FORMAT_FILE};
 use slicefs_cli::mount::{start, StartArgs};
-use slicefs_cli::{content, gc, scrub, seed, snapshot, stats};
+use slicefs_cli::{content, gc, rehash, scrub, seed, snapshot, stats};
 use tempfile::TempDir;
 
 const INCOMPAT: &str = "incompat test-new-feature r-test\n";
@@ -76,6 +76,7 @@ fn write_commands(dir: &Path) -> Vec<(&'static str, Outcome)> {
         ("snapshot create", s(snapshot::run_snapshot_create(store, None))),
         ("snapshot switch", s(snapshot::run_snapshot_switch(store, "1"))),
         ("seed", s(seed::run_seed(store, src, None))),
+        ("rehash", s(rehash::run_rehash(store, "blake3-256", false))),
         ("content::open", io(content::open(store))),
     ]
 }
@@ -213,8 +214,8 @@ fn an_empty_store_read_writes_nothing() {
     assert!(!dir.path().join(FORMAT_FILE).exists(), "no header is written");
 }
 
-/// A command that writes an existing store (gc, snapshot create and switch)
-/// refuses a path with no store and makes nothing there.
+/// A command that writes an existing store (gc, snapshot create and
+/// switch, rehash) refuses a path with no store and makes nothing there.
 #[test]
 fn a_write_command_on_no_store_makes_nothing() {
     let dir = TempDir::new().unwrap();
@@ -226,6 +227,7 @@ fn a_write_command_on_no_store_makes_nothing() {
             ("gc", gc::gc_report(store, false).map(drop).map_err(|e| e.to_string())),
             ("snapshot create", s(snapshot::run_snapshot_create(store, None))),
             ("snapshot switch", s(snapshot::run_snapshot_switch(store, "1"))),
+            ("rehash", s(rehash::run_rehash(store, "blake3-256", false))),
         ];
         assert_refused(&results, &["failed to load segments: store not found at"]);
     }

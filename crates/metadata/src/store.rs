@@ -35,7 +35,7 @@ const S_IFMT: u32 = 0o0_170_000;
 
 /// Byte layout of the root record that `commit` writes: fixed-width fields,
 /// little-endian. Each `*_DATA` field is the key of a serialized map.
-mod root_rec {
+pub(crate) mod root_rec {
     use super::KEY_BYTES as D;
     pub const INODE_MAP: usize = 0;
     pub const ROOT_DIR_INO: usize = INODE_MAP + D;
@@ -52,7 +52,7 @@ mod root_rec {
 }
 
 /// One entry of a `u64` <-> digest map: a `u64` and a digest.
-const MAP_ENTRY: usize = 8 + KEY_BYTES;
+pub(crate) const MAP_ENTRY: usize = 8 + KEY_BYTES;
 
 /// Longest directory entry name in bytes (statfs reports namelen 255).
 const NAME_MAX: usize = 255;

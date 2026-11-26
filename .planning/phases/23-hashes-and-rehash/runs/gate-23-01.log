@@ -1,0 +1,63 @@
+# gate-23-01: plan gates of 23-01
+BASE=526609e4de6bba028cb4c1cc049631cffbecb51f (feature/phase-23-hashes-rehash)
+
+## Local gate (tree of Task 3)
+cargo test --workspace -- --skip a_panic_on_another_thread_does_not_abort --skip a_reader_thread_panic_aborts_and_the_remount_replays --skip a_worker_panic_aborts_and_the_remount_replays --skip a_full_queue_that_stays_full_aborts
+exit=0
+79 "test result: ok" lines, 0 FAILED: passed=1618 failed=0 ignored=13
+(count  test result line, timings cut)
+  11 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   6 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   6 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   6 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   5 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   4 test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   3 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   3 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   3 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   3 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   2 test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   2 test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   2 test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 78 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 6 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 406 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 166 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 131 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 107 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out
+   1 test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 4 filtered out
+Gates of the Task 1 and Task 2 commits: exit=0, passed=1611 and passed=1618, failed=0.
+
+## Kani (Task 2 tree): KANI_HARNESS=name_bytes_total scripts/safety/kani.sh
+KANI harness=header::proofs::name_bytes_total result=SUCCESSFUL secs=4.51
+KANI ok harnesses=1
+#[kani::proof] attributes in crates/slicefs-cli/src: 9 (base 9)
+
+## Clippy and unsafe count (Task 3 tree): RUST_STABLE=stable scripts/safety/clippy.sh
+CLIPPY os=Darwin toolchain=stable result=ok
+UNSAFE files=31 tokens=132 result=ok
+docs/design/unsafe-review.md: no change
+
+## Dependencies
+cargo tree -p chunk-store -e normal -i sha2:
+sha2 v0.11.2
+└── chunk-store v0.1.0 (<repo>/crates/chunk-store)
+Cargo.lock names added from BASE: sha2, digest, crypto-common, block-buffer, hybrid-array, typenum, cpufeatures (0.3.1, next to 0.2.17)
+Cargo.lock names removed from BASE: sha2-compress, fixed-array, uints
+cargo build --workspace --locked: ok

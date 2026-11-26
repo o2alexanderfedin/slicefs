@@ -33,9 +33,28 @@ pub const CHUNK_PROFILE_FLAG: &str = "chunk-profile";
 /// The release word of the `chunk-profile` flag. A placeholder until the
 /// owner names the release; tests use this constant, never its text.
 pub const CHUNK_PROFILE_RELEASE: &str = "v2.2";
+/// The incompat flag of a store that has, or had, objects with SHA-256 IDs
+/// (tag 0x12): an older build cannot verify them, so it must not open the
+/// store.
+pub const HASH_SHA256_FLAG: &str = "hash-sha256";
+/// The release word of the `hash-sha256` flag. A placeholder until the
+/// owner names the release, as [`CHUNK_PROFILE_RELEASE`]; tests use this
+/// constant, never its text.
+pub const HASH_SHA256_RELEASE: &str = "v2.2";
 /// The feature flags that this build knows (Phase 22: `chunk-profile`;
-/// Phase 23 adds names here with the rule of docs/design/store-format.md).
-pub const KNOWN_FLAGS: &[&str] = &[CHUNK_PROFILE_FLAG];
+/// Phase 23: `hash-sha256`). Add a name here with the rule of
+/// docs/design/store-format.md.
+pub const KNOWN_FLAGS: &[&str] = &[CHUNK_PROFILE_FLAG, HASH_SHA256_FLAG];
+
+/// The flag that a store needs before it holds objects of `hasher`
+/// (`None`: no flag). The one place that says which hash needs a flag.
+pub fn hash_flag(hasher: &dyn ObjectHasher) -> Option<Flag> {
+    (hasher.tag() == chunk_store::hash::Sha256.tag()).then(|| Flag {
+        class: Class::Incompat,
+        name: HASH_SHA256_FLAG.to_string(),
+        release: HASH_SHA256_RELEASE.to_string(),
+    })
+}
 
 /// The header of a new store whose new objects use `hasher` (the default
 /// chunk profile).
@@ -46,9 +65,14 @@ pub fn marker(hasher: &dyn ObjectHasher) -> String {
 /// The header of a new store with the write hash `hasher` and the chunk
 /// profile `profile`. A non-default profile adds the line `chunks <min>
 /// <avg> <max>` (bytes) and its ro_compat flag; the default profile adds
-/// nothing, so the header of a default store stays as in format 7.
+/// nothing, so the header of a default store stays as in format 7. A hash
+/// that needs a flag ([`hash_flag`]: SHA-256) gets its flag line right
+/// after the hash line.
 pub fn marker_with(hasher: &dyn ObjectHasher, profile: ChunkProfile) -> String {
     let mut s = format!("{FORMAT}hash {}\n", hasher.name());
+    if let Some(f) = hash_flag(hasher) {
+        s.push_str(&format!("{} {} {}\n", f.class.word(), f.name, f.release));
+    }
     if profile != ChunkProfile::DEFAULT {
         s.push_str(&format!("chunks {} {} {}\n", profile.min(), profile.avg(), profile.max()));
         s.push_str(&format!("ro_compat {CHUNK_PROFILE_FLAG} {CHUNK_PROFILE_RELEASE}\n"));
@@ -325,7 +349,10 @@ pub fn read(store: &Path) -> std::io::Result<Option<String>> {
 /// the whole header), or a line of another kind. The `chunks` line and the
 /// flag [`CHUNK_PROFILE_FLAG`] come together or not at all, and that flag is
 /// ro_compat (an older build that does not know it opens the store
-/// read-only and keeps the `chunks` line as a line of its feature).
+/// read-only and keeps the `chunks` line as a line of its feature). A
+/// `hash sha256` line needs the flag [`HASH_SHA256_FLAG`], and that flag is
+/// incompat; the flag with no `hash sha256` line is valid (the store can
+/// still hold SHA-256 objects after the write hash went back).
 pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
     let mut pieces: Vec<&str> = text.split('\n').collect();
     if text.ends_with('\n') {
@@ -386,6 +413,19 @@ pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
         (None, Some(j)) => return Err(bad_at(j, "chunk-profile flag with no chunks line")),
         (Some(_), Some(j)) if !matches!(&lines[j], Line::Flag(f) if f.class == Class::RoCompat) => {
             return Err(bad_at(j, "the feature chunk-profile must be ro_compat"));
+        }
+        _ => {}
+    }
+    // A `hash sha256` line needs the `hash-sha256` flag, and the flag is
+    // incompat. The flag with no such line is valid: the store can still
+    // hold SHA-256 objects after the write hash went back.
+    let sha256 = chunk_store::hash::Sha256.name();
+    let hash_at = lines.iter().position(|l| matches!(l, Line::Hash(n) if n == sha256));
+    let flag_at = lines.iter().position(|l| matches!(l, Line::Flag(f) if f.name == HASH_SHA256_FLAG));
+    match (hash_at, flag_at) {
+        (Some(j), None) => return Err(bad_at(j, "hash sha256 with no hash-sha256 flag")),
+        (_, Some(j)) if !matches!(&lines[j], Line::Flag(f) if f.class == Class::Incompat) => {
+            return Err(bad_at(j, "the feature hash-sha256 must be incompat"));
         }
         _ => {}
     }
@@ -572,7 +612,7 @@ fn lock_result(dir: std::fs::File, r: Result<(), std::fs::TryLockError>) -> std:
 /// holds it.
 pub fn lock_read_mount(store: &Path) -> std::io::Result<StoreLock> {
     try_store_lock(store, true)?.ok_or_else(|| {
-        refuse(format!("{} is in use: it is mounted to write, or a command that writes it (gc, seed, snapshot create or snapshot switch) runs now. Mount it when that mount or command ends.", store.display()))
+        refuse(format!("{} is in use: it is mounted to write, or a command that writes it (gc, seed, rehash, snapshot create or snapshot switch) runs now. Mount it when that mount or command ends.", store.display()))
     })
 }
 
@@ -580,7 +620,7 @@ pub fn lock_read_mount(store: &Path) -> std::io::Result<StoreLock> {
 /// Refused while a mount (or another such command) holds it.
 pub fn lock_offline(store: &Path) -> std::io::Result<StoreLock> {
     try_store_lock(store, false)?.ok_or_else(|| {
-        refuse(format!("{} is in use: it is mounted, or another command (gc, seed, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.", store.display()))
+        refuse(format!("{} is in use: it is mounted, or another command (gc, seed, rehash, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.", store.display()))
     })
 }
 
@@ -590,7 +630,7 @@ pub fn lock_offline(store: &Path) -> std::io::Result<StoreLock> {
 /// not touched.
 pub fn lock_write_mount(store: &Path) -> std::io::Result<StoreLock> {
     try_store_lock(store, false)?.ok_or_else(|| {
-        refuse(format!("{} is in use: it is mounted, or a command (gc, seed, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.", store.display()))
+        refuse(format!("{} is in use: it is mounted, or a command (gc, seed, rehash, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.", store.display()))
     })
 }
 
@@ -940,6 +980,54 @@ mod tests {
             let err = parse(Path::new(STORE), &text).expect_err(want).to_string();
             assert!(err.contains(want), "{text:?}: {err}");
         }
+    }
+
+    /// The `hash-sha256` flag line of this build, of the class `class`.
+    fn sha256_flag(class: &str) -> String {
+        format!("{class} {HASH_SHA256_FLAG} {HASH_SHA256_RELEASE}\n")
+    }
+
+    /// D-11: a `hash sha256` line with no `hash-sha256` flag is M9 at the
+    /// hash line.
+    #[test]
+    fn hash_sha256_needs_the_incompat_flag() {
+        let err = parse(Path::new(STORE), &format!("{FORMAT}hash sha256\n")).expect_err("refused").to_string();
+        assert!(err.contains("line 2: hash sha256 with no hash-sha256 flag"), "{err}");
+    }
+
+    /// D-11: the `hash-sha256` flag is incompat (M9 at the flag line).
+    #[test]
+    fn the_hash_sha256_flag_must_be_incompat() {
+        for (class, k) in [("ro_compat", 3), ("compat", 3)] {
+            let text = format!("{FORMAT}hash sha256\n{}", sha256_flag(class));
+            let err = parse(Path::new(STORE), &text).expect_err(class).to_string();
+            assert!(err.contains(&format!("line {k}: the feature hash-sha256 must be incompat")), "{class}: {err}");
+        }
+        let text = format!("{FORMAT}{}{HASH}", sha256_flag("compat"));
+        let err = parse(Path::new(STORE), &text).expect_err("compat flag, no sha256 line").to_string();
+        assert!(err.contains("line 2: the feature hash-sha256 must be incompat"), "{err}");
+    }
+
+    /// D-11: the flag with no `hash sha256` line is valid (the store may
+    /// still hold SHA-256 objects after the hash went back).
+    #[test]
+    fn the_hash_sha256_flag_without_the_line_is_valid() {
+        let text = format!("{FORMAT}{HASH}{}", sha256_flag("incompat"));
+        let h = parse(Path::new(STORE), &text).unwrap();
+        assert_eq!(h.hash(), Some("blake3-256"));
+        assert_eq!(decide(Path::new(STORE), &h, Want::Write).unwrap(), Access::ReadWrite);
+        assert_eq!(h.to_text(), text);
+    }
+
+    /// D-11: the header of a new SHA-256 store has the flag right after the
+    /// hash line; the default header does not change.
+    #[test]
+    fn marker_of_sha256_has_the_flag() {
+        let sha = chunk_store::hasher_by_name("sha256").unwrap();
+        assert_eq!(marker(sha), format!("{FORMAT}hash sha256\n{}", sha256_flag("incompat")));
+        assert_eq!(marker(DEFAULT_HASHER), format!("{FORMAT}{HASH}"));
+        let h = parse(Path::new(STORE), &marker(sha)).unwrap();
+        assert_eq!(h.flags().cloned().collect::<Vec<_>>(), [hash_flag(sha).unwrap()]);
     }
 
     /// [Chunks line]: a `chunks` line has three sizes in decimal digits

@@ -85,7 +85,7 @@ impl Default for InodeMap {
 // After all entries the `next_ino` is NOT stored: on deserialization it is
 // recovered as max(keys) + 1 (or 2 for an empty map).
 
-const RECORD: usize = 8 + KEY_BYTES;
+pub(crate) const RECORD: usize = 8 + KEY_BYTES;
 
 /// Serialize `InodeMap` to a flat byte vector of `RECORD`-byte records.
 pub fn serialize_inode_map(map: &InodeMap) -> Vec<u8> {

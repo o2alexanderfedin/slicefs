@@ -187,7 +187,17 @@ ObjectId = tag (1 byte) | digest (32 bytes)
   entries and roots name their hash too, and a peer can verify the content
   that a key refers to.
 - A hash is an `ObjectHasher` (`chunk_store::hash`: name, tag, digest). The
-  build knows a fixed list of them (`hasher_by_name`, `hasher_by_tag`).
+  build knows a fixed list of them (`hasher_by_name`, `hasher_by_tag`):
+  `blake3-256` (tag `0x1e`) and `sha256` (tag `0x12`, the multihash code of
+  sha2-256).
+- SHA-256 comes from the RustCrypto `sha2` crate. At run time it uses the
+  SHA-NI instructions on x86_64 or the ARMv8 SHA2 instructions on aarch64,
+  if the CPU has them. On a CPU without them it runs the software code:
+  about 250 MB/s per core on the test machine, about 16 times slower than
+  BLAKE3. A store that can hold SHA-256 objects has the incompat header
+  flag `hash-sha256` (see `docs/design/store-format.md`). The flag is
+  written before the first SHA-256 object, and it stays when the store goes
+  back to BLAKE3-256.
 - Write hash: the store makes the IDs of new objects with one hasher,
   injected at open (`Options::hasher`, default BLAKE3-256), as the zstd
   level is. The store records it in its store header (`FORMAT`, see
@@ -203,13 +213,178 @@ ObjectId = tag (1 byte) | digest (32 bytes)
   verifiable. A tag that the build does not know is an error (a damaged or
   newer store), never a panic.
 - The same bytes under two hashes are two objects: there is no dedup across
-  hashes. A conversion of a whole store to a new hash is future work
-  (#62, `slicefs rehash`).
+  hashes. `slicefs rehash` converts a whole store to one hash (see
+  "Rehash (#62)" below).
 - Keys that are not content addresses do not change with the write hash: a
   directory entry key is always BLAKE3-256 of the name, so lookups keep
   working for the life of the store.
 - The cut of the manifest nodes (`is_cut`) looks at the last 4 digest bytes,
   never at the tag.
+
+## Rehash (#62)
+
+```
+slicefs rehash --to <hash> [--dry-run] <store>
+```
+
+The command writes every live object of a store again under the hash
+`<hash>`. It does this for the current root and for each snapshot root.
+After the run every live object has the tag of `<hash>`, the files and the
+snapshots (version, name, `created_at`, content) do not change, and the
+header records `hash <hash>`. The engine is `metadata::rehash`, and the
+command is `slicefs-cli/src/rehash.rs`.
+
+### Offline only
+
+- The command takes the exclusive store lock (`header::lock_offline`, see
+  `docs/design/store-format.md`) and holds it to its end, GC included. It
+  is refused while a mount or another command holds the lock.
+- It refuses a store with a `mount.lock` file (a mount that did not end
+  cleanly).
+- It refuses a store whose write log has records after the last root.
+- For the last two refusals: mount and unmount the store once, then run
+  rehash again.
+- It refuses an unknown target hash (before it takes the lock) and a path
+  that is not a store.
+
+### Steps and crash states
+
+A run has these steps. Each row says what a crash after the step leaves. In
+every case, a second run of `rehash` finishes the job.
+
+| Step | What it does | A crash after it leaves |
+|------|--------------|-------------------------|
+| 1. Checks | lock, header, `mount.lock`, write log | the old store; nothing written |
+| 2. Flag | the header flag of the target (SHA-256 only), before its first object | the old root; the flag alone is valid |
+| 3. Rewrite | new objects; temp files in `<store>/rehash-tmp/` | the old root; the new objects are garbage for the next GC; the next writable open removes `rehash-tmp` |
+| 4. Sync | the packs and the index of the new objects are durable | the old root |
+| 5. Switch | one new segment with the new root and one record per snapshot | the new root, maybe with the old hash line (a mixed store, which is valid) |
+| 6. Header | the line `hash <hash>` | the new root; the old objects are not freed yet |
+| 7. GC | a full GC on the open store, with the new roots | the new root; the GC is crash-safe by its own design |
+| 8. Report | `rehash-tmp` is removed; the report | done |
+
+A run always does the full GC, also when no root changed. Thus a second run
+after a crash between the switch and the GC frees the old objects.
+
+An error that is not a crash (a damaged object, a failed write) removes
+`rehash-tmp` and any `segment-*.seg.tmp` before the command returns. An
+error before the switch says that the new objects of the run stay until
+the next `slicefs gc` or rehash run.
+
+### Conversion
+
+- Each value (a file content, and the inode, directory and xattr nodes) is
+  read with verified reads and streamed, in windows of 1 MiB, into a
+  `FileWriter` of the store. That store is open with the target hash and
+  the chunk profile of the header. Thus a file gets the key of a fresh
+  write of its bytes under the target hash and the store profile. The tree
+  is not translated node by node, because the manifest node cuts depend on
+  the IDs (`is_cut`).
+- The key-carrying nodes are rebuilt: the manifest lists, the `u64 -> key`
+  maps, the inode map, the refcount table and the root record. Each key is
+  replaced by its new key. These nodes are always rebuilt, also when they
+  have the target tag, because they can list keys of another tag.
+- Directory entry keys (BLAKE3-256 of the name) are not content addresses.
+  They are inside the copied bytes and do not change.
+- A value whose own key and every object of its tree already have the
+  target tag is kept as it is. Its nodes are read to check the tags; its
+  chunks are not read.
+- Every read is verified with the hasher of the tag of the object. A
+  damaged object, a missing object or an unknown tag stops the run before
+  the switch. The error names the node kind and the cause, and nothing is
+  switched.
+- The refcount rows get the new keys and are sorted by them in temp files
+  (49 bytes per row: new key, count, row index), with fixed RAM (a 4 MiB
+  sort chunk, at most 32 merge inputs of 64 KiB each). Rows that get one
+  new key are merged. A row whose object is missing is dropped, and the
+  report counts it.
+
+### Switch
+
+- The switch is one segment `segment-<N>.seg` with one `RootUpdate` and one
+  `SnapshotRecord` per snapshot. The snapshot records keep the version, the
+  name and `created_at`; only the root changes.
+- The segment is written as `segment-<N>.seg.tmp`, synced, renamed to
+  `.seg`, and the directory is synced. The rename is the one atomic step.
+  Then the older segments are removed.
+- A `.seg.tmp` file is ignored by every loader, and the next run removes
+  it.
+- When no root changes but more than one segment file is there (a crash
+  after the rename, before the older segments went), the run writes the
+  switch segment with the same roots. Thus the older segments are removed.
+  The write log is empty at that point, so the roots and the snapshot list
+  are all that the segments hold.
+- The loaders keep the last record of each snapshot version, in file
+  order. So old segments that a crash left after the rename change
+  nothing: the records of the switch segment win.
+
+### Old-to-new map
+
+- The map gives the new key of a (node kind, old key) that the run already
+  did, so a value that many inodes, roots or snapshots share is done once.
+  Its keys are files and nodes, not chunks: chunks dedup by themselves
+  under the target hash.
+- A miss only costs a rewrite with the same result. So a map that a crash
+  lost or cut is safe.
+- On disk: one file in `<store>/rehash-tmp/`, an open-addressing table of
+  67-byte slots (kind, old key, new key). A new file has 2^16 slots
+  (4.4 MB). At half load it grows to twice the slots. So a distinct key
+  costs 134 to 268 bytes of disk.
+- In RAM: a direct-mapped cache of `CACHE_SLOTS` (2^14) slots, about
+  1.1 MB. It is made once and does not grow with the number of keys.
+
+### Memory and disk
+
+- RAM does not grow with the object count during the rewrite. One path of
+  nested values is open at a time (root record, map, manifest list,
+  content), with one 1 MiB read window, one reader and one writer each. In
+  addition there are the map cache and the fixed buffers of the refcount
+  sort. No value and no map is read into RAM whole.
+- Disk: the run writes the new objects next to the old ones. So it needs
+  room for up to a second copy of the live data until the GC of step 7
+  frees the old objects. The report shows the store disk usage before and
+  after.
+- The GC mark of step 7 holds one 33-byte key per metadata node and per
+  file of all roots. This is the existing bound of the GC mark (see "Full
+  GC"), not a bound of the rewrite.
+- Time: a rehash to SHA-256 on a CPU without SHA instructions runs at about
+  250 MB/s per core for the hash, plus zstd. A large store can take hours.
+  The progress lines show where the run is.
+
+### Dry run
+
+`--dry-run` takes the same lock and makes the same checks, so it refuses
+what a real run refuses. Then it reads and verifies the live tree through a
+read-only open and writes nothing in the store: no temp files, no flag,
+no header change, no pack. Its old-to-new map is the on-disk map of a real
+run, in a new directory of the system temp dir (`TMPDIR`, not the store),
+removed at the end. So a value that files, roots or snapshots share is
+read and counted once, as in a real run. The map takes about 134 bytes per
+distinct key there. Where the temp dir is a RAM file system (tmpfs), the
+map is in RAM: for a large store, set `TMPDIR` to a directory on a disk.
+It reports the values read and verified, and the objects of
+another hash with their bytes. That count is an estimate of what a real
+run rewrites and of what its GC frees.
+
+### Report
+
+Progress lines go to stderr: one line at each step (`rehash: checks
+passed`, `flag written`, `synced`, `switch` or `no switch needed`,
+`header`, `gc`), and a line of the rewrite every 5 s
+(`rehash: rewrite: root i of n: ...`). The report on stdout has these
+lines:
+
+- `Rehash to <hash>: N roots (S snapshots).`
+- `Read: ...`: the values and bytes read. Each object read was verified.
+- `Rewritten: ...; new objects: ...`: the values written again, and the
+  new objects with their stored bytes. `Rewritten` also counts the
+  key-carrying nodes that get the same key again.
+- `Kept as is: ... Stale refcount rows dropped: ...`
+- `Every live object already has hash <hash>; no root changed.`, only
+  when no root changed.
+- `GC (full): ...`: the line of `slicefs gc`.
+- `Bytes freed: N.`: the stored bytes of the objects that the GC removed.
+- The store disk usage before and after.
 
 ## Pack files
 

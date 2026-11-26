@@ -7,6 +7,7 @@
 //! read and verify the objects of the older hash.
 
 use crate::{ObjectId, DIGEST_LEN};
+use sha2::{Digest, Sha256 as Sha2};
 
 /// A hash algorithm for object IDs. Every algorithm gives `DIGEST_LEN`
 /// (32) bytes; there are no variable-length digests.
@@ -46,6 +47,24 @@ impl ObjectHasher for Blake3_256 {
     }
 }
 
+/// SHA-256. Tag 0x12: the multihash code of sha2-256. The `sha2` crate
+/// picks SHA-NI (x86_64) or the ARMv8 SHA2 instructions at run time when
+/// the CPU has them.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Sha256;
+
+impl ObjectHasher for Sha256 {
+    fn name(&self) -> &'static str {
+        "sha256"
+    }
+    fn tag(&self) -> u8 {
+        0x12
+    }
+    fn digest(&self, data: &[u8]) -> [u8; DIGEST_LEN] {
+        Sha2::digest(data).into()
+    }
+}
+
 /// A second hash for tests of hash changes: keyed BLAKE3, tag 0xf0 (a tag
 /// in no real store). Only in test builds (`cfg(test)` or the `test-hasher`
 /// feature, which the dev-dependencies of the other crates turn on).
@@ -71,6 +90,7 @@ pub const DEFAULT_HASHER: &dyn ObjectHasher = &Blake3_256;
 
 static HASHERS: &[&dyn ObjectHasher] = &[
     &Blake3_256,
+    &Sha256,
     #[cfg(any(test, feature = "test-hasher"))]
     &TestKeyedBlake3,
 ];
@@ -115,6 +135,68 @@ mod tests {
         assert_eq!(id.tag(), 0x1e);
         assert_eq!(id.digest(), blake3::hash(b"abc").as_bytes());
         assert_ne!(TestKeyedBlake3.id(b"abc").digest(), id.digest());
+        assert_eq!(hasher_by_name("sha256").unwrap().tag(), 0x12);
+        assert_eq!(hasher_by_tag(0x12).unwrap().name(), "sha256");
+        assert!(hasher_names().split(", ").any(|n| n == "sha256"), "{}", hasher_names());
+    }
+
+    fn hex(d: &[u8]) -> String {
+        d.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// D-10: the SHA-256 digest equals the known vectors (FIPS 180 examples).
+    #[test]
+    fn sha256_golden_vectors() {
+        let million_a = vec![b'a'; 1_000_000];
+        let cases: [(&[u8], &str); 4] = [
+            (b"", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+            (b"abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+            (
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+                "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+            ),
+            (&million_a, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(hex(&Sha256.digest(input)), want, "input of {} bytes", input.len());
+        }
+        assert_eq!(Sha256.id(b"abc").tag(), 0x12);
+        assert_eq!(Sha256.name(), "sha256");
+    }
+
+    /// The speed of SHA-256 on 8 KiB blocks, by hand only (VALIDATION manual
+    /// check): over 1,000 MB/s means a hardware path, about 250 MB/s the
+    /// soft path. Run it in release mode.
+    #[test]
+    #[ignore = "by hand: prints the SHA-256 speed of 8 KiB blocks"]
+    fn sha256_speed() {
+        let block = data(9, 8192);
+        let start = std::time::Instant::now();
+        let (mut n, mut acc) = (0u64, 0u8);
+        while start.elapsed() < std::time::Duration::from_secs(1) {
+            for _ in 0..1000 {
+                acc ^= Sha256.digest(&block)[0];
+            }
+            n += 1000;
+        }
+        let mb = (n * 8192) as f64 / 1e6 / start.elapsed().as_secs_f64();
+        println!("sha256: {mb:.0} MB/s on 8 KiB blocks (check byte {acc})");
+    }
+
+    /// The invariant of the tagged IDs: a store with any known write hash
+    /// puts a file and reads it back, and the key has the tag of that hash.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot run the zstd C code (ZSTD_createCCtx)")]
+    fn every_known_hasher_round_trips() {
+        let bytes = data(7, 100_000);
+        for &h in hashers() {
+            let mem = MemIo::new();
+            let s = open(&mem, h);
+            let key = write_file(&s, &bytes);
+            assert_eq!(key.tag(), h.tag(), "{}", h.name());
+            assert!(file_objects(&s, key).unwrap().iter().all(|id| id.tag() == h.tag()), "{}", h.name());
+            assert_eq!(read_file(&s, key), bytes, "{}", h.name());
+        }
     }
 
     /// A hash that no build knows (as if a newer SliceFS wrote the store).
