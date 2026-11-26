@@ -50,6 +50,14 @@ pub fn run_seed_with(store_path: &Path, source_dir: &Path, hash: Option<&str>, p
     // new store can be locked too.
     std::fs::create_dir_all(store_path)?;
     let _store_lock = crate::header::lock_offline(store_path)?;
+    // Then the source, before any store write: a bad source path must not
+    // make the header (it fixes the chunk profile) or the packs of a store
+    // with no data.
+    let source_meta = std::fs::metadata(source_dir).map_err(|e| format!("source {}: {e}", source_dir.display()))?;
+    if !source_meta.is_dir() {
+        return Err(format!("source {} is not a directory", source_dir.display()).into());
+    }
+    std::fs::read_dir(source_dir).map_err(|e| format!("source {}: {e}", source_dir.display()))?;
     // Then the store header: a new store gets it durably before `packs/`
     // and `segments/` exist (with the hash of `--hash` and the profile of
     // `--chunk-profile`); a store that this build may not write, or that
@@ -67,7 +75,6 @@ pub fn run_seed_with(store_path: &Path, source_dir: &Path, hash: Option<&str>, p
     // Update root inode (ino=1) permissions from source directory.
     // DictMetadataStore::new() creates it with uid=0/gid=0/0o755 by default,
     // which blocks non-root writes when DefaultPermissions is used.
-    let source_meta = std::fs::metadata(source_dir)?;
     let root_inode_meta = dir_inode_meta(&source_meta);
     let mut root_inode = meta_store.get_inode(1)?;
     root_inode.mode = root_inode_meta.mode;

@@ -185,6 +185,28 @@ fn seed_refuses_another_profile_and_changes_nothing() {
     seed::run_seed_with(&store, &dir.path().join("src"), None, Some(large())).unwrap();
 }
 
+/// A seed with a bad source (missing, or a file) fails before the header
+/// write: the new store gets no FORMAT (so no profile), no packs and no
+/// index, and a seed with another profile then works.
+#[test]
+fn a_failed_seed_does_not_fix_the_profile() {
+    let dir = TempDir::new().unwrap();
+    let store = dir.path().join("store");
+    let file = dir.path().join("file");
+    std::fs::write(&file, b"not a dir").unwrap();
+    for bad in [dir.path().join("missing"), file] {
+        let err = seed::run_seed_with(&store, &bad, None, Some(large())).unwrap_err().to_string();
+        for part in [FORMAT_FILE, "packs", "index", "segments"] {
+            assert!(!store.join(part).exists(), "{part} after a failed seed from {}", bad.display());
+        }
+        assert!(err.contains(&bad.display().to_string()), "the error names the source: {err}");
+    }
+    let p = ChunkProfile::new(8192, 16384, 65536).unwrap();
+    seed::run_seed_with(&store, &source(dir.path()), None, Some(p)).unwrap();
+    assert_eq!(format(&store), header::marker_with(DEFAULT_HASHER, p));
+    assert_eq!(content::open_read_only(&store).unwrap().profile(), p);
+}
+
 /// A `--hash` change rewrites the header: the `chunks` line and its flag
 /// are written back, and the store keeps its profile.
 #[test]
