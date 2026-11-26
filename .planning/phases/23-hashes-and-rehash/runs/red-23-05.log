@@ -54,3 +54,59 @@ of old.bin, which has the SHA-256 tag over chunks of all three tags)
   and an unchanged file keeps its list. So a target-tag manifest list over
   keys of another tag does not come up on these stores. The D-14 case is a file root (a value) of the
   target tag over old chunks, which mutation B2 covers.
+
+## Task 2: crash_* and verify_*
+
+Command: cargo test -p slicefs-cli --test rehash_tests -- crash verify
+
+### Run 1: mutations G1, G2 and G3
+- G1 (rehash.rs): no `cs.sync()` before the switch.
+- G2 (rehash.rs and segment/switch.rs): no `remove_switch_tmps`.
+- G3 (rehash.rs): on an engine error, write a switch segment (old roots)
+  before the error is returned.
+
+test verify_a_damaged_object_stops_before_the_switch ... FAILED
+test crash_with_a_stale_seg_tmp_then_rerun ... FAILED
+test crash_inside_the_rewrite_then_rerun ... ok
+test crash_with_old_segments_left_after_the_switch ... ok
+test crash_after_each_step_then_rerun ... ok
+thread 'verify_a_damaged_object_stops_before_the_switch' panicked at crates/slicefs-cli/tests/rehash_tests.rs:834:5:
+assertion `left == right` failed: no segment changes
+thread 'crash_with_a_stale_seg_tmp_then_rerun' panicked at crates/slicefs-cli/tests/rehash_tests.rs:756:5:
+assertion failed: !junk.exists()
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 18 filtered out; finished in 14.59s
+
+G1 did not turn a test red. A hook stop is not a power cut: the process
+ends the run with an error, and the bytes that the chunk store wrote are in
+the OS page cache, so a missing sync loses nothing in process. The sync
+before the switch is proved at the engine level (plan 23-03,
+`MemIo::crash`). Run 2 has another guard (G7) for
+`crash_after_each_step_then_rerun`.
+
+### Run 2: mutations G4, G5, G6 and G7
+- G4 (rehash.rs): every engine read error becomes `Error::Missing` before
+  the error text is made.
+- G5 (rehash.rs): the real run passes `stop_after_values: None` to the
+  engine.
+- G6 (segment/mod.rs): the loaders keep the first record of each snapshot
+  version, not the last.
+- G7 (rehash.rs): the flag is written after the rewrite (after the first
+  SHA-256 object), not before it.
+
+test verify_a_damaged_object_stops_before_the_switch ... FAILED
+test crash_with_old_segments_left_after_the_switch ... FAILED
+test crash_inside_the_rewrite_then_rerun ... FAILED
+test crash_with_a_stale_seg_tmp_then_rerun ... ok
+test crash_after_each_step_then_rerun ... FAILED
+thread 'verify_a_damaged_object_stops_before_the_switch' panicked at crates/slicefs-cli/tests/rehash_tests.rs:833:5:
+thread 'crash_with_old_segments_left_after_the_switch' panicked at crates/slicefs-cli/tests/rehash_tests.rs:668:24:
+thread 'crash_inside_the_rewrite_then_rerun' panicked at crates/slicefs-cli/tests/rehash_tests.rs:646:23:
+thread 'crash_after_each_step_then_rerun' panicked at crates/slicefs-cli/tests/rehash_tests.rs:716:17:
+FlagWritten: slicefs-store 7 (store header with feature flags)
+test result: FAILED. 1 passed; 4 failed; 0 ignored; 0 measured; 18 filtered out; finished in 4.96s
+
+Lines:
+- 833: the error text has no `cause` (G4).
+- 668: `Expect::New`, a snapshot root is old (G6).
+- 646: the hooked run did not stop (G5).
+- 716: after `FlagWritten`, the header has no flag (G7).
