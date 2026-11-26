@@ -4,8 +4,9 @@
 //!
 //! Each mode runs in its own process, so the peak RSS of a mode is its own:
 //! `whole` commits on the real `DictMetadataStore`, `batches` extracts the
-//! `inode_data` change of each commit, and `prolly` replays the changes
-//! through the prototype in a scratch store.
+//! `inode_data` change of each commit, and `flat` (a copy of today's map
+//! serializer) and `prolly` (the prototype) replay the changes, each in its
+//! own scratch store. `scale` compares the two on synthetic maps.
 //!
 //! Output: one line per record, the first word is the kind, then
 //! `key=value` fields. Progress goes to stderr. A bad argument exits 2,
@@ -29,7 +30,9 @@ const USAGE: &str = "usage: prolly-bench gen tree --dir D --files N --seed S [--
        prolly-bench seed --tree DIR --store S
        prolly-bench whole --store S --roots FILE [--seed N] [--ks \"1 10 100 1000\"] [--commits N] [--patterns \"scatter cluster\"] [--next-tree DIR]
        prolly-bench batches --store S --roots FILE --out DIR
-       prolly-bench prolly --batches DIR --store P";
+       prolly-bench flat --batches DIR --store F
+       prolly-bench prolly --batches DIR --store P
+       prolly-bench scale --mode <flat|prolly> --n N --store DIR [--seed S]";
 
 // Root record layout: a copy of `root_rec` in crates/metadata/src/store.rs
 // (it is `pub(crate)`), with 33-byte keys.
@@ -227,7 +230,9 @@ fn main() {
         Some("seed") => seed(rest),
         Some("whole") => whole::run(rest),
         Some("batches") => replay::batches(rest),
+        Some("flat") => replay::flat(rest),
         Some("prolly") => replay::prolly(rest),
+        Some("scale") => replay::scale(rest),
         Some(s) => usage(format!("unknown subcommand {s}")),
         None => usage("no subcommand"),
     };

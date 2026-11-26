@@ -1,0 +1,109 @@
+# gate 24-03 head=157c024 date=2026-11-26T19:44:16Z
+## cargo test -p prolly-bench
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test bad_arguments_exit_2 ... ok
+test smoke_end_to_end ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.67s
+rc=0
+## cargo test -p prolly
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+rc=0
+## clippy -p prolly-bench -p prolly
+clippy=0
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.49s
+## allow without reason (benchmarks/prolly-bench crates/prolly)
+missing_reason_lines=0
+## unsafe-count
+UNSAFE files=32 tokens=134 result=ok
+count_line=1
+review_doc_lines=2
+## reverse deps of prolly; registry source lines in the prolly-bench lock block
+prolly prolly-bench 
+0
+## no change to product crates and the format doc since a882251
+diff_rc=0
+prolly_diff_since_a882251_rc=1 (1 = changed by 24-01/24-02, as expected)
+prolly_diff_since_f12423c_rc=0
+## acceptance greps
+members=1
+lock_name=1
+edition_2021=1
+finish_commit=3
+fn_sync_dir=1
+put_reader=4
+put_value=3
+hash_ns_field=1
+boost_in_smoke=0
+## by-hand pass, release build, 2,000-file gen tree pair, --ks "1 10" --commits 2
+step gen1 wall_s=0.627
+step gen2 wall_s=0.292
+step seed wall_s=0.475
+step whole wall_s=0.573
+step batches wall_s=0.069
+step flat wall_s=0.318
+step prolly wall_s=0.338
+step scale_flat wall_s=0.229
+step scale_prolly wall_s=0.324
+--- outputs
+seed secs=0.411 inode_count=2017
+info inode_data_entries=2017 inode_count_field=2017 next_ino=2018 map_bytes=248131 maxrss_after_load=7020544
+disk mode=whole phase=start apparent_bytes=5845147 alloc_bytes=5857280 files=4
+version files_changed=212 files_created=0 files_deleted=0 dirs_created=0 dirs_deleted=0
+disk mode=whole phase=end apparent_bytes=6999617 alloc_bytes=7016448 files=6
+final entries=2018 digest=91229a47fe999298a0ec1e551cf0baf0e93463c2c8ebd2a8a347507b21a67490
+disk mode=flat phase=start apparent_bytes=68563 alloc_bytes=69632 files=1
+check mode=flat entries=2018 digest=91229a47fe999298a0ec1e551cf0baf0e93463c2c8ebd2a8a347507b21a67490 ok=1
+disk mode=flat phase=end apparent_bytes=306949 alloc_bytes=307200 files=1
+hash boundary_hash_ns_per_key=104.0
+disk mode=prolly phase=start apparent_bytes=73140 alloc_bytes=73728 files=1
+check mode=prolly entries=2018 digest=91229a47fe999298a0ec1e551cf0baf0e93463c2c8ebd2a8a347507b21a67490 ok=1
+disk mode=prolly phase=end apparent_bytes=197833 alloc_bytes=200704 files=1
+tree depth=2 nodes=26 leaves=25 leaf_bytes_min=1719 leaf_bytes_mean=3641 leaf_bytes_max=6039 internal_nodes=1 internal_bytes_mean=1284
+scale mode=flat n=100000 op=build ms=61.600 cpu_user_s=0.026658 cpu_sys_s=0.009599 maxrss_bytes=24698880 serialized_bytes=4100008 new_objects=385 new_stored_bytes=3368619
+scale mode=flat n=100000 op=apply1 ms=50.102 cpu_user_s=0.005940 cpu_sys_s=0.002965 maxrss_bytes=33030144 serialized_bytes=4100008 new_objects=2 new_stored_bytes=27659
+scale mode=prolly n=100000 op=build ms=173.209 cpu_user_s=0.068529 cpu_sys_s=0.013706 maxrss_bytes=7766016 serialized_bytes=4573029 new_objects=1218 new_stored_bytes=3554307
+scale mode=prolly n=100000 op=apply1 ms=44.636 cpu_user_s=0.000438 cpu_sys_s=0.000550 maxrss_bytes=8110080 serialized_bytes=7572 new_objects=3 new_stored_bytes=5830
+--- commit lines
+   1 mode=flat pattern=bulk k=0 seq=0
+   1 mode=flat pattern=cluster k=1 seq=5
+   1 mode=flat pattern=cluster k=1 seq=6
+   1 mode=flat pattern=cluster k=10 seq=7
+   1 mode=flat pattern=cluster k=10 seq=8
+   1 mode=flat pattern=scatter k=1 seq=1
+   1 mode=flat pattern=scatter k=1 seq=2
+   1 mode=flat pattern=scatter k=10 seq=3
+   1 mode=flat pattern=scatter k=10 seq=4
+   1 mode=flat pattern=version k=0 seq=9
+   1 mode=prolly pattern=bulk k=0 seq=0
+   1 mode=prolly pattern=cluster k=1 seq=5
+   1 mode=prolly pattern=cluster k=1 seq=6
+   1 mode=prolly pattern=cluster k=10 seq=7
+   1 mode=prolly pattern=cluster k=10 seq=8
+   1 mode=prolly pattern=scatter k=1 seq=1
+   1 mode=prolly pattern=scatter k=1 seq=2
+   1 mode=prolly pattern=scatter k=10 seq=3
+   1 mode=prolly pattern=scatter k=10 seq=4
+   1 mode=prolly pattern=version k=0 seq=9
+   1 mode=whole pattern=cluster k=1 seq=5
+   1 mode=whole pattern=cluster k=1 seq=6
+   1 mode=whole pattern=cluster k=10 seq=7
+   1 mode=whole pattern=cluster k=10 seq=8
+   1 mode=whole pattern=scatter k=1 seq=1
+   1 mode=whole pattern=scatter k=1 seq=2
+   1 mode=whole pattern=scatter k=10 seq=3
+   1 mode=whole pattern=scatter k=10 seq=4
+   1 mode=whole pattern=setup k=0 seq=0
+   1 mode=whole pattern=version k=0 seq=9
+--- version commit
+whole.out:commit mode=whole pattern=version k=0 seq=9 edits_meta=0 edits_content=0 edits_create=0 edits_delete=0 serialized_bytes=248484 begin_ms=0.237 finish_ms=24.993 total_ms=25.230 cpu_user_s=0.002778 cpu_sys_s=0.001772 maxrss_bytes=22994944 new_objects=448 new_raw_bytes=197914 new_stored_bytes=167004 new_record_bytes=185820
+flat.out:commit mode=flat pattern=version k=0 seq=9 entries_changed=212 serialized_bytes=82746 begin_ms=NA finish_ms=22.242 total_ms=22.242 cpu_user_s=0.000793 cpu_sys_s=0.000376 maxrss_bytes=5607424 new_objects=10 new_raw_bytes=83124 new_stored_bytes=68199 new_record_bytes=68619 nodes_read=NA nodes_written=NA
+prolly.out:commit mode=prolly pattern=version k=0 seq=9 entries_changed=212 serialized_bytes=76425 begin_ms=NA finish_ms=22.874 total_ms=22.874 cpu_user_s=0.001560 cpu_sys_s=0.000618 maxrss_bytes=4194304 new_objects=20 new_raw_bytes=76425 new_stored_bytes=59356 new_record_bytes=60196 nodes_read=21 nodes_written=20
+--- last batch lines
+batch seq=8 pattern=cluster k=10 puts=6 dels=0
+batch seq=9 pattern=version k=0 puts=212 dels=0
+final entries=2018 digest=91229a47fe999298a0ec1e551cf0baf0e93463c2c8ebd2a8a347507b21a67490
+## workspace suite: cargo test --workspace -- --skip a_panic_on_another_thread_does_not_abort --skip a_reader_thread_panic_aborts_and_the_remount_replays --skip a_worker_panic_aborts_and_the_remount_replays --skip a_full_queue_that_stays_full_aborts
+start=19:44:44Z end=19:51:07Z
+rc=0
+suites=85 passed=1694 failed=0 ignored=13

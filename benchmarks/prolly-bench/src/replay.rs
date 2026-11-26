@@ -2,20 +2,21 @@
 //! each commit; `prolly` replays the changes through the prototype in a
 //! scratch store. Neither opens `DictMetadataStore`.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use chunk_store::file::FileReader;
-use chunk_store::{ChunkStore, ObjectId, Options};
-use metadata::store_io::to_id;
+use chunk_store::{ChunkStore, ObjectId, Options, Stats};
+use metadata::store_io::{put_value, to_id};
 use prolly::{Config, Edit};
 use slicefs_traits::key::ObjectKey;
 
 use crate::{
-    key_of_hex, ms, print_disk, root_record, run_fail, rusage, stats_delta, usage_fields, Args, Fail, Res, KEY_LEN,
-    MAP_ENTRY, PIECE,
+    key_of_hex, ms, print_disk, root_record, run_fail, rusage, stats_delta, usage, usage_fields, Args, Fail, Res,
+    Rng, Usage, KEY_LEN, MAP_ENTRY, PIECE,
 };
 
 /// One batch record: op u8 (1 put, 0 delete), ino u64 LE, key.
@@ -274,7 +275,7 @@ fn read_batch(dir: &Path, seq: u64) -> Res<Vec<(bool, u64, [u8; KEY_LEN])>> {
         return run_fail(format!("batch {seq}: {} bytes is not whole records", b.len()));
     }
     let mut out = Vec::with_capacity(b.len() / BATCH_REC);
-    for r in b.chunks_exact(BATCH_REC) {
+    for r in b.as_chunks::<BATCH_REC>().0 {
         let put = match r[0] {
             1 => true,
             0 => false,
@@ -296,8 +297,29 @@ fn check(mode: &str, plan: &Plan, d: &Digest) -> Res<()> {
     Ok(())
 }
 
-/// Times `f` with the store stats and the usage around it and prints one
-/// `commit` line of a replay mode.
+/// Wall time, usage and store stats around one timed step.
+struct Measured {
+    ms: f64,
+    u0: Usage,
+    u1: Usage,
+    s0: Stats,
+    s1: Stats,
+}
+
+fn measure<T>(cs: &ChunkStore, f: impl FnOnce() -> Res<T>) -> Res<(T, Measured)> {
+    let s0 = cs.stats();
+    let u0 = rusage();
+    let t = Instant::now();
+    let out = f()?;
+    let ms = ms(t);
+    let u1 = rusage();
+    let s1 = cs.stats();
+    Ok((out, Measured { ms, u0, u1, s0, s1 }))
+}
+
+/// Times `f` (it returns its result, the serialized bytes and, for
+/// prolly, the nodes read and written) and prints one `commit` line of a
+/// replay mode.
 #[allow(clippy::too_many_arguments, reason = "one output line of many fields")]
 fn timed<T>(
     mode: &str,
@@ -308,23 +330,85 @@ fn timed<T>(
     changed: u64,
     f: impl FnOnce() -> Res<(T, u64, Option<(u64, u64)>)>,
 ) -> Res<T> {
-    let s0 = cs.stats();
-    let u0 = rusage();
-    let t = Instant::now();
-    let (out, ser, nodes) = f()?;
-    let total = ms(t);
-    let u1 = rusage();
-    let s1 = cs.stats();
+    let ((out, ser, nodes), m) = measure(cs, f)?;
     let nodes = match nodes {
         Some((r, w)) => format!("nodes_read={r} nodes_written={w}"),
         None => "nodes_read=NA nodes_written=NA".to_string(),
     };
     println!(
-        "commit mode={mode} pattern={pattern} k={k} seq={seq} entries_changed={changed} serialized_bytes={ser} begin_ms=NA finish_ms={total:.3} total_ms={total:.3} {} {} {nodes}",
-        usage_fields(&u0, &u1),
-        stats_delta(&s0, &s1)
+        "commit mode={mode} pattern={pattern} k={k} seq={seq} entries_changed={changed} serialized_bytes={ser} begin_ms=NA finish_ms={t:.3} total_ms={t:.3} {} {} {nodes}",
+        usage_fields(&m.u0, &m.u1),
+        stats_delta(&m.s0, &m.s1),
+        t = m.ms
     );
     Ok(out)
+}
+
+// ── flat ─────────────────────────────────────────────────────────────────────
+
+/// A copy of `intern_u64_digest_map` and `NodeWriter::put_node` of
+/// `crates/metadata/src/store.rs` (private there; copied so that `metadata`
+/// is not changed, D-01, D-22): the count u64 LE, then ino u64 LE and the
+/// key per entry in ino order, stored as one value through
+/// `store_io::put_value` (FastCDC chunks under a manifest tree).
+fn intern_flat(cs: &ChunkStore, map: &BTreeMap<u64, [u8; KEY_LEN]>) -> Res<u64> {
+    let mut bytes = Vec::with_capacity(8 + map.len() * MAP_ENTRY);
+    bytes.extend_from_slice(&(map.len() as u64).to_le_bytes());
+    for (ino, key) in map {
+        bytes.extend_from_slice(&ino.to_le_bytes());
+        bytes.extend_from_slice(key);
+    }
+    put_value(cs, &bytes)?;
+    Ok(bytes.len() as u64)
+}
+
+/// The current design for one map: the whole map in RAM, interned in full
+/// per commit, in a scratch store; ends with the digest check.
+pub(crate) fn flat(argv: &[String]) -> Res<()> {
+    let a = Args::parse(argv)?;
+    a.check(&["batches", "store"])?;
+    let dir = a.path("batches")?;
+    let store = a.path("store")?;
+    let plan = read_plan(&dir)?;
+    let cs = ChunkStore::open(&store, Options::default())?;
+
+    // The in-RAM map is the cost of the current design that this mode measures.
+    let mut map: BTreeMap<u64, [u8; KEY_LEN]> = BTreeMap::new();
+    for_each_base(&dir, |ino, key| {
+        map.insert(ino, *key);
+        Ok(())
+    })?;
+    timed("flat", &cs, "bulk", 0, 0, map.len() as u64, || {
+        let ser = intern_flat(&cs, &map)?;
+        cs.sync()?;
+        Ok(((), ser, None))
+    })?;
+    print_disk("flat", "start", &store)?;
+
+    for bl in &plan.batches {
+        let recs = read_batch(&dir, bl.seq)?;
+        for (put, ino, key) in &recs {
+            if *put {
+                map.insert(*ino, *key);
+            } else {
+                map.remove(ino);
+            }
+        }
+        timed("flat", &cs, &bl.pattern, bl.k, bl.seq, recs.len() as u64, || {
+            let ser = intern_flat(&cs, &map)?;
+            cs.sync()?;
+            Ok(((), ser, None))
+        })?;
+    }
+
+    let mut d = Digest::new();
+    for (ino, key) in &map {
+        d.add(*ino, key);
+    }
+    check("flat", &plan, &d)?;
+    print_disk("flat", "end", &store)?;
+    cs.close()?;
+    Ok(())
 }
 
 // ── prolly ───────────────────────────────────────────────────────────────────
@@ -346,7 +430,35 @@ pub(crate) fn prolly(argv: &[String]) -> Res<()> {
     let cfg = Config::DEFAULT;
     let cs = ChunkStore::open(&store, Options::default())?;
 
+    // The cost of the boundary hash, once over all base keys (D-12). The
+    // keys are read in pieces and only the hash loop of each piece is
+    // timed, so the file reads are not in the number.
     let base_n = fs::metadata(dir.join("base.bin"))?.len() / MAP_ENTRY as u64;
+    let mut hash_ns = 0u128;
+    let mut acc = 0u32;
+    let mut r = BufReader::new(fs::File::open(dir.join("base.bin"))?);
+    let mut piece = vec![0u8; (PIECE / MAP_ENTRY) * MAP_ENTRY];
+    loop {
+        let mut n = 0;
+        while n < piece.len() {
+            match r.read(&mut piece[n..])? {
+                0 => break,
+                k => n += k,
+            }
+        }
+        if n == 0 {
+            break;
+        }
+        let t = Instant::now();
+        for rec in piece[..n - n % MAP_ENTRY].as_chunks::<MAP_ENTRY>().0 {
+            let ino = u64::from_le_bytes(rec[..8].try_into().expect("8 bytes"));
+            acc ^= prolly::boundary_hash(0, std::hint::black_box(&pkey(ino)));
+        }
+        hash_ns += t.elapsed().as_nanos();
+    }
+    std::hint::black_box(acc);
+    println!("hash boundary_hash_ns_per_key={:.1}", hash_ns as f64 / base_n.max(1) as f64);
+
     let mut root: ObjectId = timed("prolly", &cs, "bulk", 0, 0, base_n, || {
         let mut b = prolly::Builder::new(&cs, cfg);
         for_each_base(&dir, |ino, key| Ok(b.push(&pkey(ino), key)?))?;
@@ -383,6 +495,110 @@ pub(crate) fn prolly(argv: &[String]) -> Res<()> {
     }
     check("prolly", &plan, &d)?;
     print_disk("prolly", "end", &store)?;
+    print_tree(&cs, &root)?;
+    cs.close()?;
+    Ok(())
+}
+
+/// Prints the shape of the tree `root` (one `walk`, one path held).
+fn print_tree(cs: &ChunkStore, root: &ObjectId) -> Res<()> {
+    let (mut depth, mut nodes, mut leaves, mut internal) = (0u8, 0u64, 0u64, 0u64);
+    let (mut leaf_min, mut leaf_max, mut leaf_sum, mut internal_sum) = (usize::MAX, 0usize, 0u64, 0u64);
+    prolly::walk(cs, root, |n| {
+        depth = depth.max(n.level + 1);
+        nodes += 1;
+        if n.level == 0 {
+            leaves += 1;
+            leaf_min = leaf_min.min(n.bytes);
+            leaf_max = leaf_max.max(n.bytes);
+            leaf_sum += n.bytes as u64;
+        } else {
+            internal += 1;
+            internal_sum += n.bytes as u64;
+        }
+    })?;
+    let mean = |sum: u64, n: u64| sum.checked_div(n).unwrap_or(0);
+    println!(
+        "tree depth={depth} nodes={nodes} leaves={leaves} leaf_bytes_min={} leaf_bytes_mean={} leaf_bytes_max={leaf_max} internal_nodes={internal} internal_bytes_mean={}",
+        if leaves == 0 { 0 } else { leaf_min },
+        mean(leaf_sum, leaves),
+        mean(internal_sum, internal)
+    );
+    Ok(())
+}
+
+// ── scale ────────────────────────────────────────────────────────────────────
+
+/// One synthetic map value: a 33-byte key with the tag 0x1e.
+fn synth_value(rng: &mut Rng) -> [u8; KEY_LEN] {
+    let mut v = [0u8; KEY_LEN];
+    rng.fill(&mut v);
+    v[0] = 0x1e;
+    v
+}
+
+/// Flat against prolly on a synthetic map of N entries (ino 2 to N + 1):
+/// a full build, then one changed middle value. Each op ends with a sync.
+pub(crate) fn scale(argv: &[String]) -> Res<()> {
+    let a = Args::parse(argv)?;
+    a.check(&["mode", "n", "store", "seed"])?;
+    let mode = a.str("mode")?.to_string();
+    let n = a.num("n", None)?;
+    let store = a.path("store")?;
+    let mut rng = Rng::new(a.num("seed", Some(24))?);
+    if n == 0 {
+        return usage("--n: at least 1");
+    }
+    let cs = ChunkStore::open(&store, Options::default())?;
+    let mid = 2 + n / 2;
+    let line = |op: &str, ser: u64, m: &Measured| {
+        println!(
+            "scale mode={mode} n={n} op={op} ms={:.3} {} serialized_bytes={ser} new_objects={} new_stored_bytes={}",
+            m.ms,
+            usage_fields(&m.u0, &m.u1),
+            m.s1.objects.saturating_sub(m.s0.objects),
+            m.s1.stored_bytes.saturating_sub(m.s0.stored_bytes)
+        );
+    };
+    match mode.as_str() {
+        "flat" => {
+            let mut map: BTreeMap<u64, [u8; KEY_LEN]> = (2..n + 2).map(|ino| (ino, synth_value(&mut rng))).collect();
+            let (ser, m) = measure(&cs, || {
+                let ser = intern_flat(&cs, &map)?;
+                cs.sync()?;
+                Ok(ser)
+            })?;
+            line("build", ser, &m);
+            map.insert(mid, synth_value(&mut rng));
+            let (ser, m) = measure(&cs, || {
+                let ser = intern_flat(&cs, &map)?;
+                cs.sync()?;
+                Ok(ser)
+            })?;
+            line("apply1", ser, &m);
+        }
+        "prolly" => {
+            let cfg = Config::DEFAULT;
+            let ((root, ser), m) = measure(&cs, || {
+                let mut b = prolly::Builder::new(&cs, cfg);
+                for ino in 2..n + 2 {
+                    b.push(&pkey(ino), &synth_value(&mut rng))?;
+                }
+                let (root, st) = b.finish()?;
+                cs.sync()?;
+                Ok((root, st.bytes_written))
+            })?;
+            line("build", ser, &m);
+            let edit = [Edit::Put { key: pkey(mid).to_vec(), value: synth_value(&mut rng).to_vec() }];
+            let (ser, m) = measure(&cs, || {
+                let (_, st) = prolly::apply(&cs, cfg, &root, &edit)?;
+                cs.sync()?;
+                Ok(st.bytes_written)
+            })?;
+            line("apply1", ser, &m);
+        }
+        other => return usage(format!("--mode: want flat or prolly, got {other}")),
+    }
     cs.close()?;
     Ok(())
 }

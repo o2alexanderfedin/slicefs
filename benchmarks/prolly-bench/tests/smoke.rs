@@ -86,6 +86,21 @@ fn smoke_end_to_end() {
     let check = lines(&out, "check");
     assert_eq!(check.len(), 1, "{out}");
     assert!(check[0].contains("mode=prolly") && check[0].ends_with(" ok=1"), "{out}");
+    assert_eq!(lines(&out, "hash").len(), 1, "{out}");
+    assert_eq!(lines(&out, "tree").len(), 1, "{out}");
+    let prolly_commits = lines(&out, "commit").len();
+
+    let out = ok(&["flat", "--batches", p(&batches), "--store", p(&t.join("flat"))]);
+    let check = lines(&out, "check");
+    assert_eq!(check.len(), 1, "{out}");
+    assert!(check[0].contains("mode=flat") && check[0].ends_with(" ok=1"), "{out}");
+    assert_eq!(lines(&out, "commit").len(), prolly_commits, "{out}");
+
+    for mode in ["flat", "prolly"] {
+        let store = t.join(format!("scale-{mode}"));
+        let out = ok(&["scale", "--mode", mode, "--n", "5000", "--store", p(&store)]);
+        assert_eq!(lines(&out, "scale").len(), 2, "{out}");
+    }
 }
 
 #[test]
