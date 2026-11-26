@@ -23,12 +23,9 @@ Out-of-scope findings during execution. Not fixed in this phase unless a plan sa
 - Start time of a test binary on this Mac (`<binary> --list`, no test code
   runs), measured right after the failures, load average 7.8 to 22:
 
-  | Binary | Start time |
-  |--------|------------|
-  | `pool_panic_tests` (6 runs) | 11.7 to 16.8 s |
-  | `statfs_tests` | 15.4 s |
-  | `statfs_tests`, built before the 21.2-01 change | 61 s (load rose to 22) |
-  | `/bin/ls` (control) | 0.07 s |
+  Start times: `pool_panic_tests` (6 runs) 11.7 to 16.8 s; `statfs_tests`
+  15.4 s; `statfs_tests` built before the 21.2-01 change 61 s (load rose to
+  22); `/bin/ls` (control) 0.07 s.
 
   A binary built before the change was even slower, so the slow start is a
   property of the host, not of the change. The load came from other projects
@@ -44,6 +41,7 @@ Out-of-scope findings during execution. Not fixed in this phase unless a plan sa
 - Possible follow-up (not done): find why a fresh test-binary start can stall for
   60 s on macOS under load (an exec scan of a new binary is one guess), or raise
   `CHILD_LIMIT`, or make the child a small separate binary.
+  status: acknowledged
 
 ## 2. Follow-ups of the unsafe review (found in 21.2-09)
 
@@ -60,6 +58,7 @@ plan 21.2-09 changes no file under crates). See docs/design/unsafe-review.md.
   call line; the `needless_range_loop` reason in
   `crates/slicefs-cli/tests/lock_free_io.rs` says "the block number", but the
   index there is the write number of the thread (from 21.2-03).
+  status: acknowledged
 
 ## 3. The `kill(pid)` guard of `unmount.rs` (D-33, from 21.2-09)
 
@@ -68,6 +67,7 @@ plan 21.2-09 changes no file under crates). See docs/design/unsafe-review.md.
   `kill`, with a unit test on `fuse_t_servers_of`. Item 2 has the details.
 - Not done here: Phase 21.2 has no product code change for this (D-33). The
   entry is in docs/design/unsafe-review.md.
+  status: acknowledged
 
 ## 4. Owner question: the loom preemption bound (from 21.2-01 and 21.2-06)
 
@@ -78,6 +78,7 @@ plan 21.2-09 changes no file under crates). See docs/design/unsafe-review.md.
   All 7 models at bound 3: 7 s. The CI job `model` took 1.48 min (run 45755055229).
 - Question for the owner (ask once): is a higher bound wanted, on main or by
   hand (for example `LOOM_MAX_PREEMPTIONS=4 scripts/safety/model.sh`)?
+  status: acknowledged
 
 ## 5. Race (a) uses the research variant of D-27 (from 21.2-04)
 
@@ -88,6 +89,7 @@ plan 21.2-09 changes no file under crates). See docs/design/unsafe-review.md.
   could enter between the splice and the install. The pin gives the same
   guarantee (the inode cannot be reclaimed during the install). Reversible
   (one function).
+  status: acknowledged
 
 ## 6. Pitfall 10 lock wait (from 21.2-04)
 
@@ -95,6 +97,7 @@ plan 21.2-09 changes no file under crates). See docs/design/unsafe-review.md.
   waits for the splice with its stripe held. The wait is at most one splice.
   About 1/256 of inodes share a stripe.
 - Not measured. `lock_wait_rows` can show it if the owner wants numbers.
+  status: acknowledged
 
 ## 7. D-29 outcome of each race
 
@@ -102,6 +105,7 @@ plan 21.2-09 changes no file under crates). See docs/design/unsafe-review.md.
 - Race (b), rename into the own subtree (21.2-02): fixed, 20 of 20 repeat runs pass.
 - So there is no `--workers 1` fallback on Linux. Both race tests run under
   TSan in the Safety job `tsan` and in the ci.yml test runs.
+  status: acknowledged
 
 ## 8. Owner step: required checks and the release gate (D-06)
 
@@ -113,6 +117,7 @@ plan 21.2-09 changes no file under crates). See docs/design/unsafe-review.md.
   blocked. Only the two ci.yml job names can be required on PRs to main and
   develop.
 - No agent changes the repository settings.
+  status: acknowledged
 
 ## 9. Owner choices on the time limits (D-03)
 
@@ -120,6 +125,7 @@ plan 21.2-09 changes no file under crates). See docs/design/unsafe-review.md.
   so the rule gives 10. A change of safety.yml needs a new gate run.
 - `miri` is 40 min, above the start value 30: the longest green run took
   17.6 min (run 45733734958).
+  status: acknowledged
 
 ## 10. Items of the CONTEXT Deferred list that stay deferred
 
@@ -129,3 +135,4 @@ plan 21.2-09 changes no file under crates). See docs/design/unsafe-review.md.
 - Coverage of `fuse_callbacks.rs` beyond the FUSE smoke (tests only 9.60 %,
   with the smoke 51.40 %).
 - clippy for `vendor/fuser`.
+  status: acknowledged
