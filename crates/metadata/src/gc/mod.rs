@@ -92,10 +92,9 @@ pub fn live_objects_exact_paced(
     pacer: &dyn GcPacer,
 ) -> Result<Option<ExactMark>, MetaError> {
     check_temp_space(cs, meta_roots, file_roots, true)?;
-    let err = |e: chunk_store::Error| MetaError::Corrupted(format!("GC mark: temp file: {e}"));
-    let mut live = cs.exact_mark().map_err(err)?;
+    let mut live = cs.exact_mark().map_err(tmp_err)?;
     let stop = || stop.load(Ordering::Relaxed);
-    let done = mark(cs, meta_roots, file_roots, &stop, pacer, &mut |id| live.insert(&id).map_err(err))?;
+    let done = mark(cs, meta_roots, file_roots, &stop, pacer, &mut |id| live.insert(&id).map_err(tmp_err))?;
     Ok(done.then_some(live))
 }
 
@@ -128,10 +127,16 @@ fn check_temp_space(
     if exact && objects > ram {
         need = need.saturating_add((ID_LEN as u64).saturating_mul(objects).saturating_mul(2));
     }
-    cs.gc_temp_space_check(need).map_err(|e| match e {
+    cs.gc_temp_space_check(need).map_err(tmp_err)
+}
+
+/// An error of the temp files of the mark: an I/O error stays one (a full
+/// disk, a removed or read-only `gc-tmp` is not damaged metadata).
+fn tmp_err(e: chunk_store::Error) -> MetaError {
+    match e {
         chunk_store::Error::Io(e) => MetaError::Io(e),
-        e => MetaError::Corrupted(format!("GC mark: temp space: {e}")),
-    })
+        e => MetaError::Corrupted(format!("GC mark: temp file: {e}")),
+    }
 }
 
 /// Keys of the walk of one root between two asks of the stop of the mark.
@@ -162,7 +167,7 @@ fn mark(
 ) -> Result<bool, MetaError> {
     let mut keys = cs
         .gc_sorter::<KEY_BYTES>("keys")
-        .map_err(|e| MetaError::Corrupted(format!("GC mark: temp file: {e}")))?;
+        .map_err(tmp_err)?;
     for k in file_roots {
         keys.push(k.0).map_err(MetaError::Io)?;
     }
