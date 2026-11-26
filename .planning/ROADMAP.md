@@ -189,7 +189,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
 - [x] **Phase 20: Dirty budget and rebase flusher** (#21) - no cross-file take-out, a background flusher, writers throttled before they take locks, no deadlock with a commit (completed 2026-11-23)
 - [x] **Phase 21: Worker pool** (#22) - N worker threads by mount option, drain before `destroy()`, abort on panic, 4 workers pass pjdfstest (completed 2026-11-24)
 - [x] **Phase 21.1: Store header and format policy (#154)** (INSERTED) - one store header with format number and compat/ro-compat/incompat flags, format policy doc (completed 2026-11-24)
-- [ ] **Phase 21.2: Thread-safety verification and CI gates** (INSERTED) - clippy, Miri, ThreadSanitizer, loom/shuttle models, Kani, deadlock-detect stress and Linux coverage as CI gates (release gate, manual run); fix the two Phase 19 races
+- [x] **Phase 21.2: Thread-safety verification and CI gates** (INSERTED) - clippy, Miri, ThreadSanitizer, loom/shuttle models, Kani, deadlock-detect stress and Linux coverage as CI gates (release gate, manual run); fix the two Phase 19 races (completed 2026-11-25)
 - [ ] **Phase 22: Chunk profiles** (#67) - FastCDC min/avg/max fixed per store at `seed`, benchmark of five profiles, default unchanged (parallel track)
 - [ ] **Phase 23: Hashes and rehash** (#62) - SHA-256 write hash and an offline, crash-safe `slicefs rehash` (parallel track)
 - [ ] **Phase 24: Prolly evaluation** (#19) - one-map prototype, benchmark on Boost trees, written decision (parallel track)
@@ -410,11 +410,11 @@ Plans:
 3. The two Phase 19 races are fixed, each with a test that failed before the fix and a model or stress test that stays in CI: (a) a size change of a closed file against unlink or setattr; (b) a cross-directory rename with no ancestor check. If either cannot be fixed in this phase, the Linux default is `--workers 1` until it is.
 4. Kani proves small pure code (the header parser, size limits) free of panic and overflow.
 5. Line coverage is measured in CI, also in Linux Docker with the FUSE checks, and the numbers are in the CI log. The `unsafe` blocks that Miri cannot run (FFI in slicefs-cli and vendor/fuser) have a written review.
-**Plans:** 11/11 plans executed
+**Plans:** 11/11 plans complete
 
 Plans:
 **Wave 1** *(tracer)*
-- [x] 21.2-01-PLAN.md — Tracer: `safety.yml` (every push and PR, concurrency, pins) with job `model`; cfg(loom) backend of `chunk_store::sync` and `sync::raw`; loom models of the real worker pool (red on a planted lost wakeup); `--cfg loom` workspace compile; CI checkpoint
+- [x] 21.2-01-PLAN.md — Tracer: `safety.yml` (first on every push and PR, since 2026-11-26 the release gate and a manual run; concurrency, pins) with job `model`; cfg(loom) backend of `chunk_store::sync` and `sync::raw`; loom models of the real worker pool (red on a planted lost wakeup); `--cfg loom` workspace compile; CI checkpoint
 - [x] 21.2-02-PLAN.md — Race (b): ancestor walk under the rename mutex (EINVAL), failing-first in-process tests, stress test in CI, D-29 repeat rule
 
 **Wave 2** *(blocked on Wave 1 completion)*

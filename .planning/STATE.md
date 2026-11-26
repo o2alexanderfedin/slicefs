@@ -2,15 +2,15 @@
 gsd_state_version: "1.0"
 milestone: v2.2
 milestone_name: Concurrency & Store Evolution
-current_phase: "21.2"
-current_phase_name: Thread-safety verification and CI gates
-current_plan: 11
-status: executing
-stopped_at: Completed 21.2-11-PLAN.md
-last_updated: "2026-11-26T04:50:00.000Z"
+current_phase: 22
+current_phase_name: Chunk profiles
+current_plan: Not started
+status: planning
+stopped_at: Phase 21.2 complete, ready to plan Phase 22
+last_updated: "2026-11-26T05:22:16.631Z"
 last_activity: 2026-11-25
-last_activity_desc: Phase 21.1 complete, transitioned to Phase 22
-state_head: 96f361d71fee3e15cc95c7e977f19454c7e13873
+last_activity_desc: Phase 21.2 complete, transitioned to Phase 22
+state_head: d522c321b92e1ca6cd43d2dff3a0ba318a2f6893
 progress:
   total_phases: 9
   completed_phases: 4
@@ -30,12 +30,12 @@ See: .planning/PROJECT.md (updated 2026-11-20)
 
 ## Current Position
 
-Current Plan: 11
+Current Plan: Not started
 Total Plans in Phase: 11
-Phase: 21.2 (Thread-safety verification and CI gates) — EXECUTING
+Phase: 22 — Chunk profiles
 Plan: 21.2-01 to 21.2-11 complete (11 of 11); next: /gsd-verify-work 21.2
-Status: Phase plans complete, ready to verify
-Last activity: 2026-11-26 — 21.2-11 complete: job kani, measured limits, Safety run 45755055229 green on all 8 checks, TSAFE-01..06 complete
+Status: Ready to plan
+Last activity: 2026-11-25 — Phase 21.2 complete, transitioned to Phase 22
 
 Progress: [████░░░░░░] 44%
 
@@ -269,7 +269,7 @@ None.
 ## Session Continuity
 
 Last session: 2026-11-26T01:31:02.078Z
-Stopped at: Completed 21.2-09-PLAN.md
+Stopped at: Phase 21.2 complete, ready to plan Phase 22
 Resume file: None
 
 ## Operator Next Steps
