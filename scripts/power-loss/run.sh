@@ -7,12 +7,13 @@
 # SLICEFS_TARGET_VOL names the cargo target volume (default slicefs-powerloss-target).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
-timeout 1800 docker build -q -t slicefs-powerloss "$HERE" </dev/null >/dev/null
+docker build -q -t slicefs-powerloss "$HERE" </dev/null >/dev/null
 OUT=()
 if [ -n "${PL_OUT:-}" ]; then mkdir -p "$PL_OUT"; OUT=(-v "$(cd "$PL_OUT" && pwd)":/out); fi
 # The 45 s wait before the first FUSE mount and the private mount namespace:
-# see scripts/docker-linux-test/run.sh.
-timeout 2400 docker run --rm --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
+# see scripts/docker-linux-test/run.sh. The time limits are inside the
+# container (build, loop deadline, each command); --init passes signals on.
+docker run --rm --init --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
   -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-powerloss-target}":/target -v slicefs-cargo:/usr/local/cargo/registry \
   -v "$HERE":/pl:ro ${OUT[@]+"${OUT[@]}"} -e CARGO_TARGET_DIR=/target -e PL_TO -e PL_DEADLINE -e PL_ONLY \
   slicefs-powerloss unshare -m --propagation private bash -c '
