@@ -9,7 +9,8 @@ name: Safety
 # The tool pins are only in the `env:` block below (scripts/safety/toolchains.sh
 # reads them from here). The job names are the check names for branch
 # protection (an owner step). Jobs have no `needs:`: they run in parallel,
-# each with its own time limit.
+# each with its own time limit. Limit rule (Phase 21.2, D-03): twice the
+# longest green runner time of the job, rounded up to 5 minutes, at least 10.
 on:
   push:
     tags: ["v*"]
@@ -33,7 +34,7 @@ jobs:
   model:
     name: model
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     # loom models of the real worker pool and lock shim (TSAFE-02).
     steps:
       - uses: actions/checkout@v4
@@ -42,7 +43,8 @@ jobs:
   miri:
     name: miri
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Above the start value 30: the longest green run took 17.6 min (D-03).
+    timeout-minutes: 40
     # Miri on the lib tests of chunk-store and metadata that reach unsafe or
     # the lock shim, on the pinned nightly (TSAFE-01, D-12 to D-14).
     steps:
@@ -52,7 +54,7 @@ jobs:
   tsan:
     name: tsan
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     # ThreadSanitizer on the multi-worker and race tests and a 10 s stress
     # run, on the pinned nightly with -Zbuild-std (TSAFE-01, TSAFE-03, D-15 to D-17).
     steps:
@@ -66,17 +68,28 @@ jobs:
   deadlock:
     name: deadlock
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     # The in-process stress harness with the parking_lot deadlock detector,
     # 8 workers, in release (TSAFE-01, D-30).
     steps:
       - uses: actions/checkout@v4
       - run: scripts/safety/deadlock.sh
 
+  kani:
+    name: kani
+    runs-on: ubuntu-latest
+    # No runner time yet: twice the local time (about 1 min), at least the
+    # start value 30 (D-03). kani.sh installs the pinned KANI_VERSION.
+    timeout-minutes: 30
+    # Kani proofs of the header core and the size arithmetic (TSAFE-04, D-23).
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/safety/kani.sh
+
   coverage:
     name: coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     # Line coverage in the Linux Docker harness (TSAFE-05, D-31, D-32): the
     # instrumented workspace tests, then the instrumented daemon through the
     # FUSE smoke. The log prints `COVERAGE tests ...` (workspace and per crate)
@@ -102,7 +115,7 @@ jobs:
           - name: macos
             os: macos-latest
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
