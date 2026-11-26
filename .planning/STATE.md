@@ -239,7 +239,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21.2]: 21.2-07: first CI run 45733741913 green (tsan 208 s, deadlock 111 s, 0 TSan reports); every TSan entry kept, no set change
 - [Phase 21.2]: 21.2-09: unsafe review in docs/design/unsafe-review.md (30 files, 128 tokens); no memory-safety bug; unsafe-count.sh in clippy.sh; pid > 1 guard and errno save are follow-ups (D-33)
 - [Phase 21.2]: 21.2-08: Kani 0.68.0 proves 9 harnesses (header byte core, workers_for_cpus, stripe, write_end, hard_cap_of, dirty_move) in about 37 s of solving; parse itself stays covered by unit tests; kani.sh uses terse output and checks the harness count
-- [Phase 21.2]: 21.2-10: coverage in Linux Docker with cargo-llvm-cov 0.9.2; gate on the tests-only workspace number (local 91.27 %), merged with the FUSE smoke printed (local 93.08 %, fuse_callbacks 9.60 -> 51.52 %); floor file waits for the first CI number
+- [Phase 21.2]: 21.2-10: coverage in Linux Docker with cargo-llvm-cov 0.9.2; gate on the tests-only workspace number (local 91.25 to 91.27 %), merged with the FUSE smoke printed (local 93.08 %, fuse_callbacks 9.60 -> 51.52 %); floor file waits for the first CI number
 
 ### Pending Todos
 
