@@ -1,5 +1,6 @@
 //! External sort of fixed-size records in bounded RAM: the exact mark of a
-//! full GC (see `ChunkStore::gc_finish_full`).
+//! full GC (see `ChunkStore::gc_finish_full`), and the refcount rows of
+//! `slicefs rehash` (sorted by their new keys).
 //!
 //! Records go into a buffer of at most `SortCfg::chunk_records`; a full
 //! buffer is sorted, deduplicated and written to a run file. `finish` merges
@@ -37,7 +38,7 @@ pub struct SortCfg {
 }
 
 /// A directory for temp files, removed with its files on drop.
-pub(crate) struct TmpDir {
+pub struct TmpDir {
     path: PathBuf,
 }
 
@@ -60,7 +61,7 @@ impl Drop for TmpDir {
 }
 
 /// An external sorter of `N`-byte records (ordered as bytes).
-pub(crate) struct Sorter<const N: usize> {
+pub struct Sorter<const N: usize> {
     dir: Arc<TmpDir>,
     /// Temp dirs of absorbed sorters (their runs live there).
     keep: Vec<Arc<TmpDir>>,
@@ -182,7 +183,7 @@ fn merge<const N: usize>(inputs: &[PathBuf], out: &Path) -> io::Result<()> {
 }
 
 /// A sorted file of distinct `N`-byte records (removed with its temp dir).
-pub(crate) struct SortedFile<const N: usize> {
+pub struct SortedFile<const N: usize> {
     path: PathBuf,
     file: File,
     len: u64,
@@ -193,7 +194,7 @@ pub(crate) struct SortedFile<const N: usize> {
 impl<const N: usize> SortedFile<N> {
     /// The records.
     #[cfg(test)]
-    pub fn len(&self) -> u64 {
+    pub(crate) fn len(&self) -> u64 {
         self.len
     }
 
@@ -225,7 +226,7 @@ impl<const N: usize> SortedFile<N> {
 }
 
 /// Reads the records of a run in order.
-pub(crate) struct RecReader<const N: usize> {
+pub struct RecReader<const N: usize> {
     r: BufReader<File>,
     left: u64,
 }
