@@ -5,11 +5,15 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use chunk_store::{hasher_by_name, ChunkProfile, DEFAULT_HASHER};
 use slicefs_cli::header::{self, Access, CHUNK_PROFILE_FLAG, CHUNK_PROFILE_RELEASE, FORMAT_FILE};
 use slicefs_cli::mount::{start, StartArgs};
+use metadata::store::DictMetadataStore;
+use slicefs_cli::filesystem::SliceFsFilesystem;
 use slicefs_cli::{content, seed};
+use slicefs_traits::metadata::MetadataStore;
 use tempfile::TempDir;
 
 /// `n` xorshift64 bytes from `seed`.
@@ -235,4 +239,66 @@ fn a_read_only_mount_refuses_another_profile() {
     assert!(matches!(started.access, Access::ReadOnly(_)), "{:?}", started.access);
     assert_eq!(started.fs.content().profile(), p);
     started.stop();
+}
+
+const S_IFREG: u32 = 0o100_000;
+const MIB: usize = 1 << 20;
+
+/// Check that file `ino` reads back as `model` and that its key is the key
+/// of a fresh write of the same bytes in this store.
+fn check_file(fs: &SliceFsFilesystem, ino: u64, model: &[u8], what: &str) -> slicefs_traits::key::ObjectKey {
+    let root = fs.meta().get_manifest(ino).unwrap()[0];
+    assert!(fs.read_content(&root).unwrap() == model, "{what}: bytes");
+    assert_eq!(root, content::put_all(fs.content(), model).unwrap(), "{what}: key of a fresh write");
+    root
+}
+
+/// D-22: a default store and a 16/64/256 KiB store, both open in one
+/// process through the file-system layer. In each: a streamed file, a file
+/// extended with zeros by a size change, and a small in-place edit (a
+/// splice at release). Each reads back and has the key of a fresh write.
+#[test]
+fn two_profiles_through_the_file_system() {
+    let (a, b) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    content::check_write_with(b.path(), None, Some(large())).unwrap();
+    let open = |dir: &Path| {
+        let io = Arc::new(Mutex::new(content::store_io(dir).unwrap()));
+        SliceFsFilesystem::new(DictMetadataStore::new(io.clone()), io, None)
+    };
+    let both = [(open(a.path()), ChunkProfile::DEFAULT), (open(b.path()), large())];
+    let mut big_keys = Vec::new();
+    for (fs, profile) in &both {
+        assert_eq!(fs.content().profile(), *profile);
+        let what = |step: &str| format!("{profile}: {step}");
+
+        // (1) A 4 MiB file in four 1 MiB writes.
+        let (big, fh) = fs.test_create(1, "big", S_IFREG | 0o644, 0o022, 0, 0).unwrap();
+        let mut model = Vec::with_capacity(4 * MIB);
+        for i in 0..4u64 {
+            let piece = random_bytes(MIB, 0x22_0200 + i);
+            fs.test_write(fh, i * MIB as u64, &piece).unwrap();
+            model.extend_from_slice(&piece);
+        }
+        fs.test_release(big, fh).unwrap();
+        big_keys.push(check_file(fs, big, &model, &what("stream")));
+
+        // (2) 5000 bytes, then a size change adds a 3 MiB zero run.
+        let (small, fh) = fs.test_create(1, "zeros", S_IFREG | 0o644, 0o022, 0, 0).unwrap();
+        let mut zeros = random_bytes(5000, 0x22_0210);
+        fs.test_write(fh, 0, &zeros).unwrap();
+        fs.test_release(small, fh).unwrap();
+        fs.test_setattr_size(small, None, (5000 + 3 * MIB) as u64).unwrap();
+        zeros.resize(5000 + 3 * MIB, 0);
+        check_file(fs, small, &zeros, &what("zero run"));
+
+        // (3) A 4 KiB in-place edit of file (1), stored at release.
+        let (fh, _) = fs.test_open(big, libc::O_RDWR).unwrap();
+        let at = MIB + 77;
+        let new: Vec<u8> = model[at..at + 4096].iter().map(|x| !x).collect();
+        fs.test_write(fh, at as u64, &new).unwrap();
+        model[at..at + 4096].copy_from_slice(&new);
+        fs.test_release(big, fh).unwrap();
+        check_file(fs, big, &model, &what("splice"));
+    }
+    assert_ne!(big_keys[0], big_keys[1], "the two profiles cut the same bytes into other chunks");
 }

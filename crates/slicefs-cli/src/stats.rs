@@ -126,8 +126,20 @@ pub struct StoreStats {
     pub format: Option<u32>,
     /// The feature flags of the header, by class.
     pub flags: FlagSets,
+    /// The chunk profile of the store (4/8/32 KiB when the header has no
+    /// `chunks` line, also with no header).
+    pub chunk_profile: ProfileOut,
     /// `read-write`, or `read-only` (an unknown ro_compat flag) for this SliceFS.
     pub access: &'static str,
+}
+
+/// The FastCDC chunk sizes of the store in bytes; 4096/8192/32768 when the
+/// header has no `chunks` line.
+#[derive(Debug, Serialize)]
+pub struct ProfileOut {
+    pub min: u32,
+    pub avg: u32,
+    pub max: u32,
 }
 
 /// The feature flags of the store header, by class.
@@ -239,6 +251,8 @@ pub fn store_stats(store_path: &Path) -> Result<StoreStats, Box<dyn std::error::
 
     let opened = crate::header::check(store_path, crate::header::Want::Read)?;
     let (format, flags, access) = header_fields(&opened);
+    let profile = crate::content::profile_of(opened.header.as_ref());
+    let chunk_profile = ProfileOut { min: profile.min(), avg: profile.avg(), max: profile.max() };
     let segs_dir = store_path.join("segments");
 
     // Load store from segment replay.
@@ -286,6 +300,7 @@ pub fn store_stats(store_path: &Path) -> Result<StoreStats, Box<dyn std::error::
         mounted,
         format,
         flags,
+        chunk_profile,
         access,
     };
     Ok(stats)
@@ -327,6 +342,9 @@ fn human_stats(stats: &StoreStats) -> String {
         Some(n) => { let _ = writeln!(o, "Store format     : {n}"); }
         None => { let _ = writeln!(o, "Store format     : none (no store header yet)"); }
     }
+    let p = &stats.chunk_profile;
+    let profile = chunk_store::ChunkProfile::new(p.min, p.avg, p.max).map_or_else(|_| format!("{}/{}/{} B", p.min, p.avg, p.max), |c| c.to_string());
+    let _ = writeln!(o, "Chunk profile    : {profile}");
     let f = &stats.flags;
     let all = [("compat", &f.compat), ("ro_compat", &f.ro_compat), ("incompat", &f.incompat)];
     let mut label = "Feature flags    : ";
@@ -613,6 +631,7 @@ mod tests {
             mounted: false,
             format: Some(7),
             flags: FlagSets::default(),
+            chunk_profile: ProfileOut { min: 4096, avg: 8192, max: 32768 },
             access: "read-write",
         };
         let json = serde_json::to_string(&stats).expect("StoreStats should serialize to JSON");
@@ -662,6 +681,34 @@ mod tests {
         assert_eq!(v["flags"]["ro_compat"][0]["known"], false);
         assert_eq!(v["flags"]["incompat"], serde_json::json!([]));
         assert_eq!(v["access"], "read-only");
+    }
+
+    #[test]
+    fn stats_shows_the_chunk_profile() {
+        use crate::header::{CHUNK_PROFILE_FLAG, CHUNK_PROFILE_RELEASE};
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.txt"), b"hello").unwrap();
+        let store = dir.path().join("store");
+        let p = chunk_store::ChunkProfile::new(16384, 65536, 262144).unwrap();
+        crate::seed::run_seed_with(&store, &src, None, Some(p)).unwrap();
+        let stats = store_stats(&store).unwrap();
+        let c = &stats.chunk_profile;
+        assert_eq!((c.min, c.avg, c.max), (16384, 65536, 262144));
+        let text = human_stats(&stats);
+        let flag = format!("Feature flags    : ro_compat {CHUNK_PROFILE_FLAG} (needs SliceFS {CHUNK_PROFILE_RELEASE}; known here)");
+        for line in ["Chunk profile    : 16/64/256 KiB", flag.as_str()] {
+            assert!(text.lines().any(|l| l == line), "no line {line:?} in:\n{text}");
+        }
+        let v = serde_json::to_value(&stats).unwrap();
+        assert_eq!(v["chunk_profile"], serde_json::json!({"min": 16384, "avg": 65536, "max": 262144}));
+
+        let dir = seeded_with("");
+        let stats = store_stats(&dir.path().join("store")).unwrap();
+        let text = human_stats(&stats);
+        assert!(text.lines().any(|l| l == "Chunk profile    : 4/8/32 KiB"), "{text}");
+        assert_eq!(serde_json::to_value(&stats).unwrap()["chunk_profile"]["min"], 4096);
     }
 
     #[test]
