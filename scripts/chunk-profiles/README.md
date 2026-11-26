@@ -88,8 +88,9 @@ an input is missing.
 
 ## Smoke mode
 
-`SMOKE=1` makes small inputs in `WORK/smoke-data` (or in the data dir, when
-one is given) with `chunk_profile_bench gen`: two trees of 200 files each
+`SMOKE=1` makes small inputs in `WORK/smoke-data` with
+`chunk_profile_bench gen`. It refuses a data dir argument, so the smoke data
+never go over real Boost data. It makes two trees of 200 files each
 (`x/boost_0_0_1`, then `x/boost_0_0_2` from the same seed, with other bytes
 in 1 KiB of every tenth file) and an 8 MiB random file `boost_0_0_2.tar`. It
 sets `BOOST_VERS="0_0_1 0_0_2"`, `EDIT_BYTES=4194304`, `SEQ_BYTES=4194304` and
@@ -122,8 +123,10 @@ say nothing about Boost.
 | `index_fence_bytes` | bytes | Bytes of the fence tables of the runs, in RAM |
 | `open_ms` | ms | Cold open: `ChunkStore::open` (read only) plus `index_info`, in a new process |
 | `open_peak_rss_bytes` | bytes | Peak RSS of the open process: `/usr/bin/time -l` (macOS) or `-v` (GNU time on Linux); `NA` without one of them |
-| `seq_p50_us`, `seq_p99_us` | us | p50 and p99 of sequential 4 KiB reads from offset 0 up to `SEQ_BYTES` |
-| `rand_p50_us`, `rand_p99_us` | us | p50 and p99 of `READS` random 4 KiB reads (seeded) |
+| `seq_p50_us` | us | p50 of sequential 4 KiB reads from offset 0 up to `SEQ_BYTES` |
+| `seq_p99_us` | us | p99 of the same sequential reads |
+| `rand_p50_us` | us | p50 of `READS` random 4 KiB reads (seeded offsets) |
+| `rand_p99_us` | us | p99 of the same random reads |
 | `edit_objects` | objects | Sum over the nine edits of the new objects |
 | `edit_stored_bytes` | bytes | Sum over the nine edits of the new stored bytes |
 | `edit_rechunked_bytes` | bytes | Sum over the nine edits of the bytes that `splice` cut again with FastCDC |

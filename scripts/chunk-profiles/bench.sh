@@ -4,7 +4,8 @@
 # cold in a new process, and probe reads and small edits. By hand only, never
 # in cargo test. Runs on macOS and Linux. See README.md next to this script.
 #
-# usage: bench.sh <data-dir> [runs]        (SMOKE=1: the data dir is optional)
+# usage: bench.sh <data-dir> [runs]
+#        SMOKE=1 bench.sh                  (no data dir: the smoke data go in $WORK/smoke-data)
 # env:   WORK          work dir for the store, logs and results (default: a new temp dir)
 #        BIN           the chunk_profile_bench binary (default: build it in release)
 #        PROFILES      profiles MIN/AVG/MAX in KiB (default: 4/8/32 8/16/64 8/32/128 16/64/256 32/128/512)
@@ -18,7 +19,7 @@
 #        EDIT_BYTES    edit base: the first EDIT_BYTES of the file (default 67108864)
 #        EDIT_SIZE     bytes of each edit (default 4096)
 #        RUNS          runs when [runs] is not given (default 3)
-#        SMOKE=1       small synthetic inputs in $WORK/smoke-data (or the data dir), short probe
+#        SMOKE=1       small synthetic inputs in $WORK/smoke-data, short probe
 # inputs: trees  = every DATA/x/boost_<v>/ of BOOST_VERS, into one store (see fetch-boost.sh);
 #         tar    = DATA/boost_<last v>.tar;
 #         rand   = DATA/in-rand-RAND_BYTES/random.bin, made once;
@@ -28,13 +29,15 @@
 #         input and profile (median_low per column). Edit rows go to
 #         $WORK/edits.csv, machine info to $WORK/machine.txt (no path, host or user).
 set -euo pipefail
-usage() { echo "usage: bench.sh <data-dir> [runs]   (SMOKE=1: the data dir is optional)" >&2; exit 2; }
+usage() { echo "usage: bench.sh <data-dir> [runs]   or   SMOKE=1 bench.sh   (no data dir)" >&2; exit 2; }
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 OS=$(uname -s)
 SMOKE=${SMOKE:-0}
 D=${1:-}; N=${2:-${RUNS:-3}}
 [[ "$N" =~ ^[1-9][0-9]*$ ]] || usage
-[ "$SMOKE" = 1 ] || [ -n "$D" ] || usage
+# The smoke data never go in a real data dir: gen writes over the files of
+# the versions in BOOST_VERS, and those may be real Boost data.
+if [ "$SMOKE" = 1 ]; then [ -z "$D" ] || usage; else [ -n "$D" ] || usage; fi
 abs() { case $1 in /*) echo "$1" ;; *) echo "$PWD/$1" ;; esac; }
 
 if [ -z "${WORK:-}" ]; then WORK=$(mktemp -d "${TMPDIR:-/tmp}/chunk-profiles.XXXXXX"); echo "work dir: $WORK" >&2; fi
@@ -55,7 +58,7 @@ INPUTS=${INPUTS:-trees tar}
 RAND_BYTES=${RAND_BYTES:-1073741824}
 SPARSE_BYTES=${SPARSE_BYTES:-1073741824}
 if [ "$SMOKE" = 1 ]; then
-  [ -n "$D" ] || D=$WORK/smoke-data
+  D=$WORK/smoke-data
   BOOST_VERS=${BOOST_VERS:-0_0_1 0_0_2}
   EDIT_BYTES=${EDIT_BYTES:-4194304}; SEQ_BYTES=${SEQ_BYTES:-4194304}; READS=${READS:-500}
 fi
@@ -72,7 +75,6 @@ if [ "$SMOKE" = 1 ]; then
   set -- $BOOST_VERS
   [ $# -eq 2 ] || { echo "SMOKE=1 needs two BOOST_VERS" >&2; exit 2; }
   echo "making smoke data" >&2
-  rm -rf "${D:?}/x/boost_$1" "${D:?}/x/boost_$2"
   "$BIN" gen tree --dir "$D/x/boost_$1" --files 200 --seed 1 >&2
   "$BIN" gen tree --dir "$D/x/boost_$2" --files 200 --seed 1 --change-every 10 >&2
   "$BIN" gen file --path "$D/boost_$2.tar" --bytes 8388608 --seed 2 >&2
