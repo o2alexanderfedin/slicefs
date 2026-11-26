@@ -33,9 +33,28 @@ pub const CHUNK_PROFILE_FLAG: &str = "chunk-profile";
 /// The release word of the `chunk-profile` flag. A placeholder until the
 /// owner names the release; tests use this constant, never its text.
 pub const CHUNK_PROFILE_RELEASE: &str = "v2.2";
+/// The incompat flag of a store that has, or had, objects with SHA-256 IDs
+/// (tag 0x12): an older build cannot verify them, so it must not open the
+/// store.
+pub const HASH_SHA256_FLAG: &str = "hash-sha256";
+/// The release word of the `hash-sha256` flag. A placeholder until the
+/// owner names the release, as [`CHUNK_PROFILE_RELEASE`]; tests use this
+/// constant, never its text.
+pub const HASH_SHA256_RELEASE: &str = "v2.2";
 /// The feature flags that this build knows (Phase 22: `chunk-profile`;
-/// Phase 23 adds names here with the rule of docs/design/store-format.md).
-pub const KNOWN_FLAGS: &[&str] = &[CHUNK_PROFILE_FLAG];
+/// Phase 23: `hash-sha256`). Add a name here with the rule of
+/// docs/design/store-format.md.
+pub const KNOWN_FLAGS: &[&str] = &[CHUNK_PROFILE_FLAG, HASH_SHA256_FLAG];
+
+/// The flag that a store needs before it holds objects of `hasher`
+/// (`None`: no flag). The one place that says which hash needs a flag.
+pub fn hash_flag(hasher: &dyn ObjectHasher) -> Option<Flag> {
+    (hasher.tag() == chunk_store::hash::Sha256.tag()).then(|| Flag {
+        class: Class::Incompat,
+        name: HASH_SHA256_FLAG.to_string(),
+        release: HASH_SHA256_RELEASE.to_string(),
+    })
+}
 
 /// The header of a new store whose new objects use `hasher` (the default
 /// chunk profile).
@@ -46,9 +65,14 @@ pub fn marker(hasher: &dyn ObjectHasher) -> String {
 /// The header of a new store with the write hash `hasher` and the chunk
 /// profile `profile`. A non-default profile adds the line `chunks <min>
 /// <avg> <max>` (bytes) and its ro_compat flag; the default profile adds
-/// nothing, so the header of a default store stays as in format 7.
+/// nothing, so the header of a default store stays as in format 7. A hash
+/// that needs a flag ([`hash_flag`]: SHA-256) gets its flag line right
+/// after the hash line.
 pub fn marker_with(hasher: &dyn ObjectHasher, profile: ChunkProfile) -> String {
     let mut s = format!("{FORMAT}hash {}\n", hasher.name());
+    if let Some(f) = hash_flag(hasher) {
+        s.push_str(&format!("{} {} {}\n", f.class.word(), f.name, f.release));
+    }
     if profile != ChunkProfile::DEFAULT {
         s.push_str(&format!("chunks {} {} {}\n", profile.min(), profile.avg(), profile.max()));
         s.push_str(&format!("ro_compat {CHUNK_PROFILE_FLAG} {CHUNK_PROFILE_RELEASE}\n"));

@@ -13,7 +13,9 @@ use metadata::store::DictMetadataStore;
 use metadata::wal::{create_wal, WalConfig};
 use slicefs_cli::content::{self, FORMAT, FORMAT_FILE};
 use slicefs_cli::filesystem::SliceFsFilesystem;
+use slicefs_cli::header::{HASH_SHA256_FLAG, HASH_SHA256_RELEASE};
 use slicefs_cli::seed::run_seed;
+use slicefs_traits::key::ObjectKey;
 use slicefs_traits::metadata::MetadataStore;
 use tempfile::TempDir;
 
@@ -210,4 +212,57 @@ fn seed_hash_is_recorded_and_unknown_names_are_refused() {
     std::fs::write(plain.path().join(FORMAT_FILE), format!("{FORMAT}hash sha3-1024\n")).unwrap();
     let err = content::open(plain.path()).err().expect("unknown recorded hash").to_string();
     assert!(err.contains("sha3-1024") && err.contains("does not know"), "{err}");
+}
+
+/// The `hash-sha256` flag line of this build.
+fn sha256_flag() -> String {
+    format!("incompat {HASH_SHA256_FLAG} {HASH_SHA256_RELEASE}\n")
+}
+
+/// Every object of the last root (metadata nodes and file content), with
+/// the "no object" key left out.
+fn all_objects(store: &Path) -> Vec<chunk_store::ObjectId> {
+    let (root, _) = load_store_from_segments(&store.join("segments")).unwrap();
+    let root = root.expect("a root");
+    let mut io = content::store_io(store).unwrap();
+    let mut keys = metadata::store::referenced_roots(&mut io, &root).unwrap();
+    keys.extend(metadata::store::content_keys(&mut io, &root).unwrap());
+    let cs = Arc::clone(io.store());
+    let ids = keys
+        .iter()
+        .filter(|k| **k != ObjectKey::ZERO)
+        .flat_map(|k| chunk_store::file::file_objects(&cs, content::to_id(k)).unwrap())
+        .collect();
+    cs.close().unwrap();
+    ids
+}
+
+/// HASH-01 tracer: `seed --hash sha256` makes a store whose first header
+/// has the hash line and the incompat flag, whose objects all have tag
+/// 0x12, whose files read back, and which scrub accepts.
+#[test]
+fn sha256_seed_records_the_flag_and_tags_every_object() {
+    let src = TempDir::new().unwrap();
+    let files: [(&str, Vec<u8>); 3] = [("big.bin", data(1, 300_000)), ("small.txt", b"ten bytes!".to_vec()), ("empty", Vec::new())];
+    for (name, bytes) in &files {
+        std::fs::write(src.path().join(name), bytes).unwrap();
+    }
+    let dir = TempDir::new().unwrap();
+    let store = dir.path();
+    run_seed(store, src.path(), Some("sha256")).unwrap();
+    assert_eq!(marker(store), format!("{FORMAT}hash sha256\n{}", sha256_flag()));
+
+    let ids = all_objects(store);
+    assert!(ids.len() > 10, "{}", ids.len());
+    assert!(ids.iter().all(|id| id.tag() == 0x12), "every object has tag 0x12");
+
+    let fs = open_fs(store);
+    for (name, bytes) in &files {
+        assert_eq!(&read_file(&fs, 1, name), bytes, "{name}");
+    }
+    close_fs(fs);
+    slicefs_cli::scrub::run_scrub(store, false).unwrap();
+    let st = slicefs_cli::stats::store_stats(store).unwrap();
+    let names: Vec<_> = st.flags.incompat.iter().map(|f| (f.name.as_str(), f.release.as_str(), f.known)).collect();
+    assert_eq!(names, [(HASH_SHA256_FLAG, HASH_SHA256_RELEASE, true)]);
 }

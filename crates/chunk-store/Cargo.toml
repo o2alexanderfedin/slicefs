@@ -6,6 +6,7 @@ description = "Content-addressed chunk store: FastCDC + BLAKE3 objects in append
 
 [dependencies]
 blake3.workspace = true
+sha2.workspace = true
 fastcdc.workspace = true
 zstd.workspace = true
 crc32c = "0.6"
