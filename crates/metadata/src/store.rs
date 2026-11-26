@@ -1581,6 +1581,34 @@ pub(crate) fn referenced(
     io: &mut impl crate::store_io::NodeRead,
     root: &ObjectKey,
 ) -> Result<(Vec<ObjectKey>, Vec<ObjectKey>), MetaError> {
+    let (mut nodes, mut content) = (Vec::new(), Vec::new());
+    for_each_referenced(io, root, &mut |r, k| {
+        match r {
+            Ref::Node => nodes.push(k),
+            Ref::Content => content.push(k),
+        }
+        Ok(())
+    })?;
+    Ok((nodes, content))
+}
+
+/// What a key of [`for_each_referenced`] is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Ref {
+    /// A metadata node (see [`referenced_roots`]).
+    Node,
+    /// A file content key (see [`content_keys`]).
+    Content,
+}
+
+/// Call `f` with each key that the root record `root` refers to, in the
+/// order of [`referenced`], without a list of them (the GC mark, #207). A
+/// key can come more than once.
+pub(crate) fn for_each_referenced(
+    io: &mut impl crate::store_io::NodeRead,
+    root: &ObjectKey,
+    f: &mut dyn FnMut(Ref, ObjectKey) -> Result<(), MetaError>,
+) -> Result<(), MetaError> {
     let bytes = (io).get_node(root)
         .map_err(|e| crate::store_io::node_err("root node", root, e))?;
     check_root_len(bytes.len())?;
@@ -1589,17 +1617,21 @@ pub(crate) fn referenced(
         at(root_rec::INODE_DATA), at(root_rec::DIR_DATA),
         at(root_rec::MANIFEST_DATA), at(root_rec::XATTR_DATA),
     );
-    let mut out = vec![*root, at(root_rec::INODE_MAP), inodes, dirs, manifests, xattrs,
-                       at(root_rec::REFCOUNTS)];
+    for k in [*root, at(root_rec::INODE_MAP), inodes, dirs, manifests, xattrs, at(root_rec::REFCOUNTS)] {
+        f(Ref::Node, k)?;
+    }
     for map in [inodes, dirs, xattrs] {
-        out.extend(load_u64_digest_map(io, &map)?.into_values());
+        for k in load_u64_digest_map(io, &map)?.into_values() {
+            f(Ref::Node, k)?;
+        }
     }
-    let mut content = Vec::new();
     for manifest in load_u64_digest_map(io, &manifests)?.into_values() {
-        out.push(manifest);
-        content.extend(load_manifest(io, &manifest)?);
+        f(Ref::Node, manifest)?;
+        for k in load_manifest(io, &manifest)? {
+            f(Ref::Content, k)?;
+        }
     }
-    Ok((out, content))
+    Ok(())
 }
 
 /// Error unless `len` is the size of a root record.

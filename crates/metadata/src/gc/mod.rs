@@ -14,10 +14,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use chunk_store::{ChunkStore, ExactMark, GcPacer, LiveFilter, NoPacer, ObjectId};
-use slicefs_traits::key::ObjectKey;
+use slicefs_traits::key::{ObjectKey, KEY_BYTES};
 use slicefs_traits::metadata::MetaError;
 
-use crate::store::referenced;
+use crate::store::for_each_referenced;
 use crate::store_io::{to_id, NodeRead, NodeReader};
 
 use crate::segment::compaction::{compact_segment, SegmentError};
@@ -98,8 +98,14 @@ pub fn live_objects_exact_paced(
 
 /// The walk of a mark: calls `add` with every live object (an object can
 /// come more than once). False if `stop` was set first. `pacer` runs before
-/// each root and each file (safe points: nothing is deleted during the
+/// each root and each value (safe points: nothing is deleted during the
 /// mark, and the objects put or read meanwhile go to the touched set).
+///
+/// RAM does not grow with the file or root count (#207): every key of the
+/// walk (each root can give the same keys again) goes to an external sorter
+/// in `<store>/gc-tmp` (`ChunkStore::gc_sorter`), and the sorted keys
+/// without duplicates are read back one at a time. Disk: 33 bytes per key
+/// per root, removed at the end, also on an error or a stop.
 fn mark(
     cs: &Arc<ChunkStore>,
     meta_roots: &[ObjectKey],
@@ -108,20 +114,24 @@ fn mark(
     pacer: &dyn GcPacer,
     add: &mut dyn FnMut(ObjectId) -> Result<(), MetaError>,
 ) -> Result<bool, MetaError> {
+    let mut keys = cs
+        .gc_sorter::<KEY_BYTES>("keys")
+        .map_err(|e| MetaError::Corrupted(format!("GC mark: temp file: {e}")))?;
+    for k in file_roots {
+        keys.push(k.0).map_err(MetaError::Io)?;
+    }
     let mut io = NodeReader(Arc::clone(cs));
-    let mut values: Vec<ObjectKey> = file_roots.to_vec();
     for root in meta_roots {
         pacer.at_safe_point();
         if stop.load(Ordering::Relaxed) {
             return Ok(false);
         }
-        let (nodes, content) = referenced(&mut io, root)?;
-        values.extend(nodes);
-        values.extend(content);
+        for_each_referenced(&mut io, root, &mut |_, k| keys.push(k.0).map_err(MetaError::Io))?;
     }
-    values.sort_unstable();
-    values.dedup();
-    for v in values {
+    let sorted = keys.finish().map_err(MetaError::Io)?;
+    let mut values = sorted.reader().map_err(MetaError::Io)?;
+    while let Some(rec) = values.next_rec().map_err(MetaError::Io)? {
+        let v = ObjectKey(rec);
         pacer.at_safe_point();
         if stop.load(Ordering::Relaxed) {
             return Ok(false);
@@ -265,4 +275,142 @@ fn parse_segment_id(path: &std::path::Path) -> Option<u64> {
     let stem = path.file_stem()?.to_str()?;
     let suffix = stem.strip_prefix("segment-")?;
     suffix.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Mutex;
+
+    use chunk_store::file::file_objects;
+    use chunk_store::{LiveSet, Options};
+    use slicefs_traits::metadata::{InodeMeta, MetadataStore};
+
+    use super::*;
+    use crate::store::{content_keys, referenced_roots, DictMetadataStore};
+    use crate::store_io::{put_value, StoreIo};
+
+    /// A chunk store whose GC sorter spills every 3 keys and merges 2 runs
+    /// at a time, so the mark makes many runs and merge passes.
+    fn open(dir: &std::path::Path) -> Arc<ChunkStore> {
+        let opts = Options { gc_sort_chunk_ids: 3, gc_merge_fan_in: 2, ..Options::default() };
+        Arc::new(ChunkStore::open(dir, opts).unwrap())
+    }
+
+    fn add_file(m: &DictMetadataStore, cs: &ChunkStore, parent: u64, name: &str, bytes: &[u8]) {
+        let ino = m.create_inode(&InodeMeta::new_file(0, 0, 0, 0o100644)).unwrap();
+        m.link(parent, name, ino).unwrap();
+        let key = put_value(cs, bytes).unwrap();
+        m.set_manifest(ino, &[key]).unwrap();
+        m.increment_refcount(&key);
+    }
+
+    /// Four roots (one twice) of one tree: shared values, a removed file, a
+    /// changed file, an xattr. And a value that only a file root holds.
+    fn build(cs: &Arc<ChunkStore>) -> (Vec<ObjectKey>, ObjectKey) {
+        let m = DictMetadataStore::new(Arc::new(Mutex::new(StoreIo::new("/unused", Arc::clone(cs)))));
+        let r = m.root_ino();
+        let sub = m.create_directory(r, "sub", &InodeMeta::new_directory(0, 0, 0, 0o40755)).unwrap();
+        for i in 0..20 {
+            let parent = if i % 2 == 0 { r } else { sub };
+            add_file(&m, cs, parent, &format!("f{i}"), format!("shared {}", i % 5).as_bytes());
+        }
+        add_file(&m, cs, r, "big", &vec![7u8; 300 << 10]);
+        let r1 = m.commit().unwrap();
+        add_file(&m, cs, sub, "late", b"late bytes");
+        m.unlink(r, "f0").unwrap();
+        let r2 = m.commit().unwrap();
+        add_file(&m, cs, r, "f0", b"new f0");
+        m.set_xattr(r, "user.x", b"v").unwrap();
+        let r3 = m.commit().unwrap();
+        let open_file = put_value(cs, b"an open file, in no root").unwrap();
+        (vec![r3, r1, r2, r1], open_file)
+    }
+
+    /// The distinct values of the per-root key lists (the mark before #207).
+    fn values(cs: &Arc<ChunkStore>, roots: &[ObjectKey], files: &[ObjectKey]) -> BTreeSet<ObjectKey> {
+        let mut io = NodeReader(Arc::clone(cs));
+        let mut keys: BTreeSet<ObjectKey> = files.iter().copied().collect();
+        for r in roots {
+            keys.extend(referenced_roots(&mut io, r).unwrap());
+            keys.extend(content_keys(&mut io, r).unwrap());
+        }
+        keys
+    }
+
+    fn tmp_entries(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir.join("gc-tmp")).map(|d| d.count()).unwrap_or(0)
+    }
+
+    /// Counts safe points; sets `stop` at the `at`-th one.
+    struct StopAt<'a> {
+        n: AtomicUsize,
+        at: usize,
+        stop: &'a AtomicBool,
+    }
+
+    impl GcPacer for StopAt<'_> {
+        fn at_safe_point(&self) {
+            if self.n.fetch_add(1, Ordering::Relaxed) + 1 == self.at {
+                self.stop.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[test]
+    fn the_streamed_mark_gives_the_live_set_of_the_key_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let cs = open(dir.path());
+        let (roots, open_file) = build(&cs);
+        let mut got = BTreeSet::new();
+        let mut adds = 0u64;
+        let stop = AtomicBool::new(false);
+        let pacer = StopAt { n: AtomicUsize::new(0), at: usize::MAX, stop: &stop };
+        let done = mark(&cs, &roots, &[open_file], &stop, &pacer, &mut |id| {
+            adds += 1;
+            got.insert(id);
+            Ok(())
+        })
+        .unwrap();
+        assert!(done);
+        let vals = values(&cs, &roots, &[open_file]);
+        let want: BTreeSet<ObjectId> = vals.iter().flat_map(|k| file_objects(&cs, to_id(k)).unwrap()).collect();
+        assert_eq!(got, want);
+        assert!(got.len() > 50, "{} objects", got.len());
+        // Each distinct value once: one safe point per root and per value.
+        assert_eq!(pacer.n.load(Ordering::Relaxed), roots.len() + vals.len());
+        let per_value: usize = vals.iter().map(|k| file_objects(&cs, to_id(k)).unwrap().len()).sum();
+        assert_eq!(adds, per_value as u64, "no value is walked twice");
+        assert_eq!(tmp_entries(dir.path()), 0, "the temp files are removed");
+        // The public marks agree.
+        let live = live_objects(&cs, &roots, &[open_file], &stop).unwrap().unwrap();
+        assert!(got.iter().all(|id| live.may_contain(id)));
+        let exact = live_objects_exact(&cs, &roots, &[open_file], &stop).unwrap().unwrap();
+        assert_eq!(exact.inserted(), adds);
+        drop(exact);
+        assert_eq!(tmp_entries(dir.path()), 0);
+    }
+
+    #[test]
+    fn an_error_or_a_stop_removes_the_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let cs = open(dir.path());
+        let (roots, _) = build(&cs);
+        let stop = AtomicBool::new(false);
+        let missing = ObjectKey::example(9);
+        // A missing file root: the error comes after the walk and the sort.
+        assert!(live_objects(&cs, &roots, &[missing], &stop).is_err());
+        assert_eq!(tmp_entries(dir.path()), 0, "after an error");
+        // A missing root record: the error comes inside the walk.
+        assert!(live_objects(&cs, &[roots[0], missing], &[], &stop).is_err());
+        assert_eq!(tmp_entries(dir.path()), 0, "after an error in the walk");
+        // A stop in the walk, and one in the read-back of the sorted keys.
+        for at in [2, roots.len() + 5] {
+            let stop = AtomicBool::new(false);
+            let pacer = StopAt { n: AtomicUsize::new(0), at, stop: &stop };
+            assert!(live_objects_paced(&cs, &roots, &[], &stop, &pacer).unwrap().is_none(), "stop at {at}");
+            assert_eq!(tmp_entries(dir.path()), 0, "after a stop at {at}");
+        }
+    }
 }

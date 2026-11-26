@@ -257,10 +257,11 @@ pub struct Options {
     /// RAM; a false positive only keeps a dead object). A tuning and test
     /// knob.
     pub gc_touched_exact: usize,
-    /// The directory for the temp files of a full GC (the exact mark; see
-    /// [`ChunkStore::gc_finish_full`]). A writable open removes it (files
-    /// that a crash left). [`ChunkStore::open`] sets `<dir>/gc-tmp` if
-    /// none. None: a full GC fails.
+    /// The directory for the temp files of a GC: the sorted keys of the
+    /// mark walk ([`ChunkStore::gc_sorter`]), and for a full GC the exact
+    /// mark (see [`ChunkStore::gc_finish_full`]). A writable open removes
+    /// it (files that a crash left). [`ChunkStore::open`] sets
+    /// `<dir>/gc-tmp` if none. None: a GC fails.
     pub gc_tmp_dir: Option<PathBuf>,
     /// IDs in one sorted chunk of the exact mark (RAM: 33 bytes each). A
     /// tuning and test knob.
@@ -2048,9 +2049,17 @@ impl ChunkStore {
         Ok(ExactMark { sorter: extsort::Sorter::new(self.gc_tmp()?, "live", self.sort_cfg()), inserted: 0 })
     }
 
+    /// An empty external sorter of `N`-byte records, in a new temp
+    /// directory below `Options::gc_tmp_dir` (removed when the sorter, or
+    /// the sorted file it makes, is dropped; a writable open removes what a
+    /// crash left). The GC mark streams the keys of its walk through it.
+    pub fn gc_sorter<const N: usize>(&self, name: &'static str) -> Result<extsort::Sorter<N>> {
+        Ok(extsort::Sorter::new(self.gc_tmp()?, name, self.sort_cfg()))
+    }
+
     fn gc_tmp(&self) -> Result<Arc<extsort::TmpDir>> {
         let Some(d) = &self.opts.gc_tmp_dir else {
-            return Err(Error::Io(io::Error::new(io::ErrorKind::Unsupported, "a full GC needs Options::gc_tmp_dir")));
+            return Err(Error::Io(io::Error::new(io::ErrorKind::Unsupported, "a GC needs Options::gc_tmp_dir")));
         };
         Ok(Arc::new(extsort::TmpDir::new(d)?))
     }
