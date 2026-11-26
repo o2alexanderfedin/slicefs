@@ -227,7 +227,10 @@ process, no mount; on the macOS host and in Linux Docker with GNU `time`.
 - macOS: 2026-11-26T22:18:56Z to 22:21:47Z. The script waited 30 minutes for
   a 1-minute load of 8 or less and no `slicefs-gcmem` container; the load
   stayed at 13 to 18 (jobs of other projects), so it started at 13.30
-  (after: 14.25). No `slicefs-gcmem` container ran.
+  (after: 14.25). `docker ps` showed no `slicefs-gcmem` container at the
+  start or the end. The `rustc` line of `prolly-machine.txt` was filled in
+  by hand from the toolchain that built the binary (the wait script had no
+  `rustc` in its `PATH`).
 - Linux Docker: 22:22:19Z to 22:25:15Z; VM load 0.05 before and 1.06 after,
   host load 13.80 and 15.19.
 - 6 digest checks `ok=1` on each system. `REPORT-OK` for both stems.
@@ -247,8 +250,12 @@ Old against new headline numbers (macOS, median, scatter K = 1 unless named):
 | gain where prolly helps, ms per commit | 4.7 to 5.6 | 3.7 to 8.3 |
 | 4,000,000 entries, one change: flat ms, prolly ms | 229.9, 21.8 | 242.1, 22.0 |
 | flat map passes 100 ms per commit at | 1.67 M entries | 1.60 M entries |
-| disk growth flat, prolly MiB | 31.2, 17.5 (81 commits, no index) | 64.4, 38.4 (120 commits, index) |
+| disk growth flat, prolly MiB | 31.2, 17.5 (81 commits, no index) | 64.4, 38.4 (121 commits, index) |
 | peak RSS whole, flat, prolly MiB | 390.0, 107.8, 26.6 (82 commits) | 478.2, 175.4, 33.7 (122 commits) |
+
+The peak memory table now takes "ru_maxrss after the last commit" from the
+last commit of each run (it took the median row of the last group, which is
+no longer one commit).
 
 The new `insdel` rows (macOS; Linux in brackets), CPU ms and wall ms:
 

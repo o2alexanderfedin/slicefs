@@ -101,7 +101,9 @@ def sep(n):
 class Tables:
     def __init__(self, d, stem):
         p = lambda s: os.path.join(d, f"{stem}-{s}")
-        self.results = [r for r in read_csv(p("results.csv")) if r["run"] == "median"]
+        all_rows = read_csv(p("results.csv"))
+        self.results = [r for r in all_rows if r["run"] == "median"]
+        self.run_rows = [r for r in all_rows if r["run"] != "median"]
         self.scale = [r for r in read_csv(p("scale.csv")) if r["run"] == "median"]
         self.disk = [r for r in read_csv(p("disk.csv")) if r["run"] == "median"]
         self.shape = [kv(l) for l in read_lines(p("shape.txt")) if l.strip()]
@@ -203,10 +205,15 @@ class Tables:
                 continue
             peaks = [num(r["peak_rss_bytes"]) for r in rs if num(r["peak_rss_bytes"]) is not None]
             peak = "NA" if not peaks else f_mib(statistics.median_low(peaks))
-            # The median rows are in commit order, so the last one is the last commit.
-            last = rs[-1]
+            # ru_maxrss after the last commit: the row with the highest seq of
+            # each run, median_low over the runs.
+            ends = {}
+            for r in self.run_rows:
+                if r["mode"] == m and (r["run"] not in ends or int(r["seq"]) > int(ends[r["run"]]["seq"])):
+                    ends[r["run"]] = r
+            last_rss = statistics.median_low([num(r["maxrss_bytes"]) for r in ends.values()]) if ends else None
             after_load = (f_mib(load) if load is not None else "NA") if m == "whole" else "-"
-            out.append(row([m, peak, after_load, f_mib(last["maxrss_bytes"])]))
+            out.append(row([m, peak, after_load, "NA" if last_rss is None else f_mib(last_rss)]))
         return out
 
     def on_disk(self):

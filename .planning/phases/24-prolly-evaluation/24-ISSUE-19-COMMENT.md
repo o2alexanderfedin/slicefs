@@ -10,17 +10,17 @@ Headline numbers (median, one changed file, 84,104 inodes):
 - Estimated real commit with a prolly `inode_data`: 58.4 ms (91.4 %). About 4 to 8 ms less per small commit. For 1,000 changes and for the version step, prolly is slower.
 - Real inserts and deletes in the middle of the map (they move node boundaries): at 100 per commit, prolly 10.1 CPU ms against flat 12.5 on macOS, and 13.4 against 12.7 on Linux (prolly a little slower there). At 1,000, prolly 46.3 against flat 24.2 CPU ms.
 - Scale: with 4,000,000 entries, one change costs flat 242.1 ms and prolly 22.0 ms. One flat map passes 100 ms per commit at about 1.6 million entries.
-- Disk over 120 commits (before GC, pack index included): the flat store grew by 64.4 MiB, the prolly store by 38.4 MiB.
+- Disk over 121 commits (before GC, pack index included): the flat store grew by 64.4 MiB, the prolly store by 38.4 MiB.
 
 Two facts that change the question of this issue:
 
 - File manifests are already content-cut trees (`crates/chunk-store/src/file.rs`): nodes cut by chunk ID, entries with subtree byte lengths, an edit rewrites one path. No prolly tree is needed for file content.
 - Metadata map nodes are already FastCDC-cut values (`store_io::put_value`). A commit does not store the full maps. It serializes and hashes them in full, and that is the cost that is left.
 
-Recommendation: **later** (the same as after the first run). At the Boost scale the gain is about 4 to 8 ms per commit: below the 10 ms limit of the rubric (and below 20 % on macOS). With real inserts and deletes the gain is smaller, and at 100 of them per commit it is gone on Linux. The gain becomes large at about one and a half million inodes and more. A smaller first step: `inode_map` and `inode_data` hold the same entries, so one of them can go (that also changes the root record, so it is an owner decision too).
+Recommendation: **later** (the same as after the first run). At the Boost scale the gain is about 4 to 8 ms per commit: below the 10 ms limit of the rubric (and below 20 % on macOS). With real inserts and deletes the gain is smaller, and at 100 of them per commit it is gone on Linux. The gain becomes large at about a million inodes and more. A smaller first step: `inode_map` and `inode_data` hold the same entries, so one of them can go (that also changes the root record, so it is an owner decision too).
 
 Owner questions (open, not decided by this phase):
 
-- Q-1: adopt prolly maps (a store format change), and in which milestone? Recommendation: later, when stores of about one and a half million inodes or more are a target.
+- Q-1: adopt prolly maps (a store format change), and in which milestone? Recommendation: later, when stores of about a million inodes or more are a target.
 - Q-2: one prolly map per metadata map, or one combined namespace map? Suggestion: decide it with Q-1.
 - Q-3: do the boundary rule and its constants become part of the frozen store format? Suggestion: yes if adopted, with a fixed-point table in place of the float test and a version byte for the rule.

@@ -48,7 +48,7 @@ table from the CSV files.
   costs flat 242.1 ms (221.2 CPU ms, 164,000 KB serialized, 591.5 MiB peak
   RSS), and prolly 22.0 ms (0.9 CPU ms, 10.7 KB, 85.7 MiB). By the scale
   rows, one flat map passes 100 ms per commit at about 1.6 million entries.
-- Disk, pack index included: over the 120 commits after the bulk step (80
+- Disk, pack index included: over the 121 commits after the bulk step (80
   small commits, the version step and 40 `insdel` commits), the flat store
   grew by 64.4 MiB and the prolly store by 38.4 MiB (apparent size, before
   GC).
@@ -74,10 +74,11 @@ table from the CSV files.
   at 13 to 18 (jobs of other projects, and short Docker containers of
   another project), so the wait expired and the run started at a load of
   13.30 (`load_before=13.30 14.65 16.45`, `load_after=14.25 14.62 16.11`).
-  No `slicefs-gcmem` container ran, and no other SliceFS cargo job of this
-  run. Jobs of other projects used about 13 to 15 of the 32 CPUs, about
-  twice the load of the 24-05 run. Byte, object and node counts do not
-  change with load; times can.
+  `docker ps` showed no `slicefs-gcmem` container at the start and at the
+  end, and no cargo job of this work ran beside the benchmark. Other jobs
+  were not counted; the 1-minute load average of 13 to 15 (of 32 CPUs)
+  is about twice that of the first run. Byte, object and node counts do
+  not change with load; times can.
 - Start 2026-11-26T22:18:56Z, end 22:21:47Z: 171 s for 3 runs.
 - Inputs: Boost 1_84_0 (the seed tree; `inode_data_entries=84104` in the
   `info` line of `prolly-shape.txt`) and Boost 1_85_0 (the version step:
@@ -176,8 +177,10 @@ Edit script (all from seed 24, the same in every run):
   number, with its name and content and an mtime one second later
   (`create_inode_at`); with no such file the edit is a delete. So every edit
   inserts or deletes one key in the middle of the committed map, and the
-  `inode_data` change is exactly K entries (9 of the 10 commits of each K
-  are half inserts and half deletes; the first is mostly deletes). Inserts
+  `inode_data` change is exactly K entries. For K = 1 the commits are one
+  delete or one insert in turn; for K of 10 and more, 9 of the 10 commits
+  of each K are half inserts and half deletes, and the first is mostly
+  deletes. Inserts
   and deletes in the middle move node boundaries, so prolly rewrites nodes
   up to the next resync. The product never uses a freed inode number
   again, so for `inode_data` the inserts are a stand-in: they show the cost
@@ -335,18 +338,19 @@ four O(N) maps would gain more (not measured), but the clone in
 
 | mode | peak RSS of the process (MiB) | ru_maxrss after the store load (MiB) | ru_maxrss after the last commit (MiB) |
 |---|---|---|---|
-| whole | 478.2 | 104.0 | 468.9 |
-| flat | 175.4 | - | 171.2 |
-| prolly | 33.7 | - | 30.2 |
+| whole | 478.2 | 104.0 | 478.2 |
+| flat | 175.4 | - | 175.3 |
+| prolly | 33.7 | - | 32.9 |
 
 The whole process reaches 104.0 MiB after the store load and 478.2 MiB at
-the end. Its high-water mark grows with the commits (133.8 MiB after the
-setup commit, 421.9 MiB after the version step and 468.9 MiB after the
-last `insdel` commit, from the `maxrss_bytes` column), so it is not only
-the maps; the parts were not measured. The flat process, which holds only
-`inode_data` and its chunk store, reaches 175.4 MiB (115.7 MiB after the
-version step); the prolly process 33.7 MiB (26.3 MiB after the version
-step), with no map in RAM. These peaks are higher than in the first run
+the end. Its high-water mark grows with the commits (from the
+`maxrss_bytes` column: 133.8 MiB after the setup commit, 421.9 MiB after
+the version step, and 468.9 MiB as the median of the `insdel` K = 1,000
+rows), so it is not only the maps; the parts were not measured. The flat
+process, which holds only `inode_data` and its chunk store, reaches 175.4
+MiB (115.7 MiB after the version step); the prolly process 33.7 MiB (26.3
+MiB after the version step), with no map in RAM. The last column is the
+`maxrss_bytes` of the last commit of each run (median of the runs). These peaks are higher than in the first run
 (390.0, 107.8 and 26.6 MiB) because the run now has 40 more commits, and
 the macOS high-water marks grow with the commits. On Linux the same
 processes peak at 153.2, 22.6 and 14.0 MiB, and the flat and prolly peaks
@@ -363,7 +367,7 @@ the higher macOS numbers was not measured.
 
 All sizes are taken after a close of the store, so the pack index is in
 all three modes (in the first run the flat and prolly sizes did not count
-it). After the 120 commits after the bulk build (80 small commits, the
+it). After the 121 commits after the bulk build (80 small commits, the
 version step and 40 `insdel` commits), with no GC, the prolly store of
 `inode_data` grew by 38.4 MiB and the flat store by 64.4 MiB (40 % less).
 The start sizes are close (2.9 against 2.7 MiB): a prolly node holds 41
@@ -523,7 +527,7 @@ lower than on macOS for the same work.
 
 | mode | peak RSS of the process (MiB) | ru_maxrss after the store load (MiB) | ru_maxrss after the last commit (MiB) |
 |---|---|---|---|
-| whole | 153.2 | 64.7 | 152.9 |
+| whole | 153.2 | 64.7 | 153.2 |
 | flat | 22.6 | - | 22.6 |
 | prolly | 14.0 | - | 14.0 |
 
@@ -804,9 +808,11 @@ smaller, and at 100 such changes it is gone on Linux.
 
 What would change the choice:
 
-- Stores with more than about one and a half million inodes as a target,
-  or a commit interval much shorter than today's, would make the O(N)
-  serialization the main cost. Then a new run of this benchmark at that scale (the scale rows,
+- Stores with more than about one million inodes as a target, or a commit
+  interval much shorter than today's, would make the O(N) serialization
+  the main cost (one flat map passes 100 ms at about 1.6 million entries,
+  and the whole commit, with three maps of that size, earlier; not
+  measured). Then a new run of this benchmark at that scale (the scale rows,
   or a seeded tree of that size) should decide Q-1.
 - A smaller first step exists: `inode_map` and `inode_data` hold the same
   entries, so one of the two can go. That removes about a third of the

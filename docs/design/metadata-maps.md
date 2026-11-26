@@ -40,7 +40,7 @@ run gives the same answer, with one row that is not better, see below):
   flat 242.1 ms and prolly 22.0 ms. One flat map passes 100 ms per commit at
   about 1.6 million entries (on Linux too).
 - New stored bytes and disk growth are lower with prolly (38.4 MiB in place
-  of 64.4 MiB over 120 commits, pack index included), but the current
+  of 64.4 MiB over 121 commits, pack index included), but the current
   design already stores only the changed chunks.
 - A smaller first step exists: `inode_map` and `inode_data` hold the same
   entries, so one of them can go. That also changes the root record (a
@@ -55,7 +55,7 @@ rehash, snapshots and the format number (a store format change).
 Owner questions (open, one-way doors):
 
 - Q-1: adopt prolly maps, and in which milestone? Recommendation: later,
-  when stores of about one and a half million inodes or more are a target.
+  when stores of about a million inodes or more are a target.
 - Q-2: one prolly map per metadata map, or one combined namespace map?
   Suggestion: decide it with Q-1, after the duplicate of `inode_map` and
   `inode_data` is gone.
