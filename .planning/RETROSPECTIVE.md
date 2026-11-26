@@ -59,6 +59,44 @@
 
 ---
 
+## Milestone: v2.2 — Concurrency & Store Evolution
+
+**Shipped:** 2026-11-26 (release `v2.3.0`)
+**Phases:** 9 (18-21, 21.1, 21.2, 22-24) | **Plans:** 69
+
+### What Was Built
+- Multithreaded requests: fine-grained locks with a rank checker (#21), a dirty budget with a background flusher, and a worker pool (`--workers`, #22). pjdfstest passes with 4 workers.
+- Store header format 7 with feature flags and a format policy (#154).
+- Safety gates in the release gate: clippy, Miri, TSan, loom, Kani, deadlock stress, coverage. The two Phase 19 races are fixed.
+- Per-store FastCDC profile with a benchmark (#67); SHA-256 and an offline, crash-safe `slicefs rehash` (#62); prolly-tree prototype and decision "later" (#19).
+
+### What Worked
+- Spikes first (Phase 18): S1-S7 decided each lock step with numbers, and the stress harness was the "done" test for Phases 19-21.
+- Lock-hold bars set before the runs (p99 and max per site) showed exactly which locks still did I/O; four follow-up plans (19-12..19-15) then met the bars.
+- Phases 23 and 24 ran at the same time on separate branches with no conflicts, because they edit different files.
+- Red-first tests for each race and each refusal proved that the tests see the bug.
+
+### What Was Inefficient
+- Phase 19 grew from 11 to 16 plans: the first measurements showed locked I/O that the plans did not expect.
+- Tests that start a child process or depend on time were flaky on a loaded Mac (60 s child start, idle-merge timing). Many gate runs were repeated.
+- Two phases (21.1, 21.2) were inserted during the milestone; the requirement count rose to 37.
+- The GSD tool reads Phases 18-23 as stale at close, because later phases changed covered source files.
+- The deferred-items scanner read the rows of a table as items; the table had to become plain text before the acknowledge.
+
+### Patterns Established
+- A new store setting line always comes with a feature flag; old releases refuse or mount read-only.
+- Heavy safety checks run in the release gate (release.yml) and by hand, not on each PR.
+- I/O runs in unlocked steps under a per-file step token; a step publishes only if the generation did not change.
+- Benchmarks of format options (profiles, prolly) run by hand on Boost trees; the default changes only by an owner decision.
+
+### Key Lessons
+- Measure lock holds against a stated bar before closing a lock phase; code review alone missed the locked fsync and pwrite.
+- Give each test that starts a child process a limit that covers a slow start on a loaded host, or make the child a small binary.
+- Write scaling needs its own measurement (the single pack appender); read scaling does not show it.
+- Keep deferred-item text in bullets, not tables, so the audit tools can read it.
+
+---
+
 ## Cross-Milestone Trends
 
 | Milestone | Phases | Plans | Requirements superseded |
@@ -66,3 +104,4 @@
 | v1.0 | 7 | 24 | - |
 | v2.0 | 6 | 13 | 12/21 |
 | v2.1 | 5 | 27 | 0/19 |
+| v2.2 | 9 | 69 | 0/37 |

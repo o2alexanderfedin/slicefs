@@ -68,3 +68,4 @@ From the code review (21.1-REVIEW.md), not fixed:
 17. IN-05: `Started` has no `Drop`, so a drop with no `stop` leaves the threads running and removes `mount.lock`.
 18. IN-06: the Docker FMT-02 check compares the store tree only after the unmount, not while mounted.
 19. IN-07: `create` does not sync the parent directory when it makes the store directory.
+  status: acknowledged

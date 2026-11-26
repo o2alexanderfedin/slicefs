@@ -58,12 +58,12 @@ ro_compat chunk-profile <release>
 
 The header of a new store with the write hash SHA-256
 (`seed --hash sha256`; the release word is the value of
-`HASH_SHA256_RELEASE`, now `v2.2`):
+`HASH_SHA256_RELEASE`, now `v2.3`):
 
 ```
 slicefs-store 7 (store header with feature flags)
 hash sha256
-incompat hash-sha256 v2.2
+incompat hash-sha256 v2.3
 ```
 
 A header with one flag of each class (the names are examples, and
@@ -177,8 +177,8 @@ Store format 7 has two flags: `KNOWN_FLAGS` is `chunk-profile` and
 | hash-sha256 | incompat | `HASH_SHA256_RELEASE` | The store has, or had, objects with SHA-256 IDs (tag 0x12). An older SliceFS cannot verify or read these objects, so it must not open the store. SliceFS writes the flag before the first SHA-256 object: in the first header of `seed --hash sha256`, in the same header write as the hash line of `mount --hash sha256`, and alone before `rehash --to sha256` writes an object. The flag stays when the write hash goes back to `blake3-256`, because SHA-256 objects can still be live. Removing it after a GC that proves no SHA-256 object is left is deferred. |
 
 The release words are the constants `CHUNK_PROFILE_RELEASE` and
-`HASH_SHA256_RELEASE` in `header.rs`. They are placeholders (now `v2.2`)
-until the release is named.
+`HASH_SHA256_RELEASE` in `header.rs`. Both are `v2.3`, the first
+release that writes these flags.
 
 Rule to add a flag:
 

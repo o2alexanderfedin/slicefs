@@ -37,8 +37,10 @@ Found in the plans and not fixed:
 - **One 68 ms `stripe` hold** at 8 workers in the metadata phase (21-08). The p99 wait is 0. The cause is not known.
 - **`inode_map` wait** (21-08): the only metadata map lock with a real wait (p99 29.6 us at 4 workers, 120.6 us at 8). Input for #165 and the prolly-tree evaluation (Phase 24).
 - **macOS bench log** (21-08): every `macbench` line prints `run=1`. The `== n=<N> run=<r>` header before each line gives the true run. Fix the script with the next code change.
+  status: acknowledged
 
 ## Closed in Phase 21
 
 - **[Step limit] item.** R1=pass (S7 at or under 320 MiB at 1, 2, 4 and 8 writers) and mem_bar=pass (bench daemon VmHWM at most 178 MiB at 1, 2, 4 and 8 workers). The fix is the fixed glibc mmap threshold of plan 21-05. No step limit was built.
 - **POOL-05 bar.** `verdict=PASS` (read 2.69 times at 4 workers). No follow-up issue is necessary.
+  status: acknowledged

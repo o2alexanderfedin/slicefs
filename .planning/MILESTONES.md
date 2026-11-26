@@ -1,5 +1,30 @@
 # Milestones
 
+## v2.2 Concurrency & Store Evolution (Shipped: 2026-11-26)
+
+**Phases completed:** 9 phases (18, 19, 20, 21, 21.1, 21.2, 22, 23, 24), 69 plans, 79 tasks
+**Requirements:** 37/37 satisfied
+**Audit:** `.planning/milestones/v2.2-MILESTONE-AUDIT.md` (status tech_debt; the debt is accepted and carried forward). The audit was written before the #19 post and before the flag word `v2.3`, so it says 36/37 and 8/9 phases; Phase 24 and PROLLY-03 were completed after it.
+**Release:** `v2.3.0` (the GSD milestone id stays v2.2; `v2.2.0` was already used by the v2.1 release). The store flags `chunk-profile` and `hash-sha256` carry the release word `v2.3`.
+**Git range:** 111c960 (first Phase 18 commit) to the close commit; 558 commits; 181 files changed in `crates/` and `vendor/fuser` (+41,449 / -4,685 lines).
+**Closeout type:** override_closeout. Known verification overrides: 22 newly acknowledged, 0 carried forward from a prior close (see STATE.md Deferred Items). The first audit listed 26 items; 4 of them were the rows of one table in the Phase 21.2 deferred list, so the real count is 22.
+**Verification note:** all 9 phase reports say `passed`. The GSD tool reads Phases 18-23 as `stale`, because later phases changed source files that the earlier reports cover. The reports were not run again.
+
+**What shipped (state at close):**
+- Spikes S1-S7 and an in-process stress harness with a data model (#127).
+- Fine-grained locks (#21): parking_lot shim with a debug rank checker, one `FileCell` per open inode, 256 namespace stripes, I/O steps with no lock held, log records appended under the locks of their apply. Six lock sites hold at most 1776 us (macOS) and 1967 us (Linux).
+- Dirty budget with a background flusher; writers wait for budget before they take a lock; options `--dirty-budget`, `--dirty-limit`, `--dirty-idle`, `--dirty-expire`.
+- Worker pool (#22): `--workers N`, drain before `destroy()`, abort on a worker panic. pjdfstest passes with 4 workers. Reads 2.69x at 4 workers; writes do not scale past 2 workers.
+- Store header format 7 with compat, ro_compat and incompat flags (#154); an unknown ro_compat flag mounts read-only; `docs/design/store-format.md`.
+- Safety gates in the release gate: clippy, Miri, TSan, loom, Kani, deadlock stress, coverage (floor 90.27 %). The two Phase 19 races are fixed.
+- Per-store FastCDC profile set at `seed` (#67); the benchmark recommends 8/32/128 KiB for a later default; the default stays 4/8/32 KiB.
+- SHA-256 as a second production hash, and `slicefs rehash --to <hash>`: offline, crash-safe, bounded memory, `--dry-run` (#62).
+- Prolly-tree prototype (`crates/prolly`) and benchmark on Boost; decision "later", posted on #19.
+
+**Known tech debt:** audit warnings G1 (no end-to-end test with a real mount and N workers around a rehash), G2 (the rehash refcount sorter has no free-space check), G3 (extsort, hash, rehash and the gc-tmp mark have no Miri, loom or TSan target of their own). Open follow-ups: #207 (whole `.idx` decode, Bloom filters), #210 (scrub keeps all content keys in RAM), #165 (refcount removal), #178 (release publishing).
+
+---
+
 ## v2.1 Store Index & Measurements (Shipped: 2026-11-20)
 
 **Phases completed:** 5 phases (13-17), 27 plans

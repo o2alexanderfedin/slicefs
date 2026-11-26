@@ -1,7 +1,7 @@
 ---
 phase: 24-prolly-evaluation
 verified: 2026-11-26T22:45:03Z
-status: human_needed
+status: passed
 score: 2/3 must-haves verified
 covered_files:
   - .planning/phases/24-prolly-evaluation/24-01-PLAN.md
@@ -46,7 +46,7 @@ human_verification:
 
 **Phase goal:** The owner has measured numbers and a written decision on prolly trees for metadata maps (#19).
 **Verified:** 2026-11-26, HEAD 7fab663, branch `feature/phase-24-prolly-evaluation`
-**Status:** human_needed (one item: post the #19 text)
+**Status:** passed (the #19 text is posted)
 **Re-verification:** No
 
 The test and clippy gate result on HEAD is recorded by the orchestrator. Result on 7fab663: `cargo test --workspace` (four skips) exit 0, 85 result lines, 1,696 passed, 0 failed, 13 ignored; `clippy.sh` result=ok, unsafe check result=ok. The verifier did not run cargo. In the orchestrator's gate log, which was still running at the time of this check, the `prolly` block (23 passed) and the `prolly-bench` smoke block (2 passed) are already complete. The gate of the fix branch is `runs/gate-24-fix.log`: prolly 23 passed, smoke 2 passed, clippy ok, workspace 1,696 passed.
@@ -112,3 +112,7 @@ Requirements: PROLLY-01, PROLLY-02 and PROLLY-03 map to criteria 1, 2 and 3, wit
 
 _Verified: 2026-11-26_
 _Verifier: Claude (gsd-verifier)_
+
+## Human item: resolved (2026-11-26)
+
+The owner approved the #19 text. It is posted on #19 (issuecomment-7205565294). Criterion 3 is now met in full.
