@@ -6,11 +6,11 @@ current_phase: 22
 current_phase_name: Chunk profiles
 current_plan: Not started
 status: planning
-stopped_at: Phase 21.2 complete, ready to plan Phase 22
-last_updated: "2026-11-26T05:22:16.631Z"
+stopped_at: Phase 22 context gathered
+last_updated: "2026-11-26T05:41:00.279Z"
 last_activity: 2026-11-25
 last_activity_desc: Phase 21.2 complete, transitioned to Phase 22
-state_head: d522c321b92e1ca6cd43d2dff3a0ba318a2f6893
+state_head: aa060567108a1c641c7ff29917fdd71e8030e3d3
 progress:
   total_phases: 9
   completed_phases: 4
@@ -268,9 +268,9 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-26T01:31:02.078Z
-Stopped at: Phase 21.2 complete, ready to plan Phase 22
-Resume file: None
+Last session: 2026-11-26T05:40:59.659Z
+Stopped at: Phase 22 context gathered
+Resume file: .planning/phases/22-chunk-profiles/22-CONTEXT.md
 
 ## Operator Next Steps
 
