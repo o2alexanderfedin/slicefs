@@ -432,16 +432,17 @@ fn commit_line(
 /// `crates/metadata/src/store.rs` (private there; copied so that `metadata`
 /// is not changed, D-01, D-22): the count u64 LE, then ino u64 LE and the
 /// key per entry in ino order, stored as one value through
-/// `store_io::put_value` (FastCDC chunks under a manifest tree).
-fn intern_flat(cs: &ChunkStore, map: &BTreeMap<u64, [u8; KEY_LEN]>) -> Res<u64> {
+/// `store_io::put_value` (FastCDC chunks under a manifest tree). Returns
+/// the key of the value and its byte length.
+fn intern_flat(cs: &ChunkStore, map: &BTreeMap<u64, [u8; KEY_LEN]>) -> Res<(ObjectKey, u64)> {
     let mut bytes = Vec::with_capacity(8 + map.len() * MAP_ENTRY);
     bytes.extend_from_slice(&(map.len() as u64).to_le_bytes());
     for (ino, key) in map {
         bytes.extend_from_slice(&ino.to_le_bytes());
         bytes.extend_from_slice(key);
     }
-    put_value(cs, &bytes)?;
-    Ok(bytes.len() as u64)
+    let key = put_value(cs, &bytes)?;
+    Ok((key, bytes.len() as u64))
 }
 
 /// The current design for one map: the whole map in RAM, interned in full
@@ -460,10 +461,10 @@ pub(crate) fn flat(argv: &[String]) -> Res<()> {
         map.insert(ino, *key);
         Ok(())
     })?;
-    timed("flat", &cs, "bulk", 0, 0, map.len() as u64, || {
-        let ser = intern_flat(&cs, &map)?;
+    let mut last = timed("flat", &cs, "bulk", 0, 0, map.len() as u64, || {
+        let (key, ser) = intern_flat(&cs, &map)?;
         cs.sync()?;
-        Ok(((), ser, None))
+        Ok((key, ser, None))
     })?;
     // The disk sizes are taken after a close, which writes the pack index,
     // as for whole (D-23: index included); the store is opened again.
@@ -479,16 +480,19 @@ pub(crate) fn flat(argv: &[String]) -> Res<()> {
                 map.remove(&ino);
             }
         })?;
-        timed("flat", &cs, &bl.pattern, bl.k, bl.seq, changed, || {
-            let ser = intern_flat(&cs, &map)?;
+        last = timed("flat", &cs, &bl.pattern, bl.k, bl.seq, changed, || {
+            let (key, ser) = intern_flat(&cs, &map)?;
             cs.sync()?;
-            Ok(((), ser, None))
+            Ok((key, ser, None))
         })?;
     }
 
+    // The check reads the last stored value back from the store (as prolly
+    // iterates its stored tree), so it proves what was written.
     let mut d = Digest::new();
-    for (ino, key) in &map {
-        d.add(*ino, key);
+    let mut s = MapStream::open(&cs, &last)?;
+    while let Some((ino, key)) = s.next_entry()? {
+        d.add(ino, &key);
     }
     check("flat", &plan, &d)?;
     cs.close()?;
@@ -667,14 +671,14 @@ pub(crate) fn scale(argv: &[String]) -> Res<()> {
         "flat" => {
             let mut map: BTreeMap<u64, [u8; KEY_LEN]> = (2..n + 2).map(|ino| (ino, synth_value(&mut rng))).collect();
             let (ser, m) = measure(&cs, || {
-                let ser = intern_flat(&cs, &map)?;
+                let (_, ser) = intern_flat(&cs, &map)?;
                 cs.sync()?;
                 Ok(ser)
             })?;
             line("build", ser, &m);
             map.insert(mid, synth_value(&mut rng));
             let (ser, m) = measure(&cs, || {
-                let ser = intern_flat(&cs, &map)?;
+                let (_, ser) = intern_flat(&cs, &map)?;
                 cs.sync()?;
                 Ok(ser)
             })?;

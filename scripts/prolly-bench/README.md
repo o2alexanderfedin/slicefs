@@ -111,8 +111,10 @@ one map inside the real commit:
   same entries (real digests, real creates and deletes) without opening
   `DictMetadataStore`.
 - Both replays end with a `check` line: a BLAKE3 digest of the final map
-  that must be the same as the digest of the real final map (`final` line
-  of `batches`). `ok=1` means they match. A mismatch stops the run.
+  as stored (`flat` reads its last stored value back, `prolly` iterates its
+  stored tree) that must be the same as the digest of the real final map
+  (`final` line of `batches`). `ok=1` means they match. A mismatch stops the
+  run.
 
 The modes run in this order in each run: `whole`, `batches`, then `flat`
 and `prolly` (flat first on odd runs, prolly first on even runs), then the
