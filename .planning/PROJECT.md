@@ -138,9 +138,9 @@ Other candidates: idle-merge control (#141), several roots, commits and refs (#8
 | Dirty budget and flusher: writers wait for budget before any lock; one background flusher steps idle, expired or quiet files, one step per shared gate hold; `--dirty-budget` 64M, `--dirty-limit` min(32M, budget), `--dirty-idle` 5 s, `--dirty-expire` 30 s (v2.2, Phase 20) | No take-out of another file's state; all writers throttled with a commit waiting ends; Docker S7 with the flusher peaks at 287 MiB VmHWM under the 320 MiB cap | ✓ Good |
 | Worker pool: one FUSE reader, N workers by `--workers`; default 1 on macOS, `clamp(cpus/2, 1, 8)` on Linux; a worker panic aborts the daemon (v2.2, Phase 21) | 4 workers pass pjdfstest; reads 2.69x at 4 workers; writes flat past 2 workers (single pack appender) | ✓ Good; write scaling is open |
 | Store header format 7 with compat, ro_compat and incompat flags; a new setting line always comes with a flag (v2.2, Phase 21.1) | Old releases must refuse or mount read-only what they do not understand | ✓ Good; the format freeze is an owner decision |
-| Safety gates run in the release gate, not on each PR (v2.2, Phase 21.2) | The gates are slow; the release must not ship with a failed gate | ✓ Good |
+| Safety gates run in the release gate, not on each PR (v2.2, Phase 21.2) | Owner decision (2026-11-26); the release must not ship with a failed gate | ✓ Good |
 | Chunk profile fixed per store at `seed`; default stays 4/8/32 KiB (v2.2, Phase 22) | A profile change is a store-format change; the owner decides the default | — Pending (the benchmark recommends 8/32/128 KiB) |
-| SHA-256 as a second production hash; rehash is offline only (v2.2, Phase 23) | A crash-safe whole-store conversion is simpler with no mount | ✓ Good |
+| SHA-256 as a second production hash; rehash is offline only (v2.2, Phase 23) | Owner decision; rehash refuses while the store is mounted | ✓ Good |
 | Prolly trees: decision "later" (v2.2, Phase 24) | At the Boost scale the gain per commit is small (about 4-8 ms); it grows with the map (1.6M entries pass 100 ms flat); file manifests are already content-cut trees | — Pending (#19) |
 | GSD milestone v2.2 ships as release `v2.3.0` | `v2.2.0` was already used by the v2.1 release | ✓ Done |
 

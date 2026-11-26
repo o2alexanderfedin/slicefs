@@ -4,7 +4,7 @@
 
 **Phases completed:** 9 phases (18, 19, 20, 21, 21.1, 21.2, 22, 23, 24), 69 plans, 79 tasks
 **Requirements:** 37/37 satisfied
-**Audit:** `.planning/milestones/v2.2-MILESTONE-AUDIT.md` (status tech_debt; the debt is accepted and carried forward)
+**Audit:** `.planning/milestones/v2.2-MILESTONE-AUDIT.md` (status tech_debt; the debt is accepted and carried forward). The audit was written before the #19 post and before the flag word `v2.3`, so it says 36/37 and 8/9 phases; Phase 24 and PROLLY-03 were completed after it.
 **Release:** `v2.3.0` (the GSD milestone id stays v2.2; `v2.2.0` was already used by the v2.1 release). The store flags `chunk-profile` and `hash-sha256` carry the release word `v2.3`.
 **Git range:** 111c960 (first Phase 18 commit) to the close commit; 558 commits; 181 files changed in `crates/` and `vendor/fuser` (+41,449 / -4,685 lines).
 **Closeout type:** override_closeout. Known verification overrides: 22 newly acknowledged, 0 carried forward from a prior close (see STATE.md Deferred Items). The first audit listed 26 items; 4 of them were the rows of one table in the Phase 21.2 deferred list, so the real count is 22.

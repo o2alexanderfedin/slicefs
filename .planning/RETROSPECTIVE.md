@@ -73,7 +73,7 @@
 ### What Worked
 - Spikes first (Phase 18): S1-S7 decided each lock step with numbers, and the stress harness was the "done" test for Phases 19-21.
 - Lock-hold bars set before the runs (p99 and max per site) showed exactly which locks still did I/O; four follow-up plans (19-12..19-15) then met the bars.
-- The concurrency track (18-21) and the store track (22-24) ran in parallel with no conflicts, because they edit different files.
+- Phases 23 and 24 ran at the same time on separate branches with no conflicts, because they edit different files.
 - Red-first tests for each race and each refusal proved that the tests see the bug.
 
 ### What Was Inefficient
