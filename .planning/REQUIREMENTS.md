@@ -56,12 +56,12 @@
 
 ### Hashes and rehash (#62)
 
-- [ ] **HASH-01**: SHA-256 is a production write hash with its own algorithm tag (hardware-accelerated where the CPU has it). A store can be seeded or mounted with `--hash sha256`. BLAKE3-256 stays the default.
-- [ ] **HASH-02**: `slicefs rehash --to <algorithm> <store>` rewrites all objects (file chunks, manifests, metadata nodes, roots and snapshots) under the new algorithm. A rehashed file gets the same key as a fresh write of its bytes.
-- [ ] **HASH-03**: Rehash is offline: it refuses while the store is mounted (OS file lock) or while the write log has records after the last root.
-- [ ] **HASH-04**: Rehash is crash-safe: a crash at any point leaves a store that mounts with the old or the new root. GC frees the old objects after the switch. Old objects are verified as they are read.
-- [ ] **HASH-05**: Rehash reports progress, bytes rewritten and bytes freed, and has `--dry-run`. Its memory is bounded (no in-RAM map of all objects).
-- [ ] **HASH-06**: Tests: a BLAKE3-256 store and a SHA-256 store each convert to the other and back. A store with mixed algorithms ends with one algorithm. Files and snapshots do not change, and scrub passes.
+- [x] **HASH-01**: SHA-256 is a production write hash with its own algorithm tag (hardware-accelerated where the CPU has it). A store can be seeded or mounted with `--hash sha256`. BLAKE3-256 stays the default.
+- [x] **HASH-02**: `slicefs rehash --to <algorithm> <store>` rewrites all objects (file chunks, manifests, metadata nodes, roots and snapshots) under the new algorithm. A rehashed file gets the same key as a fresh write of its bytes.
+- [x] **HASH-03**: Rehash is offline: it refuses while the store is mounted (OS file lock) or while the write log has records after the last root.
+- [x] **HASH-04**: Rehash is crash-safe: a crash at any point leaves a store that mounts with the old or the new root. GC frees the old objects after the switch. Old objects are verified as they are read.
+- [x] **HASH-05**: Rehash reports progress, bytes rewritten and bytes freed, and has `--dry-run`. Its memory is bounded (no in-RAM map of all objects).
+- [x] **HASH-06**: Tests: a BLAKE3-256 store and a SHA-256 store each convert to the other and back. A store with mixed algorithms ends with one algorithm. Files and snapshots do not change, and scrub passes.
 
 ### Prolly-tree evaluation (#19)
 
@@ -124,12 +124,12 @@ Deferred; tracked, not in this roadmap.
 | PROF-01 | Phase 22 | Complete |
 | PROF-02 | Phase 22 | Complete |
 | PROF-03 | Phase 22 | Complete |
-| HASH-01 | Phase 23 | Pending |
-| HASH-02 | Phase 23 | Pending |
-| HASH-03 | Phase 23 | Pending |
-| HASH-04 | Phase 23 | Pending |
-| HASH-05 | Phase 23 | Pending |
-| HASH-06 | Phase 23 | Pending |
+| HASH-01 | Phase 23 | Complete |
+| HASH-02 | Phase 23 | Complete |
+| HASH-03 | Phase 23 | Complete |
+| HASH-04 | Phase 23 | Complete |
+| HASH-05 | Phase 23 | Complete |
+| HASH-06 | Phase 23 | Complete |
 | PROLLY-01 | Phase 24 | Pending |
 | PROLLY-02 | Phase 24 | Pending |
 | PROLLY-03 | Phase 24 | Pending |
