@@ -1,12 +1,14 @@
 #!/bin/bash
 # The clippy gate (Phase 21.2, TSAFE-01): the command of job `clippy` in
 # .github/workflows/safety.yml (rows linux and macos), and the same run for a
-# developer. Two checks:
+# developer. Three checks:
 #   1. clippy on the pinned stable toolchain, every workspace crate and every
 #      target, with warnings as errors (vendor/fuser is outside the workspace,
 #      so its findings stay warnings);
 #   2. every lint allow/expect attribute in crates/ and benchmarks/ has a
-#      `reason = "..."` on the same line.
+#      `reason = "..."` on the same line;
+#   3. scripts/safety/unsafe-count.sh: the `unsafe` counts of the code match
+#      docs/design/unsafe-review.md.
 # Usage: scripts/safety/clippy.sh
 # Env:   RUST_STABLE   the toolchain (default: the pin in safety.yml; RUST_STABLE=stable locally)
 set -euo pipefail
@@ -29,3 +31,6 @@ if [ -n "$missing" ]; then
   exit 1
 fi
 echo "CLIPPY os=$(uname -s) toolchain=$RUST_STABLE result=ok"
+
+# Every `unsafe` token is counted in the review doc (TSAFE-06, D-05).
+"$HERE/unsafe-count.sh" </dev/null

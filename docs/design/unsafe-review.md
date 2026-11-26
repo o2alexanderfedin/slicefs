@@ -400,3 +400,294 @@ The `unsafe` in test code is listed here with one line per file.
   function headers and its test strings; no `unsafe` code.
 - `crates/slicefs-cli/tests/reply_after_locks.rs`: the word in the same
   kind of parser; no `unsafe` code.
+
+## vendor/fuser
+
+`vendor/fuser` is outside the workspace, so clippy does not check it
+(decision D-11). This review covers it.
+
+**What SliceFS compiles.** `slicefs-cli` uses `fuser` with no features
+(`default = []`). `vendor/fuser/build.rs` sets the cfg `fuser_mount_impl`:
+
+- Linux (no `libfuse` feature): `pure-rust`. `src/mnt/mod.rs` then compiles
+  `mnt/fuse_pure.rs`.
+- macOS (no `macos-no-mount` feature): a pkg-config probe of `fuse` (the
+  libfuse2 library of FUSE-T), then `libfuse2`. `src/mnt/mod.rs` then
+  compiles `mnt/fuse2.rs` and `mnt/fuse2_sys.rs`.
+- `libfuse3` is set only for other targets or with a `libfuse` feature.
+  Thus SliceFS compiles `mnt/fuse3.rs` and `mnt/fuse3_sys.rs` on no target.
+
+**How it is tested.** The CI job `linux` runs the vendored fuser lib tests
+(`scripts/docker-linux-test/run.sh all`, a copy of `vendor/fuser`,
+`cargo test --lib`), the Linux FUSE smoke test and pjdfstest. These run as
+root in Docker, so the mount is the direct `mount(2)` path, not the
+`fusermount` path. The CI job `macos` builds and links the libfuse2 path
+but does not mount. The FUSE-T mount runs only in the by-hand runs.
+
+**Code that SliceFS does not use.** The passthrough items (`BackingId`,
+`wrap_backing`, `open_backing`) and `clone_fd` are compiled, but SliceFS
+calls none of them: it makes no `BackingId` and does not set `clone_fd`.
+
+### channel.rs: `Channel::clone_fd`
+
+- **File and item**: `vendor/fuser/src/channel.rs`, `Channel::clone_fd`, the
+  `FUSE_DEV_IOC_CLONE` block.
+- **Compiled for SliceFS**: Linux yes (`cfg(target_os = "linux")`), macOS
+  no.
+- **What it does**: opens a new `/dev/fuse` fd and attaches it to the
+  session of this channel.
+- **Safety argument**: The ioctl gets an fd that `DevFuse::open` just
+  opened and a pointer to a local `u32` that lives for the call. The `nix`
+  ioctl macro checks the result.
+- **How it is tested**: not reached. Only the session option `clone_fd`
+  calls it, and SliceFS does not set it.
+
+### channel.rs: `ChannelSender::wrap_backing`
+
+- **File and item**: `channel.rs`, `unsafe fn ChannelSender::wrap_backing`
+  and the block in it.
+- **Compiled for SliceFS**: Linux yes, macOS yes.
+- **What it does**: makes a `BackingId` from a raw backing ID. There is no
+  system call.
+- **Safety argument**: The function passes its contract (the ID is open,
+  belongs to this session and is not closed while the `BackingId` lives)
+  to `BackingId::wrap_raw`. Its callers are the `wrap_backing` functions of
+  `reply.rs`, which have the same contract.
+- **How it is tested**: not reached. SliceFS calls no `wrap_backing`.
+
+### reply.rs: `ReplySender::wrap_backing`
+
+- **File and item**: `vendor/fuser/src/reply.rs`, `unsafe fn
+  ReplySender::wrap_backing` and the block in it.
+- **Compiled for SliceFS**: Linux yes, macOS yes.
+- **What it does**: passes the call to `ChannelSender::wrap_backing`.
+- **Safety argument**: the same contract, passed on unchanged.
+- **How it is tested**: not reached.
+
+### reply.rs: `ReplyOpen::wrap_backing`
+
+- **File and item**: `reply.rs`, `pub unsafe fn ReplyOpen::wrap_backing`
+  and the block in it.
+- **Compiled for SliceFS**: Linux yes, macOS yes.
+- **What it does**: the public entry for a file system that makes a
+  `BackingId` from a raw ID.
+- **Safety argument**: the `# Safety` doc of the function states the
+  contract; the caller must keep it. SliceFS does not call it.
+- **How it is tested**: not reached.
+
+### reply.rs: `ReplyCreate::wrap_backing`
+
+- **File and item**: `reply.rs`, `pub unsafe fn ReplyCreate::wrap_backing`
+  and the block in it.
+- **Compiled for SliceFS**: Linux yes, macOS yes.
+- **What it does**: as `ReplyOpen::wrap_backing`.
+- **Safety argument**: as `ReplyOpen::wrap_backing`.
+- **How it is tested**: not reached.
+
+### passthrough.rs: `BackingId::create_raw`
+
+- **File and item**: `vendor/fuser/src/passthrough.rs`,
+  `BackingId::create_raw`, the `FUSE_DEV_IOC_BACKING_OPEN` call.
+- **Compiled for SliceFS**: Linux yes, macOS yes (on macOS it returns an
+  error before the call).
+- **What it does**: registers an open file as a backing file of the
+  session and returns its ID.
+- **Safety argument**: Both fds are borrowed for the call. The argument is
+  a local `fuse_backing_map` that lives for the call. The `nix` ioctl macro
+  checks the result.
+- **How it is tested**: not reached. Only `open_backing` calls it.
+
+### passthrough.rs: `BackingId::wrap_raw`
+
+- **File and item**: `passthrough.rs`, `unsafe fn BackingId::wrap_raw`.
+- **Compiled for SliceFS**: Linux yes, macOS yes.
+- **What it does**: stores the ID and a weak reference to the channel.
+  There is no operation that needs `unsafe` in it.
+- **Safety argument**: The `unsafe` marks the contract: `Drop` closes the
+  ID, so the ID must be open and owned by this value.
+- **How it is tested**: not reached.
+
+### passthrough.rs: `Drop for BackingId`
+
+- **File and item**: `passthrough.rs`, `Drop for BackingId`, the
+  `FUSE_DEV_IOC_BACKING_CLOSE` call.
+- **Compiled for SliceFS**: Linux yes, macOS yes.
+- **What it does**: closes the backing ID when the value is dropped.
+- **Safety argument**: The call runs only if the channel still exists (the
+  weak reference upgrades), so the fd is open. The argument points to a
+  field of `self`, which lives for the call. An error is logged.
+- **How it is tested**: not reached. SliceFS makes no `BackingId`.
+
+### forget_one.rs: `ForgetOne::slice_from_inner`
+
+- **File and item**: `vendor/fuser/src/forget_one.rs`,
+  `ForgetOne::slice_from_inner` (`transmute`).
+- **Compiled for SliceFS**: Linux yes, macOS yes.
+- **What it does**: shows the `fuse_forget_one` array of a `BATCH_FORGET`
+  request as `&[ForgetOne]`.
+- **Safety argument**: `ForgetOne` is `repr(transparent)` over
+  `fuse_forget_one`, so both have the same size and alignment. The
+  `transmute` of `&[A]` to `&[B]` keeps the length and the lifetime. The
+  input slice comes from `ArgumentIterator::fetch_slice`, which uses
+  `zerocopy` and checks the size and the alignment.
+- **How it is tested**: it runs for each `BATCH_FORGET` that the kernel
+  sends. The Linux FUSE smoke test and pjdfstest of the CI job `linux` can
+  reach it; no test checks that they do.
+
+### mnt/fuse_pure.rs: `File::from_raw_fd` in `receive_fusermount_message`
+
+- **File and item**: `vendor/fuser/src/mnt/fuse_pure.rs`,
+  `receive_fusermount_message`.
+- **Compiled for SliceFS**: Linux yes, macOS no.
+- **What it does**: takes ownership of the `/dev/fuse` fd that
+  `fusermount` sends over a socket (`SCM_RIGHTS`).
+- **Safety argument**: An fd received with `SCM_RIGHTS` is new in this
+  process, and no other value owns it. A negative fd is refused.
+- **How it is tested**: reached only when the direct mount fails (a user
+  that is not root). CI mounts as root, so no CI job reaches it.
+- **Note**: only the first fd of the message is taken. An extra fd would
+  stay open (a leak, not memory damage). `fusermount` sends one.
+
+### mnt/fuse_pure.rs: `clear_cloexec_in_pre_exec`
+
+- **File and item**: `fuse_pure.rs`, `unsafe fn clear_cloexec_in_pre_exec`
+  and the `pre_exec` block in it.
+- **Compiled for SliceFS**: Linux yes, macOS no.
+- **What it does**: in the child, after `fork` and before `exec`, it clears
+  `FD_CLOEXEC` on one fd, so that `fusermount` gets that fd.
+- **Safety argument**: The `pre_exec` closure runs in the child of a
+  `fork`, where only async-signal-safe calls are allowed. It calls only
+  `fcntl`, and it does not allocate (a `nix` error becomes an `io::Error`
+  from the raw OS code). The `unsafe fn` contract is that the fd stays open
+  until the command is spawned; both callers keep it.
+- **How it is tested**: reached only on the `fusermount` path (see above).
+
+### mnt/fuse_pure.rs: the call in `fuse_mount_fusermount`
+
+- **File and item**: `fuse_pure.rs`, `fuse_mount_fusermount`.
+- **Compiled for SliceFS**: Linux yes, macOS no.
+- **What it does**: lets the `fusermount` child keep its end of the socket
+  pair.
+- **Safety argument**: `child_socket` is dropped only after `spawn`, so
+  the fd is open when the child runs the closure.
+- **How it is tested**: reached only on the `fusermount` path.
+
+### mnt/fuse_pure.rs: the call in `fuse_mount_mount_fusefs`
+
+- **File and item**: `fuse_pure.rs`, `fuse_mount_mount_fusefs`.
+- **Compiled for SliceFS**: Linux yes, macOS no.
+- **What it does**: lets `mount_fusefs` keep the `/dev/fuse` fd.
+- **Safety argument**: `fuse_device` lives until `output()` returns, so
+  the fd is open when the child runs the closure.
+- **How it is tested**: not reached on Linux. It runs only when the found
+  helper is `mount_fusefs` (the BSDs).
+
+### mnt/fuse2.rs: `fuse_mount_compat25` in `MountImpl::new`
+
+- **File and item**: `vendor/fuser/src/mnt/fuse2.rs`, `MountImpl::new`, the
+  `fuse_mount_compat25` call.
+- **Compiled for SliceFS**: Linux no, macOS yes (the FUSE-T path).
+- **What it does**: asks libfuse2 to mount and returns the session fd.
+- **Safety argument**: The mount point is a `CString` that lives for the
+  call. The argument list comes from `with_fuse_args`, which keeps its
+  strings alive for the closure. A negative result is an error.
+- **How it is tested**: the CI job `macos` builds and links it. It runs in
+  the by-hand FUSE-T runs only.
+
+### mnt/fuse2.rs: `File::from_raw_fd` in `MountImpl::new`
+
+- **File and item**: `fuse2.rs`, `MountImpl::new`.
+- **Compiled for SliceFS**: Linux no, macOS yes.
+- **What it does**: takes ownership of the fd that `fuse_mount_compat25`
+  returned.
+- **Safety argument**: In the libfuse2 API the caller owns the returned fd
+  and closes it. The fd is checked (`fd >= 0`) before the call.
+- **How it is tested**: as above.
+
+### mnt/fuse2_sys.rs: the `unsafe extern "C"` block
+
+- **File and item**: `vendor/fuser/src/mnt/fuse2_sys.rs`, the block with
+  `fuse_mount_compat25` (and `fuse_unmount_compat22` for other targets).
+- **Compiled for SliceFS**: Linux no (the module is compiled for the
+  vendored tests, but this block is `cfg(fuser_mount_impl = "libfuse2")`),
+  macOS yes.
+- **What it does**: declares the libfuse2 functions.
+- **Safety argument**: The declarations must match the C functions. The
+  `_compat25` names exist since libfuse 2.6, and `build.rs` asks pkg-config
+  for at least 2.6.0. `fuse_args` is `repr(C)` with the C fields.
+- **How it is tested**: the CI job `macos` links them against the FUSE-T
+  library. A wrong signature is not visible at link time; the by-hand
+  FUSE-T runs call it.
+
+### Not compiled for SliceFS
+
+- `mnt/fuse2.rs`, `MountImpl::umount_impl`, the `fuse_unmount_compat22`
+  block: not compiled (its cfg leaves out macOS, and Linux does not build
+  `fuse2.rs`).
+- `mnt/fuse3.rs`, 6 tokens (`fuse_session_new`, `fuse_session_mount`,
+  `fuse_session_fd`, `BorrowedFd::borrow_raw`, the unmount block,
+  `unsafe impl Send for MountImpl`): not compiled (`libfuse3` only).
+- `mnt/fuse3_sys.rs`, the `unsafe extern "C"` block: not compiled
+  (`libfuse3` only).
+- `mnt/mod.rs`, the `CStr::from_ptr` of a test of `with_fuse_args`: test
+  code; it runs in the vendored lib tests of the CI job `linux`.
+- `examples/passthrough_fork.rs` (`wrap_backing`, `fork`,
+  `OwnedFd::from_raw_fd`) and `examples/simple.rs` (3 tokens): fuser
+  examples. SliceFS does not build them.
+
+## Benchmark tools
+
+These tools run by hand only. They are not part of the daemon.
+
+- `benchmarks/chunk-bench/src/main.rs`: a zeroed `rusage` and `getrusage`.
+- `benchmarks/index-bench/src/main.rs`: zeroed `rusage` and `getrusage`
+  (three places), `task_info` for the RSS on macOS (two places, with a
+  zeroed `mach_task_basic_info`), `sysconf(_SC_PAGESIZE)` and `sync`.
+
+## Follow-ups
+
+None of these is a memory-safety bug. This review changes no code.
+
+1. `unmount.rs` and `fuset_watch.rs`: skip a pid that is not `pid > 1`
+   before `kill`, with a unit test on `fuse_t_servers_of`.
+2. `signals.rs`: save and restore `errno` in `on_signal`.
+3. Comment-only: a `SAFETY` comment on the four `unsafe` blocks of
+   `filesystem.rs` `compute_statfs`, and the `alloc_tune.rs` macOS comment
+   on the call line.
+
+## Counts
+
+Taken with `grep -ow unsafe` per `.rs` file under `crates`, `benchmarks`
+and `vendor/fuser`, sorted by path. `scripts/safety/unsafe-count.sh`
+compares these lines with the code.
+
+- count: benchmarks/chunk-bench/src/main.rs 2
+- count: benchmarks/index-bench/src/main.rs 11
+- count: crates/chunk-store/src/pack_io.rs 12
+- count: crates/chunk-store/tests/gc_full_memory_tests.rs 9
+- count: crates/metadata/src/store.rs 2
+- count: crates/slicefs-cli/src/alloc_tune.rs 4
+- count: crates/slicefs-cli/src/filesystem.rs 4
+- count: crates/slicefs-cli/src/fuset_watch.rs 2
+- count: crates/slicefs-cli/src/gc_pacing.rs 2
+- count: crates/slicefs-cli/src/signals.rs 5
+- count: crates/slicefs-cli/src/unmount.rs 2
+- count: crates/slicefs-cli/tests/dirty_budget_tests.rs 9
+- count: crates/slicefs-cli/tests/memory_bound_tests.rs 9
+- count: crates/slicefs-cli/tests/no_take_out.rs 3
+- count: crates/slicefs-cli/tests/replay_memory_tests.rs 9
+- count: crates/slicefs-cli/tests/reply_after_locks.rs 2
+- count: crates/slicefs-cli/tests/signal_tests.rs 3
+- count: crates/slicefs-cli/tests/stress_harness.rs 2
+- count: vendor/fuser/examples/passthrough_fork.rs 3
+- count: vendor/fuser/examples/simple.rs 3
+- count: vendor/fuser/src/channel.rs 3
+- count: vendor/fuser/src/forget_one.rs 1
+- count: vendor/fuser/src/mnt/fuse2.rs 3
+- count: vendor/fuser/src/mnt/fuse2_sys.rs 1
+- count: vendor/fuser/src/mnt/fuse3.rs 6
+- count: vendor/fuser/src/mnt/fuse3_sys.rs 1
+- count: vendor/fuser/src/mnt/fuse_pure.rs 5
+- count: vendor/fuser/src/mnt/mod.rs 1
+- count: vendor/fuser/src/passthrough.rs 3
+- count: vendor/fuser/src/reply.rs 6
