@@ -181,11 +181,11 @@ What the numbers say:
   `.idx` files): the tar open goes from 28.7 ms to 6.7 ms at 8/32/128 KiB.
   On the trees, the open peak RSS changes little (42.4 to 39.3 MiB).
 - Ingest: on the tar, larger profiles ingest faster (180.3 to 250.9 MB/s)
-  with less CPU (3.82 to 2.67 s), because there are fewer objects to hash,
-  index and write. On the trees, the ingest speed is about the same for
+  with less CPU (3.82 to 2.67 s), likely because there are fewer objects
+  to hash, index and write (not measured apart). On the trees, the ingest speed is about the same for
   all profiles (95.6 to 102.3 MB/s; the run-to-run spread of 4/8/32 KiB
-  was 76.3 to 103.5 MB/s), and the CPU time is a little higher for the
-  larger profiles (13.69 to 14.62 s).
+  was 76.3 to 103.5 MB/s), and so is the CPU time (median 13.69 to
+  14.62 s; the runs of 4/8/32 KiB spread from 13.59 to 15.54 s).
 - Read latency: a random 4 KiB read decodes the whole chunk, so it gets
   slower with the chunk size. The p50 grows slowly up to 8/32/128 KiB
   (52.7 to 72.1 us) and fast after it (121.8 us at 16/64/256 KiB, 257.0 us
@@ -217,8 +217,9 @@ default:
   -15.1 % objects).
 
 8/16/64 KiB is the low-risk alternative: half the objects on large files
-(-51.7 %), -9.7 % stored, and random reads within the noise of 4/8/32 KiB
-(p50 +14.6 %).
+(-51.7 %), -9.7 % stored, and the smallest read cost: random reads p50
++14.6 % (the runs do not overlap: 51.5 to 52.7 us against 60.4 to
+62.5 us), and p99 inside the noise.
 
 The code default stays 4/8/32 KiB in v2.2, as the owner decided (D-01).
 This report does not change it.
