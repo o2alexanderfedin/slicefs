@@ -458,15 +458,18 @@ SMOKE=1 RUNS=1 WORK=/tmp/pp BIN=/target/release/prolly-bench timeout 600 bash /s
 | A6 | The exact FastCDC resync after an 8-byte prefix shift dedups most chunks of `inode_map` against `inode_data` | Baseline Finding 1 | If it does not, the real-store `stats()` delta for `inode_data` is not near 0; the scratch-store design is right either way |
 | A7 | Expected outcome of the benchmark (CPU and RSS gain per commit, small stored-byte difference, scale effect) | Summary | Not a recommendation; the owner decision rests on the measured report |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Which edit kinds and K share to use in the final script?**
    - What we know: the four kinds and the two patterns above are all expressible with the public API.
    - What's unclear: whether delete needs directory removal (only files created by the script are deleted, so no).
    - Recommendation: keep the recommended script; the planner may drop `content change` if the file-content put makes the run too slow.
+   - RESOLVED: plan 24-03 Task 2 keeps all four kinds in equal shares (kind = (i + seq) mod 4); deletes remove only files the script created.
 2. **Whether the version step should be an in-place sync or a fresh seed of 1_85_0.**
    - Recommendation: in-place sync (it is the real "large commit"); the fresh-seed bulk row is a cheap extra (`flat` intern versus `prolly` build of 85,080 entries).
+   - RESOLVED: plan 24-03 Task 2 does the in-place sync (`sync_dir`, by content key) as the `version` commit.
 3. **Does the float-free `exp` need a table before the first release of the prototype?** No; golden test now, fixed-point only if adoption is chosen (Q-3).
+   - RESOLVED: plan 24-01 uses the basic-operation exp and pins it with `golden_root`; the fixed-point question stays with the owner (Q-3).
 
 ## Environment Availability
 
