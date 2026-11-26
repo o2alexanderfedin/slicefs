@@ -17,3 +17,43 @@ error[E0282]: type annotations needed
 error[E0282]: type annotations needed
 error[E0599]: no method named `profile` found for struct `Arc<ChunkStore>` in the current scope
 error: could not compile `slicefs-cli` (test "chunk_profile_tests") due to 15 previous errors; 1 warning emitted
+
+## Task 2: cargo test -p chunk-store --test profile_tests (before the per-store zero chunk)
+test bad_profiles_are_refused ... ok
+test zero_chunks_of_each_store_need_no_store_read ... FAILED
+test the_five_profiles_and_the_limits_are_accepted ... ok
+thread 'zero_chunks_of_each_store_need_no_store_read' (137669824) panicked at crates/chunk-store/tests/profile_tests.rs:80:60:
+16/64/256 KiB: chunk store I/O: Input/output error (os error 5)
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+error: test failed, to rerun pass `-p chunk-store --test profile_tests`
+
+## Task 2: cargo test -p chunk-store --lib -- file::tests per-profile tests (before splice reads the profile)
+test file::tests::zero_runs_cut_at_max_for_each_profile ... ok
+test file::tests::a_splice_over_zeros_gives_the_key_of_a_full_write_for_each_profile ... FAILED
+thread 'file::tests::a_splice_over_zeros_gives_the_key_of_a_full_write_for_each_profile' (137670573) panicked at crates/chunk-store/src/file.rs:921:9:
+assertion `left == right` failed: 8/16/64 KiB: overwrite: keep 458752 changed [32775..33799] new_len 458752
+  left: ObjectId(1e:77c1688431408f5c)
+ right: ObjectId(1e:2d5d2eb576801767)
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 127 filtered out; finished in 0.03s
+error: test failed, to rerun pass `-p chunk-store --lib`
+
+## Task 2 guard mutation: drop the power-of-two check in ChunkProfile::new (bad_profiles_are_refused; undone)
+test bad_profiles_are_refused ... FAILED
+thread 'bad_profiles_are_refused' (137674039) panicked at crates/chunk-store/tests/profile_tests.rs:57:9:
+12288/24576/49152 bytes
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p chunk-store --test profile_tests`
+
+## Task 2 guard mutation: ChunkProfile::ranges caps max at max(32 KiB, 2 x avg) (zero_runs_cut_at_max_for_each_profile; undone)
+test file::tests::zero_runs_cut_at_max_for_each_profile ... FAILED
+thread 'file::tests::zero_runs_cut_at_max_for_each_profile' (137676668) panicked at crates/chunk-store/src/file.rs:1071:75:
+called `Result::unwrap()` on an `Err` value: "chunk profile 8192/16384/65536 bytes: a run of zeros does not cut into chunks of the max size"
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 128 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p chunk-store --lib`
+
+## Task 2 guard mutation: the max limit made exclusive (MAXIMUM_MIN..MAXIMUM_MAX) (the_five_profiles_and_the_limits_are_accepted; undone)
+test the_five_profiles_and_the_limits_are_accepted ... FAILED
+thread 'the_five_profiles_and_the_limits_are_accepted' (137681060) panicked at crates/chunk-store/tests/profile_tests.rs:37:5:
+assertion failed: ChunkProfile::new(MIB, 4 * MIB, 16 * MIB).is_ok()
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s
+error: test failed, to rerun pass `-p chunk-store --test profile_tests`

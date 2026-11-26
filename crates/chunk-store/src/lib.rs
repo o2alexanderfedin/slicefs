@@ -977,6 +977,10 @@ pub struct ChunkStore {
     /// the `TRUST` file, with no store lock (LOCK-01): one writer at a time,
     /// so the file never goes back to a lower floor.
     trust: Mutex<Option<u64>>,
+    /// The zero chunk of the store profile: one zero buffer of `max` bytes
+    /// and its ID for each known hasher, made on first use (see
+    /// [`ChunkStore::zero_chunk`]; bounded memory: one buffer per store).
+    zero: std::sync::OnceLock<(Vec<ObjectId>, Vec<u8>)>,
     /// Test hook: `gc_finish` calls it at the start of its pass 1 (with 1)
     /// and of its pass 2 (with 2), with no store lock held (see
     /// `race_tests.rs`).
@@ -1290,6 +1294,7 @@ impl ChunkStore {
             gc_timing: Mutex::new(Rank::Store, GcTiming::default()),
             locality: LocalityCache::default(),
             trust: Mutex::new(Rank::Store, trust_floor),
+            zero: std::sync::OnceLock::new(),
             #[cfg(test)]
             gc_pass_hook: Mutex::new(Rank::Store, None),
             #[cfg(test)]
@@ -2983,6 +2988,18 @@ impl ChunkStore {
     /// The chunk profile of the store (see [`Options::profile`]).
     pub fn profile(&self) -> ChunkProfile {
         self.opts.profile
+    }
+
+    /// FastCDC cuts a run of zeros into chunks of the max size of the store
+    /// profile (`ChunkProfile::new` checks it), which have one ID for each
+    /// hash. Readers and `splice` use this one zero buffer of the store and
+    /// its IDs: no lookup, no I/O, no decompression (a flyweight for sparse
+    /// files).
+    pub(crate) fn zero_chunk(&self) -> &(Vec<ObjectId>, Vec<u8>) {
+        self.zero.get_or_init(|| {
+            let z = vec![0u8; self.opts.profile.max() as usize];
+            (hashers().iter().map(|h| h.id(&z)).collect(), z)
+        })
     }
 
     /// True if the store has `id` (false also if the index cannot be read).

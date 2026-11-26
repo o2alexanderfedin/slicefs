@@ -21,13 +21,13 @@
 //! old cut (not the old end if the size or the tail changes). Where the
 //! writer and an old complete node start together, it copies the whole node
 //! as one entry. Known zeros are pushed as the zero chunk without a read or
-//! a hash (FastCDC cuts zeros at `CHUNK_MAX`). The key is the key of a full
-//! write of the same bytes.
+//! a hash (FastCDC cuts zeros at the max chunk size of the store profile).
+//! The key is the key of a full write of the same bytes.
 
-use crate::{chunk_ranges, hashers, ChunkStore, Error, ObjectId, Result, CHUNK_AVG, CHUNK_MAX, DIGEST_LEN, ID_LEN};
+use crate::{ChunkStore, Error, ObjectId, Result, DIGEST_LEN, ID_LEN};
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 /// Most entries in a manifest node (a forced cut).
 pub const LEAF_ENTRIES: usize = 4096;
@@ -233,17 +233,6 @@ pub struct FileReader {
 
 const NODE_CACHE: usize = 16;
 
-/// FastCDC cuts a run of zeros into chunks of `CHUNK_MAX` zero bytes, which
-/// all have one ID for each hash. A reader serves them from one shared zero
-/// buffer: no lookup, no I/O, no decompression (a flyweight for sparse files).
-fn zero_chunk() -> &'static (Vec<ObjectId>, Vec<u8>) {
-    static ZERO: OnceLock<(Vec<ObjectId>, Vec<u8>)> = OnceLock::new();
-    ZERO.get_or_init(|| {
-        let z = vec![0u8; CHUNK_MAX as usize];
-        (hashers().iter().map(|h| h.id(&z)).collect(), z)
-    })
-}
-
 impl FileReader {
     /// Open the content `key`.
     pub fn open(store: &ChunkStore, key: ObjectId) -> Result<Self> {
@@ -305,7 +294,7 @@ impl FileReader {
                 }
                 node = child;
             };
-            let (zids, zeros) = zero_chunk();
+            let (zids, zeros) = store.zero_chunk();
             if len == zeros.len() as u64 && zids.contains(&id) {
                 let from = (pos - start) as usize;
                 let to = ((end - start).min(len)) as usize;
@@ -553,11 +542,12 @@ fn resync_at(
     Ok(e >= *end && usable(e) && cur.off == e)
 }
 
-/// True if the new bytes `[s, s + CHUNK_MAX)` are known zeros: outside every
+/// True if the new bytes `[s, s + max)` (`max`: the max chunk size of the
+/// store profile) are known zeros: outside every
 /// changed range, and below `keep` covered by old zero chunks (the cursor
 /// holds `s`). An old zero chunk may start before `s`.
 fn known_zero(store: &ChunkStore, cur: &Cursor, ext: &[Range<u64>], ci: &mut usize, keep: u64, s: u64) -> Result<bool> {
-    let e = s + CHUNK_MAX as u64;
+    let e = s + store.profile().max() as u64;
     while *ci < ext.len() && ext[*ci].end <= s {
         *ci += 1;
     }
@@ -566,14 +556,14 @@ fn known_zero(store: &ChunkStore, cur: &Cursor, ext: &[Range<u64>], ci: &mut usi
     }
     let old_end = e.min(keep);
     if s < old_end {
-        let (zids, _) = zero_chunk();
+        let (zids, _) = store.zero_chunk();
         let mut c = cur.clone();
         while c.off < old_end {
             if c.at_end() {
                 return Ok(false);
             }
             let x = c.entry();
-            if x.len != CHUNK_MAX as u64 || !zids.contains(&x.id) {
+            if x.len != store.profile().max() as u64 || !zids.contains(&x.id) {
                 return Ok(false);
             }
             c.next(store)?;
@@ -669,8 +659,8 @@ pub fn splice(
     let mut w = FileWriter::new();
     let mut st = SpliceStats::default();
     let mut ri = 0;
-    let max = CHUNK_MAX as usize;
-    let zeros = &zero_chunk().1;
+    let max = store.profile().max() as usize;
+    let zeros = &store.zero_chunk().1;
     let mut zero_id = None;
     // First changed range that ends after the current chunk start.
     let mut ci = 0;
@@ -686,12 +676,13 @@ pub fn splice(
         let mut start = cur.off;
         let mut buf: Vec<u8> = Vec::new();
         let mut resynced = false;
-        // Read-ahead past the region: CHUNK_AVG, doubled after each step
+        // Read-ahead past the region: the average chunk size of the store
+        // profile, doubled after each step
         // past the region that does not resync (a long run, for example on
         // repeating data, then reads big pieces again).
-        let mut step = CHUNK_AVG as u64;
+        let mut step = store.profile().avg() as u64;
         while start < new_len {
-            // Zero shortcut: FastCDC cuts CHUNK_MAX zeros into one chunk, so
+            // Zero shortcut: FastCDC cuts `max` zeros into one chunk, so
             // known zeros need no read and no hash.
             if start + max as u64 <= new_len && known_zero(store, &cur, &ext, &mut ci, keep, start)? {
                 let id = match zero_id {
@@ -714,7 +705,7 @@ pub fn splice(
                 // Every byte up to the end of the region is cut again, so
                 // read it in big pieces. Past it, the re-chunk can stop at
                 // any old cut, so read only `step` more: a fixed read-ahead
-                // of 2 * CHUNK_MAX read about three times the bytes it cut.
+                // of 2 * max read about three times the bytes it cut.
                 let want = end.saturating_sub(at) + step;
                 let n = want.min((2 * max - buf.len()) as u64).min(new_len - at) as usize;
                 let piece = src.read(at, n)?;
@@ -727,7 +718,7 @@ pub fn splice(
                 buf.extend_from_slice(&piece);
             }
             let all = start + buf.len() as u64 == new_len;
-            let ranges = chunk_ranges(&buf);
+            let ranges = store.profile().ranges(&buf);
             let n = if all { ranges.len() } else { ranges.len().saturating_sub(1) };
             let mut used = 0;
             for r in &ranges[..n] {
@@ -762,7 +753,7 @@ pub fn splice(
 mod tests {
     use super::*;
     use crate::mem::MemIo;
-    use crate::{Blake3_256, ObjectHasher, Options};
+    use crate::{chunk_ranges, Blake3_256, ChunkProfile, ObjectHasher, Options, CHUNK_MAX};
 
     /// A manifest of `entries` (fake chunks: only the nodes are stored).
     fn build(s: &ChunkStore, entries: &[Entry]) -> ObjectId {
@@ -1064,12 +1055,48 @@ mod tests {
         }
     }
 
-    /// The premise of the zero shortcut: FastCDC cuts zeros at CHUNK_MAX.
+    /// The five profiles of Phase 22 (4/8/32 to 32/128/512 KiB).
+    fn five_profiles() -> Vec<ChunkProfile> {
+        [(4, 8, 32), (8, 16, 64), (8, 32, 128), (16, 64, 256), (32, 128, 512)]
+            .into_iter()
+            .map(|(a, b, c)| ChunkProfile::new(a << 10, b << 10, c << 10).unwrap())
+            .collect()
+    }
+
+    /// The premise of the zero shortcut: FastCDC cuts zeros at the max
+    /// chunk size of the profile.
     #[test]
-    fn zero_runs_cut_at_chunk_max() {
-        let max = CHUNK_MAX as usize;
-        let lens: Vec<usize> = chunk_ranges(&vec![0u8; 4 * max + 100]).iter().map(|r| r.len()).collect();
-        assert_eq!(lens, vec![max, max, max, max, 100]);
+    #[cfg_attr(miri, ignore = "too slow under Miri")]
+    fn zero_runs_cut_at_max_for_each_profile() {
+        for p in five_profiles() {
+            let max = p.max() as usize;
+            let lens: Vec<usize> = p.ranges(&vec![0u8; 4 * max + 100]).iter().map(|r| r.len()).collect();
+            assert_eq!(lens, vec![max, max, max, max, 100], "{p}");
+        }
+    }
+
+    /// The zero shortcut and the re-chunk of `splice` follow the store
+    /// profile: the key is the key of a full write in that store.
+    #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri")]
+    fn a_splice_over_zeros_gives_the_key_of_a_full_write_for_each_profile() {
+        for p in five_profiles() {
+            let s = ChunkStore::open_with(Arc::new(MemIo::new()), Options { zstd_level: 0, profile: p, ..Options::default() }).unwrap();
+            let max = p.max() as u64;
+            let mut rng = Rng(0x5eed_2201_abcd_0001);
+            let mut base = vec![0u8; 4 * max as usize];
+            base.extend(rng.bytes(3 * max as usize));
+            let n = base.len() as u64;
+            let b = Some((full_write(&s, &base), &base[..]));
+            let at = max / 2 + 7;
+            let overwrite = Edit { keep: n, changed: vec![at..at + 1024], new_len: n };
+            check_splice(&s, b, &overwrite, &mut rng, &format!("{p}: overwrite"));
+            let extend = Edit { keep: n, changed: vec![], new_len: n + 4 * max };
+            let st = check_splice(&s, b, &extend, &mut rng, &format!("{p}: extend"));
+            assert!(st.zero_runs > 0, "{p}: {st:?}");
+            let shrink = Edit { keep: 2 * max + 123, changed: vec![10..110], new_len: 2 * max + 123 };
+            check_splice(&s, b, &shrink, &mut rng, &format!("{p}: shrink"));
+        }
     }
 
     #[test]
