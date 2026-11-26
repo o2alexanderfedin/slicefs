@@ -1,0 +1,24 @@
+
+## Task 1: the three engine tests before the engine (stub returns an error); cargo test -p metadata --lib -- rehash::tests
+test rehash::tests::a_stale_refcount_is_dropped_and_counted ... FAILED
+test rehash::tests::two_old_keys_of_one_content_merge_their_counts ... FAILED
+test rehash::tests::a_root_rehashes_to_the_same_tree ... FAILED
+thread 'rehash::tests::a_stale_refcount_is_dropped_and_counted' (139563664) panicked at crates/metadata/src/rehash/mod.rs:283:86:
+called `Result::unwrap()` on an `Err` value: Corrupt("not built")
+thread 'rehash::tests::two_old_keys_of_one_content_merge_their_counts' (139563665) panicked at crates/metadata/src/rehash/mod.rs:261:84:
+called `Result::unwrap()` on an `Err` value: Corrupt("not built")
+thread 'rehash::tests::a_root_rehashes_to_the_same_tree' (139563663) panicked at crates/metadata/src/rehash/mod.rs:229:86:
+called `Result::unwrap()` on an `Err` value: Corrupt("not built")
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 166 filtered out; finished in 0.23s
+error: test failed, to rerun pass `-p metadata --lib`
+
+## Task 1 guard mutation: refcount sort rows of 41 bytes (new key + count, no row index); cargo test -p metadata --lib -- rehash::tests
+test rehash::tests::a_stale_refcount_is_dropped_and_counted ... ok
+test rehash::tests::two_old_keys_of_one_content_merge_their_counts ... FAILED
+test rehash::tests::a_root_rehashes_to_the_same_tree ... ok
+thread 'rehash::tests::two_old_keys_of_one_content_merge_their_counts' (139590003) panicked at crates/metadata/src/rehash/mod.rs:777:9:
+assertion `left == right` failed: the counts of both old keys
+  left: 1
+ right: 2
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 166 filtered out; finished in 0.26s
+error: test failed, to rerun pass `-p metadata --lib`

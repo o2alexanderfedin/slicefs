@@ -25,7 +25,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 mod bloom;
-mod extsort;
+pub mod extsort;
 pub mod file;
 pub mod hash;
 mod index;
