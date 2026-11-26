@@ -89,7 +89,7 @@ pub fn parse_chunk_profile(s: &str) -> Result<ChunkProfile, String> {
     let parts: Vec<&str> = s.split('/').collect();
     let [min, avg, max] = parts[..] else { return Err(bad()) };
     let (min, avg, max) = (kib(min).ok_or_else(bad)?, kib(avg).ok_or_else(bad)?, kib(max).ok_or_else(bad)?);
-    ChunkProfile::new(min, avg, max).map_err(|reason| format!("chunk profile {s}: {reason}"))
+    ChunkProfile::new(min, avg, max).map_err(|reason| format!("chunk profile {s} KiB: {reason}"))
 }
 
 /// Parse `--hash`: the name of a known hasher.
@@ -430,6 +430,21 @@ pub(crate) mod tests {
         }
         let err = parse_chunk_profile("16/64").unwrap_err();
         assert!(err.contains("MIN/AVG/MAX"), "{err}");
+    }
+
+    /// A refused profile is named once, in KiB as typed, with the reason.
+    #[test]
+    fn a_refused_profile_is_named_once_in_kib() {
+        for (v, reason) in [
+            ("12/24/48", "each size must be a power of two"),
+            ("64/16/256", "min < avg < max"),
+            ("128/512/2048", "1024 KiB (1 MiB)"),
+        ] {
+            let err = parse_chunk_profile(v).unwrap_err();
+            assert_eq!(err.matches("chunk profile").count(), 1, "{err}");
+            assert!(err.starts_with(&format!("chunk profile {v} KiB: ")), "{err}");
+            assert!(err.contains(reason) && !err.contains("bytes"), "{err}");
+        }
     }
 
     /// Pseudo-random bytes (xorshift64): no FastCDC cut is at a fixed place.

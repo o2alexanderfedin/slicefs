@@ -146,32 +146,31 @@ impl ChunkProfile {
     /// 64 B, avg 256 B, max 1 KiB), and a profile that does not cut a run
     /// of zeros into chunks of `max` bytes (the zero chunk of the readers
     /// and of `splice` needs it). The checks run in this order, so FastCDC
-    /// never gets values that make it panic.
+    /// never gets values that make it panic. The error is the reason only
+    /// (it does not repeat the sizes): the caller names the profile in the
+    /// unit of its input.
     pub fn new(min: u32, avg: u32, max: u32) -> std::result::Result<ChunkProfile, String> {
         use fastcdc::v2020::{AVERAGE_MAX, AVERAGE_MIN, MAXIMUM_MAX, MAXIMUM_MIN, MINIMUM_MAX, MINIMUM_MIN};
-        let sizes = format!("{min}/{avg}/{max} bytes");
         if !(min.is_power_of_two() && avg.is_power_of_two() && max.is_power_of_two()) {
-            return Err(format!("chunk profile {sizes}: each size must be a power of two"));
+            return Err("each size must be a power of two".to_string());
         }
         if !(min < avg && avg < max) {
-            return Err(format!("chunk profile {sizes}: the sizes must be min < avg < max"));
+            return Err("the sizes must be min < avg < max".to_string());
         }
         if max > Self::MAX_LIMIT {
-            return Err(format!("chunk profile {sizes}: the max is above the limit of 1024 KiB (1 MiB)"));
+            return Err("the max is above the limit of 1024 KiB (1 MiB)".to_string());
         }
         if !(MINIMUM_MIN..=MINIMUM_MAX).contains(&min)
             || !(AVERAGE_MIN..=AVERAGE_MAX).contains(&avg)
             || !(MAXIMUM_MIN..=MAXIMUM_MAX).contains(&max)
         {
-            return Err(format!(
-                "chunk profile {sizes}: below the fastcdc limits (min at least 64 B, avg at least 256 B, max at least 1 KiB)"
-            ));
+            return Err("below the fastcdc limits (min at least 64 B, avg at least 256 B, max at least 1 KiB)".to_string());
         }
         let p = ChunkProfile { min, avg, max };
         let m = max as usize;
         let lens: Vec<usize> = p.ranges(&vec![0u8; 2 * m + 1]).iter().map(|r| r.len()).collect();
         if lens != [m, m, 1] {
-            return Err(format!("chunk profile {sizes}: a run of zeros does not cut into chunks of the max size"));
+            return Err("a run of zeros does not cut into chunks of the max size".to_string());
         }
         Ok(p)
     }

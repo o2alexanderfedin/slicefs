@@ -171,7 +171,7 @@ impl Args {
         let (Some(min), Some(avg), Some(max)) = (bytes(min), bytes(avg), bytes(max)) else {
             return usage(format!("--profile: too large: {p}"));
         };
-        ChunkProfile::new(min, avg, max).or_else(usage)
+        ChunkProfile::new(min, avg, max).or_else(|reason| usage(format!("--profile {p} KiB: {reason}")))
     }
 }
 
