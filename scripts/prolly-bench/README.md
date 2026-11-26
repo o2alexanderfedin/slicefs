@@ -57,7 +57,18 @@ container it runs `cargo test -p prolly` in release (so the golden root and
 the cut-decision table of the prototype are checked on Linux), builds
 `prolly-bench` in release, and runs `bench.sh` with `SMOKE=1 RUNS=1`. A full
 run in Docker needs the data dir in the container (a `-v DIR:/data:ro`
-volume, then `bench.sh /data`).
+volume, then `bench.sh /data`). `SLICEFS_TARGET_VOL` names the cargo target
+volume, as for the other modes of `run.sh`.
+
+Linux smoke in Docker (plan 24-04, image `rust:1.100.0-bookworm`): the 21
+prolly tests pass, `golden_root` included, so the golden root and the
+cut-decision bits are the same on Linux as on macOS. The smoke gives the same
+CSV shape as on macOS (30 run rows and 18 median rows, two `ok=1` checks).
+The `prolly` rows have the same entries, serialized bytes, new objects and
+nodes read and written as on macOS. The `whole` and `flat` byte columns
+differ a little, because the file mtimes of the generated trees go into the
+inode digests, and FastCDC cuts the flat maps by content. The image has no
+GNU `time`, so `peak_rss_bytes` is `NA` there.
 
 ## Subcommands and modes
 
