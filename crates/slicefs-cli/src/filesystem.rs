@@ -43,6 +43,13 @@ const S_IFBLK: u32 = 0o060_000;
 /// overlay, see `crate::overlay`).
 pub const MAX_FILE_SIZE: u64 = 1 << 40;
 
+/// The end of a write of `len` bytes at `offset`: `Some(end)` when
+/// `offset + len` fits in u64 and is at most [`MAX_FILE_SIZE`], else `None`
+/// (EFBIG). Kani proves it exact on all inputs (`mod proofs`).
+pub(crate) fn write_end(offset: u64, len: usize) -> Option<u64> {
+    offset.checked_add(len as u64).filter(|&end| end <= MAX_FILE_SIZE)
+}
+
 /// Most bytes of out-of-order writes a streaming handle holds while it waits
 /// for a gap to close. Beyond it the handle switches to an overlay.
 pub const REORDER_WINDOW: usize = 64 << 20;
@@ -701,12 +708,40 @@ impl CellGuard<'_> {
         } else if cost == 0 {
             self.cell.dirty_since.store(0, Ordering::Relaxed);
         }
-        if cost >= old {
-            self.total.fetch_add(cost - old, Ordering::Relaxed);
-        } else {
-            self.total.fetch_sub(old - cost, Ordering::Relaxed);
+        match dirty_move(old, cost) {
+            DirtyMove::Add(d) => {
+                self.total.fetch_add(d, Ordering::Relaxed);
+            }
+            DirtyMove::Sub(d) => {
+                self.total.fetch_sub(d, Ordering::Relaxed);
+            }
         }
     }
+}
+
+/// The change of the shared dirty total when the cost of one cell goes
+/// from `old` to `cost`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirtyMove {
+    Add(usize),
+    Sub(usize),
+}
+
+/// The move of the shared total for a cell cost `old` -> `cost` (no wrap:
+/// the difference of the two). Kani proves that the total stays the sum of
+/// the costs (`mod proofs`).
+fn dirty_move(old: usize, cost: usize) -> DirtyMove {
+    if cost >= old {
+        DirtyMove::Add(cost - old)
+    } else {
+        DirtyMove::Sub(old - cost)
+    }
+}
+
+/// The hard cap of a dirty `limit` (see `hard_cap`), saturating, so at
+/// least `limit` (Kani proof in `mod proofs`).
+fn hard_cap_of(limit: usize) -> usize {
+    limit.saturating_add(limit / crate::overlay::GROW_DIV).saturating_add(2 * REBASE_STEP)
 }
 
 impl Deref for CellGuard<'_> {
@@ -2703,8 +2738,7 @@ impl SliceFsFilesystem {
     /// it), and two rebase steps (Claude's discretion). The write path
     /// gates its apply on it (`write_in_cell`).
     fn hard_cap(&self) -> usize {
-        let limit = self.dirty_limit.load(Ordering::Relaxed);
-        limit.saturating_add(limit / crate::overlay::GROW_DIV).saturating_add(2 * REBASE_STEP)
+        hard_cap_of(self.dirty_limit.load(Ordering::Relaxed))
     }
 
     /// A rebase step of the writer's own locked cell `g` (D-02, D-13), with
@@ -3228,7 +3262,7 @@ impl SliceFsFilesystem {
         // An append ignores the request offset (D-12, D-17). Replay does not
         // append: each record carries the offset the write used.
         let append = (h.append || flags & libc::O_APPEND != 0) && !self.replaying.load(Ordering::Relaxed);
-        if !append && offset.checked_add(data.len() as u64).is_none_or(|end| end > MAX_FILE_SIZE) {
+        if !append && write_end(offset, data.len()).is_none() {
             return Err(libc::EFBIG);
         }
         let Some(cell) = self.cells.get(ino) else { return Err(libc::EBADF) };
@@ -3293,10 +3327,7 @@ impl SliceFsFilesystem {
                     }
                     size
                 };
-                end = match offset.checked_add(data.len() as u64) {
-                    Some(e) if e <= MAX_FILE_SIZE => e,
-                    _ => return Err(libc::EFBIG),
-                };
+                end = write_end(offset, data.len()).ok_or(libc::EFBIG)?;
             }
             cost_before = dirty_cost(&g.file);
             if let WriteMode::Overlay(ov) = &g.file.write_mode {
@@ -7177,6 +7208,25 @@ mod tests {
             assert_eq!(live, T, "the fields record is last, so its mtime must be the live one");
         }
     }
+
+    #[test]
+    fn write_end_gives_the_end_or_none() {
+        assert_eq!(write_end(0, 0), Some(0));
+        assert_eq!(write_end(MAX_FILE_SIZE - 1, 1), Some(MAX_FILE_SIZE));
+        assert_eq!(write_end(MAX_FILE_SIZE, 1), None);
+        assert_eq!(write_end(u64::MAX, 1), None);
+    }
+
+    #[test]
+    fn dirty_move_keeps_the_sum() {
+        // Costs (5, 3), total 8; the first cell goes to 2, the second to 10.
+        let apply = |total: usize, m: DirtyMove| match m {
+            DirtyMove::Add(d) => total + d,
+            DirtyMove::Sub(d) => total - d,
+        };
+        let total = apply(8, dirty_move(5, 2));
+        assert_eq!(apply(total, dirty_move(3, 10)), 12);
+    }
 }
 
 /// Models of the lock protocol on the real code (Phase 21.2, TSAFE-02):
@@ -7344,5 +7394,52 @@ mod loom_tests {
             assert_eq!(ctl.stop_exits.load(Ordering::Relaxed), 2);
             flusher.join().unwrap();
         });
+    }
+}
+
+// Kani proofs of the size and limit arithmetic (TSAFE-04). Each harness
+// writes its bound. Run with scripts/safety/kani.sh.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    // Bound: none (any u64 offset, any usize length).
+    #[kani::proof]
+    fn write_end_is_exact_and_bounded() {
+        let offset: u64 = kani::any();
+        let len: usize = kani::any();
+        let sum = u128::from(offset) + len as u128;
+        match write_end(offset, len) {
+            Some(e) => assert!(u128::from(e) == sum && e <= MAX_FILE_SIZE),
+            None => assert!(sum > u128::from(MAX_FILE_SIZE)),
+        }
+    }
+
+    // Bound: none (any usize limit).
+    #[kani::proof]
+    fn hard_cap_is_at_least_the_limit() {
+        let limit: usize = kani::any();
+        assert!(hard_cap_of(limit) >= limit);
+    }
+
+    // Bound: two cells; each old and new cost at most usize::MAX / 4, so the
+    // sums fit. The two moves are applied in either order.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn dirty_total_stays_the_sum_of_costs() {
+        let (a0, a1, b0, b1): (usize, usize, usize, usize) = (kani::any(), kani::any(), kani::any(), kani::any());
+        for c in [a0, a1, b0, b1] {
+            kani::assume(c <= usize::MAX / 4);
+        }
+        let moves = if kani::any() { [(a0, a1), (b0, b1)] } else { [(b0, b1), (a0, a1)] };
+        let mut total = a0 + b0;
+        for (old, cost) in moves {
+            let next = match dirty_move(old, cost) {
+                DirtyMove::Add(d) => total.checked_add(d),
+                DirtyMove::Sub(d) => total.checked_sub(d),
+            };
+            total = next.expect("the shared total does not wrap");
+        }
+        assert_eq!(total, a1 + b1);
     }
 }

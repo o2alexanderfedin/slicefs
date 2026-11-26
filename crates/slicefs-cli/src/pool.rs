@@ -478,3 +478,16 @@ mod loom_tests {
         });
     }
 }
+
+// Kani proof (TSAFE-04). Run with scripts/safety/kani.sh.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    // Bound: none (any usize CPU count).
+    #[kani::proof]
+    fn workers_for_cpus_in_range() {
+        let n = workers_for_cpus(kani::any());
+        assert!((1..=DEFAULT_WORKERS_MAX).contains(&n));
+    }
+}

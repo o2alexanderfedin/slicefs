@@ -143,3 +143,15 @@ mod tests {
         assert!(r.is_some());
     }
 }
+
+// Kani proof (TSAFE-04). Run with scripts/safety/kani.sh.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    // Bound: none (any u64 inode number).
+    #[kani::proof]
+    fn stripe_in_range() {
+        assert!(stripe(kani::any()) < STRIPES);
+    }
+}
