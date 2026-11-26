@@ -337,3 +337,106 @@ error: test failed, to rerun pass `-p slicefs-cli --lib`
 Caused by:
   process didn't exit successfully: `<repo>/target/loom/release/build/slicefs-cli/6f10f32bb8d077d1/out/slicefs_cli-6f10f32bb8d077d1 loom_` (signal: 6, SIGABRT: process abort signal)
 MODEL FAILED crate=slicefs-cli: cargo exit 101
+
+# red run 3 at 4c5653e: request_stop without the wake notify (planted, not committed)
+# plant: FlushCtl::request_stop set stop under flags and notified freed, but not wake
+# command: RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 cargo +stable test --locked --release -p slicefs-cli --lib -- --exact filesystem::loom_tests::loom_throttle_stop_wakes_two_writers; exit 101
+# result: deadlock with main (join of the flusher) and the flusher (wait on wake) blocked; both writers terminated
+warning: unused workspace dependency `anyhow`
+  --> Cargo.toml:33:1
+   |
+33 | anyhow     = "1"
+   | ^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `anyhow`
+warning: unused workspace dependency `bincode`
+  --> Cargo.toml:22:1
+   |
+22 | bincode    = "2"
+   | ^^^^^^^
+   |
+help: consider removing the workspace dependency `bincode`
+warning: unused workspace dependency `criterion`
+  --> Cargo.toml:24:1
+   |
+24 | criterion  = { version = "0.5", features = ["html_reports"] }
+   | ^^^^^^^^^
+   |
+help: consider removing the workspace dependency `criterion`
+warning: unused workspace dependency `redb`
+  --> Cargo.toml:29:1
+   |
+29 | redb       = "3.1"
+   | ^^^^
+   |
+help: consider removing the workspace dependency `redb`
+warning: unused workspace dependency `tokio`
+  --> Cargo.toml:31:1
+   |
+31 | tokio      = { version = "1", features = ["full"] }
+   | ^^^^^
+   |
+help: consider removing the workspace dependency `tokio`
+warning: workspace (manifest) generated 5 warnings
+   Compiling slicefs-cli v0.1.0 (<repo>/crates/slicefs-cli)
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 6 warnings
+    Finished `release` profile [optimized] target(s) in 9.12s
+     Running unittests src/lib.rs (target/loom/release/build/slicefs-cli/6f10f32bb8d077d1/out/slicefs_cli-6f10f32bb8d077d1)
+
+running 1 test
+test filesystem::loom_tests::loom_throttle_stop_wakes_two_writers ... FAILED
+
+failures:
+
+---- filesystem::loom_tests::loom_throttle_stop_wakes_two_writers stdout ----
+
+thread 'filesystem::loom_tests::loom_throttle_stop_wakes_two_writers' (136476281) panicked at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/loom-0.7.3/src/rt/execution.rs:215:13:
+deadlock; threads = [(Id(0), Blocked(Location(None))), (Id(1), Blocked(Location(None))), (Id(2), Terminated), (Id(3), Terminated)]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    filesystem::loom_tests::loom_throttle_stop_wakes_two_writers
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 386 filtered out; finished in 0.57s
+
+error: test failed, to rerun pass `-p slicefs-cli --lib`
