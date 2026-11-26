@@ -258,6 +258,15 @@ A read-only mount makes no `mount.lock`, so the commands that look for
   and also on an error that is not a crash. The map of `rehash --dry-run`
   goes to the system temp dir (`TMPDIR`), not to the store.
   Every writable open of the store removes what a crash left there.
+- A power loss during `rehash` is tested by `scripts/power-loss/` (see
+  its README). The store is on LazyFS, which drops all unsynced data on
+  `clear-cache`. The rehash process is killed just before each of its
+  sync-type calls (`fsync`, `fdatasync`, `rename`), and at its end, and the
+  unsynced data is then dropped. After each crash the store must open with
+  the old roots or the new roots, scrub must be clean, the files must be
+  equal to the source, and a rerun must finish the job. The test does not
+  model a lost rename or a missing directory sync (LazyFS makes renames
+  durable at once), torn writes, or a crash during the rerun.
 - `stats` shows `Mounted` as `yes` when `mount.lock` exists or the store
   lock is held, also while an offline `gc` runs. (It takes the lock
   exclusive and drops it at once, so a mount, `gc` or snapshot command
