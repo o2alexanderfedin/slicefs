@@ -72,8 +72,11 @@ pub enum Mode {
     /// Write the new objects. `map_dir` holds the temp files of the run (a
     /// new directory each run; the caller removes it).
     Rewrite { map_dir: PathBuf },
-    /// Write nothing: read and verify what a real run reads, and count.
-    DryRun,
+    /// Write nothing in the store: read and verify what a real run reads,
+    /// and count. `map_dir` holds the map file, as in a real run, so that
+    /// each value is read and counted once (a new directory outside the
+    /// store; the caller removes it).
+    DryRun { map_dir: PathBuf },
 }
 
 /// The options of a run.
@@ -192,8 +195,9 @@ impl Blob {
 struct Walker<'c, 'a> {
     cs: &'c ChunkStore,
     target: &'static dyn ObjectHasher,
-    /// `None` in a dry-run.
-    map_dir: Option<PathBuf>,
+    /// The directory of the map file (and in a real run of the sort files).
+    map_dir: PathBuf,
+    dry: bool,
     map: KeyMap,
     stats: Stats,
     progress: Option<&'a mut dyn FnMut(&Stats)>,
@@ -204,7 +208,7 @@ struct Walker<'c, 'a> {
 
 impl Walker<'_, '_> {
     fn dry(&self) -> bool {
-        self.map_dir.is_none()
+        self.dry
     }
 
     fn tick(&mut self, force: bool) {
@@ -400,13 +404,12 @@ impl Walker<'_, '_> {
         if count.checked_mul(MAP_ENTRY as u64).and_then(|n| n.checked_add(8)) != Some(len) {
             return Err(corrupt(format!("{len} bytes cannot hold {count} rows")));
         }
-        let mut sorter = match &self.map_dir {
-            Some(dir) => {
-                let tmp = Arc::new(TmpDir::new(dir)?);
-                let cfg = SortCfg { chunk_records: extsort::SORT_CHUNK_BYTES / REF_ROW, fan_in: extsort::MERGE_FAN_IN };
-                Some(Sorter::<REF_ROW>::new(tmp, "refcounts", cfg))
-            }
-            None => None,
+        let mut sorter = if self.dry() {
+            None
+        } else {
+            let tmp = Arc::new(TmpDir::new(&self.map_dir)?);
+            let cfg = SortCfg { chunk_records: extsort::SORT_CHUNK_BYTES / REF_ROW, fan_in: extsort::MERGE_FAN_IN };
+            Some(Sorter::<REF_ROW>::new(tmp, "refcounts", cfg))
         };
         let per = (WINDOW / MAP_ENTRY) as u64;
         let (mut off, mut done, mut row) = (8u64, 0u64, 0u64);
@@ -544,24 +547,22 @@ impl Walker<'_, '_> {
 /// [`Mode::Rewrite`], `cs` must be open with the target hasher and the
 /// store profile; the caller syncs `cs` before it uses the new roots.
 pub fn rehash_roots(cs: &ChunkStore, roots: &RootSet, opts: RehashOptions<'_>) -> Result<(RootSet, Stats), RehashError> {
-    let map_dir = match opts.mode {
+    let (map_dir, dry) = match opts.mode {
         Mode::Rewrite { map_dir } => {
             if cs.hasher().tag() != opts.target.tag() {
                 return Err(RehashError::WrongHasher { store: cs.hasher().name(), target: opts.target.name() });
             }
-            Some(map_dir)
+            (map_dir, false)
         }
-        Mode::DryRun => None,
+        Mode::DryRun { map_dir } => (map_dir, true),
     };
-    let map = match &map_dir {
-        Some(dir) => KeyMap::on_disk(dir)?,
-        None => KeyMap::cache_only(),
-    };
+    let map = KeyMap::on_disk(&map_dir)?;
     let before = cs.stats();
     let mut w = Walker {
         cs,
         target: opts.target,
         map_dir,
+        dry,
         map,
         stats: Stats { roots_total: 1 + roots.snapshots.len() as u64, ..Stats::default() },
         progress: opts.progress,
@@ -901,10 +902,10 @@ mod tests {
         assert_one_tag(&cs, &new.current, KEYED.tag());
     }
 
-    fn dry<'a>(target: &'static dyn ObjectHasher) -> RehashOptions<'a> {
+    fn dry<'a>(target: &'static dyn ObjectHasher, dir: &Path) -> RehashOptions<'a> {
         RehashOptions {
             target,
-            mode: Mode::DryRun,
+            mode: Mode::DryRun { map_dir: dir.join("dry-map") },
             progress_every: Duration::from_secs(3600),
             progress: None,
             stop_after_values: None,
@@ -922,7 +923,8 @@ mod tests {
         let root = build(&mem);
         let cs = open_read_only(&mem, BLAKE3);
         let before = cs.stats();
-        let (same, stats) = rehash_roots(&cs, &one(root), dry(KEYED)).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let (same, stats) = rehash_roots(&cs, &one(root), dry(KEYED, tmp.path())).unwrap();
         assert_eq!(same, one(root));
         assert!(stats.values_read > 0 && stats.other_tag_objects > 0 && stats.other_tag_bytes > 0, "{stats:?}");
         assert_eq!((stats.objects_written, stats.values_rewritten), (0, 0));
@@ -938,7 +940,7 @@ mod tests {
             new
         };
         let cs = open_read_only(&mem, KEYED);
-        let (_, stats) = rehash_roots(&cs, &new, dry(KEYED)).unwrap();
+        let (_, stats) = rehash_roots(&cs, &new, dry(KEYED, tmp.path())).unwrap();
         assert_eq!(stats.other_tag_objects, 0, "{stats:?}");
         assert!(stats.values_kept > 0, "{stats:?}");
     }

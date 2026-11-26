@@ -36,7 +36,11 @@
 //! already have the target hash are kept, and the GC always runs.
 //!
 //! `--dry-run` takes the same lock and makes the same checks, then reads
-//! and verifies the live tree through a read-only open and writes nothing.
+//! and verifies the live tree through a read-only open and writes nothing
+//! in the store. Its old-to-new map is the on-disk map of a real run, in a
+//! new directory of the system temp dir (`TMPDIR`) that is removed at the
+//! end, so each shared value is read and counted once, as in a real run.
+//! The map file takes disk space there: about 134 bytes per distinct key.
 
 use std::path::Path;
 use std::time::Duration;
@@ -221,7 +225,8 @@ pub fn rehash_report_with(args: &RehashArgs<'_>, progress: &mut dyn FnMut(&str))
 }
 
 /// The dry-run: read and verify the live tree, count what a real run
-/// rewrites. It writes nothing.
+/// rewrites. It writes nothing in the store (the map goes to the system
+/// temp dir).
 fn dry_run(
     args: &RehashArgs<'_>,
     target: &'static dyn ObjectHasher,
@@ -229,10 +234,13 @@ fn dry_run(
     progress: &mut dyn FnMut(&str),
 ) -> Result<String, Error> {
     let cs = content::open_read_only(args.store)?;
+    // The map in the system temp dir, removed when `map_tmp` drops (also on
+    // an error): the dry-run writes nothing in the store.
+    let map_tmp = tempfile::Builder::new().prefix("slicefs-rehash-dry-").tempdir()?;
     let mut on_stats = |s: &Stats| progress(&rewrite_line(s));
     let opts = RehashOptions {
         target,
-        mode: Mode::DryRun,
+        mode: Mode::DryRun { map_dir: map_tmp.path().to_path_buf() },
         progress_every: args.progress_every,
         progress: Some(&mut on_stats),
         stop_after_values: None,

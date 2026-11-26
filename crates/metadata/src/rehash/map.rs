@@ -160,7 +160,7 @@ fn check_pow2(what: &str, n: u64) -> io::Result<()> {
 
 /// The old-to-new map (see the module doc).
 pub struct KeyMap {
-    /// `None`: cache only (a dry-run).
+    /// `None`: cache only.
     table: Option<Table>,
     cache: Vec<[u8; SLOT]>,
     len: u64,

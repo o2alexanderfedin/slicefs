@@ -29,6 +29,9 @@ tracing        = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
 parking_lot    = { workspace = true }
+# The old-to-new map of `rehash --dry-run`, in the system temp dir (not in
+# the store, which a dry-run does not write).
+tempfile       = { workspace = true }
 
 # Models of the lock protocol: built only with `--cfg loom`, never in a normal build.
 [target.'cfg(loom)'.dependencies]
@@ -42,7 +45,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(kani)'] }
 # Registers a second hasher (`chunk_store::hash::TestKeyedBlake3`) for tests
 # of a change of the write hash.
 chunk-store = { path = "../chunk-store", features = ["test-hasher"] }
-tempfile = { workspace = true }
 # Content hashes of the store tree in the read-only mount tracer.
 blake3 = { workspace = true }
 # Latency histograms of the stress harness (`tests/stress_harness.rs`).

@@ -361,6 +361,37 @@ fn dry_run_changes_nothing_and_reports_an_estimate() {
     assert!(report.contains("estimate"), "{report}");
 }
 
+/// The values and bytes of the read line of a report (`Read: ` in a real
+/// run, `Read and verified: ` in a dry-run).
+fn read_counts(report: &str) -> (u64, u64) {
+    let line = report.lines().find(|l| l.starts_with("Read")).unwrap_or_else(|| panic!("no read line in:\n{report}"));
+    let n: Vec<u64> = line.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).map(|s| s.parse().unwrap()).collect();
+    (n[0], n[1])
+}
+
+/// WR-02: with many values, one content in several files and a snapshot
+/// that shares most values, the dry-run reads and counts each value once,
+/// as the real run does.
+#[test]
+fn dry_run_counts_equal_the_real_run() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    for i in 0..300u64 {
+        std::fs::write(src.join(format!("f{i}")), data(100 + i, 600)).unwrap();
+    }
+    for i in 0..4 {
+        std::fs::write(src.join(format!("same{i}")), data(99, 40 << 10)).unwrap();
+    }
+    let store = dir.path().join("store");
+    run_seed(&store, &src, None).unwrap();
+    run_snapshot_create(&store, Some("s1".into())).unwrap();
+    run_snapshot_create(&store, Some("s2".into())).unwrap();
+    let dry = read_counts(&rehash(&store, "sha256", true));
+    let real = read_counts(&rehash(&store, "sha256", false));
+    assert_eq!(dry, real);
+}
+
 /// D-22: the dry-run makes the checks of a real run and refuses with the
 /// same text.
 #[test]

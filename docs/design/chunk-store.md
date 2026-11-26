@@ -345,9 +345,13 @@ after a crash between the switch and the GC frees the old objects.
 
 `--dry-run` takes the same lock and makes the same checks, so it refuses
 what a real run refuses. Then it reads and verifies the live tree through a
-read-only open and writes nothing: no temp files, no flag, no header
-change, no pack. It reports the values read and verified, and the objects
-of another hash with their bytes. That count is an estimate of what a real
+read-only open and writes nothing in the store: no temp files, no flag,
+no header change, no pack. Its old-to-new map is the on-disk map of a real
+run, in a new directory of the system temp dir (`TMPDIR`, not the store),
+removed at the end; it takes about 134 bytes per distinct key there. So a
+value that files, roots or snapshots share is read and counted once, as in
+a real run. It reports the values read and verified, and the objects of
+another hash with their bytes. That count is an estimate of what a real
 run rewrites and of what its GC frees.
 
 ### Report
