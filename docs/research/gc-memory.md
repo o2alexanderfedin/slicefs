@@ -11,9 +11,12 @@ file for each extra snapshot. With one snapshot, the GC heap goes above
 1 GiB at about 2.8 million files. The earlier estimate of 33 bytes per file
 was too low by a factor of 10 or more.
 
-Update (#207): the mark is now bounded. Its heap no longer grows with
-the snapshot count, and grows only 21 to 35 MB from 100k to 1M files
-(parts outside the mark). See "After the fix" at the end.
+Update (#207): the mark is now bounded. The GC heap no longer grows
+with the snapshot count. From 100k to 1M files it grows by 21 to 35 MB
+(measured), all outside the mark: mostly the Bloom filters of the index
+runs (about 15 bytes per tiny file, by design), which adds about 135 MB
+more at 10M files, plus the per-pack `.idx` part (at most about 150 MB).
+See "After the fix" at the end.
 
 ## How it was measured
 
@@ -196,14 +199,18 @@ from the tables above.
 | 100,000 | 4 | 75 | 75 | 75 | 204 |
 | 1,000,000 | 4 | 101 | 109 (735) | 95 | 258 (764) |
 
-Peak RSS (anon) in MiB:
+Peak RSS in MiB, anon in parentheses. "Before" is from the tables above
+(no 100k row with 4 snapshots was measured before).
 
-| Files | Snapshots | gc (before) | gc --full (before) | dry-run | rehash (before) | rehash wall |
-|---|---|---|---|---|---|---|
-| 100,000 | 1 | 125 (98) (153) | 200 (174) (233) | 75 (5) | 104 (68) (260 (214)) | 4.3 s |
-| 1,000,000 | 1 | 387 (172) (562) | 494 (279) (559) | 255 (19) | 337 (103) (832 (399)) | 51 s |
-| 100,000 | 4 | 125 (101) | 176 (152) | 76 (5) | 100 (47) | 6.0 s |
-| 1,000,000 | 4 | 386 (171) (859) | 462 (246) (907) | 256 (77) | 337 (101) (861 (615)) | 69 s |
+| Files | Snapshots | Run | gc | gc --full | dry-run | rehash | rehash wall |
+|---|---|---|---|---|---|---|---|
+| 100,000 | 1 | before | 153 | 233 | 76 | 260 (214) | 11 s |
+| 100,000 | 1 | after | 125 (98) | 200 (174) | 75 (5) | 104 (68) | 4.3 s |
+| 1,000,000 | 1 | before | 562 | 559 | 258 | 832 (399) | 117 s |
+| 1,000,000 | 1 | after | 387 (172) | 494 (279) | 255 (19) | 337 (103) | 51 s |
+| 100,000 | 4 | after | 125 (101) | 176 (152) | 76 (5) | 100 (47) | 6.0 s |
+| 1,000,000 | 4 | before | 859 | 907 | 258 | 861 (615) | 68 s |
+| 1,000,000 | 4 | after | 386 (171) | 462 (246) | 256 (77) | 337 (101) | 69 s |
 
 (The rehash rows of this table ran on a store that heaptrack had
 converted first; see note (1) above. The heaptrack column is the real
@@ -216,9 +223,11 @@ Acceptance:
   `gc --full`). So the heap does not grow with the snapshot count.
 - **Files.** From 100k to 1M files (10 times the files), the heap of
   `gc` and `gc --full` grows by 21 to 35 MB, and the heap of a rehash by
-  54 MB (before: +310 MB for `gc --full` with 1 snapshot). Margin: the
-  heap at 1M files is at most 35 MB (GC) or 55 MB (rehash) above the heap
-  at 100k files.
+  54 MB (before: +310 MB for `gc --full` with 1 snapshot). Margin as
+  measured: the heap at 1M files is at most 35 MB (GC) or 55 MB (rehash)
+  above the heap at 100k files. This rest is not fixed: the Bloom filters
+  of the index runs (item 2 below) grow with the object count, about
+  15 bytes per tiny file, so about 135 MB more at 10M files.
 - At the peak of every command, no allocation of the metadata walk is in
   the top sites (heaptrack): the mark keeps only its fixed buffers.
 
@@ -253,3 +262,9 @@ RSS went down by 12 to 60 % from before.
 Disk: the sort of the keys takes about 33 bytes per key per root in
 `<store>/gc-tmp` (about 100 bytes per tiny file per root), removed at the
 end. The wall time of `gc --full` at 1M files and 1 snapshot is 73 s.
+
+Costs of the change for every GC (also the online GC of a mount): the
+temp disk space above must be free before the GC frees anything, so a GC
+on a full disk can fail (then it deletes nothing). A stop request is not
+checked during the merge of the sorted keys (sequential disk I/O, a few
+seconds per GB).
