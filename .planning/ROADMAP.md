@@ -410,7 +410,7 @@ Plans:
 3. The two Phase 19 races are fixed, each with a test that failed before the fix and a model or stress test that stays in CI: (a) a size change of a closed file against unlink or setattr; (b) a cross-directory rename with no ancestor check. If either cannot be fixed in this phase, the Linux default is `--workers 1` until it is.
 4. Kani proves small pure code (the header parser, size limits) free of panic and overflow.
 5. Line coverage is measured in CI, also in Linux Docker with the FUSE checks, and the numbers are in the CI log. The `unsafe` blocks that Miri cannot run (FFI in slicefs-cli and vendor/fuser) have a written review.
-**Plans:** 6/11 plans executed
+**Plans:** 7/11 plans executed
 
 Plans:
 **Wave 1** *(tracer)*
@@ -426,7 +426,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [x] 21.2-06-PLAN.md — loom models of the commit gate and the shared dirty budget on the real code (gate through `sync::raw`, `throttle_wait` and `request_stop` seams), red on planted faults, timings
-- [ ] 21.2-07-PLAN.md — ThreadSanitizer (named set with the race tests and a 10 s stress run) and deadlock-detect stress scripts and jobs; first Linux CI run read by the orchestrator
+- [x] 21.2-07-PLAN.md — ThreadSanitizer (named set with the race tests and a 10 s stress run) and deadlock-detect stress scripts and jobs; first Linux CI run read by the orchestrator (local work done; CI read pending)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 21.2-08-PLAN.md — Kani: byte-level core of the header parser, `write_end`, `hard_cap_of`, `dirty_move`, `workers_for_cpus`, `stripe`; nine harnesses, `kani.sh`

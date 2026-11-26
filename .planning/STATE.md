@@ -6,16 +6,16 @@ current_phase: "21.2"
 current_phase_name: Thread-safety verification and CI gates
 current_plan: 7
 status: executing
-stopped_at: Completed 21.2-06-PLAN.md
-last_updated: "2026-11-26T00:40:36.172Z"
+stopped_at: "21.2-07 at CI checkpoint (Task 3): local work committed, first tsan/deadlock CI run pending"
+last_updated: "2026-11-26T01:06:03.316Z"
 last_activity: 2026-11-25
 last_activity_desc: Phase 21.1 complete, transitioned to Phase 22
-state_head: 4c5653e61bd2dd001916649050dc11d4417c59c0
+state_head: b4d1a22d80fbbcc9a9b83f240012ce327579f0d9
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 55
-  completed_plans: 50
+  completed_plans: 51
   percent: 44
 ---
 
@@ -99,6 +99,7 @@ Progress: [████░░░░░░] 44%
 | Phase 21.2 P04 | about 3 h | 2 tasks | 5 files |
 | Phase 21.2 P05 | 3h35m | 3 tasks | 28 files |
 | Phase 21.2 P06 | about 2 h | 2 tasks | 6 files |
+| Phase 21.2 P07 | 25 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -231,6 +232,7 @@ Owner decisions for v2.2 (also in ROADMAP.md):
 - [Phase 21.2]: 21.2-05 D-13: Miri runs a named module list (chunk-store pack_io, sync, lock_tail_tests, run, index; metadata wal, inode, xattr): the full --lib run took 1449 s on Linux, over 1200 s; the list takes 982 s
 - [Phase 21.2]: 21.2-05: every lib test Miri cannot run has cfg_attr(miri, ignore = reason) from the Linux probe (chunk-store 52, metadata 109); no target-only form was needed
 - [Phase 21.2]: 21.2-06: loom CI bound stays 3; all 7 models run in 7 s; the gate and FlushCtl protocol atomics go through sync::raw
+- [Phase 21.2]: 21.2-07: lock_tail_tests stays under TSan with put_and_read_pass_a_held_keep_cap_wait skipped (5 s real-time step limit in a debug TSan build; passes under TSan in release, no report)
 
 ### Pending Todos
 
@@ -259,9 +261,9 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-26T00:40:35.558Z
-Stopped at: Completed 21.2-06-PLAN.md
-Resume file: None
+Last session: 2026-11-26T01:06:02.698Z
+Stopped at: 21.2-07 at CI checkpoint (Task 3): local work committed, first tsan/deadlock CI run pending
+Resume file: .planning/phases/21.2-thread-safety-verification-and-ci-gates/21.2-07-PLAN.md
 
 ## Operator Next Steps
 
