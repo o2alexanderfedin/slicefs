@@ -127,8 +127,10 @@ pub struct StoreStats {
     /// The feature flags of the header, by class.
     pub flags: FlagSets,
     /// The chunk profile of the store (4/8/32 KiB when the header has no
-    /// `chunks` line, also with no header).
-    pub chunk_profile: ProfileOut,
+    /// `chunks` line, also with no header), as checked by the header
+    /// parse. JSON: [`ProfileOut`].
+    #[serde(serialize_with = "profile_json")]
+    pub chunk_profile: chunk_store::ChunkProfile,
     /// `read-write`, or `read-only` (an unknown ro_compat flag) for this SliceFS.
     pub access: &'static str,
 }
@@ -140,6 +142,11 @@ pub struct ProfileOut {
     pub min: u32,
     pub avg: u32,
     pub max: u32,
+}
+
+/// The JSON of [`StoreStats::chunk_profile`]: a [`ProfileOut`].
+fn profile_json<S: serde::Serializer>(p: &chunk_store::ChunkProfile, s: S) -> Result<S::Ok, S::Error> {
+    ProfileOut { min: p.min(), avg: p.avg(), max: p.max() }.serialize(s)
 }
 
 /// The feature flags of the store header, by class.
@@ -251,8 +258,7 @@ pub fn store_stats(store_path: &Path) -> Result<StoreStats, Box<dyn std::error::
 
     let opened = crate::header::check(store_path, crate::header::Want::Read)?;
     let (format, flags, access) = header_fields(&opened);
-    let profile = crate::content::profile_of(opened.header.as_ref());
-    let chunk_profile = ProfileOut { min: profile.min(), avg: profile.avg(), max: profile.max() };
+    let chunk_profile = crate::content::profile_of(opened.header.as_ref());
     let segs_dir = store_path.join("segments");
 
     // Load store from segment replay.
@@ -342,9 +348,7 @@ fn human_stats(stats: &StoreStats) -> String {
         Some(n) => { let _ = writeln!(o, "Store format     : {n}"); }
         None => { let _ = writeln!(o, "Store format     : none (no store header yet)"); }
     }
-    let p = &stats.chunk_profile;
-    let profile = chunk_store::ChunkProfile::new(p.min, p.avg, p.max).map_or_else(|_| format!("{}/{}/{} B", p.min, p.avg, p.max), |c| c.to_string());
-    let _ = writeln!(o, "Chunk profile    : {profile}");
+    let _ = writeln!(o, "Chunk profile    : {}", stats.chunk_profile);
     let f = &stats.flags;
     let all = [("compat", &f.compat), ("ro_compat", &f.ro_compat), ("incompat", &f.incompat)];
     let mut label = "Feature flags    : ";
@@ -631,7 +635,7 @@ mod tests {
             mounted: false,
             format: Some(7),
             flags: FlagSets::default(),
-            chunk_profile: ProfileOut { min: 4096, avg: 8192, max: 32768 },
+            chunk_profile: chunk_store::ChunkProfile::DEFAULT,
             access: "read-write",
         };
         let json = serde_json::to_string(&stats).expect("StoreStats should serialize to JSON");
@@ -694,8 +698,7 @@ mod tests {
         let p = chunk_store::ChunkProfile::new(16384, 65536, 262144).unwrap();
         crate::seed::run_seed_with(&store, &src, None, Some(p)).unwrap();
         let stats = store_stats(&store).unwrap();
-        let c = &stats.chunk_profile;
-        assert_eq!((c.min, c.avg, c.max), (16384, 65536, 262144));
+        assert_eq!(stats.chunk_profile, p);
         let text = human_stats(&stats);
         let flag = format!("Feature flags    : ro_compat {CHUNK_PROFILE_FLAG} (needs SliceFS {CHUNK_PROFILE_RELEASE}; known here)");
         for line in ["Chunk profile    : 16/64/256 KiB", flag.as_str()] {
