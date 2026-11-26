@@ -225,7 +225,7 @@ One row per commit and mode (the line `commit` of `whole`, `flat` and
 | `new_objects` | objects | New objects in the store by this commit (`ChunkStore::stats()` delta; a deduped put adds 0) |
 | `new_raw_bytes` | bytes | Bytes of the new objects before zstd |
 | `new_stored_bytes` | bytes | Bytes of the new object payloads in the packs (after zstd) |
-| `new_record_bytes` | bytes | `new_stored_bytes` plus 42 header bytes per new object: the bytes that the packs grow by |
+| `new_record_bytes` | bytes | `new_stored_bytes` plus 46 bytes per new object (the 42-byte record header and the 4-byte record CRC): the bytes that the packs grow by |
 | `nodes_read` | nodes | `prolly`: nodes read by `apply` (0 for the bulk build); `NA` for `whole` and `flat` |
 | `nodes_written` | nodes | `prolly`: nodes written; `NA` for `whole` and `flat` |
 | `peak_rss_bytes` | bytes | Peak RSS of the whole step process (`/usr/bin/time -l` on macOS, `-v` with GNU time); the same for every row of a step; `NA` without one of them |
