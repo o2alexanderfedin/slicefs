@@ -46,6 +46,9 @@ pub struct SortCfg {
 /// the file system has space for them; an error stops the sort.
 pub type SpaceCheck = Arc<dyn Fn(u64) -> io::Result<()> + Send + Sync>;
 
+/// How many records a merge writes between two asks of its stop.
+const STOP_EVERY: u64 = 1 << 14;
+
 /// A directory for temp files, removed with its files on drop. It is made
 /// at the first [`TmpDir::path`], not at [`TmpDir::new`]: a sort that fits
 /// in RAM makes no directory.
@@ -165,7 +168,15 @@ impl<const N: usize> Sorter<N> {
 
     /// One sorted file of every record pushed, without duplicates (in RAM
     /// if nothing was spilled).
-    pub fn finish(mut self) -> io::Result<SortedFile<N>> {
+    pub fn finish(self) -> io::Result<SortedFile<N>> {
+        self.finish_or_stop(&|| false)?.ok_or_else(|| io::Error::other("the sort stopped"))
+    }
+
+    /// [`Sorter::finish`], but `Ok(None)` (the temp files removed) as soon
+    /// as `stop` gives true. It is asked before each merge and every
+    /// [`STOP_EVERY`] records of a merge, so a stop does not wait for the
+    /// merge passes.
+    pub fn finish_or_stop(mut self, stop: &dyn Fn() -> bool) -> io::Result<Option<SortedFile<N>>> {
         let mut keep = std::mem::take(&mut self.keep);
         keep.push(Arc::clone(&self.dir));
         if self.runs.is_empty() {
@@ -174,7 +185,7 @@ impl<const N: usize> Sorter<N> {
             buf.sort_unstable();
             buf.dedup();
             let len = buf.len() as u64;
-            return Ok(SortedFile { src: Backing::Mem(buf.into()), len, passes: 0, _dirs: keep });
+            return Ok(Some(SortedFile { src: Backing::Mem(buf.into()), len, passes: 0, _dirs: keep }));
         }
         self.spill()?;
         let mut passes = 0;
@@ -185,13 +196,18 @@ impl<const N: usize> Sorter<N> {
                     self.runs.push(group[0].clone());
                     continue;
                 }
+                if stop() {
+                    return Ok(None);
+                }
                 let mut bytes = 0u64;
                 for p in group {
                     bytes += std::fs::metadata(p)?.len();
                 }
                 self.check_space(bytes)?;
                 let out = self.new_path()?;
-                merge::<N>(group, &out)?;
+                if !merge::<N>(group, &out, stop)? {
+                    return Ok(None);
+                }
                 for p in group {
                     let _ = std::fs::remove_file(p);
                 }
@@ -203,12 +219,13 @@ impl<const N: usize> Sorter<N> {
             return Err(io::Error::other("the sort has no run"));
         };
         let len = std::fs::metadata(&path)?.len() / N as u64;
-        Ok(SortedFile { src: Backing::Disk { file: File::open(&path)?, path }, len, passes, _dirs: keep })
+        Ok(Some(SortedFile { src: Backing::Disk { file: File::open(&path)?, path }, len, passes, _dirs: keep }))
     }
 }
 
-/// Merge the sorted runs `inputs` into `out`, without duplicates.
-fn merge<const N: usize>(inputs: &[PathBuf], out: &Path) -> io::Result<()> {
+/// Merge the sorted runs `inputs` into `out`, without duplicates. False if
+/// `stop` gave true first (asked every [`STOP_EVERY`] records).
+fn merge<const N: usize>(inputs: &[PathBuf], out: &Path, stop: &dyn Fn() -> bool) -> io::Result<bool> {
     let mut readers = Vec::with_capacity(inputs.len());
     for p in inputs {
         let f = File::open(p)?;
@@ -223,7 +240,12 @@ fn merge<const N: usize>(inputs: &[PathBuf], out: &Path) -> io::Result<()> {
     }
     let mut w = BufWriter::with_capacity(READ_BUF, File::create(out)?);
     let mut last: Option<[u8; N]> = None;
+    let mut n = 0u64;
     while let Some(Reverse((rec, i))) = heap.pop() {
+        n += 1;
+        if n.is_multiple_of(STOP_EVERY) && stop() {
+            return Ok(false);
+        }
         if last != Some(rec) {
             w.write_all(&rec)?;
             last = Some(rec);
@@ -233,7 +255,7 @@ fn merge<const N: usize>(inputs: &[PathBuf], out: &Path) -> io::Result<()> {
         }
     }
     w.into_inner().map_err(|e| e.into_error())?;
-    Ok(())
+    Ok(true)
 }
 
 /// Where the records of a [`SortedFile`] are.
@@ -447,6 +469,39 @@ mod tests {
         assert_eq!(asked.load(Ordering::Relaxed), 32, "asked for the first run (4 records of 8 bytes)");
         drop(s);
         assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0, "no file was written");
+    }
+
+    #[test]
+    fn a_stop_in_the_merge_passes_ends_the_sort_and_removes_its_files() {
+        let parent = tempfile::TempDir::new().unwrap();
+        for at in [1, 3, 10] {
+            let dir = Arc::new(TmpDir::new(parent.path()).unwrap());
+            let mut s = Sorter::<8>::new(dir, "t", SortCfg { chunk_records: 4, fan_in: 2 });
+            for i in 0..2000 {
+                s.push(rec(i)).unwrap();
+            }
+            let asked = std::cell::Cell::new(0);
+            let stop = || {
+                asked.set(asked.get() + 1);
+                asked.get() >= at
+            };
+            assert!(s.finish_or_stop(&stop).unwrap().is_none(), "stop at ask {at}");
+            assert_eq!(asked.get(), at);
+            assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0, "files left after a stop at {at}");
+        }
+        // A merge long enough to ask inside it.
+        let dir = Arc::new(TmpDir::new(parent.path()).unwrap());
+        let mut s = Sorter::<8>::new(dir, "t", SortCfg { chunk_records: 1 << 14, fan_in: 2 });
+        for i in 0..(3u64 << 14) {
+            s.push(i.wrapping_mul(0x9E37_79B9_7F4A_7C15).to_be_bytes()).unwrap();
+        }
+        let asked = std::cell::Cell::new(0);
+        let stop = || {
+            asked.set(asked.get() + 1);
+            asked.get() >= 2
+        };
+        assert!(s.finish_or_stop(&stop).unwrap().is_none());
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
     }
 
     #[test]

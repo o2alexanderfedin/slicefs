@@ -63,7 +63,7 @@ pub fn live_objects_paced(
 ) -> Result<Option<LiveFilter>, MetaError> {
     check_temp_space(cs, meta_roots, file_roots, false)?;
     let mut live = cs.live_filter();
-    let done = mark(cs, meta_roots, file_roots, stop, pacer, &mut |id| {
+    let done = mark(cs, meta_roots, file_roots, &|| stop.load(Ordering::Relaxed), pacer, &mut |id| {
         live.insert(&id);
         Ok(())
     })?;
@@ -94,7 +94,8 @@ pub fn live_objects_exact_paced(
     check_temp_space(cs, meta_roots, file_roots, true)?;
     let err = |e: chunk_store::Error| MetaError::Corrupted(format!("GC mark: temp file: {e}"));
     let mut live = cs.exact_mark().map_err(err)?;
-    let done = mark(cs, meta_roots, file_roots, stop, pacer, &mut |id| live.insert(&id).map_err(err))?;
+    let stop = || stop.load(Ordering::Relaxed);
+    let done = mark(cs, meta_roots, file_roots, &stop, pacer, &mut |id| live.insert(&id).map_err(err))?;
     Ok(done.then_some(live))
 }
 
@@ -133,9 +134,15 @@ fn check_temp_space(
     })
 }
 
+/// Keys of the walk of one root between two asks of the stop of the mark.
+const WALK_STOP_EVERY: u64 = 1 << 12;
+
 /// The walk of a mark: calls `add` with every live object (an object can
-/// come more than once). False if `stop` was set first. `pacer` runs before
-/// each root and each value (safe points: nothing is deleted during the
+/// come more than once). False if `stop` gave true first: it is asked
+/// before each root, every [`WALK_STOP_EVERY`] keys of a root's walk, in
+/// the merge passes of the key sort (`Sorter::finish_or_stop`), and before
+/// each value of the read-back, so a stop (unmount) does not wait for the
+/// sort of a large store. `pacer` runs before each root and each value (safe points: nothing is deleted during the
 /// mark, and the objects put or read meanwhile go to the touched set).
 ///
 /// RAM does not grow with the file or root count (#207): every key of the
@@ -149,7 +156,7 @@ fn mark(
     cs: &Arc<ChunkStore>,
     meta_roots: &[ObjectKey],
     file_roots: &[ObjectKey],
-    stop: &AtomicBool,
+    stop: &dyn Fn() -> bool,
     pacer: &dyn GcPacer,
     add: &mut dyn FnMut(ObjectId) -> Result<(), MetaError>,
 ) -> Result<bool, MetaError> {
@@ -162,17 +169,31 @@ fn mark(
     let mut io = NodeReader(Arc::clone(cs));
     for root in meta_roots {
         pacer.at_safe_point();
-        if stop.load(Ordering::Relaxed) {
+        if stop() {
             return Ok(false);
         }
-        for_each_referenced(&mut io, root, &mut |_, k| keys.push(k.0).map_err(MetaError::Io))?;
+        let (mut n, mut stopped) = (0u64, false);
+        let walked = for_each_referenced(&mut io, root, &mut |_, k| {
+            n += 1;
+            if n.is_multiple_of(WALK_STOP_EVERY) && stop() {
+                stopped = true;
+                return Err(MetaError::Io(std::io::Error::other("GC stopped")));
+            }
+            keys.push(k.0).map_err(MetaError::Io)
+        });
+        if stopped {
+            return Ok(false);
+        }
+        walked?;
     }
-    let sorted = keys.finish().map_err(MetaError::Io)?;
+    let Some(sorted) = keys.finish_or_stop(stop).map_err(MetaError::Io)? else {
+        return Ok(false);
+    };
     let mut values = sorted.reader().map_err(MetaError::Io)?;
     while let Some(rec) = values.next_rec().map_err(MetaError::Io)? {
         let v = ObjectKey(rec);
         pacer.at_safe_point();
-        if stop.load(Ordering::Relaxed) {
+        if stop() {
             return Ok(false);
         }
         let mut failed = None;
@@ -406,7 +427,7 @@ mod tests {
         let mut adds = 0u64;
         let stop = AtomicBool::new(false);
         let pacer = StopAt { n: AtomicUsize::new(0), at: usize::MAX, stop: &stop };
-        let done = mark(&cs, &roots, &[open_file], &stop, &pacer, &mut |id| {
+        let done = mark(&cs, &roots, &[open_file], &|| stop.load(Ordering::Relaxed), &pacer, &mut |id| {
             adds += 1;
             got.insert(id);
             Ok(())
@@ -491,6 +512,38 @@ mod tests {
             }
             cs.close().unwrap();
         }
+    }
+
+    /// A stop in the merge passes of the key sort (unmount): the mark ends
+    /// there, removes its temp files, and the GC deletes nothing.
+    #[test]
+    fn a_stop_in_the_key_merge_ends_the_mark_and_deletes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cs = open(dir.path());
+        let (roots, _) = build(&cs);
+        // Only the newest root: the older trees are garbage.
+        let roots = &roots[..1];
+        let before = cs.stats().objects;
+        cs.gc_begin().unwrap();
+        // Asked once before the root (and not in its short walk); the next
+        // ask is the first of the merge passes.
+        let asked = std::cell::Cell::new(0usize);
+        let stop = || {
+            asked.set(asked.get() + 1);
+            asked.get() > roots.len()
+        };
+        let done = mark(&cs, roots, &[], &stop, &NoPacer, &mut |_| Ok(())).unwrap();
+        assert!(!done, "the mark did not stop");
+        assert_eq!(asked.get(), roots.len() + 1);
+        cs.gc_abort();
+        assert_eq!(tmp_entries(dir.path()), 0, "temp files left");
+        assert_eq!(cs.stats().objects, before, "nothing is deleted");
+        // The same GC without a stop frees the garbage.
+        let stop = AtomicBool::new(false);
+        let live = live_objects(&cs, roots, &[], &stop).unwrap().unwrap();
+        let boundary = cs.gc_begin().unwrap();
+        let st = cs.gc_finish(&live, boundary).unwrap();
+        assert!(st.removed_objects > 0, "{st:?}");
     }
 
     #[test]
