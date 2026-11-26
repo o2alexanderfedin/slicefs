@@ -2,10 +2,13 @@
 //! FastCDC profile in its header, every open of the content store uses it,
 //! and another profile on an existing store is refused with no change.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
-use chunk_store::{ChunkProfile, DEFAULT_HASHER};
-use slicefs_cli::header::{self, CHUNK_PROFILE_FLAG, CHUNK_PROFILE_RELEASE, FORMAT_FILE};
+use chunk_store::{hasher_by_name, ChunkProfile, DEFAULT_HASHER};
+use slicefs_cli::header::{self, Access, CHUNK_PROFILE_FLAG, CHUNK_PROFILE_RELEASE, FORMAT_FILE};
+use slicefs_cli::mount::{start, StartArgs};
 use slicefs_cli::{content, seed};
 use tempfile::TempDir;
 
@@ -97,4 +100,139 @@ fn another_profile_on_an_existing_store_is_refused() {
         assert!(e.contains(part), "{e}");
     }
     assert_eq!(format(&plain), before);
+}
+
+/// Names, sizes and blake3 hashes of all files and directories under
+/// `root`, by relative name (as in store_header_tests.rs).
+fn tree(root: &Path) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let mut todo = vec![root.to_path_buf()];
+    let mut buf = vec![0u8; 64 << 10];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            let rel = p.strip_prefix(root).unwrap().display().to_string();
+            if std::fs::symlink_metadata(&p).unwrap().is_dir() {
+                out.insert(format!("{rel}/"), String::new());
+                todo.push(p);
+                continue;
+            }
+            let mut f = std::fs::File::open(&p).unwrap();
+            let (mut h, mut len) = (blake3::Hasher::new(), 0);
+            loop {
+                let n = f.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                h.update(&buf[..n]);
+                len += n;
+            }
+            out.insert(rel, format!("{len} {}", h.finalize().to_hex()));
+        }
+    }
+    out
+}
+
+/// A source dir with one 1 MiB random file, at `<dir>/src`.
+fn source(dir: &Path) -> PathBuf {
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("one"), random_bytes(1 << 20, 0x5eed_0202)).unwrap();
+    src
+}
+
+/// A store at `<dir>/store` seeded with the 16/64/256 KiB profile.
+fn seeded_large(dir: &Path) -> PathBuf {
+    let store = dir.join("store");
+    seed::run_seed_with(&store, &source(dir), None, Some(large())).unwrap();
+    store
+}
+
+/// Assert that `err` names both profiles.
+fn assert_names_both(err: &str) {
+    for part in ["16/64/256 KiB", "4/8/32 KiB", "--chunk-profile"] {
+        assert!(err.contains(part), "{err}");
+    }
+}
+
+#[test]
+fn seed_with_a_profile_makes_the_store_with_it() {
+    let dir = TempDir::new().unwrap();
+    let (src, p) = (source(dir.path()), large());
+    let new = dir.path().join("new");
+    seed::run_seed_with(&new, &src, None, Some(p)).unwrap();
+    assert_eq!(format(&new), header::marker_with(DEFAULT_HASHER, p));
+    assert_eq!(content::open_read_only(&new).unwrap().profile(), p);
+
+    let new2 = dir.path().join("new2");
+    seed::run_seed_with(&new2, &src, None, None).unwrap();
+    assert_eq!(format(&new2), header::marker(DEFAULT_HASHER));
+    assert_eq!(content::open_read_only(&new2).unwrap().profile(), ChunkProfile::DEFAULT);
+}
+
+#[test]
+fn seed_refuses_another_profile_and_changes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let store = seeded_large(dir.path());
+    let before = tree(&store);
+    let err = seed::run_seed_with(&store, &dir.path().join("src"), None, Some(ChunkProfile::DEFAULT)).unwrap_err().to_string();
+    assert_names_both(&err);
+    assert_eq!(tree(&store), before, "the store tree does not change");
+    seed::run_seed_with(&store, &dir.path().join("src"), None, Some(large())).unwrap();
+}
+
+/// A `--hash` change rewrites the header: the `chunks` line and its flag
+/// are written back, and the store keeps its profile.
+#[test]
+fn a_hash_change_keeps_the_chunk_profile() {
+    let dir = TempDir::new().unwrap();
+    let (store, p) = (seeded_large(dir.path()), large());
+    let keyed = hasher_by_name("test-keyed-blake3").unwrap();
+    seed::run_seed_with(&store, &dir.path().join("src"), Some("test-keyed-blake3"), None).unwrap();
+    assert_eq!(format(&store), header::marker_with(keyed, p));
+    let cs = content::open_read_only(&store).unwrap();
+    assert_eq!((cs.profile(), cs.hasher().name()), (p, "test-keyed-blake3"));
+    drop(cs);
+
+    let args = StartArgs { hash: Some("blake3-256".to_string()), chunk_profile: Some(p), ..Default::default() };
+    let started = start(&store, &args, None).unwrap();
+    assert_eq!(started.fs.content().profile(), p);
+    started.stop();
+    assert_eq!(format(&store), header::marker_with(DEFAULT_HASHER, p));
+}
+
+#[test]
+fn mount_checks_the_profile() {
+    let dir = TempDir::new().unwrap();
+    let (store, p) = (seeded_large(dir.path()), large());
+    let before = tree(&store);
+    let other = StartArgs { chunk_profile: Some(ChunkProfile::DEFAULT), ..Default::default() };
+    let err = start(&store, &other, None).err().expect("another profile is refused").to_string();
+    assert_names_both(&err);
+    assert_eq!(tree(&store), before, "the store tree does not change");
+    for want in [Some(p), None] {
+        let args = StartArgs { chunk_profile: want, ..Default::default() };
+        let started = start(&store, &args, None).unwrap();
+        assert_eq!(started.fs.content().profile(), p, "{want:?}");
+        started.stop();
+    }
+}
+
+#[test]
+fn a_read_only_mount_refuses_another_profile() {
+    let dir = TempDir::new().unwrap();
+    let (store, p) = (seeded_large(dir.path()), large());
+    let mut f = std::fs::OpenOptions::new().append(true).open(store.join(FORMAT_FILE)).unwrap();
+    std::io::Write::write_all(&mut f, b"ro_compat test-ro-feature r-test\n").unwrap();
+    drop(f);
+    let before = tree(&store);
+    let other = StartArgs { chunk_profile: Some(ChunkProfile::DEFAULT), ..Default::default() };
+    let err = start(&store, &other, None).err().expect("another profile is refused").to_string();
+    assert_names_both(&err);
+    assert!(!err.contains("--hash"), "{err}");
+    assert_eq!(tree(&store), before, "the store tree does not change");
+    let started = start(&store, &StartArgs { chunk_profile: Some(p), ..Default::default() }, None).unwrap();
+    assert!(matches!(started.access, Access::ReadOnly(_)), "{:?}", started.access);
+    assert_eq!(started.fs.content().profile(), p);
+    started.stop();
 }

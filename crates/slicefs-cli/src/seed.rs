@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::content::{self, Content};
+use chunk_store::ChunkProfile;
 use metadata::segment::{SegmentWriter, SegmentEntry};
 use metadata::store::DictMetadataStore;
 use slicefs_traits::key::ObjectKey;
@@ -32,18 +33,28 @@ const S_IFDIR: u32 = 0o040_000;
 /// - `<store_path>/segments/segment-000001.seg` — root update segment
 ///
 /// `hash` is `--hash`: the write hash of the new objects (`None`: the
-/// store's recorded hash, blake3-256 for a new store).
+/// store's recorded hash, blake3-256 for a new store). The chunk profile is
+/// the recorded one (4/8/32 KiB for a new store): see [`run_seed_with`].
 pub fn run_seed(store_path: &Path, source_dir: &Path, hash: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    run_seed_with(store_path, source_dir, hash, None)
+}
+
+/// [`run_seed`] with `profile`, the chunk profile of `--chunk-profile`
+/// (`None`: the recorded one, 4/8/32 KiB for a new store). A new store
+/// records it in its first header write; a store with another profile is
+/// refused before anything is written.
+pub fn run_seed_with(store_path: &Path, source_dir: &Path, hash: Option<&str>, profile: Option<ChunkProfile>) -> Result<(), Box<dyn std::error::Error>> {
     // The exclusive store lock first, held to the end: seed writes a new
     // root (and with --hash, the header), so it must not run beside a
     // mount or an offline command (#201). The directory is made first so a
     // new store can be locked too.
     std::fs::create_dir_all(store_path)?;
     let _store_lock = crate::header::lock_offline(store_path)?;
-    // The store header: a new store gets it durably before `packs/`
-    // and `segments/` exist (with the hash of `--hash`); a store that this
-    // build may not write is refused.
-    if let Some(line) = content::check_write(store_path, hash)? {
+    // Then the store header: a new store gets it durably before `packs/`
+    // and `segments/` exist (with the hash of `--hash` and the profile of
+    // `--chunk-profile`); a store that this build may not write, or that
+    // has another profile, is refused.
+    if let Some(line) = content::check_write_with(store_path, hash, profile)? {
         println!("{line}");
     }
 
