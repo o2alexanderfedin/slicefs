@@ -1,0 +1,92 @@
+== cargo test -p metadata
+test test_round_trip_root_update_entries ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/wal_tests.rs (target/debug/deps/wal_tests-1fbe4781154b8454)
+
+running 9 tests
+test test_no_wal_flush_and_sync ... ok
+test test_no_wal_shutdown ... ok
+test test_no_wal_log_mutation ... ok
+test test_flush_on_fsync_wal_buffers_entries ... ok
+test test_flush_on_fsync_wal_flush_writes_entries ... ok
+test test_per_op_wal_flush_and_sync ... ok
+test test_per_op_wal_log_mutation_root_update ... ok
+test test_periodic_wal_shutdown_flushes_entries ... ok
+test test_per_op_wal_log_mutation_snapshot ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/write_log_tests.rs (target/debug/deps/write_log_tests-d07a9ca4d4ab22ed)
+
+running 9 tests
+test a_commit_cuts_the_log ... ok
+test records_added_after_the_scan_are_not_read ... ok
+test an_op_after_an_unknown_last_record_is_not_read ... ok
+test a_record_cut_after_the_scan_is_an_error ... ok
+test the_log_continues_into_later_segments ... ok
+test a_torn_record_at_the_scan_ends_both_passes ... ok
+test a_commit_makes_its_objects_durable_before_the_root ... ok
+test records_after_the_last_root_come_back_in_order ... ok
+test each_commit_rotates_the_log_to_one_segment_and_keeps_snapshots ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.59s
+
+   Doc-tests metadata
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+rc=0
+== unsafe-count.sh
+UNSAFE files=33 tokens=135 result=ok
+rc=0
+== pmap07.py --self-test
+self-test ok
+rc=0
+== cargo test --workspace
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cas_local
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests chunk_store
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests metadata
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests prolly
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests slicefs_cli
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests slicefs_traits
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+rc=0
+== rule_commit_is_ancestor
+rule_commit_is_ancestor=1
