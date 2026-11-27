@@ -217,7 +217,7 @@ Release `v2.3.0` (`v2.2.0` was already used). Full details: `.planning/milestone
   1. The map layout is decided and recorded in `docs/design/store-format.md`: one prolly map per metadata map, or one combined namespace map (Q-2 of #19), with the reason and the effect on the root record
   2. The root record holds only one of `inode_map` and `inode_data`; a store written by the new build mounts, and the existing metadata and mount tests pass with it
   3. The boundary rule uses a fixed-point table (no float test) and has a version byte; the rule, its constants and the prolly node format are in `docs/design/store-format.md`; a test with fixed input gives the same cut points on Linux and macOS
-  4. A store written by the new build has the new incompat store flag; release `v2.3.0` refuses to mount it with a clear message, and the new build refuses a store made by `v2.3.0`
+  4. A store written by the new build is store format 8; release `v2.3.0` refuses to mount it, and the new build refuses a format 7 store made by `v2.3.0` with a clear message that points to the upgrade doc
 **Plans**: TBD
 
 ### Phase 26: Prolly maps in commit, read and GC
