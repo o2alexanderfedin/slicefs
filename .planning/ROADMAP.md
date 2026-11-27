@@ -218,7 +218,17 @@ Release `v2.3.0` (`v2.2.0` was already used). Full details: `.planning/milestone
   2. The root record holds only one of `inode_map` and `inode_data`; a store written by the new build mounts, and the existing metadata and mount tests pass with it
   3. The boundary rule uses a fixed-point table (no float test) and has a version byte; the rule, its constants and the prolly node format are in `docs/design/store-format.md`; a test with fixed input gives the same cut points on Linux and macOS
   4. A store written by the new build is store format 8; release `v2.3.0` refuses to mount it, and the new build refuses a format 7 store made by `v2.3.0` with a clear message that points to the upgrade doc
-**Plans**: TBD
+**Plans:** 8 plans
+
+Plans:
+- [ ] 25-01-PLAN.md — Integer boundary rule with a generated fixed-point table, rule version byte in the node header, Config::new, salt and forced-cut counts for the bench (wave 1)
+- [ ] 25-02-PLAN.md — One inode map: drop the duplicate, 197-byte root record, inode number allocator, lock site, bench copy; Docker mount gate (wave 1)
+- [ ] 25-03-PLAN.md — Store format 8: format 7 refused with the upgrade-doc message, docs/user/upgrade.md, real v2.3.0 check in both directions, format policy D-13 (wave 1)
+- [ ] 25-04-PLAN.md — Boundary salt: header line with its ro_compat flag, `seed --boundary-salt`, refusals and M18, doc (wave 2)
+- [ ] 25-05-PLAN.md — Bench layout engine: five-map batches of real commits, layouts a/b/c, fixed output schema (wave 2)
+- [ ] 25-06-PLAN.md — Bench synthetic 1M/10M source, matrix runner, Docker case, pre-registered decision script (wave 3)
+- [ ] 25-07-PLAN.md — Full benchmark run in Docker and the layout and constants decision by the pre-registered rules; owner report (wave 4)
+- [ ] 25-08-PLAN.md — Pin the constants and goldens (macOS and Linux), write the metadata map section of store-format.md, phase gate (wave 5)
 
 ### Phase 26: Prolly maps in commit, read and GC
 
