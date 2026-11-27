@@ -48,7 +48,8 @@
 //! - an internal node never ends after its first entry;
 //! - the node ends when `after > NODE_MAX - MAX_ENTRY` (the forced cut);
 //! - else it does not end when `after < NODE_MIN` (512 B);
-//! - else it ends when `boundary_hash(level, key) / (2^32 - 1)` is below
+//! - else it ends when `boundary_hash(level, key)` (a 32-bit number) is below
+//!   `threshold(cfg, before, after)`, an integer that stands for
 //!   `1 - e^-((after^4 - before^4) / L^4)` with `L = WEIBULL_L` (4,096) and
 //!   the shape `WEIBULL_K` = 4. That is the conditional Weibull CDF of
 //!   Dolt; the mean node is about 0.906 x L, about 3.7 KB.
@@ -104,24 +105,31 @@
 //! `apply`) are safe at any time, and no type of this crate holds shared
 //! mutable state.
 //!
-//! # Floats
+//! # Integer rule
 //!
-//! The cut test uses only the four basic float operations (an exact u64
-//! difference and an own `e^-x`), so node IDs are the same on every
-//! platform; `golden_root` pins them. Whether this rule and its constants
-//! would become part of a frozen store format is owner question Q-3 of
-//! Phase 24 (a one-way door, not decided here).
+//! The cut test is an integer test: the node ends iff
+//! `boundary_hash as u64 < threshold(cfg, before, after)`, with
+//! `threshold = 2^32 - e^-delta` in units of 2^-32 and
+//! `delta = ((after^4 - before^4) << 32) / L^4` (u128). The `e^-x` part
+//! reads a committed table (`rule_table.rs`: 23 integer and 1,025 fraction
+//! entries, linear interpolation), made by `scripts/prolly-table/gen_table.py`
+//! (`--check` compares the file with the generator). No floating point is
+//! used to decide a cut, so the cut points and node IDs are the same on
+//! every platform; `golden_root` pins the table hash, thresholds, cut
+//! points and a root. Whether this rule and its constants become part of a
+//! frozen store format is not decided here.
 
 mod apply;
 mod node;
 mod rule;
+mod rule_table;
 mod tree;
 
 #[cfg(test)]
 mod tests;
 
 pub use apply::{apply, ApplyStats, Edit};
-pub use rule::{boundary_hash, cut_probability, Splitter};
+pub use rule::{boundary_hash, threshold, Splitter};
 pub use tree::{build, empty_root, get, iter, walk, BuildStats, Builder, Cursor, NodeInfo};
 
 /// Bytes of the node header: magic 4, level 1, entry count 4.

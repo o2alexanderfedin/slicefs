@@ -1,11 +1,13 @@
 //! The boundary rule: where a node ends.
 //!
 //! This is Dolt's size-aware key splitter with a Weibull CDF (K = 4), see
-//! the crate doc. The decision after an entry reads only the bytes and the
-//! entries since the last cut and the hash of the entry's key. It never
-//! reads value bytes and never looks at the next entry, so a rebuild may
-//! restart at the start of any node.
+//! the crate doc. Every cut decision uses integer math over a committed
+//! table; there is no floating point. The decision after an entry reads
+//! only the bytes and the entries since the last cut and the hash of the
+//! entry's key. It never reads value bytes and never looks at the next
+//! entry, so a rebuild may restart at the start of any node.
 
+use crate::rule_table::{EXP_FRAC, EXP_INT};
 use crate::{Config, NODE_HEADER};
 
 /// The 32-bit boundary hash of `key` at tree level `level`: the first 4
@@ -22,47 +24,49 @@ pub fn boundary_hash(level: u8, key: &[u8]) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 
-/// e to the power of minus `x`, for `x >= 0`, with only the four basic
-/// float operations, so the result is the same bits on every platform
-/// (node IDs depend on every cut). Halve `x` below 0.5, sum 16 Taylor
-/// terms in a fixed order, then square once per halving.
-pub(crate) fn exp_neg(x: f64) -> f64 {
-    if x >= 40.0 {
-        return 0.0;
+/// Largest node size that the threshold math takes as is. A node is at
+/// most `MAX_NODE_MAX` (32 KiB); above this value `delta` is far above 23
+/// for every config, so the clamp changes no result and keeps the fourth
+/// powers and the shift inside u128.
+const SIZE_CLAMP: usize = 1 << 20;
+
+/// `e^-x` scaled by 2^32, for `x` in units of 2^-32 (`x >= 0`): integer
+/// math over the committed table (`rule_table.rs`), no floating point.
+/// The integer part `x >> 32` picks `EXP_INT`; the top 10 bits of the
+/// fraction pick two neighbours of `EXP_FRAC`, and the low 22 bits
+/// interpolate between them linearly. From 23 on the result is 0.
+pub(crate) fn exp_neg_fp(x: u128) -> u64 {
+    let int = (x >> 32) as usize;
+    if int >= EXP_INT.len() {
+        return 0;
     }
-    let mut y = x;
-    let mut k = 0u32;
-    while y >= 0.5 {
-        y /= 2.0;
-        k += 1;
-    }
-    let mut sum = 1.0f64;
-    let mut term = 1.0f64;
-    for n in 1..16 {
-        term = term * -y / n as f64;
-        sum += term;
-    }
-    for _ in 0..k {
-        sum *= sum;
-    }
-    sum
+    let frac = (x & 0xFFFF_FFFF) as u64;
+    let j = (frac >> 22) as usize;
+    let r = frac & ((1 << 22) - 1);
+    let lo = EXP_FRAC[j];
+    let hi = EXP_FRAC[j + 1];
+    let f = lo - (((lo - hi) * r) >> 22);
+    // Both factors can be 2^32, so the product needs u128.
+    ((EXP_INT[int] as u128 * f as u128) >> 32) as u64
 }
 
-/// `s` to the fourth power in u64 (saturating; node sizes are at most
-/// 2^14, so the value is at most 2^56 and exact).
-fn s4(s: usize) -> u64 {
-    let s = s as u64;
-    s.saturating_mul(s).saturating_mul(s).saturating_mul(s)
-}
-
-/// The probability that a node ends after an entry that grows it from
-/// `before` to `after` bytes, given that it did not end before: Dolt's
-/// (F(after) - F(before)) / (1 - F(before)) for the Weibull CDF F with
-/// K = 4 and scale L. That is 1 - e^-delta with
-/// delta = (after^4 - before^4) / L^4; the difference is exact in u64.
-pub fn cut_probability(cfg: &Config, before: usize, after: usize) -> f64 {
-    let delta = s4(after).saturating_sub(s4(before)) as f64 / s4(cfg.weibull_l()) as f64;
-    1.0 - exp_neg(delta)
+/// The cut threshold: a node that grows from `before` to `after` bytes
+/// ends after the entry iff the 32-bit boundary hash is below this value.
+/// It is `2^32 - e^-delta` in units of 2^-32 with
+/// `delta = (after^4 - before^4) / L^4` (Dolt's conditional Weibull CDF
+/// with K = 4 and `L = cfg.weibull_l()`), computed with integers only:
+/// `delta` is `((after^4 - before^4) << 32) / L^4` in u128. The result is
+/// in `0..=2^32`: 0 when the node does not grow, 2^32 (always cut) when
+/// `delta >= 23`. Callers compare it as u64.
+pub fn threshold(cfg: &Config, before: usize, after: usize) -> u64 {
+    let p4 = |s: usize| {
+        let s = s.min(SIZE_CLAMP) as u128;
+        s * s * s * s
+    };
+    let num = p4(after).saturating_sub(p4(before)) << 32;
+    let l = cfg.weibull_l() as u128;
+    let delta = num / (l * l * l * l);
+    (1u64 << 32) - exp_neg_fp(delta)
 }
 
 /// The cut state of one node in progress: its byte size (header included)
@@ -103,7 +107,13 @@ impl Splitter {
         if self.size < cfg.node_min() {
             return false;
         }
-        (boundary_hash(level, key) as f64 / 4_294_967_295.0) < cut_probability(cfg, before, self.size)
+        (boundary_hash(level, key) as u64) < threshold(cfg, before, self.size)
+    }
+
+    /// A node in progress of `size` bytes and `count` entries (tests only).
+    #[cfg(test)]
+    pub(crate) fn at(size: usize, count: usize) -> Self {
+        Self { size, count }
     }
 
     /// Back to the state of an empty node.

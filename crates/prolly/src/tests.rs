@@ -1,4 +1,3 @@
-use crate::rule::exp_neg;
 use crate::*;
 use chunk_store::mem::MemIo;
 use chunk_store::{ChunkStore, Options};
@@ -39,35 +38,171 @@ fn build_then_get_roundtrip() {
     }
 }
 
+/// The table bytes (EXP_INT then EXP_FRAC, each u64 little endian).
+fn table_bytes() -> Vec<u8> {
+    use crate::rule_table::{EXP_FRAC, EXP_INT};
+    EXP_INT.iter().chain(EXP_FRAC.iter()).flat_map(|v| v.to_le_bytes()).collect()
+}
+
+/// Entry counts of the leaves, in leaf order.
+fn leaf_counts(s: &ChunkStore, root: &chunk_store::ObjectId) -> Vec<usize> {
+    nodes(s, root).iter().filter(|n| n.level == 0).map(|n| n.entries).collect()
+}
+
+/// `PROLLY_PRINT_GOLDENS=1 cargo test -p prolly --lib -- --exact tests::golden_root --nocapture`
+/// prints every pinned value in the form of its `pin!` line (and asserts
+/// nothing), to re-pin.
 #[test]
 fn golden_root() {
-    let s = mem_store();
-    let (root, st) = build(&s, Config::DEFAULT, u64_entries(5_000, 7)).unwrap();
-    assert_eq!(root.to_hex(), "1ee1cf56844ec96d06f8dce27d4e0de09b87e7ce5926e397ff4e4c387e271f81d6");
-    assert_eq!((st.depth, st.leaves), (3, 58));
+    let print = std::env::var_os("PROLLY_PRINT_GOLDENS").is_some();
+    macro_rules! pin {
+        ($got:expr, $want:expr) => {{
+            let got = $got;
+            if print {
+                println!("pin!({}, {:?});", stringify!($got), got);
+            } else {
+                assert_eq!(got, $want, "{}", stringify!($got));
+            }
+        }};
+    }
+    // (a) the table.
+    pin!(blake3::hash(&table_bytes()).to_hex().to_string(), "6a72017ef6d3d7daf2ea9385afe01ac20fd4bf85610a5179c9bc7384bcc369e4");
+    // (b) integer thresholds.
     let d = Config::DEFAULT;
     let table = [(d, 9, 54), (d, 467, 512), (d, 3000, 3045), (d, 4096, 4141), (d, 8000, 8045), (d, 14000, 14045)]
         .into_iter()
         .chain([(Config::SMALL, 9, 30), (Config::SMALL, 200, 230)]);
-    let bits: Vec<u64> = table.map(|(c, b, a)| cut_probability(&c, b, a).to_bits()).collect();
-    assert_eq!(
-        bits,
-        [
-            4494650349440729088,
-            4545174308703870976,
-            4580702284337380896,
-            4586457444719755424,
-            4598737513935175060,
-            4605637781295192346,
-            4551032867001516032,
-            4597940318959880728
-        ]
-    );
-    assert_eq!((boundary_hash(0, b""), boundary_hash(1, b"key")), (527_629_384, 94_351_618));
-    // The basic-operation exp agrees with the std one (a reference here only).
-    for i in 0..200 {
-        let x = i as f64 * 0.2;
-        assert!((exp_neg(x) - (-x).exp()).abs() <= 1e-13, "x={x}");
+    let ths: Vec<u64> = table.map(|(c, b, a)| threshold(&c, b, a)).collect();
+    pin!(ths, [128, 322667, 75177143, 187653637, 1207803102, 3558426651, 803046, 1045739182]);
+    // (c) the cut points of a build, (d) its root.
+    let s = mem_store();
+    let (root, st) = build(&s, Config::DEFAULT, u64_entries(5_000, 7)).unwrap();
+    pin!(leaf_counts(&s, &root), [93, 133, 70, 65, 80, 93, 72, 90, 137, 88, 73, 90, 108, 89, 96, 61, 42, 126, 109, 95, 102, 76, 124, 101, 66, 103, 104, 103, 85, 120, 98, 103, 87, 68, 83, 22, 118, 53, 98, 106, 105, 125, 53, 111, 59, 101, 38, 75, 90, 45, 76, 64, 60, 111, 82, 65, 85, 25]);
+    pin!(root.to_hex(), "1ee1cf56844ec96d06f8dce27d4e0de09b87e7ce5926e397ff4e4c387e271f81d6");
+    pin!((st.depth, st.leaves), (3, 58));
+    // (e) the unsalted boundary hash.
+    pin!((boundary_hash(0, b""), boundary_hash(1, b"key")), (527629384, 94351618));
+}
+
+fn table_float(x: f64) -> f64 {
+    (-x).exp()
+}
+
+#[test]
+fn rule_table_matches_float_exp() {
+    use crate::rule_table::{EXP_FRAC, EXP_INT};
+    let one = 1u64 << 32;
+    assert_eq!((EXP_INT[0], EXP_FRAC[0]), (one, one));
+    assert!(EXP_INT.windows(2).all(|w| w[0] > w[1]), "EXP_INT strictly decreases");
+    assert!(EXP_FRAC.windows(2).all(|w| w[0] > w[1]), "EXP_FRAC strictly decreases");
+    assert_eq!(EXP_FRAC[1024], EXP_INT[1]);
+    for (i, v) in EXP_INT.iter().enumerate() {
+        let want = (one as f64 * table_float(i as f64)).round();
+        assert!((*v as f64 - want).abs() <= 1.0, "EXP_INT[{i}]");
+    }
+    for (j, v) in EXP_FRAC.iter().enumerate() {
+        let want = (one as f64 * table_float(j as f64 / 1024.0)).round();
+        assert!((*v as f64 - want).abs() <= 1.0, "EXP_FRAC[{j}]");
+    }
+}
+
+/// The float rule, as a reference only (never a source of the table).
+fn float_p(cfg: &Config, before: usize, after: usize) -> f64 {
+    let l = cfg.weibull_l() as f64;
+    let (b, a) = (before as f64, after as f64);
+    let delta = (a.powi(4) - b.powi(4)) / l.powi(4);
+    1.0 - (-delta).exp()
+}
+
+#[test]
+fn fixed_point_matches_float() {
+    let two32 = (1u64 << 32) as f64;
+    let tol = 2f64.powi(-22);
+    let mut max_err = 0f64;
+    let mut check = |cfg: &Config, b: usize, a: usize| {
+        let err = (threshold(cfg, b, a) as f64 / two32 - float_p(cfg, b, a)).abs();
+        assert!(err <= tol, "{cfg:?} {b}->{a}: error {err}");
+        max_err = max_err.max(err);
+    };
+    let cfgs = [Config::DEFAULT, Config::SMALL];
+    let mut seed = 0x1234_5678_9abc_def1u64;
+    for cfg in &cfgs {
+        for before in (0..cfg.node_max()).step_by(64) {
+            for step in [1, 4, 45, 200, 2048] {
+                check(cfg, before, (before + step).min(cfg.node_max()));
+            }
+        }
+        for _ in 0..200_000 {
+            let b = (xorshift(&mut seed) % cfg.node_max() as u64) as usize;
+            let a = b + (xorshift(&mut seed) % (cfg.node_max() - b + 1) as u64) as usize;
+            check(cfg, b, a);
+        }
+    }
+    println!("max error {max_err}");
+    // Decisions: the integer test against the float test.
+    let mut diffs = 0;
+    for cfg in &cfgs {
+        for _ in 0..500_000 {
+            let b = cfg.node_min() + (xorshift(&mut seed) % (cfg.node_max() - cfg.node_min()) as u64) as usize;
+            let a = (b + 1 + (xorshift(&mut seed) % 2048) as usize).min(cfg.node_max());
+            let h = xorshift(&mut seed) as u32;
+            let int_cut = (h as u64) < threshold(cfg, b, a);
+            let float_cut = (h as f64 / 4_294_967_295.0) < float_p(cfg, b, a);
+            diffs += (int_cut != float_cut) as u32;
+        }
+    }
+    println!("decisions that differ: {diffs} of 1000000");
+    assert!(diffs <= 4, "{diffs} decisions differ");
+}
+
+/// A key with a boundary hash below (`below`) or at or above the threshold.
+fn key_with_hash(level: u8, thr: u64, below: bool) -> Vec<u8> {
+    (0u32..)
+        .map(|i| i.to_be_bytes().to_vec())
+        .find(|k| ((boundary_hash(level, k) as u64) < thr) == below)
+        .unwrap()
+}
+
+#[test]
+fn threshold_edges() {
+    let d = Config::DEFAULT;
+    for b in [0, 9, 512, 16_000] {
+        assert_eq!(threshold(&d, b, b), 0, "b={b}");
+    }
+    assert_eq!(threshold(&d, 0, 16_384), 1 << 32);
+    assert!(threshold(&d, 0, 4_096) < 1 << 32);
+    let (min, force) = (d.node_min(), d.force_at());
+    let thr_min = threshold(&d, NODE_HEADER, min);
+    let cut_key = key_with_hash(0, thr_min, true);
+    let keep_key = key_with_hash(0, thr_min, false);
+    // Size node_min - 1: never ends, even for a key whose hash is below the threshold.
+    assert!(!Splitter::new().push(&d, 0, &cut_key, min - 1 - NODE_HEADER));
+    // Size node_min: the hash test decides.
+    assert!(Splitter::new().push(&d, 0, &cut_key, min - NODE_HEADER));
+    assert!(!Splitter::new().push(&d, 0, &keep_key, min - NODE_HEADER));
+    // Size force_at is not forced (the hash test decides); force_at + 1 is.
+    let thr_f = threshold(&d, force - 10, force);
+    assert!(thr_f > 0 && thr_f < 1 << 32);
+    let keep = key_with_hash(0, thr_f, false);
+    assert!(!Splitter::at(force - 10, 5).push(&d, 0, &keep, 10));
+    let thr_f1 = threshold(&d, force - 10, force + 1);
+    let keep1 = key_with_hash(0, thr_f1, false);
+    assert!(Splitter::at(force - 10, 5).push(&d, 0, &keep1, 11));
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+    #[test]
+    fn threshold_is_monotone(small in proptest::prelude::any::<bool>(), b in 0usize..100_000, a_off in 0usize..100_000) {
+        let cfg = if small { Config::SMALL } else { Config::DEFAULT };
+        let m = cfg.node_max() - 1;
+        let b = b % m;
+        let a = b + a_off % (m - b + 1);
+        // Later end: a higher threshold. Later start: a lower one.
+        proptest::prop_assert!(threshold(&cfg, b, a) <= threshold(&cfg, b, a + 1));
+        if b < a {
+            proptest::prop_assert!(threshold(&cfg, b, a) >= threshold(&cfg, b + 1, a));
+        }
     }
 }
 
