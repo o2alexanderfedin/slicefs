@@ -1,11 +1,16 @@
 #!/bin/bash
-# Benchmark of the prolly prototype against the metadata commit path (#19,
-# PROLLY-02). Seed the first tree once; then, for each run, copy the seeded
-# store, run the real commit path (whole), extract the inode_data change of
-# each commit (batches), and replay the changes through the current map
-# serializer (flat) and the prototype (prolly). Each step is its own process.
-# In process, no mount. By hand only, never in cargo test. Runs on macOS and
-# Linux. See README.md next to this script.
+# Benchmark of the metadata commit path (#19, PROLLY-02, PMAP-07). Seed the
+# first tree once; then, for each run, copy the seeded store and run the real
+# commit path (whole), and run the synthetic scale rows (flat map against
+# prolly tree). Each step is its own process. In process, no mount. By hand
+# only, never in cargo test. Runs on macOS and Linux. See README.md next to
+# this script.
+#
+# BIN may be any build that has the modes seed, whole and scale: the binary of
+# tag v2.3.0 gives the flat baseline of PMAP-07, the binary of a branch with
+# prolly maps gives the tree rows. The modes that read the flat maps of a
+# product store (batches, flat, prolly, maps, layout) are retired; tag v2.3.0
+# keeps them.
 #
 # usage: bench.sh <data-dir> [runs]
 #        SMOKE=1 bench.sh                  (no data dir: generated trees in a stores dir under WORK)
@@ -23,13 +28,12 @@
 #                    empty skips them)
 # inputs: DATA/x/boost_<v>/ for both versions of BOOST_VERS (see fetch-boost.sh).
 # stdout: CSV only (results.csv); progress goes to stderr. Files in $WORK:
-#         results.csv  one row per commit and mode, then one run=median row per
+#         results.csv  one row per commit of whole, then one run=median row per
 #                      (mode, pattern, k) (median_low per column)
 #         scale.csv    the synthetic scale rows, then run=median rows per (mode, n, op)
 #         disk.csv     store size at the start and end of each mode, then run=median
 #                      rows per (mode, phase)
 #         edits.csv    the edit kinds of each whole commit
-#         batches.csv  the inode_data change (puts, dels, inserts) of each commit
 #         shape.txt    the seed, info, version, hash, tree, final and check lines
 #         machine.txt  machine and run parameters (no path, host or user)
 set -euo pipefail
@@ -135,28 +139,20 @@ step() {
   RSS=NA
   if [ -n "$TIME_OPT" ]; then RSS=$(peak_rss "$S/time.txt"); [ -n "$RSS" ] || RSS=NA; fi
 }
-# csv <file> <word> <run> <rss> <keys> [batch file]: one CSV row per line of
-# <file> that starts with <word>; the values of the comma-separated <keys> in
-# order, NA when a line lacks a key. The pseudo keys run and peak_rss_bytes take
-# <run> and <rss>. With a batch file, a missing entries_changed is puts + dels
-# of the batch line with the same seq (NA when there is none).
+# csv <file> <word> <run> <rss> <keys>: one CSV row per line of <file> that
+# starts with <word>; the values of the comma-separated <keys> in order, NA
+# when a line lacks a key. The pseudo keys run and peak_rss_bytes take <run>
+# and <rss>.
 csv() {
-  awk -v w="$2" -v run="$3" -v rss="$4" -v keys="$5" -v bf="${6:-}" '
+  awk -v w="$2" -v run="$3" -v rss="$4" -v keys="$5" '
     function parse(s, A,   n, F, i, e) {
       n = split(s, F, " ")
       for (i = 2; i <= n; i++) { e = index(F[i], "="); if (e > 0) A[substr(F[i], 1, e - 1)] = substr(F[i], e + 1) }
       return F[1]
     }
-    BEGIN {
-      nk = split(keys, K, ",")
-      if (bf != "") while ((getline l < bf) > 0) {
-        split("", B)
-        if (parse(l, B) == "batch") ec[B["seq"]] = B["puts"] + B["dels"]
-      }
-    }
+    BEGIN { nk = split(keys, K, ",") }
     $1 == w {
       split("", V); parse($0, V); V["run"] = run; V["peak_rss_bytes"] = rss
-      if (bf != "" && !("entries_changed" in V)) V["entries_changed"] = (V["seq"] in ec) ? ec[V["seq"]] : "NA"
       line = ""
       for (c = 1; c <= nk; c++) line = line (c > 1 ? "," : "") ((K[c] in V && V[K[c]] != "") ? V[K[c]] : "NA")
       print line
@@ -188,12 +184,12 @@ for g in groups.values():
 ' "$@" < /dev/null
 }
 
-R=$WORK/results.csv; SC=$WORK/scale.csv; DK=$WORK/disk.csv; E=$WORK/edits.csv; BT=$WORK/batches.csv; SH=$WORK/shape.txt
+R=$WORK/results.csv; SC=$WORK/scale.csv; DK=$WORK/disk.csv; E=$WORK/edits.csv; SH=$WORK/shape.txt
 HDR=mode,run,pattern,k,seq,entries_changed,serialized_bytes,begin_ms,finish_ms,total_ms,cpu_user_s,cpu_sys_s,maxrss_bytes,new_objects,new_raw_bytes,new_stored_bytes,new_record_bytes,nodes_read,nodes_written,peak_rss_bytes
 SC_HDR=mode,run,n,op,ms,cpu_user_s,cpu_sys_s,maxrss_bytes,serialized_bytes,new_objects,new_stored_bytes,peak_rss_bytes
 DK_HDR=mode,run,phase,apparent_bytes,alloc_bytes,files
 echo "$HDR"; echo "$HDR" > "$R"; echo "$SC_HDR" > "$SC"; echo "$DK_HDR" > "$DK"
-echo run,pattern,k,seq,meta,content,create,delete > "$E"; echo run,seq,pattern,k,puts,dels,inserts > "$BT"; : > "$SH"
+echo run,pattern,k,seq,meta,content,create,delete > "$E"; : > "$SH"
 # rows <file>: print and append to results.csv.
 rows() { tee -a "$R" < "$1"; }
 # shape <file> <run>: append the shape lines of a step to shape.txt.
@@ -215,27 +211,19 @@ step seed "$S/seed.txt" "$BIN" seed --tree "$T1" --store "$S/seeded"
 shape "$S/seed.txt" 0
 
 for r in $(seq 1 "$N"); do
-  rm -rf "$S/run" "$S/b" "$S/flat" "$S/prolly" "$S/roots.txt"
+  rm -rf "$S/run" "$S/roots.txt"
   # A clone where the file system can (APFS, reflink), else a plain copy.
   if [ "$OS" = Darwin ]; then cp -cR "$S/seeded" "$S/run" 2> /dev/null || { rm -rf "$S/run"; cp -R "$S/seeded" "$S/run"; }
   else cp -a --reflink=auto "$S/seeded" "$S/run" 2> /dev/null || { rm -rf "$S/run"; cp -R "$S/seeded" "$S/run"; }; fi
   step whole "$S/whole.txt" "$BIN" whole --store "$S/run" --roots "$S/roots.txt" --seed "$SEED" --ks "$KS" \
     --commits "$COMMITS" --patterns "$PATTERNS" --next-tree "$T2"
   RSS_WHOLE=$RSS
-  step batches "$S/batches.txt" "$BIN" batches --store "$S/run" --roots "$S/roots.txt" --out "$S/b"
-  csv "$S/whole.txt" commit "$r" "$RSS_WHOLE" "$HDR" "$S/batches.txt" > "$S/rows.csv"; rows "$S/rows.csv"
+  csv "$S/whole.txt" commit "$r" "$RSS_WHOLE" "$HDR" > "$S/rows.csv"; rows "$S/rows.csv"
   csv "$S/whole.txt" commit "$r" NA run,pattern,k,seq,edits_meta,edits_content,edits_create,edits_delete >> "$E"
-  csv "$S/batches.txt" batch "$r" NA run,seq,pattern,k,puts,dels,inserts >> "$BT"
   csv "$S/whole.txt" disk "$r" NA "$DK_HDR" >> "$DK"
-  shape "$S/whole.txt" "$r"; shape "$S/batches.txt" "$r"
+  shape "$S/whole.txt" "$r"
   # flat first on odd runs, prolly first on even runs
   if [ $((r % 2)) -eq 1 ]; then ORDER="flat prolly"; else ORDER="prolly flat"; fi
-  for M in $ORDER; do
-    step "$M" "$S/$M.txt" "$BIN" "$M" --batches "$S/b" --store "$S/$M"
-    csv "$S/$M.txt" commit "$r" "$RSS" "$HDR" > "$S/rows.csv"; rows "$S/rows.csv"
-    csv "$S/$M.txt" disk "$r" NA "$DK_HDR" >> "$DK"
-    shape "$S/$M.txt" "$r"
-  done
   # Synthetic scale rows: one process per mode and n, each on a new store.
   for n in $SCALE_NS; do
     for M in $ORDER; do
@@ -245,7 +233,7 @@ for r in $(seq 1 "$N"); do
       rm -rf "$S/scale"
     done
   done
-  rm -rf "$S/run" "$S/b" "$S/flat" "$S/prolly" "$S/roots.txt"
+  rm -rf "$S/run" "$S/roots.txt"
 done
 
 median "$R" 0,2,3 4 > "$S/med.csv" || { echo "median failed: results.csv" >&2; exit 1; }
@@ -289,5 +277,5 @@ if [ "$SMOKE" = 1 ]; then BENCH_DATA=smoke; else BENCH_DATA=boost; fi
   echo "scale_ns=$SCALE_NS"
   echo "boost_vers=$BOOST_VERS"
 } > "$WORK/machine.txt"
-echo "results: $R; also scale.csv, disk.csv, edits.csv, batches.csv, shape.txt and machine.txt in WORK" >&2
+echo "results: $R; also scale.csv, disk.csv, edits.csv, shape.txt and machine.txt in WORK" >&2
 trap '' INT TERM HUP

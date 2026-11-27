@@ -3,13 +3,12 @@
 //! in release mode; `cargo test` runs only its smoke test.
 //!
 //! Each mode runs in its own process, so the peak RSS of a mode is its own:
-//! `whole` commits on the real `DictMetadataStore`, `batches` extracts the
-//! `inode_data` change of each commit, and `flat` (a copy of today's map
-//! serializer) and `prolly` (the prototype) replay the changes, each in its
-//! own scratch store. `scale` compares the two on synthetic maps. `maps`
-//! extracts the change of all five metadata maps of each commit, and
-//! `layout` replays them into prolly trees of one layout (Phase 25), and
-//! `synth` does the same for synthetic maps of N inodes made on the fly.
+//! `whole` commits on the real `DictMetadataStore`. `scale` compares a flat
+//! map and a prolly tree on synthetic maps, and `synth` replays commits into
+//! prolly trees of one layout (Phase 25) for synthetic maps of N inodes made
+//! on the fly. The modes that read the flat metadata maps of a product store
+//! (`batches`, `flat`, `prolly`, `maps`, `layout`) are retired; tag `v2.3.0`
+//! keeps them.
 //!
 //! Output: one line per record, the first word is the kind, then
 //! `key=value` fields. Progress goes to stderr. A bad argument exits 2,
@@ -34,12 +33,7 @@ use slicefs_traits::key::ObjectKey;
 const USAGE: &str = "usage: prolly-bench gen tree --dir D --files N --seed S [--max-bytes M] [--change-every K]
        prolly-bench seed --tree DIR --store S
        prolly-bench whole --store S --roots FILE [--seed N] [--ks \"1 10 100 1000\"] [--commits N] [--patterns \"scatter cluster insdel\"] [--next-tree DIR]
-       prolly-bench batches --store S --roots FILE --out DIR
-       prolly-bench flat --batches DIR --store F
-       prolly-bench prolly --batches DIR --store P
        prolly-bench scale --mode <flat|prolly> --n N --store DIR [--seed S]
-       prolly-bench maps --store S --roots FILE --out DIR
-       prolly-bench layout --maps DIR --layout <a|b|c> --store P [--l L] [--node-max M]
        prolly-bench synth --n N --layout <a|b|c> --store P [--seed S] [--l L] [--node-max M] [--commits C] [--ks \"100 1000\"] [--patterns \"one mixed insdel\"]";
 
 // Root record layout: a copy of `root_rec` in crates/metadata/src/store.rs
@@ -237,12 +231,7 @@ fn main() {
         Some("gen") => gen(rest),
         Some("seed") => seed(rest),
         Some("whole") => whole::run(rest),
-        Some("batches") => replay::batches(rest),
-        Some("flat") => replay::flat(rest),
-        Some("prolly") => replay::prolly(rest),
         Some("scale") => replay::scale(rest),
-        Some("maps") => layout::maps(rest),
-        Some("layout") => layout::layout(rest),
         Some("synth") => synth::synth(rest),
         Some(s) => usage(format!("unknown subcommand {s}")),
         None => usage("no subcommand"),
@@ -383,20 +372,6 @@ pub(crate) fn stats_delta(before: &Stats, after: &Stats) -> String {
 /// Lowercase hex of bytes.
 pub(crate) fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
-/// A key from its hex.
-pub(crate) fn key_of_hex(s: &str) -> Res<ObjectKey> {
-    let b = s.as_bytes();
-    if b.len() != 2 * KEY_LEN {
-        return run_fail(format!("bad key hex {s}"));
-    }
-    let mut k = [0u8; KEY_LEN];
-    for (i, out) in k.iter_mut().enumerate() {
-        let h = std::str::from_utf8(&b[2 * i..2 * i + 2]).ok().and_then(|p| u8::from_str_radix(p, 16).ok());
-        *out = h.ok_or_else(|| Fail::Run(format!("bad key hex {s}")))?;
-    }
-    Ok(ObjectKey(k))
 }
 
 // ── measurement helpers ──────────────────────────────────────────────────────
