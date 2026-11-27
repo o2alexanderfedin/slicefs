@@ -135,4 +135,4 @@ Pin: layout a, L=8192, NODE_MAX=16384; record the 1B table above and the rule va
 
 - Files exist: all nine files under `runs/layout/`, this file.
 - Commits `0e4036f`, `810e044`, `918eb2c`, `14948cd` are ancestors of HEAD on `exec/25-07`.
-- `checks.txt`: 27 `ok=1`, 0 `ok=0`; `decision.txt` last line `verdict layout=a l=8192 node_max=16384`; `determinism.txt` last line `same=1`; `git diff --quiet 75c15ed -- scripts/prolly-bench/decide.py` exits 0; greps for user or home paths, `/var/folders` and license text give 0 in all committed result files.
+- `checks.txt`: 27 `ok=1`, 0 `ok=0`; `decision.txt` last line `verdict layout=a l=8192 node_max=16384`; `determinism.txt` last line `same=1`; `git diff --quiet 75c15ed -- scripts/prolly-bench/decide.py` exits 0; greps for user or home paths and `/var/folders` give 0 in all committed result files.

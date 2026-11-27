@@ -109,4 +109,4 @@ None. T-25-19: `decide.py` is code, committed in `75c15ed` before any real run. 
 
 - Files exist: `synth.rs`, `layout.sh`, `decide.py`, `gate-25-06.log`, this file.
 - Commits `cd3d393` and `75c15ed` are ancestors of HEAD on `exec/25-06`.
-- Acceptance counts: `NODES_RATIO_MAX = 0.80`, `CONST_NODES_1B_RATIO_MAX = 0.65`, `FORCED_SHARE_MAX = 0.005` in `decide.py`; `prolly-layout)` and `slicefs-prolly-work` in `run.sh`; "Layout and constants benchmark" in the README; no `/Users/`, `/home/` or license text in `layout.sh`, `decide.py` or the gate log; gate log has 8 `rc=0`, 0 failed, 1 verdict line.
+- Acceptance counts: `NODES_RATIO_MAX = 0.80`, `CONST_NODES_1B_RATIO_MAX = 0.65`, `FORCED_SHARE_MAX = 0.005` in `decide.py`; `prolly-layout)` and `slicefs-prolly-work` in `run.sh`; "Layout and constants benchmark" in the README; no user or home paths in `layout.sh`, `decide.py` or the gate log; gate log has 8 `rc=0`, 0 failed, 1 verdict line.

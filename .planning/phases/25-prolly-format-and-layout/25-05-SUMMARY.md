@@ -88,4 +88,4 @@ None. T-25-16: `maps` opens the real store with `read_only: true`; `layout` writ
 - layout.rs, the gate log and this file exist.
 - Commits 748ae7d and 940223d are on `exec/25-05`.
 - `git diff --name-only feature/phase-25-prolly-format-and-layout...HEAD` lists only files of `files_modified` (plus this SUMMARY).
-- The three acceptance counts on the gate log hold: four `rc=0`, no `rc=` failure, no home path or license text.
+- The three acceptance counts on the gate log hold: four `rc=0`, no `rc=` failure, no home path.
