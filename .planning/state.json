@@ -1,48 +1,12 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v2.2 — Concurrency & Store Evolution",
-  "phases": [
-    {
-      "number": "18",
-      "name": "Spikes, baseline and stress harness",
-      "status": "complete"
-    },
-    {
-      "number": "19",
-      "name": "Fine-grained locks",
-      "status": "complete"
-    },
-    {
-      "number": "20",
-      "name": "Dirty budget and rebase flusher",
-      "status": "complete"
-    },
-    {
-      "number": "21",
-      "name": "Worker pool",
-      "status": "complete"
-    },
-    {
-      "number": "22",
-      "name": "Chunk profiles",
-      "status": "complete"
-    },
-    {
-      "number": "23",
-      "name": "Hashes and rehash",
-      "status": "complete"
-    },
-    {
-      "number": "24",
-      "name": "Prolly evaluation",
-      "status": "complete"
-    }
-  ],
+  "milestone": "v2.3",
+  "phases": [],
   "next": {
-    "command": "/gsd-progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd-discuss-phase",
+    "label": "Discuss the first phase",
+    "reason": "Project initialized — plan your first phase"
   },
-  "updated_at": "2026-11-26T23:42:03.877Z"
+  "updated_at": "2026-11-27T00:56:14.124Z"
 }
