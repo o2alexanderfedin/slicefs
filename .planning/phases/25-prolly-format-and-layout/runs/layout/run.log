@@ -1,0 +1,19 @@
+# Task 1: pilot (layout a, config 4096:16384, Boost row and synthetic 1M row), Docker case prolly-layout, RESUME=1
+# vm load before the pilot rows (container view): 3.83 2.85 2.59; after: 2.69 2.85 2.65
+# host load average (uptime) at the end of the pilot: 110.02 67.04 65.48 (other host jobs; the Docker VM has 32 CPUs and showed a load near 3)
+# docker ps before the run: no other container
+# pilot wall time of the whole container run, build excluded: start 2026-11-27T06:58:04Z, end 2026-11-27T07:00:55Z (171 s, with the Boost seed, whole and maps steps)
+# sum of commit ms: Boost row 3.7 s over 61 commits; synthetic 1M row 13.4 s over 50 commits; build line of the 1M row 3.8 s (bytes_written 176673447)
+# estimate of the full matrix: 27 rows; a 10M row is about 10 times a 1M row, so a 10M row is under 3 minutes; the whole run is well under 1 hour (limit 12 h)
+# maxrss of the 1M synthetic row: 20942848 bytes; the 10M rows scale to about 0.2 GB
+check mode=layout source=boost n=84105 layout=a l=4096 node_max=16384 ok=1
+check mode=layout source=synth n=1000000 layout=a l=4096 node_max=16384 ok=1
+# pilot console tail
+# load before: 3.83 2.85 2.59 3/896 3446
+warming the page cache
+row boost-0-a-4096-16384
+row synth-1000000-a-4096-16384
+layout.csv 111 rows, shape.csv 20 rows, build.csv 2 rows, checks.txt 2 lines
+results: layout.csv, shape.csv, build.csv, checks.txt, machine.txt and rows/ in /work/run; failed rows: 0
+# load after: 2.69 2.85 2.65 3/872 3825
+# layout.sh rc=0
