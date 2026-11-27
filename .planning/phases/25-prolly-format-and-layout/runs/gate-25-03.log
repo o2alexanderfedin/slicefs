@@ -1,0 +1,61 @@
+== cargo test -p slicefs-cli --lib header
+test header::tests::unknown_incompat_is_refused_by_the_decision ... ok
+test header::tests::unknown_compat_is_read_write ... ok
+test header::tests::the_hash_sha256_flag_must_be_incompat ... ok
+test header::tests::unknown_ro_compat_is_read_only ... ok
+test header::tests::a_profile_header_round_trips ... ok
+test header::tests::a_chunks_line_needs_the_flag_and_the_flag_needs_the_line ... ok
+test header::tests::a_relock_is_not_refused_while_another_thread_spawns_processes ... ok
+test header::tests::a_large_header_is_refused ... ok
+test content::tests::a_new_store_gets_the_header_and_data_with_no_header_is_refused ... ok
+test header::tests::compat_flags_and_unknown_lines_are_kept_on_rewrite ... ok
+test header::tests::data_and_no_header_is_refused ... ok
+test header::tests::a_new_store_gets_a_header ... ok
+test stats::tests::stats_shows_the_header ... ok
+test header::tests::two_parallel_creates_of_a_new_store_agree ... ok
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 383 filtered out; finished in 1.91s
+rc=0
+== cargo test -p slicefs-cli --test store_header_tests
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.42s
+test an_empty_store_read_writes_nothing ... ok
+test a_write_command_on_no_store_makes_nothing ... ok
+test ro_compat_flag_allows_read_commands ... ok
+test data_and_no_header_is_refused_at_every_open_point ... ok
+test a_format_7_store_is_refused ... ok
+test seed_writes_the_header_first ... ok
+test ro_compat_flag_refuses_write_commands ... ok
+test incompat_flag_is_refused_at_every_open_point ... ok
+test ro_compat_mount_refuses_hash_and_auto_snapshot ... ok
+test a_format_6_store_is_refused ... ok
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s
+rc=0
+== cargo +stable clippy -p slicefs-cli --all-targets
+warning: unused workspace dependency `anyhow`
+warning: unused workspace dependency `bincode`
+warning: unused workspace dependency `criterion`
+warning: unused workspace dependency `redb`
+warning: unused workspace dependency `tokio`
+35 | tokio      = { version = "1", features = ["full"] }
+help: consider removing the workspace dependency `tokio`
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 04s
+rc=0
+== bash scripts/safety/unsafe-count.sh
+UNSAFE files=32 tokens=134 result=ok
+rc=0
+== cargo test --workspace
+test test_two_identical_files_share_content_digest ... ok
+test test_setattr_uid_gid_changes_ownership ... ok
+test test_setattr_truncate_larger_zero_extends_closed_file ... ok
+test a_sparse_extend_on_an_open_overlay_rebases_without_hashing_the_zeros ... ok
+test an_extend_without_a_handle_rechunks_little ... ok
+test a_rebase_rechunks_only_near_the_change ... ok
+test a_small_change_adds_only_the_changed_chunks ... ok
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.95s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+rc=0

@@ -5,7 +5,7 @@
 //! for crash-safe ordering.
 //!
 //! Locking order (always acquire in this order to prevent deadlocks):
-//!   `inode_map`, then one `inode_live` shard, then `inode_data`;
+//!   `inode_alloc`, then one `inode_live` shard, then `inode_data`;
 //!   one `dir_live` shard, then `dir_data`. The other maps are taken alone.
 //!   No hot-path call holds the `io` lock; a commit takes it briefly.
 
@@ -24,7 +24,7 @@ use crate::store_io::StoreIo;
 use crate::wal::{Lsn, WalCut, WalEntry, WalError, WalStrategy};
 
 use crate::inode::{intern_inode, load_inode};
-use crate::inode_map::{InodeMap, intern_inode_map, load_inode_map};
+use crate::inode_alloc::InodeAlloc;
 use crate::directory::{create_dir_entries, DirList};
 use crate::manifest::{intern_manifest, load_manifest};
 use crate::xattr::{intern_xattrs, load_xattrs, set_xattr_entry, get_xattr_entry,
@@ -37,8 +37,7 @@ const S_IFMT: u32 = 0o0_170_000;
 /// little-endian. Each `*_DATA` field is the key of a serialized map.
 pub(crate) mod root_rec {
     use super::KEY_BYTES as D;
-    pub const INODE_MAP: usize = 0;
-    pub const ROOT_DIR_INO: usize = INODE_MAP + D;
+    pub const ROOT_DIR_INO: usize = 0;
     pub const NEXT_INO: usize = ROOT_DIR_INO + 8;
     pub const INODE_DATA: usize = NEXT_INO + 8;
     pub const DIR_DATA: usize = INODE_DATA + D;
@@ -47,7 +46,7 @@ pub(crate) mod root_rec {
     pub const REFCOUNTS: usize = XATTR_DATA + D;
     pub const LOGICAL_BYTES: usize = REFCOUNTS + D;
     pub const INODE_COUNT: usize = LOGICAL_BYTES + 8;
-    /// Total size in bytes (230 with 33-byte keys).
+    /// Total size in bytes (197 with 33-byte keys).
     pub const SIZE: usize = INODE_COUNT + 8;
 }
 
@@ -286,7 +285,7 @@ pub struct PreparedCommit<'a> {
     /// With the ticket of each take (see `Live::flushing`).
     inodes: Vec<(u64, u64, InodeMeta)>,
     dirs: Vec<(u64, u64, DirList)>,
-    inode_map: InodeMap,
+    next_ino: u64,
     inode_data: BTreeMap<u64, ObjectKey>,
     dir_data: BTreeMap<u64, ObjectKey>,
     manifest_data: BTreeMap<u64, ObjectKey>,
@@ -340,8 +339,8 @@ pub struct DictMetadataStore {
     /// (the `StoreIo` lock is not on the hot path).
     unsynced_puts: AtomicU64,
     put_error: sync::Mutex<Option<std::io::Error>>,
-    /// Inode-number allocator + mapping table.
-    inode_map: sync::Mutex<InodeMap>,
+    /// Inode-number allocator.
+    inode_alloc: sync::Mutex<InodeAlloc>,
     /// Maps inode number → current inode data `ObjectKey`.
     inode_data: sync::Mutex<BTreeMap<u64, ObjectKey>>,
     /// Maps directory inode number → entry list `ObjectKey` as of the last flush.
@@ -353,10 +352,10 @@ pub struct DictMetadataStore {
     /// Sharded by inode number. Lock order: a `dir_live` shard, `dir_data`.
     /// No shard lock is held across a node read, a hash or a put.
     dir_live: Sharded<DirList>,
-    /// Inodes in use, with a dirty flag. `inode_data` (and `inode_map`) hold the
+    /// Inodes in use, with a dirty flag. `inode_data` holds the
     /// digest as of the last flush; a dirty inode here is newer. `commit()`
     /// writes the dirty ones. Sharded by inode number. Lock order:
-    /// `inode_map`, an `inode_live` shard, `inode_data`. No shard lock is held
+    /// `inode_alloc`, an `inode_live` shard, `inode_data`. No shard lock is held
     /// across a node read, a hash or a put.
     inode_live: Sharded<InodeMeta>,
     /// Count of mutations so far, and its value at the last commit: the
@@ -415,8 +414,6 @@ pub struct DictMetadataStore {
 impl DictMetadataStore {
     /// Create a new store with a root directory at inode 1.
     pub fn new(io: Arc<Mutex<StoreIo>>) -> Self {
-        let mut inode_map = InodeMap::new();
-
         // Build root inode + dir entries via put_node, then flush
         let cs = Arc::clone(lock_stats::lock(&io, Site::Io).store());
         let (root_inode_digest, root_dir_digest) = {
@@ -444,8 +441,6 @@ impl DictMetadataStore {
             // fsa drops here, flushing files to io
         };
 
-        inode_map.insert(1, root_inode_digest);
-
         let mut inode_data = BTreeMap::new();
         inode_data.insert(1, root_inode_digest);
 
@@ -457,7 +452,7 @@ impl DictMetadataStore {
             cs,
             unsynced_puts: AtomicU64::new(0),
             put_error: lk(None),
-            inode_map: lk(inode_map).timed(Site::InodeMap),
+            inode_alloc: lk(InodeAlloc::new()).timed(Site::InodeAlloc),
             inode_data: lk(inode_data).timed(Site::InodeData),
             dir_data: lk(dir_data).timed(Site::DirData),
             dir_live: Sharded::new(Site::DirLive),
@@ -616,7 +611,7 @@ impl DictMetadataStore {
     /// Log a single WAL entry if a WAL strategy is configured.
     ///
     /// IMPORTANT: Do NOT hold any other Mutex when calling this — WAL I/O
-    /// may block and holding dict/inode_map locks would cause deadlocks.
+    /// may block and holding dict/inode_alloc locks would cause deadlocks.
     /// Continue the WAL in a new segment that starts with `root` and every
     /// snapshot record, and delete the older segments (#20). A failure leaves
     /// the current segment in use, which is still correct (only larger).
@@ -640,7 +635,7 @@ impl DictMetadataStore {
     /// then create it with `create_directory_at`. A number reserved and not
     /// used is skipped, as a failed create skips one; replay never sees it.
     pub fn reserve_ino(&self) -> InodeId {
-        self.inode_map.lock().allocate_ino()
+        self.inode_alloc.lock().allocate_ino()
     }
 
     /// Make the next new inode number at least `ino` (never lower). Replay
@@ -648,7 +643,7 @@ impl DictMetadataStore {
     /// after it took an inode number (for example EEXIST) logged nothing, so
     /// replay skips that number the same way the live mount did.
     pub fn advance_next_ino(&self, ino: InodeId) {
-        let mut m = self.inode_map.lock();
+        let mut m = self.inode_alloc.lock();
         if m.next_ino() < ino {
             m.set_next_ino(ino);
         }
@@ -770,7 +765,7 @@ impl DictMetadataStore {
     /// The inode cache, locked, with `ino` in it. A cold inode is read with
     /// no cache lock held; it is cached only if it is still absent and its
     /// digest did not change meanwhile (else a delete or a newer flush in
-    /// between would be undone). Lock order: `inode_map`, `inode_live`,
+    /// between would be undone). Lock order: `inode_alloc`, `inode_live`,
     /// `inode_data`.
     fn cached_inode(&self, ino: InodeId) -> Result<Shard<'_, InodeMeta>, MetaError> {
         let mut cold: Option<(ObjectKey, InodeMeta)> = None;
@@ -847,20 +842,18 @@ impl DictMetadataStore {
 
     /// Cache `meta` as a new dirty inode: number `at` (`AlreadyExists` if
     /// it is taken; new numbers are above it afterwards), or a new number.
-    /// The number is taken and the inode cached under `inode_map`, so no
+    /// The number is taken and the inode cached under `inode_alloc`, so no
     /// number is given twice. A new inode is only in the cache until a flush.
     fn insert_inode(&self, at: Option<InodeId>, meta: &InodeMeta) -> Result<InodeId, MetaError> {
-        let mut map = self.inode_map.lock();
-        let ino = at.unwrap_or_else(|| map.allocate_ino());
+        let mut alloc = self.inode_alloc.lock();
+        let ino = at.unwrap_or_else(|| alloc.allocate_ino());
         let mut live = self.inode_live.lock(ino);
         if at.is_some() {
-            if map.get(ino).is_some() || live.map.contains_key(&ino)
-                || self.inode_data.lock().contains_key(&ino)
-            {
+            if live.map.contains_key(&ino) || self.inode_data.lock().contains_key(&ino) {
                 return Err(MetaError::AlreadyExists(ino));
             }
-            if map.next_ino() <= ino {
-                map.set_next_ino(ino.saturating_add(1));
+            if alloc.next_ino() <= ino {
+                alloc.set_next_ino(ino.saturating_add(1));
             }
         }
         let mut m = meta.clone();
@@ -869,7 +862,7 @@ impl DictMetadataStore {
         live.map.insert(ino, m);
         live.mark_dirty(ino);
         drop(live);
-        drop(map);
+        drop(alloc);
         self.add_size(0, size);
         self.inode_count.fetch_add(1, Ordering::Relaxed);
         self.trim_inodes(self.inode_live.dirty() >= DIRTY_FLUSH, self.inode_live.len() > INODE_CACHE_MAX);
@@ -899,7 +892,7 @@ impl DictMetadataStore {
         if dir_meta.mode & S_IFMT != S_IFDIR {
             dir_meta.mode |= S_IFDIR;
         }
-        // Take the number first; `inode_map` is released before the parent
+        // Take the number first; `inode_alloc` is released before the parent
         // directory is read or changed (it may come from disk).
         let ino = self.insert_inode(at, &dir_meta)?;
         // Then the name: if it already exists, the new inode goes again.
@@ -917,7 +910,7 @@ impl DictMetadataStore {
         Ok(ino)
     }
 
-    /// Write every dirty cached inode; record its digest in `inode_data` and `inode_map`.
+    /// Write every dirty cached inode; record its digest in `inode_data`.
     fn flush_inodes(&self) {
         self.flush_inodes_between(|| ());
     }
@@ -942,13 +935,11 @@ impl DictMetadataStore {
             if let Some(f) = between.take() {
                 f();
             }
-            let mut inode_map = self.inode_map.lock();
             let mut live = self.inode_live.lock_at(i);
             let mut inode_data = self.inode_data.lock();
             for (ino, t, d) in written {
                 if live.settle(ino, t) {
                     inode_data.insert(ino, d);
-                    inode_map.insert(ino, d);
                 }
             }
         }
@@ -1062,7 +1053,7 @@ impl DictMetadataStore {
         let fail_seq = self.wal_fail_seq.load(Ordering::SeqCst);
         let changes = self.changes.load(Ordering::Relaxed);
         let dirs = self.dir_live.take_all();
-        let inode_map = self.inode_map.lock().clone();
+        let next_ino = self.inode_alloc.lock().next_ino();
         let inodes = self.inode_live.take_all();
         let inode_data = self.inode_data.lock().clone();
         let dir_data = self.dir_data.lock().clone();
@@ -1077,7 +1068,7 @@ impl DictMetadataStore {
             fail_seq,
             inodes,
             dirs,
-            inode_map,
+            next_ino,
             inode_data,
             dir_data,
             manifest_data,
@@ -1110,7 +1101,6 @@ impl DictMetadataStore {
         for (ino, t, meta) in &p.inodes {
             let d = intern_inode(&mut w, meta);
             p.inode_data.insert(*ino, d);
-            p.inode_map.insert(*ino, d);
             new_inodes.push((*ino, *t, d));
         }
         let mut new_dirs = Vec::with_capacity(p.dirs.len());
@@ -1121,11 +1111,10 @@ impl DictMetadataStore {
         }
 
         // Serialize the state into a root record (layout: `root_rec`):
-        //   inode_map, root_dir_ino (u64), next_ino (u64), the keys of the
+        //   root_dir_ino (u64), next_ino (u64), the keys of the
         //   inode, dir, manifest, xattr and refcount maps, logical_bytes (u64)
         //   and inode_count (u64).
-        let inode_map_digest = intern_inode_map(&mut w, &p.inode_map);
-        let next_ino = p.inode_map.next_ino();
+        let next_ino = p.next_ino;
         let inode_data_digest = intern_u64_digest_map(&mut w, &p.inode_data);
         let dir_data_digest = intern_u64_digest_map(&mut w, &p.dir_data);
         let manifest_data_digest = intern_u64_digest_map(&mut w, &p.manifest_data);
@@ -1133,7 +1122,6 @@ impl DictMetadataStore {
         let refcount_data_digest = intern_key_u64_map(&mut w, &p.refcounts);
 
         let mut root_bytes = Vec::with_capacity(root_rec::SIZE);
-        put_digest(&mut root_bytes, &inode_map_digest);
         // root_dir_ino: always 1
         root_bytes.extend_from_slice(&1u64.to_le_bytes());
         root_bytes.extend_from_slice(&next_ino.to_le_bytes());
@@ -1153,12 +1141,10 @@ impl DictMetadataStore {
         // The nodes are stored: the caches may forget the entries that were
         // not changed again since the cut.
         {
-            let mut inode_map = self.inode_map.lock();
             for (ino, t, d) in new_inodes {
                 let mut live = self.inode_live.lock(ino);
                 if live.settle(ino, t) {
                     self.inode_data.lock().insert(ino, d);
-                    inode_map.insert(ino, d);
                 }
             }
         }
@@ -1430,11 +1416,9 @@ impl MetadataStore for DictMetadataStore {
         // The cache entry and the digest go in one hold of the cache lock:
         // a cold load that runs meanwhile then cannot cache the inode again.
         {
-            let mut inode_map = self.inode_map.lock();
             let mut live = self.inode_live.lock(ino);
             live.remove(ino);
             self.inode_data.lock().remove(&ino);
-            inode_map.remove(ino);
         }
         // Drop every per-inode map entry: a leftover manifest/xattr/dir entry
         // would keep the deleted content reachable (never garbage-collected).
@@ -1617,7 +1601,7 @@ pub(crate) fn for_each_referenced(
         at(root_rec::INODE_DATA), at(root_rec::DIR_DATA),
         at(root_rec::MANIFEST_DATA), at(root_rec::XATTR_DATA),
     );
-    for k in [*root, at(root_rec::INODE_MAP), inodes, dirs, manifests, xattrs, at(root_rec::REFCOUNTS)] {
+    for k in [*root, inodes, dirs, manifests, xattrs, at(root_rec::REFCOUNTS)] {
         f(Ref::Node, k)?;
     }
     for map in [inodes, dirs, xattrs] {
@@ -1630,7 +1614,7 @@ pub(crate) fn for_each_referenced(
 }
 
 /// About how many keys [`for_each_referenced`] gives for `root`, from the
-/// sizes of its four maps (no map is read): the 7 nodes of the root, one
+/// sizes of its four maps (no map is read): the 6 nodes of the root, one
 /// key per map entry, and one content key per manifest (a file with more
 /// extents gives more). For the temp space check of the GC mark.
 pub(crate) fn referenced_estimate(io: &mut impl crate::store_io::NodeRead, root: &ObjectKey) -> Result<u64, MetaError> {
@@ -1638,7 +1622,7 @@ pub(crate) fn referenced_estimate(io: &mut impl crate::store_io::NodeRead, root:
     let cs = io.chunk_store();
     let bytes = read_root(cs, root)?;
     let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
-    let mut keys = 7u64;
+    let mut keys = 6u64;
     for (off, per) in [(root_rec::INODE_DATA, 1), (root_rec::DIR_DATA, 1), (root_rec::XATTR_DATA, 1), (root_rec::MANIFEST_DATA, 2)] {
         let key = at(off);
         let r = chunk_store::file::FileReader::open(cs, crate::store_io::to_id(&key))
@@ -1823,7 +1807,6 @@ impl DictMetadataStore {
         let digest_at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
         let u64_at = |o: usize| u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap());
 
-        let inode_map_digest = digest_at(root_rec::INODE_MAP);
         let root_dir_ino = u64_at(root_rec::ROOT_DIR_INO);
         let next_ino = u64_at(root_rec::NEXT_INO);
         let inode_data_digest = digest_at(root_rec::INODE_DATA);
@@ -1834,9 +1817,9 @@ impl DictMetadataStore {
         let initial_logical_bytes = u64_at(root_rec::LOGICAL_BYTES);
         let initial_inode_count = u64_at(root_rec::INODE_COUNT);
 
-        // Load and patch inode_map so next_ino is exactly restored.
-        let mut inode_map = load_inode_map(&mut *io_guard, &inode_map_digest)?;
-        inode_map.set_next_ino(next_ino);
+        // Restore next_ino exactly.
+        let mut inode_alloc = InodeAlloc::new();
+        inode_alloc.set_next_ino(next_ino);
 
         let inode_data = load_u64_digest_map(&mut *io_guard, &inode_data_digest)?;
         let dir_data = load_u64_digest_map(&mut *io_guard, &dir_data_digest)?;
@@ -1860,7 +1843,7 @@ impl DictMetadataStore {
             cs,
             unsynced_puts: AtomicU64::new(0),
             put_error: lk(None),
-            inode_map: lk(inode_map).timed(Site::InodeMap),
+            inode_alloc: lk(inode_alloc).timed(Site::InodeAlloc),
             inode_data: lk(inode_data).timed(Site::InodeData),
             dir_data: lk(dir_data).timed(Site::DirData),
             dir_live: Sharded::new(Site::DirLive),
@@ -2435,6 +2418,44 @@ mod tests {
         // next_ino must be > max of previous inos
         let max_ino = *inos.iter().max().unwrap();
         assert!(next_ino > max_ino, "next_ino {} not > max_ino {}", next_ino, max_ino);
+    }
+
+    /// The root record has one inode map and is 197 bytes; `next_ino` in it
+    /// is the allocator value.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn root_record_layout() {
+        assert_eq!(root_rec::ROOT_DIR_INO, 0);
+        assert_eq!(root_rec::NEXT_INO, 8);
+        assert_eq!(root_rec::INODE_DATA, 16);
+        assert_eq!(root_rec::DIR_DATA, 49);
+        assert_eq!(root_rec::MANIFEST_DATA, 82);
+        assert_eq!(root_rec::XATTR_DATA, 115);
+        assert_eq!(root_rec::REFCOUNTS, 148);
+        assert_eq!(root_rec::LOGICAL_BYTES, 181);
+        assert_eq!(root_rec::INODE_COUNT, 189);
+        assert_eq!(root_rec::SIZE, 197);
+
+        let (_dir, store) = make_store();
+        let ino = store.create_inode(&new_file_meta()).unwrap();
+        store.link(store.root_ino(), "f", ino).unwrap();
+        let root = store.commit().unwrap();
+        let mut io = NodeReader(Arc::clone(store.io().lock().unwrap().store()));
+        let bytes = io.get_node(&root).unwrap();
+        assert_eq!(bytes.len(), 197);
+        let next = u64::from_le_bytes(bytes[root_rec::NEXT_INO..root_rec::NEXT_INO + 8].try_into().unwrap());
+        assert_eq!(next, store.inode_alloc.lock().next_ino());
+        assert!(next > ino);
+    }
+
+    /// A root record of the old size (two inode maps) is refused, not misread.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn a_230_byte_root_record_is_refused() {
+        let (_dir, store) = make_store();
+        let old = crate::store_io::put_value(store.io().lock().unwrap().store(), &[0u8; 230]).unwrap();
+        let r = DictMetadataStore::load_from_root(Arc::clone(store.io()), &old);
+        assert!(matches!(&r, Err(MetaError::Corrupted(m)) if m.contains("expected 197 bytes, got 230")));
     }
 
     #[test]
@@ -3136,7 +3157,7 @@ mod tests {
         store.flush_inodes_between(|| store.delete_inode(x).unwrap());
         assert!(matches!(store.get_inode(x), Err(MetaError::NotFound(_))));
         assert!(!store.inode_data.lock().contains_key(&x));
-        assert!(store.inode_map.lock().get(x).is_none());
+        assert!(!store.inode_live.lock(x).map.contains_key(&x));
         let root = store.commit().unwrap();
         let reloaded = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
         assert!(matches!(reloaded.get_inode(x), Err(MetaError::NotFound(_))));
@@ -3271,7 +3292,7 @@ mod tests {
         // The keys of whole-node loads, as the mark had them before #207.
         let bytes = io.get_node(&root).unwrap();
         let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
-        let mut want = vec![root, at(root_rec::INODE_MAP), at(root_rec::INODE_DATA), at(root_rec::DIR_DATA),
+        let mut want = vec![root, at(root_rec::INODE_DATA), at(root_rec::DIR_DATA),
                             at(root_rec::MANIFEST_DATA), at(root_rec::XATTR_DATA), at(root_rec::REFCOUNTS)];
         for o in [root_rec::INODE_DATA, root_rec::DIR_DATA, root_rec::XATTR_DATA] {
             want.extend(load_u64_digest_map(&mut io, &at(o)).unwrap().into_values());

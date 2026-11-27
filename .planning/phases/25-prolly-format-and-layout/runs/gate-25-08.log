@@ -1,0 +1,117 @@
+# gate 25-08, code commit 4a4e14d (tree with all Phase 25 plans merged)
+== cargo test --workspace (last 40 lines)
+  12 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   2 test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   1 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.40s
+   1 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.81s
+   1 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests cas_local
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests chunk_store
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests metadata
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests prolly
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests slicefs_cli
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests slicefs_traits
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+rc=0
+== RUST_STABLE=stable bash scripts/safety/clippy.sh (last 40 lines)
+    Checking metadata v0.1.0 (<repo>/crates/metadata)
+    Checking prolly v0.1.0 (<repo>/crates/prolly)
+    Checking index-bench v0.1.0 (<repo>/benchmarks/index-bench)
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:635:19
+    |
+635 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:644:19
+    |
+644 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:689:19
+    |
+689 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:815:19
+    |
+815 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:825:19
+    |
+825 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 5 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.12s
+CLIPPY os=Darwin toolchain=stable result=ok
+UNSAFE files=32 tokens=134 result=ok
+rc=0
+== scripts/docker-linux-test/run.sh all (last 40 lines)
+  daemon-exit: ok
+  workers-line: Workers: 8 (default)
+  pool-line: pool: workers=8 jobs=163 max_weight=131072 max_queue_wait_ms=0 queue_max=2 jobs_per_worker=22,23,18,22,21,18,18,21
+  allocator-line: Allocator: mmap threshold 131072 bytes (fixed)
+  steps-line: steps: save_steps=1 steps_per_s=0.80 freed_per_step=0 freed_bytes=0
+CAS bytes        : 2.90 MiB (3045221 bytes) (packs/, apparent size)
+CAS on disk      : 2.91 MiB (3051520 bytes) (packs/, allocated blocks)
+File dedup ratio : 1.00x (logical / unique content; whole-file duplicates)
+== seeded
+Logical bytes    : 2 B
+Unique content   : 2 B (each distinct file content once)
+CAS bytes        : 3.37 KiB (3450 bytes) (packs/, apparent size)
+CAS on disk      : 8.00 KiB (8192 bytes) (packs/, allocated blocks)
+88	FORMAT
+0	index
+3532	packs
+107	segments
+  workers-line: Workers: 8 (default)
+== after a.bin
+Logical bytes    : 2.86 MiB (3000002 bytes)
+Unique content   : 2.86 MiB (3000002 bytes) (each distinct file content once)
+CAS bytes        : 2.90 MiB (3043047 bytes) (packs/, apparent size)
+CAS on disk      : 2.91 MiB (3051520 bytes) (packs/, allocated blocks)
+88	FORMAT
+0	index
+3043211	packs
+187	segments
+  workers-line: Workers: 8 (default)
+== after b.bin (same content)
+Logical bytes    : 5.72 MiB (6000002 bytes)
+Unique content   : 2.86 MiB (3000002 bytes) (each distinct file content once)
+CAS bytes        : 2.90 MiB (3045934 bytes) (packs/, apparent size)
+CAS on disk      : 2.92 MiB (3059712 bytes) (packs/, allocated blocks)
+88	FORMAT
+0	index
+3046180	packs
+187	segments
+  workers-line: Workers: 8 (default)
+content ok
+rc=0
+== paths and text check of the files changed in the phase (66 files)
+paths_ok=1
+text_ok=0
+  word in .planning/phases/25-prolly-format-and-layout/25-05-SUMMARY.md (a sentence that says the check found none)
+  word in .planning/phases/25-prolly-format-and-layout/25-06-SUMMARY.md (a sentence that says the check found none)
+  word in .planning/phases/25-prolly-format-and-layout/25-07-SUMMARY.md (a sentence that says the check found none)
+== subjects
+subjects_ok=1

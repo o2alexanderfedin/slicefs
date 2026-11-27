@@ -1,11 +1,12 @@
-//! The node byte format (private to this crate, not a store format).
+//! The node byte format, part of store format 8 (`docs/design/store-format.md`).
 //!
-//! Header: `NODE_MAGIC` (4 bytes), level `u8`, entry count `u32` LE.
+//! Header: `NODE_MAGIC` (4 bytes), rule version `u8` (`RULE_VERSION`),
+//! level `u8`, entry count `u32` LE.
 //! Leaf entry (level 0): klen `u16` LE, vlen `u16` LE, key, value.
 //! Internal entry (level > 0): klen `u16` LE, key (the last key of the
 //! child), child `ObjectId` (`ID_LEN` bytes), subtree entry count `u64` LE.
 
-use crate::{Config, Error, Result, NODE_HEADER, NODE_MAGIC};
+use crate::{Config, Error, Result, NODE_HEADER, NODE_MAGIC, RULE_VERSION};
 use chunk_store::{ChunkStore, ObjectId, ID_LEN};
 
 /// One entry of an internal node: a child node and what it covers.
@@ -69,6 +70,7 @@ pub(crate) fn internal_entry_len(klen: usize) -> usize {
 fn header(level: u8, count: usize, cap: usize) -> Vec<u8> {
     let mut b = Vec::with_capacity(cap);
     b.extend_from_slice(&NODE_MAGIC);
+    b.push(RULE_VERSION);
     b.push(level);
     b.extend_from_slice(&(count as u32).to_le_bytes());
     b
@@ -151,8 +153,11 @@ pub(crate) fn decode(bytes: &[u8], cfg: &Config) -> Result<Node> {
     if bytes[..4] != NODE_MAGIC {
         return Err(corrupt("wrong magic"));
     }
-    let level = bytes[4];
-    let count = u32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]) as usize;
+    if bytes[4] != RULE_VERSION {
+        return Err(Error::RuleVersion { found: bytes[4] });
+    }
+    let level = bytes[5];
+    let count = u32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]) as usize;
     let remaining = bytes.len() - NODE_HEADER;
     let smallest = if level == 0 { leaf_entry_len(0, 0) } else { internal_entry_len(0) };
     if count > remaining / smallest {

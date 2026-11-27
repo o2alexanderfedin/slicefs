@@ -31,6 +31,11 @@ The code is `crates/slicefs-cli/src/header.rs`.
   flag line `ro_compat chunk-profile <release>`. The default profile writes
   neither line. With `seed --hash sha256`, the first header has the flag
   line `incompat hash-sha256 <release>` right after the hash line.
+  With `seed --boundary-salt random` (32 bytes from `/dev/urandom`) or
+  `seed --boundary-salt <64 hex digits>`, the first header also has the
+  `boundary-salt` line and the flag line `ro_compat boundary-salt <release>`
+  (after the `chunks` lines). Without the option a new store has neither
+  line.
 - A rewrite (`--hash` on `mount` or `seed`) changes only the hash line. All
   other lines stay, in their order, also the `chunks` line, the flag lines
   and the lines that this SliceFS does not know. If there is no hash line, the new hash line
@@ -38,10 +43,10 @@ The code is `crates/slicefs-cli/src/header.rs`.
   `incompat hash-sha256 <release>` at the end, in the same header write,
   when the header does not have it.
 
-The header of a new store (format 7, no flags):
+The header of a new store (format 8, no flags):
 
 ```
-slicefs-store 7 (store header with feature flags)
+slicefs-store 8 (store header with feature flags, prolly metadata maps)
 hash blake3-256
 ```
 
@@ -50,7 +55,7 @@ The header of a new store with the chunk profile 16/64/256 KiB
 `CHUNK_PROFILE_RELEASE`):
 
 ```
-slicefs-store 7 (store header with feature flags)
+slicefs-store 8 (store header with feature flags, prolly metadata maps)
 hash blake3-256
 chunks 16384 65536 262144
 ro_compat chunk-profile <release>
@@ -61,16 +66,34 @@ The header of a new store with the write hash SHA-256
 `HASH_SHA256_RELEASE`, now `v2.3`):
 
 ```
-slicefs-store 7 (store header with feature flags)
+slicefs-store 8 (store header with feature flags, prolly metadata maps)
 hash sha256
 incompat hash-sha256 v2.3
 ```
+
+The header of a new store with a boundary salt
+(`seed --boundary-salt random`; the digits are an example, and the release
+word is the value of `BOUNDARY_SALT_RELEASE`, now `v2.4`):
+
+```
+slicefs-store 8 (store header with feature flags, prolly metadata maps)
+hash blake3-256
+boundary-salt 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+ro_compat boundary-salt v2.4
+```
+
+The salt is an optional per-store key of the boundary hash of the metadata
+trees (the boundary rule of the trees). The default is no salt, so equal
+metadata gives equal tree nodes in every store. The salt is fixed when the
+store is made: SliceFS has no command to change it, and an existing store
+refuses any other salt (M18). The salt is not a secret: it is plain text in
+`FORMAT`.
 
 A header with one flag of each class (the names are examples, and
 `<release>` is the place of a release name):
 
 ```
-slicefs-store 7 (store header with feature flags)
+slicefs-store 8 (store header with feature flags, prolly metadata maps)
 hash blake3-256
 compat example-feature <release>
 ro_compat example-read-feature <release>
@@ -87,6 +110,7 @@ Lines are split into words at each space.
 | Flag line | `<class> <name> <release>` | Exactly three words. `<class>` is `compat`, `ro_compat` or `incompat`. |
 | Hash line | `hash <name>` | Exactly two words. At most one hash line. No hash line means `blake3-256`. |
 | Chunks line | `chunks <min> <avg> <max>` | The FastCDC chunk profile of the store. Exactly four words. The sizes are in bytes, as decimal digits. They are powers of two with min < avg < max, max at most 1 MiB (1048576, the SliceFS limit), at least the fastcdc v2020 minimums (min 64 B, avg 256 B, max 1 KiB), and FastCDC must cut a run of zeros at max. At most one chunks line. It always comes with the ro_compat flag `chunk-profile`, and the flag always comes with the line. No chunks line means 4/8/32 KiB. |
+| Boundary-salt line | `boundary-salt <salt>` | The key of the boundary hash of the metadata trees. Exactly two words. `<salt>` is exactly 64 digits of `0-9` and `a-f` (lowercase) and stands for 32 bytes. At most one salt line. It always comes with the ro_compat flag `boundary-salt`, and the flag always comes with the line. No salt line means no salt. Any other line that starts with the word `boundary-salt` is an error (M9), not an other line. |
 | Other line | any other text | An unknown setting (see the parse order). |
 
 - `<name>`: 1 to 64 characters; lowercase letters `a-z`, digits `0-9` and
@@ -102,12 +126,15 @@ Lines are split into words at each space.
 - The chunks line is a store setting too. It comes with its flag, by the
   rule below. SliceFS writes it only for a profile that is not 4/8/32 KiB;
   a chunks line of 4/8/32 KiB with the flag is accepted.
+- The boundary-salt line is a store setting too. It comes with its flag, by
+  the rule below. SliceFS writes it only when `seed --boundary-salt` makes
+  the store.
 
 Parse order:
 
 1. Read the number of the first line. If the first line does not have the
-   form `slicefs-store <number>`, stop (M4). If the number is not 7, stop
-   (M2 for a smaller number, M3 for a larger number). A store of another
+   form `slicefs-store <number>`, stop (M4). If the number is not 8, stop
+   (M2 for a number from 0 to 6, M17 for 7, M3 for a larger number). A store of another
    number can have another header layout, so SliceFS reads no more lines.
 2. Read all other lines. A bad flag line, a name that occurs two times, two
    hash lines, a bad chunks line or two chunks lines stop the parse (M9).
@@ -117,7 +144,12 @@ Parse order:
    `hash sha256` line with no `hash-sha256` flag, or a `hash-sha256` flag
    that is not incompat, also stops the parse (M9). A `hash-sha256` flag
    with no `hash sha256` line is valid: the store can still hold SHA-256
-   objects after the write hash went back.
+   objects after the write hash went back. A line that starts with
+   `boundary-salt` and is not two words with a 64-digit lowercase hex
+   value, or a second `boundary-salt` line, stops the parse (M9). Then a
+   `boundary-salt` line with no `boundary-salt` flag, a `boundary-salt` flag
+   with no `boundary-salt` line, or a `boundary-salt` flag that is not
+   ro_compat stops the parse (M9).
 3. Find the unknown flags: the flags whose name is not in `KNOWN_FLAGS`.
    The strongest unknown flag decides:
    - an unknown incompat flag: refuse (M5);
@@ -142,8 +174,8 @@ known flag changes nothing in this table):
 | incompat | refuse | refused (M5) | refused (M5) | refused (M5) |
 
 A SliceFS that knows the flag (the name is in its `KNOWN_FLAGS`) opens the
-store for read and write. A SliceFS of store format 6 or older refuses a
-format 7 store, because the first line has another number.
+store for read and write. A SliceFS of store format 7 or older refuses a
+format 8 store, because the first line has another number.
 
 If the header has more than one unknown incompat flag, the message has one
 M5 text for each of them. If it has more than one unknown ro_compat flag,
@@ -168,17 +200,19 @@ The SliceFS classes use the same meanings. The differences:
 
 ## Flag list
 
-Store format 7 has two flags: `KNOWN_FLAGS` is `chunk-profile` and
-`hash-sha256`.
+Store format 8 has three flags: `KNOWN_FLAGS` is `chunk-profile`,
+`hash-sha256` and `boundary-salt`.
 
 | Name | Class | Release | What it means |
 |------|-------|---------|---------------|
 | chunk-profile | ro_compat | `CHUNK_PROFILE_RELEASE` | The store has a FastCDC chunk profile that is not 4/8/32 KiB, in its `chunks` line. An older SliceFS can read the store: a reader takes each chunk length from the manifest entries, and its zero shortcut matches only zero chunks of its own max length (it reads all other chunks). It must not write the store: it would cut new data with 4/8/32 KiB, so a store would have two profiles, and a spliced file would not have the key of a new write of the same bytes. |
 | hash-sha256 | incompat | `HASH_SHA256_RELEASE` | The store has, or had, objects with SHA-256 IDs (tag 0x12). An older SliceFS cannot verify or read these objects, so it must not open the store. SliceFS writes the flag before the first SHA-256 object: in the first header of `seed --hash sha256`, in the same header write as the hash line of `mount --hash sha256`, and alone before `rehash --to sha256` writes an object. The flag stays when the write hash goes back to `blake3-256`, because SHA-256 objects can still be live. Removing it after a GC that proves no SHA-256 object is left is deferred. |
+| boundary-salt | ro_compat | `BOUNDARY_SALT_RELEASE` | The store has a boundary salt, in its `boundary-salt` line. An older SliceFS can read the metadata trees, because a reader follows the node keys and does not cut. It must not write the store: it would cut the trees with another rule (no salt), so equal data would get different tree nodes, and the trees of the store would mix two rules. Same reason as `chunk-profile`. |
 
-The release words are the constants `CHUNK_PROFILE_RELEASE` and
-`HASH_SHA256_RELEASE` in `header.rs`. Both are `v2.3`, the first
-release that writes these flags.
+The release words are the constants `CHUNK_PROFILE_RELEASE`,
+`HASH_SHA256_RELEASE` and `BOUNDARY_SALT_RELEASE` in `header.rs`. The first
+two are `v2.3`, the first release that writes these flags. The last is
+`v2.4`.
 
 Rule to add a flag:
 
@@ -302,8 +336,8 @@ write.
 | Id | When | Text |
 |----|------|------|
 | M1 | The store has data in packs/ or segments/, but no FORMAT file. | `{store} has data but no store header (the file FORMAT is missing). This SliceFS does not open a store with no header.` |
-| M2 | The format number is smaller than 7. | `{store} was made by an older SliceFS ({what}). The store format changed without a migration: copy the files out with the older version, then into a new store` |
-| M3 | The format number is larger than 7. | `{store} was made by a newer SliceFS (store format {n}). This SliceFS reads store format {known} only.` |
+| M2 | The format number is 0 to 6. | `{store} was made by an older SliceFS ({what}). The store format changed without a migration: copy the files out with the older version, then into a new store` |
+| M3 | The format number is larger than 8. | `{store} was made by a newer SliceFS (store format {n}). This SliceFS reads store format {known} only.` |
 | M4 | The first line does not have the form slicefs-store and a number. | `{store}: unknown store format {line:?}` |
 | M5 | An unknown incompat flag, for any command. | `{store} uses the feature {name}, which needs SliceFS {release} or later. This SliceFS cannot open it.` |
 | M6 | An unknown ro_compat flag: the mount is read-only (printed on stdout). | `Mounting read-only: {store} uses the feature {name}, which needs SliceFS {release} or later to write.` |
@@ -318,16 +352,20 @@ write.
 | M14 | gc (offline), seed, rehash, snapshot create or snapshot switch while a mount or another of these commands holds the store lock. | `{store} is in use: it is mounted, or another command (gc, seed, rehash, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.` |
 | M15 | A writable mount while another mount, gc, seed, rehash, snapshot create or snapshot switch holds the store lock. | `{store} is in use: it is mounted, or a command (gc, seed, rehash, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.` |
 | M16 | `seed` or `mount` with `--chunk-profile` that differs from the profile of the store (also a read-only mount). Nothing in the store changes. | `{store} has the chunk profile {have}; --chunk-profile {want} is another profile. The chunk profile of a store is fixed when the store is made.` |
+| M17 | The format number is 7 (a store of release v2.3.0). | `{store} was made by SliceFS v2.3.0 (store format 7, flat metadata maps). This SliceFS reads store format 8 only. Copy the files into a new store with the steps in docs/user/upgrade.md.` |
+| M18 | `seed` with `--boundary-salt` on an existing store whose salt differs (also a store with no salt, and always for `random`). Nothing in the store changes. | `{store} has {have}; --boundary-salt {want} is another salt. The boundary salt of a store is fixed when the store is made.` |
 
 The values in the texts:
 
 - `{name}` and `{release}`: the words of the flag line.
-- `{n}` in M3: the format number of the store. `{known}` in M3: 7, the
+- `{n}` in M3: the format number of the store. `{known}` in M3: 8, the
   format number of this SliceFS. `{n}` in M7: the number of records in the
   write log.
 - `{have}` in M16: the profile of the store; `{want}`: the profile of the
   option. Each is printed as `<min>/<avg>/<max> KiB` (in bytes, with `B`,
   when a size is not whole KiB).
+- `{have}` in M18: `a boundary salt` or `no boundary salt`; `{want}`: the
+  option as given (`random`, or the 64 hex digits).
 - `{k}` in M9: the line number (the first line is 1). `{line:?}` in M4 and
   M9: the line, in double quotes.
 - `{reason}` in M9 is one of:
@@ -339,6 +377,11 @@ The values in the texts:
   - `chunks line with no chunk-profile flag`
   - `chunk-profile flag with no chunks line`
   - `the feature chunk-profile must be ro_compat`
+  - `bad boundary-salt line`
+  - `two boundary-salt lines`
+  - `boundary-salt line with no boundary-salt flag`
+  - `boundary-salt flag with no boundary-salt line`
+  - `the feature boundary-salt must be ro_compat`
   - `hash sha256 with no hash-sha256 flag`
   - `the feature hash-sha256 must be incompat`
   - `unknown setting`
@@ -361,7 +404,7 @@ Other texts:
 `slicefs stats` shows four lines after the line `Mounted`:
 
 ```
-Store format     : 7
+Store format     : 8
 Chunk profile    : 4/8/32 KiB
 Feature flags    : none
 Access           : read-write
@@ -382,7 +425,7 @@ Access           : read-write
 With `--json`, the same data is in four fields:
 
 ```
-"format": 7,
+"format": 8,
 "flags": {"compat": [], "ro_compat": [], "incompat": []},
 "chunk_profile": {"min": 4096, "avg": 8192, "max": 32768},
 "access": "read-write"
@@ -395,10 +438,309 @@ With `--json`, the same data is in four fields:
   in bytes.
 - `access`: `read-write` or `read-only`.
 
+## Metadata maps (store format 8)
+
+This section is the normative definition of the metadata maps of store
+format 8: the layout, the node format, the boundary rule and its constants.
+The code is `crates/prolly`. The numbers below come from the run of plan
+25-07: `.planning/phases/25-prolly-format-and-layout/runs/layout/decision.txt`
+and the CSV files in the same folder. The last line of that file is
+`verdict layout=a l=8192 node_max=16384`.
+
+### Design target
+
+- One store holds 1,000,000,000 inodes (files and directories) or more. It is
+  a part of a global, decentralized file system.
+- No operation loads a whole map into RAM. This holds for mount, stats, GC
+  and scrub too. Memory stays bounded at any store size: one path of nodes
+  per tree, never all entries.
+- Counts come from the counts in the internal entries or from the root
+  record (`inode_count`, `logical_bytes`). They never come from a walk of
+  all leaves.
+
+### Layout
+
+The layout is **a: five maps, five prolly trees.** The maps are
+`inode_data`, `dir_data`, `manifest_data`, `xattr_data` and `refcounts`.
+Each map key of the root record points to the root of its own tree.
+
+Key grammar of layout a:
+
+| Map | Key | Value |
+| --- | --- | --- |
+| `inode_data` | `ino`, 8 bytes, big endian | 33-byte `ObjectKey` |
+| `dir_data` | `ino` of the directory, 8 bytes, big endian | 33-byte `ObjectKey` |
+| `manifest_data` | `ino`, 8 bytes, big endian | 33-byte `ObjectKey` |
+| `xattr_data` | `ino`, 8 bytes, big endian | 33-byte `ObjectKey` |
+| `refcounts` | the 33-byte content key | 8-byte count |
+
+The decision came from three layouts, tested on the same edit scripts:
+
+- **a:** five trees, as above.
+- **b:** one namespace tree, keys `0x01 || ino || kind` (kind 0 inode, 1 dir,
+  2 manifest, 3 xattr) and `0x02 || content key` for refcounts.
+- **c:** the same namespace tree, but the refcounts in their own tree.
+
+Room for a name: a later combined key may add a name suffix,
+`0x01 || ino || kind || name`. The longest such key is 8 + 255 + 2 = 265
+bytes, below `MAX_KEY` (1,024). Whether directory entries are stored by name
+(one entry per name, in place of one list per directory) is decided with the
+commit path (issue #215). It is not decided in this section.
+
+Refcounts are a prolly map like the others (D-04). Issue #165 may remove the
+map later.
+
+The rules were fixed before the run (`prereg.txt`, `decide.py`) and the run
+did not change them. Rows: the Boost trees 1_84_0 and 1_85_0, and synthetic trees of
+1,000,000 and 10,000,000 files; 10 commits per row, one process per row, in
+Docker on disk-backed storage (`scripts/prolly-bench/layout.sh`; the rules are
+in `scripts/prolly-bench/decide.py`). Layout b and c were measured against a
+at the Dolt config (L 4,096, NODE_MAX 16,384):
+
+| Rule | Limit | Layout b | Layout c |
+| --- | --- | --- | --- |
+| Mean ratio of nodes read and written per commit, 6 small rows | at most 0.80 | 0.681 pass | 0.700 pass |
+| Mean ratio of CPU per commit, 6 small rows | at most 1.25 | 0.825 pass | 0.948 pass |
+| Largest ratio of bytes written, 6 large rows | at most 1.10 | 0.912 pass | 0.906 pass |
+| Nodes at 1,000,000,000 inodes, not more than a (47,291,816) | at most 47,291,816 | 48,922,745 fail | 48,428,987 fail |
+
+Neither b nor c qualified, so the layout is a. b and c touch about 30% fewer
+nodes for a small commit, but at 1,000,000,000 inodes they need 3.4% (b) and
+2.4% (c) more nodes than five separate trees. The rule says "not more", and
+the rule decided.
+
+Two limits of the data. The Boost refcounts are empty, because the product
+writes no refcounts today. So the refcount signal, and the comparison of b
+against c, come from the synthetic rows only (2 refcount keys per file). The
+CPU columns are noisy: the host had a high load during the run. They only
+guard; the node and byte counts decided.
+
+Effect on the GC mark: one walk per tree, five walks in all. Each tree has one
+value type, so there is no dispatch on a kind byte. Memory stays one path of
+nodes per tree.
+
+### Root record
+
+The root record of this build has 197 bytes (little endian, fixed width):
+
+| Offset | Bytes | Field |
+| --- | --- | --- |
+| 0 | 8 | `ROOT_DIR_INO` |
+| 8 | 8 | `NEXT_INO` |
+| 16 | 33 | `INODE_DATA` |
+| 49 | 33 | `DIR_DATA` |
+| 82 | 33 | `MANIFEST_DATA` |
+| 115 | 33 | `XATTR_DATA` |
+| 148 | 33 | `REFCOUNTS` |
+| 181 | 8 | `LOGICAL_BYTES` |
+| 189 | 8 | `INODE_COUNT` |
+
+There is one inode map. The duplicate `inode_map` of earlier builds is gone
+(D-06); `NEXT_INO` stays in the record. Each of the five 33-byte fields is the
+key of a serialized flat map in this build.
+
+When the maps become prolly trees, layout a keeps the same record: the same
+nine fields and 197 bytes. Each of the five fields is then the 33-byte
+`ObjectId` of the root of a tree. The empty tree is the empty leaf, so every
+field always has a root. (Layout b would have had 65 bytes and layout c 98
+bytes.)
+
+### Node format
+
+A node is one chunk-store object. A child pointer is the child's `ObjectId`
+(33 bytes), and the root of a tree is one `ObjectId`. Nodes are not cut again
+by FastCDC.
+
+Header, 10 bytes:
+
+| Offset | Bytes | Field |
+| --- | --- | --- |
+| 0 | 4 | magic `SPT1` |
+| 4 | 1 | rule version `u8` (1) |
+| 5 | 1 | level `u8` (0 for a leaf) |
+| 6 | 4 | entry count `u32`, little endian |
+
+Leaf entry (level 0): key length `u16` LE, value length `u16` LE, key, value.
+
+Internal entry (level 1 and up): key length `u16` LE, the last key of the
+child, the child `ObjectId` (33 bytes), the number of leaf entries under the
+child `u64` LE.
+
+Keys are strictly ascending in every node. A reader checks:
+
+- the magic, and the rule version (a node of another version is refused);
+- the node size, up to 32,768 bytes (`MAX_NODE_MAX`); a writer of this
+  format makes nodes up to `NODE_MAX` (16,384 bytes);
+- the key and entry limits (`MAX_KEY`, `MAX_ENTRY`) and the order of the keys;
+- the count of entries against the bytes of the node (no bytes left over,
+  an internal node has at least one entry);
+- each child against the parent entry: its last key, its first key above the
+  last key of the previous sibling, and its leaf entry count.
+
+A node that fails a check is damaged data, never a panic.
+
+### Boundary rule
+
+The rule decides where a node ends. It is the size-aware key splitter of Dolt
+with a Weibull CDF of shape 4, in integer math only. The same input gives the
+same cut points on every platform.
+
+After an entry that grows a node in progress from `before` to `after` bytes
+(the node size counts the header), in this order:
+
+1. An internal node never ends after its first entry.
+2. If `after > NODE_MAX - MAX_ENTRY`, the node ends (the forced cut).
+3. If `after < NODE_MIN`, the node does not end.
+4. Else the node ends if and only if `h < T(before, after)`.
+
+`h` is the boundary hash, a 32-bit number. `T` is the threshold:
+
+`T = 2^32 - E(delta)`, and
+`delta = floor(((after^4 - before^4) * 2^32) / L^4)`, in 128-bit integers.
+
+`E(delta)` is `e^-x * 2^32` for `x = delta / 2^32`:
+
+- `i = delta >> 32`. If `i >= 23`, `E` is 0.
+- `j` = the top 10 bits of the low 32 bits of `delta`, and `r` = the low 22
+  bits.
+- `frac = F[j] - (((F[j] - F[j+1]) * r) >> 22)`.
+- `E = (I[i] * frac) >> 32`, with the product in 128 bits.
+
+The tables are `I[i] = round(2^32 * e^-i)` for i = 0 to 22 and
+`F[j] = round(2^32 * e^(-j/1024))` for j = 0 to 1024 (rounded half up). They
+are in `crates/prolly/src/rule_table.rs`. The script
+`scripts/prolly-table/gen_table.py` makes them with 60 decimal digits, and
+`gen_table.py --check` compares the file with its output. The BLAKE3 hash of
+the table bytes (`I` then `F`, each value as `u64` little endian) is
+`6a72017ef6d3d7daf2ea9385afe01ac20fd4bf85610a5179c9bc7384bcc369e4`. The test
+`golden_root` pins this hash.
+
+The error of `T` against the real formula `1 - e^-((after^4 - before^4) /
+L^4)` is at most 2^-22 (about 2.4e-7); the test `fixed_point_matches_float`
+checks it. The measured maximum is 1.2e-7. In 1,000,000 random cut decisions
+the integer rule and the float rule differ in none.
+
+The boundary hash is the first 4 bytes, little endian, of BLAKE3 over the byte
+`level + 1` and then the key. The level byte makes every level cut on its own
+bits. The hash never reads the value, so the boundaries depend on the keys and
+on the entry lengths only. With a salt, BLAKE3 runs in keyed mode (see
+"Boundary salt").
+
+The rule has a version byte, in every node header. This text defines rule
+version 1. A change of the table, the formula or the constants is a new rule
+version.
+
+### Constants
+
+| Constant | Value |
+| --- | --- |
+| `WEIBULL_L` (L) | 8,192 |
+| `WEIBULL_K` | 4 (the code writes `x*x*x*x`) |
+| `NODE_MAX` | 16,384 bytes |
+| `NODE_MIN` | 512 bytes |
+| `MAX_ENTRY` | 2,048 bytes |
+| `MAX_KEY` | 1,024 bytes |
+| `NODE_HEADER` | 10 bytes |
+| `MAX_NODE_MAX` (largest node a reader accepts) | 32,768 bytes |
+| `RULE_VERSION` | 1 |
+
+The mean node is about 0.906 x L, about 7.4 KB. The forced cut is at
+`NODE_MAX - MAX_ENTRY` = 14,336 bytes.
+
+Why L and `NODE_MAX` were chosen. Each node is one object in the chunk index,
+and the index keeps the full ID of each object. So the number of nodes at
+1,000,000,000 inodes is a real cost. The rule of plan 25-07 compared three
+configs on the layout a trees:
+
+| Config (L / NODE_MAX) | Nodes at 1B | Ratio to Dolt | Bytes written, mean of 3 rows | Ratio | CPU, mean of 3 rows | Ratio | Forced cuts / nodes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 4,096 / 16,384 (Dolt) | 47,291,816 | 1 | 1.27 MB | 1 | 41.5 ms | 1 | 0.00000 |
+| 8,192 / 16,384 | 23,479,915 | 0.4965 | 2.14 MB | 1.683 | 68.0 ms | 1.639 | 0.00011 |
+| 8,192 / 32,768 | 23,479,815 | 0.4965 | 2.14 MB | 1.683 | 66.8 ms | 1.610 | 0.00000 |
+
+A config replaces Dolt if its forced cuts are at most 0.5% of the nodes, its
+nodes at 1B are at most 0.65 of Dolt's, its bytes at most 2.5 times and its CPU
+at most 2.0 times. Both 8,192 configs qualify. Their node counts differ by 100
+nodes, so the smaller `NODE_MAX` wins: 16,384. The price is about 68% more
+bytes and about 64% more CPU for a small commit (an absolute 2.14 MB and 68
+ms); the gain is half the nodes.
+
+`NODE_MIN` is the Dolt value. `MAX_ENTRY`, `MAX_KEY` and the forced cut at
+`NODE_MAX - MAX_ENTRY` are SliceFS limits: Dolt cuts after the entry that
+passes its maximum, and SliceFS never lets a node pass `NODE_MAX`. A key with
+a name suffix (265 bytes) fits under `MAX_KEY`, and an internal entry of the
+longest key is below `MAX_ENTRY`.
+
+The constants decide every node ID. After the format freeze, a change is a new
+rule version and a copy migration of every store.
+
+### Boundary salt
+
+A store may have a boundary salt: the header line `boundary-salt` and the
+ro_compat flag of the same name (see "Header file" and "Flag list"). The salt
+is the key of keyed BLAKE3 in the boundary hash. It enters nothing else:
+stored keys do not change.
+
+- The default is no salt. Then the same metadata gives the same node IDs in
+  every store.
+- A reader needs no salt, because it follows the keys of the nodes and does
+  not cut. A writer must use the salt of the store, so a build that does not
+  know the flag must not write (the flag is ro_compat).
+- The salt of a store is fixed when the store is made. A rebuild with
+  another salt is a later command (D-11).
+
+Accepted risk. In an unsalted store, a user who can pick names or keys can
+search for keys with a low boundary hash (grinding) and make many nodes of
+about `NODE_MIN` bytes, so the tree has more nodes than it should. The harm
+has a bound: no node is above `NODE_MAX`, no node is below `NODE_MIN` except
+the last of a level, and the tree never breaks. The salt stops a search made ahead
+of time for all stores. It does not stop a user who can read the `FORMAT` file
+of the store.
+
+### Scale at 1,000,000,000 inodes
+
+Method (D-05). A 10,000,000-file base tree of each map was built and measured.
+For each tree: entries per leaf `e` = entries / leaves, and fanout `f` =
+leaves / nodes of level 1. The entries are scaled to 1,000,000,000 inodes, the
+leaves are `ceil(entries / e)`, and each level above is `ceil(previous / f)`
+until one node is left. The nodes are the sum of the levels, and the depth is
+the number of levels. No tree of 100,000,000 or 1,000,000,000 entries was
+built.
+
+Result for layout a at L 8,192 and `NODE_MAX` 16,384 (the `extrapolation`
+lines of `decision.txt`):
+
+| Map | Entries | Depth | Levels, leaves to root | Nodes |
+| --- | --- | --- | --- | --- |
+| `inode_data` | 1,000,000,000 | 5 | 6,048,100 / 40,600 / 273 / 2 / 1 | 6,088,976 |
+| `dir_data` | 100,036,700 | 4 | 604,900 / 4,400 / 33 / 1 | 609,334 |
+| `manifest_data` | 899,963,300 | 5 | 5,448,000 / 37,600 / 260 / 2 / 1 | 5,485,863 |
+| `xattr_data` | 49,818,700 | 4 | 302,300 / 2,100 / 15 / 1 | 304,416 |
+| `refcounts` | 1,799,926,600 | 5 | 10,880,200 / 110,000 / 1,113 / 12 / 1 | 10,991,326 |
+| Total | | | | 23,479,915 |
+
+The entry counts follow the mix of the synthetic base tree (2 refcount keys
+per file). The refcount line is from synthetic data only. At the Dolt config
+the same method gives 47,291,816 nodes.
+
+One change at 10,000,000 files touches 52 nodes (median of 10 commits, nodes
+read and written; Dolt config: 63).
+
+### This build and the prolly maps
+
+This build writes store format 8 with flat maps and the 197-byte root record
+above. The prolly maps of this section replace the flat maps before release
+v2.4.0 (issue #215). No release comes between, so no user store has the
+interim form. A store written by this build is not readable after that change
+(there is no backward compatibility, and no migration).
+
+The crate `crates/prolly` holds the node format, the rule and the constants of
+this section. The commit, read and GC paths of this build do not use it yet.
+
 ## Format policy
 
-- The format number changes only when an older SliceFS cannot parse the
-  header safely.
+- The format number changes when an older SliceFS cannot parse the
+  header safely, or when the metadata layout changes as a whole.
 - Any other change of the store adds a flag, by the rule of the flag list.
 - The format number is separate from the release number.
 - A store of another format number is refused. There is no migration.
@@ -406,4 +748,11 @@ With `--json`, the same data is in four fields:
   have version 2, the index MANIFEST (`SFMF`) has version 1, and the runs
   (`SFRN`) have version 2. They are part of the store format. Thus a change
   of one of them needs a flag or a new format number, by this policy.
+- Store format 8 is the format of the prolly metadata maps (issue #215). The
+  owner chose a new format number over an incompat flag on format 7 in the
+  Phase 25 discussion (2026-11-26), because every metadata map changes. The
+  release v2.3.0 refuses format 8 at the first line (M3 of that release),
+  and this release refuses format 7 with M17, which points to
+  `docs/user/upgrade.md`. The number stays separate from the release number
+  (the flag lines carry the release words).
 - The format is not frozen yet.

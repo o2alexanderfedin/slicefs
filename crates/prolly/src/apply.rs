@@ -60,6 +60,8 @@ pub struct ApplyStats {
     /// Largest sum seen of the decoded old nodes held, the writer buffer
     /// and the pending edits (the memory bound).
     pub high_water_bytes: usize,
+    /// Cuts made by the forced rule (size above `force_at`) in the new nodes.
+    pub forced_cuts: u64,
 }
 
 /// The payload of an entry at any level.
@@ -121,6 +123,7 @@ impl Work<'_> {
             nodes_written: self.writes.nodes_written,
             bytes_written: self.writes.bytes_written,
             high_water_bytes: self.high,
+            forced_cuts: self.writes.forced_cuts,
         }
     }
 }
@@ -475,6 +478,7 @@ pub fn apply(store: &ChunkStore, cfg: Config, root: &ObjectId, batch: &[Edit]) -
             let (id, st) = b.finish()?;
             w.writes.nodes_written += st.nodes_written;
             w.writes.bytes_written += st.bytes_written;
+            w.writes.forced_cuts += st.forced_cuts;
             w.note(st.high_water_bytes);
             id
         }

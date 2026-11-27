@@ -1,0 +1,266 @@
+== cargo test -p prolly-bench
+running 6 tests
+test synth::tests::an_inserted_refcount_key_sorts_next_to_its_slot ... ok
+test layout::tests::a_combined_key_sorts_by_ino_then_kind_and_refcounts_last ... ok
+test layout::tests::a_refcount_diff_has_puts_deletes_and_inserts ... ok
+test synth::tests::the_streams_are_sorted_and_their_counts_match ... ok
+test synth::tests::the_permutation_is_a_bijection_with_an_inverse ... ok
+test layout::tests::every_layout_replay_matches_the_model ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.75s
+running 3 tests
+test bad_arguments_exit_2 ... ok
+test smoke_end_to_end ... ok
+test synth_smoke ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.44s
+rc=0
+== cargo clippy -p prolly-bench
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.57s
+rc=0
+== decide.py --self-test
+self-test ok
+rc=0
+== layout.sh smoke (host)
+row boost-0-a-4096-16384
+row boost-0-a-8192-16384
+row boost-0-a-8192-32768
+row boost-0-b-4096-16384
+row boost-0-b-8192-16384
+row boost-0-b-8192-32768
+row boost-0-c-4096-16384
+row boost-0-c-8192-16384
+row boost-0-c-8192-32768
+row synth-5000-a-4096-16384
+row synth-5000-a-8192-16384
+row synth-5000-a-8192-32768
+row synth-5000-b-4096-16384
+row synth-5000-b-8192-16384
+row synth-5000-b-8192-32768
+row synth-5000-c-4096-16384
+row synth-5000-c-8192-16384
+row synth-5000-c-8192-32768
+row synth-20000-a-4096-16384
+row synth-20000-a-8192-16384
+row synth-20000-a-8192-32768
+row synth-20000-b-4096-16384
+row synth-20000-b-8192-16384
+row synth-20000-b-8192-32768
+row synth-20000-c-4096-16384
+row synth-20000-c-8192-16384
+row synth-20000-c-8192-32768
+layout.csv 297 rows, shape.csv 144 rows, build.csv 27 rows, checks.txt 27 lines
+results: layout.csv, shape.csv, build.csv, checks.txt, machine.txt and rows/ in <scratch>/ls2; failed rows: 0
+rc=0
+== decide.py smoke (host)
+row source=boost n=0 layout=a l=4096 node_max=16384 pattern=scatter k=1 commits=2 nodes=11 cpu_ms=0.955 bytes_written=7365
+row source=boost n=0 layout=a l=4096 node_max=16384 pattern=scatter k=10 commits=2 nodes=24 cpu_ms=2.204 bytes_written=37017.5
+row source=synth n=5000 layout=a l=4096 node_max=16384 pattern=one k=1 commits=2 nodes=22 cpu_ms=2.692 bytes_written=29060.5
+row source=synth n=5000 layout=a l=4096 node_max=16384 pattern=mixed k=10 commits=2 nodes=100 cpu_ms=9.460 bytes_written=174188
+row source=synth n=20000 layout=a l=4096 node_max=16384 pattern=one k=1 commits=2 nodes=31.5 cpu_ms=2.684 bytes_written=32867.5
+row source=synth n=20000 layout=a l=4096 node_max=16384 pattern=mixed k=10 commits=2 nodes=129.5 cpu_ms=9.520 bytes_written=215372
+row source=boost n=0 layout=a l=4096 node_max=16384 pattern=scatter k=40 commits=2 nodes=49 cpu_ms=4.998 bytes_written=87115
+row source=boost n=0 layout=a l=4096 node_max=16384 pattern=insdel k=40 commits=2 nodes=88 cpu_ms=6.806 bytes_written=151689
+row source=synth n=5000 layout=a l=4096 node_max=16384 pattern=mixed k=40 commits=2 nodes=247 cpu_ms=20.791 bytes_written=463222
+row source=synth n=5000 layout=a l=4096 node_max=16384 pattern=insdel k=40 commits=2 nodes=230 cpu_ms=13.925 bytes_written=408020
+row source=synth n=20000 layout=a l=4096 node_max=16384 pattern=mixed k=40 commits=2 nodes=360 cpu_ms=25.077 bytes_written=672204
+row source=synth n=20000 layout=a l=4096 node_max=16384 pattern=insdel k=40 commits=2 nodes=336.5 cpu_ms=20.486 bytes_written=610124
+row source=boost n=0 layout=b l=4096 node_max=16384 pattern=scatter k=1 commits=2 nodes=5 cpu_ms=1.034 bytes_written=6559
+row source=boost n=0 layout=b l=4096 node_max=16384 pattern=scatter k=10 commits=2 nodes=14 cpu_ms=1.915 bytes_written=23994
+row source=synth n=5000 layout=b l=4096 node_max=16384 pattern=one k=1 commits=2 nodes=15.5 cpu_ms=2.111 bytes_written=21417
+row source=synth n=5000 layout=b l=4096 node_max=16384 pattern=mixed k=10 commits=2 nodes=79.5 cpu_ms=7.793 bytes_written=136074
+row source=synth n=20000 layout=b l=4096 node_max=16384 pattern=one k=1 commits=2 nodes=21 cpu_ms=2.010 bytes_written=29048.5
+row source=synth n=20000 layout=b l=4096 node_max=16384 pattern=mixed k=10 commits=2 nodes=101 cpu_ms=8.025 bytes_written=175785
+row source=boost n=0 layout=b l=4096 node_max=16384 pattern=scatter k=40 commits=2 nodes=36 cpu_ms=6.711 bytes_written=74558.5
+row source=boost n=0 layout=b l=4096 node_max=16384 pattern=insdel k=40 commits=2 nodes=81.5 cpu_ms=9.104 bytes_written=159701
+row source=synth n=5000 layout=b l=4096 node_max=16384 pattern=mixed k=40 commits=2 nodes=190 cpu_ms=14.250 bytes_written=362063
+row source=synth n=5000 layout=b l=4096 node_max=16384 pattern=insdel k=40 commits=2 nodes=203 cpu_ms=12.991 bytes_written=385615
+row source=synth n=20000 layout=b l=4096 node_max=16384 pattern=mixed k=40 commits=2 nodes=286.5 cpu_ms=22.779 bytes_written=529553
+row source=synth n=20000 layout=b l=4096 node_max=16384 pattern=insdel k=40 commits=2 nodes=295.5 cpu_ms=17.905 bytes_written=542272
+row source=boost n=0 layout=c l=4096 node_max=16384 pattern=scatter k=1 commits=2 nodes=5 cpu_ms=0.916 bytes_written=6559
+row source=boost n=0 layout=c l=4096 node_max=16384 pattern=scatter k=10 commits=2 nodes=14 cpu_ms=1.839 bytes_written=23994
+row source=synth n=5000 layout=c l=4096 node_max=16384 pattern=one k=1 commits=2 nodes=20 cpu_ms=1.465 bytes_written=23464.5
+row source=synth n=5000 layout=c l=4096 node_max=16384 pattern=mixed k=10 commits=2 nodes=85 cpu_ms=5.048 bytes_written=138268
+row source=synth n=20000 layout=c l=4096 node_max=16384 pattern=one k=1 commits=2 nodes=22.5 cpu_ms=1.349 bytes_written=26125
+row source=synth n=20000 layout=c l=4096 node_max=16384 pattern=mixed k=10 commits=2 nodes=105 cpu_ms=5.943 bytes_written=168332
+row source=boost n=0 layout=c l=4096 node_max=16384 pattern=scatter k=40 commits=2 nodes=36 cpu_ms=4.004 bytes_written=74558.5
+row source=boost n=0 layout=c l=4096 node_max=16384 pattern=insdel k=40 commits=2 nodes=81.5 cpu_ms=7.271 bytes_written=159701
+row source=synth n=5000 layout=c l=4096 node_max=16384 pattern=mixed k=40 commits=2 nodes=202 cpu_ms=10.470 bytes_written=367180
+row source=synth n=5000 layout=c l=4096 node_max=16384 pattern=insdel k=40 commits=2 nodes=216 cpu_ms=12.328 bytes_written=377328
+row source=synth n=20000 layout=c l=4096 node_max=16384 pattern=mixed k=40 commits=2 nodes=297.5 cpu_ms=15.087 bytes_written=533279
+row source=synth n=20000 layout=c l=4096 node_max=16384 pattern=insdel k=40 commits=2 nodes=299.5 cpu_ms=12.678 bytes_written=539864
+extrapolation layout=a l=4096 node_max=16384 map=inode entries_1b=1000000000 depth=5 levels=11950000/200000/3348/57/1 nodes=12153406
+extrapolation layout=a l=4096 node_max=16384 map=dir entries_1b=101550000 depth=6 levels=1250000/50000/2000/80/4/1 nodes=1302085
+extrapolation layout=a l=4096 node_max=16384 map=manifest entries_1b=898450000 depth=5 levels=10550000/150000/2133/31/1 nodes=10702165
+extrapolation layout=a l=4096 node_max=16384 map=xattr entries_1b=54300000 depth=7 levels=650000/50000/3847/296/23/2/1 nodes=704169
+extrapolation layout=a l=4096 node_max=16384 map=refcounts entries_1b=1796900000 depth=6 levels=21650000/500001/11548/267/7/1 nodes=22161824
+nodes_1b layout=a l=4096 node_max=16384 nodes=47023649
+extrapolation layout=b l=4096 node_max=16384 map=ns entries_1b=3851200000 depth=6 levels=48800000/800000/13115/215/4/1 nodes=49613335
+nodes_1b layout=b l=4096 node_max=16384 nodes=49613335
+extrapolation layout=c l=4096 node_max=16384 map=ns entries_1b=2054300000 depth=6 levels=26800000/400000/5971/90/2/1 nodes=27206064
+extrapolation layout=c l=4096 node_max=16384 map=refcounts entries_1b=1796900000 depth=6 levels=21650000/500001/11548/267/7/1 nodes=22161824
+nodes_1b layout=c l=4096 node_max=16384 nodes=49367888
+rule layout=b nodes_ratio measured=0.664 max=0.8 pass
+rule layout=b cpu_ratio measured=0.8587 max=1.25 pass
+rule layout=b bytes_ratio measured=1.053 max=1.1 pass
+rule layout=b nodes_1b measured=4.961e+07 max=4.702e+07 fail
+rule layout=c nodes_ratio measured=0.7203 max=0.8 pass
+rule layout=c cpu_ratio measured=0.6665 max=1.25 pass
+rule layout=c bytes_ratio measured=1.053 max=1.1 pass
+rule layout=c nodes_1b measured=4.937e+07 max=4.702e+07 fail
+rule layout_choice=a qualified=none
+row source=synth n=20000 layout=a l=8192 node_max=16384 pattern=one k=1 commits=2 nodes=21.5 cpu_ms=2.600 bytes_written=50181
+row source=synth n=20000 layout=a l=8192 node_max=16384 pattern=mixed k=10 commits=2 nodes=93 cpu_ms=12.671 bytes_written=348538
+row source=boost n=0 layout=a l=8192 node_max=16384 pattern=scatter k=1 commits=2 nodes=11 cpu_ms=1.663 bytes_written=15804
+extrapolation layout=a l=8192 node_max=16384 map=inode entries_1b=1000000000 depth=5 levels=6000000/50000/417/4/1 nodes=6050422
+extrapolation layout=a l=8192 node_max=16384 map=dir entries_1b=101550000 depth=7 levels=700000/50000/3572/256/19/2/1 nodes=753850
+extrapolation layout=a l=8192 node_max=16384 map=manifest entries_1b=898450000 depth=5 levels=5300000/50000/472/5/1 nodes=5350478
+extrapolation layout=a l=8192 node_max=16384 map=xattr entries_1b=54300000 depth=9 levels=300000/50000/8334/1389/232/39/7/2/1 nodes=360004
+extrapolation layout=a l=8192 node_max=16384 map=refcounts entries_1b=1796900000 depth=5 levels=10700000/150000/2103/30/1 nodes=10852134
+nodes_1b layout=a l=8192 node_max=16384 nodes=23366888
+row source=synth n=20000 layout=a l=8192 node_max=32768 pattern=one k=1 commits=2 nodes=21.5 cpu_ms=2.323 bytes_written=50181
+row source=synth n=20000 layout=a l=8192 node_max=32768 pattern=mixed k=10 commits=2 nodes=93 cpu_ms=11.995 bytes_written=348538
+row source=boost n=0 layout=a l=8192 node_max=32768 pattern=scatter k=1 commits=2 nodes=11 cpu_ms=1.603 bytes_written=15804
+extrapolation layout=a l=8192 node_max=32768 map=inode entries_1b=1000000000 depth=5 levels=6000000/50000/417/4/1 nodes=6050422
+extrapolation layout=a l=8192 node_max=32768 map=dir entries_1b=101550000 depth=7 levels=700000/50000/3572/256/19/2/1 nodes=753850
+extrapolation layout=a l=8192 node_max=32768 map=manifest entries_1b=898450000 depth=5 levels=5300000/50000/472/5/1 nodes=5350478
+extrapolation layout=a l=8192 node_max=32768 map=xattr entries_1b=54300000 depth=9 levels=300000/50000/8334/1389/232/39/7/2/1 nodes=360004
+extrapolation layout=a l=8192 node_max=32768 map=refcounts entries_1b=1796900000 depth=5 levels=10700000/150000/2103/30/1 nodes=10852134
+nodes_1b layout=a l=8192 node_max=32768 nodes=23366888
+rule config l=4096 node_max=16384 forced_share=0.00000 max=0.00500 pass
+rule config l=8192 node_max=16384 forced_share=0.00214 max=0.00500 pass
+rule config l=8192 node_max=16384 n1b_ratio measured=0.4969 max=0.65 pass
+rule config l=8192 node_max=16384 bytes_ratio measured=1.622 max=2.5 pass
+rule config l=8192 node_max=16384 cpu_ratio measured=1.287 max=2 pass
+rule config l=8192 node_max=32768 forced_share=0.00000 max=0.00500 pass
+rule config l=8192 node_max=32768 n1b_ratio measured=0.4969 max=0.65 pass
+rule config l=8192 node_max=32768 bytes_ratio measured=1.622 max=2.5 pass
+rule config l=8192 node_max=32768 cpu_ratio measured=1.21 max=2 pass
+note boost refcounts are empty (the product writes none today): the layout b-versus-c and refcount signal comes only from the synthetic rows
+verdict layout=a l=8192 node_max=16384
+rc=0
+== docker prolly-layout (LAYOUT_SMOKE=1)
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+# load before: 3.81 2.61 2.61 3/891 3447
+making smoke data
+warming the page cache
+row boost-0-a-4096-16384
+row boost-0-a-8192-16384
+row boost-0-a-8192-32768
+row boost-0-b-4096-16384
+row boost-0-b-8192-16384
+row boost-0-b-8192-32768
+row boost-0-c-4096-16384
+row boost-0-c-8192-16384
+row boost-0-c-8192-32768
+row synth-5000-a-4096-16384
+row synth-5000-a-8192-16384
+row synth-5000-a-8192-32768
+row synth-5000-b-4096-16384
+row synth-5000-b-8192-16384
+row synth-5000-b-8192-32768
+row synth-5000-c-4096-16384
+row synth-5000-c-8192-16384
+row synth-5000-c-8192-32768
+row synth-20000-a-4096-16384
+row synth-20000-a-8192-16384
+row synth-20000-a-8192-32768
+row synth-20000-b-4096-16384
+row synth-20000-b-8192-16384
+row synth-20000-b-8192-32768
+row synth-20000-c-4096-16384
+row synth-20000-c-8192-16384
+row synth-20000-c-8192-32768
+layout.csv 297 rows, shape.csv 144 rows, build.csv 27 rows, checks.txt 27 lines
+results: layout.csv, shape.csv, build.csv, checks.txt, machine.txt and rows/ in /work/run; failed rows: 0
+# load after: 3.69 2.62 2.61 3/899 4035
+# layout.sh rc=0
+rc=0
+== bash -n layout.sh and run.sh
+rc=0
+== cargo test --workspace
+test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 134 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.16s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.97s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.78s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 27.38s
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.07s
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.16s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.38s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.47s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.94s
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.08s
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.24s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.43s
+test result: ok. 191 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.19s
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.30s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.20s
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.65s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.22s
+test result: ok. 414 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.76s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.42s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.22s
+test result: ok. 107 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.27s
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.73s
+test result: ok. 78 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.08s
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.98s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.86s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.64s
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.59s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.52s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.03s
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.59s
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.88s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.73s
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.92s
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.69s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.55s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.85s
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.26s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.88s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.33s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.90s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.93s
+test result: ok. 6 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 9.64s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 37.36s
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.60s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+rc=0

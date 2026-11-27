@@ -18,6 +18,7 @@
 #        scripts/docker-linux-test/run.sh index-bench-cold [SIZES...]   (cold page cache; privileged; by hand)
 #        scripts/docker-linux-test/run.sh chunk-profiles-smoke   (chunk profile benchmark, SMOKE=1, no FUSE; by hand, not in CI)
 #        scripts/docker-linux-test/run.sh prolly-bench-smoke   (prolly prototype smoke, SMOKE=1, no FUSE; by hand, not in CI)
+#        OUT=<result dir> DATA=<boost data dir> scripts/docker-linux-test/run.sh prolly-layout   (Phase 25 layout and constants matrix, no FUSE; LAYOUT_SMOKE=1 needs no DATA; env CONFIGS LAYOUTS SYNTH_NS KS SYNTH_KS COMMITS SEED ROW_TIMEOUT RESUME; stores on the volume slicefs-prolly-work; by hand, not in CI)
 # SLICEFS_WORKERS (for example 4) passes --workers to the mounts of the scripts.
 # SLICEFS_TARGET_VOL names the cargo target volume (default slicefs-target), so
 # two runs from different trees at the same time do not share build output.
@@ -100,6 +101,40 @@ case "${1:-all}" in
         echo "# load after: $(cat /proc/loadavg)" || exit 1
         echo "# checks ok: $(grep -c ok=1 /tmp/pp/shape.txt)" || exit 1
         cat /tmp/pp/machine.txt || exit 1' ;;
+  prolly-layout)
+    # The layout and constants matrix of Phase 25 (scripts/prolly-bench/layout.sh).
+    # It mounts nothing: no FUSE device, no SYS_ADMIN and no unshare, so it does not
+    # use RUN. DATA (the Boost data dir) is mounted read only; OUT receives the CSV
+    # and text files and rows/; the stores live on the disk-backed named volume
+    # slicefs-prolly-work (no tmpfs) and stay there only with RESUME=1.
+    # LAYOUT_SMOKE=1 runs a small generated matrix and needs no DATA.
+    [ -n "${OUT:-}" ] || { echo "prolly-layout needs OUT=<result dir>" >&2; exit 2; }
+    mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
+    DATA_MOUNT=()
+    if [ "${LAYOUT_SMOKE:-0}" != 1 ]; then
+      [ -n "${DATA:-}" ] && [ -d "$DATA" ] || { echo "prolly-layout needs DATA=<Boost data dir> (or LAYOUT_SMOKE=1)" >&2; exit 2; }
+      DATA_MOUNT=(-v "$(cd "$DATA" && pwd)":/data:ro)
+    fi
+    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry \
+      -v slicefs-prolly-work:/work -v "$OUT":/out ${DATA_MOUNT[@]+"${DATA_MOUNT[@]}"} -e CARGO_TARGET_DIR=/target \
+      -e LAYOUT_SMOKE -e CONFIGS -e LAYOUTS -e SYNTH_NS -e KS -e SYNTH_KS -e COMMITS -e SEED -e ROW_TIMEOUT -e RESUME \
+      slicefs-fusetest bash -c '
+        set -o pipefail
+        rustc -V || exit 1
+        timeout 2400 cargo build -q --release --locked -j 2 -p prolly-bench || exit 1
+        R=/work/run
+        # The volume persists between runs: start clean unless the run is resumed.
+        [ "${RESUME:-0}" = 1 ] || rm -rf "$R"
+        echo "# load before: $(cat /proc/loadavg)"
+        ARG=; [ "${LAYOUT_SMOKE:-0}" = 1 ] || ARG=/data
+        rc=0
+        WORK=$R BIN=/target/release/prolly-bench bash /src/scripts/prolly-bench/layout.sh $ARG || rc=$?
+        echo "# load after: $(cat /proc/loadavg)"
+        for f in layout.csv shape.csv build.csv checks.txt machine.txt; do [ -f "$R/$f" ] && cp "$R/$f" /out/; done
+        [ -d "$R/rows" ] && { rm -rf /out/rows; cp -R "$R/rows" /out/rows; }
+        [ "${RESUME:-0}" = 1 ] || rm -rf "$R"
+        echo "# layout.sh rc=$rc"
+        exit $rc' ;;
   index-bench-cold)
     # The chunk index with a cold page cache (by hand). --privileged, because
     # only then can root in the container write /proc/sys/vm/drop_caches; this
@@ -129,5 +164,5 @@ case "${1:-all}" in
           done; done
           echo "# size $n, load after: $(cat /proc/loadavg)"
         done' index-bench ${*:-1000000 10000000} ;;
-  *) echo "usage: $0 [smoke|test|all|verify|pjdfstest] | coverage | bigwrite [size-MiB ...] (by hand; not in CI) | s1 (by hand) | s4 (by hand; not in CI) | s6 [files] (by hand; not in CI) | pool-bench (by hand; not in CI) | harness <test-name> (by hand; not in CI; HARNESS_FEATURES=lock-stats for lock rows) | index-bench [SIZES...] | index-bench-cold [SIZES...]"; exit 2 ;;
+  *) echo "usage: $0 [smoke|test|all|verify|pjdfstest] | coverage | bigwrite [size-MiB ...] (by hand; not in CI) | s1 (by hand) | s4 (by hand; not in CI) | s6 [files] (by hand; not in CI) | pool-bench (by hand; not in CI) | harness <test-name> (by hand; not in CI; HARNESS_FEATURES=lock-stats for lock rows) | index-bench [SIZES...] | index-bench-cold [SIZES...] | prolly-layout (OUT=<dir> DATA=<dir> or LAYOUT_SMOKE=1; by hand; not in CI)"; exit 2 ;;
 esac

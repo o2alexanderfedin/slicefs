@@ -1,0 +1,20 @@
+this build: 6287396
+v2.3.0: 582a41d
+docker image: slicefs-fusetest, rustc 1.100.0 (0ef1bc386 2026-11-09)
+== this build seed of store8
+first line: slicefs-store 8 (store header with feature flags, prolly metadata maps)
+== v2.3.0 stats of store8
+slicefs stats error: /w/store8 was made by a newer SliceFS (store format 8). This SliceFS reads store format 7 only.
+exit=1
+== v2.3.0 mount of store8
+slicefs mount error: /w/store8 was made by a newer SliceFS (store format 8). This SliceFS reads store format 7 only.
+exit=1
+mounted=no
+== v2.3.0 seed of store7
+exit=0
+slicefs-store 7 (store header with feature flags)
+== this build stats of store7
+4073d827405ff39a5e6f099bcc8828a7a3bb1ee76a6cac5e318c873b9d728874  <scratch>/w/store7/FORMAT
+slicefs stats error: <scratch>/w/store7 was made by SliceFS v2.3.0 (store format 7, flat metadata maps). This SliceFS reads store format 8 only. Copy the files into a new store with the steps in docs/user/upgrade.md.
+exit=1
+4073d827405ff39a5e6f099bcc8828a7a3bb1ee76a6cac5e318c873b9d728874  <scratch>/w/store7/FORMAT

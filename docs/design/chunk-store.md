@@ -58,7 +58,7 @@ them.
 | Kind | Content | Made by |
 |---|---|---|
 | chunk | file data, one FastCDC chunk | file writes |
-| node | serialized metadata: manifest, directory, inode map, xattr, inode | commit |
+| node | serialized metadata: manifest, directory, xattr, inode | commit |
 
 Both kinds are content-addressed by a tagged hash (33 bytes, type `ObjectId`).
 A chunk and a node with the same bytes are the same object; the kind is not
@@ -160,10 +160,10 @@ log, GC off, dirty limit 32 MiB. VmHWM is the peak RSS of the daemon in MiB.
   at 4 GiB and larger at 1 GiB), so the dirty limit stays 32 MiB. The cause is not
   checked (the load of the machine changed from run to run).
 
-The other metadata (directories, inode map, xattrs) keeps its current
+The other metadata (directories, xattrs) keeps its current
 logical layout. Only the storage of its nodes moved from `State::push_all`
 into the chunk store (`metadata::store_io`, step 3). A node is stored like
-a file: FastCDC chunks under a manifest. The maps (inode, directory,
+a file: FastCDC chunks under a manifest. The five maps (inode, directory,
 manifest, xattr, refcount) are written whole at each commit, so the chunks
 matter: after a change of one file in 5,000, the next commit stored 12 KB,
 against 1.36 MB for the first commit (`tests/node_crash_tests.rs`). Roots and
@@ -172,7 +172,7 @@ snapshots are 33-byte keys in the `RootUpdate` and `Snapshot` records.
 The metadata and the file content share one `ChunkStore` instance: a commit
 syncs the active pack once, then logs the root. A directory entry key is
 BLAKE3-256 of the name (no object is stored for it). The store format
-number and the store header are in `docs/design/store-format.md` (format 7;
+number and the store header are in `docs/design/store-format.md` (format 8;
 a store of an older format is refused).
 
 ## Object IDs and the hash
@@ -281,7 +281,7 @@ the next `slicefs gc` or rehash run.
   is not translated node by node, because the manifest node cuts depend on
   the IDs (`is_cut`).
 - The key-carrying nodes are rebuilt: the manifest lists, the `u64 -> key`
-  maps, the inode map, the refcount table and the root record. Each key is
+  maps, the refcount table and the root record. Each key is
   replaced by its new key. These nodes are always rebuilt, also when they
   have the target tag, because they can list keys of another tag.
 - Directory entry keys (BLAKE3-256 of the name) are not content addresses.

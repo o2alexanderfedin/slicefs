@@ -1,0 +1,18 @@
+# golden_root on macOS
+# Darwin x86_64
+rustc 1.95.0-nightly (9e79395f9 2026-02-10)
+# code commit 4a4e14d
+== asserting run
+test tests::golden_root ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.04s
+== print run (PROLLY_PRINT_GOLDENS=1: prints the pinned values, asserts nothing)
+pin!(blake3::hash(&table_bytes()).to_hex().to_string(), "6a72017ef6d3d7daf2ea9385afe01ac20fd4bf85610a5179c9bc7384bcc369e4");
+pin!(ths, [7, 20166, 4737341, 11975333, 87726437, 448166577, 803046, 1045739182]);
+pin!(leaf_counts(&s, &root), [258, 103, 205, 132, 161, 210, 123, 185, 103, 235, 232, 177, 155, 154, 156, 251, 155, 155, 105, 162, 287, 209, 170, 139, 165, 45, 200, 215, 128, 25]);
+pin!(root.to_hex(), "1e74a7eb632708b048b3d53a40d134148232c48802088f47a84250e92c192ded4f");
+pin!((st.depth, st.leaves), (2, 30));
+pin!(salted_root.to_hex(), "1e018bcf4bdb6d818cb17bdf929bab475b6ce59a9f64fc565b3bdb85645c485e89");
+pin!((threshold(&wide, 20_000, 20_045), threshold(&wide, 30_000, 30_045)), (1178752456, 2838699595));
+pin!((boundary_hash(0, b""), boundary_hash(1, b"key")), (527629384, 94351618));
+test tests::golden_root ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.04s

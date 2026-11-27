@@ -1,48 +1,43 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v2.2 — Concurrency & Store Evolution",
+  "milestone": "v2.3 — Prolly Metadata & Robustness",
   "phases": [
     {
-      "number": "18",
-      "name": "Spikes, baseline and stress harness",
+      "number": "25",
+      "name": "Prolly format and layout",
       "status": "complete"
     },
     {
-      "number": "19",
-      "name": "Fine-grained locks",
-      "status": "complete"
+      "number": "26",
+      "name": "Prolly maps in commit, read and GC",
+      "status": "pending"
     },
     {
-      "number": "20",
-      "name": "Dirty budget and rebase flusher",
-      "status": "complete"
+      "number": "27",
+      "name": "Store migration",
+      "status": "pending"
     },
     {
-      "number": "21",
-      "name": "Worker pool",
-      "status": "complete"
+      "number": "28",
+      "name": "Crash and soak tests",
+      "status": "pending"
     },
     {
-      "number": "22",
-      "name": "Chunk profiles",
-      "status": "complete"
+      "number": "29",
+      "name": "Scrub damage report",
+      "status": "pending"
     },
     {
-      "number": "23",
-      "name": "Hashes and rehash",
-      "status": "complete"
-    },
-    {
-      "number": "24",
-      "name": "Prolly evaluation",
-      "status": "complete"
+      "number": "30",
+      "name": "Limits page",
+      "status": "pending"
     }
   ],
   "next": {
-    "command": "/gsd-progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd-progress --next",
+    "label": "Advance to the next step (plan phase 26)",
+    "reason": "Phase 2 of 6 — needs a plan"
   },
-  "updated_at": "2026-11-26T23:42:03.877Z"
+  "updated_at": "2026-11-27T08:09:04.761Z"
 }

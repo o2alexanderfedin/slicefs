@@ -1,0 +1,54 @@
+# Task 1: pilot (layout a, config 4096:16384, Boost row and synthetic 1M row), Docker case prolly-layout, RESUME=1
+# vm load before the pilot rows (container view): 3.83 2.85 2.59; after: 2.69 2.85 2.65
+# host load average (uptime) at the end of the pilot: 110.02 67.04 65.48 (other host jobs; the Docker VM has 32 CPUs and showed a load near 3)
+# docker ps before the run: no other container
+# pilot wall time of the whole container run, build excluded: start 2026-11-27T06:58:04Z, end 2026-11-27T07:00:55Z (171 s, with the Boost seed, whole and maps steps)
+# sum of commit ms: Boost row 3.7 s over 61 commits; synthetic 1M row 13.4 s over 50 commits; build line of the 1M row 3.8 s (bytes_written 176673447)
+# estimate of the full matrix: 27 rows; a 10M row is about 10 times a 1M row, so a 10M row is under 3 minutes; the whole run is well under 1 hour (limit 12 h)
+# maxrss of the 1M synthetic row: 20942848 bytes; the 10M rows scale to about 0.2 GB
+check mode=layout source=boost n=84105 layout=a l=4096 node_max=16384 ok=1
+check mode=layout source=synth n=1000000 layout=a l=4096 node_max=16384 ok=1
+# pilot console tail
+# load before: 3.83 2.85 2.59 3/896 3446
+warming the page cache
+row boost-0-a-4096-16384
+row synth-1000000-a-4096-16384
+layout.csv 111 rows, shape.csv 20 rows, build.csv 2 rows, checks.txt 2 lines
+results: layout.csv, shape.csv, build.csv, checks.txt, machine.txt and rows/ in /work/run; failed rows: 0
+# load after: 2.69 2.85 2.65 3/872 3825
+# layout.sh rc=0
+# Task 2: full matrix, Docker case prolly-layout, RESUME=1; the two pilot rows (boost-0-a-4096-16384, synth-1000000-a-4096-16384) were skipped and reused, the other 25 rows ran
+# docker ps before: no other container; host load average (uptime) before: 126.64 72.89 67.60 (other host jobs); VM load before: 2.02 2.65 2.59, after: 1.94 2.00 2.49
+# run time of the container run: 2026-11-27T07:01:46Z to 2026-11-27T07:29:26Z (28 min, 25 new rows plus 2 reused, no retry, no failed row, every .err file empty)
+row boost-0-a-8192-16384
+row boost-0-a-8192-32768
+row boost-0-b-4096-16384
+row boost-0-b-8192-16384
+row boost-0-b-8192-32768
+row boost-0-c-4096-16384
+row boost-0-c-8192-16384
+row boost-0-c-8192-32768
+row synth-1000000-a-8192-16384
+row synth-1000000-a-8192-32768
+row synth-1000000-b-4096-16384
+row synth-1000000-b-8192-16384
+row synth-1000000-b-8192-32768
+row synth-1000000-c-4096-16384
+row synth-1000000-c-8192-16384
+row synth-1000000-c-8192-32768
+row synth-10000000-a-4096-16384
+row synth-10000000-a-8192-16384
+row synth-10000000-a-8192-32768
+row synth-10000000-b-4096-16384
+row synth-10000000-b-8192-16384
+row synth-10000000-b-8192-32768
+row synth-10000000-c-4096-16384
+row synth-10000000-c-8192-16384
+row synth-10000000-c-8192-32768
+layout.csv 1449 rows, shape.csv 144 rows, build.csv 27 rows, checks.txt 27 lines
+results: layout.csv, shape.csv, build.csv, checks.txt, machine.txt and rows/ in /work/run; failed rows: 0
+# layout.sh rc=0
+# checks: 27 ok=1, 0 ok=0
+# Task 3: determinism re-run (synthetic 1M, layout a, config 8192:16384), RESUME=0, empty work volume, Boost steps run too
+# docker ps before: no other container; VM load before 1.66 1.91 2.43, after 3.25 2.56 2.61; run 2026-11-27T07:30:17Z to 2026-11-27T07:32:36Z (2 min 19 s); checks: 2 ok=1
+# determinism.txt: 50 of 50 commits equal on edits, nodes_read, nodes_written, bytes_written, forced_cuts; same=1

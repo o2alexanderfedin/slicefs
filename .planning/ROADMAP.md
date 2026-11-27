@@ -6,6 +6,7 @@
 - ✅ **v2.0 Streaming Writes & Hardening** - Phases 7.1-12 (shipped 2026-11-17, tag `milestone-v2.0`)
 - ✅ **v2.1 Store Index & Measurements** - Phases 13-17 (shipped 2026-11-20, release `v2.2.0`)
 - ✅ **v2.2 Concurrency & Store Evolution** - Phases 18-24 (shipped 2026-11-26, release `v2.3.0`)
+- 🚧 **v2.3 Prolly Metadata & Robustness** - Phases 25-30 (in progress; release `v2.4.0`)
 
 ## Phases
 
@@ -180,7 +181,127 @@ Release `v2.3.0` (`v2.2.0` was already used). Full details: `.planning/milestone
 
 </details>
 
+### 🚧 v2.3 Prolly Metadata & Robustness (Phases 25-30)
+
+**Milestone goal:** Move the metadata maps to prolly trees so a commit stays fast with millions of inodes, and make the store safer to use: a migration path between store formats, random crash tests, a scrub that names the damaged files, and a user page for the limits. It ships as release `v2.4.0`.
+
+**Order of work** (owner-approved): prolly maps (#215), then migration (#155), then crash and soak tests (#157), then the scrub report (#159), then the limits page (#158). The phases are one serial track. Each phase depends on the one before it.
+
+**Boundaries between phases:**
+- Phase 25 fixes the format: layout, boundary rule and store format 8. Phase 26 puts the maps into the commit, read and GC paths and measures them.
+- Phase 27 comes after Phase 26. Its test copies a flat-map store made by release `v2.3.0` into a prolly store.
+- Phase 26 owns the commit-cut crash test (PMAP-08). Phase 28 owns the `kill -9` run on a live mount (CRSH-01). Phase 28 runs on a prolly store.
+- Phase 30 is last because the page cites the crash tests and the other results.
+
+**Owner decisions** (fixed for this milestone):
+- No backward compatibility for stores. The new build refuses a store made by `v2.3.0`. The copy path (#155) is the upgrade.
+- The default FastCDC profile stays 4/8/32 KiB.
+- Crash tests run by hand and nightly on `ci/**` branches, not on each PR.
+- The format freeze (#156) stays an owner decision after this milestone.
+
+**Research flags** (run `/gsd-plan-phase <N> --research-phase`): Phase 25 (Q-2: one map per metadata map, or one combined namespace map; this needs an owner choice), Phase 26 (GC mark over prolly nodes, the cut points of a commit), Phase 28 (random kill and soak harness in Docker). Skip for Phases 27, 29 and 30: standard patterns.
+
+- [x] **Phase 25: Prolly format and layout** (#215) - map layout decided, `inode_map`/`inode_data` duplication removed, fixed-point boundary rule with a version byte, store format 8 (completed 2026-11-27)
+- [ ] **Phase 26: Prolly maps in commit, read and GC** (#215) - every metadata map is a prolly map, commit work in proportion to the change, GC mark with bounded memory, commit-cut replay, benchmark on the product code
+- [ ] **Phase 27: Store migration** (#155) - `scripts/migrate-store.sh`, a Docker test from a `v2.3.0` store to a prolly store, `docs/user/upgrade.md`
+- [ ] **Phase 28: Crash and soak tests** (#157) - random `kill -9` and container-stop rounds on a live mount, a 2-hour soak with a memory check
+- [ ] **Phase 29: Scrub damage report** (#159) - scrub names the files and snapshots that a bad object damages, `--json`, exit codes 0/1/2, bounded memory
+- [ ] **Phase 30: Limits page** (#158) - `docs/user/limits.md` with status, crash guarantees, limits, platforms and known issues; README link
+
+### Phase 25: Prolly format and layout
+
+**Goal**: The format of the prolly metadata maps is decided and written down, the duplicate inode map is gone, and the new format is store format 8 (#215)
+**Depends on**: Phase 24 (the v2.2 evaluation and the `crates/prolly` prototype)
+**Requirements**: PMAP-01, PMAP-02, PMAP-04, PMAP-05
+**Success Criteria** (what must be TRUE):
+  1. The map layout is decided and recorded in `docs/design/store-format.md`: one prolly map per metadata map, or one combined namespace map (Q-2 of #19), with the reason and the effect on the root record
+  2. The root record holds only one of `inode_map` and `inode_data`; a store written by the new build mounts, and the existing metadata and mount tests pass with it
+  3. The boundary rule uses a fixed-point table (no float test) and has a version byte; the rule, its constants and the prolly node format are in `docs/design/store-format.md`; a test with fixed input gives the same cut points on Linux and macOS
+  4. A store written by the new build is store format 8; release `v2.3.0` refuses to mount it, and the new build refuses a format 7 store made by `v2.3.0` with a clear message that points to the upgrade doc
+**Plans:** 8/8 plans complete
+
+Plans:
+**Wave 1**
+- [x] 25-01-PLAN.md — Integer boundary rule with a generated fixed-point table, rule version byte in the node header, Config::new, salt and forced-cut counts for the bench (wave 1)
+- [x] 25-02-PLAN.md — One inode map: drop the duplicate, 197-byte root record, inode number allocator, lock site, bench copy; Docker mount gate (wave 1)
+- [x] 25-03-PLAN.md — Store format 8: format 7 refused with the upgrade-doc message, docs/user/upgrade.md, real v2.3.0 check in both directions, format policy D-13 (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 25-04-PLAN.md — Boundary salt: header line with its ro_compat flag, `seed --boundary-salt`, refusals and M18, doc (wave 2)
+- [x] 25-05-PLAN.md — Bench layout engine: five-map batches of real commits, layouts a/b/c, fixed output schema (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 25-06-PLAN.md — Bench synthetic 1M/10M source, matrix runner, Docker case, pre-registered decision script (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 25-07-PLAN.md — Full benchmark run in Docker and the layout and constants decision by the pre-registered rules; owner report (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 25-08-PLAN.md — Pin the constants and goldens (macOS and Linux), write the metadata map section of store-format.md, phase gate (wave 5)
+
+### Phase 26: Prolly maps in commit, read and GC
+
+**Goal**: Every metadata map is a prolly map in the live store, a commit with one change does work in proportion to the change, and the gain is measured on the product code (#215)
+**Depends on**: Phase 25
+**Requirements**: PMAP-03, PMAP-06, PMAP-07, PMAP-08
+**Success Criteria** (what must be TRUE):
+  1. After seed, mount, write, commit and remount, the files, directories, hard links, xattrs and snapshots are the same as before; the mount, snapshot and pjdfstest (4 workers) suites pass on a prolly store
+  2. A commit with one change does work in proportion to the change: a counter test at two store sizes shows that the nodes read and written grow at most with the tree height
+  3. GC mark reaches every prolly node of the live root and of each snapshot with bounded memory (no whole map in RAM; a test caps peak memory on a large map); online GC at mount still runs, frees nodes that no root reaches, and keeps the rest
+  4. A commit cut at any point replays to a consistent tree: a crash test cuts the commit at each write and sync step and checks the tree after replay
+  5. The Phase 24 benchmark on the product code shows: a one-change commit at 1,000,000 inodes or more takes at most 1/5 of the flat time (flat time measured with release `v2.3.0`); Boost numbers stay within the rubric in `docs/research/prolly-trees.md`; the insert/delete-heavy regression is measured and recorded with a mitigation or a written acceptance
+**Plans**: TBD
+
+### Phase 27: Store migration
+
+**Goal**: A user can move an existing store to the new format with one documented procedure, and the procedure is tested between two real formats (#155)
+**Depends on**: Phase 26 (the test copies a flat-map store into a prolly store)
+**Requirements**: MIGR-01, MIGR-02, MIGR-03
+**Success Criteria** (what must be TRUE):
+  1. `scripts/migrate-store.sh` mounts the old store read-only with the old binary, mounts the new store with the new binary, copies with `rsync -aHAX`, and compares `slicefs stats` and a file checksum list; it exits with an error on any difference
+  2. A Docker test copies a store made by the `v2.3.0` release (flat maps) into a store made by the branch binary (prolly maps), and the compare step passes; a planted difference makes the script fail (by hand with the log recorded, if CI cannot get the old binary)
+  3. `docs/user/upgrade.md` says how to see the store format, which releases read which format, the copy steps, the disk space needed, how to check the result, and what to do on failure
+**Plans**: TBD
+
+### Phase 28: Crash and soak tests
+
+**Goal**: Random crashes and long runs of a live mount on a prolly store show that synced data survives and that memory stays under its cap (#157)
+**Depends on**: Phase 27
+**Requirements**: CRSH-01, CRSH-02, CRSH-03, CRSH-04
+**Success Criteria** (what must be TRUE):
+  1. A Docker Linux test runs a mixed load (create, write in place, append, rename, unlink, fsync, snapshot) from several processes on a live mount of a prolly store, kills the daemon with `kill -9` at a random time, remounts, and checks: `slicefs scrub` exits 0, every fsynced file has its synced content, and no file has content that was never written
+  2. A second mode stops the container instead of `kill -9`, with the same checks
+  3. The test repeats N rounds with a recorded seed; a 50-round run passes; each run writes a short log (seed, rounds, result); it runs by hand and nightly on `ci/**` branches, not on each PR
+  4. A soak mode runs the same load for hours with periodic unmount and mount and checks VmHWM against the memory cap; a 2-hour run passes
+  5. `docs/design/write-log.md` has a "Crash tests" section that says what the test checks and how to run it
+**Plans**: TBD
+
+### Phase 29: Scrub damage report
+
+**Goal**: When scrub finds a bad object, the user sees which files and snapshots it damages, in a form that scripts can read, and scrub memory stays bounded (#159)
+**Depends on**: Phase 28
+**Requirements**: SCRB-01, SCRB-02, SCRB-03, SCRB-04
+**Success Criteria** (what must be TRUE):
+  1. When scrub finds a bad object, it prints the paths that reference it, in the current root and in each snapshot
+  2. Scrub memory is bounded: manifests are streamed, and no whole file and no full key set is held in RAM (#210); a measurement on a store with many objects shows peak memory that does not grow with the object count
+  3. `slicefs scrub --json` gives the same report; exit codes are 0 (clean), 1 (corruption found) and 2 (scrub could not run); a test plants a bad chunk that two files share, and scrub lists both files and exits 1
+  4. `docs/user/scrub.md` says when to run scrub, its run time, the output, the exit codes, and what to do after corruption; `slicefs scrub --help` matches it
+**Plans**: TBD
+
+### Phase 30: Limits page
+
+**Goal**: A user can read on one page what state the product is in, what a crash can and cannot lose, and what the limits are, and each fact on the page is checked (#158)
+**Depends on**: Phase 29 (the page cites the crash tests and the other results)
+**Requirements**: DOCS-01, DOCS-02
+**Success Criteria** (what must be TRUE):
+  1. `docs/user/limits.md` gives the status (preview; the format can change until #156), the crash guarantees (from the write log and the crash tests, with links), the limits (1 TiB EFBIG cap, FastCDC 4/8/32 KiB default, memory options, the 64 MiB reorder window, one mount per store), the platforms (Linux libfuse; macOS FUSE-T with FSKit only, default 1 worker; no Windows), and the known issues with links
+  2. Each fact on the page is checked against the code or a test, and the check names the source of each fact
+  3. The README has a short "Status and limits" section with a link to the page
+**Plans**: TBD
+
 ## Progress
+
+**Execution order:** Phases run in numeric order: 25 → 26 → 27 → 28 → 29 → 30. They are one serial track.
 
 | Milestone | Phases | Plans | Status | Shipped |
 |-----------|--------|-------|--------|---------|
@@ -188,3 +309,13 @@ Release `v2.3.0` (`v2.2.0` was already used). Full details: `.planning/milestone
 | v2.0 Streaming Writes & Hardening | 7.1-12 | 13 | Complete | 2026-11-17 |
 | v2.1 Store Index & Measurements | 13-17 | 27 | Complete | 2026-11-20 |
 | v2.2 Concurrency & Store Evolution | 18-24 | 69 | Complete | 2026-11-26 |
+| v2.3 Prolly Metadata & Robustness | 25-30 | 0 | In progress | - |
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 25. Prolly format and layout | 8/8 | Complete    | 2026-11-27 |
+| 26. Prolly maps in commit, read and GC | 0/TBD | Not started | - |
+| 27. Store migration | 0/TBD | Not started | - |
+| 28. Crash and soak tests | 0/TBD | Not started | - |
+| 29. Scrub damage report | 0/TBD | Not started | - |
+| 30. Limits page | 0/TBD | Not started | - |
