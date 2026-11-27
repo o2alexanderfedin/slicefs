@@ -250,7 +250,7 @@ Plans:
   3. GC mark reaches every prolly node of the live root and of each snapshot with bounded memory (no whole map in RAM; a test caps peak memory on a large map); online GC at mount still runs, frees nodes that no root reaches, and keeps the rest
   4. A commit cut at any point replays to a consistent tree: a crash test cuts the commit at each write and sync step and checks the tree after replay
   5. The Phase 24 benchmark on the product code shows: a one-change commit at 1,000,000 inodes or more does its pre-sync work in at most 1/5 of the flat time and its total wall time, sync included, is lower than flat (flat time measured with release `v2.3.0`; owner accepts a sync-bound total such as 0.7x); Boost numbers stay within the rubric in `docs/research/prolly-trees.md`; the insert/delete-heavy regression is measured and recorded with a mitigation or a written acceptance
-**Plans:** 13 plans
+**Plans:** 14 plans
 
 Plans:
 **Wave 1**
@@ -261,30 +261,33 @@ Plans:
 - [ ] 26-03-PLAN.md — prolly-bench: retire the flat-store readers, IN-05 (--l 8192), bench.sh runs whole and scale (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 26-04-PLAN.md — Tracer: manifest_data as a prolly tree through overlay, commit, load, GC mark, rehash, counters and bench; IN-01 (wave 3)
+- [ ] 26-04-PLAN.md — Tracer: manifest_data as a prolly tree through overlay, commit, load, GC mark, rehash and the bench whole mode; IN-01 (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 26-05-PLAN.md — Commit protocol on the manifest tree: fault points, requeue of every overlay, races, online GC order, crash windows (wave 4)
+- [ ] 26-14-PLAN.md — Commit counters (CommitStats), the manifest-tree counter and idempotency tests, counters in the bench and the PMAP-07 report (wave 4)
 - [ ] 26-06-PLAN.md — Boundary salt to every tree writer and rehash; --meta-cache-size mount option (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 26-07-PLAN.md — refcounts and xattr_data as trees (saturating RMW; inline or spilled xattr sets) (wave 5)
+- [ ] 26-05-PLAN.md — Commit protocol on the manifest tree: fault points, requeue of every overlay, races, online GC order, crash windows (wave 5)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 26-08-PLAN.md — inode_data as a tree with inline inode records; the overlay replaces the inode cache (wave 6)
+- [ ] 26-07-PLAN.md — refcounts and xattr_data as trees (saturating RMW; inline or spilled xattr sets) (wave 6)
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 26-09-PLAN.md — dir_data by name with . and .. entries, range readdir, dir_is_empty in the fs layer (wave 7)
+- [ ] 26-08-PLAN.md — inode_data as a tree with inline inode records; the overlay replaces the inode cache (wave 7)
 
 **Wave 8** *(blocked on Wave 7 completion)*
-- [ ] 26-10-PLAN.md — Format switch: flat code removed, IN-02 refusal (M19), store-format doc, Docker all + pjdfstest 4 workers + verify (wave 8)
+- [ ] 26-09-PLAN.md — dir_data by name with . and .. entries, range readdir, dir_is_empty in the fs layer (wave 8)
 
 **Wave 9** *(blocked on Wave 8 completion)*
-- [ ] 26-11-PLAN.md — Scale tests: bulk loader, five-tree counter test at two sizes, GC peak memory, snapshots and online GC, snapshot cost record (wave 9)
-- [ ] 26-12-PLAN.md — Crash matrix over all five trees with a cross-tree validator and random cut schedules (wave 9)
+- [ ] 26-10-PLAN.md — Format switch: flat code removed, IN-02 refusal (M19), store-format doc, Docker all + pjdfstest 4 workers + verify (wave 9)
 
 **Wave 10** *(blocked on Wave 9 completion)*
-- [ ] 26-13-PLAN.md — PMAP-07 decision runs and verdict by the rule, insert/delete record, phase gate (wave 10)
+- [ ] 26-11-PLAN.md — Scale tests: bulk loader, five-tree counter test at two sizes, GC peak memory, snapshots and online GC, snapshot cost record (wave 10)
+- [ ] 26-12-PLAN.md — Crash matrix over all five trees with a cross-tree validator and random cut schedules (wave 10)
+
+**Wave 11** *(blocked on Wave 10 completion)*
+- [ ] 26-13-PLAN.md — PMAP-07 decision runs and verdict by the rule, insert/delete record, phase gate (wave 11)
 
 ### Phase 27: Store migration
 
