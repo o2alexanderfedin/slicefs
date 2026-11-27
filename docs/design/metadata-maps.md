@@ -1,8 +1,11 @@
 # Metadata maps
 
-The metadata of a store has six maps: `inode_map`, `inode_data`,
-`dir_data`, `manifest_data`, `xattr_data` and `refcounts`
-(`crates/metadata/src/store.rs`). Each is a `BTreeMap` in RAM. On each
+The metadata of a store has five maps: `inode_data`, `dir_data`,
+`manifest_data`, `xattr_data` and `refcounts`
+(`crates/metadata/src/store.rs`). The duplicate `inode_map` was removed in
+store format 8. The format of the prolly maps that replace the flat maps is
+in [Metadata maps (store format 8)](store-format.md). Each map is a
+`BTreeMap` in RAM. On each
 commit, `begin_commit` clones every map, and `finish_commit` serializes each
 map as one flat node (an 8-byte count and fixed entries of 41 bytes) and
 stores it with `store_io::put_value`. That function cuts the node with
@@ -42,26 +45,26 @@ run gives the same answer, with one row that is not better, see below):
 - New stored bytes and disk growth are lower with prolly (38.4 MiB in place
   of 64.4 MiB over 121 commits, pack index included), but the current
   design already stores only the changed chunks.
-- A smaller first step exists: `inode_map` and `inode_data` hold the same
-  entries, so one of them can go. That also changes the root record (a
-  smaller format change, also an owner decision).
+- A smaller first step existed: `inode_map` and `inode_data` held the same
+  entries, so one of them could go. Phase 25 removed `inode_map` (store
+  format 8).
 
 The full report, with the method, the tables, the boundary rule and the
 crate survey: [Prolly trees for the metadata maps](../research/prolly-trees.md).
 
-What adoption would change: the root record, all six maps, the GC mark,
+What adoption would change: the root record, all five maps, the GC mark,
 rehash, snapshots and the format number (a store format change).
 
-Owner questions (open, one-way doors):
+Owner questions (one-way doors; Q-2 and Q-3 are answered):
 
-- Q-1: adopt prolly maps, and in which milestone? Recommendation: later,
-  when stores of about a million inodes or more are a target.
+- Q-1: adopt prolly maps, and in which milestone? Phase 24 recommended
+  later. Answered by the v2.3 milestone: adoption is issue #215.
 - Q-2: one prolly map per metadata map, or one combined namespace map?
-  Suggestion: decide it with Q-1, after the duplicate of `inode_map` and
-  `inode_data` is gone.
+  Answered in Phase 25: one prolly tree per map (five trees). See
+  `docs/design/store-format.md`, section "Metadata maps (store format 8)".
 - Q-3: do the boundary rule and its constants become part of the frozen
-  store format? Suggestion: yes if adopted, with a fixed-point table in
-  place of the float test and a version byte for the rule.
+  store format? Answered in Phase 25: yes, with a fixed-point table in place
+  of the float test and a version byte for the rule. Same section.
 
-The prototype is the crate `crates/prolly`. Nothing in the product uses it.
-`docs/design/store-format.md` does not change.
+The crate is `crates/prolly`. Its node format, rule and constants are part of
+store format 8. No product path uses it yet (issue #215).

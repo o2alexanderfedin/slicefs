@@ -438,6 +438,305 @@ With `--json`, the same data is in four fields:
   in bytes.
 - `access`: `read-write` or `read-only`.
 
+## Metadata maps (store format 8)
+
+This section is the normative definition of the metadata maps of store
+format 8: the layout, the node format, the boundary rule and its constants.
+The code is `crates/prolly`. The numbers below come from the run of plan
+25-07: `.planning/phases/25-prolly-format-and-layout/runs/layout/decision.txt`
+and the CSV files in the same folder. The last line of that file is
+`verdict layout=a l=8192 node_max=16384`.
+
+### Design target
+
+- One store holds 1,000,000,000 inodes (files and directories) or more. It is
+  a part of a global, decentralized file system.
+- No operation loads a whole map into RAM. This holds for mount, stats, GC
+  and scrub too. Memory stays bounded at any store size: one path of nodes
+  per tree, never all entries.
+- Counts come from the counts in the internal entries or from the root
+  record (`inode_count`, `logical_bytes`). They never come from a walk of
+  all leaves.
+
+### Layout
+
+The layout is **a: five maps, five prolly trees.** The maps are
+`inode_data`, `dir_data`, `manifest_data`, `xattr_data` and `refcounts`.
+Each map key of the root record points to the root of its own tree.
+
+Key grammar of layout a:
+
+| Map | Key | Value |
+| --- | --- | --- |
+| `inode_data` | `ino`, 8 bytes, big endian | 33-byte `ObjectKey` |
+| `dir_data` | `ino` of the directory, 8 bytes, big endian | 33-byte `ObjectKey` |
+| `manifest_data` | `ino`, 8 bytes, big endian | 33-byte `ObjectKey` |
+| `xattr_data` | `ino`, 8 bytes, big endian | 33-byte `ObjectKey` |
+| `refcounts` | the 33-byte content key | 8-byte count |
+
+The decision came from three layouts, tested on the same edit scripts:
+
+- **a:** five trees, as above.
+- **b:** one namespace tree, keys `0x01 || ino || kind` (kind 0 inode, 1 dir,
+  2 manifest, 3 xattr) and `0x02 || content key` for refcounts.
+- **c:** the same namespace tree, but the refcounts in their own tree.
+
+Room for a name: a later combined key may add a name suffix,
+`0x01 || ino || kind || name`. The longest such key is 8 + 255 + 2 = 265
+bytes, below `MAX_KEY` (1,024). Whether directory entries are stored by name
+(one entry per name, in place of one list per directory) is decided with the
+commit path (issue #215). It is not decided in this section.
+
+Refcounts are a prolly map like the others (D-04). Issue #165 may remove the
+map later.
+
+The rules were fixed before the run (`prereg.txt`, `decide.py`) and the run
+did not change them. Rows: the Boost trees 1_84_0 and 1_85_0, and synthetic trees of
+1,000,000 and 10,000,000 files; 10 commits per row, one process per row, in
+Docker on disk-backed storage (`scripts/prolly-bench/layout.sh`; the rules are
+in `scripts/prolly-bench/decide.py`). Layout b and c were measured against a
+at the Dolt config (L 4,096, NODE_MAX 16,384):
+
+| Rule | Limit | Layout b | Layout c |
+| --- | --- | --- | --- |
+| Mean ratio of nodes read and written per commit, 6 small rows | at most 0.80 | 0.681 pass | 0.700 pass |
+| Mean ratio of CPU per commit, 6 small rows | at most 1.25 | 0.825 pass | 0.948 pass |
+| Largest ratio of bytes written, 6 large rows | at most 1.10 | 0.912 pass | 0.906 pass |
+| Nodes at 1,000,000,000 inodes, not more than a (47,291,816) | at most 47,291,816 | 48,922,745 fail | 48,428,987 fail |
+
+Neither b nor c qualified, so the layout is a. b and c touch about 30% fewer
+nodes for a small commit, but at 1,000,000,000 inodes they need 3.4% (b) and
+2.4% (c) more nodes than five separate trees. The rule says "not more", and
+the rule decided.
+
+Two limits of the data. The Boost refcounts are empty, because the product
+writes no refcounts today. So the refcount signal, and the comparison of b
+against c, come from the synthetic rows only (2 refcount keys per file). The
+CPU columns are noisy: the host had a high load during the run. They only
+guard; the node and byte counts decided.
+
+Effect on the GC mark: one walk per tree, five walks in all. Each tree has one
+value type, so there is no dispatch on a kind byte. Memory stays one path of
+nodes per tree.
+
+### Root record
+
+The root record of this build has 197 bytes (little endian, fixed width):
+
+| Offset | Bytes | Field |
+| --- | --- | --- |
+| 0 | 8 | `ROOT_DIR_INO` |
+| 8 | 8 | `NEXT_INO` |
+| 16 | 33 | `INODE_DATA` |
+| 49 | 33 | `DIR_DATA` |
+| 82 | 33 | `MANIFEST_DATA` |
+| 115 | 33 | `XATTR_DATA` |
+| 148 | 33 | `REFCOUNTS` |
+| 181 | 8 | `LOGICAL_BYTES` |
+| 189 | 8 | `INODE_COUNT` |
+
+There is one inode map. The duplicate `inode_map` of earlier builds is gone
+(D-06); `NEXT_INO` stays in the record. Each of the five 33-byte fields is the
+key of a serialized flat map in this build.
+
+When the maps become prolly trees, layout a keeps the same record: the same
+nine fields and 197 bytes. Each of the five fields is then the 33-byte
+`ObjectId` of the root of a tree. The empty tree is the empty leaf, so every
+field always has a root. (Layout b would have had 65 bytes and layout c 98
+bytes.)
+
+### Node format
+
+A node is one chunk-store object. A child pointer is the child's `ObjectId`
+(33 bytes), and the root of a tree is one `ObjectId`. Nodes are not cut again
+by FastCDC.
+
+Header, 10 bytes:
+
+| Offset | Bytes | Field |
+| --- | --- | --- |
+| 0 | 4 | magic `SPT1` |
+| 4 | 1 | rule version `u8` (1) |
+| 5 | 1 | level `u8` (0 for a leaf) |
+| 6 | 4 | entry count `u32`, little endian |
+
+Leaf entry (level 0): key length `u16` LE, value length `u16` LE, key, value.
+
+Internal entry (level 1 and up): key length `u16` LE, the last key of the
+child, the child `ObjectId` (33 bytes), the number of leaf entries under the
+child `u64` LE.
+
+Keys are strictly ascending in every node. A reader checks:
+
+- the magic, and the rule version (a node of another version is refused);
+- the node size, up to 32,768 bytes (`MAX_NODE_MAX`); a writer of this
+  format makes nodes up to `NODE_MAX` (16,384 bytes);
+- the key and entry limits (`MAX_KEY`, `MAX_ENTRY`) and the order of the keys;
+- the count of entries against the bytes of the node (no bytes left over,
+  an internal node has at least one entry);
+- each child against the parent entry: its last key, its first key above the
+  last key of the previous sibling, and its leaf entry count.
+
+A node that fails a check is damaged data, never a panic.
+
+### Boundary rule
+
+The rule decides where a node ends. It is the size-aware key splitter of Dolt
+with a Weibull CDF of shape 4, in integer math only. The same input gives the
+same cut points on every platform.
+
+After an entry that grows a node in progress from `before` to `after` bytes
+(the node size counts the header), in this order:
+
+1. An internal node never ends after its first entry.
+2. If `after > NODE_MAX - MAX_ENTRY`, the node ends (the forced cut).
+3. If `after < NODE_MIN`, the node does not end.
+4. Else the node ends if and only if `h < T(before, after)`.
+
+`h` is the boundary hash, a 32-bit number. `T` is the threshold:
+
+`T = 2^32 - E(delta)`, and
+`delta = floor(((after^4 - before^4) * 2^32) / L^4)`, in 128-bit integers.
+
+`E(delta)` is `e^-x * 2^32` for `x = delta / 2^32`:
+
+- `i = delta >> 32`. If `i >= 23`, `E` is 0.
+- `j` = the top 10 bits of the low 32 bits of `delta`, and `r` = the low 22
+  bits.
+- `frac = F[j] - (((F[j] - F[j+1]) * r) >> 22)`.
+- `E = (I[i] * frac) >> 32`, with the product in 128 bits.
+
+The tables are `I[i] = round(2^32 * e^-i)` for i = 0 to 22 and
+`F[j] = round(2^32 * e^(-j/1024))` for j = 0 to 1024 (rounded half up). They
+are in `crates/prolly/src/rule_table.rs`. The script
+`scripts/prolly-table/gen_table.py` makes them with 60 decimal digits, and
+`gen_table.py --check` compares the file with its output. The BLAKE3 hash of
+the table bytes (`I` then `F`, each value as `u64` little endian) is
+`6a72017ef6d3d7daf2ea9385afe01ac20fd4bf85610a5179c9bc7384bcc369e4`. The test
+`golden_root` pins this hash.
+
+The error of `T` against the real formula `1 - e^-((after^4 - before^4) /
+L^4)` is at most 2^-22 (about 2.4e-7); the test `fixed_point_matches_float`
+checks it. The measured maximum is 1.2e-7. In 1,000,000 random cut decisions
+the integer rule and the float rule differ in none.
+
+The boundary hash is the first 4 bytes, little endian, of BLAKE3 over the byte
+`level + 1` and then the key. The level byte makes every level cut on its own
+bits. The hash never reads the value, so the boundaries depend on the keys and
+on the entry lengths only. With a salt, BLAKE3 runs in keyed mode (see
+"Boundary salt").
+
+The rule has a version byte, in every node header. This text defines rule
+version 1. A change of the table, the formula or the constants is a new rule
+version.
+
+### Constants
+
+| Constant | Value |
+| --- | --- |
+| `WEIBULL_L` (L) | 8,192 |
+| `WEIBULL_K` | 4 (the code writes `x*x*x*x`) |
+| `NODE_MAX` | 16,384 bytes |
+| `NODE_MIN` | 512 bytes |
+| `MAX_ENTRY` | 2,048 bytes |
+| `MAX_KEY` | 1,024 bytes |
+| `NODE_HEADER` | 10 bytes |
+| `MAX_NODE_MAX` (largest node a reader accepts) | 32,768 bytes |
+| `RULE_VERSION` | 1 |
+
+The mean node is about 0.906 x L, about 7.4 KB. The forced cut is at
+`NODE_MAX - MAX_ENTRY` = 14,336 bytes.
+
+Why L and `NODE_MAX` were chosen. Each node is one object in the chunk index,
+and the index keeps the full ID of each object. So the number of nodes at
+1,000,000,000 inodes is a real cost. The rule of plan 25-07 compared three
+configs on the layout a trees:
+
+| Config (L / NODE_MAX) | Nodes at 1B | Ratio to Dolt | Bytes written, mean of 3 rows | Ratio | CPU, mean of 3 rows | Ratio | Forced cuts / nodes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 4,096 / 16,384 (Dolt) | 47,291,816 | 1 | 1.27 MB | 1 | 41.5 ms | 1 | 0.00000 |
+| 8,192 / 16,384 | 23,479,915 | 0.4965 | 2.14 MB | 1.683 | 68.0 ms | 1.639 | 0.00011 |
+| 8,192 / 32,768 | 23,479,815 | 0.4965 | 2.14 MB | 1.683 | 66.8 ms | 1.610 | 0.00000 |
+
+A config replaces Dolt if its forced cuts are at most 0.5% of the nodes, its
+nodes at 1B are at most 0.65 of Dolt's, its bytes at most 2.5 times and its CPU
+at most 2.0 times. Both 8,192 configs qualify. Their node counts differ by 100
+nodes, so the smaller `NODE_MAX` wins: 16,384. The price is about 68% more
+bytes and about 64% more CPU for a small commit (an absolute 2.14 MB and 68
+ms); the gain is half the nodes.
+
+`NODE_MIN` is the Dolt value. `MAX_ENTRY`, `MAX_KEY` and the forced cut at
+`NODE_MAX - MAX_ENTRY` are SliceFS limits: Dolt cuts after the entry that
+passes its maximum, and SliceFS never lets a node pass `NODE_MAX`. A key with
+a name suffix (265 bytes) fits under `MAX_KEY`, and an internal entry of the
+longest key is below `MAX_ENTRY`.
+
+The constants decide every node ID. After the format freeze, a change is a new
+rule version and a copy migration of every store.
+
+### Boundary salt
+
+A store may have a boundary salt: the header line `boundary-salt` and the
+ro_compat flag of the same name (see "Header file" and "Flag list"). The salt
+is the key of keyed BLAKE3 in the boundary hash. It enters nothing else:
+stored keys do not change.
+
+- The default is no salt. Then the same metadata gives the same node IDs in
+  every store.
+- A reader needs no salt, because it follows the keys of the nodes and does
+  not cut. A writer must use the salt of the store, so a build that does not
+  know the flag must not write (the flag is ro_compat).
+- The salt of a store is fixed when the store is made. A rebuild with
+  another salt is a later command (D-11).
+
+Accepted risk. In an unsalted store, a user who can pick names or keys can
+search for keys with a low boundary hash (grinding) and make many nodes of
+about `NODE_MIN` bytes, so the tree has more nodes than it should. The harm
+has a bound: no node is above `NODE_MAX`, no node is below `NODE_MIN` except
+the last of a level, and the tree never breaks. The salt stops a search made ahead
+of time for all stores. It does not stop a user who can read the `FORMAT` file
+of the store.
+
+### Scale at 1,000,000,000 inodes
+
+Method (D-05). A 10,000,000-file base tree of each map was built and measured.
+For each tree: entries per leaf `e` = entries / leaves, and fanout `f` =
+leaves / nodes of level 1. The entries are scaled to 1,000,000,000 inodes, the
+leaves are `ceil(entries / e)`, and each level above is `ceil(previous / f)`
+until one node is left. The nodes are the sum of the levels, and the depth is
+the number of levels. No tree of 100,000,000 or 1,000,000,000 entries was
+built.
+
+Result for layout a at L 8,192 and `NODE_MAX` 16,384 (the `extrapolation`
+lines of `decision.txt`):
+
+| Map | Entries | Depth | Levels, leaves to root | Nodes |
+| --- | --- | --- | --- | --- |
+| `inode_data` | 1,000,000,000 | 5 | 6,048,100 / 40,600 / 273 / 2 / 1 | 6,088,976 |
+| `dir_data` | 100,036,700 | 4 | 604,900 / 4,400 / 33 / 1 | 609,334 |
+| `manifest_data` | 899,963,300 | 5 | 5,448,000 / 37,600 / 260 / 2 / 1 | 5,485,863 |
+| `xattr_data` | 49,818,700 | 4 | 302,300 / 2,100 / 15 / 1 | 304,416 |
+| `refcounts` | 1,799,926,600 | 5 | 10,880,200 / 110,000 / 1,113 / 12 / 1 | 10,991,326 |
+| Total | | | | 23,479,915 |
+
+The entry counts follow the mix of the synthetic base tree (2 refcount keys
+per file). The refcount line is from synthetic data only. At the Dolt config
+the same method gives 47,291,816 nodes.
+
+One change at 10,000,000 files touches 52 nodes (median of 10 commits, nodes
+read and written; Dolt config: 63).
+
+### This build and the prolly maps
+
+This build writes store format 8 with flat maps and the 197-byte root record
+above. The prolly maps of this section replace the flat maps before release
+v2.4.0 (issue #215). No release comes between, so no user store has the
+interim form. A store written by this build is not readable after that change
+(there is no backward compatibility, and no migration).
+
+The crate `crates/prolly` holds the node format, the rule and the constants of
+this section. The commit, read and GC paths of this build do not use it yet.
+
 ## Format policy
 
 - The format number changes when an older SliceFS cannot parse the
