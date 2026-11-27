@@ -122,8 +122,8 @@ pub fn parse_salt_hex(word: &str) -> Option<[u8; 32]> {
         _ => None,
     };
     let mut out = [0u8; 32];
-    for (o, pair) in out.iter_mut().zip(b.chunks_exact(2)) {
-        *o = digit(pair[0])? << 4 | digit(pair[1])?;
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = digit(b[2 * i])? << 4 | digit(b[2 * i + 1])?;
     }
     Some(out)
 }
