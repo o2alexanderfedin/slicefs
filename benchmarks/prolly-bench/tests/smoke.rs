@@ -110,6 +110,24 @@ fn smoke_end_to_end() {
     assert!(check[0].contains(" layout=a ") && check[0].ends_with(" ok=1"), "{out}");
     assert_eq!(lines(&out, "commit").len(), after_base, "{out}");
     assert_eq!(lines(&out, "tree").len(), 10, "{out}");
+    // Layouts b and c, each in its own store, and a swept config.
+    for (layout, trees) in [("b", 2), ("c", 4)] {
+        let out = ok(&["layout", "--maps", p(&maps), "--layout", layout, "--store", p(&t.join(format!("layout-{layout}")))]);
+        let check = lines(&out, "check");
+        assert_eq!(check.len(), 1, "{out}");
+        assert!(check[0].contains(&format!(" layout={layout} ")) && check[0].ends_with(" ok=1"), "{out}");
+        assert_eq!(lines(&out, "commit").len(), after_base, "{out}");
+        assert_eq!(lines(&out, "tree").len(), trees, "{out}");
+    }
+    let out = ok(&[
+        "layout", "--maps", p(&maps), "--layout", "a", "--store", p(&t.join("layout-wide")), "--l", "8192", "--node-max", "32768",
+    ]);
+    let check = lines(&out, "check");
+    assert_eq!(check.len(), 1, "{out}");
+    assert!(check[0].ends_with(" ok=1"), "{out}");
+    let commits = lines(&out, "commit");
+    assert_eq!(commits.len(), after_base, "{out}");
+    assert!(commits.iter().all(|l| l.contains(" l=8192 node_max=32768 ")), "{out}");
 
     let out = ok(&["prolly", "--batches", p(&batches), "--store", p(&pstore)]);
     let check = lines(&out, "check");
@@ -143,4 +161,16 @@ fn smoke_end_to_end() {
 fn bad_arguments_exit_2() {
     assert_eq!(run(&["no-such-subcommand"]).0, 2);
     assert_eq!(run(&["prolly", "--no-such-flag", "x"]).0, 2);
+    // The option checks come before any file access.
+    let base = ["layout", "--maps", "no-such-dir", "--store", "no-such-store"];
+    for extra in [["--layout", "z"], ["--l", "100"], ["--node-max", "40000"]] {
+        let mut args = base.to_vec();
+        if extra[0] == "--layout" {
+            args.extend(extra);
+        } else {
+            args.extend(["--layout", "a"]);
+            args.extend(extra);
+        }
+        assert_eq!(run(&args).0, 2, "{args:?}");
+    }
 }

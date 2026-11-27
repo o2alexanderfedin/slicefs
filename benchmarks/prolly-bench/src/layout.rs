@@ -2,12 +2,28 @@
 //! five metadata maps of each real commit; `layout` replays the commits
 //! into prolly trees.
 //!
-//! Layout a: five trees, one per map (inode, dir, manifest, xattr,
-//! refcounts); the prolly key is the native key of the map.
+//! Three layouts (D-02, D-04):
+//! - a: five trees, one per map (inode, dir, manifest, xattr, refcounts);
+//!   the prolly key is the native key of the map.
+//! - b: one tree `ns`. Key of a per-inode record: `0x01 || ino (8 BE) ||
+//!   kind (1)`, kind 0 inode, 1 dir, 2 manifest, 3 xattr (10 bytes), so the
+//!   records of one file share a leaf. Key of a refcount record: `0x02 ||
+//!   content key (33)`, which sorts after every `0x01` key.
+//! - c: tree `ns` for the four per-inode maps as in b, and a separate tree
+//!   `refcounts` as in a (refcounts have another key space and lifetime).
+//!
+//! The key grammar has room for a later name suffix (`0x01 || ino || kind ||
+//! name`, at most 8 + 255 + 2 bytes, under `MAX_KEY` 1,024), but a
+//! directory stays one value per directory here: by-name entries are a
+//! Phase 26 decision, and the bench uses the value shape of today's maps.
+//!
+//! Output (one line per record, `key=value`): `maps` and `final` lines of
+//! `maps`; `commit`, `tree` and `check` lines of `layout`, each with
+//! `mode=layout source n layout l node_max`. Counts and sizes only.
 //!
 //! Memory: the base maps are streamed (two map streams at a time in
-//! `maps`, one stream per tree in a build); only the edits of one commit
-//! are held in a `Vec`.
+//! `maps`, one stream per tree in a build, a four-way merge for `ns`);
+//! only the edits of one commit are held in a `Vec`.
 
 use std::cmp::Ordering;
 use std::fs;
@@ -31,12 +47,18 @@ type KvStream<'s> = Box<dyn Iterator<Item = Res<Kv>> + 's>;
 pub(crate) enum Layout {
     /// Five trees, one per map.
     A,
+    /// One combined tree, refcounts inside.
+    B,
+    /// One combined tree for the per-inode maps, a tree for refcounts.
+    C,
 }
 
 impl Layout {
     pub(crate) fn parse(s: &str) -> Option<Layout> {
         match s {
             "a" => Some(Layout::A),
+            "b" => Some(Layout::B),
+            "c" => Some(Layout::C),
             _ => None,
         }
     }
@@ -44,6 +66,8 @@ impl Layout {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Layout::A => "a",
+            Layout::B => "b",
+            Layout::C => "c",
         }
     }
 }
@@ -74,6 +98,11 @@ impl MapKind {
 
     fn index(self) -> usize {
         self as usize
+    }
+
+    /// The kind byte of a per-inode record in the combined key.
+    fn kind_byte(self) -> u8 {
+        self as u8
     }
 
     /// True for the four maps keyed by inode number.
@@ -110,6 +139,35 @@ impl Ctx {
             self.cfg.weibull_l(),
             self.cfg.node_max()
         )
+    }
+}
+
+/// First byte of a combined key of a per-inode record.
+const NS_INODE: u8 = 0x01;
+/// First byte of a combined key of a refcount record.
+const NS_REFCOUNT: u8 = 0x02;
+
+/// The combined key of a native key: `0x01 || ino || kind` for the
+/// per-inode maps, `0x02 || content key` for refcounts.
+fn ns_key(kind: MapKind, native: &[u8]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(native.len() + 2);
+    if kind.per_inode() {
+        k.push(NS_INODE);
+        k.extend_from_slice(native);
+        k.push(kind.kind_byte());
+    } else {
+        k.push(NS_REFCOUNT);
+        k.extend_from_slice(native);
+    }
+    k
+}
+
+/// The native key of a combined key, if it belongs to `map`.
+fn ns_native(map: MapKind, k: &[u8]) -> Option<Vec<u8>> {
+    if map.per_inode() {
+        (k.len() == 10 && k[0] == NS_INODE && k[9] == map.kind_byte()).then(|| k[1..9].to_vec())
+    } else {
+        (k.first() == Some(&NS_REFCOUNT)).then(|| k[1..].to_vec())
     }
 }
 
@@ -305,6 +363,57 @@ fn shape_of(cs: &ChunkStore, root: &ObjectId) -> Res<Shape> {
     Ok(s)
 }
 
+/// The combined stream of `ns`: a four-way merge of the per-inode streams by
+/// (ino, kind), then the refcount stream when refcounts are inside. Holds
+/// one head per stream.
+struct NsMerge<'s> {
+    per_inode: Vec<KvStream<'s>>,
+    refcounts: Option<KvStream<'s>>,
+    heads: Vec<Option<Kv>>,
+    primed: bool,
+}
+
+impl Iterator for NsMerge<'_> {
+    type Item = Res<Kv>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.primed {
+            self.primed = true;
+            for (src, head) in self.per_inode.iter_mut().zip(&mut self.heads) {
+                match src.next() {
+                    Some(Ok(kv)) => *head = Some(kv),
+                    Some(Err(e)) => return Some(Err(e)),
+                    None => {}
+                }
+            }
+        }
+        // The smallest head; a tie (the same ino in two maps) goes to the
+        // lower kind, because only a strictly smaller key replaces `best`.
+        let mut best: Option<usize> = None;
+        for (i, h) in self.heads.iter().enumerate() {
+            if let Some((k, _)) = h {
+                if best.is_none_or(|b| self.heads[b].as_ref().is_some_and(|(bk, _)| k < bk)) {
+                    best = Some(i);
+                }
+            }
+        }
+        if let Some(i) = best {
+            let (k, v) = self.heads[i].take()?;
+            match self.per_inode[i].next() {
+                Some(Ok(kv)) => self.heads[i] = Some(kv),
+                Some(Err(e)) => return Some(Err(e)),
+                None => {}
+            }
+            return Some(Ok((ns_key(MapKind::ALL[i], &k), v)));
+        }
+        let (k, v) = match self.refcounts.as_mut()?.next()? {
+            Ok(kv) => kv,
+            Err(e) => return Some(Err(e)),
+        };
+        Some(Ok((ns_key(MapKind::Refcounts, &k), v)))
+    }
+}
+
 // ── engine ───────────────────────────────────────────────────────────────────
 
 /// One prolly tree of a layout.
@@ -346,6 +455,18 @@ impl<'s> Engine<'s> {
                     trees.push(Tree { name: kind.name(), root, built_forced: st.forced_cuts, applied_forced: 0 });
                 }
             }
+            Layout::B | Layout::C => {
+                let mut per_inode: Vec<KvStream<'s>> = base.into_iter().collect();
+                let refs = per_inode.pop().expect("five streams");
+                let (inside, apart) = if ctx.layout == Layout::B { (Some(refs), None) } else { (None, Some(refs)) };
+                let ns = NsMerge { per_inode, refcounts: inside, heads: vec![None; 4], primed: false };
+                let (root, st) = build_tree(cs, ctx.cfg, ns)?;
+                trees.push(Tree { name: "ns", root, built_forced: st.forced_cuts, applied_forced: 0 });
+                if let Some(refs) = apart {
+                    let (root, st) = build_tree(cs, ctx.cfg, refs)?;
+                    trees.push(Tree { name: "refcounts", root, built_forced: st.forced_cuts, applied_forced: 0 });
+                }
+            }
         }
         cs.sync()?;
         let e = Engine { cs, ctx, trees };
@@ -357,6 +478,9 @@ impl<'s> Engine<'s> {
     fn route(&self, map: MapKind, key: &[u8]) -> (usize, Vec<u8>) {
         match self.ctx.layout {
             Layout::A => (map.index(), key.to_vec()),
+            Layout::B => (0, ns_key(map, key)),
+            Layout::C if map.per_inode() => (0, ns_key(map, key)),
+            Layout::C => (1, key.to_vec()),
         }
     }
 
@@ -434,6 +558,17 @@ impl<'s> Engine<'s> {
             Layout::A => {
                 let it = prolly::iter(self.cs, &self.trees[map.index()].root)?;
                 Ok(Box::new(it.map(|r| r.map_err(Fail::from))))
+            }
+            Layout::C if !map.per_inode() => {
+                let it = prolly::iter(self.cs, &self.trees[1].root)?;
+                Ok(Box::new(it.map(|r| r.map_err(Fail::from))))
+            }
+            Layout::B | Layout::C => {
+                let it = prolly::iter(self.cs, &self.trees[0].root)?;
+                Ok(Box::new(it.filter_map(move |r| match r {
+                    Err(e) => Some(Err(Fail::from(e))),
+                    Ok((k, v)) => ns_native(map, &k).map(|key| Ok((key, v))),
+                })))
             }
         }
     }
@@ -690,7 +825,22 @@ mod tests {
     }
 
     #[test]
-    fn layout_a_replay_matches_the_model() {
-        replay_matches_model(Layout::A);
+    fn every_layout_replay_matches_the_model() {
+        for layout in [Layout::A, Layout::B, Layout::C] {
+            replay_matches_model(layout);
+        }
+    }
+
+    #[test]
+    fn a_combined_key_sorts_by_ino_then_kind_and_refcounts_last() {
+        let k = |kind, ino: u64| ns_key(kind, &ino.to_be_bytes());
+        assert!(k(MapKind::Inode, 2) < k(MapKind::Dir, 2));
+        assert!(k(MapKind::Xattr, 2) < k(MapKind::Inode, 3));
+        assert!(k(MapKind::Xattr, u64::MAX) < ns_key(MapKind::Refcounts, &[0u8; KEY_LEN]));
+        assert_eq!(ns_key(MapKind::Manifest, &7u64.to_be_bytes()).len(), 10);
+        assert_eq!(ns_key(MapKind::Refcounts, &[0u8; KEY_LEN]).len(), 34);
+        let key = k(MapKind::Manifest, 7);
+        assert_eq!(ns_native(MapKind::Manifest, &key), Some(7u64.to_be_bytes().to_vec()));
+        assert_eq!(ns_native(MapKind::Dir, &key), None);
     }
 }
