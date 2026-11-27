@@ -1,0 +1,174 @@
+== 1-prolly
+test cache::tests::cap_zero_keeps_nothing ... ok
+test tests::cursor_iterates_in_order ... ok
+test tests::apply_one_put_then_get ... ok
+test tests::same_set_twice_writes_nothing ... ok
+test cache::tests::warm_apply_counts_hits_and_same_reads ... ok
+test tests::threshold_edges ... ok
+test tests::range_edges ... ok
+test tests::golden_root ... ok
+test tests::same_batch_twice_writes_nothing ... ok
+test tests::visit_stops_when_asked ... ok
+test tests::canonical_root ... ok
+test tests::one_change_writes_one_path ... ok
+test tests::boundaries_ignore_value_bytes ... ok
+test cache::tests::bytes_stay_under_the_cap ... ok
+test cache::tests::cached_equals_uncached ... ok
+test tests::forced_cuts_are_counted ... ok
+test tests::apply_inserts_equal_bulk ... ok
+test tests::range_holds_one_path ... ok
+test tests::fixed_point_matches_float ... ok
+test tests::memory_is_bounded ... ok
+test tests::visit_yields_each_node_once ... ok
+test tests::node_size_limits ... ok
+test tests::build_then_get_roundtrip ... ok
+test tests::salted_tree_differs ... ok
+test tests::count_and_height_read_one_node ... ok
+test tests::variable_length_model ... ok
+test tests::apply_memory_is_bounded ... ok
+test tests::range_equals_filtered_iter ... ok
+test tests::order_independence ... ok
+test tests::levels_use_their_own_salt ... ok
+test tests::wide_config_tree_reads ... ok
+
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.41s
+
+   Doc-tests prolly
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+rc=0
+
+== 2-prolly-bench
+   --> vendor/fuser/src/ll/fuse_abi.rs:689:19
+    |
+689 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:815:19
+    |
+815 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:825:19
+    |
+825 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 5 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 34.12s
+     Running unittests src/main.rs (target/debug/deps/prolly_bench-6910e6429e506881)
+
+running 6 tests
+test synth::tests::an_inserted_refcount_key_sorts_next_to_its_slot ... ok
+test layout::tests::a_combined_key_sorts_by_ino_then_kind_and_refcounts_last ... ok
+test layout::tests::a_refcount_diff_has_puts_deletes_and_inserts ... ok
+test synth::tests::the_streams_are_sorted_and_their_counts_match ... ok
+test synth::tests::the_permutation_is_a_bijection_with_an_inverse ... ok
+test layout::tests::every_layout_replay_matches_the_model ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
+
+     Running tests/smoke.rs (target/debug/deps/smoke-6d24f60009e4cef4)
+
+running 3 tests
+test bad_arguments_exit_2 ... ok
+test smoke_end_to_end ... ok
+test synth_smoke ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.01s
+
+rc=0
+
+== 3-clippy
+warning: unused workspace dependency `anyhow`
+  --> Cargo.toml:37:1
+   |
+37 | anyhow     = "1"
+   | ^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `anyhow`
+warning: unused workspace dependency `bincode`
+  --> Cargo.toml:26:1
+   |
+26 | bincode    = "2"
+   | ^^^^^^^
+   |
+help: consider removing the workspace dependency `bincode`
+warning: unused workspace dependency `criterion`
+  --> Cargo.toml:28:1
+   |
+28 | criterion  = { version = "0.5", features = ["html_reports"] }
+   | ^^^^^^^^^
+   |
+help: consider removing the workspace dependency `criterion`
+warning: unused workspace dependency `redb`
+  --> Cargo.toml:33:1
+   |
+33 | redb       = "3.1"
+   | ^^^^
+   |
+help: consider removing the workspace dependency `redb`
+warning: unused workspace dependency `tokio`
+  --> Cargo.toml:35:1
+   |
+35 | tokio      = { version = "1", features = ["full"] }
+   | ^^^^^
+   |
+help: consider removing the workspace dependency `tokio`
+warning: workspace (manifest) generated 5 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.21s
+rc=0
+
+== 4-unsafe-count
+UNSAFE files=33 tokens=135 result=ok
+rc=0
+
+== 5-workspace
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cas_local
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests chunk_store
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+   Doc-tests metadata
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests prolly
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests slicefs_cli
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+   Doc-tests slicefs_traits
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+rc=0
+
