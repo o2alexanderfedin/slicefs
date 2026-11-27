@@ -1004,3 +1004,236 @@ fn forced_cuts_are_counted() {
     let (_, ast) = apply(&s, forced, &root, &batch).unwrap();
     assert!(ast.forced_cuts >= 1, "{ast:?}");
 }
+
+// ---- range, count, height, visit (plan 26-02) ----
+
+/// The entries of `es` with `start <= key < end`.
+fn filtered(es: &[(Vec<u8>, Vec<u8>)], start: &[u8], end: Option<&[u8]>) -> Vec<(Vec<u8>, Vec<u8>)> {
+    es.iter().filter(|(k, _)| k.as_slice() >= start && end.is_none_or(|e| k.as_slice() < e)).cloned().collect()
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig {
+        failure_persistence: None,
+        ..proptest::prelude::ProptestConfig::with_cases(40)
+    })]
+
+    #[test]
+    fn range_equals_filtered_iter(
+        n in 0usize..3_000,
+        seed in proptest::prelude::any::<u64>(),
+        a in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..12),
+        b in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..12),
+        sel in 0u8..9,
+    ) {
+        let s = mem_store();
+        let es = var_entries(n, seed);
+        let (root, _) = build(&s, Config::SMALL, es.iter().map(|(k, v)| (k, v))).unwrap();
+        let ctx = Ctx::uncached(&s);
+        let existing = |x: u64| es.get(x as usize % es.len().max(1)).map(|(k, _)| k.clone());
+        let start = match (sel % 3, existing(seed)) {
+            (0, Some(k)) => k,
+            (1, _) => Vec::new(),
+            _ => a,
+        };
+        let end = match (sel / 3, existing(seed >> 17)) {
+            (0, _) => None,
+            (1, Some(k)) => Some(k),
+            _ => Some(b),
+        };
+        let got = range(&ctx, &root, &start, end.as_deref()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(got, filtered(&es, &start, end.as_deref()));
+        // Through a small cache the result is the same.
+        let cache = NodeCache::new(8 * 1024);
+        let cached = Ctx::new(&s, Some(&cache));
+        let got = range(&cached, &root, &start, end.as_deref()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(got, filtered(&es, &start, end.as_deref()));
+    }
+}
+
+#[test]
+fn range_edges() {
+    let s = mem_store();
+    let ctx = Ctx::uncached(&s);
+    let es = u64_entries(3_000, 5);
+    let (root, _) = build(&s, Config::SMALL, es.iter().map(|(k, v)| (k, v))).unwrap();
+    let all = |start: &[u8], end: Option<&[u8]>| range(&ctx, &root, start, end).unwrap().collect::<Result<Vec<_>>>().unwrap();
+    assert_eq!(all(b"", None), es);
+    // Start above the last key, an empty range, and end below start.
+    assert!(all(&u64::MAX.to_be_bytes(), None).is_empty());
+    assert!(all(&es[10].0, Some(&es[10].0)).is_empty());
+    assert!(all(&es[10].0, Some(&es[5].0)).is_empty());
+    // The start key is in, the end key is out.
+    assert_eq!(all(&es[10].0, Some(&es[12].0)), es[10..12].to_vec());
+    // A start between keys.
+    let between = 4u64.to_be_bytes();
+    assert_eq!(all(&between, Some(&es[2].0))[0], es[1]);
+    // The empty tree.
+    let empty = empty_root(&s).unwrap();
+    assert!(range(&ctx, &empty, b"", None).unwrap().next().is_none());
+}
+
+#[test]
+fn range_holds_one_path() {
+    let s = mem_store();
+    let ctx = Ctx::uncached(&s);
+    let (root, st) = build(&s, Config::SMALL, u64_entries(40_000, 3)).unwrap();
+    assert!(st.depth >= 3, "depth {}", st.depth);
+    let depth = st.depth as usize;
+    let mut r = range(&ctx, &root, &20_000u64.to_be_bytes(), None).unwrap();
+    let mut seen = 0;
+    for e in r.by_ref() {
+        e.unwrap();
+        seen += 1;
+    }
+    assert!(seen > 10_000);
+    assert_eq!(r.max_nodes_held(), depth);
+    let mut r = range(&ctx, &root, &1_000u64.to_be_bytes(), Some(&2_000u64.to_be_bytes())).unwrap();
+    assert!(r.by_ref().all(|e| e.is_ok()));
+    assert!(r.max_nodes_held() <= depth);
+}
+
+#[test]
+fn count_and_height_read_one_node() {
+    for cfg in [Config::SMALL, Config::DEFAULT] {
+        for n in [0usize, 1, 50, 3_000, 40_000] {
+            let s = mem_store();
+            let (root, st) = build(&s, cfg, u64_entries(n, 3)).unwrap();
+            let cache = NodeCache::new(1 << 20);
+            let ctx = Ctx::new(&s, Some(&cache));
+            assert_eq!(count(&ctx, &root).unwrap(), n as u64, "{n}");
+            assert_eq!(cache.stats().misses, 1, "count reads the root only");
+            let cache = NodeCache::new(1 << 20);
+            let ctx = Ctx::new(&s, Some(&cache));
+            assert_eq!(height(&ctx, &root).unwrap(), st.depth, "{n}");
+            assert_eq!(cache.stats().misses, 1, "height reads the root only");
+            let top = nodes(&s, &root).iter().map(|x| x.level).max().unwrap();
+            assert_eq!(st.depth, top + 1);
+            assert_eq!(iter(&s, &root).unwrap().count() as u64, n as u64);
+        }
+    }
+}
+
+/// The node IDs of a tree by a plain recursion over the stored bytes
+/// (parent first, children left to right).
+fn reference_ids(s: &ChunkStore, id: &chunk_store::ObjectId, out: &mut Vec<(chunk_store::ObjectId, u8)>) {
+    let node = crate::node::decode(&s.read(id).unwrap(), &Config::READ).unwrap();
+    out.push((*id, node.level()));
+    if let crate::node::Node::Internal { children, .. } = node {
+        for c in children {
+            reference_ids(s, &c.id, out);
+        }
+    }
+}
+
+#[test]
+fn visit_yields_each_node_once() {
+    for (cfg, n) in [(Config::SMALL, 20_000), (Config::DEFAULT, 20_000), (Config::SMALL, 30)] {
+        let s = mem_store();
+        let ctx = Ctx::uncached(&s);
+        let es = u64_entries(n, 3);
+        let (root, _) = build(&s, cfg, es.iter().map(|(k, v)| (k, v))).unwrap();
+        let mut got = Vec::new();
+        let mut leaves = Vec::new();
+        let mut counts = Vec::new();
+        let done = visit(&ctx, &root, &mut |v| {
+            got.push((v.id, v.level));
+            counts.push((v.level, v.children, v.entries.len()));
+            leaves.extend(v.entries.iter().cloned());
+            true
+        })
+        .unwrap();
+        assert!(done);
+        let mut want = Vec::new();
+        reference_ids(&s, &root, &mut want);
+        assert_eq!(got, want, "{n}: same nodes in the same order");
+        assert_eq!(got[0].0, root);
+        // The levels are the levels of `walk`, in the same order.
+        assert_eq!(got.iter().map(|g| g.1).collect::<Vec<_>>(), nodes(&s, &root).iter().map(|x| x.level).collect::<Vec<_>>());
+        assert_eq!(leaves, es);
+        // A leaf has no children; an internal node has no entries.
+        assert!(counts.iter().all(|&(level, c, e)| if level == 0 { c == 0 } else { e == 0 && c > 0 }));
+        // Every ID once (no node of a built tree is shared).
+        let mut ids: Vec<_> = got.iter().map(|g| g.0).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), got.len(), "{n}");
+    }
+}
+
+#[test]
+fn visit_stops_when_asked() {
+    let s = mem_store();
+    let ctx = Ctx::uncached(&s);
+    let (root, st) = build(&s, Config::SMALL, u64_entries(5_000, 3)).unwrap();
+    assert!(st.depth >= 2);
+    let mut calls = 0;
+    let done = visit(&ctx, &root, &mut |_| {
+        calls += 1;
+        calls < 3
+    })
+    .unwrap();
+    assert!(!done);
+    assert_eq!(calls, 3);
+    // The empty tree is one leaf with no entries.
+    let empty = empty_root(&s).unwrap();
+    let mut seen = Vec::new();
+    assert!(visit(&ctx, &empty, &mut |v| {
+        seen.push((v.id, v.level, v.children, v.entries.len()));
+        true
+    })
+    .unwrap());
+    assert_eq!(seen, vec![(empty, 0, 0, 0)]);
+}
+
+/// Trees that are damaged or crafted give `Error::Corrupt` from the new
+/// readers, with a cache or without, and never a panic.
+#[test]
+fn crafted_trees_are_errors_in_range_count_visit() {
+    use crate::node::{encode_internal, encode_leaf, Child};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let s = mem_store();
+    let leaf = |es: &[&[u8]]| s.put(&encode_leaf(&es.iter().map(|k| (k.to_vec(), b"v".to_vec())).collect::<Vec<_>>())).unwrap();
+    let entry = |k: &[u8], id, count| Child { last_key: k.to_vec(), id, count };
+    let a = leaf(&[b"a", b"m"]);
+    let b = leaf(&[b"b", b"z"]);
+    let good = leaf(&[b"n", b"z"]);
+    let level1 = |cs: &[Child]| s.put(&encode_internal(1, cs)).unwrap();
+    let cache = NodeCache::new(1 << 20);
+    for ctx in [Ctx::uncached(&s), Ctx::new(&s, Some(&cache))] {
+        // (what, root): a bad node on the first path of range and visit.
+        let cases = [
+            ("first key not above the previous sibling", level1(&[entry(b"m", a, 2), entry(b"z", b, 2)])),
+            ("last key is not the entry's key", level1(&[entry(b"q", a, 2), entry(b"z", good, 2)])),
+            ("leaf count is not the entry's count", level1(&[entry(b"m", a, 5), entry(b"z", good, 2)])),
+            ("child at the wrong level", s.put(&encode_internal(2, &[entry(b"m", a, 2)])).unwrap()),
+        ];
+        for (what, root) in cases {
+            let got = [
+                catch_unwind(AssertUnwindSafe(|| range(&ctx, &root, b"", None).and_then(|r| r.collect::<Result<Vec<_>>>()).map(|_| ()))),
+                catch_unwind(AssertUnwindSafe(|| visit(&ctx, &root, &mut |_| true).map(|_| ()))),
+            ];
+            for (i, g) in got.into_iter().enumerate() {
+                assert!(matches!(g, Ok(Err(Error::Corrupt(_)))), "{what}, check {i}: {g:?}");
+            }
+        }
+        // Counts that overflow u64: count gives Corrupt.
+        let big = s.put(&encode_internal(1, &[entry(b"m", a, u64::MAX), entry(b"z", good, u64::MAX)])).unwrap();
+        let got = catch_unwind(AssertUnwindSafe(|| count(&ctx, &big)));
+        assert!(matches!(got, Ok(Err(Error::Corrupt(_)))), "{got:?}");
+        // A bad root node.
+        let bad = s.put(&raw(0, 1, &[10, 0, 0, 0, b'a'])).unwrap();
+        for got in [
+            catch_unwind(AssertUnwindSafe(|| range(&ctx, &bad, b"", None).map(|_| ()))),
+            catch_unwind(AssertUnwindSafe(|| count(&ctx, &bad).map(|_| ()))),
+            catch_unwind(AssertUnwindSafe(|| height(&ctx, &bad).map(|_| ()))),
+            catch_unwind(AssertUnwindSafe(|| visit(&ctx, &bad, &mut |_| true).map(|_| ()))),
+        ] {
+            assert!(matches!(got, Ok(Err(Error::Corrupt(_)))), "{got:?}");
+        }
+        // A range that starts past the bad child does not see it.
+        let root = level1(&[entry(b"m", a, 5), entry(b"z", good, 2)]);
+        let r = range(&ctx, &root, b"n", None).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(r.len(), 2);
+    }
+}

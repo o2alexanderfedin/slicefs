@@ -7,7 +7,9 @@
 //! child), child `ObjectId` (`ID_LEN` bytes), subtree entry count `u64` LE.
 
 use crate::{Config, Error, Result, NODE_HEADER, NODE_MAGIC, RULE_VERSION};
-use chunk_store::{ChunkStore, ObjectId, ID_LEN};
+use crate::cache::{Cached, Ctx};
+use chunk_store::{ObjectId, ID_LEN};
+use std::sync::Arc;
 
 /// One entry of an internal node: a child node and what it covers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,24 +208,92 @@ pub(crate) fn decode(bytes: &[u8], cfg: &Config) -> Result<Node> {
     Ok(node)
 }
 
-/// Reads (hash-verified) and decodes node `id` with the limits of `cfg`.
-/// With `want_level` (a child), the node must be at that level and must
-/// not be empty.
-pub(crate) fn load(store: &ChunkStore, cfg: &Config, id: &ObjectId, want_level: Option<u8>) -> Result<(Node, usize)> {
-    let bytes = store.read(id)?;
-    let node = decode(&bytes, cfg)?;
+/// A node loaded through a `Ctx`: the decoded node, its encoded length, and
+/// whether the cache gave it.
+pub(crate) struct Loaded {
+    pub node: Arc<Node>,
+    pub bytes: usize,
+    pub hit: bool,
+}
+
+/// The largest key and the largest encoded entry of a node (what a config
+/// checks entry by entry in `decode`).
+fn limits(node: &Node) -> (usize, usize) {
+    match node {
+        Node::Leaf(es) => es.iter().fold((0, 0), |(k, e), (key, v)| {
+            (k.max(key.len()), e.max(leaf_entry_len(key.len(), v.len())))
+        }),
+        Node::Internal { children, .. } => children.iter().fold((0, 0), |(k, e), c| {
+            (k.max(c.last_key.len()), e.max(internal_entry_len(c.last_key.len())))
+        }),
+    }
+}
+
+/// A cached node was decoded under some config; the config that asks now
+/// may have tighter limits (`apply` writes the old entries again).
+fn fits(c: &Cached, cfg: &Config) -> Result<()> {
+    if c.bytes > cfg.node_max() {
+        return Err(corrupt("node above the config's node_max"));
+    }
+    if c.max_key > cfg.max_key() {
+        return Err(corrupt("key above the config's max_key"));
+    }
+    if c.max_entry > cfg.max_entry() {
+        return Err(corrupt("entry above the config's max_entry"));
+    }
+    Ok(())
+}
+
+/// Gets node `id`: from the cache, else the hash-verified `ChunkStore::read`
+/// and `decode` with the limits of `cfg`. `want_level` and `check` run on
+/// every load, hit or miss, and a node is inserted into the cache only
+/// after they pass.
+fn load_with(
+    ctx: &Ctx,
+    cfg: &Config,
+    id: &ObjectId,
+    want_level: Option<u8>,
+    check: impl FnOnce(&Node) -> Result<()>,
+) -> Result<Loaded> {
+    let hit = ctx.cache.and_then(|c| c.get(id));
+    let was_hit = hit.is_some();
+    let cached = match hit {
+        Some(c) => {
+            fits(&c, cfg)?;
+            c
+        }
+        None => {
+            let bytes = ctx.store.read(id)?;
+            let node = decode(&bytes, cfg)?;
+            let (max_key, max_entry) = limits(&node);
+            Cached { node: Arc::new(node), bytes: bytes.len(), max_key, max_entry }
+        }
+    };
     if let Some(want) = want_level {
-        if node.level() != want {
+        if cached.node.level() != want {
             return Err(Error::Corrupt(format!(
                 "prolly node: child at wrong level {} (want {want})",
-                node.level()
+                cached.node.level()
             )));
         }
-        if node.len() == 0 {
+        if cached.node.len() == 0 {
             return Err(corrupt("empty child node"));
         }
     }
-    Ok((node, bytes.len()))
+    check(&cached.node)?;
+    if !was_hit {
+        if let Some(cache) = ctx.cache {
+            cache.insert(*id, cached.clone());
+        }
+    }
+    Ok(Loaded { node: cached.node, bytes: cached.bytes, hit: was_hit })
+}
+
+/// Reads (hash-verified) and decodes node `id` with the limits of `cfg`.
+/// With `want_level` (a child), the node must be at that level and must
+/// not be empty.
+pub(crate) fn load(ctx: &Ctx, cfg: &Config, id: &ObjectId, want_level: Option<u8>) -> Result<Loaded> {
+    load_with(ctx, cfg, id, want_level, |_| Ok(()))
 }
 
 /// Reads and decodes the child `entry` of a node, at `level`, and checks
@@ -232,31 +302,31 @@ pub(crate) fn load(store: &ChunkStore, cfg: &Config, id: &ObjectId, want_level: 
 /// parent; `None` on the leftmost path), and its leaf entries are the
 /// entry's count. With the order inside each node, these keep the keys of
 /// a tree in order and its counts true along every loaded path.
-pub(crate) fn load_child(
-    store: &ChunkStore,
-    cfg: &Config,
-    level: u8,
-    entry: &Child,
-    lo: Option<&[u8]>,
-) -> Result<(Node, usize)> {
-    let (node, bytes) = load(store, cfg, &entry.id, Some(level))?;
-    if node.last_key() != Some(entry.last_key.as_slice()) {
-        return Err(corrupt("child's last key is not its parent entry's key"));
-    }
-    if let (Some(lo), Some(first)) = (lo, node.first_key()) {
-        if first <= lo {
-            return Err(corrupt("child's first key is not above the previous sibling"));
+pub(crate) fn load_child(ctx: &Ctx, cfg: &Config, level: u8, entry: &Child, lo: Option<&[u8]>) -> Result<Loaded> {
+    load_with(ctx, cfg, &entry.id, Some(level), |node| {
+        if node.last_key() != Some(entry.last_key.as_slice()) {
+            return Err(corrupt("child's last key is not its parent entry's key"));
         }
-    }
-    let count = match &node {
-        Node::Leaf(e) => e.len() as u64,
+        if let (Some(lo), Some(first)) = (lo, node.first_key()) {
+            if first <= lo {
+                return Err(corrupt("child's first key is not above the previous sibling"));
+            }
+        }
+        if node_count(node)? != entry.count {
+            return Err(corrupt("child's entry count is not its parent entry's count"));
+        }
+        Ok(())
+    })
+}
+
+/// The leaf entries under a node: its entries for a leaf, the checked sum
+/// of its children's counts for an internal node.
+pub(crate) fn node_count(node: &Node) -> Result<u64> {
+    match node {
+        Node::Leaf(e) => Ok(e.len() as u64),
         Node::Internal { children, .. } => children
             .iter()
             .try_fold(0u64, |n, c| n.checked_add(c.count))
-            .ok_or_else(|| corrupt("subtree count above u64"))?,
-    };
-    if count != entry.count {
-        return Err(corrupt("child's entry count is not its parent entry's count"));
+            .ok_or_else(|| corrupt("subtree count above u64")),
     }
-    Ok((node, bytes))
 }
