@@ -1,0 +1,225 @@
+# golden_root on Linux: docker case prolly-bench-smoke (release build, cargo test -p prolly, then golden_root alone, then the bench smoke)
+# code commit 4a4e14d
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+warning: unused workspace dependency `anyhow`
+  --> Cargo.toml:37:1
+   |
+37 | anyhow     = "1"
+   | ^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `anyhow`
+warning: unused workspace dependency `bincode`
+  --> Cargo.toml:26:1
+   |
+26 | bincode    = "2"
+   | ^^^^^^^
+   |
+help: consider removing the workspace dependency `bincode`
+warning: unused workspace dependency `criterion`
+  --> Cargo.toml:28:1
+   |
+28 | criterion  = { version = "0.5", features = ["html_reports"] }
+   | ^^^^^^^^^
+   |
+help: consider removing the workspace dependency `criterion`
+warning: unused workspace dependency `redb`
+  --> Cargo.toml:33:1
+   |
+33 | redb       = "3.1"
+   | ^^^^
+   |
+help: consider removing the workspace dependency `redb`
+warning: unused workspace dependency `tokio`
+  --> Cargo.toml:35:1
+   |
+35 | tokio      = { version = "1", features = ["full"] }
+   | ^^^^^
+   |
+help: consider removing the workspace dependency `tokio`
+
+running 33 tests
+.................................
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.35s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+test tests::golden_root ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.01s
+warning: unused workspace dependency `anyhow`
+  --> Cargo.toml:37:1
+   |
+37 | anyhow     = "1"
+   | ^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `anyhow`
+warning: unused workspace dependency `bincode`
+  --> Cargo.toml:26:1
+   |
+26 | bincode    = "2"
+   | ^^^^^^^
+   |
+help: consider removing the workspace dependency `bincode`
+warning: unused workspace dependency `criterion`
+  --> Cargo.toml:28:1
+   |
+28 | criterion  = { version = "0.5", features = ["html_reports"] }
+   | ^^^^^^^^^
+   |
+help: consider removing the workspace dependency `criterion`
+warning: unused workspace dependency `redb`
+  --> Cargo.toml:33:1
+   |
+33 | redb       = "3.1"
+   | ^^^^
+   |
+help: consider removing the workspace dependency `redb`
+warning: unused workspace dependency `tokio`
+  --> Cargo.toml:35:1
+   |
+35 | tokio      = { version = "1", features = ["full"] }
+   | ^^^^^
+   |
+help: consider removing the workspace dependency `tokio`
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:635:19
+    |
+635 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:644:19
+    |
+644 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:689:19
+    |
+689 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:815:19
+    |
+815 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:825:19
+    |
+825 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+# load before: 3.54 2.70 2.48 2/899 4352
+making smoke data
+gen files=2000 bytes=3978381
+gen files=2100 bytes=4190778
+mode,run,pattern,k,seq,entries_changed,serialized_bytes,begin_ms,finish_ms,total_ms,cpu_user_s,cpu_sys_s,maxrss_bytes,new_objects,new_raw_bytes,new_stored_bytes,new_record_bytes,nodes_read,nodes_written,peak_rss_bytes
+warming the page cache
+run 0: seed
+run 1: whole
+run 1: batches
+whole,1,setup,0,0,NA,165713,0.130,782.625,782.756,0.019854,0.013470,9461760,15,17778,14899,15589,NA,NA,NA
+whole,1,scatter,1,1,1,165713,0.111,5.502,5.613,0.000970,0.001117,9461760,8,21452,17802,18170,NA,NA,NA
+whole,1,scatter,1,2,1,165795,0.104,4.657,4.761,0.000000,0.001763,9461760,14,31045,25789,26433,NA,NA,NA
+whole,1,scatter,10,3,6,165713,0.176,5.394,5.570,0.000801,0.002031,9461760,20,70731,58088,59008,NA,NA,NA
+whole,1,scatter,10,4,6,165713,0.133,6.943,7.077,0.002765,0.000500,9461760,23,109269,89541,90599,NA,NA,NA
+whole,1,cluster,1,5,1,165713,0.139,3.473,3.612,0.000726,0.001043,9461760,8,22142,18275,18643,NA,NA,NA
+whole,1,cluster,1,6,1,165795,0.286,5.913,6.198,0.001060,0.001270,9461760,13,20280,16981,17579,NA,NA,NA
+whole,1,cluster,10,7,6,165713,0.145,5.829,5.974,0.002130,0.000000,9461760,16,28994,23935,24671,NA,NA,NA
+whole,1,cluster,10,8,6,165713,0.133,11.836,11.969,0.000765,0.001837,9461760,18,21982,18333,19161,NA,NA,NA
+whole,1,version,0,9,312,173913,0.552,98.772,99.324,0.006494,0.004997,10739712,682,327022,258931,290303,NA,NA,NA
+whole,1,insdel,1,10,1,173831,0.178,9.944,10.123,0.002356,0.000357,10739712,12,57857,46670,47222,NA,NA,NA
+whole,1,insdel,1,11,1,173913,0.175,7.959,8.134,0.001576,0.001289,10739712,6,15121,12469,12745,NA,NA,NA
+whole,1,insdel,10,12,10,173093,0.350,6.822,7.173,0.001901,0.002961,10739712,36,202233,158391,160047,NA,NA,NA
+whole,1,insdel,10,13,10,173093,0.367,8.497,8.865,0.002462,0.001997,10739712,34,132767,105379,106943,NA,NA,NA
+run 1: flat
+flat,1,bulk,0,0,2018,82746,NA,9.857,9.857,0.001047,0.002049,4849664,8,83042,68076,68444,NA,NA,NA
+flat,1,scatter,1,1,1,82746,NA,12.561,12.561,0.001153,0.000979,4849664,2,7644,6415,6507,NA,NA,NA
+flat,1,scatter,1,2,1,82787,NA,8.155,8.155,0.000616,0.002092,4849664,3,15452,12721,12859,NA,NA,NA
+flat,1,scatter,10,3,6,82746,NA,8.152,8.152,0.001326,0.001913,4849664,5,38103,31256,31486,NA,NA,NA
+flat,1,scatter,10,4,6,82746,NA,15.097,15.097,0.001560,0.001048,4849664,5,60579,49565,49795,NA,NA,NA
+flat,1,cluster,1,5,1,82746,NA,7.819,7.819,0.001078,0.000971,4849664,2,13294,10925,11017,NA,NA,NA
+flat,1,cluster,1,6,1,82787,NA,10.569,10.569,0.000195,0.003390,4849664,3,15452,12721,12859,NA,NA,NA
+flat,1,cluster,10,7,6,82746,NA,12.270,12.270,0.001370,0.005274,4849664,2,11924,9809,9901,NA,NA,NA
+flat,1,cluster,10,8,6,82746,NA,4.466,4.466,0.000000,0.001977,4849664,2,7644,6415,6507,NA,NA,NA
+flat,1,version,0,9,312,86846,NA,12.152,12.152,0.002254,0.002147,4849664,10,87224,71570,72030,NA,NA,NA
+flat,1,insdel,1,10,1,86805,NA,9.587,9.587,0.000000,0.002468,4849664,3,23524,19319,19457,NA,NA,NA
+flat,1,insdel,1,11,1,86846,NA,7.415,7.415,0.000473,0.001439,4849664,2,14768,12141,12233,NA,NA,NA
+flat,1,insdel,10,12,10,86436,NA,10.275,10.275,0.001204,0.002452,4849664,8,72414,59439,59807,NA,NA,NA
+flat,1,insdel,10,13,10,86436,NA,4.173,4.173,0.000000,0.001954,4849664,7,58047,47691,48013,NA,NA,NA
+run 1: prolly
+prolly,1,bulk,0,0,2018,91552,NA,16.558,16.558,0.002584,0.005383,3858432,13,91552,70507,71105,0,13,NA
+prolly,1,scatter,1,1,1,12512,NA,9.562,9.562,0.000582,0.002063,3858432,2,12512,9625,9717,3,2,NA
+prolly,1,scatter,1,2,1,7472,NA,5.839,5.839,0.000197,0.001519,3858432,2,7472,5772,5864,3,2,NA
+prolly,1,scatter,10,3,6,35897,NA,7.651,7.651,0.002501,0.000725,3858432,5,35897,27631,27861,6,5,NA
+prolly,1,scatter,10,4,6,42657,NA,7.288,7.288,0.001058,0.003053,3858432,6,42657,32842,33118,7,6,NA
+prolly,1,cluster,1,5,1,7652,NA,5.897,5.897,0.000000,0.001678,3858432,2,7652,5912,6004,3,2,NA
+prolly,1,cluster,1,6,1,7472,NA,5.591,5.591,0.000000,0.001531,3858432,2,7472,5772,5864,3,2,NA
+prolly,1,cluster,10,7,6,14817,NA,4.235,4.235,0.001313,0.000430,3858432,2,8012,6187,6279,4,3,NA
+prolly,1,cluster,10,8,6,12512,NA,8.569,8.569,0.001395,0.000495,3858432,2,12512,9625,9717,3,2,NA
+prolly,1,version,0,9,312,91018,NA,18.156,18.156,0.004728,0.001261,3858432,13,91018,70099,70697,13,13,NA
+prolly,1,insdel,1,10,1,8018,NA,10.116,10.116,0.000165,0.001422,3858432,2,8018,6190,6282,3,2,NA
+prolly,1,insdel,1,11,1,8063,NA,13.022,13.022,0.000343,0.001726,3858432,2,8063,6225,6317,3,2,NA
+prolly,1,insdel,10,12,10,60468,NA,13.849,13.849,0.003996,0.000453,3858432,9,60468,46577,46991,10,9,NA
+prolly,1,insdel,10,13,10,59163,NA,16.988,16.988,0.002340,0.002305,3858432,9,59163,45573,45987,10,9,NA
+run 1: scale flat 10000
+run 1: scale prolly 10000
+run 1: scale flat 50000
+run 1: scale prolly 50000
+whole,median,setup,0,all,NA,165713,0.130,782.625,782.756,0.019854,0.013470,9461760,15,17778,14899,15589,NA,NA,NA
+whole,median,scatter,1,all,1,165713,0.104,4.657,4.761,0.000000,0.001117,9461760,8,21452,17802,18170,NA,NA,NA
+whole,median,scatter,10,all,6,165713,0.133,5.394,5.570,0.000801,0.000500,9461760,20,70731,58088,59008,NA,NA,NA
+whole,median,cluster,1,all,1,165713,0.139,3.473,3.612,0.000726,0.001043,9461760,8,20280,16981,17579,NA,NA,NA
+whole,median,cluster,10,all,6,165713,0.133,5.829,5.974,0.000765,0.000000,9461760,16,21982,18333,19161,NA,NA,NA
+whole,median,version,0,all,312,173913,0.552,98.772,99.324,0.006494,0.004997,10739712,682,327022,258931,290303,NA,NA,NA
+whole,median,insdel,1,all,1,173831,0.175,7.959,8.134,0.001576,0.000357,10739712,6,15121,12469,12745,NA,NA,NA
+whole,median,insdel,10,all,10,173093,0.350,6.822,7.173,0.001901,0.001997,10739712,34,132767,105379,106943,NA,NA,NA
+flat,median,bulk,0,all,2018,82746,NA,9.857,9.857,0.001047,0.002049,4849664,8,83042,68076,68444,NA,NA,NA
+flat,median,scatter,1,all,1,82746,NA,8.155,8.155,0.000616,0.000979,4849664,2,7644,6415,6507,NA,NA,NA
+flat,median,scatter,10,all,6,82746,NA,8.152,8.152,0.001326,0.001048,4849664,5,38103,31256,31486,NA,NA,NA
+flat,median,cluster,1,all,1,82746,NA,7.819,7.819,0.000195,0.000971,4849664,2,13294,10925,11017,NA,NA,NA
+flat,median,cluster,10,all,6,82746,NA,4.466,4.466,0.000000,0.001977,4849664,2,7644,6415,6507,NA,NA,NA
+flat,median,version,0,all,312,86846,NA,12.152,12.152,0.002254,0.002147,4849664,10,87224,71570,72030,NA,NA,NA
+flat,median,insdel,1,all,1,86805,NA,7.415,7.415,0.000000,0.001439,4849664,2,14768,12141,12233,NA,NA,NA
+flat,median,insdel,10,all,10,86436,NA,4.173,4.173,0.000000,0.001954,4849664,7,58047,47691,48013,NA,NA,NA
+prolly,median,bulk,0,all,2018,91552,NA,16.558,16.558,0.002584,0.005383,3858432,13,91552,70507,71105,0,13,NA
+prolly,median,scatter,1,all,1,7472,NA,5.839,5.839,0.000197,0.001519,3858432,2,7472,5772,5864,3,2,NA
+prolly,median,scatter,10,all,6,35897,NA,7.288,7.288,0.001058,0.000725,3858432,5,35897,27631,27861,6,5,NA
+prolly,median,cluster,1,all,1,7472,NA,5.591,5.591,0.000000,0.001531,3858432,2,7472,5772,5864,3,2,NA
+prolly,median,cluster,10,all,6,12512,NA,4.235,4.235,0.001313,0.000430,3858432,2,8012,6187,6279,3,2,NA
+prolly,median,version,0,all,312,91018,NA,18.156,18.156,0.004728,0.001261,3858432,13,91018,70099,70697,13,13,NA
+prolly,median,insdel,1,all,1,8018,NA,10.116,10.116,0.000165,0.001422,3858432,2,8018,6190,6282,3,2,NA
+prolly,median,insdel,10,all,10,59163,NA,13.849,13.849,0.002340,0.000453,3858432,9,59163,45573,45987,10,9,NA
+results: /tmp/pp/results.csv; also scale.csv, disk.csv, edits.csv, batches.csv, shape.txt and machine.txt in WORK
+# load after: 3.50 2.71 2.48 3/899 4514
+# checks ok: 2
+os=Linux 7.2.12-orbstack-00394-gbecdd6130068
+arch=x86_64
+cpu=Intel(R) Xeon(R) W-3245 CPU @ 3.20GHz
+cpus=32
+mem_bytes=16837255168
+fs=overlay
+rustc=rustc 1.100.0 (0ef1bc386 2026-11-09)
+commit=unknown
+page_cache=warm (not dropped)
+load_before=3.54 2.70 2.48
+load_after=3.50 2.71 2.48
+start_utc=2026-11-27T07:46:58Z
+end_utc=2026-11-27T07:47:01Z
+bench_data=smoke
+runs=1
+ks=1 10
+commits=2
+patterns=scatter cluster insdel
+seed=24
+scale_ns=10000 50000
+boost_vers=0_0_1 0_0_2
+rc=0
