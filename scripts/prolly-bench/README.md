@@ -1,9 +1,9 @@
 # Prolly benchmark
 
-`bench.sh` measures the prolly prototype (`crates/prolly`) against the
-metadata commit path of SliceFS (#19, PROLLY-02). For each commit of a fixed,
-seeded edit script it records, for the real commit and for two map-only
-modes:
+`bench.sh` measures the metadata commit path of SliceFS (#19, PROLLY-02,
+PMAP-07) and compares a flat map with a prolly tree on synthetic maps. For
+each commit of a fixed, seeded edit script it records, for the real commit
+(`whole`):
 
 - commit wall time (`begin_commit` and `finish_commit` apart for the real commit)
 - CPU user and system time
@@ -20,7 +20,16 @@ macOS and on Linux. It runs by hand only. It is never part of `cargo test`
 
 | Script | What |
 |---|---|
-| `bench.sh <data-dir> [runs]` | Seed the first tree once; for each run (default 3) copy the seeded store and run the edit script in the modes `whole`, `flat` and `prolly`, each step as its own process; then the synthetic `scale` rows; print one CSV row per commit and mode and one median row per (mode, pattern, k) |
+| `bench.sh <data-dir> [runs]` | Seed the first tree once; for each run (default 3) copy the seeded store and run the edit script in the mode `whole`, as its own process; then the synthetic `scale` rows; print one CSV row per commit and one median row per (mode, pattern, k) |
+| `layout.sh` | The synthetic `synth` rows of Phase 25 (see the last section) |
+
+**Retired modes.** The modes `batches`, `flat`, `prolly`, `maps` and `layout`
+read the flat metadata maps of a product store. Since Phase 26 the maps are
+prolly trees, so these modes are gone (store formats have no backward
+compatibility). Tag `v2.3.0` keeps them, for re-runs on flat stores. `bench.sh`
+takes a `BIN` of any build that has `seed`, `whole` and `scale`: the `v2.3.0`
+binary gives the flat baseline of PMAP-07 and the binary of a branch gives the
+tree rows.
 
 ## Inputs
 
@@ -60,19 +69,15 @@ run in Docker needs the data dir in the container (a `-v DIR:/data:ro`
 volume, then `bench.sh /data`). `SLICEFS_TARGET_VOL` names the cargo target
 volume, as for the other modes of `run.sh`.
 
-Linux smoke in Docker (plan 24-04, image `rust:1.100.0-bookworm`): the 21
+Linux smoke in Docker (plan 24-04, image `rust:1.100.0-bookworm`): the
 prolly tests pass, `golden_root` included, so the golden root and the
-cut-decision bits are the same on Linux as on macOS. The smoke gives the same
-CSV shape as on macOS (30 run rows and 18 median rows, two `ok=1` checks).
-The `prolly` rows have the same entries, serialized bytes, new objects and
-nodes read and written as on macOS. The `whole` and `flat` byte columns
-differ a little, because the file mtimes of the generated trees go into the
-inode digests, and FastCDC cuts the flat maps by content. The image has no
-GNU `time`, so `peak_rss_bytes` is `NA` there.
+cut-decision bits are the same on Linux as on macOS. The image has no GNU
+`time`, so `peak_rss_bytes` is `NA` there. (The numbers of the smoke of plan
+24-04 were taken before the retired modes were removed.)
 
 ## Subcommands and modes
 
-`bench.sh` calls these subcommands of `prolly-bench`. Each prints one line
+`bench.sh` and `layout.sh` call these subcommands of `prolly-bench`. Each prints one line
 per record: the first word is the kind, then `key=value` fields.
 
 | Subcommand | What | Store |
@@ -80,45 +85,14 @@ per record: the first word is the kind, then `key=value` fields.
 | `gen tree` | `SMOKE=1` only: a tree of N files in 16 subdirectories | none |
 | `seed` | Seeds the first tree with the seed code path of SliceFS (default profile and hash), once per start of the script | `seeded` |
 | `whole` | The real `DictMetadataStore` commit on a copy of the seeded store: a setup commit, the `scatter` and `cluster` commits, the next tree as one commit (the version step), then the `insdel` commits | the copy of `seeded` |
-| `batches` | Not timed. For each pair of consecutive commit roots of `whole`, the change of the `inode_data` map (sorted puts and deletes), streamed from the two map nodes | reads the copy (opened read only) |
-| `flat` | The current design for one map: the whole `inode_data` map in RAM, interned in full per commit by a copy of `intern_u64_digest_map` (through `store_io::put_value`), then `cs.sync()` | a new store with only this map |
-| `prolly` | The prototype: a bulk build from the first map, then one `prolly::apply` of each batch and one `cs.sync()` per commit | a new store with only this map |
 | `scale` | Synthetic: N sorted entries, a build, then one changed middle value (`apply1`), for `flat` or `prolly` | a new store per row |
 
-The three modes:
+`whole` is the real commit, with every map. It is the cost that a user sees.
+`scale` is the cost of one synthetic map, the flat way and the prolly way.
 
-- `whole` is the real commit, with every map. It is the cost that a user
-  sees.
-- `flat` and `prolly` are the cost of one map (`inode_data`), the current way
-  and the prolly way.
-
-Why three processes and replayed real changes, and not a stats delta of
-one map inside the real commit:
-
-- The commit internals of `metadata` are private: the fields of
-  `PreparedCommit` and `intern_u64_digest_map` are not `pub`. So the cost of
-  one map inside the real commit cannot be timed from outside the crate,
-  and this phase does not change `metadata`. `flat` is a copy of that code.
-- Before store format 8 the commit stored `inode_map` too, a second map with
-  the same `(ino, digest)` entries as `inode_data`; format 8 removed it
-  (Phase 25), and the Phase 24 numbers were taken with it. In that commit
-  `inode_map` was interned first, so a stats delta of `inode_data` read near 0
-  and made the current design look free. Each map-only mode thus has its own
-  store with only that map.
-- A `prolly` process must not hold the metadata maps, else its peak RSS
-  includes them. `flat` and `prolly` replay the batch files that `batches`
-  made from the real `inode_data` change of each commit, so they see the
-  same entries (real digests, real creates and deletes) without opening
-  `DictMetadataStore`.
-- Both replays end with a `check` line: a BLAKE3 digest of the final map
-  as stored (`flat` reads its last stored value back, `prolly` iterates its
-  stored tree) that must be the same as the digest of the real final map
-  (`final` line of `batches`). `ok=1` means they match. A mismatch stops the
-  run.
-
-The modes run in this order in each run: `whole`, `batches`, then `flat`
-and `prolly` (flat first on odd runs, prolly first on even runs), then the
-`scale` rows of each n in the same mode order.
+`whole` ends each run with the shape lines of `shape.txt`. The modes run in
+this order in each run: `whole`, then the `scale` rows of each n (flat first
+on odd runs, prolly first on even runs).
 
 ## Edit script
 
@@ -140,8 +114,7 @@ All from `SEED` (default 24), so the same for every run:
   commit: a delete takes the oldest file that the script created, and that
   is mostly a file of the same commit. So the `inode_data` change of these
   commits is about K / 2 value replacements plus a few entries at the right
-  edge (see `batches.csv`). With fixed-width values a replacement moves no
-  node boundary.
+  edge. With fixed-width values a replacement moves no node boundary.
 - Version step (seq after the `scatter` and `cluster` commits, pattern
   `version`): the next tree as one commit. A file with the same content key
   is left alone; a changed file gets new content; new files and directories
@@ -166,7 +139,7 @@ has 1 + 2 x 4 x 10 + 1 + 4 x 10 = 122 commits per mode.
 
 | Env | Default | What |
 |---|---|---|
-| `WORK` | a new temp dir | `results.csv`, `scale.csv`, `disk.csv`, `edits.csv`, `batches.csv`, `shape.txt`, `machine.txt`. The stores, step outputs and the smoke data go in `WORK/stores.XXXXXX`, a new dir that the script makes with `mktemp -d` and removes at exit (also after a signal) |
+| `WORK` | a new temp dir | `results.csv`, `scale.csv`, `disk.csv`, `edits.csv`, `shape.txt`, `machine.txt`. The stores, step outputs and the smoke data go in `WORK/stores.XXXXXX`, a new dir that the script makes with `mktemp -d` and removes at exit (also after a signal) |
 | `BIN` | build it | The `prolly-bench` binary. When unset, the script runs `cargo build --release -p prolly-bench` in the repo and takes the binary from `CARGO_TARGET_DIR` (a relative `CARGO_TARGET_DIR` is relative to the repo, as for cargo) or `target` |
 | `RUNS` | `3` | Runs, when the second argument is not given |
 | `SMOKE` | `0` | `1`: two small generated trees and a short edit script (see below) |
@@ -189,7 +162,7 @@ each number is the `median_low` of that column over the run rows of the
 group, so it is always a value of a real run. A column that is `NA` in every
 row of the group stays `NA`. The groups are (mode, pattern, k) for
 `results.csv` (with `seq=all`), (mode, n, op) for `scale.csv` and (mode,
-phase) for `disk.csv`. `edits.csv` and `batches.csv` have no median rows.
+phase) for `disk.csv`. `edits.csv` has no median rows.
 
 ## Smoke mode
 
@@ -199,28 +172,30 @@ phase) for `disk.csv`. `edits.csv` and `batches.csv` have no median rows.
 new files), each file up to 4 KiB. It refuses a data dir argument, so smoke
 data never go over real data. It sets `BOOST_VERS="0_0_1 0_0_2"` and, unless
 they are set, `KS="1 10"`, `COMMITS=2` and `SCALE_NS="10000 50000"`. With
-`RUNS=1` it gives 42 run rows and 24 median rows in `results.csv`, 16 rows
-in `scale.csv`, 12 in `disk.csv`, 14 in `edits.csv` and 13 in `batches.csv`.
-It checks that the script works; its numbers say nothing about Boost
-(`machine.txt` has `bench_data=smoke`).
+`RUNS=1` it gives 14 run rows and 8 median rows in `results.csv`, 16 rows
+in `scale.csv`, 4 in `disk.csv` and 14 in `edits.csv`. It checks that the
+script works; its numbers say nothing about Boost (`machine.txt` has
+`bench_data=smoke`).
+
+`LAYOUT_SMOKE=1 layout.sh` makes a small synthetic matrix (18 rows, 180 rows
+in `layout.csv`, 18 `check` lines).
 
 ## results.csv columns
 
-One row per commit and mode (the line `commit` of `whole`, `flat` and
-`prolly`).
+One row per commit (the line `commit` of `whole`).
 
 | Column | Unit | What |
 |---|---|---|
-| `mode` | | `whole`, `flat` or `prolly` |
+| `mode` | | `whole` |
 | `run` | | 1 to RUNS, or `median` |
-| `pattern` | | `setup`, `scatter`, `cluster`, `version` or `insdel` (`whole`); `bulk` for seq 0 of `flat` and `prolly` (the first full intern or bulk build) |
+| `pattern` | | `setup`, `scatter`, `cluster`, `version` or `insdel` |
 | `k` | files | K of the small commit; 0 for setup, bulk and version |
 | `seq` | | Commit number in the run, from 0; `all` in median rows |
-| `entries_changed` | entries | `inode_data` entries put or deleted by this commit (puts + dels of the batch; for `bulk`, the entries of the first map); `NA` for seq 0 of `whole` |
-| `serialized_bytes` | bytes | Bytes serialized and hashed by the commit. `whole`: the six map nodes plus the 230-byte root record. `flat`: the `inode_data` node (8 + 41 x entries). `prolly`: the bytes of the nodes written |
-| `begin_ms` | ms | `whole`: `begin_commit` (it clones every map); `NA` for `flat` and `prolly` |
-| `finish_ms` | ms | `whole`: `finish_commit` (interns all maps, writes the root, syncs). `flat`, `prolly`: the intern or `apply`, plus `cs.sync()`. The input is never in the time: `flat` has its map before the timer, and the `prolly` bulk build reads `base.bin` in pieces of 16,384 entries outside the timer (only the pushes, `finish` and the sync are timed) |
-| `total_ms` | ms | `begin_ms + finish_ms` (`whole`); `finish_ms` (`flat`, `prolly`) |
+| `entries_changed` | entries | `NA` (the batch files that gave it are retired) |
+| `serialized_bytes` | bytes | Bytes serialized and hashed by the commit |
+| `begin_ms` | ms | `begin_commit` (it clones every map) |
+| `finish_ms` | ms | `finish_commit` (interns all maps, writes the root, syncs) |
+| `total_ms` | ms | `begin_ms + finish_ms` |
 | `cpu_user_s` | s | User CPU time of the commit (`getrusage` before and after) |
 | `cpu_sys_s` | s | System CPU time of the commit |
 | `maxrss_bytes` | bytes | `ru_maxrss` of the process after the commit (a high-water mark, so only a rise is a cost of this commit) |
@@ -228,8 +203,8 @@ One row per commit and mode (the line `commit` of `whole`, `flat` and
 | `new_raw_bytes` | bytes | Bytes of the new objects before zstd |
 | `new_stored_bytes` | bytes | Bytes of the new object payloads in the packs (after zstd) |
 | `new_record_bytes` | bytes | `new_stored_bytes` plus 46 bytes per new object (the 42-byte record header and the 4-byte record CRC): the bytes that the packs grow by |
-| `nodes_read` | nodes | `prolly`: nodes read by `apply` (0 for the bulk build); `NA` for `whole` and `flat` |
-| `nodes_written` | nodes | `prolly`: nodes written; `NA` for `whole` and `flat` |
+| `nodes_read` | nodes | `NA` |
+| `nodes_written` | nodes | `NA` |
 | `peak_rss_bytes` | bytes | Peak RSS of the whole step process (`/usr/bin/time -l` on macOS, `-v` with GNU time); the same for every row of a step; `NA` without one of them |
 
 ## scale.csv columns
@@ -257,14 +232,14 @@ One row per commit and mode (the line `commit` of `whole`, `flat` and
 
 | Column | Unit | What |
 |---|---|---|
-| `mode` | | `whole`, `flat` or `prolly` |
+| `mode` | | `whole` |
 | `run` | | 1 to RUNS, or `median` |
-| `phase` | | `start` (`whole`: the seeded store before the setup commit; `flat`, `prolly`: after the first intern or build and a close of the store) or `end` (after the last commit and a close of the store). A close seals the active pack and writes its index, so every size includes the pack index |
+| `phase` | | `start` (the seeded store before the setup commit) or `end` (after the last commit and a close of the store). A close seals the active pack and writes its index, so every size includes the pack index |
 | `apparent_bytes` | bytes | Sum of the file sizes of the store dir |
 | `alloc_bytes` | bytes | Allocated blocks of those files x 512 |
 | `files` | files | Files in the store dir |
 
-## edits.csv, batches.csv, shape.txt and machine.txt
+## edits.csv, shape.txt and machine.txt
 
 `edits.csv` has one row per commit of `whole`:
 
@@ -276,28 +251,14 @@ One row per commit and mode (the line `commit` of `whole`, `flat` and
 | `create` | Files created (`insdel`: files inserted again at a freed inode number) |
 | `delete` | Files deleted |
 
-`batches.csv` has one row per commit after the setup commit:
-
-| Column | What |
-|---|---|
-| `run`, `seq`, `pattern`, `k` | As in `results.csv` |
-| `puts` | `inode_data` entries put (new or changed value) |
-| `dels` | `inode_data` entries deleted |
-| `inserts` | The puts of keys that the old map did not have |
-
-`shape.txt` has the lines `seed` (prefix `run=0`) and `info`, `version`,
-`final`, `check`, `hash` and `tree` (prefix `run=<r>`) as the binary prints
-them:
+`shape.txt` has the lines `seed` (prefix `run=0`) and `info` and `version`
+(prefix `run=<r>`) as the binary prints them:
 
 | Line | What |
 |---|---|
 | `seed` | Seed time and inode count |
 | `info` | `inode_data` entries, the inode count of the root record, the next inode number, the bytes of the six map nodes, `ru_maxrss` after the store load |
 | `version` | Changes of the version step: files changed, created and deleted, directories created and deleted |
-| `final` | Entries and BLAKE3 digest of the real final `inode_data` |
-| `check` | Entries and digest of the final map of `flat` or `prolly`, and `ok=1` when it equals `final` |
-| `hash` | Cost of the boundary hash per key, in ns (over the keys of the first map) |
-| `tree` | Shape of the final prolly tree: depth, nodes, leaves, leaf bytes (min, mean, max), internal nodes and their mean bytes |
 
 `machine.txt` has `key=value` lines and no path, host name or user name:
 
@@ -317,29 +278,24 @@ them:
 ## Notes
 
 - Serialized bytes are not new stored bytes. Serialized bytes are hashed
-  and cut on each commit: O(map size) for `whole` and `flat`, O(changes x
-  depth) for `prolly`. New stored bytes are small in both designs: FastCDC
-  already stores only the changed chunks of a flat map (D-24). Read the two
-  columns apart.
+  and cut on each commit: O(map size) for a flat map, O(changes x depth) for
+  a prolly tree. New stored bytes are small in both designs: FastCDC already
+  stores only the changed chunks of a flat map (D-24). Read the two columns
+  apart.
 - `begin_ms` of `whole` is the cost of cloning every map in `begin_commit`.
 - The disk growth of `whole` includes the 4 KiB content of the content
-  edits and creates. The `flat` and `prolly` stores hold only the map.
+  edits and creates.
 - All sizes are before GC: no GC runs, so dead nodes stay in the packs.
 - The page cache is warm: the script reads both trees once before the runs
   and does not drop the cache.
 - `peak_rss_bytes` is `NA` where there is no `/usr/bin/time` with `-l` or
   GNU `-v` (for example the Linux Docker image).
 - The `scale` rows are synthetic entries, not Boost.
-- The prototype has no node cache (D-17): every `apply` reads its paths
-  from the store.
-- The target map is `inode_data` only. It is one of the three maps with one
-  entry per inode or file (`inode_data`, `dir_data`, `manifest_data`; the
-  duplicate `inode_map` was removed in store format 8) and about a third of
-  the serialized bytes per commit. So a map-only gain of `prolly` over `flat`
-  is not the gain of the whole commit.
+- The prototype has no node cache (D-17): every `apply` of a `scale` row
+  reads its paths from the store.
 - Memory of the script is bounded: it holds no data in RAM. The bench
-  processes stream the trees and the map nodes in pieces (D-02); `flat`
-  holds its map, as the current design does.
+  processes stream the trees in pieces (D-02); `scale --mode flat` holds its
+  map, as the flat design does.
 - Run time of a full Boost run: plan 24-05 measures it.
 
 ## Layout and constants benchmark (Phase 25)
@@ -347,6 +303,9 @@ them:
 Phase 25 asks two questions of the prolly metadata format: how to lay the five
 metadata maps out in trees (Q-2), and which constants to use (L and NODE_MAX).
 `layout.sh` runs the whole matrix; `decide.py` holds the rules that read it.
+The Boost rows of Phase 25 (real commits of two Boost versions) ran with the
+modes `maps` and `layout`. These modes are retired (see the top of this file);
+tag `v2.3.0` keeps them. `layout.sh` now runs the synthetic rows only.
 
 **Layouts** (`layout.rs`). The key of a per-inode record is the inode number;
 the key of a refcount record is the 33-byte content key.
@@ -364,26 +323,23 @@ the key of a refcount record is the 33-byte content key.
 `L:NODE_MAX`: `4096:16384` (the Dolt values, the config of the layout
 decision), `8192:16384` and `8192:32768`.
 
-**Modes** of `prolly-bench` (each prints `key=value` lines with
+**Mode** of `prolly-bench` (it prints `key=value` lines with
 `mode=layout source=.. n=.. layout=.. l=.. node_max=..`):
 
 | Mode | What |
 |---|---|
-| `maps --store S --roots FILE --out DIR` | The change of all five maps of each real commit of `whole`, as batch files, and `plan.txt` (the commits and the real final maps) |
-| `layout --maps DIR --layout a\|b\|c --store P [--l L] [--node-max M]` | Builds the base maps into trees of the layout, replays each commit (one `apply` per tree, one `sync`), then checks every final tree against the real final map. Lines: `build`, `commit`, `tree` (phase `base` and `final`), `check` |
 | `synth --n N --layout a\|b\|c --store P [--seed S] [--l L] [--node-max M] [--commits C] [--ks "100 1000"] [--patterns "one mixed insdel"]` | The same for a synthetic source: N inodes (about 90% files with a manifest entry and 2 refcount keys each, about 10% directories, about 5% with an xattr entry), made from sorted streams on the fly (never a whole map in RAM), and the D-02 commit mix: `one` (k=1), `mixed` (k changed files) and `insdel` (k/2 creates at the right edge, k/2 deletes). The check covers the entry count of each map and every changed, inserted, created and deleted key |
 
-**The runner.** `layout.sh <data-dir>` seeds `x/boost_<V1>`, runs `whole` with
-the patterns `scatter` and `insdel` (the next tree `x/boost_<V2>` as the version
-step), runs `maps`, then one `layout` process per layout and config (the Boost
-rows), then one `synth` process per size in `SYNTH_NS`, layout and config. Each
-row process has its own store, a time limit (`ROW_TIMEOUT`) and its output in
-`rows/<source>-<n>-<layout>-<L>-<NODE_MAX>.txt`, ending with a line `rc=<code>`.
-With `RESUME=1` a finished row and a finished Boost step are not run again.
-`LAYOUT_SMOKE=1` (no data dir) runs a small generated matrix in minutes. Env:
-`WORK`, `BIN`, `CONFIGS`, `LAYOUTS`, `SYNTH_NS`, `BOOST_VERS`, `KS`,
-`SYNTH_KS`, `COMMITS`, `SEED`, `ROW_TIMEOUT`, `RESUME`, `LAYOUT_SMOKE` (the
-defaults are in the header of the script).
+**The runner.** `layout.sh` runs one `synth` process per size in `SYNTH_NS`,
+layout and config. Each row process has its own store, a time limit
+(`ROW_TIMEOUT`) and its output in
+`rows/<source>-<n>-<layout>-<L>-<NODE_MAX>.txt`, ending with a line
+`rc=<code>`. With `RESUME=1` a finished row is not run again. `LAYOUT_SMOKE=1`
+runs a small matrix in minutes. It takes no data dir. Env: `WORK`, `BIN`,
+`CONFIGS`, `LAYOUTS`, `SYNTH_NS`, `SYNTH_KS`, `COMMITS`, `SEED`,
+`ROW_TIMEOUT`, `RESUME`, `LAYOUT_SMOKE` (the defaults are in the header of the
+script). The default of `--l` of `synth` is 8192, the product value (Phase 25
+verdict).
 
 **Output files** (in `WORK`, no path, host or user):
 
@@ -395,12 +351,11 @@ defaults are in the header of the script).
 | `checks.txt` | the `check` lines; every one must be `ok=1` |
 | `machine.txt` | machine and run parameters |
 
-**Docker.** `OUT=<result dir> DATA=<Boost data dir> scripts/docker-linux-test/run.sh prolly-layout`
-builds the bench in release and runs the runner in a container. `DATA` is
-mounted read only, `OUT` receives the files above and `rows/`, and the stores
-live on the disk-backed named volume `slicefs-prolly-work` (no tmpfs), removed
-at the end unless `RESUME=1`. `LAYOUT_SMOKE=1` needs no `DATA`. It mounts
-nothing and needs no FUSE device.
+**Docker.** `OUT=<result dir> scripts/docker-linux-test/run.sh prolly-layout`
+builds the bench in release and runs the runner in a container. `OUT`
+receives the files above and `rows/`, and the stores live on the disk-backed
+named volume `slicefs-prolly-work` (no tmpfs), removed at the end unless
+`RESUME=1`. It mounts nothing and needs no FUSE device.
 
 **The decision script.** `python3 scripts/prolly-bench/decide.py [--expect-ns N1,N2] [--expect-ks K1,K2] DIR`
 reads `layout.csv`, `shape.csv` and `checks.txt` of `DIR` and prints the rows it
@@ -411,8 +366,11 @@ rules on small fixtures. The rules (the thresholds, the rows, the 1B
 extrapolation) are written in its docstring and are fixed before the real run:
 they are not changed after the data is seen.
 
-**Boost refcounts are empty.** The product never writes refcounts today, so
-the refcount map of every Boost store has no entry. In the Boost rows the
+`decide.py` also asks for the Boost rows, so it reads only the data of the
+Phase 25 run; a new run of `layout.sh` has the synthetic rows only.
+
+**Boost refcounts are empty** (in the Phase 25 Boost rows). The product never
+writes refcounts today, so the refcount map of every Boost store has no entry. In the Boost rows the
 refcounts tree of layouts a and c is empty, and layout b has no `0x02` keys. So
 the Boost rows say nothing about refcounts in a layout, and the signal about
 layout b (refcounts inside) against layout c (refcounts apart) comes only from
