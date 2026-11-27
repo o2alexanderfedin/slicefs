@@ -78,7 +78,7 @@ fn golden_root() {
     let s = mem_store();
     let (root, st) = build(&s, Config::DEFAULT, u64_entries(5_000, 7)).unwrap();
     pin!(leaf_counts(&s, &root), [93, 133, 70, 65, 80, 93, 72, 90, 137, 88, 73, 90, 108, 89, 96, 61, 42, 126, 109, 95, 102, 76, 124, 101, 66, 103, 104, 103, 85, 120, 98, 103, 87, 68, 83, 22, 118, 53, 98, 106, 105, 125, 53, 111, 59, 101, 38, 75, 90, 45, 76, 64, 60, 111, 82, 65, 85, 25]);
-    pin!(root.to_hex(), "1ee1cf56844ec96d06f8dce27d4e0de09b87e7ce5926e397ff4e4c387e271f81d6");
+    pin!(root.to_hex(), "1ec2d422083f61f9882ffc6615b023b186e262c94b8507c6bbdb307610c3aeb220");
     pin!((st.depth, st.leaves), (3, 58));
     // (e) the unsalted boundary hash.
     pin!((boundary_hash(0, b""), boundary_hash(1, b"key")), (527629384, 94351618));
@@ -349,7 +349,13 @@ fn memory_is_bounded() {
 
 /// Node bytes with any header and body (no checks).
 fn raw(level: u8, count: u32, body: &[u8]) -> Vec<u8> {
+    raw_v(RULE_VERSION, level, count, body)
+}
+
+/// Like `raw`, with any rule version byte.
+fn raw_v(version: u8, level: u8, count: u32, body: &[u8]) -> Vec<u8> {
     let mut b = NODE_MAGIC.to_vec();
+    b.push(version);
     b.push(level);
     b.extend_from_slice(&count.to_le_bytes());
     b.extend_from_slice(body);
@@ -864,10 +870,41 @@ fn malformed_node_is_an_error_in_apply() {
     let batch = [put(b"zzzz", b"new")];
     for (what, bytes) in cases {
         let bad = s.put(&bytes).unwrap();
-        let parent = s.put(&encode_internal(if bytes[4] == 0 { 1 } else { bytes[4] + 1 }, &[child(bad, 1)])).unwrap();
+        let parent = s.put(&encode_internal(if bytes[5] == 0 { 1 } else { bytes[5] + 1 }, &[child(bad, 1)])).unwrap();
         for (place, root) in [("root", bad), ("child", parent)] {
             let got = catch_unwind(AssertUnwindSafe(|| apply(&s, Config::SMALL, &root, &batch)));
             assert!(matches!(got, Ok(Err(Error::Corrupt(_)))), "{what} as {place}: {got:?}");
         }
+    }
+}
+
+#[test]
+fn node_header_layout() {
+    use crate::node::encode_leaf;
+    let s = mem_store();
+    let empty = s.read(&empty_root(&s).unwrap()).unwrap();
+    assert_eq!(empty.as_slice(), [b'S', b'P', b'T', b'1', 1, 0, 0, 0, 0, 0]);
+    assert_eq!(empty.len(), NODE_HEADER);
+    let one = encode_leaf(&[(b"k".to_vec(), b"v".to_vec())]);
+    assert_eq!(&one[..10], [b'S', b'P', b'T', b'1', 1, 0, 1, 0, 0, 0]);
+}
+
+#[test]
+fn rule_version_is_refused() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let s = mem_store();
+    for version in [0u8, 2] {
+        let bytes = raw_v(version, 0, 1, &raw_leaf_entry(b"a", b"1"));
+        let root = s.put(&bytes).unwrap();
+        let is_refused = |what: &str, got: std::thread::Result<Result<()>>| match got {
+            Ok(Err(Error::RuleVersion { found })) => assert_eq!(found, version, "{what}"),
+            other => panic!("{what} with version {version}: {other:?}"),
+        };
+        is_refused("get", catch_unwind(AssertUnwindSafe(|| get(&s, &root, b"a").map(|_| ()))));
+        is_refused("iter", catch_unwind(AssertUnwindSafe(|| iter(&s, &root).map(|_| ()))));
+        is_refused("walk", catch_unwind(AssertUnwindSafe(|| walk(&s, &root, |_| {}))));
+        let before = s.stats().objects;
+        is_refused("apply", catch_unwind(AssertUnwindSafe(|| apply(&s, Config::DEFAULT, &root, &[put(b"b", b"2")]).map(|_| ()))));
+        assert_eq!(s.stats().objects, before, "apply wrote an object");
     }
 }

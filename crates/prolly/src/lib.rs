@@ -19,8 +19,10 @@
 //! # Node format
 //!
 //! The node bytes are private to this crate; this is not a store format.
-//! Header (`NODE_HEADER` = 9 bytes): `NODE_MAGIC` (`SPT1`), level `u8`,
-//! entry count `u32` LE. A leaf entry (level 0) is klen `u16` LE, vlen
+//! Header (`NODE_HEADER` = 10 bytes): `NODE_MAGIC` (`SPT1`), rule version
+//! `u8` (`RULE_VERSION`), level `u8`, entry count `u32` LE. A node of
+//! another rule version gives `Error::RuleVersion` in `get`, the cursor,
+//! `walk` and `apply`. A leaf entry (level 0) is klen `u16` LE, vlen
 //! `u16` LE, key, value. An internal entry (level 1 and up) is klen `u16`
 //! LE, the last key of the child, the child `ObjectId` (33 bytes) and the
 //! leaf entry count of the child's subtree `u64` LE. Keys are strictly
@@ -132,8 +134,12 @@ pub use apply::{apply, ApplyStats, Edit};
 pub use rule::{boundary_hash, threshold, Splitter};
 pub use tree::{build, empty_root, get, iter, walk, BuildStats, Builder, Cursor, NodeInfo};
 
-/// Bytes of the node header: magic 4, level 1, entry count 4.
-pub const NODE_HEADER: usize = 9;
+/// The version of the boundary rule (the threshold function, its table and
+/// the constants of `Config::DEFAULT`) that wrote a node. Every node header
+/// carries it; a reader refuses another version.
+pub const RULE_VERSION: u8 = 1;
+/// Bytes of the node header: magic 4, rule version 1, level 1, entry count 4.
+pub const NODE_HEADER: usize = 10;
 /// No cut below this node size (Dolt `minChunkSize`).
 pub const NODE_MIN: usize = 512;
 /// Hard bound of a node, header included (Dolt `maxChunkSize`).
@@ -218,6 +224,8 @@ pub enum Error {
     KeyTooLarge { len: usize, max: usize },
     /// Keys are not strictly ascending.
     Unsorted,
+    /// A node was written under another boundary rule version.
+    RuleVersion { found: u8 },
 }
 
 impl std::fmt::Display for Error {
@@ -228,6 +236,9 @@ impl std::fmt::Display for Error {
             Error::EntryTooLarge { len, max } => write!(f, "prolly: entry of {len} bytes is above the limit {max}"),
             Error::KeyTooLarge { len, max } => write!(f, "prolly: key of {len} bytes is above the limit {max}"),
             Error::Unsorted => write!(f, "prolly: keys are not strictly ascending"),
+            Error::RuleVersion { found } => {
+                write!(f, "prolly: node of boundary rule version {found}; this build knows version {RULE_VERSION} only")
+            }
         }
     }
 }
