@@ -22,10 +22,10 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-11-26)
+See: .planning/PROJECT.md (updated 2026-11-27)
 
 **Core value:** High-ratio data deduplication that works transparently as a real, daily-driver POSIX filesystem
-**Current focus:** Phase 25 — Prolly format and layout
+**Current focus:** Phase 26 — Prolly maps in commit, read and GC
 
 ## Current Position
 
@@ -50,6 +50,7 @@ Progress: [██░░░░░░░░] 17%
 
 Full log: Key Decisions in .planning/PROJECT.md; per-phase detail in .planning/milestones/v2.2-phases/.
 Owner-approved order of work for v2.3: prolly maps (#215), migration (#155), crash and soak tests (#157), scrub report (#159), limits page (#158). Serial track; each phase depends on the one before it.
+Phase 25: layout a (one prolly tree per map), L=8192 / NODE_MAX=16384, integer boundary rule with a version byte, optional boundary salt (ro_compat), store format 8, 197-byte root record with one inode map.
 
 ### Pending Todos
 
@@ -57,7 +58,8 @@ None.
 
 ### Blockers/Concerns
 
-- Phase 25: Q-2 is decided by a bench test of both layouts at the start of the phase (owner delegated the choice; see 25-CONTEXT.md D-02).
+- Phase 26: this interim build writes format 8 headers with flat maps (review IN-02); the Phase 26 root record check must refuse such stores cleanly. Also take IN-01 (read `next_ino` after `take_all()`) and IN-05 (bench `--l` default 4096) there.
+- Phase 26: the product writes no refcounts today, so only synthetic rows measured the refcounts map.
 - Phase 26: the flat-map store code goes away. The "1/5 of the flat time" check (PMAP-07) needs a flat baseline; measure it with release `v2.3.0`.
 - Phase 27: `rsync -aHAX` copies the live tree only. Snapshots of the old store are not carried over; `docs/user/upgrade.md` must say this.
 - Phase 29: with prolly maps, a bad metadata node can damage many files or a whole snapshot. The scrub report must handle a bad node, not only a bad chunk.
@@ -102,9 +104,9 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-27T04:07:09.154Z
+Last session: 2026-11-27T08:09:54Z
 Stopped at: Phase 25 complete, ready to plan Phase 26
-Resume file: .planning/phases/25-prolly-format-and-layout/25-CONTEXT.md
+Resume file: None
 
 ## Operator Next Steps
 

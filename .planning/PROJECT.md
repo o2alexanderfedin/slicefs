@@ -25,7 +25,7 @@ High-ratio data deduplication that works transparently as a real, daily-driver f
 **Goal:** Move the metadata maps to prolly trees so a commit stays fast with millions of inodes, and make the store safer to use: a migration path between store formats, random crash tests, a scrub that names the damaged files, and a user page for the limits. It ships as release `v2.4.0`.
 
 **Target features:**
-- Prolly trees for the metadata maps, behind a store format flag (#215)
+- Prolly trees for the metadata maps, as store format 8 (#215)
 - Migration path between store formats: the copy path, `scripts/migrate-store.sh`, `docs/user/upgrade.md` (#155)
 - Random crash tests and soak runs of a live mount in Docker (#157)
 - Scrub lists the files and snapshots that each bad object damages; `--json`; exit codes 0/1/2; bounded memory (#159)
@@ -101,7 +101,7 @@ Other candidates: idle-merge control (#141), several roots, commits and refs (#8
 
 ### Active
 
-- [ ] Prolly-tree metadata maps behind a store format flag (#215)
+- [ ] Prolly-tree metadata maps, store format 8 (#215); format, layout and header done in Phase 25, maps in the commit, read and GC paths in Phase 26
 - [ ] Migration path between store formats (#155)
 - [ ] Random crash tests and soak runs of a live mount (#157)
 - [ ] Scrub names the damaged files and snapshots (#159)
@@ -157,6 +157,9 @@ Other candidates: idle-merge control (#141), several roots, commits and refs (#8
 | SHA-256 as a second production hash; rehash is offline only (v2.2, Phase 23) | Owner decision; rehash refuses while the store is mounted | ✓ Good |
 | Prolly trees: decision "later" (v2.2, Phase 24) | At the Boost scale the gain per commit is small (about 4-8 ms); it grows with the map (1.6M entries pass 100 ms flat); file manifests are already content-cut trees | ⚠️ Overridden: the owner filed #215 (priority high) on 2026-11-26; prolly maps are adopted in v2.3 |
 | GSD milestone v2.2 ships as release `v2.3.0` | `v2.2.0` was already used by the v2.1 release | ✓ Done |
+| Prolly layout a: one tree per metadata map, refcounts included (v2.3, Phase 25) | Pre-registered bench rules at Boost, 1M and 10M inodes: the combined layouts touch about 30% fewer nodes per small commit but have 2.4-3.4% more nodes at 1B inodes | ✓ Decided by rule; owner may revisit the 1B tolerance |
+| Prolly constants L=8192, NODE_MAX=16384, integer rule with version byte (v2.3, Phase 25) | Halves the nodes at 1B inodes (23.5M vs 47.3M); costs 1.68x bytes and 1.64x CPU per small commit, inside the limits | ✓ Decided by rule |
+| Store format 8 for prolly stores; v2.3.0 and format 7 refuse each other (v2.3, Phase 25) | Owner decision D-12; format policy text amended | ✓ Done |
 
 ## Evolution
 
@@ -177,4 +180,4 @@ This document evolves at phase transitions and milestone boundaries.
 
 ---
 
-*Last updated: 2026-11-26 after the start of milestone v2.3*
+*Last updated: 2026-11-27 after Phase 25*
