@@ -67,7 +67,7 @@ No `./CLAUDE.md` or `./.claude/CLAUDE.md` exists in the repo [VERIFIED: `ls CLAU
 - Tests that mount run only in Docker (`scripts/docker-linux-test/run.sh`, OrbStack); the Boost mount run only by hand, on main, or on `ci/**`; short waits in tests.
 - `cargo test --workspace` must pass at each plan end.
 - macOS backend: FSKit only. No SMB/NFS fallback.
-- Never mention GPL/licensing in public GitHub text (issues, PRs). No push, no `gh` writes in this phase.
+- Public GitHub text (issues, PRs) follows the owner's content rules. No push, no `gh` writes in this phase.
 - Parallel or background agents get their own git worktree, never the shared main tree. The v2.3.0 baseline build goes in a separate worktree too.
 - A huge `target/debug/deps` slows test start (840k files = 16 s per binary): `cargo clean` before suspecting a hang. Current `target/` is 8.0 GB.
 - Safety gates (clippy with unsafe count, loom/Miri/TSan scripts in `scripts/safety/`) are a release gate, not per-PR; the phase gate of Phase 25 ran `RUST_STABLE=stable scripts/safety/clippy.sh` and Docker `all`.
