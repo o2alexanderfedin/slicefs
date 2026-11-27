@@ -8,7 +8,8 @@
 //! serializer) and `prolly` (the prototype) replay the changes, each in its
 //! own scratch store. `scale` compares the two on synthetic maps. `maps`
 //! extracts the change of all five metadata maps of each commit, and
-//! `layout` replays them into prolly trees of one layout (Phase 25).
+//! `layout` replays them into prolly trees of one layout (Phase 25), and
+//! `synth` does the same for synthetic maps of N inodes made on the fly.
 //!
 //! Output: one line per record, the first word is the kind, then
 //! `key=value` fields. Progress goes to stderr. A bad argument exits 2,
@@ -16,6 +17,7 @@
 
 mod layout;
 mod replay;
+mod synth;
 mod whole;
 
 use std::collections::BTreeMap;
@@ -37,7 +39,8 @@ const USAGE: &str = "usage: prolly-bench gen tree --dir D --files N --seed S [--
        prolly-bench prolly --batches DIR --store P
        prolly-bench scale --mode <flat|prolly> --n N --store DIR [--seed S]
        prolly-bench maps --store S --roots FILE --out DIR
-       prolly-bench layout --maps DIR --layout <a|b|c> --store P [--l L] [--node-max M]";
+       prolly-bench layout --maps DIR --layout <a|b|c> --store P [--l L] [--node-max M]
+       prolly-bench synth --n N --layout <a|b|c> --store P [--seed S] [--l L] [--node-max M] [--commits C] [--ks \"100 1000\"] [--patterns \"one mixed insdel\"]";
 
 // Root record layout: a copy of `root_rec` in crates/metadata/src/store.rs
 // (it is `pub(crate)`), with 33-byte keys.
@@ -240,6 +243,7 @@ fn main() {
         Some("scale") => replay::scale(rest),
         Some("maps") => layout::maps(rest),
         Some("layout") => layout::layout(rest),
+        Some("synth") => synth::synth(rest),
         Some(s) => usage(format!("unknown subcommand {s}")),
         None => usage("no subcommand"),
     };

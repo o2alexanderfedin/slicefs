@@ -157,6 +157,56 @@ fn smoke_end_to_end() {
     }
 }
 
+/// One `synth` run of the smoke: the lines of kind `build`, `commit`,
+/// `tree` and `check` and the exit code.
+fn synth_run(t: &Path, name: &str, layout: &str, extra: &[&str]) -> String {
+    let store = t.join(name);
+    let mut args = vec!["synth", "--layout", layout, "--store", p(&store)];
+    args.extend(extra);
+    ok(&args)
+}
+
+#[test]
+fn synth_smoke() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let t = tmp.path();
+    // Task 1: the `one` pattern in every layout, and a swept config.
+    for (layout, trees) in [("a", 5), ("b", 1), ("c", 2)] {
+        let out = synth_run(t, &format!("one-{layout}"), layout, &["--n", "5000", "--commits", "2", "--patterns", "one"]);
+        assert_eq!(lines(&out, "build").len(), 1, "{out}");
+        let commits = lines(&out, "commit");
+        assert_eq!(commits.len(), 2, "{out}");
+        assert!(commits.iter().all(|l| l.contains(" source=synth ") && l.contains(" pattern=one ") && l.contains(" k=1 ")), "{out}");
+        assert!(commits.iter().all(|l| num(l, "edits") >= 3), "{out}");
+        // base and final trees
+        assert_eq!(lines(&out, "tree").len(), 2 * trees, "{out}");
+        let check = lines(&out, "check");
+        assert_eq!(check.len(), 1, "{out}");
+        assert!(check[0].contains(&format!(" layout={layout} ")) && check[0].ends_with(" ok=1"), "{out}");
+    }
+    let out = synth_run(t, "one-wide", "a", &["--n", "5000", "--commits", "2", "--patterns", "one", "--l", "8192", "--node-max", "32768"]);
+    assert!(lines(&out, "commit").iter().all(|l| l.contains(" l=8192 node_max=32768 ")), "{out}");
+    assert!(lines(&out, "check")[0].ends_with(" ok=1"), "{out}");
+
+    // Task 2: the whole mix, in layouts b and c.
+    for layout in ["b", "c"] {
+        let out = synth_run(t, &format!("mix-{layout}"), layout, &["--n", "20000", "--commits", "2", "--ks", "10 40"]);
+        let commits = lines(&out, "commit");
+        let of = |pattern: &str| -> Vec<&str> {
+            commits.iter().copied().filter(|l| l.contains(&format!(" pattern={pattern} "))).collect()
+        };
+        assert_eq!(of("one").len(), 2, "{out}");
+        assert_eq!(of("mixed").len(), 4, "{out}");
+        let insdel = of("insdel");
+        assert_eq!(insdel.len(), 4, "{out}");
+        assert!(insdel.iter().all(|l| num(l, "edits") >= num(l, "k")), "{out}");
+        assert_eq!(commits.len(), 10, "{out}");
+        let check = lines(&out, "check");
+        assert_eq!(check.len(), 1, "{out}");
+        assert!(check[0].ends_with(" ok=1"), "{out}");
+    }
+}
+
 #[test]
 fn bad_arguments_exit_2() {
     assert_eq!(run(&["no-such-subcommand"]).0, 2);
@@ -171,6 +221,19 @@ fn bad_arguments_exit_2() {
             args.extend(["--layout", "a"]);
             args.extend(extra);
         }
+        assert_eq!(run(&args).0, 2, "{args:?}");
+    }
+    // synth: the option checks come before any file access too.
+    let synth: [&[&str]; 5] = [
+        &["--n", "5", "--layout", "a"],
+        &["--n", "100", "--layout", "z"],
+        &["--n", "100", "--layout", "a", "--patterns", "x"],
+        &["--n", "100", "--layout", "a", "--ks", "26"],
+        &["--n", "100", "--layout", "a", "--commits", "0"],
+    ];
+    for extra in synth {
+        let mut args = vec!["synth", "--store", "no-such-store"];
+        args.extend(extra);
         assert_eq!(run(&args).0, 2, "{args:?}");
     }
 }
