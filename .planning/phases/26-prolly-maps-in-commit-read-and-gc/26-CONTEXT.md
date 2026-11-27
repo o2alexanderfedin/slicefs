@@ -20,6 +20,9 @@ Not in this phase: store migration (Phase 27), crash/soak tests of a live mount 
 ### On-disk format (owner decisions, 2026-11-27)
 - Directory entries are stored by name in the `dir_data` tree: key = directory ino (8 bytes, big endian) || entry name; value = child ino + file type. One change in any directory touches O(tree height) nodes; readdir is a range scan from the directory prefix; the per-directory list object goes away. This replaces the `dir_data` row of the layout-a key grammar in `docs/design/store-format.md` (Phase 25 left room for it). — **Reversibility:** one-way — it is part of store format 8; undo needs a format change and a store copy (Phase 27 path).
 - Small values are stored inline in the prolly leaves: the inode record goes inline in `inode_data`; an xattr set goes inline in `xattr_data` when the entry fits `MAX_ENTRY` (2,048 bytes) and spills to a separate object (value = `ObjectKey`) when it does not; `manifest_data` values stay 33-byte `ObjectKey`s (a manifest is a content tree). `refcounts` keep content key → 8-byte count. This removes about one chunk-index entry and one read per inode lookup. — **Reversibility:** one-way — part of store format 8; undo needs a format change and a store copy.
+- Directory entry details (owner, after research): `.` and `..` are stored as entries, so an empty directory still has entries in the tree; the entry's file type comes from the child's inode mode; readdir order is name byte order (was name hash). — **Reversibility:** one-way — part of store format 8.
+- Value encodings (owner, after research): inode values carry no tag byte (always the inline record); xattr values carry a 1-byte tag (inline set or spilled `ObjectKey`). — **Reversibility:** one-way — part of store format 8.
+- Scope (owner, after research): rehash is ported to rebuild the trees (node IDs change with the hash); paged readdir (resume from a name cookie) is a stretch item, not required; the GC mark walks every snapshot root in full (N snapshots cost N times the node count) and this cost is accepted and recorded; skipping shared subtrees is a later item.
 - `docs/design/store-format.md` § "Metadata maps (store format 8)" is updated with the new key grammar and value encodings (with a version or tag byte where an inline value and a spilled value can both occur).
 
 ### Carried from Phase 25 (locked)
@@ -37,6 +40,8 @@ Not in this phase: store migration (Phase 27), crash/soak tests of a live mount 
 - [Bench] Q: 'How to build a store of 1M+ inodes and the flat baseline?' → Selected: 'a generator that writes through the product metadata API; flat baseline with a v2.3.0 binary built in a separate worktree' — bench tooling
 
 ### Claude's Discretion
+- PMAP-07 rubric reading (owner said "You decide"): "Boost numbers stay within the rubric" means **not `drop`** under the Phase 24 rubric in `docs/research/prolly-trees.md` (prolly better than flat in median wall time and CPU for K up to 100 at Boost scale, new stored bytes at most 2 x flat). Reason: Phase 24 already measured a Boost gain below the `adopt` level, and the owner adopted prolly (#215) for the scale case; the main gate is the 1/5 rule at 1,000,000 inodes. The reading is pre-registered before the run.
+- Node cache cap: a new byte cap of its own (default 64 MiB) with its own mount option, because no existing byte cap covers metadata reads (`--cache-size` is accepted but unused today).
 - Encoding details of the inline values (field order, tag byte), cache eviction policy, the exact fault-point list, the mitigation for the insert/delete-heavy regression (or a written acceptance), and how hard links appear in `dir_data` (each name is its own entry pointing to the same ino).
 
 </decisions>
