@@ -195,8 +195,26 @@ fn a_format_6_store_is_refused() {
     assert_refused(&results, &["older SliceFS (store format 6, no feature flags)"]);
 }
 
+/// [Number]: a format-7 store (made by release v2.3.0) is refused by every
+/// command, with the message that names the upgrade page; no file changes
+/// and no lock file is left.
+#[test]
+fn a_format_7_store_is_refused() {
+    let dir = seeded();
+    let store = dir.path().join("store");
+    let text = std::fs::read_to_string(store.join(FORMAT_FILE)).unwrap();
+    let (_, rest) = text.split_once('\n').unwrap();
+    std::fs::write(store.join(FORMAT_FILE), format!("slicefs-store 7 (store header with feature flags)\n{rest}")).unwrap();
+    let before = tree(&store);
+    let mut all = write_commands(dir.path());
+    all.extend(read_commands(dir.path()));
+    all.push(("mount", mount(&store, &StartArgs::default())));
+    assert_refused(&all, &["store format 7, flat metadata maps", "docs/user/upgrade.md"]);
+    assert_eq!(tree(&store), before, "the store tree does not change");
+}
+
 /// [Durable first]: seed into a new directory writes the header of a new
-/// store (format 7, the default hash, no flag line).
+/// store (format 8, the default hash, no flag line).
 #[test]
 fn seed_writes_the_header_first() {
     let dir = seeded();

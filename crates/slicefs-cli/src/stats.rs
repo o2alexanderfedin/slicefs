@@ -633,13 +633,13 @@ mod tests {
             refcount_distribution: RefcountDist { unique: 10, shared_2x: 5, shared_3plus: 2 },
             snapshots: vec![],
             mounted: false,
-            format: Some(7),
+            format: Some(8),
             flags: FlagSets::default(),
             chunk_profile: chunk_store::ChunkProfile::DEFAULT,
             access: "read-write",
         };
         let json = serde_json::to_string(&stats).expect("StoreStats should serialize to JSON");
-        assert!(json.contains("\"format\":7"), "JSON should contain format: {json}");
+        assert!(json.contains("\"format\":8"), "JSON should contain format: {json}");
         assert!(json.contains("logical_bytes"), "JSON should contain logical_bytes");
         assert!(json.contains("physical_bytes"), "JSON should contain physical_bytes");
         assert!(json.contains("file_dedup_ratio"), "JSON should contain file_dedup_ratio");
@@ -665,12 +665,12 @@ mod tests {
     fn stats_shows_the_header() {
         let dir = seeded_with("compat test-compat-feature r-test\nro_compat test-ro-feature r-test\n");
         let stats = store_stats(&dir.path().join("store")).unwrap();
-        assert_eq!(stats.format, Some(7));
+        assert_eq!(stats.format, Some(8));
         assert_eq!((stats.flags.compat.len(), stats.flags.ro_compat.len(), stats.flags.incompat.len()), (1, 1, 0));
         assert_eq!(stats.access, "read-only");
         let text = human_stats(&stats);
         for line in [
-            "Store format     : 7",
+            "Store format     : 8",
             "Feature flags    : compat test-compat-feature (needs SliceFS r-test; unknown here)",
             "                   ro_compat test-ro-feature (needs SliceFS r-test; unknown here)",
             "Access           : read-only",
@@ -678,7 +678,7 @@ mod tests {
             assert!(text.lines().any(|l| l == line), "no line {line:?} in:\n{text}");
         }
         let v = serde_json::to_value(&stats).unwrap();
-        assert_eq!(v["format"], 7);
+        assert_eq!(v["format"], 8);
         assert_eq!(v["flags"]["compat"][0]["name"], "test-compat-feature");
         assert_eq!(v["flags"]["ro_compat"][0]["name"], "test-ro-feature");
         assert_eq!(v["flags"]["ro_compat"][0]["release"], "r-test");
@@ -719,7 +719,7 @@ mod tests {
         let dir = seeded_with("");
         let stats = store_stats(&dir.path().join("store")).unwrap();
         let text = human_stats(&stats);
-        for line in ["Store format     : 7", "Feature flags    : none", "Access           : read-write"] {
+        for line in ["Store format     : 8", "Feature flags    : none", "Access           : read-write"] {
             assert!(text.lines().any(|l| l == line), "no line {line:?} in:\n{text}");
         }
         let v = serde_json::to_value(&stats).unwrap();

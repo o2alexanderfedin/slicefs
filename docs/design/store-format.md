@@ -38,10 +38,10 @@ The code is `crates/slicefs-cli/src/header.rs`.
   `incompat hash-sha256 <release>` at the end, in the same header write,
   when the header does not have it.
 
-The header of a new store (format 7, no flags):
+The header of a new store (format 8, no flags):
 
 ```
-slicefs-store 7 (store header with feature flags)
+slicefs-store 8 (store header with feature flags, prolly metadata maps)
 hash blake3-256
 ```
 
@@ -50,7 +50,7 @@ The header of a new store with the chunk profile 16/64/256 KiB
 `CHUNK_PROFILE_RELEASE`):
 
 ```
-slicefs-store 7 (store header with feature flags)
+slicefs-store 8 (store header with feature flags, prolly metadata maps)
 hash blake3-256
 chunks 16384 65536 262144
 ro_compat chunk-profile <release>
@@ -61,7 +61,7 @@ The header of a new store with the write hash SHA-256
 `HASH_SHA256_RELEASE`, now `v2.3`):
 
 ```
-slicefs-store 7 (store header with feature flags)
+slicefs-store 8 (store header with feature flags, prolly metadata maps)
 hash sha256
 incompat hash-sha256 v2.3
 ```
@@ -70,7 +70,7 @@ A header with one flag of each class (the names are examples, and
 `<release>` is the place of a release name):
 
 ```
-slicefs-store 7 (store header with feature flags)
+slicefs-store 8 (store header with feature flags, prolly metadata maps)
 hash blake3-256
 compat example-feature <release>
 ro_compat example-read-feature <release>
@@ -106,8 +106,8 @@ Lines are split into words at each space.
 Parse order:
 
 1. Read the number of the first line. If the first line does not have the
-   form `slicefs-store <number>`, stop (M4). If the number is not 7, stop
-   (M2 for a smaller number, M3 for a larger number). A store of another
+   form `slicefs-store <number>`, stop (M4). If the number is not 8, stop
+   (M2 for a number from 0 to 6, M17 for 7, M3 for a larger number). A store of another
    number can have another header layout, so SliceFS reads no more lines.
 2. Read all other lines. A bad flag line, a name that occurs two times, two
    hash lines, a bad chunks line or two chunks lines stop the parse (M9).
@@ -142,8 +142,8 @@ known flag changes nothing in this table):
 | incompat | refuse | refused (M5) | refused (M5) | refused (M5) |
 
 A SliceFS that knows the flag (the name is in its `KNOWN_FLAGS`) opens the
-store for read and write. A SliceFS of store format 6 or older refuses a
-format 7 store, because the first line has another number.
+store for read and write. A SliceFS of store format 7 or older refuses a
+format 8 store, because the first line has another number.
 
 If the header has more than one unknown incompat flag, the message has one
 M5 text for each of them. If it has more than one unknown ro_compat flag,
@@ -168,7 +168,7 @@ The SliceFS classes use the same meanings. The differences:
 
 ## Flag list
 
-Store format 7 has two flags: `KNOWN_FLAGS` is `chunk-profile` and
+Store format 8 has two flags: `KNOWN_FLAGS` is `chunk-profile` and
 `hash-sha256`.
 
 | Name | Class | Release | What it means |
@@ -302,8 +302,8 @@ write.
 | Id | When | Text |
 |----|------|------|
 | M1 | The store has data in packs/ or segments/, but no FORMAT file. | `{store} has data but no store header (the file FORMAT is missing). This SliceFS does not open a store with no header.` |
-| M2 | The format number is smaller than 7. | `{store} was made by an older SliceFS ({what}). The store format changed without a migration: copy the files out with the older version, then into a new store` |
-| M3 | The format number is larger than 7. | `{store} was made by a newer SliceFS (store format {n}). This SliceFS reads store format {known} only.` |
+| M2 | The format number is 0 to 6. | `{store} was made by an older SliceFS ({what}). The store format changed without a migration: copy the files out with the older version, then into a new store` |
+| M3 | The format number is larger than 8. | `{store} was made by a newer SliceFS (store format {n}). This SliceFS reads store format {known} only.` |
 | M4 | The first line does not have the form slicefs-store and a number. | `{store}: unknown store format {line:?}` |
 | M5 | An unknown incompat flag, for any command. | `{store} uses the feature {name}, which needs SliceFS {release} or later. This SliceFS cannot open it.` |
 | M6 | An unknown ro_compat flag: the mount is read-only (printed on stdout). | `Mounting read-only: {store} uses the feature {name}, which needs SliceFS {release} or later to write.` |
@@ -318,11 +318,12 @@ write.
 | M14 | gc (offline), seed, rehash, snapshot create or snapshot switch while a mount or another of these commands holds the store lock. | `{store} is in use: it is mounted, or another command (gc, seed, rehash, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.` |
 | M15 | A writable mount while another mount, gc, seed, rehash, snapshot create or snapshot switch holds the store lock. | `{store} is in use: it is mounted, or a command (gc, seed, rehash, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.` |
 | M16 | `seed` or `mount` with `--chunk-profile` that differs from the profile of the store (also a read-only mount). Nothing in the store changes. | `{store} has the chunk profile {have}; --chunk-profile {want} is another profile. The chunk profile of a store is fixed when the store is made.` |
+| M17 | The format number is 7 (a store of release v2.3.0). | `{store} was made by SliceFS v2.3.0 (store format 7, flat metadata maps). This SliceFS reads store format 8 only. Copy the files into a new store with the steps in docs/user/upgrade.md.` |
 
 The values in the texts:
 
 - `{name}` and `{release}`: the words of the flag line.
-- `{n}` in M3: the format number of the store. `{known}` in M3: 7, the
+- `{n}` in M3: the format number of the store. `{known}` in M3: 8, the
   format number of this SliceFS. `{n}` in M7: the number of records in the
   write log.
 - `{have}` in M16: the profile of the store; `{want}`: the profile of the
@@ -361,7 +362,7 @@ Other texts:
 `slicefs stats` shows four lines after the line `Mounted`:
 
 ```
-Store format     : 7
+Store format     : 8
 Chunk profile    : 4/8/32 KiB
 Feature flags    : none
 Access           : read-write
@@ -382,7 +383,7 @@ Access           : read-write
 With `--json`, the same data is in four fields:
 
 ```
-"format": 7,
+"format": 8,
 "flags": {"compat": [], "ro_compat": [], "incompat": []},
 "chunk_profile": {"min": 4096, "avg": 8192, "max": 32768},
 "access": "read-write"
@@ -397,8 +398,8 @@ With `--json`, the same data is in four fields:
 
 ## Format policy
 
-- The format number changes only when an older SliceFS cannot parse the
-  header safely.
+- The format number changes when an older SliceFS cannot parse the
+  header safely, or when the metadata layout changes as a whole.
 - Any other change of the store adds a flag, by the rule of the flag list.
 - The format number is separate from the release number.
 - A store of another format number is refused. There is no migration.
@@ -406,4 +407,11 @@ With `--json`, the same data is in four fields:
   have version 2, the index MANIFEST (`SFMF`) has version 1, and the runs
   (`SFRN`) have version 2. They are part of the store format. Thus a change
   of one of them needs a flag or a new format number, by this policy.
+- Store format 8 is the format of the prolly metadata maps (issue #215). The
+  owner chose a new format number over an incompat flag on format 7 in the
+  Phase 25 discussion (2026-11-26), because every metadata map changes. The
+  release v2.3.0 refuses format 8 at the first line (M3 of that release),
+  and this release refuses format 7 with M17, which points to
+  `docs/user/upgrade.md`. The number stays separate from the release number
+  (the flag lines carry the release words).
 - The format is not frozen yet.

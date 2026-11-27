@@ -1,6 +1,6 @@
 //! The store header: the text file `<store>/FORMAT`.
 //!
-//! The first line names the store format (`slicefs-store 7 ...`). Each
+//! The first line names the store format (`slicefs-store 8 ...`). Each
 //! later line is one item: the store setting `hash <name>` (the write
 //! hash), the store setting `chunks <min> <avg> <max>` (the chunk profile,
 //! with the ro_compat flag `chunk-profile`), or a feature flag `<class> <name> <release>`, where the class is
@@ -21,9 +21,9 @@ use chunk_store::{ChunkProfile, ObjectHasher, DEFAULT_HASHER};
 /// The header file in the store root.
 pub const FORMAT_FILE: &str = "FORMAT";
 /// The store format number that this build reads and writes.
-pub const FORMAT_NUMBER: u32 = 7;
+pub const FORMAT_NUMBER: u32 = 8;
 /// The first line that this build writes.
-pub const FORMAT: &str = "slicefs-store 7 (store header with feature flags)\n";
+pub const FORMAT: &str = "slicefs-store 8 (store header with feature flags, prolly metadata maps)\n";
 /// The largest header that [`read`] accepts, in bytes.
 pub const MAX_HEADER: usize = 64 * 1024;
 /// The ro_compat flag of a store with a non-default chunk profile (the
@@ -64,7 +64,7 @@ pub fn marker(hasher: &dyn ObjectHasher) -> String {
 /// The header of a new store with the write hash `hasher` and the chunk
 /// profile `profile`. A non-default profile adds the line `chunks <min>
 /// <avg> <max>` (bytes) and its ro_compat flag; the default profile adds
-/// nothing, so the header of a default store stays as in format 7. A hash
+/// nothing, so the header of a default store is the first line and the hash line only. A hash
 /// that needs a flag ([`hash_flag`]: SHA-256) gets its flag line right
 /// after the hash line.
 pub fn marker_with(hasher: &dyn ObjectHasher, profile: ChunkProfile) -> String {
@@ -241,6 +241,11 @@ fn msg_older(store: &Path, what: &str) -> String {
     format!("{store} was made by an older SliceFS ({what}). The store format changed without a migration: copy the files out with the older version, then into a new store")
 }
 
+fn msg_flat_maps(store: &Path) -> String {
+    let store = store.display();
+    format!("{store} was made by SliceFS v2.3.0 (store format 7, flat metadata maps). This SliceFS reads store format 8 only. Copy the files into a new store with the steps in docs/user/upgrade.md.")
+}
+
 fn msg_newer(store: &Path, n: u32) -> String {
     let (store, known) = (store.display(), FORMAT_NUMBER);
     format!("{store} was made by a newer SliceFS (store format {n}). This SliceFS reads store format {known} only.")
@@ -361,12 +366,15 @@ pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
     let format = first_line_number(first.as_bytes()).ok_or_else(|| refuse(msg_unknown_format(store, first)))?;
     match format {
         n if n < FORMAT_NUMBER => {
-            let what = match n {
-                0..=4 => "metadata in vt0/",
-                5 => "224-bit object IDs",
-                _ => "store format 6, no feature flags",
-            };
-            return Err(refuse(msg_older(store, what)));
+            // A new format number needs a new arm here, so the next bump
+            // cannot fall into the format 7 arm silently.
+            const _: () = assert!(FORMAT_NUMBER == 8);
+            return Err(refuse(match n {
+                0..=4 => msg_older(store, "metadata in vt0/"),
+                5 => msg_older(store, "224-bit object IDs"),
+                6 => msg_older(store, "store format 6, no feature flags"),
+                _ => msg_flat_maps(store),
+            }));
         }
         n if n > FORMAT_NUMBER => return Err(refuse(msg_newer(store, n))),
         _ => {}
@@ -794,9 +802,9 @@ mod tests {
         crate::content::open(&store).unwrap();
         let text = read(&store).unwrap().expect("FORMAT exists");
         assert_eq!(text, marker(DEFAULT_HASHER));
-        assert_eq!(text, format!("slicefs-store 7 (store header with feature flags)\n{HASH}"));
+        assert_eq!(text, format!("slicefs-store 8 (store header with feature flags, prolly metadata maps)\n{HASH}"));
         let h = parse(&store, &text).unwrap();
-        assert_eq!((h.format, h.flags().count(), h.hash()), (7, 0, Some("blake3-256")));
+        assert_eq!((h.format, h.flags().count(), h.hash()), (8, 0, Some("blake3-256")));
 
         let other = d.path().join("other");
         create(&other).unwrap();
@@ -813,14 +821,14 @@ mod tests {
     /// is not compared.
     #[test]
     fn the_number_is_parsed_not_the_line() {
-        let h = parse(Path::new(STORE), &format!("slicefs-store 7 other free text\n{HASH}")).unwrap();
-        assert_eq!(h.format, 7);
+        let h = parse(Path::new(STORE), &format!("slicefs-store 8 other free text\n{HASH}")).unwrap();
+        assert_eq!(h.format, 8);
         assert_eq!(decide(Path::new(STORE), &h, Want::Write).unwrap(), Access::ReadWrite);
-        assert_eq!(parse(Path::new(STORE), "slicefs-store 7\n").unwrap().format, 7);
+        assert_eq!(parse(Path::new(STORE), "slicefs-store 8\n").unwrap().format, 8);
         let err = parse(Path::new(STORE), &format!("slicefs-store x\n{HASH}")).expect_err("x").to_string();
         assert!(err.contains("unknown store format") && err.contains("slicefs-store x"), "{err}");
-        let err = parse(Path::new(STORE), &format!("slicefs-store 8 (x)\n{HASH}")).expect_err("8").to_string();
-        assert!(err.contains("newer SliceFS (store format 8)"), "{err}");
+        let err = parse(Path::new(STORE), &format!("slicefs-store 9 (x)\n{HASH}")).expect_err("9").to_string();
+        assert!(err.contains("newer SliceFS (store format 9)") && err.contains("reads store format 8 only"), "{err}");
     }
 
     /// [Flags]: an unknown ro_compat flag gives read-only access; a write is
@@ -902,8 +910,8 @@ mod tests {
         assert_eq!(read(d.path()).unwrap(), Some(marker(DEFAULT_HASHER)));
     }
 
-    /// [Number]: a format below 7 gets the older-SliceFS text, above 7 the
-    /// newer-SliceFS text, another first line `unknown store format`. The
+    /// [Number]: a format below 7 gets the older-SliceFS text, 7 the flat-maps
+    /// text, above 8 the newer-SliceFS text, another first line `unknown store format`. The
     /// lines after another number are not read.
     #[test]
     fn older_and_newer_formats_are_refused() {
@@ -911,7 +919,8 @@ mod tests {
             ("slicefs-store 4 (file content in packs)", "older SliceFS (metadata in vt0/)"),
             ("slicefs-store 5 (metadata and file content in packs)", "older SliceFS (224-bit object IDs)"),
             ("slicefs-store 6 (metadata and file content in packs, tagged object IDs)", "older SliceFS (store format 6, no feature flags)"),
-            ("slicefs-store 8 (x)", "newer SliceFS (store format 8)"),
+            ("slicefs-store 7 (store header with feature flags)", "store format 7, flat metadata maps"),
+            ("slicefs-store 9 (x)", "newer SliceFS (store format 9)"),
             ("slicefs-store", "unknown store format"),
             ("slicefs-store +7", "unknown store format"),
             ("hello", "unknown store format"),
@@ -920,6 +929,8 @@ mod tests {
             let err = parse(Path::new(STORE), &format!("{first}\nany other layout\n")).expect_err(first).to_string();
             assert!(err.contains(want), "{first}: {err}");
         }
+        let err = parse(Path::new(STORE), "slicefs-store 7 (store header with feature flags)\n").expect_err("7").to_string();
+        assert!(err.contains("docs/user/upgrade.md") && !err.contains("store format 6"), "{err}");
     }
 
     /// [Flags]: a name is 1 to 64 of `a-z`, `0-9`, `-` (a letter or digit at
@@ -1094,7 +1105,7 @@ mod tests {
         std::fs::write(d.path().join(FORMAT_FILE), format!("{max}x")).unwrap();
         let err = read(d.path()).expect_err("refused").to_string();
         assert!(err.contains("larger than 64 KiB"), "{err}");
-        std::fs::write(d.path().join(FORMAT_FILE), b"slicefs-store 7 \xff\xfe\n").unwrap();
+        std::fs::write(d.path().join(FORMAT_FILE), b"slicefs-store 8 \xff\xfe\n").unwrap();
         let err = read(d.path()).expect_err("not UTF-8");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err}");
     }
